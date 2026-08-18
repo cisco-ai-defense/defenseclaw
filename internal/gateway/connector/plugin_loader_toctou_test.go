@@ -26,6 +26,16 @@ import (
 	"testing"
 )
 
+func TestLoadPluginsRejectsRegularFileRoot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plugins")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlugins(path); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("LoadPlugins regular-file root error=%v", err)
+	}
+}
+
 // TestValidatePluginRootChain_HappyPath confirms a strict-perms tree
 // owned by the test runner is accepted.
 func TestValidatePluginRootChain_HappyPath(t *testing.T) {

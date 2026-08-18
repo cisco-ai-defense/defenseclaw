@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // applyHermeticConnectorHomes redirects built-in connector
@@ -33,7 +34,7 @@ import (
 // override (when one is already in flight from another suite) is
 // restored even if the subtest fails.
 //
-// Belt-and-suspenders: we ALSO call t.Setenv("HOME", tmpHome). Every
+// Belt-and-suspenders: we ALSO call testenv.SetHome(t, tmpHome). Every
 // connector's *Path() helper falls back to “os.Getenv("HOME")“
 // when its override is empty, so if a future refactor (or a fresh
 // test added here without the override goroutine) ever leaves a
@@ -56,7 +57,7 @@ func applyHermeticConnectorHomes(t *testing.T) {
 	// bypasses the *PathOverride seam still lands inside tmpHome.
 	// Go's testing framework restores the previous HOME at test
 	// completion automatically.
-	t.Setenv("HOME", tmpHome)
+	testenv.SetHome(t, tmpHome)
 
 	prevOC := connector.OpenClawHomeOverride
 	connector.OpenClawHomeOverride = filepath.Join(tmpHome, ".openclaw")
@@ -91,6 +92,10 @@ func applyHermeticConnectorHomes(t *testing.T) {
 		connector.OmnigentSitePackagesPathOverride = prevOmnigentSite
 	})
 
+	prevAMP := connector.AMPPluginPathOverride
+	connector.AMPPluginPathOverride = filepath.Join(tmpHome, ".config", "amp", "plugins", "defenseclaw.ts")
+	t.Cleanup(func() { connector.AMPPluginPathOverride = prevAMP })
+
 	// Plan A4 / S0.12: ZeptoClaw's Setup refuses to proceed when the
 	// provider list is empty. Seed a single usable provider so the
 	// matrix subtest reaches the persist step.
@@ -113,7 +118,7 @@ func applyHermeticConnectorHomes(t *testing.T) {
 
 // TestApplyHermeticConnectorHomes_RedirectsHOME guards the
 // belt-and-suspenders defense added to applyHermeticConnectorHomes:
-// dropping t.Setenv("HOME", tmpHome) would silently re-open the
+// dropping testenv.SetHome(t, tmpHome) would silently re-open the
 // regression where ~/.claude/settings.json was getting polluted by
 // test-temp hook paths (e.g. "/var/folders/.../T/Test.../001/hooks/
 // claude-code-hook.sh"). Claude Code's hook bus reads those paths
@@ -213,7 +218,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
@@ -277,6 +282,15 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 			}
 
 			p.switchConnectorLocked(target)
+			if !connector.ConnectorSupportedOnHostOS(target) {
+				if p.connector.Name() != "codex" {
+					t.Fatalf("unsupported connector switch changed active connector to %q", p.connector.Name())
+				}
+				if persisted := connector.LoadActiveConnector(dir); persisted != "" {
+					t.Fatalf("unsupported connector switch persisted state %q", persisted)
+				}
+				return
+			}
 
 			if p.connector.Name() != target {
 				t.Errorf("connector after switchConnectorLocked(%q) = %q",
@@ -309,7 +323,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
 			// See note in TestSwitchConnector_PerConnectorPersistsState:
@@ -361,6 +375,12 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 			}
 
 			p.applyRuntime(map[string]any{"connector": target})
+			if !connector.ConnectorSupportedOnHostOS(target) {
+				if p.connector.Name() != "codex" {
+					t.Fatalf("unsupported runtime switch changed active connector to %q", p.connector.Name())
+				}
+				return
+			}
 
 			if p.connector.Name() != target {
 				t.Errorf("applyRuntime({connector=%q}) -> %q",

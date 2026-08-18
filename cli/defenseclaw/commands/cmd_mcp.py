@@ -36,6 +36,7 @@ import shutil
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 import click
 
@@ -44,6 +45,9 @@ from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.models import ActionEntry, ActionState, ScanResult
+
+if TYPE_CHECKING:
+    from defenseclaw.scanner.rulepack import RulePackOverlayCache
 
 
 def _parse_args(raw: str) -> list[str]:
@@ -55,7 +59,39 @@ def _parse_args(raw: str) -> list[str]:
             if isinstance(parsed, list):
                 return [str(a) for a in parsed]
         except json.JSONDecodeError:
-            pass
+            # The managed Windows ``defenseclaw.cmd`` compatibility launcher
+            # is retained for cmd.exe.  When PowerShell invokes that batch
+            # file with a JSON value held in a variable, cmd.exe removes the
+            # JSON string delimiters before ``%*`` forwards the argument.  A
+            # valid value such as ["--from","C:\\\\path"] therefore arrives
+            # as [--from,C:\\\\path].  Recover that narrow, bracketed form so
+            # the connector stores the argv the operator supplied.  This is
+            # deliberately not shell evaluation: every item remains a
+            # literal subprocess argument.
+            if stripped.endswith("]"):
+                inner = stripped[1:-1]
+                recovered: list[str] = []
+                try:
+                    for item in inner.split(","):
+                        item = item.strip()
+                        if not item:
+                            continue
+                        # Decode only JSON backslash escaping left behind by
+                        # the stripped string delimiters.  A surviving quote
+                        # means the boundary is ambiguous and must fail closed.
+                        if '"' in item:
+                            raise ValueError
+                        decoded = json.loads(f'"{item}"')
+                        if not isinstance(decoded, str):
+                            raise ValueError
+                        recovered.append(decoded)
+                except (json.JSONDecodeError, ValueError):
+                    raise click.BadParameter(
+                        "malformed JSON array; pass a JSON string array or a "
+                        "comma-separated argument list",
+                        param_hint="--args",
+                    ) from None
+                return recovered
     return [a.strip() for a in raw.split(",") if a.strip()]
 
 
@@ -505,7 +541,8 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
               allow_private: bool = False,
               connector: str = "",
               json_error_sink: list[dict] | None = None,
-              audit_target: str = "") -> ScanResult | None:
+              audit_target: str = "",
+              pack_cache: RulePackOverlayCache | None = None) -> ScanResult | None:
     """Run the MCP scanner on *target*.  Returns None on fatal error."""
     from dataclasses import replace
 
@@ -537,7 +574,12 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
     # (command/args/env/url). No-op when no rule_pack_dir is set.
     from defenseclaw.scanner.rulepack import maybe_wrap
 
-    scanner = maybe_wrap(scanner, app.cfg)
+    scanner = maybe_wrap(
+        scanner,
+        app.cfg,
+        connector or None,
+        pack_cache=pack_cache,
+    )
     # NOTE: pre-S6.4 this printed "Scanning MCP server: <target>"; the
     # new shared scan UX renders that information once via
     # ``_scan_ui.render_preamble`` + a per-target glyph line, so we
@@ -773,6 +815,8 @@ def _scan_all_mcp(
     scan_instructions: bool,
     as_json: bool,
     allow_private: bool = False,
+    error_count_sink: list[int] | None = None,
+    pack_cache: RulePackOverlayCache | None = None,
 ) -> list[dict]:
     """Scan every MCP server registered for ``connector``.
 
@@ -783,6 +827,9 @@ def _scan_all_mcp(
 
     from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
+
+    if pack_cache is None:
+        pack_cache = {}
 
     servers = app.cfg.mcp_servers(connector)
     if not servers:
@@ -841,6 +888,7 @@ def _scan_all_mcp(
             connector=connector,
             json_error_sink=json_errors if as_json else None,
             audit_target=_mcp_scoped_scan_target(connector, s.name),
+            pack_cache=pack_cache,
         )
         if result is None:
             errored += 1
@@ -884,6 +932,8 @@ def _scan_all_mcp(
         from defenseclaw.commands import hint
         if blocked:
             hint("View alerts:  defenseclaw alerts")
+    if error_count_sink is not None:
+        error_count_sink.append(errored)
     return json_rows
 
 
@@ -987,6 +1037,7 @@ def _scan_one_resolved(
     allow_private: bool,
     pe,
     emit_hints: bool,
+    pack_cache: RulePackOverlayCache | None = None,
 ) -> str:
     """Resolve, block-check, and scan a single name/URL within one connector.
 
@@ -1027,6 +1078,7 @@ def _scan_one_resolved(
         allow_private=allow_private,
         connector=connector,
         audit_target=_mcp_scoped_scan_target(connector, entry.name) if entry else "",
+        pack_cache=pack_cache,
     )
     if result is None:
         return "error"
@@ -1132,23 +1184,30 @@ def scan(
     )
     from defenseclaw.enforce import PolicyEngine
 
+    pack_cache: RulePackOverlayCache = {}
+
     if scan_all:
         # An explicit --connector targets exactly one connector; otherwise a
         # no-flag scan uses the plural resolver so a zero-connector config exits
         # with guidance instead of falling back through active_connector().
         connectors = resolve_list_connectors(app, connector_flag)
         json_rows: list[dict] = []
+        error_counts: list[int] = []
         for c in connectors:
             if len(connectors) > 1 and not as_json:
                 click.secho(f"\n── connector: {c} ──", fg="cyan")
             rows = _scan_all_mcp(
                 app, c, analyzers, scan_prompts, scan_resources, scan_instructions,
                 as_json, allow_private=allow_private,
+                error_count_sink=error_counts,
+                pack_cache=pack_cache,
             )
             if as_json:
                 json_rows.extend(rows)
         if as_json:
             click.echo(json.dumps(json_rows, indent=2))
+        if sum(error_counts):
+            raise SystemExit(1)
         return
 
     if not target:
@@ -1156,12 +1215,17 @@ def scan(
         # (no --all, no target) scans every server on that one connector.
         if connector_flag:
             connector = resolve_list_connector(app, connector_flag)
+            error_counts: list[int] = []
             rows = _scan_all_mcp(
                 app, connector, analyzers, scan_prompts, scan_resources,
                 scan_instructions, as_json, allow_private=allow_private,
+                error_count_sink=error_counts,
+                pack_cache=pack_cache,
             )
             if as_json:
                 click.echo(json.dumps(rows, indent=2))
+            if sum(error_counts):
+                raise SystemExit(1)
             return
         raise click.UsageError(
             "Specify what to scan:\n"
@@ -1184,6 +1248,7 @@ def scan(
         as_json=as_json,
         allow_private=allow_private,
         pe=pe,
+        pack_cache=pack_cache,
     )
 
     # An explicit --connector or a direct URL keeps the single-resolution
@@ -1230,7 +1295,6 @@ def scan(
             click.echo(f"error [{c}]: {exc.format_message()}", err=True)
     if errored:
         raise SystemExit(1)
-
 
 # ---------------------------------------------------------------------------
 # block / allow / unblock  (accept name or url)

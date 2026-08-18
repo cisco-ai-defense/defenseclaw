@@ -78,6 +78,7 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 				seedClaudeCodeSettingsParentDir(t)
 			case "codex":
 				seedCodexConfigParentDir(t)
+				seedCodexPolicyFixture(t, dataDir, &opts)
 			}
 
 			// Stage 1: pre-Setup, fresh DataDir + isolated home →
@@ -85,6 +86,9 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 			if err := c.VerifyClean(opts); err != nil {
 				t.Fatalf("[%s] VerifyClean before Setup: unexpected residue: %v",
 					fx.Name, err)
+			}
+			if !connector.ConnectorSupportedOnHostOS(fx.Name) {
+				t.Skipf("[%s] has no native lifecycle on this host; platform rejection is covered by connector support tests", fx.Name)
 			}
 
 			// Stage 2: Setup. The actual error type is implementation

@@ -222,6 +222,7 @@ ACTION_SETUP_GUARDRAIL: Final[str] = "setup-guardrail"
 ACTION_SETUP_HOOK_CONNECTOR: Final[str] = "setup-hook-connector"
 ACTION_SETUP_CONNECTOR_MODE: Final[str] = "setup-connector-mode"
 ACTION_SETUP_REDACTION_TOGGLE: Final[str] = "setup-redaction-toggle"
+ACTION_SETUP_REDACTION_POLICY: Final[str] = "setup-redaction-policy"
 ACTION_SETUP_NOTIFICATIONS_TOGGLE: Final[str] = "setup-notifications-toggle"
 ACTION_SETUP_NOTIFICATIONS_SET: Final[str] = "setup-notifications-set"
 ACTION_SETUP_SPLUNK: Final[str] = "setup-splunk"
@@ -413,6 +414,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_SETUP_HOOK_CONNECTOR,
     ACTION_SETUP_CONNECTOR_MODE,
     ACTION_SETUP_REDACTION_TOGGLE,
+    ACTION_SETUP_REDACTION_POLICY,
     ACTION_SETUP_NOTIFICATIONS_TOGGLE,
     ACTION_SETUP_NOTIFICATIONS_SET,
     ACTION_SETUP_SPLUNK,

@@ -21,6 +21,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 )
 
 // capturedPhase records one call to the phase tracer.
@@ -36,13 +37,13 @@ type phaseCapture struct {
 	events []capturedPhase
 }
 
-func (c *phaseCapture) hook() func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
-	return func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
-		return ctx, func(action, severity string, latMs int64) {
+func (c *phaseCapture) hook() func(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration)) {
+	return func(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration)) {
+		return ctx, func(action, severity string, latency time.Duration) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			c.events = append(c.events, capturedPhase{
-				Phase: phase, Action: action, Severity: severity, LatMs: latMs,
+				Phase: phase, Action: action, Severity: severity, LatMs: latency.Milliseconds(),
 			})
 		}
 	}
@@ -115,8 +116,8 @@ func TestSetPhaseTracerFunc_DetachPreservesStage(t *testing.T) {
 	cap := &phaseCapture{}
 	g := NewGuardrailInspector("local", nil, nil, "")
 
-	g.SetTracerFunc(func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)) {
-		return ctx, func(string, string, string, int64) {}
+	g.SetTracerFunc(func(ctx context.Context, stage, direction, model, mode string) (context.Context, func(*ScanVerdict, time.Duration)) {
+		return ctx, func(*ScanVerdict, time.Duration) {}
 	})
 	g.SetPhaseTracerFunc(cap.hook())
 

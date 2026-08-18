@@ -17,8 +17,11 @@
 import Foundation
 
 enum RegistryStore {
-    static func load(config: DefenseClawConfig) -> RegistrySnapshot {
-        load(sources: config.registrySources, dataDirectory: dataDirectory(for: config))
+    static func load(config: DefenseClawConfig, dataDirectory: URL) -> RegistrySnapshot {
+        load(
+            sources: config.registrySources,
+            dataDirectory: dataDirectory
+        )
     }
 
     static func load(
@@ -66,15 +69,6 @@ enum RegistryStore {
             ($0.sourceID, $0.type, $0.name) < ($1.sourceID, $1.type, $1.name)
         }
         return RegistrySnapshot(sources: loadedSources, entries: loadedEntries)
-    }
-
-    static func dataDirectory(for config: DefenseClawConfig) -> URL {
-        guard let configured = config.dataDir?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !configured.isEmpty
-        else { return ConfigStore.dataDirectory }
-
-        let expanded = (configured as NSString).expandingTildeInPath
-        return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
     }
 
     static func indexURL(dataDirectory: URL, sourceID: String) throws -> URL {

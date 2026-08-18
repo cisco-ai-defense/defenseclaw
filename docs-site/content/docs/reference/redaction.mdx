@@ -1,125 +1,446 @@
 ---
 title: Redaction
-description: How DefenseClaw masks PII / prompts / verdict reasons before they reach any sink, the two env vars and one config field that control the behaviour, and the right command to flip it.
+description: Configure centralized, field-aware redaction independently for local history, buckets, and export destinations in DefenseClaw observability v8.
 keywords:
   - DefenseClaw redaction
-  - DEFENSECLAW_REVEAL_PII
-  - DEFENSECLAW_DISABLE_REDACTION
-  - privacy.disable_redaction
-  - defenseclaw setup redaction
-  - PII placeholder
-  - audit DB redaction
-  - Splunk HEC redaction
+  - observability redaction profiles
+  - PII redaction
+  - credential redaction
+  - config version 8
 ---
 
-DefenseClaw inspects LLM traffic that routinely contains PII (emails, phone numbers, SSNs, credentials, customer records). Operators need rich diagnostic detail to triage false positives and incidents, but raw PII must never be the **default** in any sink — stderr, SQLite audit DB, Splunk HEC, OTel log exporters, webhook payloads. Redaction is the contract that keeps that promise.
+Observability v8 performs redaction once, at the projection boundary between a
+canonical record and each destination. This lets one collected event be retained
+locally, sent to a trusted forensic backend with full content, and sent to a SOC
+backend with only sensitive substrings removed.
 
-This page explains the contract, the two env vars and one config field that control it, and the right CLI to flip them.
+Fresh v8 configuration is intentionally full fidelity: the default profile is
+`none`, including local SQLite and capability-default remote exports. This can
+include prompts, outputs, tool arguments/results, evidence, paths, and identifiers.
+Choose a redacting profile for every destination whose trust boundary does not
+permit that data.
 
-## What gets redacted
+Grafana and the bundled local dashboards are consumers of the resulting canonical
+OTEL projection, not another redaction boundary. They do not mask, redact, or hide
+fields: every field present after DefenseClaw's central projection is displayed or
+linked to its exact raw event. If dashboard content must be reduced, configure the
+local destination's v8 profile upstream; do not rely on panel queries.
 
-The following surfaces are passed through `internal/redaction/redaction.go` before they leave the gateway:
-
-- User prompts (request bodies)
-- Judge / scanner LLM bodies (request and response)
-- Evidence windows (the bracketed snippets that explain a verdict)
-- Verdict reasons (the human-readable verdict string)
-- Connector trace metadata (entity names, identifiers)
-- Webhook payloads forwarded to chat / incident receivers
-
-Placeholder shape, parseable across log lines:
-
-```
-<redacted len=N sha=8hex>
-```
-
-The 8-char SHA-256 prefix lets operators correlate the same value across log lines without exposing the value itself. Length is preserved so false-positive triage (distinguishing a 9-digit value from a 16-digit value) still works.
-
-## The three controls — at a glance
-
-| Control | Scope | Persistence | Use case |
-| --- | --- | --- | --- |
-| `privacy.disable_redaction` (config) | ALL sinks | Persisted in `~/.defenseclaw/config.yaml` | Lab / single-tenant install where every sink is inside the same trust boundary. |
-| `DEFENSECLAW_DISABLE_REDACTION=1` (env) | ALL sinks | Ephemeral (process env) | Same as above but without rewriting `config.yaml`. |
-| `DEFENSECLAW_REVEAL_PII=1` (env) | **Operator-facing only** (stderr / TUI Logs panel / `gateway.log`) | Ephemeral (process env) | Short-lived incident triage on a workstation. Persistent sinks STILL redact. |
-
-<Callout title="Reveal vs Disable — the threat models differ">
-- **Reveal** is a short-lived display-only opt-in: an operator wants to see one prompt to debug a false positive. The audit DB, Splunk HEC, and webhook receivers continue to receive redacted placeholders, so the compliance contract stays intact.
-- **Disable** is a deliberate, persistent operator decision: every downstream consumer is trusted, redacted placeholders only obstruct the work. The unconditional-redaction contract documented in `OBSERVABILITY.md` is **explicitly violated** when this is on. The CLI emits a loud warning every time the flag is flipped on, and config loaders log a once-per-process warning at sidecar boot.
+<Callout type="warn" title="Review the effective plan before enabling export">
+An enabled destination with no `send` or `routes` receives every signal it supports,
+from every bucket, with profile `none`. Run `defenseclaw observability plan` and
+`defenseclaw doctor` to find unredacted legs.
 </Callout>
 
-## How to toggle
+## Guided CLI workflow
+
+Run the redaction command without a subcommand for the guided workflow:
 
 ```bash
-defenseclaw setup redaction status     # show current state (config + env + effective)
-defenseclaw setup redaction off        # turn it OFF (raw passthrough). Confirms first.
-defenseclaw setup redaction off --yes  # CI / TUI form (no confirmation)
-defenseclaw setup redaction on         # turn it back ON
+defenseclaw setup redaction
 ```
 
-`setup redaction` updates `privacy.disable_redaction` in `~/.defenseclaw/config.yaml` and logs an audit entry. The gateway config watcher hot-applies the kill-switch in the default reload mode; deployments using `gateway.config_reload.mode: restart` apply it through the full restart path.
+It first prints the compiler-owned effective destination and bucket policy, then
+offers four simple choices: keep the current policy, remove redaction, apply one
+profile everywhere, or change the global baseline. The next prompt is **Show
+advanced settings?**. Choose it to work with:
 
-For a one-shell ephemeral reveal during incident triage:
+1. global collection and profile defaults;
+2. any of the 14 catalog buckets, selected by number, name, comma list, or `all`;
+3. built-in and custom profiles, detector groups, field classes, and modes;
+4. destination `send` policy and ordered first-match routes, including every
+   route selector;
+5. related raw-data controls and immutable policy boundaries;
+6. a staged effective-policy review, or a reset of all staged changes.
 
-```bash
-DEFENSECLAW_REVEAL_PII=1 defenseclaw tui     # raw values in the Logs panel only
-```
+The wizard does not write while you move between advanced screens. At the end it
+compiles the complete staged candidate, shows effective destination/route/bucket/
+signal changes, calls out newly unredacted legs, and asks for confirmation.
 
-— the audit DB and Splunk HEC will continue to receive redacted placeholders.
+### macOS, Linux, and native Windows
 
-<Callout title="There is no config-set command">
-The `defenseclaw config` group only exposes `show`, `path`, and `validate`. Use `defenseclaw setup redaction on|off` to flip the kill-switch. The Go and Python loaders emit a startup warning when `privacy.disable_redaction=true`; that warning points at this command.
-</Callout>
-
-## What `status` prints
-
-```text
-  Redaction state
-    config (privacy.disable_redaction):  ON (redacted)
-    env (DEFENSECLAW_DISABLE_REDACTION): (unset)
-    effective at sidecar boot:           ON — placeholders only
-```
-
-Three lines because the answer "is redaction on?" depends on **both** the persisted config and the runtime env. The "effective" line is the one that matches what the running sidecar will do on its next boot.
-
-## Per-sink behaviour
-
-| Sink | Reveal=1 | Disable=1 / config off |
-| --- | --- | --- |
-| stderr (gateway log file) | raw | raw |
-| TUI Logs panel | raw | raw |
-| SQLite audit DB | redacted | raw |
-| `gateway.jsonl` | redacted | raw |
-| OTel log exporter | redacted | raw |
-| Splunk HEC | redacted | raw |
-| Webhook receivers | redacted | raw |
-
-The isolation is enforced by routing persistent sinks through `ForSink*` helpers (which check `DisableAll()`) rather than the raw `Reveal()`-respecting variants. Reading `internal/redaction/redaction.go` is the canonical source if you ever need to verify behaviour.
-
-## Verifying redaction is working
-
-In the TUI:
-
-- The **Privacy** tab shows the current state, the most recent flip, and the warning banner when redaction is off.
-- The **Logs** panel shows an `[R]` indicator next to every redacted line. Lines without the indicator have a `<redacted len=N sha=...>` placeholder embedded in them.
-
-From the CLI:
+The command surface and policy semantics are the same on macOS, Linux, and the
+native Windows x64 package. On macOS/Linux, run it from a POSIX shell:
 
 ```bash
 defenseclaw setup redaction status
-tail -f ~/.defenseclaw/gateway.jsonl | jq 'select(.event.body)'   # look for placeholders
+defenseclaw setup redaction remove-all --dry-run
+defenseclaw setup redaction
 ```
 
-## What to do during an incident
+On Windows, run the same commands in PowerShell, cmd, or the packaged TUI:
 
-1. **Default**: leave redaction on. Use `DEFENSECLAW_REVEAL_PII=1` in your shell to surface raw values **in the operator-facing logs only** while you triage.
-2. **Lab debugging**: flip `defenseclaw setup redaction off` for the duration of the prompt-engineering session, then flip it back on.
-3. **Production**: never flip the kill-switch. If you cannot triage with the placeholders, file a bug — the placeholder shape is supposed to give you enough signal to correlate.
+```powershell
+defenseclaw setup redaction status
+defenseclaw setup redaction remove-all --dry-run
+defenseclaw setup redaction
+```
 
-## Reference
+In the TUI, open **Setup → Redaction Policy**. Quick actions default mutations
+to dry-run. **Show advanced settings** exposes every scripted bucket, collection,
+custom-profile, destination, selector, and ordered-route action; **Open the
+complete guided workflow** runs the prompt-driven editor in Activity. The TUI
+streams prompts and accepts stdin on both POSIX terminals and native Windows.
 
-- [`internal/redaction/redaction.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/redaction/redaction.go) — the canonical implementation, threat-model docs, `Reveal()` / `DisableAll()` / `ForSink*` helpers.
-- `internal/config/config.go::warnDisableRedactionConfig` — the Go startup warning.
-- `cli/defenseclaw/config.py::_warn_disable_redaction_config` — the Python startup warning.
-- [Reference → Env vars](/docs/reference/env-vars) — the canonical list of every env var, including these two.
-- [Setup → guardrail](/docs/setup/guardrail) — picks safe defaults including redaction-on.
+In the macOS app, open **Logs → Redaction policy…**. The sheet provides effective
+status, one-click broad profiles, and a **Show advanced settings** disclosure for
+the same global defaults, 14 buckets, custom profiles, destinations, and ordered
+route selectors. Advanced mutations default to dry-run and show their exact CLI
+command before execution.
+
+Every changed, non-dry-run mutation writes a timestamped pre-change backup. Its
+path begins with `~/.defenseclaw/backups/config.yaml.before-redaction` on
+macOS/Linux and
+`%USERPROFILE%\.defenseclaw\backups\config.yaml.before-redaction` in the packaged
+Windows profile. Newly created parents and every backup file are owner-private
+(`0700`/`0600` on POSIX; a protected current-user/SYSTEM DACL on Windows), and
+replacement is atomic and durable on both platform families. Existing safe
+parent-directory permissions are validated without being changed.
+
+### The simple remove-all command
+
+To select profile `none` for every configurable log and trace projection:
+
+```bash
+defenseclaw setup redaction remove-all --dry-run
+defenseclaw setup redaction remove-all --yes
+```
+
+This sets the global baseline to `none` and removes more-specific bucket,
+destination `send`, and route profile overrides. It deliberately leaves
+collection and routing unchanged. The generated local SQLite projection inherits
+`none`; the managed enterprise destination remains release-owned and locked to
+its managed profile. Existing stored or exported records are not rewritten.
+
+The command governs observability log and trace projections. It does not disable
+the separate safety scrub applied to OS notifications or agent hook responses.
+Those attended surfaces may show exact ship-authored rule IDs and titles, but
+continue to hide free-form reasons and matched literals that could contain PII,
+credentials, or prompt-injection content.
+
+<Callout type="warn" title="remove-all permits raw governed content">
+`remove-all` can expose prompts, responses, tool arguments/results, evidence,
+paths, and identifiers to every configurable destination. Use it only when local
+history and every downstream sink share an approved trust boundary.
+</Callout>
+
+### Scripted policy commands
+
+The same policy surface is available without prompts:
+
+```bash
+# Inspect effective policy
+defenseclaw setup redaction status
+defenseclaw setup redaction status --json
+
+# Broad baselines
+defenseclaw setup redaction apply --scope all-configurable --profile strict --dry-run
+defenseclaw setup redaction apply --scope defaults --profile sensitive --yes
+defenseclaw setup redaction defaults set --profile content --no-traces --yes
+
+# Bucket overrides
+defenseclaw setup redaction bucket list
+defenseclaw setup redaction bucket set model.io --profile content --no-logs --yes
+defenseclaw setup redaction bucket reset model.io --yes
+
+# Custom profiles
+defenseclaw setup redaction profile set soc \
+  --extends sensitive \
+  --detector pii --detector credentials --detector secrets \
+  --field content=detect --field evidence=detect \
+  --field path=hash --field credential=remove --yes
+defenseclaw setup redaction profile show soc
+defenseclaw setup redaction profile remove soc --replace-with sensitive --yes
+
+# Concise destination policy
+defenseclaw setup redaction destination send splunk-production \
+  --signal logs --bucket security.finding --bucket enforcement.action \
+  --profile sensitive --yes
+defenseclaw setup redaction destination inherit splunk-production --yes
+
+# Ordered advanced routes
+defenseclaw setup redaction route add splunk-production critical-findings \
+  --position 1 --signal logs --bucket security.finding \
+  --min-severity HIGH --route-action send --profile strict --yes
+defenseclaw setup redaction route move splunk-production critical-findings \
+  --position 2 --yes
+defenseclaw setup redaction route remove splunk-production critical-findings --yes
+```
+
+Mutation commands accept `--dry-run`, `--json`, and `--restart/--no-restart`.
+Machine-readable mutations require either `--dry-run` or `--yes`. An omitted flag
+means “leave that field unchanged”; reset/inherit verbs remove the corresponding
+source override explicitly. JSON dry-runs report `applied: false`; confirmed
+writes emit their result only after verification and include `backup_path`,
+`verified_plan_digest`, and `restarted`.
+
+## Built-in profiles
+
+| Profile | Behavior | Typical use |
+| --- | --- | --- |
+| `none` | Preserves every registered field and supplied content. | Trusted local lab or tightly controlled forensic backend. |
+| `sensitive` | Detects PII, credentials, and secrets inside content-like fields while retaining useful surrounding structure. | Internal operations and SOC investigation. |
+| `content` | Redacts whole prompt, response, tool, document, evidence, and other content bodies while preserving safe metadata/correlation. | Shared production observability. |
+| `strict` | Removes or transforms content, credentials, paths, reasons, evidence, and error detail aggressively. | Least-data external export. |
+| `legacy-v7` | Immutable migration profile that reproduces the effective v7 persistent-sink projection. | Automatic upgrade only. |
+
+`legacy-v7` cannot be extended or redefined. It exists so automatic migration can
+preserve an existing installation's behavior even though fresh-v8 defaults differ.
+
+## Resolution order
+
+For each delivered log or trace, the most specific configured profile wins:
+
+1. `send.redaction_profile` or the first matching route's
+   `redaction_profile`;
+2. `observability.buckets.<bucket>.redaction_profile`;
+3. `observability.defaults.redaction_profile`;
+4. the reviewed bucket catalog default (`none` in catalog v1).
+
+Metrics do not contain content fields and do not take a redaction profile.
+
+This example keeps the fresh default for local SQLite, removes whole model content
+on general routes, and applies substring detection to one SOC destination:
+
+```yaml
+config_version: 8
+observability:
+  defaults:
+    redaction_profile: content
+  buckets:
+    compliance.activity:
+      redaction_profile: sensitive
+  destinations:
+    - name: forensic
+      kind: otlp
+      protocol: grpc
+      endpoint: forensic.example.com:4317
+      send:
+        signals: [logs, traces, metrics]
+        buckets: ['*']
+        redaction_profile: none
+    - name: soc
+      kind: splunk_hec
+      endpoint: https://splunk.example.com:8088/services/collector/event
+      token_env: SPLUNK_HEC_TOKEN
+      send:
+        signals: [logs]
+        buckets: [compliance.activity, security.finding, enforcement.action]
+        redaction_profile: sensitive
+```
+
+Because `observability.defaults.redaction_profile` also applies to the generated
+local destination, the local SQLite projection is `content` in this example. Omit
+the global default and place profiles only on remote routes if local history should
+remain unredacted.
+
+## Custom profiles
+
+A custom profile extends exactly one redacting built-in profile: `sensitive`,
+`content`, or `strict`.
+
+```yaml
+observability:
+  redaction_profiles:
+    soc:
+      extends: sensitive
+      detectors: [pii, credentials, secrets]
+      field_classes:
+        metadata: preserve
+        identifier: preserve
+        content: detect
+        reason: detect
+        evidence: detect
+        error: detect
+        path: hash
+        credential: remove
+```
+
+The only operator-facing detector groups are:
+
+| Group | Detects |
+| --- | --- |
+| `pii` | Email addresses, phone numbers, SSNs/national identifiers, payment-card candidates, and other registered personal-data patterns. |
+| `credentials` | Authorization material, API keys/tokens, passwords, private-key material, and registered credential forms. |
+| `secrets` | High-confidence secret patterns and registered secret-bearing values not already classified as credentials. |
+
+Unknown groups fail validation. Detection is bounded and runs only on field classes
+whose mode resolves to `detect`.
+
+## Field classes and modes
+
+Every registered telemetry field has one field class:
+
+| Class | Examples |
+| --- | --- |
+| `metadata` | stable operation, provider, status, and policy metadata |
+| `identifier` | trace, span, agent, session, evaluation, and asset identifiers |
+| `content` | prompts, completions, tool arguments/results, retrieved documents |
+| `reason` | verdict explanation, policy or operator reason |
+| `evidence` | matched snippets and derived evidence summaries |
+| `error` | bounded exception and failure detail |
+| `path` | file, workspace, repository, or executable paths |
+| `credential` | tokens, keys, authorization material, and secret values |
+
+Profiles assign one of these modes:
+
+| Mode | Result |
+| --- | --- |
+| `preserve` | Retain the bounded value unchanged. |
+| `detect` | Replace only detector matches; retain nonsensitive surrounding text. |
+| `whole` | Replace the entire value with a typed redaction marker. |
+| `hash` | Normalize by the field-class contract and emit a keyed, nonreversible correlation token. |
+| `remove` | Omit the field from that destination projection. |
+
+The hash token is designed for same-install correlation, not disclosure or
+cross-install identity. It uses DefenseClaw-managed key material derived under the
+data directory. Neither the digest algorithm, key path, scan limits, nor marker
+format is an operator knob.
+
+## What field-aware redaction looks like
+
+Given a model input:
+
+```text
+Send the report to alice@example.com using token sk-live-example.
+```
+
+the possible projections are conceptually:
+
+| Mode/profile | Projected value |
+| --- | --- |
+| `none` | Original sentence. |
+| `detect` with `pii,credentials` | Sentence retained, email and token replaced by typed correlation markers. |
+| `whole` | One marker representing the complete field; no sentence fragments retained. |
+| `remove` | Field absent. |
+
+The exact marker and correlation token formats are generated protocol contracts;
+consumers should treat them as opaque strings and use the companion content-state
+fields when present.
+
+### Credential-bearing URL queries
+
+URL detectors normalize query-key case and bounded percent-encoding before
+classifying the associated value. Partially encoded keys such as `tok%65n` and
+`api%5Fkey` therefore receive the same protection as `token` and `api_key`.
+Duplicate parameters are handled independently, while safe parameters, paths,
+hosts, and fragments remain available for diagnostics.
+
+Malformed or excessively encoded query keys are never treated as proof that the
+value is safe. Diagnostic URL scrubbers replace the entire ambiguous query item
+with a redacted placeholder, or replace an unparseable URL with a safe placeholder.
+These transformations apply only to logs, telemetry, and audit projections; they
+do not rewrite an upstream request.
+
+## Multiple destinations
+
+Redaction is resolved independently for each matching destination. It never mutates
+the canonical record or another destination's copy:
+
+```text
+canonical security.finding log
+  +-> local SQLite     profile none       full registered projection
+  +-> Splunk HEC      profile sensitive  only sensitive substrings replaced
+  +-> archive OTLP    profile content    whole governed content removed
+```
+
+A route may explicitly use `redaction_profile: none`. It needs no break-glass flag,
+but the effective plan always displays it as `none / unredacted` instead of hiding
+it behind “default.”
+
+## Fail-closed behavior
+
+If a field map is valid but detection, key use, scalar transformation, or a field
+limit fails, the projector replaces the complete affected field with a bounded
+`failed_closed` token, continues other fields, and emits value-free health
+accounting. It never preserves a scanned prefix or suffix around an unsafe middle.
+
+If classification is missing/ambiguous, container traversal is unsafe, the trusted
+projection context mismatches, or the complete projected record cannot be bounded
+and serialized, that destination receives no projection. Other destinations
+continue independently. Mandatory SQLite attempts a minimal content-safe failure
+record. The failure report never includes the rejected value, destination secret,
+endpoint, path, or exception text.
+
+The selected `none` profile intentionally preserves registered values and does not
+run detectors, but schema, type, size, and serialization limits still apply. No
+profile or error path falls back from a configured redacting profile to raw output.
+
+Local mandatory records are minimal and content-safe by construction. Disabling
+normal log collection cannot disable this SQLite-only compliance floor.
+
+## V7 compatibility (upgrades only)
+
+The v7 `privacy` block's `disable_redaction` field and
+`DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
+They are not v8 runtime policy knobs. During `defenseclaw upgrade`, the converter
+materializes their effective behavior into `none` or `legacy-v7` profiles before
+retiring those inputs. A v8 gateway rejects legacy observability/redaction blocks
+with an actionable upgrade message.
+
+`DEFENSECLAW_REVEAL_PII` remains an operator-display concern where supported; it
+does not alter the v8 destination route graph or a persistent-sink projection.
+
+## Write and activation safety
+
+The CLI is the preferred redaction editor. Each mutation runs the strict Python
+source validator and the canonical Go compiler before writing. For a changed,
+non-dry-run write, it compares the live file with the preview digest, installs a
+private backup, atomically replaces `config.yaml`, verifies the installed
+effective-plan digest, and records a `setup-redaction-policy` audit action. The
+backup path is unique for each write:
+
+```text
+<data-dir>/backups/config.yaml.before-redaction-<nanosecond-timestamp>
+```
+
+Comments and unrelated source formatting are retained outside the exact policy
+span being edited. `--restart` restarts the gateway after verification; without
+it, the gateway uses its configured hot-reload behavior.
+
+When `--no-restart` explicitly stages a change while the gateway is unavailable,
+the CLI still verifies the installed effective-plan digest but warns on stderr
+that the canonical setup audit event could not be recorded. Start the gateway
+before the next policy change when canonical audit admission is required. JSON
+mutation output remains machine-readable on stdout.
+
+For manual changes outside the CLI-owned redaction surface, edit only
+`~/.defenseclaw/config.yaml` and stop before restart if validation fails:
+
+```bash
+umask 077
+cp "$HOME/.defenseclaw/config.yaml" \
+  "$HOME/.defenseclaw/config.yaml.before-redaction-edit"
+
+defenseclaw config validate && \
+defenseclaw config show --effective --section observability && \
+defenseclaw observability plan && \
+defenseclaw-gateway restart && \
+defenseclaw doctor
+```
+
+Do not edit the generated reference or a compiled/effective view. Restore the
+backup or correct the source when validation fails. A global or bucket profile
+also affects local SQLite; use `destination send` or a route profile when only
+that remote trust boundary should be redacted.
+
+## Verify policy
+
+```bash
+defenseclaw config validate
+defenseclaw config show --effective --section observability
+defenseclaw observability plan
+defenseclaw doctor
+```
+
+The source view shows deliberate choices. The effective/plan views show generated
+local SQLite policy, capability-default routes, resolved profiles, and warnings.
+Endpoints and secret references are masked; resolved secrets and governed content
+must not appear in plan, doctor, TUI, or migration output.
+
+## See also
+
+- [Observability](/docs/observability) — buckets, capabilities, and routing.
+- [Configuration](/docs/reference/configuration) — full v8 source shape.
+- [Upgrade DefenseClaw](/docs/get-started/upgrade) — automatic v7 preservation.
+- [Environment variables](/docs/reference/env-vars) — current variables and explicitly labeled legacy inputs.

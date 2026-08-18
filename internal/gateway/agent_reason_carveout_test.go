@@ -34,11 +34,8 @@ const carveoutReason = "matched: PII-EMAIL:alice@example.com"
 func TestAgentReasonCarveOut_HookResponses(t *testing.T) {
 	t.Cleanup(func() {
 		redaction.SetAgentReasonRedactionDisabled(false)
-		redaction.SetDisableAll(false)
 	})
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
-	t.Setenv("DEFENSECLAW_DISABLE_REDACTION", "")
-	redaction.SetDisableAll(false)
 
 	shapers := map[string]func() string{
 		"cursor": func() string {

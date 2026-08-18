@@ -16,24 +16,18 @@
 
 package telemetry
 
-import (
-	"context"
-	"fmt"
-	"time"
-
-	"go.opentelemetry.io/otel/log"
-)
-
 // actionMapping maps audit.Event.Action strings to OTel lifecycle attributes.
 // Keys mirror internal/audit Action* constants; telemetry cannot import audit
 // because audit.Logger already depends on telemetry.Provider.
 type actionMapping struct {
-	LifecycleAction string
-	Actor           string
+	LifecycleAction     string
+	Actor               string
+	CanonicalEvent      string
+	CanonicalTransition string
 }
 
 var actionMap = map[string]actionMapping{
-	"install-detected":             {LifecycleAction: "install", Actor: "watcher"},
+	"install-detected":             {LifecycleAction: "install", Actor: "watcher", CanonicalEvent: "asset.discovered", CanonicalTransition: "discover"},
 	"install-rejected":             {LifecycleAction: "block", Actor: "watcher"},
 	"install-allowed":              {LifecycleAction: "allow", Actor: "watcher"},
 	"install-allowed-skip-enforce": {LifecycleAction: "allow", Actor: "watcher"},
@@ -58,66 +52,22 @@ var actionMap = map[string]actionMapping{
 	"api-plugin-enable":            {LifecycleAction: "enable", Actor: "user"},
 }
 
-// severityToOTel maps string severity to OTel severity number.
-func severityToOTel(sev string) (string, int) {
-	switch sev {
-	case "CRITICAL", "ERROR":
-		return "ERROR", 17
-	case "HIGH", "WARN":
-		return "WARN", 13
-	default:
-		return "INFO", 9
-	}
+// AssetLifecycleActionMapping is the closed translation contract used by the
+// generated v8 asset-family adapter. An empty CanonicalEvent is intentional:
+// the audit action describes another domain and must not be relabeled as an
+// asset state transition.
+type AssetLifecycleActionMapping struct {
+	Transition     string
+	CanonicalEvent string
 }
 
-// EmitLifecycleEvent emits an OTel LogRecord for an asset lifecycle event.
-func (p *Provider) EmitLifecycleEvent(
-	action, target, assetType, reason, severity string,
-	enforcement map[string]string,
-) {
-	if !p.LogsEnabled() {
-		return
-	}
-
+func AssetLifecycleAction(action string) (AssetLifecycleActionMapping, bool) {
 	mapping, ok := actionMap[action]
 	if !ok {
-		return
+		return AssetLifecycleActionMapping{}, false
 	}
-
-	sevText, sevNum := severityToOTel(severity)
-	body := fmt.Sprintf("%s %s %s: %s", assetType, target, mapping.LifecycleAction, reason)
-
-	now := time.Now()
-	rec := log.Record{}
-	rec.SetTimestamp(now)
-	rec.SetObservedTimestamp(now)
-	rec.SetSeverity(log.Severity(sevNum))
-	rec.SetSeverityText(sevText)
-	rec.SetBody(log.StringValue(body))
-
-	attrs := []log.KeyValue{
-		log.String("event.name", mapping.LifecycleAction),
-		log.String("event.domain", "defenseclaw.asset"),
-		log.String("defenseclaw.asset.type", assetType),
-		log.String("defenseclaw.asset.name", target),
-		log.String("defenseclaw.lifecycle.action", mapping.LifecycleAction),
-		log.String("defenseclaw.lifecycle.reason", reason),
-		log.String("defenseclaw.lifecycle.actor", mapping.Actor),
-	}
-
-	if sourcePath, ok := enforcement["source_path"]; ok && sourcePath != "" {
-		attrs = append(attrs, log.String("defenseclaw.asset.source_path", sourcePath))
-	}
-	if v, ok := enforcement["install"]; ok {
-		attrs = append(attrs, log.String("defenseclaw.enforcement.install", v))
-	}
-	if v, ok := enforcement["file"]; ok {
-		attrs = append(attrs, log.String("defenseclaw.enforcement.file", v))
-	}
-	if v, ok := enforcement["runtime"]; ok {
-		attrs = append(attrs, log.String("defenseclaw.enforcement.runtime", v))
-	}
-
-	rec.AddAttributes(attrs...)
-	p.logger.Emit(context.Background(), rec)
+	return AssetLifecycleActionMapping{
+		Transition:     mapping.CanonicalTransition,
+		CanonicalEvent: mapping.CanonicalEvent,
+	}, true
 }

@@ -1,0 +1,521 @@
+# DEFENSECLAW CONFIGURATION v8 — OBSERVABILITY REFERENCE
+#
+# GENERATED FILE. DO NOT EDIT.
+# Canonical schema: schemas/config/v8/defenseclaw-config.schema.json
+# Generator: scripts/generate_observability_v8_reference.py
+#
+# This is the complete source-config surface, not a recommended production
+# file. Start from a preset or minimal config and copy only deliberate overrides.
+#
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ DATA FLOW                                                                │
+# │                                                                          │
+# │ producer -> bucket/signal -> collection gate                             │
+# │                                  │                                       │
+# │                                  ├-> automatic unredacted SQLite logs     │
+# │                                  └-> each optional destination            │
+# │                                        omitted policy = all capabilities │
+# │                                        concise send, or advanced routes  │
+# │                                          ├-> drop                        │
+# │                                          └-> redact -> sign -> deliver   │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
+# Defaults are intentionally full-fidelity: all buckets collect logs, traces,
+# and metrics; enabled destinations export every signal they support; and the
+# default redaction profile is none. Explicit send/routes replace the generated
+# destination default. Collection is evaluated before routing and sampling.
+#
+# Built-in redaction: none, sensitive, content, strict, legacy-v7.
+# Route selectors: different fields AND; values inside one field OR.
+# Route evaluation: first match wins independently per destination and signal.
+# Secrets are references (for example token_env or {env: NAME}), never literals.
+#
+# Useful commands:
+#   defenseclaw config validate
+#   defenseclaw config show --effective --section observability
+#   defenseclaw config reference observability
+#   defenseclaw observability plan
+
+# Selects the strict v8 configuration contract; unknown keys are errors.
+config_version: 8
+observability:
+  # Optional in source. Version 8 currently resolves catalog 1; pin it only
+  # when deliberately binding the file to this reviewed bucket taxonomy.
+  bucket_catalog_version: 1
+  # OpenTelemetry resource attributes shared by emitted signals. Keep values
+  # bounded and non-secret; credentials belong in environment references.
+  resource:
+    attributes:
+      service.name: defenseclaw-gateway
+      deployment.environment: production
+  # Process-wide trace sampling, semantic-convention profile, compatibility
+  # aliases, and hard payload limits. Bucket collection runs before sampling.
+  trace_policy:
+    # Samplers: always_on/off, traceidratio, or their parentbased variants.
+    sampler: parentbased_traceidratio
+    # Ratio in [0,1], required only by ratio samplers.
+    sampler_arg: '0.10'
+    # Immutable registry profile combining OTel GenAI portability with
+    # DefenseClaw lifecycle, guardrail, evidence, and security attributes.
+    semantic_profile: defenseclaw-genai-rich-v1
+    # Temporarily emit documented legacy aliases from the same redacted value.
+    compatibility_aliases: true
+    # Hard per-span/event/message limits; truncation stays deterministic.
+    limits:
+      max_attributes_per_span: 128
+      max_events_per_span: 64
+      max_links_per_span: 32
+      max_attributes_per_event: 32
+      max_attribute_value_bytes: 16384
+      max_projected_span_bytes: 262144
+      max_stacktrace_bytes: 32768
+      max_message_items: 128
+  # Process-wide metric reader interval and aggregation temporality.
+  metric_policy:
+    # Positive reader interval; destination export does not override it.
+    export_interval_seconds: 60
+    # delta or cumulative; choose for backend aggregation expectations.
+    temporality: delta
+  # Optional global bucket override. Omit it to inherit versioned catalog
+  # defaults (all signals collected, no redaction in catalog v1).
+  defaults:
+    # Signal construction gate. false avoids normal producer/runtime cost.
+    collect:
+      logs: true
+      traces: true
+      metrics: true
+    # Source default is intentionally unredacted; buckets may override it.
+    redaction_profile: none
+  # All 14 catalog buckets are expanded here for discoverability. Normal source
+  # files should list only deliberate collection or redaction overrides.
+  buckets:
+    compliance.activity:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    security.finding:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    guardrail.evaluation:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    enforcement.action:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    model.io:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    tool.activity:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    asset.scan:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    asset.lifecycle:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    network.egress:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    agent.lifecycle:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    ai.discovery:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    telemetry.ingest:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    platform.health:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+    diagnostic:
+      collect:
+        logs: true
+        traces: true
+        metrics: true
+      redaction_profile: none
+  # Custom profiles extend exactly one built-in redacting profile.
+  # Detector groups: pii, credentials, secrets.
+  # Field modes: preserve, detect, whole, hash, remove.
+  redaction_profiles:
+    soc:
+      # Inheritance is single-level: sensitive, content, or strict.
+      extends: sensitive
+      # Detector groups run only where a field class uses detect.
+      detectors:
+      - pii
+      - credentials
+      - secrets
+      # Per-class handling redacts only sensitive substrings when set to detect.
+      field_classes:
+        metadata: preserve
+        identifier: preserve
+        content: detect
+        reason: detect
+        evidence: detect
+        error: detect
+        path: hash
+        credential: remove
+  # Notification-only connector compatibility. This is not telemetry routing;
+  # the removed v7 connectors.*.audit_sinks key is intentionally unavailable.
+  connectors:
+    codex:
+      # Present empty list suppresses inherited global webhooks; entries retain
+      # the existing WebhookConfig notification contract.
+      webhooks:
+      - name: soc-generic
+        url: https://hooks.example.test/defenseclaw
+        type: generic
+        # Credential lookup by environment-variable name, never inline value.
+        secret_env: DEFENSECLAW_WEBHOOK_SECRET
+        room_id: soc
+        min_severity: HIGH
+        events:
+        - block
+        - scan
+        - guardrail
+        - drift
+        - health
+        timeout_seconds: 10
+        cooldown_seconds: 60
+        enabled: false
+  # SQLite is mandatory, generated when omitted, and cannot be disabled or
+  # filtered. retention_days: 0 retains forever and raises a capacity warning.
+  local:
+    # Main immutable audit/evidence store; defaults below the data directory.
+    path: ~/.defenseclaw/audit.db
+    # Separate forensic judge-body store; must not alias any configured file.
+    judge_bodies_path: ~/.defenseclaw/judge_bodies.db
+    # Applies to local event/evidence/judge history; zero means retain forever.
+    retention_days: 90
+  # Optional exports. Presence defaults enabled:true. Every example is disabled
+  # so this exhaustive reference is safe to inspect without exporting data.
+  destinations:
+  # JSONL: logs only. Ordered routes demonstrate first-match drop/send behavior.
+  - name: local-jsonl
+    kind: jsonl
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    path: ~/.defenseclaw/gateway.jsonl
+    # Size/age rotation with optional gzip compression; zero backups/age disables
+    # that pruning dimension without disabling the destination.
+    rotation:
+      max_size_mb: 50
+      max_backups: 5
+      max_age_days: 30
+      compress: true
+    # Queue count/bytes are always bounded. Push destinations additionally
+    # bound encoded request count/bytes and delay; batch count <= queue count.
+    batch:
+      max_queue_size: 2048
+      max_queue_bytes: 67108864
+    # Advanced ordered rules. First match wins for each destination and signal.
+    routes:
+    - name: omit-diagnostics
+      signals:
+      - logs
+      # Selector fields AND together; values within one field OR together.
+      selector:
+        buckets:
+        - diagnostic
+      # drop terminates routing and cannot specify a redaction profile.
+      action: drop
+    - name: reviewed-security
+      signals:
+      - logs
+      # Selector fields AND together; values within one field OR together.
+      selector:
+        buckets:
+        - security.finding
+        - guardrail.evaluation
+        sources:
+        - ai_defense
+        - codeguard
+        connectors:
+        - codex
+        - openclaw
+        actions:
+        - block
+        - quarantine
+        event_names:
+        - finding.observed
+        min_severity: HIGH
+      # send applies the route profile, or the bucket profile when omitted.
+      action: send
+      redaction_profile: soc
+  # Console: logs only. Concise send replaces the generated all-logs policy.
+  - name: operator-console
+    kind: console
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    # Queue count/bytes are always bounded. Push destinations additionally
+    # bound encoded request count/bytes and delay; batch count <= queue count.
+    batch:
+      max_queue_size: 1024
+      max_queue_bytes: 33554432
+    # Concise policy: exact signals + buckets + optional redaction profile.
+    send:
+      signals:
+      - logs
+      buckets:
+      - compliance.activity
+      - platform.health
+      redaction_profile: strict
+  # Prometheus: metrics only, exposed through the configured pull endpoint.
+  - name: prometheus
+    kind: prometheus
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    listen: 127.0.0.1:9464
+    path: /metrics
+    # Concise policy: exact signals + buckets + optional redaction profile.
+    send:
+      signals:
+      - metrics
+      buckets:
+      - security.finding
+      - guardrail.evaluation
+  # Splunk HEC: logs only. Private/CGNAT collectors require reviewed opt-in;
+  # metadata, link-local, and other prohibited ranges remain blocked.
+  - name: splunk-production
+    kind: splunk_hec
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    endpoint: https://splunk.example.test:8088/services/collector/event
+    # Required HEC token environment-variable name.
+    token_env: SPLUNK_HEC_TOKEN
+    index: main
+    source: defenseclaw
+    sourcetype: defenseclaw:event
+    sourcetype_overrides:
+      llm-judge-response: defenseclaw:judge
+      guardrail-verdict: defenseclaw:verdict
+    # TLS verification defaults on. A CA path is read-only and may be shared.
+    tls:
+      insecure_skip_verify: false
+      ca_cert: ''
+    # Positive per-export timeout in milliseconds.
+    timeout_ms: 10000
+    # Private and CGNAT destinations require separate explicit opt-ins. DNS is
+    # rechecked at connect time; metadata/link-local targets are always blocked.
+    network_safety:
+      allow_private_networks: false
+      allow_cgnat: false
+    # Queue count/bytes are always bounded. Push destinations additionally
+    # bound encoded request count/bytes and delay; batch count <= queue count.
+    batch:
+      max_queue_size: 2048
+      max_queue_bytes: 67108864
+      max_export_batch_size: 256
+      max_export_batch_bytes: 8388608
+      scheduled_delay_ms: 1000
+    # Advanced ordered rules. First match wins for each destination and signal.
+    routes:
+    - name: security
+      signals:
+      - logs
+      # Selector fields AND together; values within one field OR together.
+      selector:
+        buckets:
+        - security.finding
+        - enforcement.action
+        min_severity: HIGH
+      # send applies the route profile, or the bucket profile when omitted.
+      action: send
+      redaction_profile: soc
+  # Generic HTTP JSONL: logs only. Header/auth values use environment references.
+  - name: http-archive
+    kind: http_jsonl
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    endpoint: https://archive.example.test/defenseclaw
+    method: POST
+    # Optional bearer token environment-variable name.
+    bearer_env: ARCHIVE_BEARER_TOKEN
+    # Header values may be bounded literal metadata or {env: NAME} secrets.
+    headers:
+      X-Tenant:
+        env: ARCHIVE_TENANT
+    # TLS verification defaults on. A CA path is read-only and may be shared.
+    tls:
+      insecure_skip_verify: false
+      ca_cert: ''
+    # Positive per-export timeout in milliseconds.
+    timeout_ms: 10000
+    # Private and CGNAT destinations require separate explicit opt-ins. DNS is
+    # rechecked at connect time; metadata/link-local targets are always blocked.
+    network_safety:
+      allow_private_networks: false
+      allow_cgnat: false
+    # Queue count/bytes are always bounded. Push destinations additionally
+    # bound encoded request count/bytes and delay; batch count <= queue count.
+    batch:
+      max_queue_size: 2048
+      max_queue_bytes: 67108864
+      max_export_batch_size: 100
+      max_export_batch_bytes: 8388608
+      scheduled_delay_ms: 1000
+    # Concise policy: exact signals + buckets + optional redaction profile.
+    send:
+      signals:
+      - logs
+      buckets:
+      - compliance.activity
+      redaction_profile: strict
+  # General OTLP: logs, traces, and metrics with per-signal endpoint overrides.
+  - name: general-otel
+    kind: otlp
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    # grpc, grpc/protobuf, http, or http/protobuf; HTTP means OTLP protobuf,
+    # never arbitrary JSON.
+    protocol: http/protobuf
+    endpoint: https://otel.example.test
+    # Header values may be bounded literal metadata or {env: NAME} secrets.
+    headers:
+      Authorization:
+        env: OTEL_AUTHORIZATION
+      X-Deployment: production
+    logger_name: defenseclaw.audit
+    # TLS verification defaults on. A CA path is read-only and may be shared.
+    tls:
+      insecure: false
+      ca_cert: /etc/defenseclaw/otel-ca.pem
+    # Positive per-export timeout in milliseconds.
+    timeout_ms: 10000
+    # Private and CGNAT destinations require separate explicit opt-ins. DNS is
+    # rechecked at connect time; metadata/link-local targets are always blocked.
+    network_safety:
+      allow_private_networks: false
+      allow_cgnat: false
+    # Empty endpoint inherits the destination endpoint; path remains per signal.
+    signal_overrides:
+      logs:
+        endpoint: ''
+        path: /v1/logs
+      traces:
+        endpoint: ''
+        path: /v1/traces
+      metrics:
+        endpoint: ''
+        path: /v1/metrics
+    # Queue count/bytes are always bounded. Push destinations additionally
+    # bound encoded request count/bytes and delay; batch count <= queue count.
+    batch:
+      max_queue_size: 4096
+      max_queue_bytes: 134217728
+      max_export_batch_size: 512
+      max_export_batch_bytes: 16777216
+      scheduled_delay_ms: 5000
+    # Advanced ordered rules. First match wins for each destination and signal.
+    routes:
+    - name: operational-logs
+      signals:
+      - logs
+      # Selector fields AND together; values within one field OR together.
+      selector:
+        buckets:
+        - compliance.activity
+        - platform.health
+      # send applies the route profile, or the bucket profile when omitted.
+      action: send
+      redaction_profile: strict
+    - name: runtime-signals
+      signals:
+      - traces
+      - metrics
+      # Selector fields AND together; values within one field OR together.
+      selector:
+        buckets:
+        - model.io
+        - tool.activity
+        - agent.lifecycle
+      # send applies the route profile, or the bucket profile when omitted.
+      action: send
+      redaction_profile: sensitive
+  # Galileo is the OTLP adapter's trace-only rich-v2 preset; its batch-delay
+  # override is 1000 ms while the general OTLP default remains 5000 ms.
+  - name: galileo
+    kind: otlp
+    preset: galileo
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    # grpc, grpc/protobuf, http, or http/protobuf; HTTP means OTLP protobuf,
+    # never arbitrary JSON.
+    protocol: http/protobuf
+    endpoint: https://api.galileo.ai/otel/traces
+    # Header values may be bounded literal metadata or {env: NAME} secrets.
+    headers:
+      Galileo-API-Key:
+        env: GALILEO_API_KEY
+      project: defenseclaw
+      logstream: production
+    # Private and CGNAT destinations require separate explicit opt-ins. DNS is
+    # rechecked at connect time; metadata/link-local targets are always blocked.
+    network_safety:
+      allow_private_networks: false
+      allow_cgnat: false
+    # Queue count/bytes are always bounded. Push destinations additionally
+    # bound encoded request count/bytes and delay; batch count <= queue count.
+    batch:
+      max_queue_size: 2048
+      max_queue_bytes: 67108864
+      max_export_batch_size: 512
+      max_export_batch_bytes: 8388608
+      scheduled_delay_ms: 1000
+    # Concise policy: exact signals + buckets + optional redaction profile.
+    send:
+      signals:
+      - traces
+      buckets:
+      - agent.lifecycle
+      - model.io
+      - tool.activity
+      - guardrail.evaluation
+      redaction_profile: sensitive

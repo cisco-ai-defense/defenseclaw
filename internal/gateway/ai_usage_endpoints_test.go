@@ -44,12 +44,16 @@ func aiUsageTestServer(t *testing.T, withDiscovery bool) *APIServer {
 	cfg.Gateway.Token = "test-token"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 	if withDiscovery {
-		api.SetAIDiscoveryService(inventory.NewContinuousDiscoveryServiceWithOptions(
-			inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir(), EmitOTel: false},
+		service := inventory.NewContinuousDiscoveryServiceWithOptions(
+			inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir()},
 			nil,
-			nil,
-			nil,
-		))
+		)
+		t.Cleanup(func() {
+			if closed, err := service.CloseIfNeverStarted(); err != nil || !closed {
+				t.Errorf("close prepared AI discovery service = (%t, %v), want (true, nil)", closed, err)
+			}
+		})
+		api.SetAIDiscoveryService(service)
 	}
 	return api
 }
@@ -661,7 +665,7 @@ func TestRollupComponents_VendorAndFrameworkPickFirstNonEmpty(t *testing.T) {
 			LastSeen:  now,
 		},
 	}
-	out := rollupComponents(signals, inventory.ConfidenceParams{}, false)
+	out := rollupComponents(signals, inventory.ConfidenceParams{})
 	if len(out) != 1 {
 		t.Fatalf("rollup len=%d want 1", len(out))
 	}
@@ -691,7 +695,7 @@ func TestRollupComponents_LocationOmitsZeroLastSeen(t *testing.T) {
 			// "0001-01-01T00:00:00Z" surfacing bug.
 		},
 	}
-	out := rollupComponents(signals, inventory.ConfidenceParams{}, false)
+	out := rollupComponents(signals, inventory.ConfidenceParams{})
 	if len(out) != 1 || len(out[0].Locations) != 1 {
 		t.Fatalf("unexpected rollup shape: %+v", out)
 	}
@@ -718,7 +722,7 @@ func TestRollupComponents_LocationKeepsRealLastSeen(t *testing.T) {
 			LastSeen:  stamp,
 		},
 	}
-	out := rollupComponents(signals, inventory.ConfidenceParams{}, false)
+	out := rollupComponents(signals, inventory.ConfidenceParams{})
 	if got := out[0].Locations[0].LastSeen; got != "2026-05-05T12:00:00Z" {
 		t.Errorf("location LastSeen=%q want 2026-05-05T12:00:00Z", got)
 	}
@@ -733,14 +737,14 @@ func TestRollupComponents_SkipsGoneSignals(t *testing.T) {
 		Evidence:  []inventory.AIEvidence{{Basename: "pyproject.toml"}},
 		LastSeen:  now,
 	}
-	if out := rollupComponents([]inventory.AISignal{gone}, inventory.ConfidenceParams{}, false); len(out) != 0 {
+	if out := rollupComponents([]inventory.AISignal{gone}, inventory.ConfidenceParams{}); len(out) != 0 {
 		t.Fatalf("gone-only component rollup = %+v, want empty", out)
 	}
 	active := gone
 	active.State = inventory.AIStateSeen
 	active.Fingerprint = "active"
 	active.WorkspaceHash = "ws-active"
-	out := rollupComponents([]inventory.AISignal{gone, active}, inventory.ConfidenceParams{}, false)
+	out := rollupComponents([]inventory.AISignal{gone, active}, inventory.ConfidenceParams{})
 	if len(out) != 1 {
 		t.Fatalf("mixed rollup len=%d want 1: %+v", len(out), out)
 	}

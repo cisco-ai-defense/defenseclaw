@@ -92,7 +92,6 @@ interface GeneratorState {
   hiltMinSeverity: HitlSeverity;
   port: string;
   blockMessage: string;
-  disableRedaction: boolean;
   workspaceDir: string;
   disableGuardrail: boolean;
   restart: boolean;
@@ -141,7 +140,6 @@ const DEFAULT_STATE: GeneratorState = {
   hiltMinSeverity: 'high',
   port: '',
   blockMessage: '',
-  disableRedaction: false,
   workspaceDir: '',
   disableGuardrail: false,
   restart: true,
@@ -419,13 +417,6 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
     } else {
       warnings.push(`Port ${s.port} is not a valid TCP port. Flag omitted.`);
     }
-  }
-
-  if (s.disableRedaction) {
-    lines.push('--disable-redaction');
-    warnings.push(
-      'Redaction is disabled. Sinks will receive UNREDACTED prompts. Only do this inside trusted, single-tenant environments.',
-    );
   }
 
   if (s.workspaceDir.trim()) {
@@ -925,11 +916,22 @@ export function CommandGenerator() {
                 value={state.workspaceDir}
                 onChange={(v) => update('workspaceDir', v)}
               />
-              <Toggle
-                label="Disable redaction (dangerous)"
-                checked={state.disableRedaction}
-                onChange={(v) => update('disableRedaction', v)}
-              />
+              <div className="rounded-lg border border-fd-border bg-fd-background/60 p-3 text-xs text-fd-muted-foreground sm:col-span-2">
+                <p>
+                  Redaction has a separate v8 policy editor. Run{' '}
+                  <code>defenseclaw setup redaction</code> for its guided flow. Its
+                  scripted bucket, profile, destination, and route commands own{' '}
+                  <code>observability.destinations[].routes[].selector.buckets</code>{' '}
+                  and <code>observability.redaction_profiles</code>. Independently
+                  validate, inspect, plan, and restart with:
+                </p>
+                <pre className="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-fd-foreground">
+                  {`defenseclaw config validate
+defenseclaw config show --effective --section observability
+defenseclaw observability plan
+defenseclaw-gateway restart`}
+                </pre>
+              </div>
               <Toggle
                 label="Restart gateway after setup"
                 checked={state.restart}

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import re
 import sys
 import time
@@ -255,6 +256,18 @@ def _assert_decision(records: list[dict[str, Any]], stamp: str) -> None:
         raise ContinuityError(f"run {stamp} raw/effective hook decision drifted")
 
 
+def _canonical_tempo_trace_id(value: object) -> str | None:
+    """Restore Tempo search IDs to the canonical 16-byte W3C spelling."""
+
+    if not isinstance(value, str) or value != value.strip():
+        return None
+    raw = value
+    if re.fullmatch(r"[0-9a-fA-F]{1,32}", raw) is None:
+        return None
+    canonical = raw.lower().zfill(32)
+    return None if canonical == "0" * 32 else canonical
+
+
 def _tempo_spans(stamps: tuple[str, str], lookback_seconds: int) -> list[dict[str, Any]]:
     stamp_expression = "|".join(re.escape(stamp) for stamp in stamps)
     now = time.time()
@@ -269,9 +282,10 @@ def _tempo_spans(stamps: tuple[str, str], lookback_seconds: int) -> list[dict[st
         timeout_seconds=60,
     )
     trace_ids = {
-        item.get("traceID", "").lower()
+        canonical
         for item in response.get("traces", [])
-        if isinstance(item, dict) and re.fullmatch(r"[0-9a-fA-F]{32}", str(item.get("traceID", "")))
+        if isinstance(item, dict)
+        and (canonical := _canonical_tempo_trace_id(item.get("traceID", ""))) is not None
     }
     return [
         span
@@ -352,23 +366,81 @@ def _assert_trace(stamp: str, spans: list[dict[str, Any]]) -> str:
     return trace_id
 
 
-def _assert_metrics(stamps: tuple[str, str]) -> None:
-    expression = "|".join(re.escape(stamp) for stamp in stamps)
-    series = dashboards._prometheus_vector(  # noqa: SLF001
-        'defenseclaw_agent_last_seen_seconds{gen_ai_agent_id=~"golden-agent-(root|direct|nested)-('
-        + expression
-        + ')"}',
+def _assert_metrics(metric_cutover_seconds: float, lookback_hours: int) -> None:
+    """Prove low-cardinality lifecycle series have samples on both sides.
+
+    Agent IDs are intentionally forbidden Prometheus labels in v8. The
+    last-seen gauge value is itself an epoch timestamp, so min/max over the
+    retained range proves that the same bounded role series contains a sample
+    from before the upgrade and a newer sample emitted after it.
+    """
+
+    if not math.isfinite(metric_cutover_seconds) or metric_cutover_seconds <= 0:
+        raise ContinuityError("metric cutover must be a finite positive epoch")
+
+    selector = (
+        'defenseclaw_agent_last_seen_seconds{connector="codex",'
+        'gen_ai_agent_type=~"root|direct|nested"}'
+    )
+    window = f"{lookback_hours}h"
+    minimum = dashboards._prometheus_vector(  # noqa: SLF001
+        f"min_over_time({selector}[{window}])",
         timeout_seconds=60,
     )
-    observed = {
-        item.get("metric", {}).get("gen_ai_agent_id")
-        for item in series
-        if dashboards._positive_prometheus_series(item)  # noqa: SLF001
-    }
-    expected = {f"golden-agent-{role}-{stamp}" for stamp in stamps for role in ("root", "direct", "nested")}
-    if not expected.issubset(observed):
-        missing = sorted(expected - observed)
-        raise ContinuityError(f"Prometheus lost pre/post lifecycle series: {missing}")
+    maximum = dashboards._prometheus_vector(  # noqa: SLF001
+        f"max_over_time({selector}[{window}])",
+        timeout_seconds=60,
+    )
+
+    def by_role(
+        series: list[dict[str, Any]],
+        *,
+        aggregate: Any,
+        query_name: str,
+    ) -> dict[str, float]:
+        observed: dict[str, float] = {}
+        for item in series:
+            metric = item.get("metric")
+            if not isinstance(metric, dict):
+                continue
+            role = metric.get("gen_ai_agent_type")
+            value = item.get("value")
+            if role not in {"root", "direct", "nested"}:
+                continue
+            if not isinstance(value, list) or len(value) != 2:
+                raise ContinuityError(
+                    f"Prometheus {query_name} lifecycle metric for {role} is malformed",
+                )
+            try:
+                metric_value = float(value[1])
+            except (TypeError, ValueError):
+                raise ContinuityError(
+                    f"Prometheus {query_name} lifecycle metric for {role} is not numeric",
+                ) from None
+            if not math.isfinite(metric_value) or metric_value <= 0:
+                raise ContinuityError(
+                    f"Prometheus {query_name} lifecycle metric for {role} "
+                    "is non-finite or non-positive",
+                )
+            if role in observed:
+                observed[role] = aggregate(observed[role], metric_value)
+            else:
+                observed[role] = metric_value
+        return observed
+
+    minimum_by_role = by_role(minimum, aggregate=min, query_name="minimum")
+    maximum_by_role = by_role(maximum, aggregate=max, query_name="maximum")
+    expected = {"root", "direct", "nested"}
+    missing = sorted(expected - (minimum_by_role.keys() & maximum_by_role.keys()))
+    if missing:
+        raise ContinuityError(f"Prometheus lost lifecycle role series: {missing}")
+    not_pre = sorted(role for role in expected if minimum_by_role[role] >= metric_cutover_seconds)
+    not_post = sorted(role for role in expected if maximum_by_role[role] <= metric_cutover_seconds)
+    if not_pre or not_post:
+        raise ContinuityError(
+            "Prometheus lifecycle history does not straddle the upgrade boundary: "
+            f"missing_pre={not_pre} missing_post={not_post}",
+        )
 
 
 def _assert_dashboards(
@@ -422,6 +494,7 @@ def verify(
     pre_stamp: str,
     post_stamp: str,
     *,
+    metric_cutover_seconds: float,
     lookback_hours: int,
     dashboard_deadline_seconds: int,
 ) -> dict[str, Any]:
@@ -449,7 +522,7 @@ def verify(
         record_counts[stamp] = len(run_records)
     if trace_ids[pre_stamp] == trace_ids[post_stamp]:
         raise ContinuityError("post-upgrade execution reused the pre-upgrade W3C trace")
-    _assert_metrics((pre_stamp, post_stamp))
+    _assert_metrics(metric_cutover_seconds, lookback_hours)
     dashboard_report = _assert_dashboards(
         lookback_hours=lookback_hours,
         deadline=time.monotonic() + dashboard_deadline_seconds,
@@ -468,6 +541,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pre-stamp", required=True)
     parser.add_argument("--post-stamp", required=True)
+    parser.add_argument("--metric-cutover-seconds", required=True, type=float)
     parser.add_argument("--lookback-hours", type=int, default=2)
     parser.add_argument("--wait-seconds", type=int, default=60)
     parser.add_argument("--dashboard-deadline-seconds", type=int, default=300)
@@ -477,6 +551,8 @@ def main() -> int:
             parser.error(f"--{name}-stamp must be numeric")
     if args.pre_stamp == args.post_stamp:
         parser.error("pre- and post-stamps must differ")
+    if not math.isfinite(args.metric_cutover_seconds) or args.metric_cutover_seconds <= 0:
+        parser.error("--metric-cutover-seconds must be finite and positive")
     if args.lookback_hours <= 0 or args.wait_seconds <= 0 or args.dashboard_deadline_seconds <= 0:
         parser.error("lookback and deadline values must be positive")
 
@@ -487,6 +563,7 @@ def main() -> int:
             report = verify(
                 args.pre_stamp,
                 args.post_stamp,
+                metric_cutover_seconds=args.metric_cutover_seconds,
                 lookback_hours=args.lookback_hours,
                 dashboard_deadline_seconds=args.dashboard_deadline_seconds,
             )

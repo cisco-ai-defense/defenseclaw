@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestFirstSubmatch_ParsesCodesignFixtures exercises the three
@@ -101,8 +102,13 @@ func TestBundleIDFromExecutable_WalksToApp(t *testing.T) {
 		t.Fatalf("write stub: %v", err)
 	}
 	orig := plutilBinary
+	origTimeout := plutilTimeout
 	plutilBinary = stub
-	t.Cleanup(func() { plutilBinary = orig })
+	plutilTimeout = 15 * time.Second
+	t.Cleanup(func() {
+		plutilBinary = orig
+		plutilTimeout = origTimeout
+	})
 
 	cases := []struct {
 		name string

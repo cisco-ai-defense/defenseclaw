@@ -11,12 +11,41 @@
 package connector
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestAntigravityDefaultCapabilitiesMatchResolvedContract(t *testing.T) {
+	opts := SetupOpts{DataDir: t.TempDir()}
+	conn := NewAntigravityConnector()
+	direct := conn.HookCapabilities(opts)
+	resolved := conn.HookProfile(opts).Capabilities
+	if !reflect.DeepEqual(direct, resolved) {
+		t.Fatalf("HookCapabilities()=%+v, default resolved contract=%+v", direct, resolved)
+	}
+}
+
+func sharedHookBytes(t *testing.T, hookDir string) map[string][]byte {
+	t.Helper()
+	out := make(map[string][]byte, len(genericHookScripts)+len(hookHelperScripts))
+	for _, name := range append(append([]string{}, genericHookScripts...), hookHelperScripts...) {
+		body, err := os.ReadFile(filepath.Join(hookDir, name))
+		if err != nil {
+			t.Fatalf("read shared hook %s: %v", name, err)
+		}
+		out[name] = body
+	}
+	return out
+}
 
 func TestHookContractResolution(t *testing.T) {
 	cases := []struct {
@@ -27,10 +56,23 @@ func TestHookContractResolution(t *testing.T) {
 		wantID     string
 		wantNorm   string
 	}{
-		{"codex_known", "codex", "codex 0.124.0", HookCompatibilityKnown, "codex-hooks-v1", "0.124.0"},
+		{"codex_six_event_minimum", "codex", "codex 0.124.0", HookCompatibilityKnown, "codex-hooks-v1", "0.124.0"},
+		{"codex_six_event_upper_boundary", "codex", "codex 0.128.99", HookCompatibilityKnown, "codex-hooks-v1", "0.128.99"},
+		{"codex_eight_event_minimum", "codex", "codex 0.129.0", HookCompatibilityKnown, "codex-hooks-v2", "0.129.0"},
+		{"codex_eight_event_upper_boundary", "codex", "codex 0.132.99", HookCompatibilityKnown, "codex-hooks-v2", "0.132.99"},
+		{"codex_ten_event_selective_minimum", "codex", "codex 0.133.0", HookCompatibilityKnown, "codex-hooks-v3", "0.133.0"},
+		{"codex_ten_event_selective_upper_boundary", "codex", "codex 0.134.99", HookCompatibilityKnown, "codex-hooks-v3", "0.134.99"},
+		{"codex_generic_function_minimum", "codex", "codex 0.135.0", HookCompatibilityKnown, "codex-hooks-v3-generic", "0.135.0"},
+		{"codex_generic_function_upper_boundary", "codex", "codex 0.144.99", HookCompatibilityKnown, "codex-hooks-v3-generic", "0.144.99"},
+		{"codex_session_end_minimum", "codex", "codex 0.145.0", HookCompatibilityKnown, "codex-hooks-v4", "0.145.0"},
+		{"codex_current", "codex", "codex 0.146.0", HookCompatibilityKnown, "codex-hooks-v4", "0.146.0"},
+		{"codex_unversioned_uses_full_default", "codex", "", HookCompatibilityUnversioned, "codex-hooks-v4", ""},
 		{"codex_unknown_before_stable", "codex", "codex 0.123.0", HookCompatibilityUnknown, "", "0.123.0"},
-		{"claude_alias_known", "claude-code", "Claude Code v2.1.144", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.144"},
+		{"claude_before_message_display", "claude-code", "Claude Code v2.1.151", HookCompatibilityUnknown, "", "2.1.151"},
+		{"claude_alias_known", "claude-code", "Claude Code v2.1.152", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.152"},
 		{"openhands_alias_known", "open-hands", "OpenHands 1.0.0", HookCompatibilityKnown, "openhands-hooks-v1", "1.0.0"},
+		{"antigravity_before_reliable_post", "antigravity", "Antigravity CLI v1.1.8", HookCompatibilityUnknown, "", "1.1.8"},
+		{"antigravity_reliable_post_minimum", "antigravity", "Antigravity CLI v1.1.9", HookCompatibilityKnown, "antigravity-hooks-v2", "1.1.9"},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
 		{"openclaw_proxy_not_gated", "openclaw", "", HookCompatibilityNotGated, "", ""},
 		{"zeptoclaw_proxy_not_gated", "zeptoclaw", "zeptoclaw 0.5.0", HookCompatibilityNotGated, "", "0.5.0"},
@@ -47,6 +89,110 @@ func TestHookContractResolution(t *testing.T) {
 			}
 			if got.NormalizedVersion != tc.wantNorm {
 				t.Fatalf("NormalizedVersion=%q want %q", got.NormalizedVersion, tc.wantNorm)
+			}
+		})
+	}
+}
+
+func TestCodexHookContractVersionedEventMatrix(t *testing.T) {
+	tests := []struct {
+		version string
+		wantID  string
+		events  []string
+	}{
+		{
+			version: "0.124.0",
+			wantID:  "codex-hooks-v1",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "Stop",
+			},
+		},
+		{
+			version: "0.129.0",
+			wantID:  "codex-hooks-v2",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "PreCompact",
+				"PostCompact", "Stop",
+			},
+		},
+		{
+			version: "0.133.0",
+			wantID:  "codex-hooks-v3",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "SubagentStart",
+				"SubagentStop", "PreCompact", "PostCompact", "Stop",
+			},
+		},
+		{
+			version: "0.135.0",
+			wantID:  "codex-hooks-v3-generic",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "SubagentStart",
+				"SubagentStop", "PreCompact", "PostCompact", "Stop",
+			},
+		},
+		{
+			version: "0.145.0",
+			wantID:  "codex-hooks-v4",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "SubagentStart",
+				"SubagentStop", "PreCompact", "PostCompact", "Stop",
+				"SessionEnd",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.version, func(t *testing.T) {
+			resolution := ResolveHookContract("codex", test.version)
+			if resolution.Status != HookCompatibilityKnown {
+				t.Fatalf("status = %q, want %q", resolution.Status, HookCompatibilityKnown)
+			}
+			if resolution.Contract.ContractID != test.wantID {
+				t.Fatalf("contract = %q, want %q", resolution.Contract.ContractID, test.wantID)
+			}
+			if !reflect.DeepEqual(resolution.Contract.Events, test.events) {
+				t.Fatalf("events = %#v, want %#v", resolution.Contract.Events, test.events)
+			}
+		})
+	}
+}
+
+func TestCodexHookContractToolSurfaceBands(t *testing.T) {
+	selective := []ToolSurface{
+		ToolSurfaceShell, ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
+	}
+	generic := []ToolSurface{
+		ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
+	}
+	for _, tc := range []struct {
+		version string
+		want    []ToolSurface
+	}{
+		{version: "0.124.0", want: selective},
+		{version: "0.129.0", want: selective},
+		{version: "0.133.0", want: selective},
+		{version: "0.135.0", want: generic},
+		{version: "0.145.0", want: generic},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			lifecycle := ResolveHookContract("codex", tc.version).Contract.ToolCallLifecycle
+			if !reflect.DeepEqual(lifecycle.CoveredToolSurfaces, tc.want) {
+				t.Fatalf("covered surfaces = %v, want %v", lifecycle.CoveredToolSurfaces, tc.want)
+			}
+			if lifecycle.OutcomeAuthority != ToolOutcomeSurfaceSpecific {
+				t.Fatalf("outcome authority = %q, want %q", lifecycle.OutcomeAuthority, ToolOutcomeSurfaceSpecific)
+			}
+			if !reflect.DeepEqual(lifecycle.PreProposalEvents, []string{"PreToolUse"}) {
+				t.Fatalf("pre-proposal events = %v, want only PreToolUse", lifecycle.PreProposalEvents)
+			}
+			if lifecycle.RouteForEvent("PermissionRequest") != ToolEventRouteStructuredAction ||
+				lifecycle.IsPreProposalEvent("PermissionRequest") {
+				t.Fatal("PermissionRequest must remain a direct structured-action event without proposal authority")
 			}
 		})
 	}
@@ -74,7 +220,7 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		conn, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %s", name)
@@ -96,11 +242,15 @@ func TestHookContractsCoverHookEndpoints(t *testing.T) {
 			if len(contract.AIDSurfaces) == 0 {
 				t.Fatalf("%s contract %s missing AID surfaces", name, contract.ContractID)
 			}
-			if contract.ResponseFieldName == "" && name != "omnigent" {
+			directResponse := name == "omnigent" || name == "amp"
+			if contract.ResponseFieldName == "" && !directResponse {
 				t.Fatalf("%s contract %s missing response field", name, contract.ContractID)
 			}
-			if name == "omnigent" && contract.ResponseFieldName != "" {
+			if directResponse && contract.ResponseFieldName != "" {
 				t.Fatalf("%s contract %s must return its policy verdict directly, not through %q", name, contract.ContractID, contract.ResponseFieldName)
+			}
+			if err := ValidateToolCallLifecycleContract(contract.ToolCallLifecycle, contract.Events); err != nil {
+				t.Fatalf("%s contract %s has invalid tool-call lifecycle: %v", name, contract.ContractID, err)
 			}
 		}
 	}
@@ -141,15 +291,16 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			MinInclusive string `json:"min_inclusive"`
 			MaxExclusive string `json:"max_exclusive"`
 		} `json:"agent_version"`
-		DefaultForUnversioned   bool     `json:"default_for_unversioned"`
-		HookScriptVersion       string   `json:"hook_script_version"`
-		HookConfigPathTemplates []string `json:"hook_config_path_templates"`
-		ResponseField           string   `json:"response_field"`
-		Events                  []string `json:"events"`
-		AIDSurfaces             []string `json:"aid_surfaces"`
-		SupportsTraceparent     bool     `json:"supports_traceparent"`
-		NativeOTLP              bool     `json:"native_otlp"`
-		ContentEnvelopeKey      string   `json:"content_envelope_key"`
+		DefaultForUnversioned   bool                      `json:"default_for_unversioned"`
+		HookScriptVersion       string                    `json:"hook_script_version"`
+		HookConfigPathTemplates []string                  `json:"hook_config_path_templates"`
+		ResponseField           string                    `json:"response_field"`
+		Events                  []string                  `json:"events"`
+		AIDSurfaces             []string                  `json:"aid_surfaces"`
+		SupportsTraceparent     bool                      `json:"supports_traceparent"`
+		NativeOTLP              bool                      `json:"native_otlp"`
+		ContentEnvelopeKey      string                    `json:"content_envelope_key"`
+		ToolCallLifecycle       ToolCallLifecycleContract `json:"tool_call_lifecycle"`
 		Capabilities            struct {
 			CanBlock           bool     `json:"can_block"`
 			CanAskNative       bool     `json:"can_ask_native"`
@@ -251,6 +402,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			if manifestContract.ContentEnvelopeKey != runtime.ContentEnvelopeKey {
 				t.Fatalf("%s content_envelope_key=%q want %q", runtime.ContractID, manifestContract.ContentEnvelopeKey, runtime.ContentEnvelopeKey)
 			}
+			if !reflect.DeepEqual(manifestContract.ToolCallLifecycle, runtime.ToolCallLifecycle) {
+				t.Fatalf("%s tool_call_lifecycle manifest/runtime drift:\nmanifest=%+v\nruntime=%+v", runtime.ContractID, manifestContract.ToolCallLifecycle, runtime.ToolCallLifecycle)
+			}
 			if manifestContract.Capabilities.CanBlock != runtime.Capabilities.CanBlock {
 				t.Fatalf("%s can_block=%v want %v", runtime.ContractID, manifestContract.Capabilities.CanBlock, runtime.Capabilities.CanBlock)
 			}
@@ -327,7 +481,7 @@ func stringInSlice(values []string, want string) bool {
 func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 	profile := NewClaudeCodeConnector().HookProfile(SetupOpts{
 		APIAddr:      "127.0.0.1:18970",
-		AgentVersion: "Claude Code v2.1.144",
+		AgentVersion: "Claude Code v2.1.152",
 	})
 	if profile.ContractID != "claudecode-hooks-v1" {
 		t.Fatalf("ContractID=%q", profile.ContractID)
@@ -340,6 +494,428 @@ func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 	}
 	if !HookProfileAIDSurfaceEnabled(profile, "tool_call") {
 		t.Fatalf("AID tool_call surface not enabled: %+v", profile.AIDSurfaces)
+	}
+	if profile.ToolCallLifecycle.Version != ToolCallLifecycleContractVersion || !profile.ToolCallLifecycle.SupportsExactInvocationJoin() {
+		t.Fatalf("Claude Code lifecycle contract was not resolved: %+v", profile.ToolCallLifecycle)
+	}
+	profile.ToolCallLifecycle.PreProposalEvents[0] = "mutated"
+	resolved := ResolveHookContract("claudecode", "2.1.152")
+	if resolved.Contract.ToolCallLifecycle.PreProposalEvents[0] != "PreToolUse" {
+		t.Fatal("resolved HookProfile aliases the built-in lifecycle contract")
+	}
+}
+
+func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
+	claude := ResolveHookContract("claudecode", "2.1.152").Contract.ToolCallLifecycle
+	if got := claude.RouteForEvent("PreToolUse"); got != ToolEventRouteStructuredAction {
+		t.Fatalf("Claude PreToolUse route=%q", got)
+	}
+	if got := claude.RouteForEvent("PostToolUseFailure"); got != ToolEventRouteResultContent {
+		t.Fatalf("Claude PostToolUseFailure route=%q", got)
+	}
+	if got := claude.RouteForEvent("ConfigChange"); got != ToolEventRouteUnknown {
+		t.Fatalf("Claude ConfigChange route=%q want unknown", got)
+	}
+	if got := claude.RouteForEvent("UserPromptSubmit"); got != ToolEventRouteUnknown {
+		t.Fatalf("Claude prompt route=%q want unknown", got)
+	}
+	if claude.IsStateTransitionEvent("ConfigChange") || claude.IsPreProposalEvent("ConfigChange") {
+		t.Fatal("Claude ConfigChange must not claim tool or typed-state authority")
+	}
+	if claude.IsAuthoritativeTerminalEvent("SubagentStop") {
+		t.Fatal("session-scoped pending state treated child stop as session terminal")
+	}
+	if !claude.IsPreProposalEvent("PreToolUse") || !claude.ExactInvocationJoinEligible("PostToolUse") {
+		t.Fatal("Claude exact proposal/result lifecycle is not join eligible")
+	}
+	if claude.IsPreProposalEvent("PermissionRequest") ||
+		claude.RouteForEvent("PermissionRequest") != ToolEventRouteStructuredAction {
+		t.Fatal("Claude PermissionRequest must remain direct-only without proposal authority")
+	}
+	if got := claude.ClassifyTerminalOutcome("claudecode", "PermissionDenied", nil); got != ToolLifecycleOutcomeDenied {
+		t.Fatalf("Claude denial outcome=%q", got)
+	}
+	copilot := ResolveHookContract("copilot", "1.0.18").Contract.ToolCallLifecycle
+	if copilot.IsAuthoritativeTerminalEvent("subagentStop") {
+		t.Fatal("Copilot subagent stop must not clear session-wide pending state")
+	}
+
+	cases := []struct {
+		name      string
+		connector string
+		version   string
+		event     string
+		payload   map[string]interface{}
+		want      ToolLifecycleOutcome
+	}{
+		{
+			name:      "hermes_success_status",
+			connector: "hermes", event: "post_tool_call",
+			payload: map[string]interface{}{"extra": map[string]interface{}{"status": "ok"}},
+			want:    ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "hermes_blocked_status",
+			connector: "hermes", event: "post_tool_call",
+			payload: map[string]interface{}{"extra": map[string]interface{}{"status": "blocked"}},
+			want:    ToolLifecycleOutcomeDenied,
+		},
+		{
+			name:      "gemini_error",
+			connector: "geminicli", event: "AfterTool",
+			payload: map[string]interface{}{"tool_response": map[string]interface{}{"error": "command failed"}},
+			want:    ToolLifecycleOutcomeFailure,
+		},
+		{
+			name:      "gemini_missing_response_is_unknown",
+			connector: "geminicli", event: "AfterTool",
+			payload: map[string]interface{}{},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "openhands_explicit_success",
+			connector: "openhands", event: "post_tool_use",
+			payload: map[string]interface{}{"tool_response": map[string]interface{}{"is_error": false}},
+			want:    ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "antigravity_requires_step",
+			connector: "antigravity", event: "PostToolUse",
+			payload: map[string]interface{}{},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "codex_shell_scalar_response_is_unknown",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":     "shell",
+				"tool_input":    map[string]interface{}{"command": "exit 7"},
+				"tool_response": "Chunk ID: 5d7f2a\nProcess exited with code 7\nFinal output:\n",
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "codex_generic_status_object_is_unknown",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":     "custom_function",
+				"tool_input":    map[string]interface{}{"value": "test"},
+				"tool_response": map[string]interface{}{"status": "completed", "success": true},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "codex_apply_patch_scalar_response_is_success",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name": "apply_patch",
+				"tool_input": map[string]interface{}{
+					"command": "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch",
+				},
+				"tool_response": "Success. Updated files.",
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "codex_mcp_call_tool_result_without_error_is_success",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":  "mcp__github__get_issue",
+				"tool_input": map[string]interface{}{"owner": "example", "repo": "project", "issue_number": float64(1)},
+				"tool_response": map[string]interface{}{
+					"content": []interface{}{map[string]interface{}{"type": "text", "text": "issue"}},
+				},
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "codex_mcp_call_tool_result_error_is_failure",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":  "mcp__github__get_issue",
+				"tool_input": map[string]interface{}{"owner": "example", "repo": "project", "issue_number": float64(1)},
+				"tool_response": map[string]interface{}{
+					"content": []interface{}{map[string]interface{}{"type": "text", "text": "not found"}},
+					"isError": true,
+				},
+			},
+			want: ToolLifecycleOutcomeFailure,
+		},
+		{
+			name:      "codex_mcp_call_tool_result_false_error_is_success",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":  "mcp__github__get_issue",
+				"tool_input": map[string]interface{}{},
+				"tool_response": map[string]interface{}{
+					"content": []interface{}{},
+					"isError": false,
+				},
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "codex_mcp_response_without_input_is_unknown",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name": "mcp__github__get_issue",
+				"tool_response": map[string]interface{}{
+					"content": []interface{}{},
+				},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "codex_mcp_response_without_content_is_unknown",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":     "mcp__github__get_issue",
+				"tool_input":    map[string]interface{}{"owner": "example", "repo": "project", "issue_number": float64(1)},
+				"tool_response": map[string]interface{}{"isError": false},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_missing_result",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_empty_result_object",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{"tool_response": map[string]interface{}{}},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_result_requires_string_output",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_response": map[string]interface{}{"output": map[string]interface{}{}},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_empty_string_result_is_success",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_response": map[string]interface{}{"output": ""},
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "opencode_bash_zero_exit_is_success",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_name": "bash",
+				"tool_response": map[string]interface{}{
+					"output": "", "metadata": map[string]interface{}{"exit": float64(0)},
+				},
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "opencode_bash_nonzero_exit_is_failure",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_name": "bash",
+				"tool_response": map[string]interface{}{
+					"output": "failed", "metadata": map[string]interface{}{"exit": float64(7)},
+				},
+			},
+			want: ToolLifecycleOutcomeFailure,
+		},
+		{
+			name:      "opencode_bash_null_exit_is_unknown",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_name": "bash",
+				"tool_response": map[string]interface{}{
+					"output": "timeout", "metadata": map[string]interface{}{"exit": nil},
+				},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_bash_missing_exit_is_unknown",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_name": "bash",
+				"tool_response": map[string]interface{}{
+					"output": "", "metadata": map[string]interface{}{},
+				},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "amp_done_is_success",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{
+				"status": "done",
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "amp_error_is_failure",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{
+				"status": "error", "error": "command failed",
+			},
+			want: ToolLifecycleOutcomeFailure,
+		},
+		{
+			name:      "amp_cancelled_is_cancelled",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{
+				"status": "cancelled",
+			},
+			want: ToolLifecycleOutcomeCancelled,
+		},
+		{
+			name:      "amp_done_with_error_is_unknown",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{
+				"status": "done", "error": "contradictory",
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "amp_missing_status_is_unknown",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "amp_uppercase_status_is_unknown",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{"status": "DONE"},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "amp_padded_status_is_unknown",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{"status": " done "},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			contract := ResolveHookContract(tc.connector, tc.version).Contract.ToolCallLifecycle
+			if got := contract.ClassifyTerminalOutcome(tc.connector, tc.event, tc.payload); got != tc.want {
+				t.Fatalf("outcome=%q want %q", got, tc.want)
+			}
+		})
+	}
+
+	for _, connectorName := range []string{"windsurf", "geminicli", "copilot", "openhands", "omnigent"} {
+		contract := ResolveHookContract(connectorName, "").Contract.ToolCallLifecycle
+		if contract.SupportsExactInvocationJoin() {
+			t.Fatalf("%s must not claim exact invocation joins", connectorName)
+		}
+	}
+	antigravity := ResolveHookContract("antigravity", "1.1.9").Contract
+	antigravity.ToolCallLifecycle.StatefulEnforcementLevel = StatefulToolPairedOutcomes
+	if err := ValidateToolCallLifecycleContract(antigravity.ToolCallLifecycle, antigravity.Events); err == nil {
+		t.Fatal("paired sequence must not be promoted to exact paired-outcome enforcement")
+	}
+	amp := ResolveHookContract("amp", "0.0.1785334225").Contract.ToolCallLifecycle
+	if !amp.SupportsExactInvocationJoin() || !amp.IsPreProposalEvent("tool.call") ||
+		!amp.ExactInvocationJoinEligible("tool.result") ||
+		!amp.IsAuthoritativePendingDiscardEvent("agent.end") {
+		t.Fatal("Amp exact proposal/result lifecycle is incomplete")
+	}
+}
+
+func TestToolCallLifecycleTerminalResetEventsAreSessionScoped(t *testing.T) {
+	for _, tc := range []struct {
+		connector      string
+		version        string
+		event          string
+		terminal       bool
+		discardPending bool
+	}{
+		{connector: "codex", version: "0.146.0", event: "Stop", discardPending: true},
+		{connector: "codex", version: "0.146.0", event: "SessionEnd", terminal: true},
+		{connector: "claudecode", version: "2.1.152", event: "Stop", discardPending: true},
+		{connector: "claudecode", version: "2.1.152", event: "StopFailure", discardPending: true},
+		{connector: "claudecode", version: "2.1.152", event: "SessionEnd", terminal: true},
+		{connector: "hermes", event: "subagent_stop"},
+		{connector: "hermes", event: "on_session_end", terminal: true},
+		{connector: "hermes", event: "on_session_finalize", terminal: true},
+		{connector: "hermes", event: "on_session_reset", terminal: true},
+		{connector: "cursor", event: "stop", discardPending: true},
+		{connector: "cursor", event: "sessionEnd", terminal: true},
+		{connector: "windsurf", event: "post_cascade_response", discardPending: true},
+		{connector: "windsurf", event: "post_cascade_response_with_transcript", discardPending: true},
+		{connector: "geminicli", event: "AfterAgent", discardPending: true},
+		{connector: "geminicli", event: "SessionEnd", terminal: true},
+		{connector: "copilot", event: "agentStop", discardPending: true},
+		{connector: "copilot", event: "sessionEnd", terminal: true},
+		{connector: "openhands", event: "stop", discardPending: true},
+		{connector: "openhands", event: "session_end", terminal: true},
+		{connector: "antigravity", version: "1.1.9", event: "Stop", discardPending: true},
+		{connector: "opencode", event: "session.idle", discardPending: true},
+		{connector: "opencode", event: "session.deleted", terminal: true},
+		{connector: "amp", event: "session.start"},
+		{connector: "amp", event: "agent.end", discardPending: true},
+		{connector: "omnigent", event: "AfterAgentResponse", discardPending: true},
+	} {
+		t.Run(tc.connector+"/"+tc.event, func(t *testing.T) {
+			contract := ResolveHookContract(tc.connector, tc.version).Contract
+			if !containsExact(contract.Events, tc.event) {
+				t.Fatalf("reviewed event %q is not declared by %s", tc.event, contract.ContractID)
+			}
+			if got := contract.ToolCallLifecycle.IsAuthoritativeTerminalEvent(tc.event); got != tc.terminal {
+				t.Fatalf("terminal=%t want %t", got, tc.terminal)
+			}
+			if got := contract.ToolCallLifecycle.IsAuthoritativePendingDiscardEvent(tc.event); got != tc.discardPending {
+				t.Fatalf("pending discard=%t want %t", got, tc.discardPending)
+			}
+		})
+	}
+
+	for _, version := range []string{"0.124.0", "0.129.0", "0.133.0", "0.135.0", "0.144.0"} {
+		contract := ResolveHookContract("codex", version).Contract
+		if got := contract.ToolCallLifecycle.AuthoritativeTerminalEvents; len(got) != 0 {
+			t.Fatalf("Codex %s terminal reset events=%v before SessionEnd support", version, got)
+		}
+	}
+}
+
+func TestToolCallLifecycleStateTransitionRouteIsReservedAndEmpty(t *testing.T) {
+	for connectorName, contracts := range builtinHookContracts {
+		for _, contract := range contracts {
+			transitions := contract.ToolCallLifecycle.Routing.StateTransitionEvents
+			if len(transitions) != 0 {
+				t.Fatalf("unsupported state-transition route for %s/%s: %v", connectorName, contract.ContractID, transitions)
+			}
+		}
+	}
+
+	synthetic := ResolveHookContract("claudecode", "2.1.152").Contract
+	synthetic.ToolCallLifecycle.Routing.StateTransitionEvents = []string{"ConfigChange"}
+	if got := synthetic.ToolCallLifecycle.RouteForEvent("ConfigChange"); got != ToolEventRouteStateTransition {
+		t.Fatalf("reserved state-transition route=%q", got)
+	}
+	if !synthetic.ToolCallLifecycle.IsStateTransitionEvent("ConfigChange") || synthetic.ToolCallLifecycle.IsPreProposalEvent("ConfigChange") {
+		t.Fatal("reserved state transition was treated as a tool proposal")
+	}
+	if err := ValidateToolCallLifecycleContract(synthetic.ToolCallLifecycle, synthetic.Events); err != nil {
+		t.Fatalf("valid reserved state-transition route rejected: %v", err)
+	}
+
+	cloned := cloneToolCallLifecycleContract(synthetic.ToolCallLifecycle)
+	cloned.Routing.StateTransitionEvents[0] = "mutated"
+	if synthetic.ToolCallLifecycle.Routing.StateTransitionEvents[0] != "ConfigChange" {
+		t.Fatal("state-transition route aliases its clone")
+	}
+
+	synthetic.ToolCallLifecycle.Routing.StructuredActionEvents = append(
+		synthetic.ToolCallLifecycle.Routing.StructuredActionEvents,
+		"ConfigChange",
+	)
+	if err := ValidateToolCallLifecycleContract(synthetic.ToolCallLifecycle, synthetic.Events); err == nil {
+		t.Fatal("state-transition event shared with a tool route must be rejected")
 	}
 }
 
@@ -360,6 +936,15 @@ func TestApplyHookContractUsesPinnedContractForUnknownVersion(t *testing.T) {
 	}
 	if !profile.Capabilities.CanBlock || len(profile.SupportedEvents) == 0 {
 		t.Fatalf("pinned contract did not populate capabilities/events: %+v", profile)
+	}
+	if profile.ExperimentalToolLifecycleEligible() {
+		t.Fatal("known version mismatch retained experimental lifecycle authority")
+	}
+	unversioned := NewCodexConnector().HookProfile(SetupOpts{
+		APIAddr: "127.0.0.1:18970",
+	})
+	if !unversioned.ExperimentalToolLifecycleEligible() {
+		t.Fatal("reviewed unversioned default lost experimental lifecycle authority")
 	}
 }
 
@@ -391,35 +976,448 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	}
 }
 
-func TestHookContractLockDriftedIgnoresHookScriptDigestChanges(t *testing.T) {
-	previous := HookContractLockEntry{
-		Connector:              "codex",
-		RawAgentVersion:        "codex-cli 0.142.0",
-		NormalizedAgentVersion: "0.142.0",
-		ContractID:             "codex-hooks-v1",
-		HookScriptDigests: map[string]string{
-			"codex-hook.sh": "sha256:before",
+func TestSaveFreshHookContractLockEntryRefreshesIdempotentEvidence(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entry := HookContractLockEntry{Connector: "codex", ContractID: "codex-hooks-v1"}
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, hookContractLockFile)
+	old := time.Unix(1, 0)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(old) {
+		t.Fatal("ordinary idempotent save unexpectedly rewrote the contract lock")
+	}
+	if err := SaveFreshHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ModTime().Equal(old) {
+		t.Fatal("fresh boot save did not rewrite unchanged contract evidence")
+	}
+}
+
+func TestSharedInspectScriptsAreConnectorIndependent(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	claudeOpts := SetupOpts{
+		DataDir:            dir,
+		APIAddr:            "127.0.0.1:18970",
+		HookFailMode:       "closed",
+		HookAPIToken:       "claude-scoped-fixture",
+		HookAPITokenScoped: true,
+		ManagedEnterprise:  true,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, claudeOpts, NewClaudeCodeConnector()); err != nil {
+		t.Fatalf("write Claude hooks: %v", err)
+	}
+	before := sharedHookBytes(t, hookDir)
+
+	codexOpts := claudeOpts
+	codexOpts.HookFailMode = "open"
+	codexOpts.HookAPIToken = "codex-scoped-fixture"
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, codexOpts, NewCodexConnector()); err != nil {
+		t.Fatalf("write Codex hooks: %v", err)
+	}
+	after := sharedHookBytes(t, hookDir)
+	for name, want := range before {
+		if !bytes.Equal(after[name], want) {
+			t.Fatalf("shared hook %s changed across connector/mode/token render", name)
+		}
+		for _, forbidden := range [][]byte{
+			[]byte(".hook-claudecode.token"),
+			[]byte(".hook-codex.token"),
+			[]byte("X-DefenseClaw-Connector: claudecode"),
+			[]byte("X-DefenseClaw-Connector: codex"),
+		} {
+			if bytes.Contains(after[name], forbidden) {
+				t.Fatalf("shared hook %s contains connector-specific data %q", name, forbidden)
+			}
+		}
+	}
+}
+
+func TestHookContractLockStoresSharedScriptsOnce(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	connectors := []struct {
+		conn Connector
+		mode string
+	}{
+		{NewClaudeCodeConnector(), "closed"},
+		{NewCodexConnector(), "open"},
+	}
+	for _, tc := range connectors {
+		opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: tc.mode}
+		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, tc.conn); err != nil {
+			t.Fatalf("write %s hooks: %v", tc.conn.Name(), err)
+		}
+		if err := SaveHookContractLockEntry(dir, NewHookContractLockEntry(opts, tc.conn, "test-build")); err != nil {
+			t.Fatalf("save %s lock: %v", tc.conn.Name(), err)
+		}
+	}
+	lock := loadHookContractLock(dir)
+	if lock.Version != hookContractLockVersion {
+		t.Fatalf("lock version=%d want %d", lock.Version, hookContractLockVersion)
+	}
+	if len(lock.SharedHookScriptDigests) != len(genericHookScripts)+len(hookHelperScripts) {
+		t.Fatalf("shared digests=%v", lock.SharedHookScriptDigests)
+	}
+	for _, tc := range connectors {
+		entry := lock.Connectors[tc.conn.Name()]
+		for name := range entry.HookScriptDigests {
+			if sharedHookScriptName(name) {
+				t.Fatalf("%s entry retained shared digest %s", tc.conn.Name(), name)
+			}
+		}
+		owned := "codex-hook.sh"
+		if tc.conn.Name() == "claudecode" {
+			owned = "claude-code-hook.sh"
+		}
+		if entry.HookScriptDigests[owned] == "" {
+			t.Fatalf("%s owned digest missing: %v", tc.conn.Name(), entry.HookScriptDigests)
+		}
+	}
+}
+
+func TestHookContractLockMigratesDivergentLegacySharedDigests(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: "closed"}
+	conn := NewClaudeCodeConnector()
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatalf("write canonical hooks: %v", err)
+	}
+	selected := NewHookContractLockEntry(opts, conn, "test-build")
+	peerOwned := "sha256:peer-owned"
+	legacy := hookContractLock{
+		Version: 1,
+		Connectors: map[string]HookContractLockEntry{
+			"claudecode": {
+				Connector:         "claudecode",
+				ContractID:        "claudecode-hooks-v1",
+				HookFailMode:      "open",
+				HookScriptDigests: map[string]string{"claude-code-hook.sh": "sha256:old-claude"},
+			},
+			"codex": {
+				Connector:         "codex",
+				ContractID:        "codex-hooks-v1",
+				HookFailMode:      "open",
+				HookScriptDigests: map[string]string{"codex-hook.sh": peerOwned},
+			},
 		},
 	}
+	for _, name := range append(append([]string{}, genericHookScripts...), hookHelperScripts...) {
+		legacy.Connectors["claudecode"].HookScriptDigests[name] = "sha256:legacy-claude"
+		legacy.Connectors["codex"].HookScriptDigests[name] = "sha256:legacy-codex"
+	}
+	body, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveHookContractLockEntry(dir, selected); err != nil {
+		t.Fatalf("migrate lock: %v", err)
+	}
+	migratedPath := filepath.Join(dir, hookContractLockFile)
+	migrated, err := os.ReadFile(migratedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := loadHookContractLock(dir)
+	if lock.Version != hookContractLockVersion {
+		t.Fatalf("migrated version=%d", lock.Version)
+	}
+	if lock.Connectors["codex"].HookFailMode != "open" || lock.Connectors["codex"].HookScriptDigests["codex-hook.sh"] != peerOwned {
+		t.Fatalf("peer metadata changed during migration: %+v", lock.Connectors["codex"])
+	}
+	for name, digest := range lock.SharedHookScriptDigests {
+		actual := HookScriptDigests(opts, conn)[name]
+		if digest != actual {
+			t.Fatalf("shared digest %s=%q want current %q", name, digest, actual)
+		}
+		for connectorName, entry := range lock.Connectors {
+			if _, exists := entry.HookScriptDigests[name]; exists {
+				t.Fatalf("legacy shared digest %s remains under %s", name, connectorName)
+			}
+		}
+	}
+	if err := SaveHookContractLockEntry(dir, NewHookContractLockEntry(opts, conn, "test-build")); err != nil {
+		t.Fatalf("repeat save: %v", err)
+	}
+	repeated, err := os.ReadFile(migratedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(repeated, migrated) {
+		t.Fatal("repeated reconciliation rewrote an already-current contract lock")
+	}
+}
+
+func TestHookContractLockRejectsMalformedOrFutureExistingLock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "malformed", body: `{not-json`},
+		{name: "future", body: `{"version":99,"future_field":"preserve","connectors":{"codex":{"connector":"codex"}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := testenv.PrivateTempDir(t)
+			path := filepath.Join(dir, hookContractLockFile)
+			before := []byte(tc.body)
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := SaveHookContractLockEntry(dir, HookContractLockEntry{Connector: "claudecode", ContractID: "claudecode-hooks-v1"})
+			if err == nil {
+				t.Fatal("save accepted an unreadable or unsupported existing lock")
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("failed save rewrote existing contract evidence")
+			}
+		})
+	}
+}
+
+func TestHookContractLockRejectsPartialSharedDigestSet(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entry := HookContractLockEntry{
+		Connector:         "claudecode",
+		HookScriptDigests: map[string]string{"inspect-tool.sh": "sha256:partial", "claude-code-hook.sh": "sha256:owned"},
+	}
+	if err := SaveHookContractLockEntry(dir, entry); err == nil {
+		t.Fatal("partial shared digest set was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, hookContractLockFile)); !os.IsNotExist(err) {
+		t.Fatalf("partial save created a lock: %v", err)
+	}
+}
+
+func TestHookContractLockNormalizesSharedLauncherDigestAcrossPeers(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	legacy := hookContractLock{
+		Version: 1,
+		Connectors: map[string]HookContractLockEntry{
+			"claudecode": {Connector: "claudecode", HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-claude"}},
+			"codex":      {Connector: "codex", HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-codex"}},
+		},
+	}
+	body, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selected := legacy.Connectors["claudecode"]
+	selected.HookScriptDigests[windowsHookBinaryName] = "sha256:current-launcher"
+	if err := SaveHookContractLockEntry(dir, selected); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"claudecode", "codex"} {
+		entry := LoadHookContractLockEntry(dir, name)
+		if got := entry.HookScriptDigests[windowsHookBinaryName]; got != "sha256:current-launcher" {
+			t.Fatalf("%s launcher digest=%q", name, got)
+		}
+	}
+}
+
+func TestHookContractClearRollsBackWhenRuntimeStateCannotBeUpdated(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock := hookContractLock{
+		Version: hookContractLockVersion,
+		SharedHookScriptDigests: map[string]string{
+			"inspect-tool.sh": "sha256:shared",
+		},
+		Connectors: map[string]HookContractLockEntry{
+			"claudecode": {Connector: "claudecode"},
+			"codex":      {Connector: "codex"},
+		},
+	}
+	body, err := json.MarshalIndent(lock, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, '\n')
+	lockPath := filepath.Join(dir, hookContractLockFile)
+	if err := os.WriteFile(lockPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, hookConfigSidecarName), []byte(`{"malformed":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ClearHookContractLockEntry(dir, "claudecode"); err == nil {
+		t.Fatal("clear succeeded despite malformed runtime state")
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, body) {
+		t.Fatal("failed runtime clear did not restore the contract lock")
+	}
+}
+
+func TestHookContractClearCannotBeUndoneByStaleReconcileSave(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", HookFailMode: "closed"}
+	conn := NewClaudeCodeConnector()
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatal(err)
+	}
+	entry := NewHookContractLockEntry(opts, conn, "test-build")
+	if err := SaveHookContractLockEntry(dir, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearHookContractLockEntry(dir, conn.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(dir, entry); err == nil {
+		t.Fatal("stale reconcile save resurrected a contract after runtime teardown")
+	}
+	if got := LoadHookContractLockEntry(dir, conn.Name()); got.Connector != "" {
+		t.Fatalf("stale reconcile save restored cleared contract: %+v", got)
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(dir, NewHookContractLockEntry(opts, conn, "test-build")); err != nil {
+		t.Fatalf("fresh reconcile could not restore runtime and contract together: %v", err)
+	}
+}
+
+func TestHookContractLockConcurrentUpdatesPreserveConnectorPeers(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entries := []HookContractLockEntry{
+		{Connector: "claudecode", ContractID: "claudecode-hooks-v1", HookFailMode: "closed"},
+		{Connector: "codex", ContractID: "codex-hooks-v1", HookFailMode: "open"},
+	}
+	var wg sync.WaitGroup
+	errors := make(chan error, len(entries))
+	for _, entry := range entries {
+		entry := entry
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errors <- SaveHookContractLockEntry(dir, entry)
+		}()
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, entry := range entries {
+		loaded := LoadHookContractLockEntry(dir, entry.Connector)
+		if loaded.ContractID != entry.ContractID || loaded.HookFailMode != entry.HookFailMode {
+			t.Fatalf("connector %s lock entry lost during concurrent update: %+v", entry.Connector, loaded)
+		}
+	}
+}
+
+func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
+	previous := HookContractLockEntry{
+		Connector:              "codex",
+		RawAgentVersion:        "codex-cli 0.142.4",
+		NormalizedAgentVersion: "0.142.4",
+		ContractID:             "codex-hooks-v1",
+		HookScriptDigests:      map[string]string{"codex-hook.sh": "sha256:old"},
+	}
 	current := previous
-	current.HookScriptDigests = map[string]string{
-		"codex-hook.sh": "sha256:after",
-	}
+	current.HookScriptDigests = map[string]string{"codex-hook.sh": "sha256:new"}
+
 	if HookContractLockDrifted(previous, current) {
-		t.Fatal("hook script digest change alone must be repairable, not contract drift")
+		t.Fatal("generated artifact drift must remain repairable")
 	}
+	if HookContractCompatibilityDrifted(previous, current) {
+		t.Fatal("generated artifact drift must not be treated as upstream contract drift")
+	}
+
 	current = previous
-	current.NormalizedAgentVersion = "0.143.0"
-	if !HookContractLockDrifted(previous, current) {
-		t.Fatal("agent version change must still be contract drift")
+	current.ContractID = "codex-hooks-v2"
+	if !HookContractCompatibilityDrifted(previous, current) {
+		t.Fatal("contract identity changes must remain compatibility drift")
 	}
+	if !HookContractLockDrifted(previous, current) {
+		t.Fatal("contract identity changes must remain lock drift")
+	}
+
+	current = previous
+	current.NormalizedAgentVersion = "0.150.0"
+	if !HookContractCompatibilityDrifted(previous, current) {
+		t.Fatal("agent version changes must remain compatibility drift")
+	}
+	if !HookContractLockDrifted(previous, current) {
+		t.Fatal("agent version changes must remain lock drift")
+	}
+
+	t.Run("Amp relative release age is presentation-only", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "amp",
+			RawAgentVersion:        "0.0.1785342457-g1011d5 (released 2026-07-29T16:27:37.000Z, 2h ago)",
+			NormalizedAgentVersion: "0.0.1785342457",
+			ContractID:             "amp-plugin-v1",
+		}
+		current := previous
+		current.RawAgentVersion = "0.0.1785342457-g1011d5 (released 2026-07-29T16:27:37.000Z, 3h ago)"
+		if HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("Amp's changing relative release-age annotation must not cause contract drift")
+		}
+
+		current.RawAgentVersion = "0.0.1785342457-gdifferent (released 2026-07-29T16:27:37.000Z, 3h ago)"
+		if !HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("Amp's stable version+commit identity change must remain contract drift")
+		}
+	})
+
+	t.Run("other raw prerelease identities remain significant", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "codex",
+			RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
+			NormalizedAgentVersion: "0.144.0",
+			ContractID:             "codex-hooks-v1",
+		}
+		current := previous
+		current.RawAgentVersion = "codex-cli 0.144.0-alpha.5"
+		if !HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("non-Amp raw prerelease identity changes must remain contract drift")
+		}
+	})
 }
 
 func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	workspace := filepath.Join(dir, "repo")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	conn := NewOpenHandsConnector()
 	opts := SetupOpts{
 		DataDir:      filepath.Join(dir, "dc"),
@@ -483,22 +1481,429 @@ func TestHookContractLockEntryUsesPinnedContractMetadata(t *testing.T) {
 	}
 }
 
-func TestLoadCachedAgentVersion(t *testing.T) {
-	dir := t.TempDir()
+func TestCodexGenericDiscoveryCacheAuthorityIsWindowsScoped(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
 	payload := map[string]interface{}{
-		"version": 1,
+		"version": 3,
 		"agents": map[string]interface{}{
-			"codex": map[string]interface{}{"version": "codex 0.31.0"},
+			"codex": map[string]interface{}{
+				"installed":   true,
+				"version":     "codex 0.31.0",
+				"binary_path": `C:\Program Files\Codex\codex.exe`,
+				"error":       "",
+			},
 		},
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "agent_discovery.json"), b, 0o600); err != nil {
+	if err := atomicWriteFile(filepath.Join(dir, "agent_discovery.json"), b, 0o600); err != nil {
 		t.Fatalf("write discovery: %v", err)
 	}
-	if got := LoadCachedAgentVersion(dir, "codex"); got != "codex 0.31.0" {
-		t.Fatalf("LoadCachedAgentVersion=%q", got)
+	version := LoadCachedAgentVersion(dir, "codex")
+	executable := LoadCachedAgentExecutable(dir, "codex")
+	if runtime.GOOS == "windows" {
+		if version != "" || executable != "" {
+			t.Fatalf("Windows trusted generic cache: version=%q executable=%q", version, executable)
+		}
+		return
+	}
+	if version != "codex 0.31.0" || executable != `C:\Program Files\Codex\codex.exe` {
+		t.Fatalf("non-Windows discovery parity: version=%q executable=%q", version, executable)
+	}
+}
+
+func TestCodexSetupSelectionReceiptIsBoundAndSealed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	executable := filepath.Join(dir, "codex.exe")
+	if err := atomicWriteFile(executable, []byte("fixture-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("could not hash fixture executable")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{
+			"codex": {
+				Connector:         "codex",
+				Source:            "setup-selected",
+				Executable:        executable,
+				RawVersion:        "codex 0.144.3",
+				NormalizedVersion: "0.144.3",
+				SHA256:            digest,
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+			},
+		},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != "codex 0.144.3" {
+		t.Fatalf("receipt version = %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, executable) {
+		t.Fatalf("receipt executable = %q, want %q", got, executable)
+	}
+
+	entry := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: "codex 0.144.3", AgentExecutable: executable},
+		NewCodexConnector(),
+		"test-build",
+	)
+	if entry.AgentExecutableSource != "setup-selected" ||
+		!sameCodexExecutablePath(entry.AgentExecutable, executable) ||
+		entry.AgentExecutableSHA256 != digest {
+		t.Fatalf("sealed executable evidence = %+v", entry)
+	}
+}
+
+func writeCodexSetupSelectionForTest(
+	t *testing.T,
+	dir string,
+	executable string,
+	rawVersion string,
+	normalizedVersion string,
+	selectedAt time.Time,
+	expiresAt time.Time,
+) agentSelectionEvidence {
+	t.Helper()
+	_, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("could not hash fixture Codex executable")
+	}
+	selection := agentSelectionEvidence{
+		Connector:         "codex",
+		Source:            "setup-selected",
+		Executable:        executable,
+		RawVersion:        rawVersion,
+		NormalizedVersion: normalizedVersion,
+		SHA256:            digest,
+		SelectedAt:        selectedAt.Format(time.RFC3339),
+		ExpiresAt:         expiresAt.Format(time.RFC3339),
+	}
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     selectedAt.Format(time.RFC3339),
+		Selections:    map[string]agentSelectionEvidence{"codex": selection},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return selection
+}
+
+func writeCodexContractLockForTest(
+	t *testing.T,
+	dir string,
+	entry HookContractLockEntry,
+	updatedAt time.Time,
+) {
+	t.Helper()
+	entry.UpdatedAt = updatedAt.Format(time.RFC3339)
+	lock := hookContractLock{
+		Version:    hookContractLockVersion,
+		UpdatedAt:  updatedAt.Format(time.RFC3339),
+		Connectors: map[string]HookContractLockEntry{"codex": entry},
+	}
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFreshCodexSetupSelectionRepairsLegacyLockAndBecomesAuthoritative(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	executable := filepath.Join(dir, "codex.exe")
+	if err := atomicWriteFile(executable, []byte("replacement-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	writeCodexContractLockForTest(t, dir, HookContractLockEntry{
+		Connector:              "codex",
+		RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
+		NormalizedAgentVersion: "0.144.0",
+		ContractID:             "codex-hooks-v3-generic",
+		CompatibilityStatus:    HookCompatibilityKnown,
+	}, now.Add(-time.Minute))
+	selection := writeCodexSetupSelectionForTest(
+		t, dir, executable, "codex-cli 0.144.3", "0.144.3", now, now.Add(agentSelectionMaxLifetime),
+	)
+
+	if previous := LoadHookContractLockEntry(dir, "codex"); previous.Connector != "" {
+		t.Fatalf("fresh explicit repair exposed stale lock to drift gate: %+v", previous)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != selection.RawVersion {
+		t.Fatalf("repair version = %q, want %q", got, selection.RawVersion)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, executable) {
+		t.Fatalf("repair executable = %q, want %q", got, executable)
+	}
+	opts := SetupOpts{DataDir: dir, AgentVersion: selection.RawVersion, AgentExecutable: executable}
+	if _, err := validateCodexPolicyExecutable(opts); err != nil {
+		t.Fatalf("fresh explicit repair evidence failed policy validation: %v", err)
+	}
+
+	entry := NewHookContractLockEntry(opts, NewCodexConnector(), "test-build")
+	if err := SaveFreshHookContractLockEntry(dir, entry); err != nil {
+		t.Fatalf("persist repaired Codex lock: %v", err)
+	}
+	sealed := LoadHookContractLockEntry(dir, "codex")
+	if !validCodexAgentExecutableEvidence(sealed) ||
+		sealed.RawAgentVersion != selection.RawVersion ||
+		!sameCodexExecutablePath(sealed.AgentExecutable, executable) ||
+		sealed.AgentExecutableSHA256 != selection.SHA256 {
+		t.Fatalf("repaired lock did not regain authority: %+v", sealed)
+	}
+}
+
+func TestNewerCodexSetupSelectionSupersedesOlderValidLock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	lockedExecutable := filepath.Join(dir, "old", "codex.exe")
+	if err := os.MkdirAll(filepath.Dir(lockedExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(lockedExecutable, []byte("old-locked-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	locked := NewHookContractLockEntry(
+		SetupOpts{
+			DataDir:         dir,
+			AgentVersion:    "codex-cli 0.144.0-alpha.4",
+			AgentExecutable: lockedExecutable,
+		},
+		NewCodexConnector(),
+		"old-build",
+	)
+	writeCodexContractLockForTest(t, dir, locked, now.Add(-2*time.Minute))
+
+	selectedExecutable := filepath.Join(dir, "current", "codex.exe")
+	if err := os.MkdirAll(filepath.Dir(selectedExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(selectedExecutable, []byte("current-selected-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	selection := writeCodexSetupSelectionForTest(
+		t,
+		dir,
+		selectedExecutable,
+		"codex-cli 0.144.3",
+		"0.144.3",
+		now,
+		now.Add(agentSelectionMaxLifetime),
+	)
+
+	if previous := LoadHookContractLockEntry(dir, "codex"); previous.Connector != "" {
+		t.Fatalf("newer explicit selection did not supersede older valid lock: %+v", previous)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != selection.RawVersion {
+		t.Fatalf("selected version = %q, want %q", got, selection.RawVersion)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, selectedExecutable) {
+		t.Fatalf("selected executable = %q, want %q", got, selectedExecutable)
+	}
+	if _, err := validateCodexPolicyExecutable(SetupOpts{
+		DataDir:         dir,
+		AgentVersion:    selection.RawVersion,
+		AgentExecutable: selectedExecutable,
+	}); err != nil {
+		t.Fatalf("newer explicit selection failed policy validation: %v", err)
+	}
+}
+
+func TestNewerCodexLockRejectsStaleSetupSelection(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	dir := testenv.PrivateTempDir(t)
+	lockedExecutable := filepath.Join(dir, "codex.exe")
+	if err := atomicWriteFile(lockedExecutable, []byte("authoritative-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	locked := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: "codex-cli 0.144.3", AgentExecutable: lockedExecutable},
+		NewCodexConnector(),
+		"test-build",
+	)
+	writeCodexContractLockForTest(t, dir, locked, now.Add(-time.Minute))
+
+	staleExecutable := filepath.Join(dir, "stale", "codex.exe")
+	if err := os.MkdirAll(filepath.Dir(staleExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(staleExecutable, []byte("stale-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCodexSetupSelectionForTest(
+		t,
+		dir,
+		staleExecutable,
+		"codex-cli 0.144.0-alpha.4",
+		"0.144.0",
+		now.Add(-2*time.Minute),
+		now.Add(5*time.Minute),
+	)
+
+	if got := LoadCachedAgentVersion(dir, "codex"); got != locked.RawAgentVersion {
+		t.Fatalf("stale receipt replaced newer lock version: %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, lockedExecutable) {
+		t.Fatalf("stale receipt replaced newer lock executable: %q", got)
+	}
+	if got := LoadHookContractLockEntry(dir, "codex"); !validCodexAgentExecutableEvidence(got) {
+		t.Fatalf("stale receipt hid authoritative lock: %+v", got)
+	}
+}
+
+func TestInvalidCodexSetupSelectionsDoNotRepairLegacyLock(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex setup selections are native-Windows authority")
+	}
+	for _, test := range []struct {
+		name  string
+		write func(*testing.T, string, string, time.Time)
+	}{
+		{
+			name: "expired",
+			write: func(t *testing.T, dir, executable string, now time.Time) {
+				writeCodexSetupSelectionForTest(
+					t, dir, executable, "codex-cli 0.144.3", "0.144.3",
+					now.Add(-20*time.Minute), now.Add(-5*time.Minute),
+				)
+			},
+		},
+		{
+			name: "malformed",
+			write: func(t *testing.T, dir, _ string, _ time.Time) {
+				if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := testenv.PrivateTempDir(t)
+			executable := filepath.Join(dir, "codex.exe")
+			if err := atomicWriteFile(executable, []byte("fixture-codex-binary"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			writeCodexContractLockForTest(t, dir, HookContractLockEntry{
+				Connector:              "codex",
+				RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
+				NormalizedAgentVersion: "0.144.0",
+				ContractID:             "codex-hooks-v3-generic",
+				CompatibilityStatus:    HookCompatibilityKnown,
+			}, now.Add(-time.Minute))
+			test.write(t, dir, executable, now)
+
+			if got := LoadCachedAgentVersion(dir, "codex"); got != "" {
+				t.Fatalf("invalid receipt repaired legacy version: %q", got)
+			}
+			if got := LoadCachedAgentExecutable(dir, "codex"); got != "" {
+				t.Fatalf("invalid receipt repaired legacy executable: %q", got)
+			}
+			if got := LoadHookContractLockEntry(dir, "codex"); got.Connector != "codex" {
+				t.Fatalf("invalid receipt hid fail-closed legacy lock: %+v", got)
+			}
+		})
+	}
+}
+
+func TestExistingCodexLockWithoutExecutableEvidenceFailsClosed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex lock authority is native-Windows-only")
+	}
+	dir := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	lock := hookContractLock{
+		Version:   hookContractLockVersion,
+		UpdatedAt: now,
+		Connectors: map[string]HookContractLockEntry{
+			"codex": {
+				Connector:              "codex",
+				RawAgentVersion:        "codex 0.144.3",
+				NormalizedAgentVersion: "0.144.3",
+				ContractID:             "codex-hooks-v3-generic",
+				CompatibilityStatus:    HookCompatibilityKnown,
+				UpdatedAt:              now,
+			},
+		},
+	}
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != "" {
+		t.Fatalf("legacy lock returned version %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); got != "" {
+		t.Fatalf("legacy lock returned executable %q", got)
+	}
+}
+
+func TestProtectedCodexLockIsRuntimeExecutableAuthority(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected Codex lock authority is native-Windows-only")
+	}
+	dir := testenv.PrivateTempDir(t)
+	executable := filepath.Join(dir, "codex.exe")
+	if err := atomicWriteFile(executable, []byte("locked-codex-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entry := NewHookContractLockEntry(
+		SetupOpts{DataDir: dir, AgentVersion: "codex 0.144.3", AgentExecutable: executable},
+		NewCodexConnector(),
+		"test-build",
+	)
+	lock := hookContractLock{
+		Version:    hookContractLockVersion,
+		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Connectors: map[string]HookContractLockEntry{"codex": entry},
+	}
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadCachedAgentVersion(dir, "codex"); got != "codex 0.144.3" {
+		t.Fatalf("locked version = %q", got)
+	}
+	if got := LoadCachedAgentExecutable(dir, "codex"); !sameCodexExecutablePath(got, executable) {
+		t.Fatalf("locked executable = %q, want %q", got, executable)
 	}
 }

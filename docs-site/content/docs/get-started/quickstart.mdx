@@ -11,6 +11,13 @@ keywords:
 
 After the [install](/docs/get-started/install), DefenseClaw is on disk but not yet configured. You then run **one** first-run command. There are two of them — they do the same work, with different UX.
 
+<Callout>
+On native Windows, first review the [Windows connector matrix and setup
+notes](/docs/get-started/windows). Windows uses native agent hooks, excludes WSL
+agents and proxy-only connectors, and otherwise uses the same `init` and
+`quickstart` backend described here.
+</Callout>
+
 <Cards>
   <Card title="defenseclaw init" description="Interactive wizard. Asks about connector, profile, scanner mode, judge, HITL. Recommended the first time." />
   <Card title="defenseclaw quickstart" description="Zero-prompt equivalent with safe defaults. Recommended for CI, scripts, and demos." />
@@ -72,7 +79,15 @@ The scripted equivalent. Same backend, no prompts ever, safe defaults baked in: 
 defenseclaw quickstart --connector claudecode
 ```
 
-Replace `claudecode` with `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `omnigent`, `openclaw`, or `zeptoclaw` to target the agent you actually use. `quickstart` configures **one** connector. If you skip `--connector`, it uses the single configured or detected connector; if more than one connector is configured/detected, or the installer hint disagrees with the detected connector, it exits and asks you to rerun with `--connector <name>`.
+Replace `claudecode` with the setup name for the agent you use. On native
+Windows, choose Codex CLI, Claude Code, or Amp from the [Native Windows
+guide](/docs/get-started/windows); they are the certified connectors. Other
+platforms also offer proxy and additional hook connectors. `quickstart`
+configures **one** connector. If you
+skip `--connector`, it uses the single configured or detected connector; if
+more than one connector is configured/detected, or the installer hint disagrees
+with the detected connector, it exits and asks you to rerun with `--connector
+<name>`.
 
 </Step>
 
@@ -103,17 +118,23 @@ If `status` is `needs_attention` the command exits non-zero and lists the gaps (
 
 ### Drive the agent
 
-Open Claude Code (or whichever connector you picked). Every prompt and tool call now flows through DefenseClaw. Watch decisions land in the live dashboard:
+Open Claude Code (or whichever connector you picked). DefenseClaw now receives
+the lifecycle events and interception surfaces supported by that connector.
+Watch the resulting decisions land in the live dashboard:
 
 ```bash
 defenseclaw tui
 ```
 
-Or tail the JSONL fan-out from a script:
+Or take a scriptable snapshot from mandatory SQLite event history:
 
 ```bash
-tail -f ~/.defenseclaw/gateway.jsonl | jq .
+defenseclaw-gateway audit export --output - | tail -n 200 | jq .
 ```
+
+JSONL is no longer an implicit mirror. If you need a continuous external file,
+configure an explicit v8 `kind: jsonl` destination with the buckets, signals,
+and redaction profile that file is allowed to receive.
 
 </Step>
 
@@ -147,7 +168,7 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|amp|omnigent",
       description: "Agent connector. Required when more than one connector is configured or detected; otherwise quickstart uses the single configured/detected connector, then the installer hint if no connector can be detected.",
     },
     "--mode": {
@@ -167,7 +188,7 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Hook fail-mode for response-layer failures. Defaults to preserving whatever the connector already had.",
+      description: "Hook fail-mode for delivery, authentication, and invalid gateway responses. Defaults to preserving whatever the connector already had.",
     },
     "--human-approval / --no-human-approval": {
       type: "flag",
@@ -181,7 +202,7 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
       type: "flag",
       description: "Hard-skip every confirmation. Implied by --json-summary.",
     },
-    "--yes / -y": {
+    "--yes": {
       type: "flag",
       description: "Auto-accept every confirmation. Pair with --non-interactive in CI.",
     },

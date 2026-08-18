@@ -13,8 +13,24 @@ package e2e
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func goldenPathForConnector(t *testing.T, connector, name string) string {
+	t.Helper()
+	return filepath.Join(moduleRoot(t), "test", "e2e", "testdata", "v7", "golden", connector, name)
+}
 
 // TestGoldenPerConnectorLayout — Plan E3.4 / item 1.
 //

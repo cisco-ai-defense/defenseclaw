@@ -2,6 +2,17 @@ version: 1
 category: command
 rules:
   - id: CMD-REVSHELL-BASH
+    expression: >-
+      f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT,
+      defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN] &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))
     pattern: '(?i)bash\s+-i\s+>&\s*/dev/tcp/'
     title: "Bash reverse shell"
     severity: CRITICAL
@@ -40,24 +51,38 @@ rules:
     confidence: 0.90
     tags: [execution, reverse-shell]
   - id: CMD-PIPE-CURL
-    # Closes (parity with strict/rules/commands.yaml):
-    # also match absolute shell paths like `/bin/sh`, `/bin/bash`,
-    # `/usr/bin/zsh`, plus the bare `sh` / `bash` / `zsh` forms.
-    pattern: '(?i)\bcurl\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
+    # Candidate discovery covers POSIX curl pipelines and PowerShell web-cmdlet
+    # aliases. The exact fallback contract proves stdout-to-interpreter flow.
+    pattern: '(?i)(?:\bcurl\b\s+[^|;\r\n]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b|\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\b[^|;\r\n]*\|\s*(?:invoke-expression|iex)\b)'
     title: "curl piped to shell"
     severity: CRITICAL
     confidence: 0.95
     tags: [execution, download-exec]
   - id: CMD-PIPE-WGET
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
     # Closes (parity with CMD-PIPE-CURL above).
-    pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
+    pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b'
     title: "wget piped to shell"
     severity: CRITICAL
     confidence: 0.95
     tags: [execution, download-exec]
   - id: CMD-PIPE-BASE64
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)
     # Closes (parity with CMD-PIPE-CURL above).
-    pattern: '(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
+    pattern: '(?i:\bbase64\b)[^|;\n]*\s(?:-d+i?|--decode)\b[^|;\n]*\|\s*(?i:(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby))\b'
     title: "base64 decode piped to shell"
     severity: CRITICAL
     confidence: 0.95
@@ -93,24 +118,44 @@ rules:
     confidence: 0.55
     tags: [execution]
   - id: CMD-RM-RF
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE))
     pattern: '(?i)\brm\s+(?:-[a-zA-Z]*\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\b(?:\s+\S+)*\s+/(?:$|["''\s,}\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|["''\s,}\]]))'
     title: "Recursive force delete from critical root path"
     severity: CRITICAL
     confidence: 0.95
     tags: [destructive]
   - id: CMD-MKFS
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program != 'dd' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)
     pattern: '(?i)\bmkfs\b'
     title: "Filesystem format command"
     severity: CRITICAL
     confidence: 0.90
     tags: [destructive]
   - id: CMD-DD-IF
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'dd' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
     pattern: '(?i)\bdd\s+if='
     title: "dd disk write"
     severity: HIGH
     confidence: 0.80
     tags: [destructive]
   - id: CMD-CHMOD-WORLD
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))
     pattern: '(?i)\bchmod\s+[0-7]*[0-7][0-7][2367]\s'
     title: "chmod world-writable"
     severity: HIGH
@@ -123,6 +168,12 @@ rules:
     confidence: 0.75
     tags: [privilege]
   - id: CMD-SUDO
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) ||
+      (c.program in ['find', 'getcap'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))
     pattern: '(?i)\bsudo\s+'
     title: "sudo invocation"
     severity: LOW
@@ -135,12 +186,23 @@ rules:
     confidence: 0.90
     tags: [system-file]
   - id: CMD-CRONTAB
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'crontab' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SCHEDULE in c.operations)
     pattern: '(?i)\bcrontab\s+(?:-[a-zA-Z]\s+)*(?:-e|-r|-l|/|[''"<>|])'
     title: "Crontab modification"
     severity: HIGH
     confidence: 0.75
     tags: [persistence]
   - id: CMD-SYSTEMCTL
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SCHEDULE in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations ||
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])))
     pattern: '(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b'
     title: "Suspicious systemd persistence enablement"
     severity: CRITICAL
@@ -153,6 +215,19 @@ rules:
     confidence: 0.85
     tags: [network, reverse-shell]
   - id: CMD-CURL-UPLOAD
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ) &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
+      f.data_flows.exists(d, d.to_command_id == c.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_FILE &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_PROCESS) &&
+      f.data_flows.exists(d, d.from_command_id == c.id &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
     pattern: '(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)'
     title: "curl file upload"
     severity: HIGH
@@ -171,8 +246,243 @@ rules:
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-ENV-DUMP
-    pattern: '(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\s+-p)\b'
+    expression: >-
+      f.commands.exists(src, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ENVIRONMENT_READ in src.operations &&
+      f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations &&
+      src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) &&
+      f.commands.exists(src, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ENVIRONMENT_READ in src.operations &&
+      f.data_flows.exists(d, d.from_command_id == src.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) &&
+      f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations &&
+      f.data_flows.exists(d, d.to_command_id == dst.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) &&
+      f.network.exists(n, n.command_id == dst.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
+      f.data_flows.exists(d, d.from_command_id == dst.id &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
+    pattern: '(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
     title: "Environment variable dump"
     severity: HIGH
     confidence: 0.80
     tags: [credential]
+  - id: secrets.cloud_secret_manager_read
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
+      c.program in ['aws', 'gcloud', 'az', 'vault', 'op', 'pass', 'security'])
+    pattern: '(?i)\b(?:aws\s+secretsmanager\s+get-secret-value|gcloud\s+secrets\s+versions\s+access|az\s+keyvault\s+secret\s+show|vault\s+kv\s+get|op\s+(?:read|item\s+get)|pass\s+show|security\s+find-(?:generic|internet)-password)\b'
+    title: "Cloud secret manager value read"
+    severity: CRITICAL
+    confidence: 0.94
+    tags: [credential, cloud, secret-manager]
+  - id: exfil.secret_read_and_egress_oneliner
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(src,
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) &&
+      f.paths.exists(p, p.command_id == src.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ)) &&
+      f.commands.exists(src,
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) &&
+      f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations &&
+      src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) &&
+      f.commands.exists(src, f.data_flows.exists(d, d.from_command_id == src.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) &&
+      f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations &&
+      f.data_flows.exists(d, d.to_command_id == dst.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) &&
+      f.network.exists(n, n.command_id == dst.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
+      f.data_flows.exists(d, d.from_command_id == dst.id &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
+    pattern: '(?i)\b(?:cat|type|Get-Content)\b[^|;\n]*(?:\.env|credentials|\.git-credentials|\.netrc|_netrc|\.npmrc|\.pypirc|config\.json|/token)\s*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
+    title: "Sensitive read piped to external upload"
+    severity: CRITICAL
+    confidence: 0.96
+    tags: [credential, exfiltration, network]
+  - id: exec.reverse_tunnel
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_TUNNEL in c.operations &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_TUNNEL,
+      defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT] &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))
+    pattern: '(?i)(?:\b(?:ssh|autossh)(?:\.exe)?\b[^;\n]*(?:^|\s)-R(?:\s+|\S)|\bchisel(?:\.exe)?\b[^;\n]*\bclient\b[^;\n]*\bR:(?:socks|\S+)|\bligolo(?:-ng)?-agent\b[^;\n]*--?connect(?:=|\s+)\S+)'
+    title: "SSH reverse tunnel"
+    severity: HIGH
+    confidence: 0.90
+    tags: [network, tunnel, persistence]
+  - id: exec.agent_runtime_bypass_flags
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)
+    pattern: '(?i)\b(?:(?:npx(?:\s+-y)?|pnpm\s+dlx|bunx)\s+)?(?:claude|codex|gemini)(?:\.exe)?\b[^;\n]*(?:--dangerously-skip-permissions|--permission-mode(?:=|\s+)bypassPermissions\b|--dangerously-bypass-approvals-and-sandbox|--yolo\b|(?:--sandbox|-s)(?:=|\s+)danger-full-access\b[^;\n]*(?:--ask-for-approval|-a)(?:=|\s+)never\b|(?:--ask-for-approval|-a)(?:=|\s+)never\b[^;\n]*(?:--sandbox|-s)(?:=|\s+)danger-full-access\b)'
+    title: "Agent runtime safety bypass flags"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [execution, policy-bypass, agent-runtime]
+  - id: integrity.git_hooks_bypass
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'git')
+    pattern: '(?i)\bgit\b[^;\n]*(?:(?:\bcommit\b|\bpush\b)[^;\n]*--no-verify\b|-c\s+core\.hooksPath=(?:/dev/null|nul:?|["'']{2})[^;\n]*\b(?:commit|push)\b|\bconfig\s+core\.hooksPath\s+(?:/dev/null|nul:?|["'']{2}))'
+    title: "Git verification hook bypass"
+    severity: MEDIUM
+    confidence: 0.90
+    tags: [integrity, policy-bypass]
+  - id: integrity.history_tamper
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      (c.program == 'history' ||
+      (c.program == 'unset' && 'HISTFILE' in c.argv)))
+    pattern: '(?i)(?:\bhistory\b[^;\n]*\s-[acnrw]*c[acnrw]*(?:[\s;&|]|$)|\bunset\b[^;\n]*\bHISTFILE\b)'
+    title: "Shell history clear or disable"
+    severity: MEDIUM
+    confidence: 0.95
+    tags: [integrity, defense-evasion]
+  - id: recon.network_sweep
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN &&
+      n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR,
+      defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE,
+      defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST,
+      defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))
+    pattern: '(?i)\b(?:nmap|masscan|zmap|rustscan|naabu|fping)\b[^;\n]*(?:\b(?:-iL|--input-file|--target-file|-list|--list|-iR|-g|--generate)\b|(?:\d{1,3}\.){3}\d{1,3}/(?:[0-9]|[12][0-9]|3[01])\b)'
+    title: "Multi-host network sweep"
+    severity: MEDIUM
+    confidence: 0.90
+    tags: [reconnaissance, network]
+  - id: privilege.container_host_escape
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['docker', 'podman', 'nerdctl'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations &&
+      c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] &&
+      (p.normalized == '/' || p.resolved == '/')))
+    pattern: '(?i)\b(?:docker|podman|nerdctl)\b[^;\n]*\brun\b[^;\n]*--privileged\b[^;\n]*(?:-v|--volume)(?:=|\s+)/:[^;\s]+'
+    title: "Privileged container with host-root bind"
+    severity: CRITICAL
+    confidence: 0.96
+    tags: [privilege, container, host-escape]
+  - id: privilege.host_namespace_entry
+    tool_call_only: true
+    pattern: '(?i)\b(?:nsenter\b[^;\n]*(?:(?:-t|--target)(?:=|\s+)1\b|/proc/1/ns/(?:mnt|uts|ipc|net|pid|user|cgroup|time)\b)|chroot\b[^;\n]*/proc/1/root\b)'
+    title: "Host PID-1 namespace or root entry"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [privilege, container, host-escape]
+  - id: lateral.workload_exec
+    tool_call_only: true
+    pattern: '(?i)\b(?:(?:kubectl|oc)\b[^;\n]*\b(?:exec|debug|rsh)\b|crictl\b[^;\n]*\bexec\b|ctr\b[^;\n]*\btasks?\s+exec\b|(?:docker|podman)\b[^;\n]*(?:--host|-H)(?:=|\s+)(?:tcp|ssh)://[^;\s]+\s+exec\b)'
+    title: "Remote workload command execution"
+    severity: HIGH
+    confidence: 0.92
+    tags: [execution, lateral-movement, workload]
+  - id: impact.cryptomining_launch
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['docker', 'podman', 'nerdctl'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)
+    pattern: '(?i)(?:^|[;&|\s])(?:[/\\\w.-]+[/\\])?(?:xmrig(?:-proxy)?|minerd|cpuminer(?:-multi)?|ethminer|cgminer|bfgminer|t-rex|lolminer|nbminer|teamredminer|phoenixminer|nanominer)(?:\s|$)'
+    title: "Cryptocurrency miner launch"
+    severity: HIGH
+    confidence: 0.95
+    tags: [impact, resource-hijacking]
+  - id: impact.fork_bomb
+    tool_call_only: true
+    pattern: '(?i)(?:^|\s)(?::\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:|perl\s+-e\s+[''"]?\s*fork\s+while\s+fork\s*;?\s*[''"]?|ruby\s+-e\s+[''"]?\s*loop\s*\{\s*fork\s*\}\s*;?\s*[''"]?)\s*$'
+    title: "Unbounded fork bomb"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [impact, denial-of-service]
+  - id: impact.mass_process_termination
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['kill', 'stop-process', 'taskkill'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PROCESS_KILL in c.operations)
+    pattern: '(?i)\b(?:kill\b[^;\n]*(?:-9|-KILL|-SIGKILL)\b[^;\n]*-1\b|stop-process\b[^;\n]*(?:-name|-processname)(?:=|\s+)\*[^;\n]*-force\b|taskkill\b[^;\n]*/im\s+\*[^;\n]*/f\b)'
+    title: "Mass process termination"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [impact, denial-of-service]
+  - id: source.git_remote_tamper
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'git' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))
+    pattern: '(?i)\bgit\b[^;\n]*\bremote\s+(?:add|set-url)\b[^;\n]*(?:https?|ssh|git)://[^;\s]+'
+    title: "Git remote routing change"
+    severity: MEDIUM
+    confidence: 0.90
+    tags: [source-control, network, tampering]
+  - id: source.git_config_exec
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'git' &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations ||
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      (p.normalized == '.git/config' || p.resolved.endsWith('/.git/config'))))))
+    # Candidate discovery covers executable git-config keys and read commands
+    # that target .git/config; the exact fallback contract proves the write.
+    pattern: '(?i)\bgit\b[^;\r\n]*(?:\bconfig\b[^;\r\n]*(?:alias\.[A-Za-z0-9._-]+|credential\.helper|core\.(?:sshCommand|hooksPath))\b[^;\r\n]+|\b(?:show|log|diff|whatchanged)\b[^;\r\n]*--output(?:=|\s+)[^;\r\n]*\.git[/\\]config(?:$|["''\s]))'
+    title: "Git executable configuration change or overwrite"
+    severity: MEDIUM
+    confidence: 0.90
+    tags: [source-control, execution, tampering]
+  - id: persistence.ssh_authorized_keys_command
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c,
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
+    pattern: '(?i)(?:>>?|(?:tee|truncate|rm|unlink|cp|mv|set-content|add-content|out-file|remove-item|copy-item|move-item)\b[^;\n]*)[^;\n]*(?:[/\\]\.ssh[/\\](?:authorized_keys2?)|[/\\]programdata[/\\]ssh[/\\]administrators_authorized_keys)\b'
+    title: "SSH authorized keys mutation"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [persistence, credential, ssh]
+  - id: persistence.privileged_account_change
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['useradd', 'usermod', 'gpasswd', 'groupmems', 'adduser',
+      'dseditgroup', 'dscl', 'net', 'net1', 'add-localgroupmember', 'add-adgroupmember'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations)
+    pattern: '(?i)\b(?:useradd\b[^;\n]*(?:-u|--uid)(?:=|\s+)0\b|usermod\b[^;\n]*(?:(?:-u|--uid)(?:=|\s+)0\b|(?:-G|--groups)(?:=|\s+)[^;\n]*(?:root|sudo|wheel|admin|docker|lxd|incus|podman))|(?:gpasswd|groupmems|adduser|dseditgroup|dscl)\b[^;\n]*(?:root|sudo|wheel|admin|docker|lxd|incus|podman)\b|net\s+localgroup\s+(?:Administrators|Remote Desktop Users)\b[^;\n]*/add\b|Add-(?:Local|AD)GroupMember\b[^;\n]*(?:Administrators|Domain Admins|Enterprise Admins)\b)'
+    title: "Privileged account or group change"
+    severity: HIGH
+    confidence: 0.95
+    tags: [persistence, privilege, account]

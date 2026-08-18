@@ -17,8 +17,54 @@ INSTALL_DEV = ROOT / "scripts" / "install-dev.sh"
 MAKEFILE = ROOT / "Makefile"
 
 
+def _make_target_prerequisites(text: str, target: str) -> list[str]:
+    logical_lines: list[str] = []
+    pending = ""
+    for physical_line in text.splitlines():
+        line = physical_line.rstrip()
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        logical_lines.append(pending + line.lstrip() if pending else line)
+        pending = ""
+    if pending:
+        logical_lines.append(pending.rstrip())
+
+    prerequisites: list[str] = []
+    matched = False
+    for line in logical_lines:
+        if line.startswith("\t") or line.lstrip().startswith("#"):
+            continue
+        declaration = line.split(";", 1)[0]
+        target_expression, separator, prerequisite_expression = declaration.partition(":")
+        if separator and target in target_expression.split():
+            matched = True
+            prerequisites.extend(
+                token for token in prerequisite_expression.split() if token != "|"
+            )
+
+    assert matched, f"missing Make target: {target}"
+    return prerequisites
+
+
+def test_make_target_prerequisites_handle_complete_rule_syntax() -> None:
+    text = (
+        "# sample: ignored\n"
+        "sample: pycli \\\n"
+        "  extra\n"
+        "sample: repeated | order-only\n"
+    )
+
+    assert _make_target_prerequisites(text, "sample") == [
+        "pycli",
+        "extra",
+        "repeated",
+        "order-only",
+    ]
+
+
 def test_dev_install_syncs_openclaw_embed_before_go_build() -> None:
-    text = INSTALL_DEV.read_text()
+    text = INSTALL_DEV.read_text(encoding="utf-8")
     sync = 'make -C "${REPO_ROOT}" sync-openclaw-extension'
     build = 'GOOS="${OS}" GOARCH="${ARCH_NORMALIZED}" go build'
     assert sync in text
@@ -34,6 +80,58 @@ def test_optional_developer_entry_points_do_not_abort_make_install() -> None:
         in text
     )
     assert '"$$src" "$(INSTALL_DIR)/$$tool$(EXE)" || true;' in text
+
+
+def test_make_python_recipes_use_cross_platform_venv_path() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+
+    assert "$(VENV)/bin/python" not in text
+    assert "$(VENV_BIN)/python$(EXE) -m pytest cli/tests -q" in text
+
+
+def test_noninteractive_quickstart_adds_newly_detected_connectors_safely() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    quickstart = text[text.index("\nquickstart:") : text.index("\n# Post-install interactive prompt")]
+    init_command = '"$$dc_bin" init --non-interactive --yes'
+    setup_guard = 'if ! "$$dc_bin" setup --add-detected --yes --restart; then'
+
+    first_init = quickstart.index(init_command)
+    no_tty_init = quickstart.index(init_command, first_init + len(init_command))
+    assert no_tty_init < quickstart.index(setup_guard)
+    setup_failure = quickstart[
+        quickstart.index(setup_guard) : quickstart.index("\n\t\t\tfi; \\", quickstart.index(setup_guard))
+    ]
+    assert "Could not add newly detected connectors" in setup_failure
+    assert "exit 1;" in setup_failure
+
+
+def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    pycli = text[text.index("\npycli:") : text.index("\ndev-pycli:")]
+
+    assert "uv sync --frozen --python 3.12" in pycli
+    assert "--no-dev" not in pycli
+    assert "pycli" in _make_target_prerequisites(text, "dev-pycli")
+
+    for target in (
+        "cli-test",
+        "cli-test-cov",
+        "cli-test-snap",
+        "py-connector-matrix-test",
+        "test-verbose",
+        "test-file",
+        "check-audit-actions",
+        "check-audit-no-raw-literals",
+        "check-error-codes",
+        "check-schemas",
+        "telemetry-generate",
+        "telemetry-check",
+        "check-observability-v8-hard-cut",
+        "check-grafana-dashboards",
+        "check-llm-catalog",
+        "py-lint",
+    ):
+        assert "pycli" in _make_target_prerequisites(text, target)
 
 
 def test_skip_install_never_publishes_unclaimed_shared_cli() -> None:

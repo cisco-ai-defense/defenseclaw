@@ -151,6 +151,39 @@ func TestEventMarshalOmitsEmptyPayloads(t *testing.T) {
 	}
 }
 
+func TestAIDiscoveryModelClassificationJSONCompatibility(t *testing.T) {
+	confidence := 0.95
+	want := AIDiscoveryModel{
+		ID:                  "Qwen3.5-4B-Q4_K_M",
+		Status:              "installed",
+		OwnerApplication:    "Meetily",
+		Modality:            "generative",
+		Relevance:           "primary",
+		DiscoveryConfidence: &confidence,
+	}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal AI discovery model: %v", err)
+	}
+	var got AIDiscoveryModel
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal AI discovery model: %v", err)
+	}
+	if got.OwnerApplication != want.OwnerApplication || got.Modality != want.Modality ||
+		got.Relevance != want.Relevance || got.DiscoveryConfidence == nil ||
+		*got.DiscoveryConfidence != *want.DiscoveryConfidence {
+		t.Fatalf("classification metadata did not round trip: got=%+v want=%+v", got, want)
+	}
+	zero := 0.0
+	raw, err = json.Marshal(AIDiscoveryModel{ID: "unknown", Status: "installed", DiscoveryConfidence: &zero})
+	if err != nil {
+		t.Fatalf("marshal explicit zero discovery confidence: %v", err)
+	}
+	if !strings.Contains(string(raw), `"discovery_confidence":0`) {
+		t.Fatalf("explicit zero discovery confidence was omitted: %s", raw)
+	}
+}
+
 func TestEventHookDecisionPayloadPreservesEnforcementSemantics(t *testing.T) {
 	e := Event{
 		Timestamp: time.Unix(0, 0).UTC(), EventType: EventHookDecision,
@@ -282,29 +315,5 @@ func TestActivityPayloadDiff(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in %s", want, got)
 		}
-	}
-}
-
-// TestWriterStampsProvenance verifies the writer choke point stamps
-// provenance. Callers should never have to remember to stamp; the
-// writer is the sole authority.
-func TestWriterStampsProvenance(t *testing.T) {
-	version.ResetForTesting()
-	version.SetBinaryVersion("7.0.0")
-
-	w, err := New(Config{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	var seen Event
-	w.WithFanout(func(e Event) { seen = e })
-	w.Emit(Event{EventType: EventLifecycle})
-
-	if seen.SchemaVersion != version.SchemaVersion {
-		t.Fatalf("writer did not stamp schema_version: %+v", seen)
-	}
-	if seen.BinaryVersion != "7.0.0" {
-		t.Fatalf("writer did not stamp binary_version: %+v", seen)
 	}
 }

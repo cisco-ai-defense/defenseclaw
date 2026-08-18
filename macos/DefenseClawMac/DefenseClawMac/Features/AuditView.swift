@@ -93,7 +93,7 @@ struct AuditView: View {
             if visibleEvents.isEmpty {
                 DCEmptyState(
                     title: "No audit events",
-                    message: "Nothing in \(ConfigStore.auditDBURL.path) matches. The gateway writes audit events as it enforces policy.",
+                    message: "Nothing in \(appState.installationContext.auditDBURL.path) matches. The gateway writes audit events as it enforces policy.",
                     systemImage: "checklist"
                 )
                 .frame(maxHeight: .infinity)
@@ -137,7 +137,10 @@ struct AuditView: View {
             _ = applyPendingPanelRequest()
         }
         .onChange(of: selection) { _, _ in loadSelectedDetails() }
-        .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in load(reset: true) }
+        .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in
+            load(reset: true)
+            loadSelectedDetails()
+        }
         .onDisappear {
             loadTask?.cancel()
             detailTask?.cancel()
@@ -326,17 +329,22 @@ struct AuditView: View {
         }
         let selectedID = event.id
         detailTask = Task {
+            let installationGeneration = appState.installationGeneration
             let freshEvents = await appState.audit.relatedEvents(
                 target: event.runID.isEmpty ? event.target : nil,
                 runID: event.runID.nonEmpty,
                 limit: 12
             )
+            guard !Task.isCancelled,
+                  installationGeneration == appState.installationGeneration else { return }
             let freshFindings = await appState.audit.scanFindings(
                 runID: event.runID.nonEmpty,
                 target: event.target.nonEmpty,
                 limit: 10
             )
-            guard !Task.isCancelled, selectedEvent?.id == selectedID else { return }
+            guard !Task.isCancelled,
+                  installationGeneration == appState.installationGeneration,
+                  selectedEvent?.id == selectedID else { return }
             relatedEvents = freshEvents
             relatedFindings = freshFindings
         }
@@ -349,11 +357,13 @@ struct AuditView: View {
         let requestedPreset = preset
         let requestedSearch = search
         let offset = reset ? 0 : events.count
+        let installationGeneration = appState.installationGeneration
         isLoading = true
         loadTask = Task {
             if debounce {
                 try? await Task.sleep(for: .milliseconds(200))
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      installationGeneration == appState.installationGeneration else { return }
             }
             var severities: [Severity]? = nil
             var actions: [String]? = nil
@@ -371,7 +381,9 @@ struct AuditView: View {
                 severities: severities,
                 actionLike: actions
             )
-            guard !Task.isCancelled, generation == loadGeneration else { return }
+            guard !Task.isCancelled,
+                  generation == loadGeneration,
+                  installationGeneration == appState.installationGeneration else { return }
             if reset {
                 events = fresh
             } else {

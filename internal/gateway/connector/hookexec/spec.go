@@ -63,6 +63,7 @@ type spec struct {
 
 	defaultBlockReason string // used when action=block but reason is empty
 
+	openAllow         failResult // connector-native allow for empty/fail-open paths
 	oversizedClosed   failResult // oversized payload + FAIL_MODE=closed
 	unreachableStrict failResult // transport failure + STRICT_AVAILABILITY=1
 	responseClosed    failResult // response-layer failure + FAIL_MODE=closed
@@ -76,6 +77,15 @@ const (
 // specs is the single source of truth for the Go hook contract. Every entry
 // here is pinned by a golden test against the corresponding .sh hook.
 var specs = map[string]spec{
+	"amp": {
+		connector: "amp", hookName: "amp-plugin", errLabel: "amp",
+		subject: "amp tool", endpoint: "/api/v1/amp/hook",
+		outputField: "", style: styleActionStderr,
+		defaultBlockReason: "Blocked by DefenseClaw Amp policy.",
+		oversizedClosed:    failResult{exit: blockExit},
+		unreachableStrict:  failResult{exit: blockExit},
+		responseClosed:     failResult{exit: blockExit},
+	},
 	"claudecode": {
 		connector: "claudecode", hookName: "claude-code-hook", errLabel: "claude-code",
 		subject: "claude-code tool", endpoint: "/api/v1/claude-code/hook",
@@ -98,6 +108,7 @@ var specs = map[string]spec{
 		connector: "cursor", hookName: "cursor-hook", errLabel: "cursor",
 		subject: "cursor tool", endpoint: "/api/v1/cursor/hook",
 		outputField: "hook_output", style: styleHookEcho,
+		openAllow:         failResult{body: cursorAllow(), exit: 0},
 		oversizedClosed:   failResult{body: cursorDeny(tooLarge), exit: blockExit},
 		unreachableStrict: failResult{body: cursorDeny(failedClosed), exit: blockExit},
 		responseClosed:    failResult{body: cursorDeny(failedClosed), exit: 0},
@@ -159,7 +170,11 @@ var specs = map[string]spec{
 }
 
 func cursorDeny(msg string) string {
-	return `{"continue":true,"permission":"deny","user_message":"` + msg + `","agent_message":"` + msg + `"}`
+	return `{"continue":false,"permission":"deny","user_message":"` + msg + `","agent_message":"` + msg + `"}`
+}
+
+func cursorAllow() string {
+	return `{"continue":true}`
 }
 
 func specFor(connector string) (spec, bool) {

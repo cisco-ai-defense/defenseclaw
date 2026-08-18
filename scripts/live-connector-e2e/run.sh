@@ -43,7 +43,7 @@ done
 [ -n "${CONNECTOR}" ] || dc_die "--connector <name|all> is required"
 
 # Registry connectors (Layer A covers all; Layer B covers those with drivers).
-ALL_CONNECTORS=(codex claudecode geminicli cursor copilot openhands hermes windsurf antigravity)
+ALL_CONNECTORS=(codex claudecode amp geminicli cursor copilot openhands hermes windsurf antigravity)
 
 resolve_connectors() {
   if [ "${CONNECTOR}" = "all" ]; then

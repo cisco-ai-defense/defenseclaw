@@ -14,13 +14,24 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from defenseclaw.tui.panels.ai_discovery import AIUsageModel, AIUsageSignal, AIUsageSnapshot, AIUsageSummary
+from defenseclaw.observability.v8_status import (
+    V8BucketStatus,
+    V8DestinationStatus,
+    V8OperatorStatus,
+)
+from defenseclaw.tui.panels.ai_discovery import (
+    AIUsageModel,
+    AIUsageSignal,
+    AIUsageSnapshot,
+    AIUsageSummary,
+)
 from defenseclaw.tui.panels.overview import (
     MAX_AI_DISCOVERY_OVERVIEW_ROWS,
     STALENESS_WINDOW,
     ConnectorHealth,
     DoctorCache,
     DoctorCheck,
+    DoctorRepairSummary,
     HealthSnapshot,
     OverviewConfig,
     OverviewPanelModel,
@@ -77,7 +88,7 @@ def test_overview_standalone_hint_and_notices() -> None:
 
     model.set_health(HealthSnapshot(gateway=SubsystemHealth(state="reconnecting")))
     notices = model.build_notices()
-    assert any(notice.level == "error" and "Gateway is offline" in notice.message for notice in notices)
+    assert any(notice.level == "info" and "health checks will retry" in notice.message for notice in notices)
 
 
 def test_overview_mode_key_is_modal_owned_not_fake_command() -> None:
@@ -120,103 +131,113 @@ def test_omnigent_zero_traffic_notice_uses_policy_wording() -> None:
     assert "hook setup" not in notice
 
 
-def test_overview_telemetry_detail_lists_named_destinations() -> None:
+def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference() -> None:
     model = _model()
+    model.set_observability_status(
+        V8OperatorStatus(
+            source="/tmp/config.yaml",
+            data_dir="/tmp/dc",
+            plan_digest="a" * 64,
+            bucket_catalog_version=1,
+            retention_days=0,
+            local_path="/tmp/dc/audit.db",
+            judge_bodies_path="/tmp/dc/judge.db",
+            destinations=(
+                V8DestinationStatus(
+                    name="local-sqlite",
+                    kind="sqlite",
+                    enabled=True,
+                    generated=True,
+                    capabilities=("logs",),
+                    selected_signals=("logs",),
+                    policy_form="implicit_local",
+                    endpoint="/tmp/dc/audit.db",
+                    route_count=1,
+                    buckets=("compliance.activity", "model.io"),
+                    redaction_profiles=("none", "strict"),
+                ),
+                V8DestinationStatus(
+                    name="collector",
+                    kind="otlp",
+                    enabled=True,
+                    generated=False,
+                    capabilities=("logs", "traces", "metrics"),
+                    selected_signals=("logs", "traces", "metrics"),
+                    policy_form="capability_default",
+                    endpoint="https://collector.example.test/v1/traces",
+                    route_count=1,
+                    buckets=("compliance.activity", "model.io"),
+                    redaction_profiles=("none",),
+                    queue_max_items=2048,
+                    queue_max_bytes=67_108_864,
+                    export_batch_max_items=512,
+                    export_batch_max_bytes=8_388_608,
+                    scheduled_delay_ms=5000,
+                ),
+            ),
+            buckets=(
+                V8BucketStatus("compliance.activity", ("logs", "traces", "metrics"), "none"),
+                V8BucketStatus("model.io", ("logs", "traces", "metrics"), "strict"),
+            ),
+            warnings=(),
+            judge_bodies_enabled=False,
+        )
+    )
     model.set_health(
         HealthSnapshot(
             telemetry=SubsystemHealth(
                 state="running",
+                last_error="Bearer must-not-render",
                 details={
-                    "destination_count": 2,
                     "destinations": [
-                        {"name": "local-observability", "enabled": True},
                         {
-                            "name": "galileo",
-                            "enabled": True,
-                            "routing": {
-                                "accepted": 3,
-                                "dropped": 1,
-                                "total": 4,
-                                "accepted_percentage": 75,
-                            },
-                            "delivery": {
-                                "attempted": 3,
-                                "delivered": 3,
-                                "rejected": 0,
-                                "failed": 0,
-                            },
-                        },
+                            "name": "collector",
+                            "state": "degraded",
+                            "reason": "queue_full",
+                            "queue_items": 4,
+                            "max_queue_items": 16,
+                            "queue_bytes": 2048,
+                            "max_queue_bytes": 8192,
+                            "queue_dropped": 2,
+                            "last_success": "2026-07-06T10:00:00Z",
+                            "last_failure": "2026-07-06T10:01:00Z",
+                            "last_error_class": "retryable_delivery",
+                            "endpoint": "https://user:secret@evil.invalid/?token=secret",
+                        }
                     ],
+                    "retention_state": "degraded",
+                    "retention_failure": "run_failed",
                 },
             )
         )
     )
-    cards = {card.key: card for card in model.service_cards()}
-    assert cards["telemetry"].detail == "2 destinations: local-observability, Galileo (100.0% delivered)"
 
+    local, collector = model.observability_destination_rows()
+    assert local.target == "v8"
+    assert local.policy_state == "enabled"
+    assert local.state == "unavailable"
+    assert local.signals == "logs"
+    assert local.buckets == "2/2"
+    assert local.redaction == "mixed: none, strict"
+    assert local.queue == "unavailable"
+    assert local.limits == "not-applicable"
+    assert local.endpoint == "/tmp/dc/audit.db"
+    assert collector.state == "degraded"
+    assert collector.health_reason == "queue_full"
+    assert collector.redaction == "unredacted (none)"
+    assert collector.limits == ("queue=2048 items/64.0 MiB; batch=512 items/8.0 MiB; delay=5000ms")
+    assert collector.queue == "4/16 items, 2.0 KiB/8.0 KiB, 2 dropped"
+    assert collector.activity == ("ok 2026-07-06T10:00:00Z; error 2026-07-06T10:01:00Z (retryable_delivery)")
+    assert collector.endpoint == "https://collector.example.test/v1/traces"
+    assert "must-not-render" not in repr((local, collector))
+    assert "user:secret" not in repr((local, collector))
 
-def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
-    model = _model()
-    model.set_health(
-        HealthSnapshot(
-            telemetry=SubsystemHealth(
-                state="running",
-                details={
-                    "destinations": [
-                        {
-                            "name": "galileo",
-                            "preset": "galileo",
-                            "enabled": True,
-                            "endpoint": "https://user:secret@api.example.test/otel/traces?api_key=secret",
-                            "signals": "traces",
-                            "headers": {"Galileo-API-Key": "must-not-render"},
-                            "routing": {"accepted": 3, "dropped": 1, "total": 10, "eligibility_percentage": 30},
-                            "delivery": {"attempted": 3, "collector_accepted": 3},
-                        },
-                        {
-                            "name": "local-observability",
-                            "preset": "local-otlp",
-                            "enabled": False,
-                            "endpoint": "127.0.0.1:4317",
-                            "signals": "traces, metrics, logs",
-                        },
-                    ]
-                },
-            ),
-            sinks=SubsystemHealth(
-                state="running",
-                details={
-                    "sinks": [
-                        {
-                            "name": "soc-archive",
-                            "kind": "otlp_logs",
-                            "enabled": True,
-                            "scope": "connector:codex",
-                            "endpoint": "https://user:secret@collector.example.test:4317/provider/token?token=secret",
-                        }
-                    ]
-                },
-            ),
-        )
-    )
-
-    rows = model.observability_destination_rows()
-    assert [(row.name, row.target) for row in rows] == [
-        ("Galileo", "otel"),
-        ("local-observability", "otel"),
-        ("soc-archive", "audit_sinks"),
-    ]
-    assert rows[0].routing == "collector accepted 3/3; pending 0; rejected 0; failed 0"
-    assert rows[0].endpoint == "https://api.example.test/otel/traces"
-    assert rows[0].signals == "traces"
-    assert rows[1].state == "disabled"
-    assert rows[2].signals == "audit-events"
-    assert rows[2].scope == "connector:codex"
-    assert rows[2].endpoint == "https://collector.example.test:4317/…"
-    assert "must-not-render" not in repr(rows)
-    assert "user:secret" not in repr(rows)
-    assert "api_key=secret" not in repr(rows)
-    assert "token=secret" not in repr(rows)
+    storage = model.observability_storage_status()
+    assert storage is not None
+    assert storage.retention == "unbounded"
+    assert storage.judge_capture == "disabled"
+    assert storage.retention_health == "degraded"
+    assert storage.retention_failure == "run_failed"
 
 
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
@@ -373,6 +394,16 @@ def test_doctor_cache_missing_required_credentials_and_keys_status() -> None:
     assert status.label == "4 missing: KEY_A, KEY_B (+2 more)"
     assert keys_overflow_suffix(5, 2) == " (+3 more)"
 
+    model.set_doctor_cache(
+        DoctorCache(
+            warned=1,
+            checks=(DoctorCheck("warn", "Doctor cache", "cache unavailable"),),
+            outcome="warning",
+            cache_valid=False,
+        )
+    )
+    assert model.keys_status().available is False
+
 
 def test_doctor_box_all_green_failures_stale_and_live_recovery() -> None:
     now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
@@ -424,6 +455,106 @@ def test_doctor_box_all_green_failures_stale_and_live_recovery() -> None:
     assert all(check.badge == "STALE" for check in recovered.checks)
     assert not any("Doctor found 2 failure(s)" in notice.message for notice in model.build_notices(now=now))
     assert any("/health disagrees" in notice.message for notice in model.build_notices(now=now))
+
+
+def test_future_dated_doctor_cache_fails_closed_after_clock_skew_tolerance() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now + timedelta(minutes=6),
+            passed=5,
+            schema_version=2,
+            outcome="healthy",
+        )
+    )
+
+    box = model.doctor_box(now=now)
+
+    assert box.stale is True
+    assert box.run_outcome == "warning"
+    assert box.all_green is False
+    notices = model.build_notices(now=now)
+    assert any("Doctor cache is stale" in notice.message for notice in notices)
+    assert any("last Doctor run needs operator attention" in notice.message for notice in notices)
+
+
+def test_doctor_box_keeps_repair_failures_separate_and_never_green() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now,
+            passed=5,
+            schema_version=2,
+            mode="repair",
+            outcome="failed",
+            exit_code=1,
+            repair_summary=DoctorRepairSummary(applied=2, failed=1, blocked=1),
+            repair_states=("applied", "applied", "failed", "blocked"),
+        )
+    )
+
+    box = model.doctor_box(now=now)
+    assert box.summary_parts == ("5 pass",)
+    assert box.repair_summary_parts == ("2 applied", "1 failed", "1 blocked")
+    assert box.run_outcome == "failed"
+    assert box.all_green is False
+    notices = model.build_notices(now=now)
+    assert any(notice.level == "error" and "1 failed, 1 blocked" in notice.message for notice in notices)
+
+
+def test_doctor_box_fails_closed_on_unexplained_schema_v2_outcome() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now,
+            passed=5,
+            schema_version=2,
+            outcome="failed",
+        )
+    )
+
+    box = model.doctor_box(now=now)
+    assert box.summary_parts == ("5 pass",)
+    assert box.repair_summary_parts == ()
+    assert box.run_outcome == "failed"
+    assert box.all_green is False
+    assert any(
+        notice.level == "error" and "last Doctor run ended with a failed outcome" in notice.message
+        for notice in model.build_notices(now=now)
+    )
+
+
+def test_doctor_cache_fails_closed_on_understated_or_unknown_detail() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+
+    understated = DoctorCache(
+        captured_at=now,
+        failed=1,
+        schema_version=2,
+        outcome="healthy",
+    )
+    assert understated.outcome_state() == "failed"
+
+    unknown_repair = DoctorCache(
+        captured_at=now,
+        passed=1,
+        schema_version=2,
+        outcome="healthy",
+        repair_states=("future_success_state",),
+    )
+    assert unknown_repair.outcome_state() == "warning"
+
+    invalid_cache = DoctorCache(
+        captured_at=now,
+        passed=1,
+        schema_version=2,
+        outcome="healthy",
+        cache_valid=False,
+    )
+    assert invalid_cache.outcome_state() == "warning"
 
 
 def test_live_health_contradicts_known_labels() -> None:
@@ -592,7 +723,13 @@ def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
     assert ordered[0].model.status == "loaded"
 
 
-def test_connector_labels_cover_hook_surface_connectors() -> None:
+def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -> None:
+    hermes_home = tmp_path / "hermes-home"
+    claude_home = tmp_path / "claude-home"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
     cases = {
         "hermes": "Hermes",
         "cursor": "Cursor",
@@ -603,7 +740,12 @@ def test_connector_labels_cover_hook_surface_connectors() -> None:
     for wire, want in cases.items():
         assert friendly_connector_name(wire) == want
 
-    assert ".hermes/config.yaml" in connector_source_label("hermes", "mcps")
+    assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "mcps")
+    assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "config")
+    assert str(hermes_home / "skills") in connector_source_label("hermes", "skills")
+    assert str(hermes_home / "plugins") in connector_source_label("hermes", "plugins")
+    assert str(claude_home / "settings.json") in connector_source_label("claudecode", "config")
+    assert str(codex_home / "config.toml") in connector_source_label("codex", "config")
     assert ".cursor/skills" in connector_source_label("cursor", "skills")
     assert ".codeium/windsurf/hooks.json" in connector_source_label("windsurf", "config")
     assert ".gemini/extensions" in connector_source_label("geminicli", "plugins")
@@ -620,7 +762,9 @@ def test_connector_labels_cover_hook_surface_connectors() -> None:
     assert "hooks-only" not in antigravity_mcps
     assert "unsupported" not in antigravity_mcps
     assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
-    assert "discovery-only" in connector_source_label("antigravity", "plugins")
+    antigravity_plugins = connector_source_label("antigravity", "plugins")
+    assert ".gemini/config/plugins" in antigravity_plugins
+    assert "read/write" in antigravity_plugins
     assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
     assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
     assert "unsupported" in connector_source_label("omnigent", "skills")

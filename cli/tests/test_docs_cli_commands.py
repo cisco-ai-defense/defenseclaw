@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
+pytestmark = pytest.mark.supported_connector_host
+
 ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "scripts" / "check_docs_cli_commands.py"
 

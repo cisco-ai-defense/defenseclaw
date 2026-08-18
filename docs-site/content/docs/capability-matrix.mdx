@@ -11,6 +11,15 @@ keywords:
 
 This page is the single source of truth for "can this connector do X?". Every row is hand-derived from the Go connector files in `internal/gateway/connector/` and re-verified on every change. Use it to pick the connector that fits your safety posture, or to find the gaps you need to compensate for.
 
+<Callout title="Connector capability is not platform certification">
+This matrix describes each connector's product-level hook or proxy contract.
+Native Windows currently certifies Codex and Claude Code as hook-backed
+connectors and Amp as a system-plugin connector; the Windows package does not
+provide a subprocess sandbox. See the [native Windows connector
+matrix](/docs/get-started/windows/connectors-enforcement) before applying these
+rows to Windows.
+</Callout>
+
 <CapabilityMatrix />
 
 ## Reading the matrix
@@ -18,7 +27,7 @@ This page is the single source of truth for "can this connector do X?". Every ro
 <Cards>
   <Card title="Family" description="proxy = DefenseClaw sits in the LLM data path. hooks = DefenseClaw hooks into the agent's lifecycle; the agent talks directly to its upstream." />
   <Card title="Tool inspection" description="When DefenseClaw can see the tool call. pre-execution + response-scan means we score before the call fires and after it returns." />
-  <Card title="Subprocess policy" description="sandbox = DefenseClaw wires the agent into the openshell sandbox. none = the agent's own runtime executes commands; we observe via hooks." />
+  <Card title="Subprocess policy" description="sandbox = connector setup calls DefenseClaw's OpenShell/shim enforcement wiring. none = the agent's own runtime executes commands; DefenseClaw observes or blocks only through the connector's hook/proxy surface." />
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
   <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />
@@ -31,12 +40,21 @@ This page is the single source of truth for "can this connector do X?". Every ro
 | --- | --- |
 | Family | `internal/gateway/connector/*.go` (whether the connector implements `RoutingConnector` for proxy mode) |
 | Tool inspection | `_CONNECTOR_META[<id>].tool_mode` in `cli/defenseclaw/commands/cmd_setup.py` |
-| Subprocess policy | `_CONNECTOR_META[<id>].subprocess_policy` in `cli/defenseclaw/commands/cmd_setup.py` |
+| Subprocess policy | Effective setup call sites for `SetupSubprocessEnforcement` in `internal/gateway/connector/*.go`, cross-checked with `_CONNECTOR_META[<id>].subprocess_policy` |
 | Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
 | Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json`, checked against `internal/gateway/connector/hook_contract.go` |
 | HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
 
 The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change.
+
+<Callout type="info" title="Advertised contract vs empirical verification">
+The Antigravity v2 contract advertises native ask on `PreInvocation` and
+`PreToolUse`, and block on `PreInvocation`, `PreToolUse`, and `Stop`.
+DefenseClaw has empirically verified only the `PreToolUse` ask/block branch
+against `agy` v1.0.1. The additional registered branches remain gated on
+upstream implementation parity; an advertised branch is not the same as an
+end-to-end verification claim.
+</Callout>
 
 ## Common patterns
 
@@ -46,12 +64,18 @@ Pick a row with **proxy family**, **block: yes**, **native ask: yes**, **fail-cl
 
 ### "I want enforcement on Claude Code without the proxy"
 
-Hook-only enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), [Copilot CLI](/docs/connectors/copilot), [OpenHands](/docs/connectors/openhands), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode), and [OmniGent](/docs/connectors/omnigent). The constraint: hook-only enforcement cannot block a request the agent has not yet asked the hook about. Trust the hook surface to scope what's possible.
+Direct-to-upstream hook enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), [Copilot CLI](/docs/connectors/copilot), [OpenHands](/docs/connectors/openhands), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode), and [OmniGent](/docs/connectors/omnigent). [Amp](/docs/connectors/amp) uses a direct-to-upstream system policy plugin instead. The constraint is the same: these connectors cannot block a request the agent has not yet presented to their hook or policy surface.
 
 ### "I want HITL approvals to surface inside the agent UI"
 
-Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse), Antigravity (verified PreToolUse), or OmniGent (`request`, `tool_call`, `llm_request`). Confirm verdicts on every other connector/event take an immediate connector-specific fallback; there is no TUI approval queue.
+Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor
+(beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse),
+Antigravity (`PreInvocation` advertised by the v2 contract and `PreToolUse`
+empirically verified), Amp (`tool.call` and model-bound `tool.result` in the
+active foreground thread), or OmniGent (`request`, `tool_call`, `llm_request`).
+Confirm verdicts on every other connector/event take an immediate
+connector-specific fallback; there is no TUI approval queue.
 
 ### "I want fail-closed on transport failures"
 
-Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, OpenCode, OpenHands, and OmniGent. GitHub Copilot CLI, Hermes, Windsurf, and Antigravity do not expose a DefenseClaw-controlled fail-closed transport response.
+Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Amp, OpenHands, and OmniGent. GitHub Copilot CLI, Hermes, Windsurf, and Antigravity do not expose a DefenseClaw-controlled fail-closed transport response.

@@ -19,13 +19,17 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
@@ -216,6 +220,46 @@ printf '{"nested":{"action":"deny"}}' | _dc_jq -r '.action // "allow"'
 	}
 }
 
+func TestHermesConfigPathHonorsHermesHomeAndExplicitOverride(t *testing.T) {
+	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
+	t.Setenv("HERMES_HOME", hermesHome)
+
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	if got, want := hermesConfigPath(SetupOpts{}), filepath.Join(hermesHome, "config.yaml"); got != want {
+		t.Fatalf("hermesConfigPath() = %q, want %q", got, want)
+	}
+	caps := NewHermesConnector().Capabilities(SetupOpts{})
+	if got, want := caps.Skills.ReadPaths, []string{filepath.Join(hermesHome, "skills")}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("Hermes skill paths = %v, want %v", got, want)
+	}
+
+	explicit := filepath.Join(t.TempDir(), "explicit-config.yaml")
+	HermesConfigPathOverride = explicit
+	if got := hermesConfigPath(SetupOpts{}); got != explicit {
+		t.Fatalf("HermesConfigPathOverride lost precedence: got %q, want %q", got, explicit)
+	}
+}
+
+func TestHermesConfigPathUsesWindowsLocalAppData(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows Hermes path")
+	}
+	localAppData := filepath.Join(t.TempDir(), "Local AppData")
+	t.Setenv("HERMES_HOME", "")
+	t.Setenv("LOCALAPPDATA", localAppData)
+
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	if got, want := hermesConfigPath(SetupOpts{}), filepath.Join(localAppData, "hermes", "config.yaml"); got != want {
+		t.Fatalf("hermesConfigPath() = %q, want %q", got, want)
+	}
+}
+
 func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
 	cases := []struct {
@@ -264,7 +308,7 @@ func TestAntigravityConnector_CapabilityContract(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	workspace := filepath.Join(dir, "repo")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	conn := NewAntigravityConnector()
 	opts := SetupOpts{
@@ -385,8 +429,24 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read config after setup: %v", err)
 			}
-			if !strings.Contains(string(data), conn.scriptName) {
-				t.Fatalf("config after setup does not reference %s:\n%s", conn.scriptName, string(data))
+			wantConfigNeedle := conn.scriptName
+			if runtime.GOOS == "windows" {
+				if conn.Name() == "cursor" {
+					wantConfigNeedle = "cursor-hook.ps1"
+				} else {
+					wantConfigNeedle = nativeHookFlag + conn.Name()
+				}
+			}
+			if runtime.GOOS == "windows" && conn.Name() == "antigravity" {
+				var cfg map[string]interface{}
+				if err := json.Unmarshal(data, &cfg); err != nil {
+					t.Fatalf("parse antigravity config after setup: %v\n%s", err, data)
+				}
+				if !structuredHookCommandReferences(cfg, []string{conn.hookCommand(opts)}) {
+					t.Fatalf("config after setup does not reference safe Antigravity command:\n%s", string(data))
+				}
+			} else if !strings.Contains(string(data), wantConfigNeedle) {
+				t.Fatalf("config after setup does not reference %s:\n%s", wantConfigNeedle, string(data))
 			}
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
@@ -530,9 +590,10 @@ func mapKeys(m map[string]interface{}) []string {
 //   - its value is a map with key "PreToolUse"
 //   - "PreToolUse" is a list with exactly one entry
 //   - that entry has matcher="*" and hooks=[{type="command",
-//     command=<bare absolute path to antigravity-hook.sh>}]
-//   - the inner command field has no quote characters and no
-//     surrounding whitespace
+//     command=<tokenizer-safe Antigravity command>}]
+//   - the inner command field has no visible quote characters and no
+//     surrounding whitespace; on Windows the absolute managed launcher path
+//     lives inside the PowerShell encoded command instead
 //
 // If a future agy release pivots back to a flat schema, OR adds
 // shell invocation, OR moves the hooks file again, this test must
@@ -617,14 +678,30 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 			command,
 		)
 	}
-	// Secondary: the path resolves cleanly to a file ending in
-	// antigravity-hook.sh. Defends against accidentally writing a
-	// relative path or a different script name.
-	if !strings.HasSuffix(command, "antigravity-hook.sh") {
-		t.Fatalf("command=%q does not end with antigravity-hook.sh", command)
+	wantCommand := conn.hookCommand(opts)
+	if command != wantCommand {
+		t.Fatalf("command=%q want %q", command, wantCommand)
 	}
-	if !filepath.IsAbs(command) {
-		t.Fatalf("command=%q is not an absolute path", command)
+	// Unix runs the absolute shell hook. Windows runs a tokenizer-safe system
+	// PowerShell command whose encoded script invokes the absolute no-console
+	// hook launcher path; agy's direct-exec tokenizer cannot dequote that path
+	// if it is placed visibly in hooks.json.
+	if runtime.GOOS == "windows" {
+		if command == legacyAntigravityWindowsHookCommand() {
+			t.Fatalf("windows command still uses vulnerable bare launcher: %q", command)
+		}
+		decoded := decodePowerShellEncodedCommandForTest(t, command)
+		if !strings.Contains(decoded, windowsNativePowerShellStartForTest(defenseclawHookBinary(), "antigravity")) ||
+			!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
+			t.Fatalf("windows encoded command lost managed launcher or hardening:\n%s", decoded)
+		}
+	} else {
+		if !strings.HasSuffix(command, "antigravity-hook.sh") {
+			t.Fatalf("command=%q does not end with antigravity-hook.sh", command)
+		}
+		if !filepath.IsAbs(command) {
+			t.Fatalf("command=%q is not an absolute path", command)
+		}
 	}
 	// Tertiary: no surrounding whitespace either.
 	if command != strings.TrimSpace(command) {
@@ -678,13 +755,75 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 			t.Errorf("%s[%q][0].hooks[0].type=%#v want command", outerKey, event, hookEntry["type"])
 		}
 		eventCommand, ok := hookEntry["command"].(string)
-		if !ok || !strings.HasSuffix(eventCommand, "antigravity-hook.sh") {
-			t.Errorf("%s[%q][0].hooks[0].command=%#v want absolute path ending antigravity-hook.sh", outerKey, event, hookEntry["command"])
+		if !ok || eventCommand != wantCommand {
+			t.Errorf("%s[%q][0].hooks[0].command=%#v want %q", outerKey, event, hookEntry["command"], wantCommand)
 		}
 	}
 }
 
+func TestAntigravityRemoveConfigEntriesPrunesLegacyWindowsCommand(t *testing.T) {
+	setHookBinaryOverride(t, `C:\Users\Jane Doe\.local\bin\defenseclaw-hook.exe`)
+	current := hookInvocationCommandFor("windows", "antigravity", "")
+	legacy := legacyAntigravityWindowsHookCommand()
+	legacyNonWaiting := legacyAntigravityNonWaitingWindowsHookCommand()
+	foreign := `foreign-hook.exe hook --connector antigravity`
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	cfg := map[string]interface{}{
+		"defenseclaw-antigravity-pretooluse": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"matcher": "*",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": current},
+						map[string]interface{}{"type": "command", "command": legacy},
+						map[string]interface{}{"type": "command", "command": legacyNonWaiting},
+					},
+				},
+			},
+		},
+		"operator-hook": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"matcher": "*",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": foreign},
+					},
+				},
+			},
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write fixture hooks.json: %v", err)
+	}
+
+	conn := NewAntigravityConnector()
+	if err := conn.removeConfigEntries(path, current); err != nil {
+		t.Fatalf("removeConfigEntries: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read pruned hooks.json: %v", err)
+	}
+	var pruned map[string]interface{}
+	if err := json.Unmarshal(after, &pruned); err != nil {
+		t.Fatalf("parse pruned hooks.json: %v\n%s", err, after)
+	}
+	if structuredHookCommandReferences(pruned, []string{current, legacy, legacyNonWaiting}) {
+		t.Fatalf("managed Antigravity command survived pruning:\n%s", after)
+	}
+	if !strings.Contains(string(after), foreign) {
+		t.Fatalf("foreign hook was not preserved:\n%s", after)
+	}
+}
+
 func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenHands requires WSL and is unsupported on native Windows; platform rejection coverage remains active")
+	}
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, ".openhands", "hooks.json")
 	prev := OpenHandsHooksPathOverride
@@ -966,7 +1105,7 @@ func TestOpenHandsWorkspaceRootFallsBackToHomeWhenDaemonCwdIsDataDir(t *testing.
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	prevHooks := OpenHandsHooksPathOverride
 	prevWorkspace := OpenHandsWorkspaceDirOverride
@@ -1000,7 +1139,7 @@ func TestCopilotSetupDefaultsToGlobalWhenDaemonCwdIsDataDir(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	prevHooks := CopilotHooksPathOverride
 	prevWorkspace := CopilotWorkspaceDirOverride
@@ -1069,6 +1208,100 @@ func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"failClosed": true`) {
 		t.Fatalf("cursor hooks did not enable failClosed when explicitly requested:\n%s", string(data))
+	}
+
+	// Refreshing the same connector in observe/fail-open mode must replace the
+	// managed entries rather than retaining stale host-side enforcement.
+	opts.HookFailMode = "open"
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("observe refresh Setup: %v", err)
+	}
+	cfg, err := readJSONObject(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	for event, raw := range hooks {
+		entries, _ := raw.([]interface{})
+		if len(entries) != 1 {
+			t.Fatalf("Cursor %s entries = %d after refresh, want 1", event, len(entries))
+		}
+		entry, _ := entries[0].(map[string]interface{})
+		if entry["failClosed"] != false {
+			t.Fatalf("Cursor %s retained failClosed=true after observe refresh: %#v", event, entry)
+		}
+	}
+}
+
+func TestCursorHooks_RefreshMigratesNativeCommandAndUpdatesFailClosed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("direct-native to PowerShell adapter migration is Windows-specific")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "hooks.json")
+	prev := CursorHooksPathOverride
+	CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { CursorHooksPathOverride = prev })
+	setHookBinaryOverride(t, filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName))
+
+	legacyNative := windowsQuoteExe(defenseclawHookBinary()) + " " + nativeHookFlag + "cursor"
+	foreign := `& 'C:\Tools\operator-hook.ps1'`
+	seed := fmt.Sprintf(`{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {"type":"command","command":%q,"failClosed":true},
+      {"type":"command","command":%q,"failClosed":true}
+    ]
+  }
+}`, legacyNative, foreign)
+	if err := os.WriteFile(cfgPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := NewCursorConnector()
+	opts := SetupOpts{
+		DataDir:      filepath.Join(dir, "dc"),
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+		HookFailMode: "open",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("observe Setup: %v", err)
+	}
+	// A second setup must be idempotent rather than duplicating the adapter.
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repeated observe Setup: %v", err)
+	}
+
+	cfg, err := readJSONObject(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	entries, _ := hooks["beforeSubmitPrompt"].([]interface{})
+	if len(entries) != 2 {
+		t.Fatalf("beforeSubmitPrompt entries = %d, want one foreign and one DefenseClaw: %#v", len(entries), entries)
+	}
+	managedCount := 0
+	foreignFound := false
+	for _, raw := range entries {
+		item, _ := raw.(map[string]interface{})
+		command, _ := item["command"].(string)
+		switch {
+		case command == foreign:
+			foreignFound = true
+		case strings.Contains(command, "cursor-hook.ps1"):
+			managedCount++
+			if item["failClosed"] != false {
+				t.Fatalf("observe adapter retained failClosed=true: %#v", item)
+			}
+		case command == legacyNative:
+			t.Fatalf("legacy direct-native command survived refresh: %#v", item)
+		}
+	}
+	if !foreignFound || managedCount != 1 {
+		t.Fatalf("refresh did not preserve foreign hook and deduplicate adapter: %#v", entries)
 	}
 }
 

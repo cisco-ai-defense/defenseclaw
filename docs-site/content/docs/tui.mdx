@@ -11,8 +11,8 @@ keywords:
 The DefenseClaw **TUI** is a full-screen, keyboard-driven dashboard over the
 `defenseclaw` CLI. It surfaces the gateway status, your scanned inventory
 (skills, MCPs, and plugins), alerts, logs, audit trail, and setup — all in
-one place. Every action in the TUI maps to a real `defenseclaw` command, so you
-never have to memorize the CLI to drive it.
+one place. Operator actions use the same supported CLI and gateway surfaces, so
+you do not have to memorize their syntax.
 
 ## Open the TUI
 
@@ -54,6 +54,21 @@ rows so a large model cache cannot hide agent activity. Open **AI Discovery**
 with `V` for the full model inventory; model rows add Model, Model status, and
 Format columns, with recipe, modality, device, byte size, and pinned state in
 the detail view when the source reports them.
+
+### Doctor status and cache
+
+The Overview panel reads `~/.defenseclaw/doctor_cache.json`; it does not rerun
+credential or network probes during rendering. Doctor schema v2 keeps health
+checks and repair attempts in separate ledgers, and the Overview derives the
+run outcome from both. A failed or dependency-blocked repair therefore cannot
+produce an all-green Doctor card.
+
+Unknown or malformed schema-v2 state becomes a visible warning rather than
+being assumed healthy. Snapshots older than 15 minutes are marked stale, and
+pressing `D` runs Doctor in the background to refresh the view. Failed
+credential checks also feed the bounded missing-credential notice without
+exposing values. See the [Doctor cache reference](/docs/reference/configuration#doctor-cache)
+for the on-disk format.
 
 ## Handy keys
 

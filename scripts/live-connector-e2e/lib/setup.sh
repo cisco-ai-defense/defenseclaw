@@ -36,6 +36,7 @@ dc_connector_config_file() {
     openhands)   printf '%s/.openhands/hooks.json' "${HOME}" ;;
     antigravity) printf '%s/.gemini/config/hooks.json' "${HOME}" ;;
     hermes)      printf '%s/.hermes/config.yaml' "${HOME}" ;;
+    amp)         printf '%s/.config/amp/plugins/defenseclaw.ts' "${HOME}" ;;
     *)           printf '' ;;
   esac
 }
@@ -56,10 +57,17 @@ dc_write_env_key() {
 
 # dc_init_defenseclaw — run `defenseclaw init` once and stand up the gateway.
 # Idempotent: re-running against an initialized home is a no-op for config.
+# Set DC_E2E_ISOLATE_GATEWAY=1 when a harness must assign run-owned ports
+# before the first sidecar starts (for example, on a developer workstation
+# where the default API port may already belong to the user's gateway).
 dc_init_defenseclaw() {
   if [ ! -f "${DEFENSECLAW_HOME}/config.yaml" ]; then
     dc_log "running defenseclaw init"
-    defenseclaw init
+    if [ "${DC_E2E_ISOLATE_GATEWAY:-0}" = "1" ]; then
+      defenseclaw init --no-start-gateway
+    else
+      defenseclaw init
+    fi
   else
     dc_log "defenseclaw already initialized at ${DEFENSECLAW_HOME}"
   fi
@@ -83,5 +91,11 @@ dc_teardown_connector() {
   dc_log "tearing down ${connector}"
   defenseclaw-gateway connector teardown --connector "${connector}" || \
     dc_warn "teardown command returned non-zero for ${connector}"
+  # The in-process hook guard debounces filesystem changes for 500ms. Wait
+  # beyond that window before verification so a teardown/guardian race cannot
+  # pass in the transient clean interval and reinstall managed config after the
+  # test exits. The low-level teardown marks the connector explicitly inactive;
+  # this delay proves the running guard honors that ownership revocation.
+  sleep "${DC_E2E_TEARDOWN_SETTLE_SECONDS:-1.25}"
   defenseclaw-gateway connector verify --connector "${connector}"
 }

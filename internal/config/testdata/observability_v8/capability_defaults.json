@@ -1,0 +1,9 @@
+[
+  {"name":"jsonl","kind":"jsonl","signals":["logs"]},
+  {"name":"console","kind":"console","signals":["logs"]},
+  {"name":"splunk","kind":"splunk_hec","signals":["logs"]},
+  {"name":"http","kind":"http_jsonl","signals":["logs"]},
+  {"name":"prometheus","kind":"prometheus","signals":["metrics"]},
+  {"name":"otlp","kind":"otlp","signals":["logs","traces","metrics"]},
+  {"name":"galileo","kind":"otlp","preset":"galileo","signals":["traces"]}
+]

@@ -8,63 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
-
-func parseGatewaySeverity(s string) gatewaylog.Severity {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
-	case "CRITICAL":
-		return gatewaylog.SeverityCritical
-	case "HIGH":
-		return gatewaylog.SeverityHigh
-	case "MEDIUM", "MED":
-		return gatewaylog.SeverityMedium
-	case "LOW", "WARN":
-		return gatewaylog.SeverityLow
-	default:
-		return gatewaylog.SeverityInfo
-	}
-}
-
-func redactMapShallow(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		switch t := v.(type) {
-		case string:
-			out[k] = redaction.ForSinkString(t)
-		case map[string]any:
-			out[k] = redactMapShallow(t)
-		default:
-			b, _ := json.Marshal(v)
-			out[k] = redaction.ForSinkString(string(b))
-		}
-	}
-	return out
-}
-
-func activityDiffToGateway(in []ActivityDiffEntry) []gatewaylog.DiffEntry {
-	out := make([]gatewaylog.DiffEntry, 0, len(in))
-	for _, d := range in {
-		out = append(out, gatewaylog.DiffEntry{
-			Path:   d.Path,
-			Op:     d.Op,
-			Before: d.Before,
-			After:  d.After,
-		})
-	}
-	return out
-}
 
 // logActivityImpl contains the Track 5 LogActivity body.
 func (l *Logger) logActivityImpl(in ActivityInput) error {
@@ -96,44 +45,9 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 
 	activityID := uuid.New().String()
-	prov := version.Current()
-
-	beforeJSON, _ := json.Marshal(in.Before)
-	afterJSON, _ := json.Marshal(in.After)
-	diffJSON, _ := json.Marshal(in.Diff)
-
-	row := ActivityEventRow{
-		ID:                activityID,
-		Timestamp:         time.Now().UTC(),
-		Actor:             actor,
-		Action:            action,
-		TargetType:        targetType,
-		TargetID:          targetID,
-		Reason:            in.Reason,
-		BeforeJSON:        string(beforeJSON),
-		AfterJSON:         string(afterJSON),
-		DiffJSON:          string(diffJSON),
-		VersionFrom:       in.VersionFrom,
-		VersionTo:         in.VersionTo,
-		RequestID:         in.RequestID,
-		TraceID:           in.TraceID,
-		RunID:             in.RunID,
-		SchemaVersion:     prov.SchemaVersion,
-		ContentHash:       prov.ContentHash,
-		Generation:        prov.Generation,
-		BinaryVersion:     prov.BinaryVersion,
-		SidecarInstanceID: ProcessAgentInstanceID(),
-	}
-	if row.RunID == "" {
-		row.RunID = currentRunID()
-	}
-
-	if err := l.store.InsertActivityEvent(row); err != nil {
-		_, otel, _ := l.snapshot()
-		if otel != nil {
-			otel.RecordAuditDBError(context.Background(), "insert_activity_event")
-		}
-		return fmt.Errorf("audit: activity row: %w", err)
+	runID := in.RunID
+	if runID == "" {
+		runID = currentRunID()
 	}
 
 	summary := map[string]any{
@@ -142,9 +56,9 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		"action":       action,
 		"target_type":  targetType,
 		"target_id":    targetID,
-		"reason":       redaction.ForSinkReason(in.Reason),
-		"before":       redactMapShallow(in.Before),
-		"after":        redactMapShallow(in.After),
+		"reason":       in.Reason,
+		"before":       cloneStructuredPayload(in.Before),
+		"after":        cloneStructuredPayload(in.After),
 		"diff":         in.Diff,
 		"version_from": in.VersionFrom,
 		"version_to":   in.VersionTo,
@@ -163,85 +77,51 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		Actor:             actor,
 		Details:           string(summaryBlob),
 		Severity:          severity,
-		RunID:             row.RunID,
+		RunID:             runID,
 		RequestID:         in.RequestID,
 		TraceID:           in.TraceID,
-		SchemaVersion:     prov.SchemaVersion,
-		ContentHash:       prov.ContentHash,
-		Generation:        prov.Generation,
-		BinaryVersion:     prov.BinaryVersion,
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
-	auditEv = sanitizeEvent(auditEv)
-	if err := l.store.LogEvent(auditEv); err != nil {
-		_, otel, _ := l.snapshot()
-		if otel != nil {
-			otel.RecordAuditDBError(context.Background(), "insert_activity_audit")
-		}
-		return err
+	stampAuditEventEnvelope(&auditEv)
+	activityMetrics, metricErr := newActivityRuntimeV8GeneratedMetrics(
+		auditEv, action, targetType, actor, len(in.Diff),
+	)
+	if metricErr != nil {
+		return metricErr
 	}
-
-	sinksMgr, otel, structured := l.snapshot()
-	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), auditEv.Action, auditEv.Severity)
-		otel.RecordActivityTotal(context.Background(), action, targetType, actor, len(in.Diff))
+	evidence, evidenceErr := controlPlaneV8ActivityEvidence(in)
+	if evidenceErr != nil {
+		return evidenceErr
 	}
-	l.emitStructuredSnapshot(structured, auditEv)
-
-	gwActivity := &gatewaylog.ActivityPayload{
-		Actor:       actor,
-		Action:      action,
-		TargetType:  targetType,
-		TargetID:    targetID,
-		Reason:      in.Reason,
-		Before:      in.Before,
-		After:       in.After,
-		Diff:        activityDiffToGateway(in.Diff),
-		VersionFrom: in.VersionFrom,
-		VersionTo:   in.VersionTo,
+	disposition, emitErr := l.emitControlPlaneV8WithEvidenceAndMetrics(
+		context.Background(), auditEv, evidence, activityMetrics,
+	)
+	if emitErr != nil {
+		return emitErr
 	}
-	gwEv := gatewaylog.Event{
-		Timestamp: time.Now().UTC(),
-		EventType: gatewaylog.EventActivity,
-		Severity:  parseGatewaySeverity(severity),
-		RunID:     row.RunID,
-		RequestID: in.RequestID,
-		TraceID:   in.TraceID,
-		Activity:  gwActivity,
+	// Runtime-handled activity occurrences exclusively own canonical SQLite and
+	// optional destination fanout. The historical activity_events table is not
+	// written by v8. The registered aggregate
+	// metrics are emitted in one generated batch on the same runtime binding as
+	// the canonical occurrence and remain exactly once for dashboard continuity.
+	if disposition != auditV8Unhandled {
+		return nil
 	}
-	stampGatewayEnvelope(&gwEv)
-	if otel != nil {
-		otel.RecordGatewayEvent(gwEv)
-	}
-	l.emitGatewaySnapshot(structured, gwEv)
-
-	if !in.SkipSinkFanout {
-		se := sinks.Event{
-			ID:                auditID,
-			Timestamp:         auditEv.Timestamp,
-			Action:            action,
-			Target:            auditEv.Target,
-			Actor:             actor,
-			Details:           string(summaryBlob),
-			Severity:          severity,
-			RunID:             row.RunID,
-			TraceID:           in.TraceID,
-			RequestID:         in.RequestID,
-			SidecarInstanceID: ProcessAgentInstanceID(),
-			Structured: map[string]any{
-				"defenseclaw_event": "activity",
-				"activity_id":       activityID,
-				"actor":             actor,
-				"action":            action,
-				"target_type":       targetType,
-				"target_id":         targetID,
+	disposition, emitErr = l.emitCompatibilityAuditV8(
+		context.Background(), auditEv,
+		compatibilityAuditV8Options{
+			classification: observability.ClassificationContext{
+				MandatoryFacts: observability.MandatoryFacts{ControlPlaneMutation: true},
 			},
-		}
-		if sinksMgr != nil {
-			fwdCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = sinksMgr.Forward(fwdCtx, se)
-		}
+			phase: "apply", outcome: observability.OutcomeApplied,
+			companionMetrics: activityMetrics,
+		},
+	)
+	if emitErr != nil {
+		return emitErr
 	}
-	return nil
+	if disposition != auditV8Unhandled {
+		return nil
+	}
+	return fmt.Errorf("audit: no generated v8 family handled activity action %q", action)
 }

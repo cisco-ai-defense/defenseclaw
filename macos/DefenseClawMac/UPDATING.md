@@ -110,7 +110,14 @@ Confirm the app-only ZIP contains exactly one top-level `.app` bundle and no abs
 
 The first-run runtime installer pins its fallback `uv` download by version and SHA-256 in `RuntimeInstaller.swift`. When updating that pin, use an immutable `astral-sh/uv` release, copy the Apple Silicon archive digest from the release asset, and verify the archive locally before changing both constants together.
 
-Production releases publish verified macOS app-update assets when all five release-environment secrets are configured together (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER_ID`). With none configured, the workflow publishes only ad-hoc-signed `-unverified` assets, which the in-app self-updater rejects. Partial or invalid credentials fail the build rather than silently downgrading a configured signing path.
+All five release-environment secrets
+(`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`,
+`MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and
+`MACOS_NOTARY_ISSUER_ID`) produce verified macOS app-update assets. Production
+and local builds may omit all five and produce ad-hoc-signed `-unverified`
+assets for manual download and installation; the in-app self-updater rejects
+them. Partial credentials, or any invalid configured credential, stop the
+workflow before publication.
 
 ## 5. Review before merging
 
@@ -119,6 +126,8 @@ Production releases publish verified macOS app-update assets when all five relea
 - Confirm every GitHub Action is pinned to an immutable commit SHA.
 - Confirm the release job downloads both the DMG and zip before regenerating `checksums.txt` and publishing the atomic GitHub release.
 - Confirm `test_update_checker_verification.sh` and `test_update_checker_safety.sh` pass, covering verified-only asset selection and pre-extraction archive rejection.
-- Confirm `python3 scripts/check-macos-upstream.py` succeeds online. The release preflight fails before signing if the pin is stale.
+- Confirm `python3 scripts/check-macos-upstream.py` succeeds online. Release
+  preflight validates the lock offline; the scheduled freshness workflow owns
+  detection of a newer upstream release.
 - Confirm the scheduled `macOS Upstream Freshness` workflow is enabled. It opens one update issue when the latest stable standalone release advances.
 - Record exact commands and observed results in the pull request test plan.

@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from textual import events, on
 from textual.app import ComposeResult
@@ -21,7 +21,11 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from defenseclaw.platform_support import supported_connectors
+from defenseclaw.platform_support import (
+    connector_platform_support,
+    connector_preview_on_os,
+    supported_connectors,
+)
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.action_menu import ActionMenu, MenuAction
 
@@ -48,6 +52,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
     ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
+    ModeChoice("amp", "Amp", "i", False, "synchronous TypeScript policy plugin; native confirm/block"),
     ModeChoice("omnigent", "OmniGent", "m", False, "custom policy ALLOW/ASK/DENY + optional native OTLP"),
 )
 
@@ -55,11 +60,23 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
 def visible_mode_picker_choices(os_name: str | None = None) -> tuple[ModeChoice, ...]:
     """Mode-picker rows supported on *os_name*.
 
-    On Windows the proxy connectors (openclaw/zeptoclaw) are dropped because
-    DefenseClaw is hook-only there; on macOS/Linux this is a no-op.
+    Unsupported Windows connectors are dropped. Preview connectors remain
+    selectable with an explicit label/reason; macOS/Linux are unchanged.
     """
     supported = set(supported_connectors([c.wire for c in MODE_PICKER_CHOICES], os_name))
-    return tuple(c for c in MODE_PICKER_CHOICES if c.wire in supported)
+    visible: list[ModeChoice] = []
+    for choice in MODE_PICKER_CHOICES:
+        if choice.wire not in supported:
+            continue
+        if connector_preview_on_os(choice.wire, os_name):
+            reason = connector_platform_support(choice.wire, os_name).reason
+            choice = replace(
+                choice,
+                label=f"{choice.label} (preview)",
+                tagline=f"{choice.tagline}; {reason}",
+            )
+        visible.append(choice)
+    return tuple(visible)
 
 
 class ModePickerScreen(ModalScreen[str | None]):
@@ -103,7 +120,7 @@ class ModePickerScreen(ModalScreen[str | None]):
 
     def __init__(self, current_wire: str = "", *, os_name: str | None = None) -> None:
         super().__init__()
-        # Hide proxy connectors on Windows; no-op on macOS/Linux. Resolve
+        # Hide unsupported connectors on Windows; no-op on macOS/Linux. Resolve
         # once so compose() and _sync_preview() share the same row order.
         self.choices = visible_mode_picker_choices(os_name)
         self.current_wire = self._resolve_current_wire(current_wire)
@@ -236,6 +253,11 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
             "OmniGent: setup will re-run to refresh the custom Python policy runtime, "
             "config, and runtime files."
         )
+    if current == dest and dest == "amp":
+        return (
+            "Amp: setup will re-run to refresh the synchronous TypeScript policy plugin, "
+            "permissions inventory, and runtime files."
+        )
     if current == dest:
         return f"{label}: setup will re-run to refresh hooks, config, and runtime files."
     if choice_for_wire(dest).guardrail_ok:
@@ -248,6 +270,12 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
             "OmniGent: installs the custom Python policy runtime, maps all six phases "
             "to ALLOW/ASK/DENY, and honors per-connector policy mode."
         )
+    if dest == "amp":
+        return (
+            "Amp: installs the synchronous TypeScript policy plugin, gates tool.call execution "
+            "and model-bound tool.result output, and records lifecycle events for Agent 360, Galileo, and other "
+            "configured observability destinations."
+        )
     return (
         f"{label}: runs hook-driven connector setup, wires hooks and native OTel where supported, "
         "and honors guardrail.mode for PreToolUse deny verdicts."
@@ -256,7 +284,11 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
 
 def _choice_action(choice: ModeChoice, *, current_wire: str) -> MenuAction:
     active = " (active)" if normalize_connector(current_wire) == choice.wire else ""
-    guardrail = "guardrail" if choice.guardrail_ok else ("policy" if choice.wire == "omnigent" else "hooks")
+    guardrail = (
+        "guardrail"
+        if choice.guardrail_ok
+        else ("policy" if choice.wire in {"omnigent", "amp"} else "hooks")
+    )
     return MenuAction(
         action_id=choice.wire,
         # Escape the opening bracket so Rich treats ``[c] Codex`` as

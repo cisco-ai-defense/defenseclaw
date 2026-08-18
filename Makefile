@@ -1,18 +1,20 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
-VERSION     := 0.8.4
+HOOK_LAUNCHER := defenseclaw-hook
+VERSION     := 0.8.6
+.DEFAULT_GOAL := help
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
-INSTALL_DIR := $(HOME)/.local/bin
 PLUGIN_DIR  := extensions/defenseclaw
-DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
-OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
+# The race-enabled gateway package can exceed the default test deadline on
+# supported arm64 developer/CI hosts without any individual test hanging.
+GO_TEST_TIMEOUT ?= 60m
 
 DIST_DIR    := dist
-UPGRADE_SMOKE_FROM ?= 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.3 0.6.2 0.6.1 0.6.0 0.5.0 0.4.0
+UPGRADE_SMOKE_FROM ?=
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe
@@ -22,37 +24,116 @@ UPGRADE_SMOKE_FROM ?= 0.8.3 0.8.2 0.8.1 0.8.0 0.7.2 0.7.1 0.6.6 0.6.5 0.6.4 0.6.
 # Linux/macOS. $(OS) is set to "Windows_NT" by Windows itself and inherited by
 # the MSYS/Git-Bash shell make runs there; it is unset elsewhere.
 ifeq ($(OS),Windows_NT)
+PYTHON ?= python
+# PowerShell's inherited PATH places System32 before MSYS. Make recipes rely on
+# POSIX utilities such as find, cp, ln, and rm, so prefer the MSYS toolchain;
+# otherwise Windows find.exe interprets GNU find arguments and prints
+# "FIND: Parameter format not correct" while silently skipping work.
+export PATH := /usr/bin:$(PATH)
+# GNU Make runs these recipes through MSYS, whose HOME defaults to
+# /home/<user>. Native PowerShell and the installed DefenseClaw CLI use
+# USERPROFILE instead, so deriving install paths from HOME silently places a
+# second copy under C:\msys64\home that PowerShell never executes. Convert the
+# native profile path to an MSYS path for recipe compatibility while keeping
+# every installed artifact in the real Windows user profile.
+USER_HOME := $(shell if [ -n "$$USERPROFILE" ]; then cygpath -u "$$USERPROFILE" 2>/dev/null || printf '%s' "$$USERPROFILE"; else printf '%s' "$$HOME"; fi)
 VENV_BIN := $(VENV)/Scripts
 EXE      := .exe
 else
+PYTHON ?= python3
+USER_HOME := $(HOME)
 VENV_BIN := $(VENV)/bin
 EXE      :=
 endif
 
-.PHONY: all path doctor uninstall quickstart llm-setup \
+INSTALL_DIR := $(USER_HOME)/.local/bin
+DC_EXT_DIR  := $(USER_HOME)/.defenseclaw/extensions/defenseclaw
+OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
+
+# _bundle-data is a prerequisite of the target that creates $(VENV), so a
+# fresh checkout cannot use the project interpreter while staging its first
+# wheel/editable install. The runtime-asset expander is deliberately
+# standard-library-only; select the venv interpreter when it already exists
+# and otherwise use the host Python available on every supported installer/CI
+# platform. Dependency-bearing scripts continue to use $(VENV_BIN)/python.
+BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%s' "$(VENV_BIN)/python$(EXE)"; elif command -v python3 >/dev/null 2>&1; then command -v python3; elif command -v python >/dev/null 2>&1; then command -v python; else printf '%s' python; fi)
+
+# Resolve newly published stable baselines at execution time. Explicit
+# UPGRADE_SMOKE_FROM values still provide a deterministic developer override.
+# Dynamic resolution requires the exact candidate in ARGS so only older
+# releases can become upgrade baselines; the checked-in development VERSION is
+# intentionally not a release-selection fallback.
+define run_upgrade_matrix
+	@set -eu; \
+	from_versions='$(strip $(UPGRADE_SMOKE_FROM))'; \
+	target_version=''; \
+	set -- $(ARGS); \
+	while [ "$$#" -gt 0 ]; do \
+		case "$$1" in \
+			--target-version) shift; [ "$$#" -gt 0 ] || { echo 'missing value for --target-version' >&2; exit 2; }; target_version="$$1" ;; \
+			--target-version=*) target_version="$${1#--target-version=}" ;; \
+		esac; \
+		shift; \
+	done; \
+	resolution_dir=''; \
+	cleanup() { if [ -n "$$resolution_dir" ]; then rm -rf "$$resolution_dir"; fi; }; \
+	trap cleanup EXIT HUP INT TERM; \
+	if [ -z "$$from_versions" ]; then \
+		[ -n "$$target_version" ] || { echo 'dynamic upgrade matrix requires ARGS="--target-version X.Y.Z ..." (or explicit UPGRADE_SMOKE_FROM)' >&2; exit 2; }; \
+		resolution_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/defenseclaw-baselines.XXXXXX")"; \
+		$(BOOTSTRAP_PYTHON) scripts/resolve_upgrade_baselines.py \
+			--target-version "$$target_version" \
+			--output "$$resolution_dir/effective.json"; \
+		from_versions="$$( $(BOOTSTRAP_PYTHON) -c \
+			'import json, sys; print(" ".join(json.load(open(sys.argv[1], encoding="utf-8"))["published_baselines"]))' \
+			"$$resolution_dir/effective.json" )"; \
+	fi; \
+	$(1) --from-versions "$$from_versions" $(2) $(ARGS)
+endef
+
+.PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
+        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-grafana-dashboards check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
-        upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix \
+        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
-        _bundle-data _source-install-preflight \
-        proto proto-tools \
+        _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
+        proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
+
+# ---------------------------------------------------------------------------
+# Developer workflow help
+# ---------------------------------------------------------------------------
+
+help:
+	@echo "DefenseClaw source-development workflow"
+	@echo ""
+	@echo "  make all      Build and activate this checkout with a test-ready environment."
+	@echo "                This is the normal local development path."
+	@echo "  make build    Build all local artifacts and the test-ready environment."
+	@echo "                May update .venv; does not publish checkout artifacts or"
+	@echo "                change managed installation state."
+	@echo "  make test     Run the Python and race-enabled Go test suites."
+	@echo "  make check    Run the standard validation suite."
+	@echo "  make clean    Remove local build artifacts."
+	@echo ""
+	@echo "Common developer options:"
+	@echo "  make all NO_QUICKSTART=1   rebuild/install without first-run setup"
+	@echo "  make all CONNECTOR=none    rebuild/install without connector setup"
 
 # ---------------------------------------------------------------------------
 # Version stamping
 # ---------------------------------------------------------------------------
-# The manually dispatched release workflow owns the candidate version and
-# creates the remote tag only after every native gate and the protected release
-# approval succeed. The reviewed main commit must already be stamped; the
-# workflow invokes `scripts/stamp-version.sh "$TAG"` only to prove it is a no-op.
-# Local devs who want to pre-stage a version (e.g. for a manual smoke test of
-# `make dist`) can use this target as a friendly wrapper.
+# The manually dispatched release workflow owns the candidate version, stamps
+# it into an isolated build checkout, and creates the remote tag only after
+# every native gate and the protected release approval succeed. A version-only
+# PR is not required. Local devs who want to stage a version for a manual smoke
+# test of `make dist` can use this target as a friendly wrapper.
 #
 #   make set-version VERSION=0.4.1
 #
@@ -92,8 +173,8 @@ check-version-sync:
 #
 # We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
 # CI jobs that only want the binaries.
-all: _source-install-preflight
-	@$(MAKE) --no-print-directory install
+all: _source-install-dev-preflight
+	@$(MAKE) --no-print-directory _source-dev-install
 	@$(MAKE) --no-print-directory path
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup
@@ -121,6 +202,9 @@ path: _source-install-preflight
 # Run the freshly-installed CLI binary directly so a stale shell PATH
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
+# When no TTY is available, the follow-up additive setup observes only newly
+# detected hook connectors, preserves existing modes, and restarts the gateway
+# only when it actually adds a connector.
 quickstart: _source-install-preflight
 	@profile="$${PROFILE:-observe}"; \
 	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
@@ -134,7 +218,8 @@ quickstart: _source-install-preflight
 		elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
 			dc_bin="$(VENV)/bin/defenseclaw"; \
 		else \
-			echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
+			echo "  Could not locate the defenseclaw binary."; \
+			echo "  Developers: run 'make all'. Release installs: run 'defenseclaw upgrade'."; \
 			exit 1; \
 		fi; \
 		if [ -n "$${CONNECTOR:-}" ]; then \
@@ -144,12 +229,14 @@ quickstart: _source-install-preflight
 				--scanner-mode "$${SCANNER_MODE:-local}" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+				exit 1; \
 			fi; \
 		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
 			if ! "$$dc_bin" init \
 				--scanner-mode "$${SCANNER_MODE:-local}" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+				exit 1; \
 			fi; \
 		else \
 			if ! "$$dc_bin" init --non-interactive --yes \
@@ -157,6 +244,11 @@ quickstart: _source-install-preflight
 				--scanner-mode "$${SCANNER_MODE:-local}" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+				exit 1; \
+			fi; \
+			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
+				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
+				exit 1; \
 			fi; \
 		fi; \
 	fi
@@ -216,7 +308,10 @@ build: pycli gateway plugin
 	@echo "  • Go gateway   → ./$(GATEWAY)"
 	@echo "  • OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo ""
-	@echo "Run 'make install' to install all components."
+	@echo "Build only: checkout artifacts were not published and managed install state was not changed."
+	@echo "The repository-local .venv may have been created or updated."
+	@echo "The local environment is test-ready; run 'make test' next."
+	@echo "To activate this exact checkout for development, run 'make all'."
 
 install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_INSTALL_TARGET)
 	@./scripts/source-install-preflight.sh claim \
@@ -263,10 +358,13 @@ maybe-openclaw-plugin-install: _source-install-preflight
 dev-install: _source-install-preflight
 	@./scripts/install-dev.sh
 
-# pycli depends on _bundle-data so every editable install (and the
-# downstream `make all` / `make build`) sees the latest bundled
-# assets — Grafana dashboards, splunk_local_bridge, guardrail
-# policy bundles, codeguard skills. The runtime resolves these via
+# pycli owns the one local source environment used by build, activation,
+# tests, checks, and lint. Source development never needs a separate
+# production-only venv: release packaging selects its runtime dependencies
+# independently. It also depends on _bundle-data so every editable install
+# (and the downstream `make all` / `make build`) sees the latest bundled
+# assets — Grafana dashboards, splunk_local_bridge, guardrail policy bundles,
+# and codeguard skills. The runtime resolves these via
 # importlib.resources.files("defenseclaw") / "_data", which in
 # editable mode points straight at cli/defenseclaw/_data/. Without
 # the dependency, edits under bundles/local_observability_stack/ or
@@ -279,20 +377,20 @@ dev-install: _source-install-preflight
 pycli: _bundle-data
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	uv sync --frozen --no-dev --python 3.12
-
-dev-pycli: pycli
 	uv sync --frozen --python 3.12
+
+# Backward-compatible alias. `pycli` is already the complete local developer
+# environment, so callers no longer need to choose between two venv shapes.
+dev-pycli: pycli
 	@echo ""
-	@echo "Done. Activate the environment and run:"
+	@echo "Local developer environment is ready. Activate it with:"
 	@echo "  source $(VENV)/bin/activate"
-	@echo "  defenseclaw --help"
 
 # ---------------------------------------------------------------------------
 # Protobuf regeneration
 # ---------------------------------------------------------------------------
 # `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
-# Client) contract at proto/defenseclaw/secureclient/v1/*.proto.
+# Client) contract and the private semantic guardrail facts.
 # Tool binaries are installed under .tools/bin so contributors do not
 # need protoc-gen-go in their global $GOPATH/bin, and the versions
 # are pinned to what the generated files were produced against.
@@ -301,7 +399,7 @@ dev-pycli: pycli
 # changes.
 PROTO_TOOLS_DIR := $(CURDIR)/.tools
 PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
-PROTOC_GEN_GO_VERSION      := v1.36.5
+PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 
 proto-tools:
@@ -315,13 +413,32 @@ proto: proto-tools
 		--go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		secureclient.proto
-	@echo "Regenerated proto/defenseclaw/secureclient/v1/*.pb.go"
+	@cd internal/guardrail/semanticpb && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=. --go_opt=paths=source_relative \
+		facts.proto
+	@echo "Regenerated committed Go protobuf stubs"
+
+proto-check: proto
+	@git ls-files --error-unmatch -- \
+		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
+		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
+		internal/guardrail/semanticpb/facts.pb.go >/dev/null
+	@git diff --exit-code -- \
+		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
+		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
+		internal/guardrail/semanticpb/facts.pb.go
 
 gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
+ifeq ($(OS),Windows_NT)
+	go build -ldflags "-H=windowsgui -X main.version=$(VERSION)" -o $(HOOK_LAUNCHER).exe ./cmd/defenseclaw-hook
+	go run ./internal/tools/windowsresources -target windows_amd64 -executable $(HOOK_LAUNCHER).exe -component hook -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
+	@echo "Built $(HOOK_LAUNCHER).exe (Windows GUI subsystem)"
+endif
 
 # sync-openclaw-extension copies the runtime files of the DefenseClaw
 # OpenClaw plugin into internal/gateway/connector/openclaw_extension so
@@ -392,7 +509,21 @@ extensions: plugin sync-openclaw-extension
 
 gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
+	@if [ "$(GOOS)" = "windows" ] && [ "$(GOARCH)" != "amd64" ]; then \
+		echo "native Windows release resources currently certify only GOARCH=amd64" >&2; exit 1; \
+	fi
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	@if [ "$(GOOS)" = "windows" ]; then \
+		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+			-executable $(BINARY)-$(GOOS)-$(GOARCH) -component gateway -version $(VERSION) \
+			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
+		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
+			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
+			-o $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe ./cmd/defenseclaw-hook; \
+		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+			-executable $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe -component hook -version $(VERSION) \
+			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
+	fi
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
 
 gateway-run: gateway
@@ -409,6 +540,10 @@ plugin:
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo "  Install with: make plugin-install"
 
+amp-plugin-typecheck:
+	cd scripts/amp-plugin-typecheck && npm ci --ignore-scripts --no-audit --no-fund
+	cd scripts/amp-plugin-typecheck && npm test
+
 # ---------------------------------------------------------------------------
 # Individual install targets
 # ---------------------------------------------------------------------------
@@ -422,6 +557,59 @@ _source-install-preflight:
 	@./scripts/source-install-preflight.sh check \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+
+# `make all` is the explicit developer-machine activation workflow. It may
+# adopt existing user state when the shared executable paths are empty, and it
+# may rebuild paths already owned by this checkout. Foreign executables and
+# ownership markers still fail closed. Direct install targets remain strict so
+# they cannot become an alternate release upgrader.
+_source-install-dev-preflight:
+	@./scripts/source-install-preflight.sh dev-check \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+
+# Developer-only publication used by `make all`.  Keep the dev modes literal
+# here so ordinary install targets cannot inherit or opt into the reclaim path.
+_source-dev-install: _source-install-dev-preflight
+	@$(MAKE) --no-print-directory pycli
+	@./scripts/source-install-preflight.sh dev-ensure-dir \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@./scripts/source-install-preflight.sh dev-publish-cli \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@if [ -x "$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" ]; then \
+		python3 ./scripts/source-install-publish.py symlink \
+			"$(CURDIR)/$(VENV_BIN)/litellm$(EXE)" "$(INSTALL_DIR)/litellm$(EXE)" || true; \
+	fi
+	@for tool in skill-scanner skill-scanner-api skill-scanner-pre-commit \
+	             mcp-scanner mcp-scanner-api; do \
+		src="$(CURDIR)/$(VENV_BIN)/$$tool$(EXE)"; \
+		if [ -x "$$src" ]; then \
+			python3 ./scripts/source-install-publish.py symlink \
+				"$$src" "$(INSTALL_DIR)/$$tool$(EXE)" || true; \
+		fi; \
+	done
+	@$(MAKE) --no-print-directory gateway
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway $(GATEWAY)$(EXE) || exit 1; \
+	fi
+	@./scripts/source-install-preflight.sh dev-publish-gateway \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@./scripts/source-install-preflight.sh dev-claim \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@$(MAKE) --no-print-directory $(SOURCE_PLUGIN_INSTALL_TARGET)
+	@echo ""
+	@echo "All components installed:"
+	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
+	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
+	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
+	else \
+		echo "  • OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)"; \
+	fi
 
 cli-install: _source-install-preflight
 	@$(MAKE) --no-print-directory pycli
@@ -471,13 +659,13 @@ gateway-install: _source-install-preflight cli-install
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
-	@# If a sidecar is already running it kept the old inode; tell the
-	@# operator so they know a restart is needed to pick up the new build.
+	@# On Unix, a running sidecar kept the old inode; tell the operator so
+	@# they know a restart is needed to pick up the new build.
 	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
 	@# matches this very make invocation ("make gateway-install") and
 	@# any editor/tail window with the binary path on its cmdline, so
 	@# it would fire a false "sidecar is running" hint on every build.
-	@if pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
+	@if [ "$(OS)" != "Windows_NT" ] && pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
 		echo "  Gateway sidecar is running an older build — restart with:"; \
 		echo "    $(INSTALL_DIR)/$(GATEWAY)$(EXE) restart"; \
 	fi
@@ -522,17 +710,17 @@ plugin-install: _source-install-preflight gateway-install
 
 test: cli-test gateway-test
 
-cli-test: _bundle-data
-	$(VENV)/bin/python -m pytest cli/tests -q
+cli-test: pycli
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests -q
 
-cli-test-cov: _bundle-data
-	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
+cli-test-cov: pycli
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
-cli-test-snap:
-	$(VENV)/bin/python -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
+cli-test-snap: pycli
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
 
 gateway-test: sync-openclaw-extension
-	go test -race ./internal/gateway/ ./test/... -v
+	go test -race -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v
 
 # packaging-macos-test runs the pure-bash unit tests for the macOS installer
 # scripts under packaging/macos/. They don't touch /Library, sudo, or
@@ -558,10 +746,10 @@ packaging-macos-test:
 #
 # Overrides: GOOS/GOARCH cross-compile the gateway.
 BUNDLE_GOOS  ?= darwin
-# Universal (x86_64 + arm64 via lipo) is the default for macOS drops so the
-# packaging team ships one artifact for both Intel and Apple Silicon. Override
-# with BUNDLE_GOARCH=amd64 or =arm64 for a single-arch bundle.
-BUNDLE_GOARCH ?= universal
+# macOS release support is Apple Silicon only. Keep the bundle architecture
+# fixed to arm64 so local packaging cannot accidentally recreate an unsupported
+# Intel or universal release surface.
+BUNDLE_GOARCH ?= arm64
 BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
 BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
 # BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
@@ -592,6 +780,9 @@ CMID_OVERLAY ?=
 CMID_VERSION ?=
 
 packaging-macos-bundle:
+	@test "$(BUNDLE_GOARCH)" = "arm64" || { \
+		echo "packaging-macos-bundle supports only BUNDLE_GOARCH=arm64" >&2; exit 1; \
+	}
 	@scripts/build-macos-bundle.sh \
 	    "$(BUNDLE_GOOS)" \
 	    "$(BUNDLE_GOARCH)" \
@@ -629,6 +820,7 @@ macos-app-build: macos-app-license-check
 macos-app-test:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
+	macos/DefenseClawMac/script/test_ai_discovery_models.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
@@ -636,6 +828,9 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_app_state_signal_safety.sh
 	macos/DefenseClawMac/script/test_update_checker_verification.sh
 	macos/DefenseClawMac/script/test_update_checker_safety.sh
+	macos/DefenseClawMac/script/test_installation_context.sh
+	macos/DefenseClawMac/script/test_local_model_discovery.sh
+	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check extensions dist-cli
@@ -645,11 +840,11 @@ macos-app-release-verify:
 	scripts/verify-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
 
 # security-suite-test runs the deterministic security + PII coverage suite
-# (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.
+# (structured tool calls + regex + stubbed LLM judge) and severity benchmark.
 # No LLM key or running gateway required; this is the CI-safe tier and is
 # also covered by `make gateway-test`.
 security-suite-test:
-	go test ./internal/gateway/ -run 'TestSecuritySuiteRegex|TestSecuritySuiteJudge|TestSeverityBenchmark' -count=1 -v
+	go test ./internal/gateway/ -run 'TestSecuritySuiteToolCall|TestSecuritySuiteRegex|TestSecuritySuiteJudge|TestSeverityBenchmark' -count=1 -v
 
 # security-suite-eval scores the judge corpus against a live model and runs
 # the full eval corpus. Requires DEFENSECLAW_LLM_KEY. Not run in CI.
@@ -657,7 +852,7 @@ security-suite-eval:
 	GUARDRAIL_BENCHMARK_LLM=1 go test ./internal/gateway/ -run '^(TestSecuritySuiteJudge|TestEvalInjectionJudge|TestEvalPIIJudge|TestEvalExfilJudge|TestEvalToolInjectionJudge)$$' -count=1 -timeout 120m -v
 
 go-test-cov: sync-openclaw-extension
-	go test -race -count=1 -coverprofile=coverage.out ./...
+	go test -race -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage.out ./...
 
 connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
 
@@ -670,8 +865,8 @@ go-connector-matrix-test: sync-openclaw-extension
 		./test/e2e \
 		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
 
-py-connector-matrix-test:
-	$(VENV)/bin/python -m pytest -q \
+py-connector-matrix-test: pycli
+	$(VENV_BIN)/python$(EXE) -m pytest -q \
 		cli/tests/test_agent_discovery.py \
 		cli/tests/test_cmd_guardrail_matrix.py \
 		cli/tests/test_cmd_init.py \
@@ -692,12 +887,12 @@ ts-test:
 rego-test:
 	PATH="$(GOBIN):$(PATH)" opa test policies/rego/ -v
 
-test-verbose:
-	$(VENV)/bin/python -m unittest discover -s cli/tests -v --failfast
+test-verbose: pycli
+	$(VENV_BIN)/python$(EXE) -m unittest discover -s cli/tests -v --failfast
 
-test-file:
+test-file: pycli
 	@test -n "$(FILE)" || { echo "Usage: make test-file FILE=test_config"; exit 1; }
-	$(VENV)/bin/python -m unittest cli.tests.$(FILE) -v
+	$(VENV_BIN)/python$(EXE) -m unittest cli.tests.$(FILE) -v
 
 # ---------------------------------------------------------------------------
 # v7 parity gates — prevent drift between Go (source of truth),
@@ -706,25 +901,43 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest
+check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest check-guardrail-catalog
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
 
-check-audit-actions:
-	@$(VENV)/bin/python scripts/check_audit_actions.py
+check-audit-actions: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_audit_actions.py
 
-check-audit-no-raw-literals:
-	@$(VENV)/bin/python scripts/check_audit_no_raw_literals.py
+check-audit-no-raw-literals: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_audit_no_raw_literals.py
 
-check-error-codes:
-	@$(VENV)/bin/python scripts/check_error_codes.py
+check-error-codes: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_error_codes.py
 
-check-schemas:
-	@$(VENV)/bin/python scripts/check_schemas.py
+check-schemas: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_schemas.py
 
-check-grafana-dashboards: _bundle-data
-	@$(VENV)/bin/python scripts/check_grafana_dashboards.py --require-packaged
+telemetry-generate: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/generate_telemetry_registry.py --write
+
+telemetry-check: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/generate_telemetry_registry.py --check
+
+generate-guardrail-catalog:
+	@go run ./cmd/generate-guardrail-catalog
+
+check-guardrail-catalog:
+	@go run ./cmd/generate-guardrail-catalog --check
+
+# Semantic hard-cut gate: v7 may remain only inside the explicit
+# upgrade/recovery boundaries. It checks forbidden ownership paths and
+# patterns, not fragile repository-wide inventory totals.
+check-observability-v8-hard-cut: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_observability_v8_hard_cut.py
+
+check-grafana-dashboards: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_grafana_dashboards.py --require-packaged
 
 # check-provider-coverage runs the shared test/testdata/llm-endpoints.json
 # corpus through both the Go shape detector (provider_coverage_test.go)
@@ -750,8 +963,8 @@ check-provider-coverage: sync-openclaw-extension
 # curated catalog carries provider/auth/region metadata LiteLLM does not
 # model (so it stays hand-maintained), but the model list still rots as
 # providers ship and retire models — this gate catches that drift.
-check-llm-catalog:
-	@$(VENV)/bin/python scripts/check_llm_catalog.py
+check-llm-catalog: pycli
+	@$(VENV_BIN)/python$(EXE) scripts/check_llm_catalog.py
 
 check-upgrade-manifest:
 	@python3 scripts/generate-upgrade-manifest.py --check
@@ -760,30 +973,33 @@ upgrade-smoke:
 	@scripts/test-upgrade-protocol-release.sh --refusal-contract-only $(ARGS)
 
 upgrade-smoke-matrix:
-	@scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" --refusal-contract-only $(ARGS)
+	$(call run_upgrade_matrix,scripts/test-upgrade-protocol-release.sh,--refusal-contract-only)
 
 upgrade-refusal-contract-matrix: upgrade-smoke-matrix
+
+upgrade-developer-activation:
+	@scripts/test-developer-target-activation.sh $(ARGS)
 
 upgrade-legacy-smoke:
 	@scripts/test-upgrade-release.sh $(ARGS)
 
 upgrade-legacy-smoke-matrix:
-	@scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
+	$(call run_upgrade_matrix,scripts/test-upgrade-release.sh,)
 
 upgrade-signed-protocol:
 	@scripts/test-upgrade-protocol-release.sh $(ARGS)
 
 upgrade-signed-protocol-matrix:
-	@scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)
+	$(call run_upgrade_matrix,scripts/test-upgrade-protocol-release.sh,)
 
 # ---------------------------------------------------------------------------
 # Lint targets
 # ---------------------------------------------------------------------------
 
 lint: py-lint go-lint
-	$(VENV)/bin/python -m py_compile cli/defenseclaw/main.py
+	$(VENV_BIN)/python$(EXE) -m py_compile cli/defenseclaw/main.py
 
-py-lint:
+py-lint: pycli
 	$(RUFF) check cli/defenseclaw/
 
 go-lint: sync-openclaw-extension
@@ -802,8 +1018,9 @@ go-lint: sync-openclaw-extension
 		cat "$$tmp"; \
 		rm -f "$$tmp"; \
 		exit 0; \
+	else \
+		status=$$?; \
 	fi; \
-	status=$$?; \
 	if [ $$status -eq 127 ] || grep -qE "used to build golangci-lint is lower than the targeted Go version|package requires newer Go version" "$$tmp"; then \
 		cat "$$tmp"; \
 		echo "golangci-lint is unavailable or does not yet support this repo's Go toolchain; falling back to 'go vet ./...'"; \
@@ -829,9 +1046,8 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 	@echo "  NOTE: $(DIST_DIR)/ is not authenticated installer input for 0.8.4+."
 	@echo "  The protected release workflow wraps, signs, seals, and tests these inputs."
 	@echo ""
-	@echo "Cut a release (the protected workflow creates the tag + assets atomically):"
-	@echo "  Actions UI -> 'Release' workflow -> Run workflow -> enter $(VERSION)"
-	@echo "  Or from the CLI: gh workflow run release.yaml --ref main -f version=$(VERSION)"
+	@echo "Cut a release from a reviewed main commit (one dispatch):"
+	@echo "  gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref main -f operation=release -f version=X.Y.Z"
 	@echo ""
 	@echo "  NOTE: version must be bare X.Y.Z, no 'v' prefix — the release"
 	@echo "  workflow + scripts/install.sh + 'defenseclaw upgrade' all"
@@ -853,6 +1069,9 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@mkdir -p cli/defenseclaw/_data/llm
+	@mkdir -p cli/defenseclaw/_data/config/v8
+	@rm -rf cli/defenseclaw/_data/telemetry/v8
+	@mkdir -p cli/defenseclaw/_data/telemetry/v8
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
@@ -866,13 +1085,24 @@ _bundle-data:
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
-	cp internal/envvars/registry.json cli/defenseclaw/_data/envvars/
+	@# Use the canonical generator without repairing tracked docs before CI checks.
+	$(PYTHON) scripts/gen_envvars_docs.py --bundle-only
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the
 	@# Textual TUI model picker via importlib.resources. Tracked source lives
 	@# at bundles/llm/; _data/llm/ is the gitignored build-staging copy.
 	cp bundles/llm/model_catalog.json cli/defenseclaw/_data/llm/
+	@# v8 config contracts are canonical under schemas/. The wheel receives
+	@# exact build-staging copies so importlib.resources works after install.
+	cp schemas/config/v8/defenseclaw-config.schema.json cli/defenseclaw/_data/config/v8/
+	cp schemas/config/v8/reference/observability.yaml cli/defenseclaw/_data/config/v8/
+	cp schemas/config/v8/reference/observability.md cli/defenseclaw/_data/config/v8/
+	@# Git stores the reproducible telemetry runtime artifacts as deterministic
+	@# gzip members. Wheels keep the stable public contract: exact raw JSON under
+	@# the same six resource names used by installed CLI code.
+	"$(BOOTSTRAP_PYTHON)" scripts/telemetry_runtime_assets.py \
+		--root . --stage cli/defenseclaw/_data/telemetry/v8
 	@# splunk_local_bridge and local_observability_stack are bind-mounted by Docker
 	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. Prefer
 	@# rsync-with-delete over `rm -rf && cp -r` because Docker Desktop on macOS
@@ -884,9 +1114,9 @@ _bundle-data:
 	@#
 	@# Hosted Windows runners ship no rsync (`make install` for the connector
 	@# contract matrix died here with CreateProcess failed). Fall back to a plain
-	@# mirror there. That fallback loses inode stability, but the obs Docker stack
-	@# — the only consumer of that property — never runs on those Windows build
-	@# hosts, so the tradeoff is safe. Mirrors the rsync-or-cp guard in
+	@# mirror there. That fallback loses inode stability during package staging;
+	@# the runtime controller refreshes the user's seeded stack with atomic file
+	@# replacement on every supported OS. Mirrors the rsync-or-cp guard in
 	@# sync-openclaw-extension above.
 	@for d in splunk_local_bridge local_observability_stack; do \
 	  if command -v rsync >/dev/null 2>&1; then \
@@ -902,7 +1132,7 @@ _bundle-data:
 
 dist-gateway:
 	@mkdir -p $(DIST_DIR)
-	@for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+	@for pair in linux/amd64 linux/arm64 darwin/arm64; do \
 		goos=$${pair%%/*}; goarch=$${pair##*/}; \
 		echo "Building gateway $${goos}/$${goarch}..."; \
 		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build \
@@ -957,7 +1187,7 @@ dist-clean:
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(BINARY)-linux-* $(BINARY)-darwin-*
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

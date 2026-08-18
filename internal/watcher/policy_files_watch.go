@@ -18,7 +18,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -89,8 +88,8 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 	}
 
 	gen := version.BumpGeneration()
-	if w.otel != nil {
-		w.otel.RecordProvenanceBump(ctx, "policy_files")
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordProvenanceBumpMetric(ctx, "policy_files")
 	}
 
 	for _, p := range changed {
@@ -100,6 +99,9 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 			prevKeys := w.policyListSnap[p]
 			diff := diffPolicySnapshot(prevHash, "", prevKeys, nil)
 			targetID := filepath.Base(p)
+			// Logger is the sole v7/v8 activity owner, including the independent
+			// registered counters. A watcher-side OTel/gateway mirror would emit a
+			// second log and double the activity metric after canonical cutover.
 			_ = w.logger.LogActivity(audit.ActivityInput{
 				Actor:      "watcher",
 				Action:     audit.ActionPolicyReload,
@@ -109,22 +111,6 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 				Diff:       diff,
 				VersionTo:  fmt.Sprintf("gen=%d", gen),
 			})
-			if w.otel != nil {
-				w.otel.RecordActivity(ctx, string(audit.ActionPolicyReload), "policy_file", "watcher", len(diff))
-				w.otel.EmitGatewayEvent(gatewaylog.Event{
-					Timestamp: time.Now().UTC(),
-					EventType: gatewaylog.EventActivity,
-					Severity:  gatewaylog.SeverityInfo,
-					Activity: &gatewaylog.ActivityPayload{
-						Actor:      "watcher",
-						Action:     string(audit.ActionPolicyReload),
-						TargetType: "policy_file",
-						TargetID:   targetID,
-						Reason:     "on-disk policy or list file removed",
-						Diff:       activityDiffFromAudit(diff),
-					},
-				})
-			}
 			delete(w.policyFileHashes, p)
 			delete(w.policyListSnap, p)
 			continue
@@ -142,38 +128,9 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 			Diff:       diff,
 			VersionTo:  fmt.Sprintf("gen=%d", gen),
 		})
-		if w.otel != nil {
-			w.otel.RecordActivity(ctx, string(audit.ActionPolicyReload), "policy_file", "watcher", len(diff))
-			w.otel.EmitGatewayEvent(gatewaylog.Event{
-				Timestamp: time.Now().UTC(),
-				EventType: gatewaylog.EventActivity,
-				Severity:  gatewaylog.SeverityInfo,
-				Activity: &gatewaylog.ActivityPayload{
-					Actor:      "watcher",
-					Action:     string(audit.ActionPolicyReload),
-					TargetType: "policy_file",
-					TargetID:   targetID,
-					Reason:     "on-disk policy or list file changed",
-					Diff:       activityDiffFromAudit(diff),
-				},
-			})
-		}
 		w.policyFileHashes[p] = s.hash
 		w.policyListSnap[p] = s.keys
 	}
-}
-
-func activityDiffFromAudit(in []audit.ActivityDiffEntry) []gatewaylog.DiffEntry {
-	out := make([]gatewaylog.DiffEntry, 0, len(in))
-	for _, d := range in {
-		out = append(out, gatewaylog.DiffEntry{
-			Path:   d.Path,
-			Op:     d.Op,
-			Before: d.Before,
-			After:  d.After,
-		})
-	}
-	return out
 }
 
 func diffPolicySnapshot(oldHash, newHash string, oldKeys, newKeys []string) []audit.ActivityDiffEntry {

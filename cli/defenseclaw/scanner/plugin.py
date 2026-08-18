@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from defenseclaw.config import LLMConfig
 from defenseclaw.models import Finding, ScanResult
-from defenseclaw.scanner._llm_env import litellm_model
+from defenseclaw.scanner._llm_env import litellm_model, llm_analyzer_ready
 from defenseclaw.scanner.plugin_scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import (
     PluginScanOptions,
@@ -129,12 +129,11 @@ class PluginScannerWrapper:
         if llm_consensus_runs > 0:
             override["consensus_runs"] = llm_consensus_runs
 
-        # P-F: the LLM lane is default-ON whenever a model is configured.
-        #   use_llm is None  → auto: enable iff a model resolves.
-        #   use_llm is True  → force on; loud-degrade to static (YARA/heuristic)
-        #                      with a stderr warning if no model resolves, so a
-        #                      requested-but-unavailable LLM is never a silent
-        #                      clean pass.
+        # P-F: the LLM lane is default-ON whenever a usable model is configured.
+        #   use_llm is None  → auto: enable iff a model resolves and can auth.
+        #   use_llm is True  → force-request it; loud-degrade to static
+        #                      (YARA/heuristic) when the model or required
+        #                      credential is unavailable.
         #   use_llm is False → force off (local analyzers only; --no-llm).
         # The plugin_scanner orchestrator additionally surfaces a runtime LLM
         # failure (backend unreachable) as an LLM-SCAN-ERROR finding rather than
@@ -142,18 +141,48 @@ class PluginScannerWrapper:
         model_configured = bool(override.get("model")) or bool(
             self._llm and litellm_model(self._llm)
         )
+        readiness_llm = LLMConfig(
+            model=str(override.get("model") or ""),
+            provider=str(override.get("provider") or ""),
+            api_key=str(override.get("api_key") or ""),
+            base_url=str(override.get("api_base") or ""),
+        )
+        llm_ready = model_configured and llm_analyzer_ready(readiness_llm)
         if use_llm is None:
-            if model_configured:
+            if llm_ready:
                 override["enabled"] = True
+            elif model_configured:
+                key_name = (
+                    self._llm.api_key_env
+                    if self._llm and self._llm.api_key_env
+                    else "DEFENSECLAW_LLM_KEY"
+                )
+                print(
+                    "warning: LLM analyzer skipped: "
+                    f"{key_name} is not configured; continuing with local analyzers",
+                    file=sys.stderr,
+                )
         elif use_llm:
-            if model_configured:
+            if llm_ready:
                 override["enabled"] = True
-            else:
+            elif not model_configured:
                 print(
                     "warning: --use-llm requested but no model is configured for "
                     "scanners.plugin — running static (YARA/heuristic) analysis "
                     "only. Set llm.model or scanners.plugin.llm to enable the "
                     "semantic LLM lane.",
+                    file=sys.stderr,
+                )
+            else:
+                key_name = (
+                    self._llm.api_key_env
+                    if self._llm and self._llm.api_key_env
+                    else "DEFENSECLAW_LLM_KEY"
+                )
+                print(
+                    "warning: --use-llm requested but "
+                    f"{key_name} is not configured — running static "
+                    "(YARA/heuristic) analysis only.",
                     file=sys.stderr,
                 )
         if override:

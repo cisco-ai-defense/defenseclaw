@@ -16,281 +16,89 @@
 </p>
 
 <p>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" /></a>
-  <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg" /></a>
-  <a href="https://go.dev/"><img alt="Go 1.26.4" src="https://img.shields.io/badge/go-1.26.4-00ADD8.svg" /></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" /></a>
   <a href="https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml/badge.svg" /></a>
-  <a href="https://discord.com/invite/nKWtDcXxtx"><img alt="Discord: Join us" src="https://img.shields.io/badge/Discord-Join%20Us-7289DA?logo=discord&amp;logoColor=white" /></a>
-</p>
-
-<p>
-  <a href="https://www.cisco.com/site/us/en/products/security/ai-defense/index.html"><img alt="Cisco AI Defense" src="https://img.shields.io/badge/Cisco-AI%20Defense-049fd9?logo=cisco&amp;logoColor=white" /></a>
-  <a href="https://learn-cloudsecurity.cisco.com/ai-security-framework"><img alt="AI Security Framework" src="https://img.shields.io/badge/AI%20Security-Framework-orange" /></a>
-  <a href="https://deepwiki.com/cisco-ai-defense/defenseclaw"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg" /></a>
+  <a href="https://discord.com/invite/nKWtDcXxtx"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-7289DA?logo=discord&amp;logoColor=white" /></a>
 </p>
 
 </div>
 
-| Govern | Inspect | Probe |
-|--------|---------|-------|
-| Skills, MCP servers, plugins, and generated code before they run | Prompts, completions, tool calls, and sandbox activity at runtime | SQLite audit history, JSONL, OTLP, Splunk, webhooks, and TUI views |
-
-DefenseClaw combines a Python operator CLI, a Go gateway sidecar, and an OpenClaw TypeScript plugin. Together they enforce a simple operating rule: untrusted agent capabilities are scanned, governed, logged, and blocked when policy says they are unsafe.
-
-## Highlights
-
-- **Admission control** - scan skills, MCP servers, plugins, and code before they run.
-- **Runtime guardrails** - inspect prompts, completions, and tool calls with regex rules, policy, optional LLM judge, and Cisco AI Defense inspection.
-- **CodeGuard** - built-in static checks for secrets, dangerous execution, unsafe deserialization, weak crypto, injection patterns, and risky file access.
-- **OpenShell sandbox support** - Linux sandbox setup with network, filesystem, syscall, and policy controls.
-- **Registries** - ingest external skill / MCP catalogs (corporate HTTPS YAML, [smithery.ai](https://smithery.ai/), [skills.sh](https://skills.sh/), git, ClawHub) with SSRF guards, scanner-driven verdicts, and auto-promotion into asset policy. See [docs/REGISTRIES.md](docs/REGISTRIES.md).
-- **Audit and observability** - SQLite audit store, JSONL gateway logs, OTLP export, Splunk HEC, webhooks, Splunk Observability and local Grafana/Splunk bundles.
-- **Operator UX** - a CLI and TUI for setup, health checks, alerts, block/allow lists, scanner results, and policy workflows.
-
----
-
-## Scope and Limitations
-
-DefenseClaw is an enforcement and evidence layer for agentic AI deployments. It improves safety by combining scanner results, runtime inspection, policy decisions, sandbox controls, and audit trails, but it does not prove that an agent, skill, plugin, or model interaction is risk-free.
-
-High-risk deployments should pair DefenseClaw with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring. In observe mode, findings are logged without blocking. In action mode, configured HIGH and CRITICAL findings can block prompts, tool calls, or component admission.
-
----
+DefenseClaw combines a Python operator CLI, a Go gateway, connector hooks, policy,
+scanners, and observability exporters. It is an enforcement and evidence layer;
+it does not prove that an agent, model interaction, or third-party capability is
+risk-free.
 
 ## Documentation
 
-| Guide | Description |
-|-------|-------------|
-| [Quick Start](docs/QUICKSTART.md) | First successful local setup and scan flow |
-| [Install](docs/INSTALL.md) | macOS, Linux, DGX Spark, source builds, and release installation |
-| [CLI Reference](docs/CLI.md) | Python CLI commands and operator workflows |
-| [API Reference](docs/API.md) | Gateway REST API and sidecar endpoints |
-| [Architecture](docs/ARCHITECTURE.md) | Component model, data flow, and responsibilities |
-| [Guardrail](docs/GUARDRAIL.md) | LLM and tool inspection architecture |
-| [Guardrail Rule Packs](docs/GUARDRAIL_RULE_PACKS.md) | Rule packs, suppressions, and tuning |
-| [Sandbox](docs/SANDBOX.md) | OpenShell sandbox setup, architecture, monitoring, and debugging |
-| [Observability](docs/OBSERVABILITY.md) | Audit sinks, OTLP, Splunk, Grafana, and webhook notifications |
-| [Splunk App](docs/SPLUNK_APP.md) | Local Splunk app dashboards and investigation flow |
-| [Splunk O11y Dashboards](bundles/splunk_o11y_dashboards/README.md) | Splunk Observability Cloud dashboards and detectors for native OTel metrics |
-| [TUI](docs/TUI.md) | Terminal dashboard panels and navigation |
-| [Config Files](docs/CONFIG_FILES.md) | Config locations, environment variables, and policy files |
-| [Registries](docs/REGISTRIES.md) | External skill / MCP catalog ingestion (clawhub, smithery, skills.sh, http, git, file) |
-| [Plugin Development](docs/PLUGINS.md) | Custom scanner plugin workflow and example |
-| [Testing](docs/TESTING.md) | Python, Go, TypeScript, Rego, docs, and CI checks |
-| [Developer Spec](docs/development/DEVELOPER_SPEC.md) | Historical product/developer spec |
-| [Gateway Spec](docs/reference/GATEWAY_SPEC.md) | Internal gateway package specification |
+The [DefenseClaw documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
+is the source of truth for installation, setup, configuration, commands, and
+operator workflows:
 
-Project Markdown documentation is centralized under [docs/](docs/). Package-local READMEs stay beside bundles or examples that need local context.
+| Topic | Canonical guide |
+| --- | --- |
+| Install | [Install DefenseClaw](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/) |
+| First run | [Quickstart](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/) |
+| Upgrade | [Upgrade](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/) |
+| Windows | [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) |
+| Connectors | [Connector compatibility](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/) |
+| Guardrails | [Guardrail setup](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/guardrail/) |
+| Configuration | [Configuration reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/) |
+| CLI | [CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/) |
+| Observability | [Observability](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/) |
 
----
+Repository Markdown is limited to contributor guidance, implementation
+contracts, package-local notes, generated schema references, test fixtures, and
+historical design records. Start at [`docs/README.md`](docs/README.md).
 
-## Installation
+## Source development
 
-### Prerequisites
-
-| Requirement | Version |
-|-------------|---------|
-| Python | 3.10+ |
-| Go | 1.26.4+ |
-| Node.js | 18+ for the OpenClaw plugin |
-| uv | Recommended for Python installs |
-| Docker | Optional, for local observability and Splunk bundles |
-
-### Build from source (developers only)
+Source targets are contributor tooling. They are not an installation or upgrade
+path for a release-managed host; use the website guides above for those tasks.
+The checked-in toolchain contracts are Python `>=3.10,<3.14`
+([`pyproject.toml`](pyproject.toml)) and Go `1.26.4`
+([`go.mod`](go.mod)). CI exercises the TypeScript components with Node.js 24.
 
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
-make all
-```
-
-The source targets and `scripts/install-dev.sh` are development tooling, not an
-upgrade path. They refuse to overwrite a release-managed installation or one
-owned by another checkout. Repeat builds are allowed only while the checkout's
-reviewed release, source-install compatibility epoch, and runtime schema still
-match its strict ownership marker. A source-owned version transition has no
-tested in-place path: keep that checkout and state unchanged, use an isolated
-fresh developer `HOME`/install directory, or contact support. Release-managed
-installations must use the release-owned `scripts/upgrade.sh` or
-`scripts/upgrade.ps1` resolver.
-
-### Install with the release script
-
-```bash
-VERSION=0.8.4
-INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
-curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
-defenseclaw init --enable-guardrail
-```
-
-For platform-specific steps, see [docs/INSTALL.md](docs/INSTALL.md).
-
----
-
-## Quick Start
-
-```bash
-# Check the local install and dependencies
-defenseclaw doctor
-
-# Initialize config, scanner defaults, and guardrail plumbing
-defenseclaw init --enable-guardrail
-
-# Scan installed agent capabilities
-defenseclaw skill scan all
-defenseclaw mcp list
-defenseclaw plugin scan extensions/defenseclaw
-
-# Start the Go gateway sidecar
-defenseclaw-gateway start
-
-# Open the operator dashboard
-defenseclaw tui
-```
-
-Run the guardrail in observe mode while tuning:
-
-```bash
-defenseclaw setup guardrail --mode observe --restart
-```
-
-Switch to action mode when the policy is ready to block:
-
-```bash
-defenseclaw setup guardrail --mode action --restart
-```
-
-See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full walkthrough.
-
----
-
-## Architecture
-
-| Component | Runtime | Role |
-|-----------|---------|------|
-| Python CLI | Python | Operator commands, scanner orchestration, config setup, local bundles |
-| Gateway sidecar | Go | REST API, WebSocket bridge, policy engine, guardrail proxy, audit store, telemetry |
-| OpenClaw plugin | TypeScript | Fetch interception, tool-call inspection hooks, slash commands, sidecar integration |
-| Policies | YAML/Rego | Admission decisions, guardrail actions, sandbox/firewall behavior, scanner profiles |
-| Documentation | Markdown/JSON | Centralized docs, package-local READMEs, and DeepWiki configuration |
-
-The gateway exposes local REST APIs for the CLI and plugin, connects to OpenClaw over WebSocket, inspects LLM traffic through a local proxy, and records decisions in a durable audit store.
-
-```text
-Agent runtime -> OpenClaw plugin -> DefenseClaw gateway -> policy + scanners + audit
-                                    |
-                                    +-> guardrail proxy -> LLM provider
-                                    +-> OTLP / Splunk / webhooks / JSONL
-```
-
-For diagrams and detailed flows, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
----
-
-## Scanning and Guardrails
-
-DefenseClaw wraps Cisco AI Defense scanners and local policy into a single admission flow:
-
-| Surface | Scanner or control |
-|---------|--------------------|
-| Skills | `cisco-ai-skill-scanner`, CodeGuard, policy actions |
-| MCP servers | `cisco-ai-mcp-scanner`, block/allow policy |
-| Plugins | DefenseClaw plugin scanner, install-source checks, optional LLM analysis |
-| Source code | CodeGuard via CLI, sidecar API, and plugin write/edit hooks |
-| Prompts and completions | Guardrail proxy with rule packs, suppressions, optional LLM judge, Cisco inspection |
-| Tool calls | Tool argument inspection, sensitive path checks, command risk checks, policy verdicts |
-
-Scanner policies live in [policies/scanners/](policies/scanners/). Guardrail rule packs live in [policies/guardrail/](policies/guardrail/).
-
----
-
-## Observability
-
-DefenseClaw records enforcement and runtime evidence across several channels:
-
-| Channel | Use |
-|---------|-----|
-| SQLite audit store | Local durable event history |
-| Gateway JSONL | Correlated structured runtime events |
-| OTLP | Named, independent metrics/logs/traces destinations with native fan-out |
-| Splunk HEC | SIEM forwarding and local Splunk app workflows |
-| Splunk O11y dashboards | Native Splunk Observability Cloud dashboards and detectors for DefenseClaw metrics |
-| Webhooks | Slack, PagerDuty, Webex, and generic event notifications |
-| TUI | Operator-facing alerts, health, scans, tools, policy, and setup |
-
-Start local observability with:
-
-```bash
-defenseclaw setup local-observability up
-defenseclaw-gateway start
-defenseclaw setup local-observability status
-```
-
-Add Galileo Cloud or self-hosted Galileo without replacing the local route:
-
-```bash
-export GALILEO_API_KEY='...'
-defenseclaw setup galileo --project defenseclaw --logstream production
-defenseclaw setup galileo test
-```
-
-See [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md), the
-[Galileo guide](docs-site/content/docs/observability/galileo.mdx), and
-[schema ownership map](schemas/README.md). Splunk-specific setup is in
-[docs/SPLUNK_APP.md](docs/SPLUNK_APP.md).
-
-An installed, coherent `0.8.4` bridge can migrate with the built-in
-`defenseclaw upgrade --yes`; it first acquires authenticated `0.8.4` rollback
-artifacts before backup or service stop. For `0.8.3` or older, do not execute
-any obsolete raw-network hint printed by the frozen built-in CLI. Authenticate
-the current release-owned resolver and run it in latest mode, without a version
-override. The migration backs up and atomically converts configuration,
-preserves narrower routing/redaction behavior and root/subagent Agent360
-compatibility, refreshes owned local dashboards without resetting volumes, and
-never requires a separate apply command. See [CLI Reference — upgrade](docs/CLI.md#upgrade)
-for the authenticated resolver bootstrap.
-
-For Splunk Observability Cloud, use the dashboard bundle at
-[bundles/splunk_o11y_dashboards/README.md](bundles/splunk_o11y_dashboards/README.md):
-
-```bash
-defenseclaw setup splunk dashboards apply \
-  --api-url <api-endpoint> \
-  --o11y-api-token <api-access-token> \
-  --with-detectors \
-  --enable-detectors \
-  --yes
-```
-
----
-
-## Development
-
-```bash
-# Build all components
 make build
-
-# Run primary test suites
 make test
-
-# Run lint checks
+make check
 make lint
 ```
 
-Focused test and development guidance lives in [docs/TESTING.md](docs/TESTING.md) and [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
+`make build` produces checkout artifacts without publishing them or changing
+managed installation state; its `pycli` step may create or update the shared
+repository-local `.venv`. Run `make help` before using state-changing source
+targets. All local source targets share that one locked, test-ready `.venv`;
+there is no separate production-versus-development Python environment to
+select. `make test`, `make check`, and `make py-lint` bootstrap that environment
+when needed. `make all` intentionally rebuilds and activates the current
+checkout for local development; the lower-level
+`make install`, `make dev-install`, and `scripts/install-dev.sh` targets enforce
+source-ownership rules and are not an upgrade path. Release-managed
+installations use the release-owned `scripts/upgrade.sh` or
+`scripts/upgrade.ps1` resolver described on the
+[upgrade page](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/).
 
----
+The principal source areas are:
 
-## Contributing
+| Area | Path |
+| --- | --- |
+| Python CLI and TUI | [`cli/defenseclaw/`](cli/defenseclaw/) |
+| Go gateway commands | [`cmd/`](cmd/) |
+| Go implementation packages | [`internal/`](internal/) |
+| OpenClaw extension | [`extensions/defenseclaw/`](extensions/defenseclaw/) |
+| Policy bundles | [`policies/`](policies/) |
+| Versioned schemas | [`schemas/`](schemas/) |
+| Release and developer automation | [`scripts/`](scripts/) |
+| Tests and fixtures | [`test/`](test/) and component-local `*_test.*` files |
 
-Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md), and the focused docs for the area you are changing.
-
-## Security
-
-Please report vulnerabilities through the process in [SECURITY.md](SECURITY.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the pull-request workflow and
+[`SECURITY.md`](SECURITY.md) for private vulnerability reporting.
 
 ## License
 
-Apache 2.0 - see [LICENSE](LICENSE).
+Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
 
 Copyright 2026 Cisco Systems, Inc. and its affiliates.

@@ -12,7 +12,11 @@ keywords:
   - defenseclaw non-interactive
 ---
 
-`defenseclaw setup guardrail` is the operator command. It picks the connector, picks the mode, points the scanners at the right backend, optionally enables the LLM judge, and configures human-in-the-loop. Every other setup verb in DefenseClaw is a thin wrapper around this one.
+`defenseclaw setup guardrail` is the central operator command. It picks the
+connector, mode, scanner backend, optional LLM judge, and human-in-the-loop
+posture. Connector setup aliases select a connector through a smaller flag
+surface; auxiliary setup commands independently manage webhooks,
+observability, scanners, providers, and other focused configuration.
 
 <Callout>
 Run it interactively the first time — the wizard explains each choice and picks safe defaults. Once the configuration is happy, re-run with explicit flags (or use `--non-interactive`) for unattended setups and CI.
@@ -30,7 +34,7 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
   frames={[
     { type: 'cmd', text: 'defenseclaw setup guardrail', pauseMs: 700 },
     { type: 'spacer' },
-    { type: 'warn', text: '⚠ privacy.disable_redaction=true — sinks will receive UNREDACTED prompts.' },
+    { type: 'warn', text: '⚠ Redaction is per destination; fresh v8 defaults are unredacted.' },
     { type: 'spacer' },
     { type: 'dim', text: '  LLM Guardrail Setup' },
     { type: 'dim', text: '  ───────────────────' },
@@ -55,7 +59,8 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
     { type: 'dim', text: '   10. OpenHands      — global ~/.openhands/hooks.json command hooks' },
     { type: 'dim', text: '   11. Antigravity    — five Antigravity 2.0 lifecycle hooks in ~/.gemini/config/hooks.json' },
     { type: 'dim', text: '   12. OpenCode       — auto-loaded JS bridge plugin; tool.execute.before blocking' },
-    { type: 'dim', text: '   13. OmniGent       — custom Python policy bridge; ALLOW/ASK/DENY enforcement' },
+    { type: 'dim', text: '   13. Amp            — synchronous TypeScript policy plugin; native call/result confirmation' },
+    { type: 'dim', text: '   14. OmniGent       — custom Python policy bridge; ALLOW/ASK/DENY enforcement' },
     { type: 'spacer' },
     { type: 'prompt', text: '  Selection [3]: ', reply: '', pauseMs: 1100 },
     { type: 'spacer' },
@@ -89,7 +94,7 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
     { type: 'ok', text: '  ✓ Gateway restarted on 127.0.0.1:18970' },
     { type: 'ok', text: '  ✓ Guardrail engaged: claudecode | observe | local | no-judge' },
     { type: 'spacer' },
-    { type: 'dim', text: '  Watch live:      defenseclaw tui    (or tail -f ~/.defenseclaw/gateway.jsonl)' },
+    { type: 'dim', text: '  Watch live:      defenseclaw tui' },
     { type: 'dim', text: '  Health check:    defenseclaw doctor' },
   ]}
 />
@@ -120,8 +125,8 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 
 | Prompt (default) | Flag equivalent | Note |
 | --- | --- | --- |
-| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Explicitly selects the connector being configured. Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `omnigent`, `openclaw`, `zeptoclaw`. |
-| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, and OmniGent all have one-line hook or policy setup aliases. |
+| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Explicitly selects the connector being configured. Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `amp`, `omnigent`, `openclaw`, `zeptoclaw`. |
+| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, Amp, and OmniGent all have one-line hook or policy setup aliases. |
 | **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
 | **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
 | **Select hook fail mode** *(default: current config; closed on a fresh install)* | **interactive-only here** | Change later with `defenseclaw guardrail fail-mode <open\|closed>`. Only asked on first setup or when `--mode` changes. |
@@ -135,10 +140,22 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | **Who consumes the unified LLM key?** *(proxy connectors only)* | `--llm-role judge_only\|judge_and_agent` | Defaults to `judge_only` for hook-based connectors (Claude Code, Codex, ...) and `judge_and_agent` for proxy connectors (OpenClaw, ZeptoClaw). See [Unified LLM key → Hook-based vs proxy-based connectors](/docs/setup/unified-llm-key#hook-based-vs-proxy-based-connectors). |
 | **Judge provider / region / instance** *(judge on, advanced)* | `--judge-provider`, `--judge-region`, `--judge-instance-name` | Use `--judge-provider bedrock\|vertex_ai\|azure\|anthropic\|openai\|...` and the matching regional flags below to point the judge at a different backend than the agent LLM. `--judge-instance-name` binds to a `~/.defenseclaw/custom-providers.json` overlay entry. |
 | **Configure judge fallback models?** *(default: N)* | **interactive-only** | Edit `guardrail.judge.fallback_models` in `~/.defenseclaw/config.yaml` to script. |
-| **Configure advanced options?** *(default: N)* | — | Gates the next three prompts. |
+| **Configure advanced options?** *(default: N)* | — | Gates the next two prompts. |
 | **Guardrail proxy port** *(default: 4000)* | `--port` | — |
 | **Custom block message?** *(action mode only)* | `--block-message` | — |
-| **Disable redaction?** *(default: current)* | `--disable-redaction` / `--enable-redaction` | Only disable inside trusted, single-tenant environments. |
+
+<Callout title="Redaction has its own v8 policy workflow">
+Run `defenseclaw setup redaction` after guardrail setup. Its simple flow can
+keep policy, remove redaction, or apply one profile; **Show advanced settings?**
+opens all 14 buckets, custom profiles, destinations, and ordered routes. Those
+settings own `observability.destinations[].routes[].selector.buckets` and
+`observability.redaction_profiles`. You can independently verify them with
+`defenseclaw config validate`,
+`defenseclaw config show --effective --section observability`, and
+`defenseclaw observability plan`; apply an explicit restart with
+`defenseclaw-gateway restart`. See [Redaction](/docs/reference/redaction) for
+the full interactive and scripted workflow.
+</Callout>
 
 On a multi-connector install, `--connector <name>` scopes this setup run to that connector. When `--block-message` is supplied without `--connector`, setup treats it as broad operator intent: it updates the shared block message and reconciles active connector overrides so one connector does not keep stale block text.
 
@@ -178,7 +195,10 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-The audit DB fills up with every prompt and tool call. Nothing blocks. Open `defenseclaw tui` for the live audit panel, or `tail -f ~/.defenseclaw/gateway.jsonl | jq` for a scripted view.
+Mandatory SQLite history fills with every collected prompt and tool call.
+Nothing blocks. Open `defenseclaw tui` for the live audit panel. For a scripted
+stream, configure an explicit v8 `kind: jsonl` destination with the buckets and
+redaction profile you intend to expose.
 
 </Tab>
 
@@ -254,7 +274,7 @@ defenseclaw setup guardrail \
 
 Routes the judge through AWS Bedrock instead of a SaaS endpoint. `boto3` ships in the base install, so no extra `pip install` is needed. Swap `--judge-provider vertex_ai` + `--judge-vertex-{project-id,region,auth-mode,service-account-json-env}` for GCP Vertex, or `--judge-provider azure` + `--judge-azure-{endpoint,api-version,auth-mode,deployment-alias}` for Azure OpenAI. For self-signed lab endpoints, add `--judge-tls-ca-cert-file /etc/ssl/lab-root.pem`. See [Unified LLM key → Regional providers](/docs/setup/unified-llm-key#regional-providers-bedrock-vertex-ai-azure-openai) for the full matrix.
 
-If the same Bedrock / Vertex / Azure posture is already configured on a custom-provider overlay entry (region, auth mode, deployment aliases, TLS — see [Bedrock / Vertex AI / Azure on a custom instance](/docs/setup/unified-llm-key#bedrock--vertex-ai--azure-on-a-custom-instance)), the judge can inherit it with a single `--judge-instance-name <name>` instead of repeating every flag. Role-level judge flags still win field-by-field, so a shared overlay can supply auth credentials while `--judge-bedrock-region` pins a different region per environment.
+If the same Bedrock / Vertex / Azure posture is already configured on a custom-provider overlay entry (region, auth mode, deployment aliases, TLS — see [Bedrock / Vertex AI / Azure on a custom instance](/docs/setup/unified-llm-key#bedrock-vertex-ai-azure-on-a-custom-instance)), the judge can inherit it with a single `--judge-instance-name <name>` instead of repeating every flag. Role-level judge flags still win field-by-field, so a shared overlay can supply auth credentials while `--judge-bedrock-region` pins a different region per environment.
 
 </Tab>
 
@@ -265,7 +285,7 @@ If the same Bedrock / Vertex / Azure posture is already configured on a custom-p
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|amp|omnigent",
       description: "Agent framework connector. Drives traffic interception, tool inspection, and subprocess enforcement defaults.",
     },
     "--mode": {
@@ -350,7 +370,7 @@ If the same Bedrock / Vertex / Azure posture is already configured on a custom-p
     },
     "--judge-vertex-project-id / --judge-vertex-region / --judge-vertex-auth-mode / --judge-vertex-service-account-json-env": {
       type: "string",
-      description: "Vertex AI judge backend. Mirrors the agent-side --vertex-* flags. The Vertex SDK is an opt-in extra (`pip install 'defenseclaw[vertex]'`); the gateway falls back to LiteLLM's REST transport when the SDK is absent.",
+      description: "Vertex AI judge backend. Mirrors the agent-side --vertex-* flags. The Go gateway routes Vertex through Bifrost; Python CLI scanner/judge paths use LiteLLM and require the opt-in Google SDK extra. Source contributors can install it with `uv sync --extra vertex`; there is no documented SDK-less Python fallback.",
     },
     "--judge-azure-endpoint / --judge-azure-api-version / --judge-azure-auth-mode / --judge-azure-deployment-alias": {
       type: "string",
@@ -383,10 +403,6 @@ If the same Bedrock / Vertex / Azure posture is already configured on a custom-p
     "--hilt-min-severity": {
       type: "high|medium|low|critical",
       description: "Minimum severity that asks for human approval. Case-insensitive (Click renders lowercase in --help).",
-    },
-    "--disable-redaction / --enable-redaction": {
-      type: "flag",
-      description: "Disable or enable PII / prompt redaction. Disable only inside trusted environments.",
     },
     "--restart / --no-restart": {
       type: "flag",
@@ -434,7 +450,14 @@ defenseclaw status
 defenseclaw alerts --limit 25
 ```
 
-`doctor` prints the full health report. `status` shows enforcement flags plus a per-connector block for every active connector (it has no flags of its own — it always reports the full Agents roster from config and `/health`, identical layout whether one or N connectors are wired). `alerts` lists recent decisions as a table; pass `--connector <name>` to filter by connector attribution and `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
+`doctor` prints the full health report. `status` shows enforcement flags plus a
+per-connector block for every active connector (it has no flags of its own — it
+always reports the full Agents roster from config and `/health`, identical layout
+whether one or N connectors are wired). `alerts` lists recent decisions as a
+table; pass `--connector <name>` to filter by connector attribution and `--show
+<n>` to expand a specific row. For a live stream, open `defenseclaw tui`. For a
+scripted stream, configure an explicit v8 `kind: jsonl` destination with a
+reviewed bucket selector and redaction profile.
 
 ## Interactive vs non-interactive — every command
 
@@ -444,12 +467,12 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 
 | Command | Interactive wizard | Non-interactive flags | Notes |
 | --- | --- | --- | --- |
-| [`defenseclaw init`](/docs/get-started/quickstart#path-a--interactive-defenseclaw-init) | ✓ default on a TTY | ✓ `--non-interactive --yes` + per-knob flags | Identical to the wizard mode of `quickstart` once choices are made; both call `bootstrap.run_first_run()`. |
-| [`defenseclaw quickstart`](/docs/get-started/quickstart#path-b--zero-prompts-defenseclaw-quickstart) | ✗ never prompts | ✓ always | Zero-prompt by design. There is no wizard variant — use `init` for that. |
+| [`defenseclaw init`](/docs/get-started/quickstart#path-a-interactive-defenseclaw-init) | ✓ default on a TTY | ✓ `--non-interactive --yes` + per-knob flags | Identical to the wizard mode of `quickstart` once choices are made; both call `bootstrap.run_first_run()`. |
+| [`defenseclaw quickstart`](/docs/get-started/quickstart#path-b-zero-prompts-defenseclaw-quickstart) | ✗ never prompts | ✓ always | Zero-prompt by design. There is no wizard variant — use `init` for that. |
 | `defenseclaw setup guardrail` | ✓ default | ✓ `--non-interactive` + flags | Two prompts have **no flag** — see callout above. |
 | [`defenseclaw setup claude-code`](/docs/connectors/claudecode) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Direct-to-upstream wrapper; observe by default, action returns supported lifecycle verdicts. |
 | [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Same shape as `setup claude-code`. |
-| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` / `setup omnigent` | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, connector policy flags | Generated wrappers; observe by default, action uses the connector's native hook or policy decision surface. |
+| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` / `setup amp` / `setup omnigent` | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, connector policy flags | Generated wrappers; observe by default, action uses the connector's native hook or policy decision surface. |
 | `defenseclaw setup openclaw` / `setup zeptoclaw` | ✓ confirm prompt | ✓ `--yes` | Confirm is skippable; the **full** guardrail wizard is **not** available here — pass `setup guardrail` flags after the confirm. |
 | [`defenseclaw setup splunk`](/docs/observability/splunk) | ✓ wizard when no mode flag | ✓ `--non-interactive` + `--logs` / `--enterprise` / `--o11y` | |
 | [`defenseclaw setup local-observability`](/docs/observability/local-observability) | ✗ no prompts | ✓ flags only | Compose-style up/down/logs subcommands; never asks. |
@@ -458,17 +481,17 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | `defenseclaw registry add / edit / remove / sync` | ✓ prompts for missing args | ✓ `--non-interactive` + required flags | `sync` (not `refresh`) fetches + scans + promotes. Module is built dual-path on purpose. |
 | `defenseclaw doctor` | conditional — only with `--fix` | ✓ `--fix --yes` | Default run is read-only and never prompts. |
 | [`defenseclaw agent discover`](/docs/ai-discovery) | ✗ no prompts | ✓ flags / `--json` | Read-only inventory command. |
-| [`defenseclaw aibom scan`](/docs/ai-discovery#aibom) | ✗ no prompts | ✓ flags only | Read-only. |
+| [`defenseclaw aibom scan`](/docs/ai-discovery#aibom-ai-bill-of-materials) | ✗ no prompts | ✓ flags only | Read-only. |
 | `defenseclaw policy ...` | ✗ no prompts | ✓ flags only | Pure CLI for repeatable policy authoring. |
 | `defenseclaw tui` | ✓ full TUI | — | Interactive only — Textual dashboard with audit, alerts, logs, inventory, and setup panels. |
 | `defenseclaw alerts` | ✗ no prompts | ✓ `--limit`, `--show <n>`, `acknowledge` / `dismiss` subcommands | Snapshot view of recent alerts; not a live tail. |
-| `defenseclaw-gateway audit export` (Go binary) | ✗ no prompts | ✓ `--output`, `--limit`, `--include-activity` | JSONL export of `audit_events` from the SQLite DB. |
+| `defenseclaw-gateway audit export` (Go binary) | ✗ no prompts | ✓ `--output`, `--limit`, `--include-activity` | Legacy v7 JSONL export of `audit_events` for compatibility and migration; not the canonical v8 projection stream. |
 | `defenseclaw-gateway` (sidecar daemon) | ✗ no prompts | ✓ flags only | Long-running gateway — `--config`, `--port`, `--log-level`. Started for you by `setup guardrail --restart`. |
 
 <Callout>
 The two **interactive-only** corners worth knowing about: the integration-mode submenu inside `setup guardrail` (Claude Code / Codex), and the judge fallback-models prompt. Everything else has a flag.
 
-The **non-interactive-only** group is `quickstart`, `setup local-observability`, `policy`, `agent discover`, `aibom scan`, `defenseclaw-gateway audit export`, and `gateway start` — all by design (CI-shaped, read-only, or daemon).
+The **non-interactive-only** group is `quickstart`, `setup local-observability`, `policy`, `agent discover`, `aibom scan`, the legacy-maintenance `defenseclaw-gateway audit export`, and `gateway start` — all by design (CI-shaped, read-only, or daemon).
 </Callout>
 
 ## Common follow-ups

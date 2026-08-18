@@ -156,6 +156,7 @@
             "setup-hook-connector",
             "setup-connector-mode",
             "setup-redaction-toggle",
+            "setup-redaction-policy",
             "setup-notifications-toggle",
             "setup-notifications-set",
             "setup-splunk",

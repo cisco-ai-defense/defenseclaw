@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Rule-level findings detail. Driven by $rule_id, $scanner, $severity. Combines the Prometheus per-rule counter (defenseclaw_scan_findings_by_rule_total) with the Loki scan_finding event stream so operators can rank rules, map first/last-seen, and pivot into target attribution and finding→verdict correlation. The $scanner dropdown is populated dynamically and covers the full unified finding pipeline: classic (skill, mcp), hook-rules (claudecode/codex/cursor/windsurf/copilot/geminicli/hermes), inspect-http, guardrail-llm, mid-stream, tool-call-inspect, asset-policy, and drift (rescan). Pivot from any per-rule row into the originating evaluation via the evaluation_id label.",
+  "description": "Rule-level findings detail. Driven by $rule_id, $scanner, and $severity. Combines the generated Prometheus per-rule counter with canonical finding.observed/finding.correlated records in Loki so operators can rank rules, map first/last-seen activity, attribute safe target references, and pivot into the originating evaluation.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -49,7 +49,7 @@
       {
         "name": "connector",
         "label": "Connector",
-        "description": "Optional connector filter. Sourced from defenseclaw_connector_hook_invocations_total{connector}. The per-rule scan metric (defenseclaw_scan_findings_by_rule_total) now carries a first-class connector label, so this var narrows every per-rule panel via connector=~\"$connector\" as well as the finding→verdict correlation panel (defenseclaw_inspect_evaluations_total, tool=<connector>:<event>) via tool=~\"$connector:.*\". Connector-agnostic scans (CLI file scans, background rescans) record connector=\"unknown\". Defaults to All (.+).",
+        "description": "Optional connector filter. Sourced from defenseclaw_connector_hook_invocations_total{connector}. Both per-rule scan metrics and finding→verdict inspect metrics carry a first-class connector label, so this variable narrows them directly. Connector-agnostic scans (CLI file scans, background rescans) record connector=\"unknown\". Defaults to All (.+).",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -396,8 +396,8 @@
       },
       "targets": [
         {
-          "expr": "topk(1, sum by (scan_finding_target) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"scan_finding\" | json | __error__=\"\" | scan_finding_target!=\"\" | scan_finding_scanner=~\"$scanner\" | scan_finding_rule_id=~\"$rule_id\" | scan_finding_severity=~\"$severity\" | gen_ai_agent_name=~\"$connector\" [1h])))",
-          "legendFormat": "{{scan_finding_target}}",
+          "expr": "topk(1, sum by (finding_target) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"finding[.](observed|correlated)\" | label_format finding_target=\"{{.body_defenseclaw_finding_target_ref}}\" | finding_target!=\"\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\" | connector=~\"$connector\" [1h])))",
+          "legendFormat": "{{finding_target}}",
           "refId": "A",
           "instant": true
         }
@@ -744,7 +744,7 @@
       },
       "targets": [
         {
-          "expr": "topk(15, sum by (scan_finding_target) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"scan_finding\" | json | __error__=\"\" | scan_finding_target!=\"\" | scan_finding_scanner=~\"$scanner\" | scan_finding_rule_id=~\"$rule_id\" | scan_finding_severity=~\"$severity\" | gen_ai_agent_name=~\"$connector\" [1h])))",
+          "expr": "topk(15, sum by (finding_target) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"finding[.](observed|correlated)\" | label_format finding_target=\"{{.body_defenseclaw_finding_target_ref}}\" | finding_target!=\"\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\" | connector=~\"$connector\" [1h])))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -763,7 +763,7 @@
             },
             "renameByName": {
               "Value": "findings/1h",
-              "scan_finding_target": "target"
+              "finding_target": "target"
             }
           }
         }
@@ -788,7 +788,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (tool, action, severity) (increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", severity=~\"$severity\"}[$__range]))",
+          "expr": "sum by (tool, action, severity) (increase(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", severity=~\"$severity\"}[$__range]))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -814,7 +814,7 @@
     },
     {
       "type": "row",
-      "title": "Recent scan_finding events (Loki)",
+      "title": "Recent canonical finding events (Loki)",
       "gridPos": {
         "x": 0,
         "y": 47,
@@ -825,7 +825,7 @@
     },
     {
       "type": "logs",
-      "title": "scan_finding stream",
+      "title": "Finding event stream",
       "description": "EventScanFinding records — body carries the (already redacted) description; target / location.line_number live in JSON attributes.",
       "datasource": {
         "type": "loki",
@@ -840,7 +840,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"scan_finding\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"finding[.](observed|correlated)\" | body_defenseclaw_scan_scanner=~\"$scanner\" | body_defenseclaw_finding_rule_id=~\"$rule_id\" | body_defenseclaw_security_severity=~\"$severity\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -869,7 +869,7 @@
     {
       "type": "timeseries",
       "title": "Findings by connector",
-      "description": "EventScanFinding records carry a connector field. Counts scan_finding events grouped by connector so multi-connector installs can compare per-connector finding volume. Filtered by $connector (All = .+). Honors $rule_id.",
+      "description": "Canonical finding records carry the connector in the envelope. This generated metric view groups finding volume by connector for multi-connector comparisons and honors the scanner, severity, and rule filters.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"

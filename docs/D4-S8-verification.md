@@ -1,5 +1,9 @@
 # Phase D4 — S8.1 / S8.2 / S8.3 Verification Log
 
+> **Status: historical verification snapshot.** Test names, flags, fallbacks,
+> and pass statements below record the 2026-04-28 branch state. They do not
+> replace current tests or the published connector documentation.
+
 **Date**: 2026-04-28
 **Branch**: PR #194 single rollup base
 **Verification target**: confirm S8.1 / S8.2 / S8.3 are actually

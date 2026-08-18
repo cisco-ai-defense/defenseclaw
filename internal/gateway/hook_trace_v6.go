@@ -38,7 +38,7 @@ var hookTraceV6Propagator propagation.TextMapPropagator = propagation.TraceConte
 // Trace extraction is intentionally scoped on THREE axes — accepting
 // traceparent on every route would let any caller (including
 // unauthenticated /health probes) splice an arbitrary trace into
-// the gateway's trace tree. The OTel HTTP middleware wraps OUTSIDE
+// the gateway's trace tree. The propagation middleware wraps OUTSIDE
 // tokenAuth, so this function runs BEFORE the auth check; we cannot
 // rely on the auth gate to filter traffic. Instead we gate on:
 //
@@ -56,8 +56,8 @@ var hookTraceV6Propagator propagation.TextMapPropagator = propagation.TraceConte
 //
 // The tokenAuth check still runs after this and rejects the
 // request body, but by then the parent context has already been
-// safely dropped — the server span exists as a fresh root, never
-// rooted under an attacker-supplied trace id.
+// safely dropped, so no generated operation can inherit an
+// attacker-supplied trace id.
 func shouldExtractHookTrace(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false

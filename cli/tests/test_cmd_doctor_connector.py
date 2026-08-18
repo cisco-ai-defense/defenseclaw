@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -48,8 +49,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.commands.cmd_doctor import (
     _active_connector,
+    _check_amp_native_policy_surfaces,
+    _check_codex_hooks,
     _check_connector_hooks,
     _check_connector_inventory,
+    _check_cursor_configured_runtime,
     _check_hook_contract_lock,
     _check_hook_health,
     _check_omnigent_policy_health,
@@ -61,6 +65,13 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
     _fix_plugin_registry_required,
     _plugin_registry_required_offenders,
+    _probe_cursor_windows_runtime,
+)
+from defenseclaw.rulepack_validation import (
+    RulePackValidationBridgeError,
+    RulePackValidationIssue,
+    RulePackValidationResult,
+    safe_display_path,
 )
 
 
@@ -120,7 +131,9 @@ class TestCheckConnectorInventory(unittest.TestCase):
         # these returning plain strings so the isolated helper test doesn't
         # trip over MagicMock auto-attributes in os.path.isdir.
         cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_hook_fail_mode.return_value = "closed"
         cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        cfg.data_dir = ""
         return cfg
 
     def test_known_connector_passes(self) -> None:
@@ -216,7 +229,9 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         cfg.plugin_dirs.return_value = []
         cfg.mcp_servers.return_value = []
         cfg.guardrail.effective_mode.return_value = "observe"
+        cfg.guardrail.effective_hook_fail_mode.return_value = "closed"
         cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        cfg.data_dir = ""
         return cfg
 
     def test_header_label_is_always_connector(self) -> None:
@@ -238,8 +253,30 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         _check_connector_inventory(cfg, "codex", r)
         labels = {c["label"]: c for c in r.checks}
         self.assertIn("Mode", labels)
-        self.assertEqual(labels["Mode"]["detail"], "action")
+        self.assertEqual(
+            labels["Mode"]["detail"],
+            "action; fail-mode=closed; provenance=config",
+        )
         self.assertIn("Rule pack", labels)
+
+    @patch(
+        "defenseclaw.fail_mode.connector_fail_mode_report",
+        return_value={"effective": "open", "provenance": "process-env"},
+    )
+    def test_inventory_mode_row_reports_runtime_provenance_without_new_statistic(self, _report) -> None:
+        cfg = self._cfg()
+        cfg.guardrail.effective_mode.return_value = "action"
+        r = _DoctorResult()
+
+        _check_connector_inventory(cfg, "codex", r)
+
+        mode_rows = [c for c in r.checks if c["label"] == "Mode"]
+        self.assertEqual(len(mode_rows), 1)
+        self.assertEqual(
+            mode_rows[0]["detail"],
+            "action; fail-mode=open; provenance=process-env",
+        )
+        self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 
 
 class TestCheckConnectorHooks(unittest.TestCase):
@@ -264,6 +301,219 @@ class TestCheckConnectorHooks(unittest.TestCase):
             _check_connector_hooks(cfg, "codex", r)
         self.assertEqual(r.checks[-1]["label"], "Codex hooks [codex]")
 
+    def _cursor_runtime_case(self, tmp: str, *, mode: str, fail_closed: bool, legacy_native: bool = False):
+        runtime_dir = os.path.join(tmp, "DefenseClaw Hooks")
+        os.makedirs(runtime_dir, exist_ok=True)
+        if legacy_native:
+            runtime = os.path.join(runtime_dir, "defenseclaw-hook.exe")
+            with open(runtime, "wb") as fh:
+                fh.write(b"MZ")
+            command = f'"{runtime}" hook --connector cursor'
+        else:
+            runtime = os.path.join(runtime_dir, "cursor-hook.ps1")
+            with open(runtime, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "# defenseclaw-managed-hook v8\n"
+                    "$startInfo = New-Object System.Diagnostics.ProcessStartInfo\n"
+                    "$startInfo.RedirectStandardOutput = $true\n"
+                    "$process.WaitForExit()\n"
+                    "# defenseclaw-hook.exe hook --connector cursor --input-file $payloadPath\n"
+                )
+            command = "& '" + runtime.replace("'", "''") + "'"
+        hooks_path = os.path.join(tmp, "hooks.json")
+        with open(hooks_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "beforeSubmitPrompt": [
+                            {
+                                "command": command,
+                                "failClosed": fail_closed,
+                            }
+                        ]
+                    },
+                },
+                fh,
+            )
+        cfg = MagicMock()
+        cfg.guardrail.effective_mode.return_value = mode
+        cfg.guardrail.effective_hook_fail_mode.return_value = "closed" if fail_closed else "open"
+        return cfg, hooks_path, runtime
+
+    def test_cursor_doctor_validates_configured_windows_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+            )
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+                probe_runtime=False,
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertIn(runtime, r.checks[-1]["detail"])
+        self.assertIn("mode=observe", r.checks[-1]["detail"])
+        self.assertIn("failClosed=false", r.checks[-1]["detail"])
+        self.assertNotIn("inspect-tool.sh", r.checks[-1]["detail"])
+
+    def test_cursor_doctor_rejects_legacy_direct_windows_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+                legacy_native=True,
+            )
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+                probe_runtime=False,
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("PowerShell input adapter", r.checks[-1]["detail"])
+
+    def test_cursor_doctor_rejects_fail_closed_observe_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=True,
+            )
+            cfg.guardrail.effective_hook_fail_mode.return_value = "open"
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+                probe_runtime=False,
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("expected false", r.checks[-1]["detail"])
+
+    def test_cursor_doctor_accepts_fail_closed_action_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="action",
+                fail_closed=True,
+            )
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+                probe_runtime=False,
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertIn("mode=action", r.checks[-1]["detail"])
+        self.assertIn("failClosed=true", r.checks[-1]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch(
+        "defenseclaw.commands.cmd_doctor._windows_system_powershell",
+        return_value=(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Windows",
+        ),
+    )
+    @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
+    def test_cursor_windows_runtime_probe_requires_json_and_counter_advance(
+        self,
+        run_mock,
+        _powershell_mock,
+        http_probe_mock,
+    ) -> None:
+        before = json.dumps({"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]})
+        after = json.dumps(
+            {
+                "connectors": [
+                    {
+                        "name": "cursor",
+                        "requests": 5,
+                        "errors": 0,
+                        "last_activity_at": "2026-07-01T22:46:47Z",
+                    }
+                ]
+            }
+        )
+        http_probe_mock.side_effect = [(200, before), (200, after)]
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=["powershell.exe"],
+            returncode=0,
+            stdout=b'{"continue":true}',
+            stderr=b"",
+        )
+        cfg = MagicMock()
+        cfg.gateway.api_port = 18970
+
+        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+
+        self.assertTrue(ok)
+        self.assertIn("requests 4->5", detail)
+        argv = run_mock.call_args.args[0]
+        self.assertEqual(
+            argv[:4],
+            [
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+            ],
+        )
+        self.assertFalse(run_mock.call_args.kwargs.get("shell", False))
+        self.assertEqual(run_mock.call_args.kwargs["env"]["SystemRoot"], r"C:\Windows")
+        self.assertEqual(run_mock.call_args.kwargs["env"]["WINDIR"], r"C:\Windows")
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch(
+        "defenseclaw.commands.cmd_doctor._windows_system_powershell",
+        return_value=(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Windows",
+        ),
+    )
+    @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
+    def test_cursor_windows_runtime_probe_rejects_fail_open_without_delivery(
+        self,
+        run_mock,
+        _powershell_mock,
+        http_probe_mock,
+    ) -> None:
+        health = json.dumps({"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]})
+        http_probe_mock.side_effect = [(200, health), (200, health)]
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=["powershell.exe"],
+            returncode=0,
+            stdout=b'{"continue":true}',
+            stderr=b"",
+        )
+        cfg = MagicMock()
+        cfg.gateway.api_port = 18970
+
+        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+
+        self.assertFalse(ok)
+        self.assertIn("did not advance", detail)
+
     def test_unknown_connector_is_noop(self) -> None:
         r = _DoctorResult()
         _check_connector_hooks(MagicMock(), "totallymadeupclaw", r)
@@ -287,6 +537,7 @@ class TestCheckHookContractLock(unittest.TestCase):
 
     def test_known_contract_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            runtime_path = os.path.join(tmp, "hooks", "inspect-tool.sh")
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
                     {
@@ -300,6 +551,61 @@ class TestCheckHookContractLock(unittest.TestCase):
                                 "locations": {
                                     "workspace_dir": "/tmp/repo",
                                     "hook_config_paths": ["/home/test/.codex/config.toml"],
+                                    "hook_script_paths": [runtime_path],
+                                },
+                            }
+                        }
+                    },
+                    fh,
+                )
+            for platform_name in ("linux", "darwin"):
+                with self.subTest(platform_name=platform_name):
+                    r = _DoctorResult()
+                    _check_hook_contract_lock(
+                        self._cfg(tmp),
+                        "codex",
+                        r,
+                        platform_name=platform_name,
+                    )
+                    check = r.checks[-1]
+                    self.assertEqual(check["status"], "pass")
+                    self.assertIn("codex-hooks-v1", check["detail"])
+                    self.assertIn("0.30.0", check["detail"])
+                    self.assertIn("workspace=/tmp/repo", check["detail"])
+                    self.assertIn("hook_path=/home/test/.codex/config.toml", check["detail"])
+                    self.assertIn(f"runtime_path={runtime_path}", check["detail"])
+
+    def test_posix_missing_runtime_help_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp)
+            for platform_name in ("linux", "darwin"):
+                with self.subTest(platform_name=platform_name):
+                    r = _DoctorResult()
+                    _check_codex_hooks(cfg, r, platform_name=platform_name)
+                    hook_script = os.path.join(tmp, "hooks", "codex-hook.sh")
+                    self.assertEqual(
+                        r.checks[-1]["detail"],
+                        f"hook script not found at {hook_script}",
+                    )
+
+    def test_windows_contract_does_not_mislabel_portable_shell_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = os.path.join(tmp, "hooks", "cursor-hook.ps1")
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "cursor": {
+                                "contract_id": "cursor-hooks-v1",
+                                "compatibility_status": "known",
+                                "hook_script_version": "v8",
+                                "locations": {
+                                    "hook_config_paths": [os.path.join(tmp, "hooks.json")],
+                                    "hook_script_paths": [
+                                        os.path.join(tmp, "hooks", "inspect-tool.sh"),
+                                        os.path.join(tmp, "hooks", "cursor-hook.sh"),
+                                        adapter,
+                                    ],
                                 },
                             }
                         }
@@ -308,13 +614,16 @@ class TestCheckHookContractLock(unittest.TestCase):
                 )
 
             r = _DoctorResult()
-            _check_hook_contract_lock(self._cfg(tmp), "codex", r)
-            check = r.checks[-1]
-            self.assertEqual(check["status"], "pass")
-            self.assertIn("codex-hooks-v1", check["detail"])
-            self.assertIn("0.30.0", check["detail"])
-            self.assertIn("workspace=/tmp/repo", check["detail"])
-            self.assertIn("hook_path=/home/test/.codex/config.toml", check["detail"])
+            _check_hook_contract_lock(
+                self._cfg(tmp),
+                "cursor",
+                r,
+                platform_name="nt",
+            )
+            detail = r.checks[-1]["detail"]
+            self.assertEqual(r.checks[-1]["status"], "pass")
+            self.assertIn(f"runtime_path={adapter}", detail)
+            self.assertNotRegex(detail.lower(), r"inspect-tool\.sh|cursor-hook\.sh")
 
     def test_discovered_version_drift_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,7 +644,12 @@ class TestCheckHookContractLock(unittest.TestCase):
                 json.dump({"agents": {"claudecode": {"version": "1.2.4"}}}, fh)
 
             r = _DoctorResult()
-            _check_hook_contract_lock(self._cfg(tmp), "claudecode", r)
+            _check_hook_contract_lock(
+                self._cfg(tmp),
+                "claudecode",
+                r,
+                platform_name="linux",
+            )
             check = r.checks[-1]
             self.assertEqual(check["status"], "fail")
             self.assertIn("drift", check["detail"])
@@ -370,20 +684,18 @@ class TestCheckScanCoverage(unittest.TestCase):
         # Plugin row should literally contain every plugin category from
         # _scan_ui — locking the contract that doctor and the scanner
         # preamble can never disagree on what's being checked.
-        plugin_row = next(
-            c for c in r.checks if c["label"] == "Scanner coverage (plugin)"
-        )
+        plugin_row = next(c for c in r.checks if c["label"] == "Scanner coverage (plugin)")
         for cat in _scan_ui.categories_for("plugin"):
             self.assertIn(cat, plugin_row["detail"])
 
 
 class TestConnectorInventoryRulePack(unittest.TestCase):
-    """The inventory block surfaces each connector's effective rule pack,
-    warning when the resolved directory is missing/empty on disk.
+    """The inventory block authoritatively validates each effective rule pack.
 
     D9: when no explicit ``rule_pack_dir`` is set, the gateway resolves the
-    built-in default to ``<data_dir>/policies/guardrail/default`` and loads
-    packs from there — doctor must validate THAT path, not emit a benign skip.
+    built-in default to ``<data_dir>/policies/guardrail/default``. Doctor must
+    send that effective path to the Go helper, not infer validity from whether
+    the directory happens to contain files.
     """
 
     def _cfg(self, *, rule_pack_dir="", data_dir="/tmp/dc-doctor-test-datadir"):
@@ -400,57 +712,227 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         cfg.guardrail.judge.hook_connectors = []
         return cfg
 
-    def test_rule_pack_dir_missing_warns(self):
+    @staticmethod
+    def _valid(**overrides: int | str) -> RulePackValidationResult:
+        summary: dict[str, int | str] = {
+            "judge_count": 2,
+            "judge_category_count": 2,
+            "rule_file_count": 4,
+            "rule_count": 12,
+            "enabled_rule_count": 11,
+            "local_pattern_count": 6,
+            "suppression_count": 3,
+            "sensitive_tool_count": 5,
+            "digest": "a" * 64,
+        }
+        summary.update(overrides)
+        return RulePackValidationResult(
+            wire_version=1,
+            kind="validation",
+            valid=True,
+            summary=summary,
+        )
+
+    @staticmethod
+    def _invalid() -> RulePackValidationResult:
+        return RulePackValidationResult(
+            wire_version=1,
+            kind="validation_error",
+            valid=False,
+            error=RulePackValidationIssue(
+                path="$",
+                code="pack_not_found",
+                reason="rule-pack directory does not exist",
+            ),
+        )
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_rule_pack_invalid_fails(self, validate):
+        validate.return_value = self._invalid()
         r = _DoctorResult()
         _check_connector_inventory(self._cfg(rule_pack_dir="/nonexistent/rule/pack/dir"), "cursor", r)
         rp = next(c for c in r.checks if c["label"] == "Rule pack")
-        self.assertEqual(rp["status"], "warn")
+        self.assertEqual(rp["status"], "fail")
+        self.assertIn("pack_not_found", rp["detail"])
         self.assertIn("/nonexistent/rule/pack/dir", rp["detail"])
+        validate.assert_called_once_with("/nonexistent/rule/pack/dir")
 
-    def test_rule_pack_dir_present_passes(self):
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_rule_pack_helper_valid_passes(self, validate):
+        validate.return_value = self._valid()
         r = _DoctorResult()
         _check_connector_inventory(self._cfg(rule_pack_dir=os.getcwd()), "cursor", r)
         rp = next(c for c in r.checks if c["label"] == "Rule pack")
         self.assertEqual(rp["status"], "pass")
+        self.assertIn("11/12 rules enabled", rp["detail"])
+        validate.assert_called_once_with(os.getcwd())
 
-    def test_rule_pack_dir_empty_validates_resolved_default_missing(self):
-        # D9: empty rule_pack_dir → resolve <data_dir>/policies/guardrail/default;
-        # when it's absent, WARN (enforcement would run with no rule packs)
-        # rather than the old benign skip.
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_valid_partial_pack_with_no_direct_rules_warns(self, validate):
+        validate.return_value = self._valid(
+            rule_file_count=0,
+            rule_count=0,
+            enabled_rule_count=0,
+        )
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("0/0 rules enabled", rp["detail"])
+        self.assertIn("compiled default categories retained", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_valid_pack_with_all_rules_disabled_warns_without_default_hint(
+        self, validate,
+    ):
+        validate.return_value = self._valid(rule_count=5, enabled_rule_count=0)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("0/5 rules enabled", rp["detail"])
+        self.assertNotIn("compiled default categories retained", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_empty_digest_is_omitted_from_valid_pack_detail(self, validate):
+        validate.return_value = self._valid(digest="")
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "pass")
+        self.assertNotIn("digest=", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_unset_rule_pack_validates_resolved_default(self, validate):
+        validate.return_value = self._invalid()
         with tempfile.TemporaryDirectory() as data_dir:
             r = _DoctorResult()
             _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
             rp = next(c for c in r.checks if c["label"] == "Rule pack")
-            self.assertEqual(rp["status"], "warn")
+            self.assertEqual(rp["status"], "fail")
             self.assertIn("built-in default", rp["detail"])
-            self.assertIn(
-                os.path.join(data_dir, "policies", "guardrail", "default"),
-                rp["detail"],
-            )
-
-    def test_rule_pack_dir_empty_validates_resolved_default_empty(self):
-        # D9: the default dir exists but is empty → still a degradation (zero
-        # rule packs loaded), so WARN.
-        with tempfile.TemporaryDirectory() as data_dir:
-            os.makedirs(os.path.join(data_dir, "policies", "guardrail", "default"))
-            r = _DoctorResult()
-            _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
-            rp = next(c for c in r.checks if c["label"] == "Rule pack")
-            self.assertEqual(rp["status"], "warn")
-            self.assertIn("empty", rp["detail"])
-
-    def test_rule_pack_dir_empty_validates_resolved_default_present(self):
-        # D9: the resolved default dir exists and is seeded → PASS.
-        with tempfile.TemporaryDirectory() as data_dir:
             default_dir = os.path.join(data_dir, "policies", "guardrail", "default")
-            os.makedirs(default_dir)
-            with open(os.path.join(default_dir, "injection.yaml"), "w") as fh:
-                fh.write("rules: []\n")
-            r = _DoctorResult()
-            _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
-            rp = next(c for c in r.checks if c["label"] == "Rule pack")
-            self.assertEqual(rp["status"], "pass")
-            self.assertIn("built-in default", rp["detail"])
+            self.assertIn(safe_display_path(default_dir), rp["detail"])
+            validate.assert_called_once_with(default_dir)
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        side_effect=RulePackValidationBridgeError(
+            "rule-pack validation helper protocol is incompatible; run defenseclaw upgrade",
+            code="protocol_error",
+        ),
+    )
+    def test_incompatible_helper_warns_and_never_passes(self, _validate):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("validation unavailable", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        side_effect=RulePackValidationBridgeError(
+            "defenseclaw-gateway is required for authoritative rule-pack validation; "
+            "run defenseclaw upgrade",
+            code="gateway_unavailable",
+        ),
+    )
+    def test_missing_helper_warns_and_never_passes(self, _validate):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertNotEqual(rp["status"], "pass")
+        self.assertIn("defenseclaw-gateway is required", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        return_value={"valid": True, "secret": "DO-NOT-ECHO"},
+    )
+    def test_wrong_validator_outcome_type_warns_safely(self, _validate):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("internal response mismatch", rp["detail"])
+        self.assertNotIn("DO-NOT-ECHO", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        return_value=RulePackValidationResult(
+            wire_version=1,
+            kind="validation_error",
+            valid=False,
+        ),
+    )
+    def test_invalid_outcome_missing_error_warns(self, _validate):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("missing diagnostic", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_shared_pack_is_validated_once_with_connector_attribution(self, validate):
+        validate.return_value = self._valid()
+        r = _DoctorResult()
+        cache: dict[str, object] = {}
+        cfg = self._cfg(rule_pack_dir="/tmp/shared")
+        for connector in ("codex", "cursor"):
+            with _doctor_label_suffix(f"[{connector}]"):
+                _check_connector_inventory(
+                    cfg,
+                    connector,
+                    r,
+                    rule_pack_validation_cache=cache,
+                )
+
+        validate.assert_called_once_with("/tmp/shared")
+        rows = [c for c in r.checks if c["label"].startswith("Rule pack")]
+        self.assertEqual(
+            [row["label"] for row in rows],
+            ["Rule pack [codex]", "Rule pack [cursor]"],
+        )
+        self.assertTrue(all(row["status"] == "pass" for row in rows))
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        side_effect=RuntimeError("sensitive validator value"),
+    )
+    def test_unexpected_validator_failure_warns_safely_and_is_cached(self, validate):
+        r = _DoctorResult()
+        cache: dict[str, object] = {}
+        cfg = self._cfg(rule_pack_dir="/tmp/shared")
+        for connector in ("codex", "cursor"):
+            with _doctor_label_suffix(f"[{connector}]"):
+                _check_connector_inventory(
+                    cfg,
+                    connector,
+                    r,
+                    rule_pack_validation_cache=cache,
+                )
+
+        validate.assert_called_once_with("/tmp/shared")
+        rows = [c for c in r.checks if c["label"].startswith("Rule pack")]
+        self.assertTrue(all(row["status"] == "warn" for row in rows))
+        details = "\n".join(row["detail"] for row in rows)
+        self.assertIn("unexpected validator failure", details)
+        self.assertIn("RuntimeError", details)
+        self.assertNotIn("sensitive validator value", details)
 
 
 class TestDoctorActiveConnectors(unittest.TestCase):
@@ -534,10 +1016,25 @@ class TestCheckHookHealth(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
             _check_hook_health(
-                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]), "hermes", r,
+                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]),
+                "hermes",
+                r,
             )
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn("not found", r.checks[-1]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._check_cursor_configured_runtime")
+    def test_passive_cursor_health_disables_runtime_probe(self, configured_runtime) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "hooks.json")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write('{"hooks": [], "owner": "defenseclaw"}\n')
+            r = _DoctorResult(passive=True)
+
+            _check_hook_health(self._cfg(tmp, "cursor", [hook]), "cursor", r)
+
+        configured_runtime.assert_called_once()
+        self.assertIs(configured_runtime.call_args.kwargs["probe_runtime"], False)
 
     def test_opencode_flat_js_plugin_passes(self) -> None:
         """opencode's hook is a flat ``.js`` file (not JSON) keyed on the
@@ -550,6 +1047,66 @@ class TestCheckHookHealth(unittest.TestCase):
             _check_hook_health(self._cfg(tmp, "opencode", [hook]), "opencode", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
+
+    def test_amp_warns_for_other_direct_plugins_without_following_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            amp_home = os.path.join(tmp, "system", "amp")
+            system_plugins = os.path.join(amp_home, "plugins")
+            project_plugins = os.path.join(tmp, "workspace", ".amp", "plugins")
+            os.makedirs(system_plugins)
+            os.makedirs(project_plugins)
+            first_party = os.path.join(system_plugins, "defenseclaw.ts")
+            system_third_party = os.path.join(system_plugins, "telemetry.ts")
+            project_third_party = os.path.join(project_plugins, "custom-agent.ts")
+            for path in (first_party, system_third_party, project_third_party):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("throw new Error('doctor must not execute TypeScript')\n")
+            linked = os.path.join(project_plugins, "linked.ts")
+            try:
+                os.symlink(system_third_party, linked)
+            except OSError:
+                linked = ""
+
+            cfg = MagicMock()
+            cfg.plugin_dirs.return_value = [project_plugins, system_plugins]
+            cfg.connector_workspace_dir.return_value = os.path.join(tmp, "workspace")
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_doctor.amp_config_home",
+                    return_value=amp_home,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor.amp_managed_settings_path",
+                    return_value="",
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor.connector_policy_settings",
+                    return_value={},
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor.rule_paths",
+                    return_value=[],
+                ),
+            ):
+                r = _DoctorResult()
+                _check_amp_native_policy_surfaces(cfg, r)
+
+        warnings = [
+            check
+            for check in r.checks
+            if check["label"] == "Amp plugin initialization"
+        ]
+        self.assertEqual(len(warnings), 1)
+        detail = warnings[0]["detail"]
+        self.assertEqual(warnings[0]["status"], "warn")
+        self.assertIn(system_third_party, detail)
+        self.assertIn(project_third_party, detail)
+        self.assertNotIn(first_party, detail)
+        if linked:
+            self.assertNotIn(linked, detail)
+        self.assertIn("outside DefenseClaw's tool.call interception", detail)
+        self.assertIn("handler order is undefined", detail)
+        self.assertIn("does not sandbox Amp plugin initialization", detail)
 
     def test_unknown_connector_is_noop(self) -> None:
         r = _DoctorResult()
@@ -571,10 +1128,16 @@ class TestCheckHookHealth(unittest.TestCase):
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module, pth],
-                    }}}},
+                    {
+                        "connectors": {
+                            "omnigent": {
+                                "locations": {
+                                    "hook_config_paths": [config],
+                                    "hook_script_paths": [module, pth],
+                                }
+                            }
+                        }
+                    },
                     fh,
                 )
             r = _DoctorResult()
@@ -593,10 +1156,16 @@ class TestCheckHookHealth(unittest.TestCase):
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module],
-                    }}}},
+                    {
+                        "connectors": {
+                            "omnigent": {
+                                "locations": {
+                                    "hook_config_paths": [config],
+                                    "hook_script_paths": [module],
+                                }
+                            }
+                        }
+                    },
                     fh,
                 )
             r = _DoctorResult()
@@ -619,10 +1188,16 @@ class TestCheckHookHealth(unittest.TestCase):
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module, pth],
-                    }}}},
+                    {
+                        "connectors": {
+                            "omnigent": {
+                                "locations": {
+                                    "hook_config_paths": [config],
+                                    "hook_script_paths": [module, pth],
+                                }
+                            }
+                        }
+                    },
                     fh,
                 )
             with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
@@ -699,10 +1274,16 @@ class TestCheckHookHealth(unittest.TestCase):
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module, pth],
-                    }}}},
+                    {
+                        "connectors": {
+                            "omnigent": {
+                                "locations": {
+                                    "hook_config_paths": [config],
+                                    "hook_script_paths": [module, pth],
+                                }
+                            }
+                        }
+                    },
                     fh,
                 )
             r = _DoctorResult()
@@ -737,7 +1318,7 @@ class TestCheckHookHealth(unittest.TestCase):
                 r = _DoctorResult()
                 _check_connector_hooks(cfg, connector, r)
             self.assertTrue(r.checks, msg=connector)
-            self.assertEqual(r.checks[-1]["label"], label, msg=connector)
+            self.assertIn(label, {check["label"] for check in r.checks}, msg=connector)
 
 
 class TestConnectorEnabled(unittest.TestCase):
@@ -822,29 +1403,21 @@ class TestDetectionStrategyRow(unittest.TestCase):
     def test_hook_connector_not_gated(self):
         # judge enabled but this hook connector is NOT in hook_connectors →
         # surfaces root #4: the judge won't actually fire for it.
-        row = self._detection_row(
-            self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex"
-        )
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex")
         self.assertIn("NOT gated", row["detail"])
 
     def test_hook_connector_gated_explicit(self):
-        row = self._detection_row(
-            self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex"
-        )
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex")
         self.assertIn("judge active (hook lane)", row["detail"])
 
     def test_hook_connector_gated_wildcard(self):
-        row = self._detection_row(
-            self._cfg(judge_enabled=True, hook_connectors=["*"]), "codex"
-        )
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["*"]), "codex")
         self.assertIn("judge active (hook lane)", row["detail"])
 
     def test_proxy_connector_uses_proxy_lane(self):
         # openclaw is a proxy connector: the judge runs in the proxy lane
         # whenever it's enabled, regardless of hook_connectors.
-        row = self._detection_row(
-            self._cfg(judge_enabled=True, hook_connectors=[]), "openclaw"
-        )
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=[]), "openclaw")
         self.assertIn("judge active (proxy lane)", row["detail"])
 
 
@@ -886,9 +1459,7 @@ class TestPluginRegistryRequiredCheck(unittest.TestCase):
 
     def test_per_connector_required_warns(self):
         r = _DoctorResult()
-        _check_plugin_registry_required(
-            self._cfg(global_required=False, connector_required=True), r
-        )
+        _check_plugin_registry_required(self._cfg(global_required=False, connector_required=True), r)
         row = next(c for c in r.checks if c["label"] == "Plugin registry policy")
         self.assertEqual(row["status"], "warn")
         self.assertIn("connector:codex", row["detail"])
@@ -942,7 +1513,8 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
 
     def test_clears_global(self):
         cfg = self._cfg(global_required=True)
-        tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=True):
+            tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
         self.assertEqual(tag, "pass")
         self.assertFalse(cfg.asset_policy.plugin.registry_required)
         cfg.save.assert_called_once()
@@ -950,7 +1522,8 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
 
     def test_clears_per_connector_to_none(self):
         cfg = self._cfg(global_required=False, connector_required=True)
-        tag, _ = _fix_plugin_registry_required(cfg, assume_yes=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=True):
+            tag, _ = _fix_plugin_registry_required(cfg, assume_yes=True)
         self.assertEqual(tag, "pass")
         # Tri-state field reset to None (inherit), not False.
         self.assertIsNone(cfg.asset_policy.connectors["codex"].plugin.registry_required)
@@ -964,6 +1537,15 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
         cfg.save.assert_not_called()
         # Flag is untouched on decline.
         self.assertTrue(cfg.asset_policy.plugin.registry_required)
+
+    def test_missing_config_refuses_to_create_it(self):
+        cfg = self._cfg(global_required=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=False):
+            tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
+        self.assertEqual(tag, "skip")
+        self.assertIn("config.yaml is missing", detail)
+        self.assertTrue(cfg.asset_policy.plugin.registry_required)
+        cfg.save.assert_not_called()
 
 
 if __name__ == "__main__":

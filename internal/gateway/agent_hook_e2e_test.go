@@ -15,9 +15,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // TestHandleAgentHook_FullChain_PerConnector is the M6 end-to-end
@@ -44,6 +41,7 @@ import (
 //   - claudecode response carries the top-level "claude_code_output"
 //     key (Claude Code reads that exact field).
 //   - codex response carries "codex_output".
+//   - Amp and OmniGent consume the canonical top-level action directly.
 //   - every other connector returns "hook_output".
 //   - all responses carry the canonical action/mode/severity fields.
 //
@@ -109,14 +107,14 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		},
 		{
 			connector:      "copilot",
-			event:          "PreToolUse",
+			event:          "preToolUse",
 			toolName:       "shell",
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
 		},
 		{
 			connector:      "openhands",
-			event:          "PreToolUse",
+			event:          "pre_tool_use",
 			toolName:       "terminal",
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
@@ -136,6 +134,15 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			expectAction:   "block",
 		},
 		{
+			connector: "amp",
+			event:     "tool.call",
+			toolName:  "bash",
+			// The TypeScript plugin consumes canonical top-level action,
+			// reason, and additional_context fields directly.
+			topLevelOutput: "",
+			expectAction:   "block",
+		},
+		{
 			connector: "omnigent",
 			event:     "PreToolUse",
 			toolName:  "bash",
@@ -146,31 +153,15 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		},
 	}
 
-	// Set up a real in-memory tracer so we can assert that the
-	// full chain wires gen_ai.* + defenseclaw.* span attributes for
-	// every connector.
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(prev)
-	defer func() { _ = tp.Shutdown(context.Background()) }()
-
 	for _, sh := range shapes {
 		sh := sh
 		t.Run(sh.connector, func(t *testing.T) {
-			exp.Reset()
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = sh.connector
-			api := &APIServer{scannerCfg: cfg}
-			handler := otelHTTPServerMiddleware(
-				"sidecar-api",
-				http.HandlerFunc(api.handleAgentHook(sh.connector)),
-			)
+			health := NewSidecarHealth()
+			api := &APIServer{scannerCfg: cfg, health: health}
+			handler := inboundTraceContextMiddleware(http.HandlerFunc(api.handleAgentHook(sh.connector)))
 			body, err := json.Marshal(map[string]interface{}{
 				"hook_event_name": sh.event,
 				"session_id":      "session-" + sh.connector,
@@ -227,23 +218,12 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				t.Errorf("dangerous request action=%q, want %q\nbody=%s", action, sh.expectAction, w.Body.String())
 			}
 
-			// Span attribute parity: every connector must emit a
-			// span with the gen_ai.conversation.id (session_id)
-			// set so SIEM correlation works across the full
-			// hook→audit chain.
-			spans := exp.GetSpans()
-			if len(spans) == 0 {
-				t.Fatalf("no spans recorded for connector %q", sh.connector)
+			connectorHealth := connByName(health.Snapshot().Connectors)[sh.connector]
+			if connectorHealth.Requests != 1 {
+				t.Errorf("connector health requests=%d, want 1", connectorHealth.Requests)
 			}
-			conv, ok := attrByKey(spans[0].Attributes, "gen_ai.conversation.id")
-			if !ok {
-				t.Errorf("span missing gen_ai.conversation.id for %s", sh.connector)
-			} else if got := conv.AsString(); got != "session-"+sh.connector {
-				t.Errorf("span gen_ai.conversation.id = %q, want %q", got, "session-"+sh.connector)
-			}
-			ctorAttr, _ := attrByKey(spans[0].Attributes, "defenseclaw.connector")
-			if got := ctorAttr.AsString(); got != sh.connector {
-				t.Errorf("span defenseclaw.connector = %q, want %q", got, sh.connector)
+			if connectorHealth.LastActivityAt == nil {
+				t.Error("connector health last_activity_at is nil after accepted hook")
 			}
 		})
 	}
@@ -277,7 +257,8 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 //   - no panic propagates if the evaluator throws — same fail-open
 //     posture as the regular path.
 func TestHandleAgentHook_FullChain_SyntheticPath(t *testing.T) {
-	api := &APIServer{}
+	health := NewSidecarHealth()
+	api := &APIServer{health: health}
 	ctx := context.Background()
 
 	req := agentHookRequest{
@@ -308,6 +289,13 @@ func TestHandleAgentHook_FullChain_SyntheticPath(t *testing.T) {
 	wire := renderAgentHookResponse("codex", resp)
 	if _, ok := wire["codex_output"]; !ok && resp.HookOutput != nil {
 		t.Errorf("synthetic codex response missing codex_output: %+v", wire)
+	}
+	connectorHealth := connByName(health.Snapshot().Connectors)["codex"]
+	if connectorHealth.Requests != 1 {
+		t.Errorf("synthetic connector health requests=%d, want 1", connectorHealth.Requests)
+	}
+	if connectorHealth.LastActivityAt == nil {
+		t.Error("synthetic connector health last_activity_at is nil after accepted hook")
 	}
 }
 

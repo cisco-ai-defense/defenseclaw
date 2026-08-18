@@ -1,6 +1,6 @@
 ---
 title: Gemini CLI
-description: Gemini CLI connector wires settings.json hooks (BeforeAgent, BeforeModel, BeforeTool, AfterTool, AfterAgent) plus the native OTLP exporter pointing at the gateway.
+description: Gemini CLI connector wires eleven settings.json lifecycle hooks; five are block-capable, and the native logs/metrics/traces exporter points at the gateway.
 keywords:
   - DefenseClaw Gemini CLI connector
   - Gemini CLI hooks
@@ -8,7 +8,10 @@ keywords:
   - Gemini CLI observability
 ---
 
-The Gemini CLI connector wires DefenseClaw into [Google's Gemini CLI hooks](https://github.com/google/generative-ai-tools) and points the agent's native OTLP exporter at the gateway so traces, metrics, and logs land in one place.
+The Gemini CLI connector wires DefenseClaw into
+[Google's Gemini CLI hooks](https://github.com/google-gemini/gemini-cli) and
+points the agent's native OTLP exporter at the gateway so traces, metrics, and
+logs land in one place.
 
 ## Setup
 
@@ -16,17 +19,35 @@ The Gemini CLI connector wires DefenseClaw into [Google's Gemini CLI hooks](http
 defenseclaw setup geminicli
 ```
 
-`setup geminicli` is shorthand for `setup guardrail --connector geminicli`: it adds or reconfigures Gemini CLI, wires hooks against `~/.gemini/settings.json`, and points Gemini's native OTLP exporter at the gateway. **There is no proxy-enforcement path** for Gemini CLI — blocking happens hook-side via the documented `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, and `AfterAgent` events. Gemini CLI has no native ask surface, so confirm verdicts use an immediate alert/context fallback with `raw_action` preserved for audit.
+<Callout type="warning">
+Gemini CLI setup is supported on macOS and Linux. The DefenseClaw connector is
+not certified on native Windows x64, so setup rejects it there.
+</Callout>
+
+`setup geminicli` is the dedicated Gemini CLI alias. It uses the shared
+guardrail setup backend, wires hooks against `~/.gemini/settings.json`, and
+points Gemini's native OTLP exporter at the gateway. **There is no
+proxy-enforcement path** — blocking happens hook-side via `BeforeAgent`,
+`BeforeModel`, `BeforeTool`, `AfterTool`, and `AfterAgent`. Gemini CLI has no
+native ask surface, so confirm verdicts use an immediate alert/context
+fallback with `raw_action` preserved for audit.
 
 #### What `setup geminicli` actually does
 
-The wrapper accepts exactly three flags. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+The table highlights convenience options rather than the complete alias
+surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
+approval, block-message, add/replace, workspace, and rule-pack-directory
+options. See the [quick-alias reference](/docs/setup/guardrail/aliases); use
+[full guardrail setup](/docs/setup/guardrail) for scanner, detection-strategy,
+and judge-provider configuration.
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--yes / -y` | off | Skip the confirmation prompt (alias: `--non-interactive`, `--accept-defaults`). |
+| `--yes / -y` | off | Skip the confirmation prompt. |
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks + OTLP env vars wire in. |
-| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
+| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
+
+Redaction remains a v8 bucket/profile policy (`none` for fresh v8). Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy).
 
 The alias defaults Gemini CLI to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Gemini CLI after install, keep using [`defenseclaw setup guardrail --connector geminicli`](/docs/setup/guardrail) — see the variations below.
 
@@ -40,7 +61,7 @@ The alias defaults Gemini CLI to observe mode and can join an existing hook-conn
 defenseclaw setup geminicli
 ```
 
-Confirms once, wires the hooks against `~/.gemini/settings.json`, points OTLP at the gateway, restarts the gateway. Findings flow to `~/.defenseclaw/gateway.jsonl` and the TUI; no traffic is intercepted, no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Confirms once, wires the hooks against `~/.gemini/settings.json`, points OTLP at the gateway, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
 
 </Tab>
 
@@ -50,7 +71,7 @@ Confirms once, wires the hooks against `~/.gemini/settings.json`, points OTLP at
 defenseclaw setup geminicli --yes --with-local-stack
 ```
 
-Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo/Grafana come up locally — particularly useful for Gemini since native OTLP feeds traces and metrics directly into Tempo and Prometheus. See [Local observability](/docs/observability/local-observability).
+Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo/Grafana come up locally — particularly useful for Gemini since native OTLP feeds traces and metrics directly into Tempo and Prometheus. That command writes the export destination after the alias has already restarted the gateway, so run its printed `defenseclaw-gateway restart` step before expecting exports. See [Local observability](/docs/observability/local-observability).
 
 </Tab>
 
@@ -63,30 +84,30 @@ defenseclaw setup geminicli                               # base alias first
 defenseclaw setup guardrail \
   --connector geminicli \
   --rule-pack strict \
-  --scanner-mode both \
+  --scanner-mode local \
   --detection-strategy regex_judge \
   --judge-model anthropic/claude-sonnet-4-20250514 \
   --judge-api-key-env DEFENSECLAW_LLM_KEY \
+  --judge-hook-connectors geminicli \
   --restart
 ```
 
-The alias selects Gemini CLI; the follow-up `setup guardrail --connector geminicli` swaps in the strict rule pack, runs both local + [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
+The alias selects Gemini CLI; the follow-up `setup guardrail --connector geminicli` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/setup/guardrail), which validates its endpoint and API-key environment variable.
 
 </Tab>
 
 <Tab value="Hook-side enforcement">
 
-Gemini CLI has no proxy enforcement, but its hooks themselves can block. After `setup geminicli`, edit `~/.defenseclaw/config.yaml` and set the per-connector hook mode:
+Gemini CLI has no proxy enforcement, but its hooks can enforce directly:
 
-```yaml
-connector_hooks:
-  geminicli:
-    enabled: true
-    mode: action          # observe (default) | action
-    fail_mode: open       # open | closed
+```bash
+defenseclaw setup geminicli --mode action --fail-mode closed
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Gemini's lifecycle hooks block when policy returns `block`. Because Gemini CLI has no native ask surface, `confirm` uses an alert/context fallback; operators can review the event in audit or the TUI, but cannot resume it there.
+With `mode=action`, the declared blocking hooks stop policy-denied work.
+Because Gemini CLI has no native ask surface, `confirm` uses an alert/context
+fallback; operators can review the event in audit or the TUI, but cannot
+resume it there.
 
 </Tab>
 
@@ -96,13 +117,13 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Ge
 
 <Cards>
   <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Gemini CLI has no native ask; confirm uses an alert/context fallback preserved in audit." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector geminicli` when tuning Gemini CLI." />
+  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector geminicli`." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ## Files DefenseClaw will modify
@@ -131,10 +152,10 @@ Gemini CLI has no native human-approval surface. Confirm verdicts fall back to a
 <Flow
   direction="LR"
   compact
-  caption="Hooks cover the lifecycle; native OTLP delivers traces and metrics out-of-band."
+  caption="Hooks cover the lifecycle; native OTLP delivers logs, metrics, and traces out-of-band."
 >
   <Node id="gemini" kind="agent">Gemini CLI</Node>
-  <Node id="hooks" kind="connector">{`BeforeAgent / BeforeModel /\nBeforeTool / AfterTool / AfterAgent`}</Node>
+  <Node id="hooks" kind="connector">{`11 lifecycle hooks\n(5 block-capable)`}</Node>
   <Node id="otlp" kind="connector">Native OTLP exporter</Node>
   <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
   <Edge from="gemini" to="hooks" />
@@ -146,5 +167,5 @@ Gemini CLI has no native human-approval surface. Confirm verdicts fall back to a
 ## Disable
 
 ```bash
-defenseclaw setup guardrail --disable
+defenseclaw guardrail disable --connector geminicli --yes
 ```

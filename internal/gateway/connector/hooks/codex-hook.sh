@@ -64,10 +64,8 @@ defenseclaw_harden_resources
 defenseclaw_harden_env
 
 # Fail mode governs response-layer failures (4xx, bad JSON, missing
-# action). Transport failures (gateway unreachable / 5xx) are handled
-# separately by fail_unreachable below — they ALWAYS allow unless the
-# operator has set DEFENSECLAW_STRICT_AVAILABILITY=1, because a
-# DefenseClaw outage must not brick the user's agent. Set BEFORE the
+# action) and transport failures (gateway unreachable / timeout / 5xx).
+# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override. Set BEFORE the
 # missing-token check so defenseclaw_handle_missing_token below has a
 # stable FAIL_MODE to log against.
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
@@ -87,6 +85,10 @@ if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}
   defenseclaw_handle_missing_token codex codex-hook "codex tool"
 fi
 
+# Drop inherited export attributes before these names receive private values.
+# A plain Bash assignment preserves the exported bit of an inherited variable,
+# which would otherwise copy the hook payload or bearer into curl's environment.
+unset PAYLOAD API_TOKEN CURL_CONFIG_TOKEN
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
@@ -111,10 +113,14 @@ elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+# The hook needs only its private shell-local copy from this point forward.
+# Drop the exported source before trace extraction or descriptor writers can
+# spawn child processes.
+unset DEFENSECLAW_GATEWAY_TOKEN
 
 # Transport-layer failure: gateway is unreachable, the connection was
 # refused, the request timed out, or the gateway answered with 5xx.
-# Always allow unless the operator opted into strict availability.
+# Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
   defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "codex tool" "$1"
@@ -139,11 +145,6 @@ fail_response() {
   exit 2
 }
 
-AUTH_HEADER_ARGS=()
-if [ -n "${API_TOKEN}" ]; then
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
-fi
-
 # W3C trace propagation: mapfile fills
 # TRACE_HEADER_ARGS with a sequence of `-H "traceparent: …"` /
 # `-H "tracestate: …"` arguments; invalid env values are dropped
@@ -155,6 +156,39 @@ if command -v mapfile >/dev/null 2>&1; then
   mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
 fi
 
+# Keep authentication and the hook event off the curl command line. Process
+# inspection is available to other same-user processes on supported hosts, so
+# passing either value as a literal argv entry discloses the gateway credential
+# and the potentially sensitive tool payload. curl reads both through inherited
+# descriptors instead; argv contains only the descriptor paths. The
+# descriptor-backed --config form works on curl releases older than 7.55.0,
+# unlike --header @file.
+AUTH_HEADER_ARGS=()
+AUTH_HEADER_FD_OPEN=0
+if [ -n "${API_TOKEN}" ]; then
+  # A bearer token is an HTTP field value, so CR/LF is never valid. Reject it
+  # before formatting curl configuration, then escape the two metacharacters
+  # recognized inside a quoted curl config value.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
+  esac
+  CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"
+  CURL_CONFIG_TOKEN="${CURL_CONFIG_TOKEN//\"/\\\"}"
+  exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${CURL_CONFIG_TOKEN}\"")
+  AUTH_HEADER_FD_OPEN=1
+  AUTH_HEADER_ARGS=(--config "/dev/fd/8")
+fi
+
+# curl does not need the shell-local values once the private descriptors are
+# open. Clear them before spawning curl so no credential or payload is
+# inherited as process environment.
+exec 9< <(printf '%s' "${PAYLOAD}")
+API_TOKEN=
+PAYLOAD=
+CURL_CONFIG_TOKEN=
+unset API_TOKEN PAYLOAD CURL_CONFIG_TOKEN
+
+CURL_STATUS=0
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: codex-hook/1.0" \
@@ -162,9 +196,14 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
-  -d "$PAYLOAD" 2>/dev/null) || {
+  --data-binary "@/dev/fd/9" 2>/dev/null) || CURL_STATUS=$?
+exec 9<&-
+if [ "$AUTH_HEADER_FD_OPEN" = "1" ]; then
+  exec 8<&-
+fi
+if [ "$CURL_STATUS" -ne 0 ]; then
   fail_unreachable "gateway unreachable"
-}
+fi
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -187,9 +226,13 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+case "$ACTION" in
+  allow|block|confirm) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
 
 # Codex's hook protocol is strictly EITHER structured JSON on stdout
 # with exit 0 (Codex parses the decision from the JSON) OR exit 2

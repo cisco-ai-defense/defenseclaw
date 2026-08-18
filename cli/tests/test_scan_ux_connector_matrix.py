@@ -75,6 +75,8 @@ SUPPORTED_CONNECTORS = (
     "copilot",
     "openhands",
     "antigravity",
+    "opencode",
+    "amp",
     "omnigent",
 )
 

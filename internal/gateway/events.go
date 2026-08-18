@@ -31,62 +31,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
-// gatewayEvents is the process-wide structured event writer. It is
-// installed by the sidecar boot path and consumed by the verdict /
-// judge / lifecycle emission helpers in this package.
-//
-// A nil writer is a valid "events disabled" state — every helper
-// checks for nil so unit tests and libraries that import internal/
-// gateway without running the sidecar can no-op cleanly.
 var (
-	gatewayEventsMu sync.RWMutex
-	gatewayEvents   *gatewaylog.Writer
-
-	// judgeResponseStore persists v7-correlated judge rows when set
-	// (tests, or sidecar wiring). When nil, legacy judgePersistor may
-	// still run for backward compatibility.
+	// judgeResponseStore is the process-wide bounded completion queue. Its body
+	// inserter is optional, so canonical judge logs remain active when forensic
+	// response retention is disabled.
 	judgeResponseStoreMu sync.RWMutex
 	judgeResponseStore   *JudgeStore
-
-	// judgePersistor is an optional hook invoked for every Judge
-	// event when guardrail.retain_judge_bodies is on and the
-	// sidecar wired up a persistence callback. Left nil in unit
-	// tests and in the "retention off" path.
-	//
-	// Signature carries Direction alongside the payload because the
-	// JudgePayload envelope intentionally does NOT — direction
-	// belongs to the surrounding Event. A prior revision dropped
-	// this data when persisting, so every SQLite row wrote an empty
-	// direction regardless of inbound/outbound.
-	//
-	// v7: also carries the request ctx + per-emission opts
-	// (tool_name/tool_id/policy_id/destination_app) so the
-	// persistor can merge the request-scoped envelope with the
-	// emit-scoped overrides before writing the audit row. Before
-	// this, every llm-judge-response audit row had
-	// agent/session/run/trace/request NULL because the closure
-	// had no request context to pull from.
-	judgePersistor func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts)
 )
 
-// SetJudgePersistor installs the optional SQLite persistence hook
-// invoked from emitJudge when retention is enabled. Passing nil
-// disables persistence (safe default). The callback receives the
-// raw payload plus the request direction so downstream storage
-// can tag whether the judge fired on an inbound prompt or an
-// outbound completion.
-func SetJudgePersistor(fn func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts)) {
-	gatewayEventsMu.Lock()
-	defer gatewayEventsMu.Unlock()
-	judgePersistor = fn
-}
-
-// SetJudgeResponseStore installs the v7 SQLite writer for retained judge
-// bodies. When non-nil it takes precedence over SetJudgePersistor for
-// persistence (only one path runs per emit).
+// SetJudgeResponseStore installs the bounded judge completion queue. Passing
+// nil disables queued canonical completion and optional body persistence.
 func SetJudgeResponseStore(js *JudgeStore) {
 	judgeResponseStoreMu.Lock()
 	defer judgeResponseStoreMu.Unlock()
@@ -99,59 +55,10 @@ func activeJudgeStore() *JudgeStore {
 	return judgeResponseStore
 }
 
-// judgePersist returns the currently installed persistor (may be nil).
-func judgePersist() func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts) {
-	gatewayEventsMu.RLock()
-	defer gatewayEventsMu.RUnlock()
-	return judgePersistor
-}
-
-// SetEventWriter installs the process-wide gatewaylog.Writer. The
-// sidecar calls this exactly once, right after the writer is
-// constructed, before any request handling begins.
-func SetEventWriter(w *gatewaylog.Writer) {
-	gatewayEventsMu.Lock()
-	defer gatewayEventsMu.Unlock()
-	gatewayEvents = w
-}
-
-// EventWriter returns the active writer (may be nil).
-func EventWriter() *gatewaylog.Writer {
-	gatewayEventsMu.RLock()
-	defer gatewayEventsMu.RUnlock()
-	return gatewayEvents
-}
-
-// emitEvent is the low-level helper that all other emitters delegate
-// to. It enforces the "gateway.jsonl (and every downstream OTel /
-// Splunk / webhook fan-out) never sees unredacted PII" invariant by
-// scrubbing caller-supplied free-form strings here. Rule IDs and
-// canonical IDs survive (ForSinkReason/ForSinkString preserve the
-// metadata token shape); matched literals are masked with a
-// deterministic hash prefix so operators can still correlate.
-//
-// Copy-on-write discipline: every payload struct that we need to
-// mutate is shallow-copied before we touch its fields, so a caller
-// that kept a reference to the original (e.g. for a subsequent
-// audit.Log call) does NOT observe the redacted values. The
-// scrubbing here is a sink-only transform.
-//
-// Lifecycle.Details and Diagnostic.Fields are NOT redacted. Those
-// bags carry operator-authored metadata — ports, file paths,
-// version strings, subsystem names — which operators need in the
-// clear to triage incidents. Redacting them turns every startup
-// event into an opaque smear of `<redacted len=6 sha=…>`
-// placeholders, breaking the primary use case for structured
-// lifecycle logs. If a caller ever needs to put user-provided
-// content into one of these fields they must run it through the
-// appropriate redaction helper before the emit.
 // stampEventCorrelation populates the eight correlation / identity
-// fields of a gatewaylog.Event from a request context. Called by
-// every hot-path emit helper so the contract "verdict/judge/error
-// events carry run_id, request_id, session_id, trace_id, agent_id,
-// agent_name, agent_instance_id, sidecar_instance_id whenever the
-// enclosing request has them" is enforced at a single choke point
-// instead of at each call site.
+// fields of the compatibility gatewaylog envelope used as source input by the
+// generated egress adapter. Generated family producers own persistence,
+// routing, destination delivery, and redaction.
 //
 // Nil ctx is tolerated (boot/shutdown emits) and leaves every field
 // at the caller-supplied value. Non-empty caller-supplied values
@@ -234,82 +141,6 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	}
 }
 
-func emitEvent(ctx context.Context, e gatewaylog.Event) {
-	w := EventWriter()
-	if w == nil {
-		return
-	}
-	stampEventCorrelation(&e, ctx)
-	// Resolve the cloud-controlled per-inspection redaction directive
-	// (managed_enterprise only) once and apply it to every field below.
-	// An explicit directive stamped on the event wins over the
-	// ctx-carried one so async re-emits keep their decision; we also
-	// stamp it back so the audit-mirror path (sanitizeGatewayLogEvent)
-	// can honor the same decision without the request ctx.
-	policy := sinkPolicyFor(ctx, e.RedactionEnabled)
-	if e.RedactionEnabled == nil {
-		e.RedactionEnabled = redactionDecisionFromContext(ctx)
-	}
-	if v := e.Verdict; v != nil {
-		cp := *v
-		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
-		e.Verdict = &cp
-	}
-	if j := e.Judge; j != nil {
-		cp := *j
-		// RawResponse routinely echoes the triggering
-		// prompt verbatim — sinks must only ever see the
-		// redacted form. ParseError is short caller-owned
-		// metadata but we redact it too in case a parser
-		// embeds a snippet of the offending body.
-		cp.RawResponse = redaction.StringForSink(cp.RawResponse, policy)
-		cp.ParseError = redaction.StringForSink(cp.ParseError, policy)
-		e.Judge = &cp
-	}
-	if er := e.Error; er != nil {
-		cp := *er
-		cp.Message = redaction.StringForSink(cp.Message, policy)
-		cp.Cause = redaction.StringForSink(cp.Cause, policy)
-		e.Error = &cp
-	}
-	if p := e.LLMPrompt; p != nil {
-		cp := *p
-		if cp.Prompt != "" {
-			cp.Prompt = redaction.MessageContentForSink(cp.Prompt, policy)
-		}
-		if cp.RawRequestBody != "" {
-			cp.RawRequestBody = redaction.MessageContentForSink(cp.RawRequestBody, policy)
-		}
-		e.LLMPrompt = &cp
-	}
-	if r := e.LLMResponse; r != nil {
-		cp := *r
-		if cp.Response != "" {
-			cp.Response = redaction.MessageContentForSink(cp.Response, policy)
-		}
-		if cp.RawResponseBody != "" {
-			cp.RawResponseBody = redaction.MessageContentForSink(cp.RawResponseBody, policy)
-		}
-		e.LLMResponse = &cp
-	}
-	if t := e.Tool; t != nil {
-		cp := *t
-		if cp.ToolInput != "" {
-			cp.ToolInput = redaction.MessageContentForSink(cp.ToolInput, policy)
-		}
-		if cp.ToolOutput != "" {
-			cp.ToolOutput = redaction.MessageContentForSink(cp.ToolOutput, policy)
-		}
-		e.Tool = &cp
-	}
-	if h := e.HookDecision; h != nil {
-		cp := *h
-		cp.Reason = redaction.ReasonForSink(cp.Reason, policy)
-		e.HookDecision = &cp
-	}
-	w.EmitContext(ctx, e)
-}
-
 // emitVerdictExtras carries optional verdict-event fields that
 // runtime finding emitters (guardrail Inspect, mid-stream,
 // tool-call inspect) stamp so SIEM can join the verdict to its
@@ -321,14 +152,9 @@ type emitVerdictExtras struct {
 	RuleIDs      []string
 }
 
-// emitVerdict records a single guardrail-pipeline stage decision.
-// ctx carries the request correlation + agent identity that Gets
-// stamped onto the envelope. Pass context.Background() when emitting
-// outside a request (boot fall-backs, background self-tests).
-//
-// The variadic extras slot lets new call sites stamp evaluation_id
-// + rule_ids without forcing every existing caller (multi-turn,
-// block-list, approval-denied, etc.) to update.
+// emitVerdict preserves the old call shape while generated guardrail, finding,
+// enforcement, and tool producers own the occurrence. It intentionally emits
+// nothing and must be removed with the remaining call sites.
 func emitVerdict(
 	ctx context.Context,
 	stage gatewaylog.Stage,
@@ -340,32 +166,9 @@ func emitVerdict(
 	latencyMs int64,
 	extras ...emitVerdictExtras,
 ) {
-	var ext emitVerdictExtras
-	if len(extras) > 0 {
-		ext = extras[0]
-	}
-	// Plan B6 / S0.10: VerdictPayload.Reason is documented as
-	// "short, redacted" but the redactor pipeline DOES legitimately
-	// receive raw-secret strings on the way in (the redaction layer
-	// strips them in-place before the wire emit). Scrub assertion
-	// would fight that path; the canary lives only on the egress
-	// shape where no caller has any legitimate reason to pass a
-	// credential prefix. See emitEgress in this file.
-	emitEvent(ctx, gatewaylog.Event{
-		EventType: gatewaylog.EventVerdict,
-		Severity:  severity,
-		Direction: direction,
-		Model:     model,
-		Verdict: &gatewaylog.VerdictPayload{
-			Stage:        stage,
-			Action:       action,
-			Reason:       reason,
-			Categories:   categories,
-			LatencyMs:    latencyMs,
-			EvaluationID: ext.EvaluationID,
-			RuleIDs:      ext.RuleIDs,
-		},
-	})
+	// Generated guardrail producers own the production occurrence. This legacy
+	// call shape remains temporarily source-compatible while call sites migrate;
+	// it must never create a second record.
 }
 
 // JudgeEmitOpts carries optional correlation for judge persistence and payloads.
@@ -375,6 +178,10 @@ type JudgeEmitOpts struct {
 	ToolID         string
 	PolicyID       string
 	DestinationApp string
+	// FailureClass is required exactly when action is "error". It is a
+	// closed, low-cardinality classification; the positional failureSummary
+	// argument remains the centrally-redacted diagnostic detail.
+	FailureClass gatewaylog.JudgeFailureClass
 	// InputContent, when non-empty, is the inspected judge input
 	// (the prompt/request text the judge was asked to evaluate).
 	// emitJudge computes its sha256 digest and stores the result in
@@ -399,23 +206,43 @@ func emitJudge(
 	latencyMs int64,
 	action string,
 	severity gatewaylog.Severity,
-	parseError string,
+	failureSummary string,
 	raw string,
 	opts JudgeEmitOpts,
 ) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	action = strings.ToLower(strings.TrimSpace(action))
+	failureSummary = strings.ToValidUTF8(failureSummary, "\uFFFD")
+	if len(failureSummary) > 65536 {
+		failureSummary = truncateToRuneBoundary(failureSummary, 65536)
+	}
+	if action == "error" {
+		if !opts.FailureClass.Valid() || strings.TrimSpace(failureSummary) == "" {
+			emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
+				"judge error omitted a valid internal failure classification", nil)
+			return
+		}
+	} else if opts.FailureClass != "" || failureSummary != "" {
+		emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
+			"successful judge result carried failure-only metadata", nil)
+		return
+	}
 	payload := gatewaylog.JudgePayload{
-		Kind:        kind,
-		Model:       model,
-		InputBytes:  inputBytes,
-		LatencyMs:   latencyMs,
-		Action:      action,
-		Severity:    severity,
-		ParseError:  parseError,
-		RawResponse: raw,
-		Findings:    opts.Findings,
+		Kind:         kind,
+		Model:        model,
+		InputBytes:   inputBytes,
+		LatencyMs:    latencyMs,
+		Action:       action,
+		Severity:     severity,
+		FailureClass: opts.FailureClass,
+		ErrorSummary: failureSummary,
+		RawResponse:  raw,
+		Findings:     opts.Findings,
+	}
+	if opts.FailureClass == gatewaylog.JudgeFailureOutputParse {
+		payload.ParseError = failureSummary
 	}
 	// ("Judge input_hash is computed from the
 	// response body") closure: when callers supply the inspected
@@ -429,26 +256,14 @@ func emitJudge(
 		payload.InputHash = "sha256:" + hex.EncodeToString(sum[:])
 	}
 
-	// SQLite persistence runs first because emitEvent mutates its own
-	// shallow copy of the payload (it scrubs RawResponse before
-	// forwarding to the sinks pipeline). We want the local,
-	// operator-owned store to receive the un-redacted body — retention
-	// is explicit opt-in via guardrail.retain_judge_bodies and the SQLite
-	// file is already covered by the same filesystem ACLs as the rest
-	// of ~/.defenseclaw.
-	if js := activeJudgeStore(); js != nil && raw != "" {
+	// Queue the original payload. The
+	// worker always emits the canonical completion; only a queue configured with
+	// an optional body inserter writes RawResponse to the operator-owned SQLite
+	// file. Retention remains explicit and never changes completion visibility.
+	if js := activeJudgeStore(); js != nil {
 		_ = js.PersistJudgeEvent(ctx, direction, payload, opts.ToolName, opts.ToolID, opts.PolicyID, opts.DestinationApp)
-	} else if persist := judgePersist(); persist != nil && raw != "" {
-		persist(ctx, payload, direction, opts)
 	}
 
-	emitEvent(ctx, gatewaylog.Event{
-		EventType: gatewaylog.EventJudge,
-		Severity:  severity,
-		Direction: direction,
-		Model:     model,
-		Judge:     &payload,
-	})
 }
 
 // emitLifecycle records a sidecar state change. Details is free-form
@@ -464,31 +279,10 @@ func emitJudge(
 // and get dropped as schema violations. The original intent is
 // preserved on details.transition_raw for audit fidelity.
 func emitLifecycle(ctx context.Context, subsystem, transition string, details map[string]string) {
-	normalized := normalizeLifecycleTransition(transition)
-	if normalized != transition {
-		if details == nil {
-			details = map[string]string{}
-		}
-		if _, ok := details["transition_raw"]; !ok {
-			details["transition_raw"] = transition
-		}
-	}
-	ev := gatewaylog.Event{
-		EventType: gatewaylog.EventLifecycle,
-		Lifecycle: &gatewaylog.LifecyclePayload{
-			Subsystem:  subsystem,
-			Transition: normalized,
-			Details:    details,
-		},
-	}
-	// Promote a connector detail to the first-class envelope field so
-	// gateway.jsonl consumers (Splunk local bridge, AgentWatch) can
-	// filter/group by connector without parsing the details bag — the
-	// same contract the audit-event connector column provides.
-	if c := details["connector"]; c != "" {
-		ev.Connector = c
-	}
-	emitEvent(ctx, ev)
+	_ = ctx
+	_ = details
+	fmt.Fprintf(os.Stderr, "[gateway] lifecycle subsystem=%s transition=%s\n",
+		sanitizeAlertField(subsystem), sanitizeAlertField(normalizeLifecycleTransition(transition)))
 }
 
 // normalizeLifecycleTransition maps caller-supplied transition
@@ -525,23 +319,17 @@ func emitError(ctx context.Context, subsystem, code, message string, cause error
 
 // emitErrorConnector is emitError with first-class connector attribution.
 // Connector-scoped failures (e.g. hook self-heal re-install failures) pass
-// the originating connector so gateway.jsonl error events carry the same
+// the originating connector so canonical error events carry the same
 // connector dimension as every other surface; "" behaves like emitError.
 func emitErrorConnector(ctx context.Context, subsystem, code, connector, message string, cause error) {
-	payload := &gatewaylog.ErrorPayload{
-		Subsystem: subsystem,
-		Code:      code,
-		Message:   message,
-	}
+	_ = ctx
+	_ = connector
+	causeClass := ""
 	if cause != nil {
-		payload.Cause = cause.Error()
+		causeClass = " cause=present"
 	}
-	emitEvent(ctx, gatewaylog.Event{
-		EventType: gatewaylog.EventError,
-		Severity:  gatewaylog.SeverityHigh,
-		Connector: connector,
-		Error:     payload,
-	})
+	fmt.Fprintf(os.Stderr, "[gateway] error subsystem=%s code=%s message=%s%s\n",
+		sanitizeAlertField(subsystem), sanitizeAlertField(code), sanitizeAlertField(message), causeClass)
 }
 
 // emitDiagnostic records a structured debug-level event. Use this
@@ -553,22 +341,10 @@ func emitErrorConnector(ctx context.Context, subsystem, code, connector, message
 // (Fields is an open typed bag). Callers pass a simple string map
 // for ergonomics; we widen it to interface{} here.
 func emitDiagnostic(ctx context.Context, component, message string, details map[string]string) {
-	var fields map[string]interface{}
-	if len(details) > 0 {
-		fields = make(map[string]interface{}, len(details))
-		for k, v := range details {
-			fields[k] = v
-		}
-	}
-	emitEvent(ctx, gatewaylog.Event{
-		EventType: gatewaylog.EventDiagnostic,
-		Severity:  gatewaylog.SeverityInfo,
-		Diagnostic: &gatewaylog.DiagnosticPayload{
-			Component: component,
-			Message:   message,
-			Fields:    fields,
-		},
-	})
+	_ = ctx
+	_ = message
+	_ = details
+	fmt.Fprintf(os.Stderr, "[gateway] diagnostic component=%s\n", sanitizeAlertField(component))
 }
 
 // emitEgress records a classified outbound request observed by the
@@ -586,6 +362,20 @@ func emitDiagnostic(ctx context.Context, component, message string, details map[
 // enum values defined in EgressPayload — the schema validator will
 // drop misspelled branches/decisions.
 func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
+	emitEgressWithRuntime(ctx, p, nil, false)
+}
+
+func (p *GuardrailProxy) emitEgress(ctx context.Context, payload gatewaylog.EgressPayload) {
+	runtime, authoritative := p.observabilityV8EgressRuntime()
+	emitEgressWithRuntime(ctx, payload, runtime, authoritative)
+}
+
+func emitEgressWithRuntime(
+	ctx context.Context,
+	p gatewaylog.EgressPayload,
+	runtime gatewayEgressV8Runtime,
+	authoritative bool,
+) {
 	if p.Source == "" {
 		p.Source = "go"
 	}
@@ -599,7 +389,7 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 		sev = gatewaylog.SeverityMedium
 	}
 	// TargetPath is sanitized before truncation so query strings and
-	// fragments never reach gateway.jsonl. Providers routinely
+	// fragments never reach canonical observability records. Providers routinely
 	// smuggle tokens / session IDs / tenant hints through the
 	// query string (OpenAI-compat proxies use ?api-key=, Anthropic
 	// compat uses ?token=, vendor SDKs append ?key=, Gemini uses
@@ -610,7 +400,7 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	// ":generateContent") are unaffected because the colon is a
 	// path-valid character. TargetHost is a FQDN so 253 is the DNS
 	// ceiling. Reason is operator-facing; 512 keeps it useful
-	// without letting a misbehaving TS caller bloat gateway.jsonl.
+	// without letting a misbehaving TS caller bloat canonical records.
 	if p.TargetPath != "" {
 		if i := strings.IndexAny(p.TargetPath, "?#"); i >= 0 {
 			p.TargetPath = p.TargetPath[:i]
@@ -654,39 +444,25 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	if p.Source != "go" && p.Source != "ts" {
 		p.Source = "ts"
 	}
-	emitEvent(ctx, gatewaylog.Event{
-		EventType: gatewaylog.EventEgress,
-		Severity:  sev,
-		Egress:    &p,
-	})
+	if emitGatewayEgressV8(ctx, p, sev, runtime, authoritative) {
+		return
+	}
 	incEgressCounter(ctx, p.Branch, p.Decision, p.Source)
 	if sev == gatewaylog.SeverityHigh {
 		emitEgressAlert(ctx, p)
 	}
 }
 
-// incEgressCounter + emitEgressAlert are package-level hooks so the
-// telemetry / alerting wiring can be swapped out in tests without
-// pulling in the full OTel stack. Default: stderr alert + no-op
-// counter; SetEgressTelemetry upgrades both to real OTel sinks.
+// incEgressCounter is retained only as a test-visible assertion that the
+// canonical generated egress path does not fall through. Production generated
+// metrics are emitted by emitGatewayEgressV8; there is no provider-backed
+// fallback. emitEgressAlert remains the independent human-facing rail.
 var (
-	egressTelemetryMu sync.RWMutex
-	egressTelemetry   *telemetry.Provider
-
-	incEgressCounter = func(ctx context.Context, branch, decision, source string) {
-		egressTelemetryMu.RLock()
-		tp := egressTelemetry
-		egressTelemetryMu.RUnlock()
-		if tp == nil {
-			return
-		}
-		tp.RecordEgress(ctx, branch, decision, source)
-	}
-	emitEgressAlert = func(ctx context.Context, p gatewaylog.EgressPayload) {
+	incEgressCounter = func(context.Context, string, string, string) {}
+	emitEgressAlert  = func(ctx context.Context, p gatewaylog.EgressPayload) {
 		// Always log to stderr — operators need a signal even when
-		// the OTel stack is disabled. The gatewaylog Writer already
-		// emits the structured event; this is the complementary
-		// human-facing rail.
+		// remote export is disabled. Canonical v8 routing owns the
+		// structured record; this is the complementary human-facing rail.
 		//
 		// Sanitize every caller-controlled string before printing to
 		// stderr to prevent log injection: a malicious reason/host
@@ -736,17 +512,6 @@ func sanitizeAlertField(s string) string {
 		}
 	}
 	return b.String()
-}
-
-// SetEgressTelemetry installs the OTel provider used by the
-// emitEgress counter hook. Passing nil resets to the no-op default.
-// The sidecar boot path calls this right after telemetry is
-// configured so Layer 3 events begin counting as soon as the
-// passthrough handler accepts traffic.
-func SetEgressTelemetry(tp *telemetry.Provider) {
-	egressTelemetryMu.Lock()
-	defer egressTelemetryMu.Unlock()
-	egressTelemetry = tp
 }
 
 // deriveSeverity maps an audit.Event severity string into the strict

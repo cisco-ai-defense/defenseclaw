@@ -59,9 +59,10 @@ import click
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for response-layer failures. 'open' (default) allows + logs; "
-        "'closed' blocks. Transport failures (gateway down / 5xx) ALWAYS allow unless "
-        "DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting. "
+        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
+        "'open' (default) allows + logs; 'closed' blocks where the hook supports it. "
+        "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
+        "missing-token failures closed. "
         "Quickstart is non-interactive — pick 'closed' here to opt the agent into a "
         "stricter posture without later running `defenseclaw guardrail fail-mode`."
     ),
@@ -120,6 +121,7 @@ import click
             "openhands",
             "antigravity",
             "opencode",
+            "amp",
             "omnigent",
         ],
         case_sensitive=False,
@@ -235,6 +237,10 @@ def quickstart_cmd(
             hilt_min_severity=hilt_min_severity or "",
         )
     )
+    _require_operational_success(
+        report,
+        gateway_requested=not skip_gateway,
+    )
     if json_summary:
         payload = report.to_dict()
         if connector_source:
@@ -250,12 +256,32 @@ def quickstart_cmd(
         sys.exit(1)
 
 
+def _require_operational_success(report, *, gateway_requested: bool) -> None:
+    """Make quickstart's requested operational outcomes command-fatal.
+
+    Bootstrap warnings are normally advisory so interactive first-run flows
+    can finish with remediation hints. Quickstart is an automation boundary:
+    its selected connector must be established, and a requested gateway start
+    must leave the sidecar running. Promote only those warnings before
+    rendering so human output, JSON, and the process exit status agree.
+    """
+    from defenseclaw.bootstrap import _rollup_status
+
+    if gateway_requested:
+        for step in report.setup + report.readiness:
+            if step.name in {"Connector", "Sidecar"} and step.status == "warn":
+                step.status = "fail"
+
+    report.status = _rollup_status(report.setup, report.readiness)
+
+
 def _configured_quickstart_connectors(cfg_mod) -> list[str]:
     """Return meaningful active connectors from an existing config, if any."""
     try:
         config_file = cfg_mod.config_path()
         if not os.path.exists(config_file):
             return []
+        cfg_mod.require_v8_config()
         cfg = cfg_mod.load()
     except Exception:
         return []

@@ -62,6 +62,7 @@ struct DefenseClawApp: App {
                     }
                 }
                 .keyboardShortcut("h", modifiers: [.command, .shift])
+                .disabled(!appState.installationMutationsAllowed)
 
                 Button("Scan AI Components") {
                     appState.selectedPanel = .aiDiscovery
@@ -70,7 +71,11 @@ struct DefenseClawApp: App {
                     }
                 }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
-                .disabled(!appState.gatewayReachable || appState.scanInFlight)
+                .disabled(
+                    !appState.gatewayReachable
+                        || appState.scanInFlight
+                        || !appState.installationMutationsAllowed
+                )
 
                 // The TUI's `m` key: step the shared connector filter
                 // All → conn0 → conn1 → … → All across every panel.
@@ -98,12 +103,13 @@ struct DefenseClawApp: App {
                     appState.exportLastCommandOutput()
                 }
                 .keyboardShortcut("s", modifiers: [.control])
+                .disabled(!appState.installationMutationsAllowed)
 
                 Button("Diagnose in Background") {
                     appState.runBackgroundDiagnose()
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
-                .disabled(appState.diagnoseRunning)
+                .disabled(appState.diagnoseRunning || !appState.installationMutationsAllowed)
             }
             CommandMenu("Go") {
                 ForEach(Array(PanelID.allCases.enumerated()), id: \.element) { index, panel in

@@ -41,8 +41,11 @@ import unittest
 from unittest import mock
 
 import click
+import pytest
 import yaml
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw import config as _cfgmod
 from defenseclaw import credentials as creds
 from defenseclaw.commands import _llm_picker
@@ -73,7 +76,11 @@ def _make_cfg(data_dir: str) -> Config:
     """
     cfg_path = os.path.join(data_dir, "config.yaml")
     with open(cfg_path, "w", encoding="utf-8") as f:
-        f.write("llm:\n  provider: anthropic\n  model: claude-sonnet-4-5\n")
+        f.write(
+            "config_version: 8\n"
+            "observability: {}\n"
+            "llm:\n  provider: anthropic\n  model: claude-sonnet-4-5\n"
+        )
     return _load_via_env(data_dir)
 
 

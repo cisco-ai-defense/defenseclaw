@@ -3,9 +3,17 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func requireOpenShellRuntime(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell runtime is unsupported on native Windows; CLI rejection coverage remains active")
+	}
+}
 
 func TestCheckVersionCompatibility(t *testing.T) {
 	tests := []struct {
@@ -39,6 +47,7 @@ func TestVerifyOpenShellBinary_NotFound(t *testing.T) {
 }
 
 func TestVerifyOpenShellBinary_HappyPath(t *testing.T) {
+	requireOpenShellRuntime(t)
 	tmpDir := t.TempDir()
 	bin := filepath.Join(tmpDir, "openshell-sandbox")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho \"openshell-sandbox v0.6.2\""), 0o755); err != nil {
@@ -58,6 +67,7 @@ func TestVerifyOpenShellBinary_HappyPath(t *testing.T) {
 }
 
 func TestVerifyOpenShellBinary_Directory(t *testing.T) {
+	requireOpenShellRuntime(t)
 	tmpDir := t.TempDir()
 	_, err := VerifyOpenShellBinary(tmpDir)
 	if err == nil {
@@ -69,6 +79,7 @@ func TestVerifyOpenShellBinary_Directory(t *testing.T) {
 }
 
 func TestVerifyOpenShellBinary_VersionVariants(t *testing.T) {
+	requireOpenShellRuntime(t)
 	tests := []struct {
 		name    string
 		output  string

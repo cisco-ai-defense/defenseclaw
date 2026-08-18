@@ -26,6 +26,8 @@ struct RuntimeInstallFilesystemTests {
         failedAttemptPreservesConcurrentDataHomeContents()
         nonemptyDataHomeFailsClosedWithoutMutation()
         symlinkDataHomeFailsClosedWithoutFollowingOrMutation()
+        selectedRuntimeMarkerCoversSplitHomeAndVenv()
+        arbitrarySelectedDirectoryUsesPinnedWalk()
         stagingCleanupPreservesAReplacement()
         symlinkedInstallAncestorsAreRefusedWithoutExternalMutation()
         releaseAttestedGatewayCopyIsByteExact()
@@ -50,6 +52,7 @@ struct RuntimeInstallFilesystemTests {
         successfulNoReplaceActivationCanRemoveOnlyItsOwnTargets()
         interruptedActivationJournalRecoversEveryCutPoint()
         interruptedActivationJournalPreservesConcurrentReplacement()
+        interruptedActivationJournalRecoversSplitHomeAndVenv()
         print("RuntimeInstallFilesystemTests passed")
     }
 
@@ -123,6 +126,59 @@ struct RuntimeInstallFilesystemTests {
             expect(
                 !lexicalPathExists(target.appendingPathComponent(".venv.staging")),
                 "guard prevents staging through a data-home symlink"
+            )
+        }
+    }
+
+    private static func selectedRuntimeMarkerCoversSplitHomeAndVenv() {
+        withTemporaryHome { home in
+            let dataHome = home.appendingPathComponent("selected-home")
+            let venvParent = home.appendingPathComponent("selected-runtime")
+            let venvDir = venvParent.appendingPathComponent("python")
+            try FileManager.default.createDirectory(at: dataHome, withIntermediateDirectories: false)
+            try FileManager.default.createDirectory(at: venvParent, withIntermediateDirectories: false)
+            expect(
+                RuntimeInstallFilesystem.existingSelectedRuntimeMarker(
+                    dataHome: dataHome.path,
+                    venvDir: venvDir.path
+                ) == nil,
+                "empty custom home and absent custom venv remain eligible for fresh install"
+            )
+
+            try FileManager.default.createDirectory(at: venvDir, withIntermediateDirectories: false)
+            expect(
+                RuntimeInstallFilesystem.existingSelectedRuntimeMarker(
+                    dataHome: dataHome.path,
+                    venvDir: venvDir.path
+                ) == venvDir.path,
+                "an existing split venv is a fresh-install refusal marker"
+            )
+            try FileManager.default.removeItem(at: venvDir)
+            try Data("state".utf8).write(to: dataHome.appendingPathComponent("config.yaml"))
+            expect(
+                RuntimeInstallFilesystem.existingSelectedRuntimeMarker(
+                    dataHome: dataHome.path,
+                    venvDir: venvDir.path
+                ) == dataHome.path,
+                "custom DEFENSECLAW_HOME state is a fresh-install refusal marker"
+            )
+        }
+    }
+
+    private static func arbitrarySelectedDirectoryUsesPinnedWalk() {
+        withTemporaryHome { home in
+            // FileManager reports the Darwin temporary root through /var,
+            // whose first component is a symlink to /private/var. Exercise
+            // the success path through the corresponding all-real spelling.
+            let realHomePath = home.path.hasPrefix("/var/")
+                ? "/private" + home.path
+                : home.path
+            let realHome = URL(fileURLWithPath: realHomePath, isDirectory: true)
+            let selected = realHome.appendingPathComponent("custom/state")
+            let identity = try RuntimeInstallFilesystem.ensureRealDirectoryPath(selected.path)
+            expect(
+                RuntimeInstallFilesystem.pathIdentity(selected.path) == identity,
+                "custom InstallationContext directories use the pinned real-directory walk"
             )
         }
     }
@@ -645,6 +701,80 @@ struct RuntimeInstallFilesystemTests {
             expect(!lexicalPathExists(gatewayStage), "unactivated gateway stage is cleaned")
             expect(!lexicalPathExists(cliStage), "unactivated CLI stage is cleaned")
             expect(!lexicalPathExists(journal), "completed recovery retires its journal")
+        }
+    }
+
+    private static func interruptedActivationJournalRecoversSplitHomeAndVenv() {
+        withTemporaryHome { home in
+            let dataHome = home.appendingPathComponent("selected-home")
+            let venvParent = home.appendingPathComponent("selected-runtime")
+            let venvDestination = venvParent.appendingPathComponent("python")
+            let binDir = home.appendingPathComponent(".local/bin")
+            try FileManager.default.createDirectory(at: dataHome, withIntermediateDirectories: false)
+            try FileManager.default.createDirectory(at: venvParent, withIntermediateDirectories: false)
+            try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+
+            let venvStage = venvParent.appendingPathComponent(
+                "python.staging-\(UUID().uuidString)"
+            )
+            let gatewayStage = binDir.appendingPathComponent(
+                "defenseclaw-gateway.install-\(UUID().uuidString)"
+            )
+            let cliStage = binDir.appendingPathComponent(
+                "defenseclaw.install-\(UUID().uuidString)"
+            )
+            try FileManager.default.createDirectory(at: venvStage, withIntermediateDirectories: false)
+            try Data("venv".utf8).write(to: venvStage.appendingPathComponent("installed"))
+            try Data("gateway".utf8).write(to: gatewayStage)
+            try FileManager.default.createSymbolicLink(
+                atPath: cliStage.path,
+                withDestinationPath: venvDestination.appendingPathComponent("bin/defenseclaw").path
+            )
+            let gatewayDestination = binDir.appendingPathComponent("defenseclaw-gateway")
+            let cliDestination = binDir.appendingPathComponent("defenseclaw")
+            let targets = try RuntimeInstallFilesystem.prepareActivationTargets([
+                (staged: venvStage.path, destination: venvDestination.path),
+                (staged: gatewayStage.path, destination: gatewayDestination.path),
+                (staged: cliStage.path, destination: cliDestination.path),
+            ])
+            let journal = dataHome.appendingPathComponent(
+                ".fresh-install-activation-journal.json"
+            )
+            _ = try RuntimeInstallFilesystem.prepareActivationJournal(targets, path: journal.path)
+            try FileManager.default.moveItem(at: venvStage, to: venvDestination)
+
+            var wrongSelectionWasRefused = false
+            do {
+                _ = try RuntimeInstallFilesystem.recoverFreshInstallActivation(
+                    journalPath: journal.path,
+                    dataHome: dataHome.path,
+                    binDir: binDir.path,
+                    venvDir: venvParent.appendingPathComponent("different").path
+                )
+            } catch {
+                wrongSelectionWasRefused = true
+            }
+            expect(wrongSelectionWasRefused, "recovery requires the exact selected custom venv")
+            expect(lexicalPathExists(journal), "a mismatched selection cannot retire the journal")
+            expect(
+                lexicalPathExists(venvDestination),
+                "a mismatched selection cannot remove the activated custom venv"
+            )
+
+            let preserved = try RuntimeInstallFilesystem.recoverFreshInstallActivation(
+                journalPath: journal.path,
+                dataHome: dataHome.path,
+                binDir: binDir.path,
+                venvDir: venvDestination.path
+            )
+            expect(preserved.isEmpty, "split-home recovery had no concurrent state")
+            expect(!lexicalPathExists(journal), "split-home recovery retires its journal")
+            for path in [
+                venvStage, gatewayStage, cliStage,
+                venvDestination, gatewayDestination, cliDestination,
+            ] {
+                expect(!lexicalPathExists(path), "split-home recovery removes only captured inodes")
+            }
         }
     }
 

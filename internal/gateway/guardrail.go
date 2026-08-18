@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // defaultLogWriter is the destination for guardrail diagnostic messages.
@@ -56,6 +57,7 @@ type ScanVerdict struct {
 	// per-finding scan_findings rows it produced. Not serialized on
 	// the wire; for in-process correlation only.
 	EvaluationID string   `json:"-"`
+	ScanID       string   `json:"-"`
 	RuleIDs      []string `json:"-"`
 	// RedactionEnabled is the cloud-controlled per-inspection
 	// redaction directive from the managed Cisco AI Defense inspect
@@ -64,7 +66,15 @@ type ScanVerdict struct {
 	// false = store raw. Only populated on managed_enterprise
 	// responses; never serialized (in-process control metadata that
 	// rides the verdict to the sink choke points).
-	RedactionEnabled *bool `json:"-"`
+	RedactionEnabled *bool   `json:"-"`
+	Confidence       float64 `json:"-"`
+	// GeneratedTraceOwned is sticky once the v8 inspector accepted ownership,
+	// including normal collection or sampling decline. TraceContext is the
+	// exact ended apply span used to correlate later durable logs and metrics.
+	GeneratedTraceOwned bool              `json:"-"`
+	TraceContext        trace.SpanContext `json:"-"`
+	EnforcementID       string            `json:"-"`
+	FindingsEmitted     bool              `json:"-"`
 }
 
 func allowVerdict(scanner string) *ScanVerdict {
@@ -76,7 +86,32 @@ func allowVerdict(scanner string) *ScanVerdict {
 }
 
 func guardrailFallbackActionForSeverity(severity string) string {
-	switch strings.ToUpper(strings.TrimSpace(severity)) {
+	return guardrailFallbackActionForProfile(severity, "default")
+}
+
+func guardrailFallbackActionForProfile(severity, profile string) string {
+	severity = strings.ToUpper(strings.TrimSpace(severity))
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "strict":
+		switch severity {
+		case "CRITICAL", "HIGH", "MEDIUM":
+			return "block"
+		case "LOW":
+			return "alert"
+		default:
+			return "allow"
+		}
+	case "permissive":
+		switch severity {
+		case "CRITICAL":
+			return "block"
+		case "HIGH":
+			return "alert"
+		default:
+			return "allow"
+		}
+	}
+	switch severity {
 	case "CRITICAL":
 		return "block"
 	case "MEDIUM", "HIGH":
@@ -87,11 +122,15 @@ func guardrailFallbackActionForSeverity(severity string) string {
 }
 
 func fallbackGuardrailVerdict(v *ScanVerdict) *ScanVerdict {
+	return fallbackGuardrailVerdictForProfile(v, "default")
+}
+
+func fallbackGuardrailVerdictForProfile(v *ScanVerdict, profile string) *ScanVerdict {
 	if v == nil {
 		return allowVerdict("fallback")
 	}
 	out := *v
-	out.Action = guardrailFallbackActionForSeverity(out.Severity)
+	out.Action = guardrailFallbackActionForProfile(out.Severity, profile)
 	return &out
 }
 
@@ -117,23 +156,21 @@ type TriageSignal struct {
 }
 
 // guardrailSpanEmitter is the callback surface the inspector
-// uses to open and close OTel spans for each stage. Kept as a
-// pair of function fields instead of an interface so the
-// sidecar wiring can populate it from internal/telemetry
-// without the inspector package importing telemetry directly.
+// uses to open and close generated spans for each stage. Callback ownership
+// keeps the inspector independent from the process runtime graph.
 //
 // A nil emitter (or either nil field) is valid — every call
-// site guards before invoking, so tests and non-otel consumers
+// site guards before invoking, so tests and non-telemetry consumers
 // opt out by just not calling SetTracer.
 //
-// `start` opens the root "stage" span (regex_only / regex_judge /
-// judge_first). `startPhase` opens child spans for each sub-stage
+// `start` opens the root evaluation span and records its strategy
+// (regex_only / regex_judge / judge_first). `startPhase` opens child spans
 // (regex, cisco_ai_defense, judge.prompt_injection, judge.pii,
 // opa, finalize) so operators can drill past stage-level latency
 // into the exact phase that dominated the budget.
 type guardrailSpanEmitter struct {
-	start       func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64))
-	startPhase  func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64))
+	start       func(ctx context.Context, stage, direction, model, mode string) (context.Context, func(verdict *ScanVerdict, latency time.Duration))
+	startPhase  func(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration))
 	recordPanic func(ctx context.Context)
 }
 
@@ -158,6 +195,7 @@ type GuardrailInspector struct {
 	managedMode       bool
 	judge             *LLMJudge
 	policyDir         string
+	fallbackProfile   atomic.Value // string; default, strict, or permissive
 	detectionStrategy string
 	strategyPrompt    string
 	strategyComplete  string
@@ -190,10 +228,14 @@ type GuardrailInspector struct {
 	engineInitOnce  sync.Once
 	engineErrLogged sync.Once
 
-	// tracer is set via SetTracer() from the sidecar wiring layer
-	// once an OTel provider is available. Kept as an interface so
-	// the inspector doesn't need to import internal/telemetry.
+	// tracer is set from the sidecar wiring layer once the process-owned v8
+	// runtime is available.
 	tracer *guardrailSpanEmitter
+	// managedAIDFailOpenRecorder owns the canonical availability/diagnostic occurrence for
+	// managed AID fail-open branches. It is bound with the generation-owned v8
+	// runtime and never falls back to the retired process-global writer.
+	managedAIDFailOpenMu       sync.RWMutex
+	managedAIDFailOpenRecorder func(context.Context, string, string)
 }
 
 // NewGuardrailInspector creates an inspector from config parameters.
@@ -214,10 +256,39 @@ func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge 
 		judge:       judge,
 		policyDir:   policyDir,
 	}
+	g.SetFallbackProfile("default")
 	if cisco != nil {
 		g.ciscoClient = cisco
 	}
 	return g
+}
+
+// SetFallbackProfile preserves the configured posture when OPA is absent or
+// unavailable. The value is atomic because validated config reloads can race
+// in-flight inspections.
+func (g *GuardrailInspector) SetFallbackProfile(profile string) {
+	if g == nil {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "strict":
+		g.fallbackProfile.Store("strict")
+	case "permissive":
+		g.fallbackProfile.Store("permissive")
+	default:
+		g.fallbackProfile.Store("default")
+	}
+}
+
+func (g *GuardrailInspector) currentFallbackProfile() string {
+	if g == nil {
+		return "default"
+	}
+	profile, _ := g.fallbackProfile.Load().(string)
+	if profile == "" {
+		return "default"
+	}
+	return profile
 }
 
 // SetCiscoInspector replaces the remote inspector after construction.
@@ -239,6 +310,18 @@ func (g *GuardrailInspector) SetManagedMode(on bool) {
 		return
 	}
 	g.managedMode = on
+}
+
+// SetManagedAIDFailOpenRecorder installs the generation-owned callback used to
+// persist machine-readable managed AID fail-open diagnostics. Passing nil
+// detaches the retiring runtime during reload/shutdown.
+func (g *GuardrailInspector) SetManagedAIDFailOpenRecorder(record func(context.Context, string, string)) {
+	if g == nil {
+		return
+	}
+	g.managedAIDFailOpenMu.Lock()
+	defer g.managedAIDFailOpenMu.Unlock()
+	g.managedAIDFailOpenRecorder = record
 }
 
 // mergeVerdict is the single choke point for combining local and cloud
@@ -296,12 +379,11 @@ func demoteLocalBlockForManaged(v *ScanVerdict) *ScanVerdict {
 	return &cp
 }
 
-// SetTracerFunc installs the OTel span emitter. Pass nil to
+// SetTracerFunc installs the generated span emitter. Pass nil to
 // disable span emission entirely (tests typically never call
-// this). The sidecar wires this to telemetry.Provider once
-// OTel is initialized.
+// this). The proxy wires it only from the authoritative v8 runtime.
 func (g *GuardrailInspector) SetTracerFunc(
-	start func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)),
+	start func(ctx context.Context, stage, direction, model, mode string) (context.Context, func(verdict *ScanVerdict, latency time.Duration)),
 ) {
 	if start == nil {
 		// Preserve any phase tracer already installed — SetTracerFunc
@@ -328,7 +410,7 @@ func (g *GuardrailInspector) SetTracerFunc(
 // legacy dashboards, or phase-only for latency debugging without
 // doubling span cost in production.
 func (g *GuardrailInspector) SetPhaseTracerFunc(
-	start func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)),
+	start func(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration)),
 ) {
 	if start == nil {
 		if g.tracer != nil {
@@ -374,9 +456,9 @@ func (g *GuardrailInspector) recordRecoveredPanic(ctx context.Context) {
 // startPhaseSpan is the internal helper every phase call site uses.
 // Returns (ctx, endFn). endFn is always non-nil so callers can
 // unconditionally `defer end(...)` without a nil guard.
-func (g *GuardrailInspector) startPhaseSpan(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
+func (g *GuardrailInspector) startPhaseSpan(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration)) {
 	if g.tracer == nil || g.tracer.startPhase == nil {
-		return ctx, func(string, string, int64) {}
+		return ctx, func(string, string, time.Duration) {}
 	}
 	return g.tracer.startPhase(ctx, phase)
 }
@@ -483,17 +565,25 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 
 	strategy := g.effectiveStrategy(direction)
 
-	// Open a span for the whole inspection — stage naming follows
-	// the strategy so dashboards can compare regex-only vs
-	// regex+judge latency distributions side-by-side.
-	var endSpan func(action, severity, reason string, latencyMs int64)
+	// Open one generated evaluation span for the whole inspection. The typed
+	// strategy field lets dashboards compare regex-only vs regex+judge latency
+	// without fragmenting the canonical span-name vocabulary.
+	var endSpan func(verdict *ScanVerdict, latency time.Duration)
 	if g.tracer != nil && g.tracer.start != nil {
 		var newCtx context.Context
-		newCtx, endSpan = g.tracer.start(ctx, strategy, direction, model)
+		newCtx, endSpan = g.tracer.start(ctx, strategy, direction, model, mode)
 		ctx = newCtx
 	}
 
 	start := time.Now()
+	traceFinished := false
+	if endSpan != nil {
+		defer func() {
+			if !traceFinished {
+				endSpan(nil, time.Since(start))
+			}
+		}()
+	}
 	var verdict *ScanVerdict
 	switch {
 	case g.managedMode:
@@ -501,7 +591,11 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		// the sole decision-maker. Local regex, judge, and OPA are all
 		// skipped; a request AID cannot decide fails open. See
 		// inspectManagedAIDOnly.
-		verdict = g.inspectManagedAIDOnly(ctx, direction, messages)
+		verdict = g.inspectManagedAIDOnly(
+			ctx,
+			direction,
+			managedAIDMessagesForInspection(direction, content, messages),
+		)
 	case strategy == "regex_judge":
 		verdict = g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
 	case strategy == "judge_first":
@@ -510,7 +604,8 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
 	}
 
-	latencyMs := time.Since(start).Milliseconds()
+	elapsed := time.Since(start)
+	latencyMs := elapsed.Milliseconds()
 
 	// Apply the prompt-surface UX contract before any caller observes the
 	// verdict. Done here (rather than in each call site) so the clamp is
@@ -528,11 +623,8 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 	}
 
 	if endSpan != nil {
-		var action, sev, reason string
-		if verdict != nil {
-			action, sev, reason = verdict.Action, verdict.Severity, verdict.Reason
-		}
-		endSpan(action, sev, reason, latencyMs)
+		traceFinished = true
+		endSpan(verdict, elapsed)
 	}
 
 	// Structured verdict emission — one record per top-level Inspect
@@ -561,39 +653,42 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 // ScanAllRules), no LLM judge, and no OPA finalize. This is the "AID is
 // authoritative" contract — see the managed aid-only inspection design.
 //
-// Fail-open semantics: if the managed inspector is unwired (ciscoClient ==
-// nil), there is nothing to inspect (no messages), or AID returns no verdict
+// Fail-open semantics: if there is no inspectable message text, the managed
+// inspector is unwired (ciscoClient == nil), or AID returns no verdict
 // (transport error, timeout, token failure), the request is ALLOWED rather
 // than blocked. Operators still see the failure via EmitCiscoError on the
 // client side, but traffic is never held hostage to AID availability in
 // managed mode.
 func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, direction string, messages []ChatMessage) *ScanVerdict {
+	if !managedAIDMessagesHaveInspectableContent(messages) {
+		// Nothing AID can inspect (for example, Inspect rewrites every empty
+		// completion to one assistant message with empty Content). This is a
+		// benign skipped scan, not an availability failure. Classify it before
+		// checking the client so empty traffic cannot page for an unwired or
+		// unavailable inspector that was never needed.
+		g.recordManagedAIDFailOpen(ctx, aidFailOpenNoContent, direction)
+		return allowVerdict("ai-defense")
+	}
 	if g.ciscoClient == nil {
 		// Managed mode with no wired inspector = no decision-maker at all.
 		// Fail open, but surface it loudly so operators can alert on a
 		// misconfigured managed install rather than silently running with
 		// no enforcement.
-		recordManagedAIDFailOpen(ctx, aidFailOpenUnwired, direction)
-		return allowVerdict("ai-defense")
-	}
-	if len(messages) == 0 {
-		// Nothing to inspect (e.g. an empty completion). This is a benign
-		// skipped scan, not an availability failure — record it at info
-		// level with a distinct reason so it stays out of AID-outage alerts.
-		recordManagedAIDFailOpen(ctx, aidFailOpenNoContent, direction)
+		g.recordManagedAIDFailOpen(ctx, aidFailOpenUnwired, direction)
 		return allowVerdict("ai-defense")
 	}
 	t0 := time.Now()
-	_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-	v := g.ciscoClient.Inspect(messages)
-	elapsed := float64(time.Since(t0).Milliseconds())
-	endCisco(phaseAction(v), phaseSeverity(v), int64(elapsed))
+	ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+	v := g.ciscoClient.Inspect(ciscoCtx, messages)
+	duration := time.Since(t0)
+	elapsed := float64(duration) / float64(time.Millisecond)
+	endCisco(phaseAction(v), phaseSeverity(v), duration)
 	if v == nil {
 		// AID down / timeout / token failure → fail open. The client
 		// already emitted EmitCiscoError for the underlying transport
 		// failure; this records the decision-level fail-open so operators
 		// can alert on sustained AID unavailability driving allow decisions.
-		recordManagedAIDFailOpen(ctx, aidFailOpenUnavailable, direction)
+		g.recordManagedAIDFailOpen(ctx, aidFailOpenUnavailable, direction)
 		return allowVerdict("ai-defense")
 	}
 	v.CiscoElapsedMs = elapsed
@@ -601,6 +696,44 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 		v.ScannerSources = []string{"ai-defense"}
 	}
 	return v
+}
+
+// managedAIDContentIsInspectable mirrors the text AID actually receives.
+// Both Cisco clients serialize ChatMessage.Content and ignore RawContent,
+// tool calls, and other local-only fields, so whitespace-only Content cannot
+// produce a meaningful remote decision.
+func managedAIDContentIsInspectable(content string) bool {
+	return strings.TrimSpace(content) != ""
+}
+
+func managedAIDMessagesHaveInspectableContent(messages []ChatMessage) bool {
+	for _, message := range messages {
+		if managedAIDContentIsInspectable(message.Content) {
+			return true
+		}
+	}
+	return false
+}
+
+// managedAIDMessagesForInspection closes the gap between provider-native
+// prompt formats and the canonical message payload sent to Cisco AI Defense.
+// Passthrough routes expose top-level prompt text through content, while both
+// Cisco clients serialize only ChatMessage.Content. When no existing message
+// has serializable text, preserve the original history and append one user
+// turn carrying that prompt. Existing chat history is already authoritative
+// and must not receive a duplicate; blank prompts keep the benign no_content
+// path. Completion/response payloads are normalized to one assistant message
+// before this helper runs and are intentionally left alone.
+func managedAIDMessagesForInspection(direction, content string, messages []ChatMessage) []ChatMessage {
+	if direction != "prompt" ||
+		!managedAIDContentIsInspectable(content) ||
+		managedAIDMessagesHaveInspectableContent(messages) {
+		return messages
+	}
+
+	normalized := make([]ChatMessage, len(messages), len(messages)+1)
+	copy(normalized, messages)
+	return append(normalized, ChatMessage{Role: "user", Content: content})
 }
 
 // managedAIDFailOpenComponent is the stable diagnostic component / message
@@ -623,33 +756,35 @@ const (
 // recordManagedAIDFailOpen emits an observable, distinctly-labeled signal for
 // a managed-mode fail-open decision so operators can monitor and alert.
 //
-// It rides a diagnostic event rather than an error event on purpose: the
-// gateway error path wholesale-redacts Message/Cause under the managed sink
-// policy (see emitEvent), which would erase the machine-readable reason. The
-// DiagnosticPayload.Fields bag is not redacted, so the reason/severity_hint
-// labels survive to every sink (gateway.jsonl, audit, AID) unchanged. The two
-// availability failures (unwired inspector, nil AID verdict) carry
-// severity_hint=high so a dashboard can alert on sustained AID unavailability;
-// the benign no-content skip carries severity_hint=info so it stays out of
-// those alerts. All three share the same component/reason schema so a single
-// monitor can pivot on `reason`.
+// The two availability failures (unwired inspector, nil AID verdict) ride the
+// mandatory platform-health family and are HIGH. Their exact low-cardinality
+// reason is encoded in the identifier-class health subsystem, so destination
+// redaction cannot erase it. The benign no-content skip remains an opt-in INFO
+// diagnostic. All three share the same component prefix so a single monitor
+// can pivot on the suffix.
 //
 // The underlying transport failure for aidFailOpenUnavailable is separately
 // surfaced as a HIGH-severity error by the client's EmitCiscoError; this adds
 // the decision-level fail-open signal on top of that.
-func recordManagedAIDFailOpen(ctx context.Context, reason, direction string) {
-	severityHint := "high"
-	if reason == aidFailOpenNoContent {
-		severityHint = "info"
+func (g *GuardrailInspector) recordManagedAIDFailOpen(ctx context.Context, reason, direction string) {
+	var record func(context.Context, string, string)
+	if g != nil {
+		g.managedAIDFailOpenMu.RLock()
+		record = g.managedAIDFailOpenRecorder
+		g.managedAIDFailOpenMu.RUnlock()
 	}
-	emitDiagnostic(ctx, managedAIDFailOpenComponent,
-		"managed AID inspection failed open",
-		map[string]string{
-			"reason":        reason,
-			"severity_hint": severityHint,
-			"direction":     direction,
-			"decision":      "allow",
-		})
+	if record != nil {
+		record(ctx, reason, direction)
+	}
+	// Preserve a bounded immediate stderr signal even if the canonical runtime
+	// or its destination is unhealthy. Both values are normalized closed enums;
+	// no request or response content reaches this fallback.
+	fmt.Fprintf(
+		defaultLogWriter,
+		"[guardrail] managed AID fail-open reason=%s direction=%s\n",
+		normalizeManagedAIDFailOpenReason(reason),
+		normalizeManagedAIDFailOpenDirection(direction),
+	)
 }
 
 // clampPromptDirectionVerdict applies the prompt-surface UX contract to a
@@ -711,14 +846,36 @@ func categoriesOf(findings []string) []string {
 // content (sensitive paths, dangerous commands, critical injection patterns)
 // and block the stream immediately without waiting for an LLM round-trip.
 func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
-	// managed_enterprise: per-chunk local regex is off. AID inspects the
-	// full completion on the POST-CALL path (Inspect → inspectManagedAIDOnly),
-	// so mid-stream chunks pass through (fail open).
-	if g.managedMode {
-		return allowVerdict("ai-defense")
+	var endSpan func(verdict *ScanVerdict, latency time.Duration)
+	if g.tracer != nil && g.tracer.start != nil {
+		var started context.Context
+		started, endSpan = g.tracer.start(ctx, "regex_only", direction, model, mode)
+		ctx = started
 	}
-	verdict := g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
-	clampPromptDirectionVerdict(verdict, direction)
+	start := time.Now()
+	traceFinished := false
+	if endSpan != nil {
+		defer func() {
+			if !traceFinished {
+				endSpan(nil, time.Since(start))
+			}
+		}()
+	}
+	var verdict *ScanVerdict
+	if g.managedMode {
+		// managed_enterprise: per-chunk local regex is off. AID inspects the
+		// full completion on the POST-CALL path (Inspect →
+		// inspectManagedAIDOnly), so mid-stream chunks pass through while the
+		// canonical v8 evaluation span still records the allow decision.
+		verdict = allowVerdict("ai-defense")
+	} else {
+		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+		clampPromptDirectionVerdict(verdict, direction)
+	}
+	if endSpan != nil {
+		traceFinished = true
+		endSpan(verdict, time.Since(start))
+	}
 	return verdict
 }
 
@@ -734,7 +891,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
 	localResult = scanLocalPatterns(direction, content)
-	endRegex(phaseAction(localResult), phaseSeverity(localResult), time.Since(regexStart).Milliseconds())
+	endRegex(phaseAction(localResult), phaseSeverity(localResult), time.Since(regexStart))
 
 	// The local-HIGH short-circuit historically returned early without
 	// consulting AID cloud so a HIGH local regex hit could enforce a
@@ -753,10 +910,11 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 
 	if (sm == "remote" || sm == "both") && g.ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
-		_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(messages)
-		ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
-		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), int64(ciscoElapsedMs))
+		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoElapsed := time.Since(t0)
+		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
+		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 	}
 
 	merged := g.mergeVerdict(localResult, ciscoResult)
@@ -766,16 +924,20 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 }
 
 // inspectRegexJudge uses triage patterns to route ambiguous findings to the
-// LLM judge, while running the full rule engine (ScanAllRules) as a safety net
-// for patterns triage doesn't cover (sensitive paths, commands, C2, etc.).
+// LLM judge, while keeping content-only rules as a safety net. Action-shaped
+// categories are intentionally excluded here: prose is not proof that a
+// command, path access, cognitive-file mutation, or C2 operation will run.
 func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
 	signals := triagePatterns(direction, content)
 	high, review, _ := partitionSignals(signals)
 
-	// Run the full rule engine for categories triage doesn't cover.
-	ruleFindings := ScanAllRules(content, "")
+	// Keep trust, credential, and PII detection on untrusted content. Concrete
+	// actions are evaluated through the tool-call path where execution facts
+	// are available, rather than treating their literal appearance in prose as
+	// an action.
+	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
 	var ruleVerdict *ScanVerdict
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
@@ -803,17 +965,18 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	if len(high) > 0 && (regexVerdictForSpan == nil || severityRank["HIGH"] > severityRank[regexVerdictForSpan.Severity]) {
 		regexVerdictForSpan = &ScanVerdict{Action: guardrailFallbackActionForSeverity("HIGH"), Severity: "HIGH"}
 	}
-	endRegex(phaseAction(regexVerdictForSpan), phaseSeverity(regexVerdictForSpan), time.Since(regexStart).Milliseconds())
+	endRegex(phaseAction(regexVerdictForSpan), phaseSeverity(regexVerdictForSpan), time.Since(regexStart))
 
 	var ciscoResult *ScanVerdict
 	var ciscoElapsedMs float64
 
 	runCisco := func() {
 		t0 := time.Now()
-		_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(messages)
-		ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
-		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), int64(ciscoElapsedMs))
+		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoElapsed := time.Since(t0)
+		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
+		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 	}
 
 	// HIGH_SIGNAL triage findings produce an immediate verdict.
@@ -853,7 +1016,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.adjudicate")
 			judgeVerdict = g.judge.AdjudicateFindings(judgeCtx, direction, content, review)
-			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart).Milliseconds())
+			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart))
 		}
 		if judgeVerdict == nil || judgeVerdict.JudgeFailed {
 			judgeVerdict = signalsToVerdict(review, "local-triage-fallback")
@@ -867,7 +1030,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 		sweepStart := time.Now()
 		sweepCtx, endSweep := g.startPhaseSpan(ctx, "judge.sweep")
 		judgeVerdict = g.judge.RunJudges(sweepCtx, direction, content, "")
-		endSweep(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(sweepStart).Milliseconds())
+		endSweep(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(sweepStart))
 	}
 
 	// Cisco AI Defense (if configured).
@@ -929,7 +1092,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.sweep")
 			v := g.judge.RunJudges(judgeCtx, direction, content, "")
-			endJudge(phaseAction(v), phaseSeverity(v), time.Since(judgeStart).Milliseconds())
+			endJudge(phaseAction(v), phaseSeverity(v), time.Since(judgeStart))
 			judgeCh <- result{verdict: v}
 		}()
 	} else {
@@ -949,7 +1112,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		sigs := triagePatterns(direction, content)
 		// Regex phase without a verdict still records latency — timing
 		// alone is a useful signal when comparing judge_first budgets.
-		endRegex("", "", time.Since(regexStart).Milliseconds())
+		endRegex("", "", time.Since(regexStart))
 		triageCh <- sigs
 	}()
 
@@ -973,17 +1136,18 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		fallbackStart := time.Now()
 		_, endFallback := g.startPhaseSpan(ctx, "regex.fallback")
 		localResult := scanLocalPatterns(direction, content)
-		endFallback(phaseAction(localResult), phaseSeverity(localResult), time.Since(fallbackStart).Milliseconds())
+		endFallback(phaseAction(localResult), phaseSeverity(localResult), time.Since(fallbackStart))
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
 		}
 		// Also run Cisco remote on fallback for full parity with regex_only path.
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
 			t0 := time.Now()
-			_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-			ciscoResult = g.ciscoClient.Inspect(messages)
-			ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
-			endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), int64(ciscoElapsedMs))
+			ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+			ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+			ciscoElapsed := time.Since(t0)
+			ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
+			endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 			localResult = g.mergeVerdict(localResult, ciscoResult)
 			if localResult != nil {
 				localResult.CiscoElapsedMs = ciscoElapsedMs
@@ -1003,9 +1167,10 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		merged = mergeWithJudge(merged, regexVerdict)
 	}
 
-	// Run the full rule engine as a safety net for categories the judge and
-	// triage don't cover (sensitive paths, dangerous commands, C2, etc.).
-	ruleFindings := ScanAllRules(content, "")
+	// Keep the same content/action boundary as regex_judge. The trusted action
+	// dispatcher remains responsible for command, path, cognitive-file, and C2
+	// enforcement because it can reason over parsed execution facts.
+	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
 		if severityRank[maxSev] >= severityRank["HIGH"] {
@@ -1031,10 +1196,11 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// Cisco AI Defense (if configured).
 	if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
-		_, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(messages)
-		ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
-		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), int64(ciscoElapsedMs))
+		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
+		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoElapsed := time.Since(t0)
+		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
+		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
 		merged = g.mergeVerdict(merged, ciscoResult)
 		merged.CiscoElapsedMs = ciscoElapsedMs
 	}
@@ -1111,15 +1277,15 @@ func (g *GuardrailInspector) ReloadPolicies() error {
 }
 
 // finalize runs OPA policy evaluation if available, otherwise applies the
-// built-in CRITICAL-only block fallback.
+// built-in posture-equivalent fallback.
 func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, merged *ScanVerdict, ciscoResult *ScanVerdict) *ScanVerdict {
 	if g.policyDir == "" {
-		return fallbackGuardrailVerdict(merged)
+		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
 	}
 
 	engine := g.policyEngine()
 	if engine == nil {
-		return fallbackGuardrailVerdict(merged)
+		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
 	}
 
 	input := policy.GuardrailInput{
@@ -1151,12 +1317,12 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 	opaStart := time.Now()
 	opaCtx, endOPA := g.startPhaseSpan(ctx, "opa")
 	out, err := engine.EvaluateGuardrail(opaCtx, input)
-	opaLatency := time.Since(opaStart).Milliseconds()
+	opaLatency := time.Since(opaStart)
 	if err != nil || out == nil {
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return fallbackGuardrailVerdict(merged)
+		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 
@@ -1187,59 +1353,42 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 
 var localPatternsMu sync.RWMutex
 
-var defaultInjectionPatterns = []string{
-	"ignore previous", "ignore all instructions", "ignore above",
-	"ignore all previous", "ignore your instructions", "ignore prior",
-	"disregard previous", "disregard all", "disregard your",
-	"forget your instructions", "forget all previous",
-	"override your instructions", "override all instructions",
-	"you are now", "pretend you are",
-	"jailbreak", "do anything now", "dan mode",
-	"developer mode enabled",
-}
+// Injection detection is owned by the contextual trust-exploit rules. The old
+// local substring floor promoted ordinary prose such as "pretend you are a
+// compiler" and "ignore prior test output" without an adversarial object.
+// Operators can still opt into local phrases through local-patterns.yaml.
+var defaultInjectionPatterns = []string{}
 
-var injectionPatterns = append([]string(nil), defaultInjectionPatterns...)
+var injectionPatterns = cloneLocalPatternStrings(defaultInjectionPatterns)
 
-var defaultInjectionRegexSources = []string{
-	`ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`,
-	`disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`,
-	`(?:share|reveal|show|print|output|dump|repeat|give\s+me)\s+(?:your|the)\s+(?:system\s+)?(?:prompt|instructions|rules)`,
-	`(?:what\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompt|instructions|rules))`,
-	`act\s+as\b`,
-	`bypass\s+(?:your|the|my|all|any)\s+(?:filter|guard|safe|restrict|rule|instruction)`,
-}
+var defaultInjectionRegexSources = []string{}
 
 var injectionRegexes = compileBaseline(defaultInjectionRegexSources)
 
 var defaultPIIRequestPatterns = []string{
 	"find their ssn", "find my ssn", "look up their ssn",
 	"retrieve their ssn", "get their ssn", "get my ssn",
-	"social security number", "mother's maiden name",
-	"mothers maiden name", "credit card number",
 	"find their password", "look up their password",
-	"find their email", "look up their email",
-	"date of birth", "bank account number",
-	"passport number", "driver's license",
-	"drivers license",
 }
 
-var piiRequestPatterns = append([]string(nil), defaultPIIRequestPatterns...)
+var piiRequestPatterns = cloneLocalPatternStrings(defaultPIIRequestPatterns)
 
 var defaultPIIDataRegexSources = []string{
-	`\b\d{3}-\d{2}-\d{4}\b`,
+	`\b(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6[0-5][0-9]|66[0-5]|66[7-9]|6[7-9][0-9]|[78][0-9]{2})-(?:0[1-9]|[1-9][0-9])-(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\b`,
 	`\b(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`,
 	`\b3[47]\d{2}[- ]?\d{6}[- ]?\d{5}\b`,
 }
 
 var piiDataRegexes = compileBaseline(defaultPIIDataRegexSources)
 
-var defaultSecretPatterns = []string{
-	"sk-ant-", "sk-proj-",
-	"-----begin rsa", "-----begin private", "-----begin openssh",
-	"ghp_", "gho_", "github_pat_",
-}
+// Secret prefixes and key-header words are common in detector source and
+// documentation. Actual credential values are owned by the length- and
+// structure-aware secret rules below, so the local literal floor is empty by
+// default. Operator-specific literal indicators remain supported through the
+// local-pattern override.
+var defaultSecretPatterns = []string{}
 
-var secretPatterns = append([]string(nil), defaultSecretPatterns...)
+var secretPatterns = cloneLocalPatternStrings(defaultSecretPatterns)
 
 // compileBaseline panics on a bad pattern. This is intentional: the
 // defaults are constants in source, not operator input, so a bad regex
@@ -1264,92 +1413,150 @@ func compileBaseline(sources []string) []*regexp.Regexp {
 //   - empty slice (lp.X != nil, len 0) → operator explicitly cleared the field
 //   - populated slice → wholesale replacement of the default
 //
-// Regex sources that fail to compile are logged and dropped from the
-// override; the default for that single regex slot is *not* retained
-// for the failed entry (the override is best-effort within the field).
-// A separate `compileRegexSafe`-style ReDoS guard would be sound but
-// is intentionally NOT applied here because the only producer of these
-// YAMLs today is human operators, not multi-tenant input — the rule
-// pack itself is a trust boundary upstream of the gateway. Callers
-// who need stricter compile guarantees should validate the YAML at
-// activation time (see cli/defenseclaw/commands/cmd_policy.py).
-func ApplyLocalPatternsOverride(lp *guardrail.LocalPatterns) {
-	localPatternsMu.Lock()
-	defer localPatternsMu.Unlock()
+// The candidate is compiled completely before any runtime state is mutated.
+// Invalid operator regexes therefore reject activation instead of silently
+// dropping only the failed entries. Every activation starts from the generated
+// defaults, so removing a field from an override restores its default rather
+// than retaining the previous candidate's value.
+func ApplyLocalPatternsOverride(lp *guardrail.LocalPatterns) error {
+	activation, err := prepareLocalPatternsOverride(lp)
+	if err != nil {
+		return err
+	}
+	publishLocalPatternsOverride(activation)
+	return nil
+}
 
-	if lp == nil {
-		injectionPatterns = append([]string(nil), defaultInjectionPatterns...)
-		injectionRegexes = compileBaseline(defaultInjectionRegexSources)
-		piiRequestPatterns = append([]string(nil), defaultPIIRequestPatterns...)
-		piiDataRegexes = compileBaseline(defaultPIIDataRegexSources)
-		secretPatterns = append([]string(nil), defaultSecretPatterns...)
-		exfilPatterns = append([]string(nil), defaultExfilPatterns...)
+type localPatternsActivation struct {
+	injectionPatterns  []string
+	injectionRegexes   []*regexp.Regexp
+	piiRequestPatterns []string
+	piiDataRegexes     []*regexp.Regexp
+	secretPatterns     []string
+	exfilPatterns      []string
+}
+
+func prepareLocalPatternsOverride(lp *guardrail.LocalPatterns) (*localPatternsActivation, error) {
+	activation := &localPatternsActivation{
+		injectionPatterns:  cloneLocalPatternStrings(defaultInjectionPatterns),
+		injectionRegexes:   compileBaseline(defaultInjectionRegexSources),
+		piiRequestPatterns: cloneLocalPatternStrings(defaultPIIRequestPatterns),
+		piiDataRegexes:     compileBaseline(defaultPIIDataRegexSources),
+		secretPatterns:     cloneLocalPatternStrings(defaultSecretPatterns),
+		exfilPatterns:      cloneLocalPatternStrings(defaultExfilPatterns),
+	}
+	if lp != nil {
+		if lp.Injection != nil {
+			activation.injectionPatterns = cloneLocalPatternStrings(lp.Injection)
+		}
+		if lp.InjectionRegexes != nil {
+			compiled, err := compileLocalPatternSources("injection_regexes", lp.InjectionRegexes)
+			if err != nil {
+				return nil, err
+			}
+			activation.injectionRegexes = compiled
+		}
+		if lp.PIIRequests != nil {
+			activation.piiRequestPatterns = cloneLocalPatternStrings(lp.PIIRequests)
+		}
+		if lp.PIIDataRegexes != nil {
+			compiled, err := compileLocalPatternSources("pii_data_regexes", lp.PIIDataRegexes)
+			if err != nil {
+				return nil, err
+			}
+			activation.piiDataRegexes = compiled
+		}
+		if lp.Secrets != nil {
+			activation.secretPatterns = cloneLocalPatternStrings(lp.Secrets)
+		}
+		if lp.Exfiltration != nil {
+			activation.exfilPatterns = cloneLocalPatternStrings(lp.Exfiltration)
+		}
+	}
+	return activation, nil
+}
+
+func cloneLocalPatternStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
+}
+
+func publishLocalPatternsOverride(activation *localPatternsActivation) {
+	if activation == nil {
 		return
 	}
-
-	if lp.Injection != nil {
-		injectionPatterns = append([]string(nil), lp.Injection...)
-	}
-	if lp.InjectionRegexes != nil {
-		out := make([]*regexp.Regexp, 0, len(lp.InjectionRegexes))
-		for _, src := range lp.InjectionRegexes {
-			re, err := regexp.Compile(src)
-			if err != nil {
-				fmt.Fprintf(defaultLogWriter, "[guardrail] local-patterns: skip injection_regexes %q: %v\n", src, err)
-				continue
-			}
-			out = append(out, re)
-		}
-		injectionRegexes = out
-	}
-	if lp.PIIRequests != nil {
-		piiRequestPatterns = append([]string(nil), lp.PIIRequests...)
-	}
-	if lp.PIIDataRegexes != nil {
-		out := make([]*regexp.Regexp, 0, len(lp.PIIDataRegexes))
-		for _, src := range lp.PIIDataRegexes {
-			re, err := regexp.Compile(src)
-			if err != nil {
-				fmt.Fprintf(defaultLogWriter, "[guardrail] local-patterns: skip pii_data_regexes %q: %v\n", src, err)
-				continue
-			}
-			out = append(out, re)
-		}
-		piiDataRegexes = out
-	}
-	if lp.Secrets != nil {
-		secretPatterns = append([]string(nil), lp.Secrets...)
-	}
-	if lp.Exfiltration != nil {
-		exfilPatterns = append([]string(nil), lp.Exfiltration...)
-	}
+	localPatternsMu.Lock()
+	injectionPatterns = activation.injectionPatterns
+	injectionRegexes = activation.injectionRegexes
+	piiRequestPatterns = activation.piiRequestPatterns
+	piiDataRegexes = activation.piiDataRegexes
+	secretPatterns = activation.secretPatterns
+	exfilPatterns = activation.exfilPatterns
+	localPatternsMu.Unlock()
 }
 
-// secretPatternRegexes tighten patterns that cause false positives as bare
-// substrings. Requires assignment-like context with a long alphanumeric value
-// (20+ chars) to avoid matching conversational "reply with this token: XYZ".
-var secretPatternRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`),
+func compileLocalPatternSources(field string, sources []string) ([]*regexp.Regexp, error) {
+	compiled := make([]*regexp.Regexp, 0, len(sources))
+	for index, src := range sources {
+		re, err := compileRegexSafe(src)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"local-patterns %s entry %d contains an invalid regular expression: %w",
+				field,
+				index,
+				err,
+			)
+		}
+		compiled = append(compiled, re)
+	}
+	return compiled, nil
+}
+
+type localSecretDetectorKind uint8
+
+const (
+	localSecretDetectorToken localSecretDetectorKind = iota + 1
+	localSecretDetectorPassword
+	localSecretDetectorAPIKey
+	localSecretDetectorBearer
+	localSecretDetectorAWS
+)
+
+type localSecretDetector struct {
+	kind        localSecretDetectorKind
+	canonicalID string
+	pattern     *regexp.Regexp
+}
+
+// secretPatternDetectors tighten patterns that cause false positives as bare
+// substrings. Every detector carries stable behavioral and canonical identities
+// so slice reordering cannot silently change acceptance or finding IDs.
+var secretPatternDetectors = []localSecretDetector{
+	{localSecretDetectorToken, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`)},
 	// Require an actual secret-shaped VALUE after the key name, so prose
 	// that merely mentions "password" / "api_key" / "bearer" is not flagged.
-	regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["']?[^\s"']{8,}`),
-	regexp.MustCompile(`(?i)\bapi[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}`),
-	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}`),
-	regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`),
+	{localSecretDetectorPassword, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["']?[^\s"']{8,}`)},
+	{localSecretDetectorAPIKey, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\bapi[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}`)},
+	{localSecretDetectorBearer, "LP-SECRET-BEARER", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}`)},
+	{localSecretDetectorAWS, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`)},
 }
 
-var defaultExfilPatterns = []string{
-	"/etc/passwd", "/etc/shadow", "base64 -d", "base64 --decode",
-	"exfiltrate", "exfil", "send to my server", "curl http",
-}
+// Target names and transfer verbs are common in source review and operational
+// documentation. Strong built-in exfil detection therefore requires the
+// conjunction of a read/dump verb, a sensitive target, and an egress verb.
+// Operators can still add organization-specific literal phrases here.
+var defaultExfilPatterns = []string{}
 
-var exfilPatterns = append([]string(nil), defaultExfilPatterns...)
+var exfilPatterns = cloneLocalPatternStrings(defaultExfilPatterns)
 
-// exfilRegexes is the deterministic regex FLOOR for credential-file
-// reads. It runs against the normalized triage view (lowercased,
-// zero-width stripped, whitespace-around-slashes collapsed) so it
-// catches typo evasions and odd separators that the literal
-// substring list above would silently miss:
+// exfilTargetRegexes recognize sensitive credential-file targets. A target
+// match alone is telemetry-free for prompt prose: findStrongExfilIntent also
+// requires an extraction verb and an egress verb in a compact context window.
+// The target expressions run against the normalized triage view (lowercased,
+// zero-width stripped, whitespace-around-slashes collapsed) so contextual
+// detection still catches typo evasions and odd separators:
 //
 //   - "etccc passwd", "etc passsswd", "etc/  passwd"
 //     → matches via `etc.{0,3}pas{1,8}wd`
@@ -1370,20 +1577,41 @@ var exfilPatterns = append([]string(nil), defaultExfilPatterns...)
 // The pattern is still anchored to the exact target words ("etc" +
 // "pas...wd" / "sha...dow") so false positives from prose
 // containing both fragments separately are rare.
-//
-// Treat this as a floor under the LLM-judge layer: even if the exfil
-// judge is offline, mis-routed, or returns "false" on a polite typo
-// prompt, these patterns alone are enough to raise a HIGH_SIGNAL
-// triage finding. They are intentionally narrow (no `\.env`,
-// `kubeconfig`, etc. — those live under the rules engine and the
-// exfil-context probe) so the FLOOR stays opinionated and hard to
-// false-positive.
-var exfilRegexes = []*regexp.Regexp{
+var exfilTargetRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`etc.{0,3}pas{1,8}wd\b`),
 	regexp.MustCompile(`etc.{0,3}sha{1,8}dow\b`),
 	regexp.MustCompile(`\bid_(?:rsa|ed25519|ecdsa|dsa)\b`),
 	regexp.MustCompile(`(?:^|[/\s'"` + "`" + `])\.ssh/`),
 	regexp.MustCompile(`(?:^|[/\s'"` + "`" + `])\.aws/(?:credentials|config)\b`),
+}
+
+var exfilReadIntentRegex = regexp.MustCompile(`\b(?:cat|collect|copy|dump|extract|fetch|read|steal)\b`)
+var exfilEgressIntentRegex = regexp.MustCompile(`\b(?:exfil(?:trate|tration)?|post|send|transmit|upload)\b`)
+
+const exfilIntentContextBytes = 240
+
+// findStrongExfilIntent reports a sensitive target only when extraction and
+// egress intent occur nearby. Requiring all three components prevents path or
+// command examples in docs from becoming alerts while keeping an offline,
+// deterministic floor for explicit credential-exfiltration requests.
+func findStrongExfilIntent(normalized string) (string, bool) {
+	for _, targetRegex := range exfilTargetRegexes {
+		for _, targetLoc := range targetRegex.FindAllStringIndex(normalized, -1) {
+			start := targetLoc[0] - exfilIntentContextBytes
+			if start < 0 {
+				start = 0
+			}
+			end := targetLoc[1] + exfilIntentContextBytes
+			if end > len(normalized) {
+				end = len(normalized)
+			}
+			window := normalized[start:end]
+			if exfilReadIntentRegex.MatchString(window) && exfilEgressIntentRegex.MatchString(window) {
+				return normalized[targetLoc[0]:targetLoc[1]], true
+			}
+		}
+	}
+	return "", false
 }
 
 // bulkAccessRegex detects prompts requesting bulk extraction from sensitive tools
@@ -1420,6 +1648,11 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	lower := normalizeForTriage(content)
 	var flags []string
 	isHigh := false
+	type localPIICandidate struct {
+		flag     string
+		evidence string
+	}
+	var localPIICandidates []localPIICandidate
 
 	if direction == "prompt" {
 		for _, p := range injPatterns {
@@ -1447,18 +1680,9 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 				isHigh = true
 			}
 		}
-		// Regex floor: catches typo evasions like "etccc passwd",
-		// "etc shaadow", and direct ~/.ssh/.aws/ credential paths
-		// that the literal substring list above misses.
-		for _, re := range exfilRegexes {
-			if match, norm, ok := findRegexMatch(content, lower, re); ok {
-				flag := "exfil-regex:" + match
-				if norm {
-					flag = "exfil-regex:[normalized] " + match
-				}
-				flags = append(flags, flag)
-				isHigh = true
-			}
+		if target, ok := findStrongExfilIntent(lower); ok {
+			flags = append(flags, "exfil-context:"+target)
+			isHigh = true
 		}
 		if bulkAccessRegex.MatchString(lower) {
 			flags = append(flags, "bulk-access:sensitive-tool")
@@ -1474,13 +1698,15 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	// be a lie: PII/secret regexes are exactly the surfaces an attacker
 	// would target with invisible-character splicing.
 	for _, re := range piiDRegexes {
-		if match, norm, ok := findRegexMatch(content, lower, re); ok {
+		if match, norm, ok := findAcceptedLocalPIIMatch(content, lower, re); ok {
 			flag := "pii-data:" + match
 			if norm {
 				flag = "pii-data:[normalized] " + match
 			}
-			flags = append(flags, flag)
-			isHigh = true
+			localPIICandidates = append(localPIICandidates, localPIICandidate{
+				flag:     flag,
+				evidence: normalizedPIIEvidenceKey(sanitizeEvidence(match)),
+			})
 		}
 	}
 
@@ -1489,8 +1715,8 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 			flags = append(flags, p)
 		}
 	}
-	for _, re := range secretPatternRegexes {
-		if match, norm, ok := findRegexMatch(content, lower, re); ok {
+	for _, detector := range secretPatternDetectors {
+		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
 			flag := match
 			if norm {
 				flag = "[normalized] " + match
@@ -1499,10 +1725,29 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		}
 	}
 
-	// Run the full rule engine (sensitive paths, dangerous commands, C2, etc.)
-	// so that scanLocalPatterns covers every category regardless of strategy.
+	// Content scanning retains trust, credential, and PII rules. Literal
+	// commands, paths, cognitive files, and C2 indicators are action categories
+	// and require parsed tool-call facts before they can affect enforcement.
 	maxRuleSev := "NONE"
-	ruleFindings := ScanAllRules(content, "")
+	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
+	catalogPIIEvidence := make(map[string]struct{})
+	for _, rf := range ruleFindings {
+		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {
+			catalogPIIEvidence[normalizedPIIEvidenceKey(rf.Evidence)] = struct{}{}
+		}
+	}
+	seenLocalPIIEvidence := make(map[string]struct{})
+	for _, candidate := range localPIICandidates {
+		if _, duplicate := catalogPIIEvidence[candidate.evidence]; duplicate {
+			continue
+		}
+		if _, duplicate := seenLocalPIIEvidence[candidate.evidence]; duplicate {
+			continue
+		}
+		seenLocalPIIEvidence[candidate.evidence] = struct{}{}
+		flags = append(flags, candidate.flag)
+		isHigh = true
+	}
 	for _, rf := range ruleFindings {
 		flags = append(flags, rf.RuleID+":"+rf.Title)
 		if severityRank[rf.Severity] >= severityRank["HIGH"] {
@@ -1546,37 +1791,9 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // Triage pattern scanning (for regex_judge and judge_first strategies)
 // ---------------------------------------------------------------------------
 
-// Multi-word injection phrases that are unambiguously adversarial.
-var highSignalInjectionPatterns = []string{
-	"ignore all previous instructions", "ignore all instructions",
-	"ignore your instructions", "ignore previous instructions",
-	"disregard all instructions", "disregard previous instructions",
-	"disregard your instructions",
-	"forget your instructions", "forget all previous",
-	"override your instructions", "override all instructions",
-	"developer mode enabled", "do anything now", "dan mode",
-}
-
-// Short injection keywords that need LLM adjudication — many are benign.
-var reviewInjectionPatterns = []string{
-	"ignore previous", "ignore above", "ignore prior",
-	"disregard previous", "disregard all",
-	"you are now", "pretend you are",
-	"jailbreak",
-}
-
-var reviewInjectionRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`act\s+as\b`),
-	regexp.MustCompile(`bypass\s+(?:your|the|my|all|any)\s+(?:filter|guard|safe|restrict|rule|instruction)`),
-}
-
-var highSignalInjectionRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`),
-	regexp.MustCompile(`disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`),
-	regexp.MustCompile(`(?:share|reveal|show|print|output|dump|repeat|give\s+me)\s+(?:your|the)\s+(?:system\s+)?(?:prompt|instructions|rules)`),
-	regexp.MustCompile(`(?:what\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompt|instructions|rules))`),
-}
-
+// Contextual trust-exploit rules are the authoritative injection detector.
+// Keeping duplicate phrase/regex triage floors here caused benign prose to be
+// routed to a missing judge and converted into a MEDIUM alert.
 // SSN format \d{3}-\d{2}-\d{4} is HIGH_SIGNAL (unambiguous).
 var ssnDashRegex = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
 
@@ -1594,9 +1811,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 		return nil
 	}
 	// Snapshot the overridable pattern sets once for the lifetime of
-	// the call, same reasoning as in scanLocalPatterns. The high/low
-	// signal injection splits are not (yet) operator-tunable so they
-	// are read directly from their compiled-in globals.
+	// the call, same reasoning as in scanLocalPatterns.
 	localPatternsMu.RLock()
 	piiPatterns := piiRequestPatterns
 	exfPatterns := exfilPatterns
@@ -1610,46 +1825,6 @@ func triagePatterns(direction, content string) []TriageSignal {
 	var signals []TriageSignal
 
 	if direction == "prompt" {
-		// HIGH_SIGNAL injection patterns (multi-word, unambiguous).
-		for _, p := range highSignalInjectionPatterns {
-			if strings.Contains(lower, p) {
-				signals = append(signals, TriageSignal{
-					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-INJ-PHRASE",
-					Category: "injection", Pattern: p,
-					Evidence: extractEvidence(content, lower, p), Confidence: 0.95,
-				})
-			}
-		}
-		for _, re := range highSignalInjectionRegexes {
-			if re.MatchString(lower) {
-				signals = append(signals, TriageSignal{
-					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-INJ-REGEX",
-					Category: "injection", Pattern: re.String(),
-					Evidence: extractEvidenceRegex(content, lower, re), Confidence: 0.90,
-				})
-			}
-		}
-
-		// NEEDS_REVIEW injection patterns (short, ambiguous).
-		for _, p := range reviewInjectionPatterns {
-			if strings.Contains(lower, p) {
-				signals = append(signals, TriageSignal{
-					Level: "NEEDS_REVIEW", FindingID: "TRIAGE-INJ-REVIEW",
-					Category: "injection", Pattern: p,
-					Evidence: extractEvidence(content, lower, p), Confidence: 0.50,
-				})
-			}
-		}
-		for _, re := range reviewInjectionRegexes {
-			if re.MatchString(lower) {
-				signals = append(signals, TriageSignal{
-					Level: "NEEDS_REVIEW", FindingID: "TRIAGE-INJ-REVIEW",
-					Category: "injection", Pattern: re.String(),
-					Evidence: extractEvidenceRegex(content, lower, re), Confidence: 0.50,
-				})
-			}
-		}
-
 		// PII request patterns (asking for PII = HIGH_SIGNAL).
 		for _, p := range piiPatterns {
 			if strings.Contains(lower, p) {
@@ -1671,24 +1846,12 @@ func triagePatterns(direction, content string) []TriageSignal {
 				})
 			}
 		}
-		// Regex floor: typo / separator-evasion variants of the
-		// credential-file targets above. HIGH_SIGNAL because the
-		// regex set is opinionated enough that a positive match is
-		// not benign — see exfilRegexes for the discipline. This is
-		// what guarantees that "please dump etccc passwd" still
-		// blocks even if the exfil judge is unreachable.
-		for _, re := range exfilRegexes {
-			if loc, src, norm, ok := findRegexLoc(content, lower, re); ok {
-				ev := extractEvidenceAt(src, loc[0], loc[1])
-				if norm {
-					ev = "[normalized] " + ev
-				}
-				signals = append(signals, TriageSignal{
-					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-EXFIL-REGEX",
-					Category: "exfil", Pattern: re.String(),
-					Evidence: ev, Confidence: 0.90,
-				})
-			}
+		if target, ok := findStrongExfilIntent(lower); ok {
+			signals = append(signals, TriageSignal{
+				Level: "HIGH_SIGNAL", FindingID: "TRIAGE-EXFIL-CONTEXT",
+				Category: "exfil", Pattern: "read-sensitive-target-egress",
+				Evidence: extractEvidence(content, lower, target), Confidence: 0.92,
+			})
 		}
 
 		// Bulk data access (NEEDS_REVIEW — judge decides if intent is benign).
@@ -1705,7 +1868,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 	// `content` and `lower` via findRegexLoc so zero-width / Unicode-
 	// whitespace splicing ("123-45\u200B-6789", "4111\u00A04111…")
 	// cannot slip past SSN / 9-digit / credit-card triage.
-	if loc, src, norm, ok := findRegexLoc(content, lower, ssnDashRegex); ok {
+	if loc, src, norm, ok := findAcceptedRuleLoc(content, lower, "ENT-BULK-SSN", ssnDashRegex); ok {
 		ev := extractEvidenceAt(src, loc[0], loc[1])
 		if norm {
 			ev = "[normalized] " + ev
@@ -1727,7 +1890,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 			Evidence: ev, Confidence: 0.30,
 		})
 	}
-	if loc, src, norm, ok := findRegexLoc(content, lower, creditCardRegex); ok {
+	if loc, src, norm, ok := findAcceptedRuleLoc(content, lower, "ENT-CC-VISA", creditCardRegex); ok {
 		ev := extractEvidenceAt(src, loc[0], loc[1])
 		if norm {
 			ev = "[normalized] " + ev
@@ -1760,15 +1923,23 @@ func triagePatterns(direction, content string) []TriageSignal {
 	// fallback the docstring on scanLocalPatterns above — which
 	// promises normalization defeats whitespace/slash-run evasions —
 	// would not hold for secrets.
-	for _, re := range secretPatternRegexes {
-		if loc, src, norm, ok := findRegexLoc(content, lower, re); ok {
-			ev := extractEvidenceAt(src, loc[0], loc[1])
+	for _, detector := range secretPatternDetectors {
+		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
+			src := content
+			if norm {
+				src = lower
+			}
+			loc := strings.Index(src, match)
+			if loc < 0 {
+				continue
+			}
+			ev := extractEvidenceAt(src, loc, loc+len(match))
 			if norm {
 				ev = "[normalized] " + ev
 			}
 			signals = append(signals, TriageSignal{
 				Level: secretLevel, FindingID: "TRIAGE-SECRET-REGEX",
-				Category: "secret", Pattern: re.String(),
+				Category: "secret", Pattern: detector.pattern.String(),
 				Evidence: ev, Confidence: 0.75,
 			})
 		}

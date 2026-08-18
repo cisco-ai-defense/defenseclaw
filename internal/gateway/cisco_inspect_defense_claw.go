@@ -14,11 +14,13 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // CiscoDefenseClawInspectClient calls the Cisco AI Defense DefenseClaw
@@ -47,7 +49,9 @@ type CiscoDefenseClawInspectClient struct {
 	endpoint string
 	timeout  time.Duration
 	client   *http.Client
-	tel      *telemetry.Provider
+
+	observabilityV8Mu sync.RWMutex
+	observabilityV8   hookLifecycleMetricV8Runtime
 }
 
 // Compile-time assertion: the managed client satisfies Inspector.
@@ -93,31 +97,52 @@ func NewCiscoDefenseClawInspectClient(cfg *config.CiscoAIDefenseConfig, provider
 	}
 }
 
-// SetTelemetry wires OTel metrics.
-func (c *CiscoDefenseClawInspectClient) SetTelemetry(p *telemetry.Provider) {
+// bindObservabilityV8 installs the active generated-v8 metric capability.
+// The request context remains authoritative when a guardrail phase supplies
+// a narrower runtime so metrics join that exact phase span.
+func (c *CiscoDefenseClawInspectClient) bindObservabilityV8(runtime hookLifecycleMetricV8Runtime) {
 	if c == nil {
 		return
 	}
-	c.tel = p
+	c.observabilityV8Mu.Lock()
+	c.observabilityV8 = runtime
+	c.observabilityV8Mu.Unlock()
+}
+
+func (c *CiscoDefenseClawInspectClient) observabilityV8Runtime() hookLifecycleMetricV8Runtime {
+	if c == nil {
+		return nil
+	}
+	c.observabilityV8Mu.RLock()
+	defer c.observabilityV8Mu.RUnlock()
+	return c.observabilityV8
 }
 
 // Inspect sends messages to the DefenseClaw AID endpoint and returns a
 // normalized verdict. Returns nil on any error so the caller falls back
 // to local-only scanning — same fail-open contract as the API-key path.
-func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
+func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []ChatMessage) *ScanVerdict {
 	if c == nil || c.provider == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runtime := ciscoInspectRuntimeFromContext(ctx, c.observabilityV8Runtime())
 
 	// Refresh the token per call — cheap in-memory cache read after
 	// the first successful load. Caching semantics live in the managed
 	// cloud auth module registered via internal/managed/cloudreg.
-	tokenCtx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	tokenCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	tok, err := c.provider.Token(tokenCtx)
-	if err != nil {
-		// Any error maps to a fail-open outcome for this request. The
-		// fail-closed decision was made at boot-time in the picker.
+	if err != nil || strings.TrimSpace(tok) == "" {
+		detail := "managed cloud token unavailable"
+		if err != nil {
+			detail += ": " + err.Error()
+		}
+		EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError, detail)
+		recordCiscoInspectV8(ctx, runtime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeUpstreamError)
 		return nil
 	}
 
@@ -149,19 +174,17 @@ func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVer
 	// Provider from inside doInspectHTTP.
 	currentToken := tok
 
-	return doInspectHTTP(inspectCall{
+	return doInspectHTTP(ctx, runtime, inspectCall{
 		client:   c.client,
 		endpoint: c.endpoint,
-		tel:      c.tel,
 		urlPath:  "/api/v1/inspect/defense_claw",
 		payload:  payload,
 		setAuth: func(req *http.Request) {
 			req.Header.Set("Authorization", "Bearer "+currentToken)
 		},
-		telSpanName: "cisco.inspect.defense_claw",
-		onUnauthorized: func() bool {
+		onUnauthorized: func(retryCtx context.Context) bool {
 			c.provider.Invalidate()
-			ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+			ctx, cancel := context.WithTimeout(retryCtx, c.timeout)
 			defer cancel()
 			fresh, err := c.provider.Token(ctx)
 			if err != nil || fresh == "" || fresh == currentToken {

@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestActiveConnector_Precedence pins the resolution order:
@@ -140,6 +142,28 @@ func TestPluginDirs_DispatchesViaConnector(t *testing.T) {
 // when guardrail.connector is unset, SkillDirs() must keep returning
 // OpenClaw paths (workspace/skills + claw_home/skills) so existing
 // deployments don't drift.
+func TestConnectorHomesHonorClientOverrides(t *testing.T) {
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex-home")
+	claudeHome := filepath.Join(root, "claude-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+
+	cfg := &Config{}
+	if got := cfg.ConnectorHomeDir("codex"); got != codexHome {
+		t.Fatalf("Codex home = %q, want %q", got, codexHome)
+	}
+	if got := cfg.ConnectorHomeDir("claudecode"); got != claudeHome {
+		t.Fatalf("Claude config dir = %q, want %q", got, claudeHome)
+	}
+	if got := cfg.SkillDirsForConnector("codex")[0]; got != filepath.Join(codexHome, "skills") {
+		t.Fatalf("Codex skill dir = %q", got)
+	}
+	if got := cfg.PluginDirsForConnector("claudecode")[0]; got != filepath.Join(claudeHome, "plugins") {
+		t.Fatalf("Claude plugin dir = %q", got)
+	}
+}
+
 func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 	homeDir := t.TempDir()
 	cfg := &Config{}
@@ -162,11 +186,12 @@ func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 // plugins — must continue producing claw_home/extensions when no
 // connector is configured.
 func TestPluginDirs_FallsBackToOpenClaw(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "legacy-oc-home")
 	cfg := &Config{}
-	cfg.Claw.HomeDir = "/tmp/legacy-oc-home"
+	cfg.Claw.HomeDir = home
 
 	dirs := cfg.PluginDirs()
-	want := "/tmp/legacy-oc-home/extensions"
+	want := filepath.Join(home, "extensions")
 	if len(dirs) != 1 || dirs[0] != want {
 		t.Errorf("PluginDirs() = %v, want [%q]", dirs, want)
 	}
@@ -197,13 +222,15 @@ func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 }
 
 func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "foo")
 	cfg := &Config{}
 	cfg.Guardrail.Connector = "future-connector"
-	cfg.Claw.HomeDir = "/tmp/foo"
+	cfg.Claw.HomeDir = home
 
 	dirs := cfg.PluginDirsForConnector("openclaw")
-	if len(dirs) != 1 || dirs[0] != "/tmp/foo/extensions" {
-		t.Errorf("PluginDirsForConnector(openclaw) = %v, want [/tmp/foo/extensions]", dirs)
+	want := filepath.Join(home, "extensions")
+	if len(dirs) != 1 || dirs[0] != want {
+		t.Errorf("PluginDirsForConnector(openclaw) = %v, want [%s]", dirs, want)
 	}
 }
 
@@ -235,7 +262,7 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 	// register global MCP servers like playwright) doesn't leak into
 	// the assertion below — Codex layers the global TOML table with
 	// the project-local ./.mcp.json we wrote above.
-	t.Setenv("HOME", tmp)
+	testenv.SetHome(t, tmp)
 
 	prev, err := os.Getwd()
 	if err != nil {
@@ -273,7 +300,7 @@ func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	writeMCP := func(path, name string) {
 		t.Helper()
@@ -356,7 +383,7 @@ func containsPath(paths []string, want string) bool {
 // the fused command argv and surfacing remote servers by URL.
 func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	ocDir := filepath.Join(home, ".config", "opencode")
 	if err := os.MkdirAll(ocDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -402,7 +429,7 @@ func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 // opencode has none.
 func TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	clawDir := filepath.Join(home, ".openclaw")
 	if err := os.MkdirAll(clawDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -429,7 +456,7 @@ func TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw(t *testing.T) {
 
 func TestReadMCPServersForConnector_AntigravityReadsNativeMCP(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	if err := os.MkdirAll(filepath.Join(home, ".gemini", "config"), 0o700); err != nil {
 		t.Fatal(err)
@@ -506,7 +533,7 @@ func TestReadMCPServersForConnector_AntigravityReadsNativeMCP(t *testing.T) {
 
 func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	if err := os.MkdirAll(filepath.Join(workspace, ".agents"), 0o700); err != nil {
 		t.Fatal(err)
@@ -527,7 +554,7 @@ func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testin
 
 func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClawFallback(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	clawDir := filepath.Join(home, ".openclaw")
 	if err := os.MkdirAll(clawDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -569,7 +596,7 @@ func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClaw
 // through to OpenClaw paths.
 func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	cfg := &Config{}
 	cfg.Claw.HomeDir = "/tmp/should-not-appear"
@@ -618,7 +645,7 @@ func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
 // ~/.gemini/antigravity-cli, neither the OpenClaw home_dir (claw.go:406).
 func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	cfg := &Config{}
 	cfg.Claw.HomeDir = "/tmp/openclaw-home"
 
@@ -636,12 +663,278 @@ func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
 	home := t.TempDir()
 	configHome := filepath.Join(home, "isolated-omnigent")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	t.Setenv("OMNIGENT_CONFIG_HOME", configHome)
 	cfg := &Config{}
 
 	if got := cfg.ConnectorHomeDir("omnigent"); got != configHome {
 		t.Fatalf("ConnectorHomeDir(omnigent) = %q, want %q", got, configHome)
+	}
+}
+
+func TestAMPReadsJSONCSettingsAndSkillBundledMCPWithPrecedence(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "repo")
+	for _, dir := range []string{
+		filepath.Join(home, ".config", "amp"),
+		filepath.Join(home, ".config", "agents", "skills", "browser"),
+		filepath.Join(workspace, ".amp"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userSettings := `{
+	  // Amp uses dotted top-level setting names.
+	  "amp.mcpServers": {
+	    "user-only": {"command": "user-mcp", "args": ["--stdio"],},
+	    "shared": {"command": "user-shared"}
+	  },
+	}`
+	if err := os.WriteFile(filepath.Join(home, ".config", "amp", "settings.jsonc"), []byte(userSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceSettings := `{"amp.mcpServers":{
+	  "shared":{"command":"workspace-shared"},
+	  "remote":{"url":"https://example.test/mcp","headers":{"Authorization":"${TOKEN}"}}
+	}}`
+	if err := os.WriteFile(filepath.Join(workspace, ".amp", "settings.json"), []byte(workspaceSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	skillMCP := `{
+	  "skill-only":{"command":"skill-mcp"},
+	  "shared":{"command":"skill-must-not-win"}
+	}`
+	if err := os.WriteFile(filepath.Join(home, ".config", "agents", "skills", "browser", "mcp.json"), []byte(skillMCP), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = workspace
+	entries, err := cfg.ReadMCPServersForConnector("amp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := mcpEntriesByName(entries)
+	for _, want := range []string{"user-only", "shared", "remote", "skill-only"} {
+		if _, ok := byName[want]; !ok {
+			t.Fatalf("entries=%+v missing %q", entries, want)
+		}
+	}
+	if got := byName["shared"].Command; got != "workspace-shared" {
+		t.Fatalf("shared command=%q want workspace override", got)
+	}
+	if got := byName["remote"].Headers["Authorization"]; got != "${TOKEN}" {
+		t.Fatalf("remote header=%q", got)
+	}
+}
+
+func TestAMPSkillAndPluginDiscoveryHonorsSettings(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "repo")
+	custom := filepath.Join(home, "team-skills")
+	pluginSkills := filepath.Join(home, ".config", "amp", "plugins", "team-plugin", "skills")
+	for _, dir := range []string{
+		filepath.Join(workspace, ".amp"),
+		custom,
+		pluginSkills,
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings := `{
+	  "amp.skills.path": "` + strings.ReplaceAll(custom, `\`, `\\`) + `",
+	  "amp.skills.disableClaudeCodeSkills": true
+	}`
+	if err := os.WriteFile(filepath.Join(workspace, ".amp", "settings.jsonc"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = workspace
+	skills := cfg.SkillDirsForConnector("amp")
+	for _, want := range []string{
+		filepath.Join(home, ".config", "agents", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".config", "amp", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+		custom,
+		pluginSkills,
+	} {
+		if !containsPath(skills, want) {
+			t.Errorf("Amp skills=%v missing %q", skills, want)
+		}
+	}
+	for _, path := range skills {
+		if strings.Contains(path, filepath.Join(".claude", "skills")) {
+			t.Fatalf("Claude skill path present despite disable setting: %v", skills)
+		}
+	}
+	plugins := cfg.PluginDirsForConnector("amp")
+	for _, want := range []string{
+		filepath.Join(home, ".config", "amp", "plugins"),
+		filepath.Join(workspace, ".amp", "plugins"),
+	} {
+		if !containsPath(plugins, want) {
+			t.Errorf("Amp plugins=%v missing %q", plugins, want)
+		}
+	}
+	if got, want := cfg.ConnectorHomeDir("amp"), filepath.Join(home, ".config", "amp"); got != want {
+		t.Fatalf("ConnectorHomeDir(amp)=%q want %q", got, want)
+	}
+}
+
+func TestAMPClaudePluginCacheSkillsFollowDisableSetting(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "repo")
+	settingsDir := filepath.Join(workspace, ".amp")
+	cachedSkills := filepath.Join(
+		home,
+		".claude",
+		"plugins",
+		"cache",
+		"marketplace",
+		"review-plugin",
+		"1.2.3",
+		"skills",
+	)
+	for _, dir := range []string{settingsDir, cachedSkills} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if skills := ampSkillDirs(home, workspace); !containsPath(skills, cachedSkills) {
+		t.Fatalf("Amp skills=%v missing Claude plugin-cache skills %q", skills, cachedSkills)
+	}
+
+	settings := `{"amp.skills.disableClaudeCodeSkills":true}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	skills := ampSkillDirs(home, workspace)
+	if containsPath(skills, cachedSkills) {
+		t.Fatalf("Claude plugin-cache skills present despite disable setting: %v", skills)
+	}
+	for _, path := range skills {
+		if strings.Contains(path, filepath.Join(".claude", "skills")) {
+			t.Fatalf("Claude skill path present despite disable setting: %v", skills)
+		}
+	}
+}
+
+func TestAMPSettingsReaderRejectsSymlinkAndOversize(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(root, "target.json")
+		link := filepath.Join(root, "settings.json")
+		if err := os.WriteFile(
+			target,
+			[]byte(`{"amp.skills.disableClaudeCodeSkills":true}`),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if _, err := readJSONObjectJSONC(link); err == nil {
+			t.Fatal("Amp settings reader followed a symlink")
+		}
+	})
+
+	t.Run("oversize", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "settings.json")
+		if err := os.WriteFile(path, make([]byte, ampSettingsReadLimit+1), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readJSONObjectJSONC(path); err == nil {
+			t.Fatalf("Amp settings reader accepted a file larger than %d bytes", ampSettingsReadLimit)
+		}
+	})
+}
+
+func TestAMPSkillSettingsPreferJSONAndFallBackToJSONC(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	configDir := filepath.Join(home, ".config", "amp")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jsonSkills := filepath.Join(home, "json-skills")
+	jsoncSkills := filepath.Join(home, "jsonc-skills")
+	jsonSettings := `{
+	  "amp.skills.path": "` + strings.ReplaceAll(jsonSkills, `\`, `\\`) + `",
+	  "amp.skills.disableClaudeCodeSkills": true
+	}`
+	jsoncSettings := `{
+	  "amp.skills.path": "` + strings.ReplaceAll(jsoncSkills, `\`, `\\`) + `",
+	  "amp.skills.disableClaudeCodeSkills": false
+	}`
+	jsonPath := filepath.Join(configDir, "settings.json")
+	jsoncPath := filepath.Join(configDir, "settings.jsonc")
+	if err := os.WriteFile(jsonPath, []byte(jsonSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsoncPath, []byte(jsoncSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	skills := ampSkillDirs(home, "")
+	if !containsPath(skills, jsonSkills) || containsPath(skills, jsoncSkills) {
+		t.Fatalf("both settings files skills=%v; want JSON only", skills)
+	}
+	for _, path := range skills {
+		if strings.Contains(path, filepath.Join(".claude", "skills")) {
+			t.Fatalf("JSON disable setting did not win: %v", skills)
+		}
+	}
+
+	if err := os.Remove(jsonPath); err != nil {
+		t.Fatal(err)
+	}
+	skills = ampSkillDirs(home, "")
+	if !containsPath(skills, jsoncSkills) || containsPath(skills, jsonSkills) {
+		t.Fatalf("JSON absent skills=%v; want JSONC fallback only", skills)
+	}
+	if !containsPath(skills, filepath.Join(home, ".claude", "skills")) {
+		t.Fatalf("JSONC fallback disable setting was not applied: %v", skills)
+	}
+}
+
+func TestHermesSurfacesHonorHermesHome(t *testing.T) {
+	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
+	t.Setenv("HERMES_HOME", hermesHome)
+	configPath := filepath.Join(hermesHome, "config.yaml")
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configYAML := []byte("mcp:\n  servers:\n    native-windows:\n      command: hermes-mcp\n")
+	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	if got := cfg.ConnectorHomeDir("hermes"); got != hermesHome {
+		t.Errorf("ConnectorHomeDir(hermes) = %q, want %q", got, hermesHome)
+	}
+	if got, want := cfg.SkillDirsForConnector("hermes"), filepath.Join(hermesHome, "skills"); len(got) != 1 || got[0] != want {
+		t.Errorf("SkillDirsForConnector(hermes) = %v, want [%q]", got, want)
+	}
+	plugins := cfg.PluginDirsForConnector("hermes")
+	if want := filepath.Join(hermesHome, "plugins"); !containsPath(plugins, want) {
+		t.Errorf("PluginDirsForConnector(hermes) = %v, missing %q", plugins, want)
+	}
+	entries, err := cfg.ReadMCPServersForConnector("hermes")
+	if err != nil {
+		t.Fatalf("ReadMCPServersForConnector(hermes): %v", err)
+	}
+	if got := mcpEntriesByName(entries)["native-windows"].Command; got != "hermes-mcp" {
+		t.Fatalf("Hermes MCP command = %q, want hermes-mcp; entries=%+v", got, entries)
 	}
 }
 

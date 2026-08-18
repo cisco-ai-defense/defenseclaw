@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
@@ -130,19 +131,27 @@ func TestEvaluateRuntimeSkillAssetPolicyDisableLookupErrorFailsClosed(t *testing
 	}
 }
 
-func TestClaudeCodeSlashCommandPluginRuntimeDisable(t *testing.T) {
+func TestClaudeCodeSlashCommandPluginRuntimeDisableUsesCanonicalIDAndPreservesAuditDetails(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	enablePluginRuntimeDetection(cfg)
-	store, _ := testStoreAndLogger(t)
+	store, err := audit.NewStore(":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory audit store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatalf("initialize in-memory audit store: %v", err)
+	}
 	if err := store.SetActionFieldForConnector("plugin", "disabled-plugin", "claudecode", "runtime", "disable", "manual"); err != nil {
 		t.Fatalf("seed plugin disable: %v", err)
 	}
 	api := &APIServer{scannerCfg: cfg, store: store}
+	const namespacedCommand = "disabled-plugin:run-diagnostics"
 
 	decisions := api.claudeCodeSlashCommandAssetDecisions(context.Background(), claudeCodeHookRequest{
 		HookEventName: "UserPromptExpansion",
 		ExpansionType: "slash_command",
-		CommandName:   "disabled-plugin",
+		CommandName:   namespacedCommand,
 		CommandSource: "plugin",
 	})
 
@@ -153,8 +162,110 @@ func TestClaudeCodeSlashCommandPluginRuntimeDisable(t *testing.T) {
 	if got.targetType != "plugin" {
 		t.Fatalf("targetType=%q, want plugin", got.targetType)
 	}
-	if got.decision.TargetType != "plugin" || got.decision.Action != "block" || got.decision.Source != "runtime-disable" {
+	if got.decision.TargetType != "plugin" || got.decision.TargetName != "disabled-plugin" || got.decision.Action != "block" || got.decision.Source != "runtime-disable" {
 		t.Fatalf("decision=%+v, want plugin runtime-disable block", got.decision)
+	}
+
+	canonicalName, rawName := claudeCodeSlashCommandAssetName("plugin", namespacedCommand)
+	if canonicalName != "disabled-plugin" || rawName != namespacedCommand {
+		t.Fatalf("canonical name=%q raw=%q, want disabled-plugin and full command", canonicalName, rawName)
+	}
+	details := runtimeSkillAssetPolicyAuditDetails(got.decision, "claudecode", "UserPromptExpansion", skillRuntimeProbe{
+		TargetType: "plugin",
+		SkillName:  canonicalName,
+		ToolName:   namespacedCommand,
+		RawName:    rawName,
+		SourcePath: "plugin",
+		Surface:    "prompt_expansion",
+		Matched:    true,
+	})
+	if !strings.Contains(details, "tool="+namespacedCommand) {
+		t.Fatalf("asset-policy details %q missing full namespaced tool", details)
+	}
+	if !strings.Contains(details, `name_raw="`+namespacedCommand+`"`) {
+		t.Fatalf("asset-policy details %q missing full raw command", details)
+	}
+}
+
+func TestClaudeCodeNamespacedPluginCommandAssetPolicyLookup(t *testing.T) {
+	tests := []struct {
+		name        string
+		commandName string
+		configure   func(*config.Config)
+		wantMatched bool
+		wantSource  string
+		wantTarget  string
+	}{
+		{
+			name:        "admin allow matches bare plugin id",
+			commandName: "release-tools:deploy",
+			configure: func(cfg *config.Config) {
+				cfg.AssetPolicy.Plugin.Default = "deny"
+				cfg.AssetPolicy.Plugin.Allowed = []config.AssetPolicyRule{{Name: "release-tools"}}
+			},
+		},
+		{
+			name:        "admin deny matches bare plugin id",
+			commandName: "release-tools:deploy",
+			configure: func(cfg *config.Config) {
+				cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "release-tools"}}
+			},
+			wantMatched: true,
+			wantSource:  "admin-deny",
+			wantTarget:  "release-tools",
+		},
+		{
+			name:        "registered bare plugin id is accepted",
+			commandName: "release-tools:deploy",
+			configure: func(cfg *config.Config) {
+				cfg.AssetPolicy.Plugin.RegistryRequired = true
+				cfg.AssetPolicy.Plugin.Registry = []config.AssetPolicyRule{{Name: "release-tools", Reason: "registry:internal"}}
+			},
+		},
+		{
+			name:        "unregistered bare plugin id is denied",
+			commandName: "rogue-tools:deploy",
+			configure: func(cfg *config.Config) {
+				cfg.AssetPolicy.Plugin.RegistryRequired = true
+				cfg.AssetPolicy.Plugin.Registry = []config.AssetPolicyRule{{Name: "release-tools", Reason: "registry:internal"}}
+			},
+			wantMatched: true,
+			wantSource:  "registry-required",
+			wantTarget:  "rogue-tools",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.AssetPolicy.Enabled = true
+			cfg.AssetPolicy.Mode = "action"
+			enablePluginRuntimeDetection(cfg)
+			tc.configure(cfg)
+			store, logger := newNativeSkillRuntimeTestStore(t)
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+
+			decisions := api.claudeCodeSlashCommandAssetDecisions(context.Background(), claudeCodeHookRequest{
+				HookEventName: "UserPromptExpansion",
+				ExpansionType: "slash_command",
+				CommandName:   tc.commandName,
+				CommandSource: "plugin",
+			})
+
+			if !tc.wantMatched {
+				if len(decisions) != 0 {
+					t.Fatalf("decisions=%+v, want policy allow", decisions)
+				}
+				return
+			}
+			if len(decisions) != 1 {
+				t.Fatalf("decisions=%+v, want one policy block", decisions)
+			}
+			decision := decisions[0].decision
+			if decision.Action != "block" || decision.Source != tc.wantSource || decision.TargetName != tc.wantTarget {
+				t.Fatalf("decision=%+v, want block source=%q target=%q", decision, tc.wantSource, tc.wantTarget)
+			}
+		})
 	}
 }
 

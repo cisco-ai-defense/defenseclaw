@@ -28,19 +28,22 @@ import "context"
 // "unknown for this event" and round-trips as NULL in SQLite and
 // an absent attribute on OTel/sinks.
 type CorrelationEnvelope struct {
-	RunID             string
-	TraceID           string
-	RequestID         string
-	SessionID         string
-	TurnID            string
-	AgentID           string
-	AgentName         string
-	AgentInstanceID   string
-	SidecarInstanceID string
-	PolicyID          string
-	DestinationApp    string
-	ToolName          string
-	ToolID            string
+	SemanticEventID     string
+	LogicalEventID      string
+	ConnectorInstanceID string
+	RunID               string
+	TraceID             string
+	RequestID           string
+	SessionID           string
+	TurnID              string
+	AgentID             string
+	AgentName           string
+	AgentInstanceID     string
+	SidecarInstanceID   string
+	PolicyID            string
+	DestinationApp      string
+	ToolName            string
+	ToolID              string
 	// Connector is the hook/proxy connector identity (codex, claudecode,
 	// antigravity, openclaw, …) that produced the request. Empty on
 	// single-connector installs where attribution is implicit. Stamped
@@ -88,6 +91,15 @@ func EnvelopeFromContext(ctx context.Context) CorrelationEnvelope {
 // before calling LogEventCtx / ApplyEnvelope is strictly less
 // error-prone than mutating fields on a copy.
 func MergeEnvelope(base, overlay CorrelationEnvelope) CorrelationEnvelope {
+	if base.SemanticEventID == "" {
+		base.SemanticEventID = overlay.SemanticEventID
+	}
+	if base.LogicalEventID == "" {
+		base.LogicalEventID = overlay.LogicalEventID
+	}
+	if base.ConnectorInstanceID == "" {
+		base.ConnectorInstanceID = overlay.ConnectorInstanceID
+	}
 	if base.RunID == "" {
 		base.RunID = overlay.RunID
 	}

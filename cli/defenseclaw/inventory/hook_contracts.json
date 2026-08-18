@@ -31,9 +31,207 @@
           "contract_id": "codex-hooks-v1",
           "agent_version": {
             "min_inclusive": "0.124.0",
-            "max_exclusive": ""
+            "max_exclusive": "0.129.0"
           },
-          "default_for_unversioned": true,
+          "default_for_unversioned": false,
+          "hook_script_version": "v6",
+          "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml"
+          ],
+          "response_field": "codex_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "Stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [
+              "PostToolUse"
+            ],
+            "authoritative_failure_events": [
+              "PostToolUse"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "Stop"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "surface-specific",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse",
+                "PermissionRequest"
+              ],
+              "result_content_events": [
+                "PostToolUse"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "SessionStart",
+                "Stop"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "shell",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://learn.chatgpt.com/docs/hooks",
+              "https://developers.openai.com/codex/config-reference/"
+            ],
+            "limitations": [
+              "PermissionRequest carries no tool_use_id, so it is a direct decision surface and can never create pending state.",
+              "Only an exact apply_patch scalar response or an MCP CallToolResult with a content array and absent/false isError proves success; MCP isError=true proves failure.",
+              "Shell and generic PostToolUse responses do not expose authoritative outcomes, and PostToolUse also fires for unsuccessful shell commands, so they never advance successful state.",
+              "Hosted tools, file reads, and write_stdin do not provide complete hook coverage; skill loading has no dedicated tool-call lifecycle event."
+            ]
+          },
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "Stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Codex 0.124.0 through 0.128.x expose six stable hook events. They have no hooks/list trust introspection and ignore hooks.state; validate them only as legacy no-bypass execution.",
+            "DefenseClaw may preseed inert hook state for upgrade continuity, but does not describe 0.124.0 through 0.128.x as trust-certified.",
+            "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
+          ]
+        },
+        {
+          "contract_id": "codex-hooks-v2",
+          "agent_version": {
+            "min_inclusive": "0.129.0",
+            "max_exclusive": "0.133.0"
+          },
+          "default_for_unversioned": false,
+          "hook_script_version": "v6",
+          "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml"
+          ],
+          "response_field": "codex_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "PreCompact",
+            "PostCompact",
+            "Stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [
+              "PostToolUse"
+            ],
+            "authoritative_failure_events": [
+              "PostToolUse"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "Stop"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "surface-specific",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse",
+                "PermissionRequest"
+              ],
+              "result_content_events": [
+                "PostToolUse"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "SessionStart",
+                "Stop"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "shell",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://learn.chatgpt.com/docs/hooks",
+              "https://developers.openai.com/codex/config-reference/"
+            ],
+            "limitations": [
+              "PermissionRequest carries no tool_use_id, so it is a direct decision surface and can never create pending state.",
+              "Only an exact apply_patch scalar response or an MCP CallToolResult with a content array and absent/false isError proves success; MCP isError=true proves failure.",
+              "Shell and generic PostToolUse responses do not expose authoritative outcomes, and PostToolUse also fires for unsuccessful shell commands, so they never advance successful state.",
+              "Hosted tools, file reads, and write_stdin do not provide complete hook coverage; skill loading has no dedicated tool-call lifecycle event."
+            ]
+          },
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "Stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Codex 0.129.x through 0.132.x add PreCompact and PostCompact plus hooks/list trust introspection, for eight supported events.",
+            "On native Windows the generic and command_windows values must remain byte-identical so 0.129.x and newer clients derive the same trusted hook identity.",
+            "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
+          ]
+        },
+        {
+          "contract_id": "codex-hooks-v3",
+          "agent_version": {
+            "min_inclusive": "0.133.0",
+            "max_exclusive": "0.135.0"
+          },
+          "default_for_unversioned": false,
           "hook_script_version": "v6",
           "hook_script": "codex-hook.sh",
           "hook_config_path_templates": [
@@ -59,6 +257,65 @@
           ],
           "supports_traceparent": true,
           "native_otlp": true,
+          "native_otlp_auth": "header-token",
+          "native_otlp_signals": [
+            "logs",
+            "metrics",
+            "traces"
+          ],
+          "native_otlp_endpoint_template": "/v1/<signal>",
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [
+              "PostToolUse"
+            ],
+            "authoritative_failure_events": [
+              "PostToolUse"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "Stop"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "surface-specific",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse",
+                "PermissionRequest"
+              ],
+              "result_content_events": [
+                "PostToolUse"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "SessionStart",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "shell",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://learn.chatgpt.com/docs/hooks",
+              "https://developers.openai.com/codex/config-reference/"
+            ],
+            "limitations": [
+              "PermissionRequest carries no tool_use_id, so it is a direct decision surface and can never create pending state.",
+              "Only an exact apply_patch scalar response or an MCP CallToolResult with a content array and absent/false isError proves success; MCP isError=true proves failure.",
+              "Shell and generic PostToolUse responses do not expose authoritative outcomes, and PostToolUse also fires for unsuccessful shell commands, so they never advance successful state.",
+              "Hosted tools, file reads, and write_stdin do not provide complete hook coverage; skill loading has no dedicated tool-call lifecycle event."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -74,7 +331,236 @@
             "scope": "user"
           },
           "notes": [
-            "Codex hooks were made stable in 0.124.0. DefenseClaw leaves the upper bound open until upstream publishes a breaking hook change.",
+            "Codex 0.133.0 through 0.134.x expose the complete ten-event DefenseClaw matrix, adding SubagentStart and SubagentStop while retaining the selective local-function hook payload.",
+            "Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
+            "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
+          ]
+        },
+        {
+          "contract_id": "codex-hooks-v3-generic",
+          "agent_version": {
+            "min_inclusive": "0.135.0",
+            "max_exclusive": "0.145.0"
+          },
+          "default_for_unversioned": false,
+          "hook_script_version": "v6",
+          "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml"
+          ],
+          "response_field": "codex_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "SubagentStart",
+            "SubagentStop",
+            "PreCompact",
+            "PostCompact",
+            "Stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "native_otlp_auth": "header-token",
+          "native_otlp_signals": [
+            "logs",
+            "metrics",
+            "traces"
+          ],
+          "native_otlp_endpoint_template": "/v1/<signal>",
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [
+              "PostToolUse"
+            ],
+            "authoritative_failure_events": [
+              "PostToolUse"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "Stop"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "surface-specific",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse",
+                "PermissionRequest"
+              ],
+              "result_content_events": [
+                "PostToolUse"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "SessionStart",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://learn.chatgpt.com/docs/hooks",
+              "https://developers.openai.com/codex/config-reference/"
+            ],
+            "limitations": [
+              "PermissionRequest carries no tool_use_id, so it is a direct decision surface and can never create pending state.",
+              "Only an exact apply_patch scalar response or an MCP CallToolResult with a content array and absent/false isError proves success; MCP isError=true proves failure.",
+              "Shell and generic PostToolUse responses do not expose authoritative outcomes, and PostToolUse also fires for unsuccessful shell commands, so they never advance successful state.",
+              "Hosted tools, file reads, and write_stdin do not provide complete hook coverage; skill loading has no dedicated tool-call lifecycle event."
+            ]
+          },
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "Stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Codex 0.135.0 extends PreToolUse and PostToolUse to generic local function tools while retaining the ten-event hook matrix.",
+            "Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
+            "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
+          ]
+        },
+        {
+          "contract_id": "codex-hooks-v4",
+          "agent_version": {
+            "min_inclusive": "0.145.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml"
+          ],
+          "response_field": "codex_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "SubagentStart",
+            "SubagentStop",
+            "PreCompact",
+            "PostCompact",
+            "Stop",
+            "SessionEnd"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "native_otlp_auth": "header-token",
+          "native_otlp_signals": [
+            "logs",
+            "metrics",
+            "traces"
+          ],
+          "native_otlp_endpoint_template": "/v1/<signal>",
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [
+              "PostToolUse"
+            ],
+            "authoritative_failure_events": [
+              "PostToolUse"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "Stop"
+            ],
+            "authoritative_terminal_events": [
+              "SessionEnd"
+            ],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "surface-specific",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse",
+                "PermissionRequest"
+              ],
+              "result_content_events": [
+                "PostToolUse"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "SessionStart",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop",
+                "SessionEnd"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://learn.chatgpt.com/docs/hooks",
+              "https://developers.openai.com/codex/config-reference/"
+            ],
+            "limitations": [
+              "PermissionRequest carries no tool_use_id, so it is a direct decision surface and can never create pending state.",
+              "Only an exact apply_patch scalar response or an MCP CallToolResult with a content array and absent/false isError proves success; MCP isError=true proves failure.",
+              "Shell and generic PostToolUse responses do not expose authoritative outcomes, and PostToolUse also fires for unsuccessful shell commands, so they never advance successful state.",
+              "Hosted tools, file reads, and write_stdin do not provide complete hook coverage; skill loading has no dedicated tool-call lifecycle event."
+            ]
+          },
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "Stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Codex 0.145.0 adds SessionEnd for main-thread teardown; Stop remains a turn boundary and does not end the session.",
+            "Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
             "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
           ]
         }
@@ -88,11 +574,11 @@
         {
           "contract_id": "claudecode-hooks-v1",
           "agent_version": {
-            "min_inclusive": "2.1.144",
+            "min_inclusive": "2.1.152",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
-          "hook_script_version": "v6",
+          "hook_script_version": "v7",
           "hook_script": "claude-code-hook.sh",
           "hook_config_path_templates": [
             "~/.claude/settings.json"
@@ -136,6 +622,70 @@
           ],
           "supports_traceparent": true,
           "native_otlp": true,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [
+              "PostToolUse"
+            ],
+            "authoritative_failure_events": [
+              "PostToolUseFailure"
+            ],
+            "authoritative_denial_events": [
+              "PermissionDenied"
+            ],
+            "authoritative_pending_discard_events": [
+              "Stop",
+              "StopFailure"
+            ],
+            "authoritative_terminal_events": [
+              "SessionEnd"
+            ],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "event-kind",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse",
+                "PermissionRequest"
+              ],
+              "result_content_events": [
+                "PostToolUse",
+                "PostToolUseFailure",
+                "PermissionDenied",
+                "PostToolBatch"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "SessionStart",
+                "Stop",
+                "StopFailure",
+                "SubagentStart",
+                "SubagentStop",
+                "SessionEnd"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp",
+              "skills"
+            ],
+            "official_source_urls": [
+              "https://code.claude.com/docs/en/hooks",
+              "https://code.claude.com/docs/en/tools-reference"
+            ],
+            "limitations": [
+              "PermissionRequest has no tool_use_id, so it is a direct decision surface and cannot create pending state.",
+              "Direct slash-command skill invocation can bypass the Skill tool event; UserPromptExpansion remains the observable expansion boundary.",
+              "File references expanded by the client are not equivalent to FileRead tool calls, and post-action hooks cannot undo completed side effects."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,
@@ -147,13 +697,12 @@
               "UserPromptExpansion",
               "PreToolUse",
               "PermissionRequest",
-              "PostToolUse",
-              "PostToolBatch",
               "TaskCreated",
               "TaskCompleted",
               "TeammateIdle",
               "Stop",
               "SubagentStop",
+              "ConfigChange",
               "PreCompact",
               "Elicitation",
               "ElicitationResult"
@@ -162,8 +711,10 @@
             "scope": "user"
           },
           "notes": [
-            "Pinned to the current documented Claude Code hook surface as of 2.1.144; older Claude Code releases exposed smaller hook event sets.",
-            "Claude Code PreToolUse supports native HITL via permissionDecision=ask."
+            "Pinned to the documented Claude Code hook surface as of 2.1.152, which introduced MessageDisplay; older Claude Code releases exposed smaller hook event sets.",
+            "Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
+            "PostToolUse and PostToolBatch findings are advisory because their payloads are returned bytes, not typed action requests; command/path enforcement stays on PreToolUse.",
+            "ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions."
           ]
         }
       ]
@@ -183,6 +734,8 @@
           "hook_script_version": "v6",
           "hook_script": "hermes-hook.sh",
           "hook_config_path_templates": [
+            "$HERMES_HOME/config.yaml",
+            "%LOCALAPPDATA%/hermes/config.yaml",
             "~/.hermes/config.yaml"
           ],
           "response_field": "hook_output",
@@ -207,6 +760,64 @@
           "supports_traceparent": true,
           "native_otlp": false,
           "content_envelope_key": "extra",
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "pre_tool_call"
+            ],
+            "authoritative_success_events": [
+              "post_tool_call"
+            ],
+            "authoritative_failure_events": [
+              "post_tool_call"
+            ],
+            "authoritative_denial_events": [
+              "post_tool_call"
+            ],
+            "authoritative_pending_discard_events": [],
+            "authoritative_terminal_events": [
+              "on_session_end",
+              "on_session_finalize",
+              "on_session_reset"
+            ],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "result-payload",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "pre_tool_call"
+              ],
+              "result_content_events": [
+                "post_tool_call"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "on_session_start",
+                "on_session_end",
+                "on_session_finalize",
+                "on_session_reset",
+                "subagent_start",
+                "subagent_stop"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp",
+              "skills"
+            ],
+            "official_source_urls": [
+              "https://github.com/NousResearch/hermes-agent/blob/126ff7071b6b755055879648f4e859b3187d0fac/agent/shell_hooks.py",
+              "https://github.com/NousResearch/hermes-agent/blob/126ff7071b6b755055879648f4e859b3187d0fac/model_tools.py"
+            ],
+            "limitations": [
+              "Only pre_tool_call can block, and hook subprocess errors, timeouts, or malformed output fail open upstream.",
+              "A post_tool_call commits success only when extra.status is ok; error and blocked statuses must not advance state."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -237,7 +848,7 @@
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
-          "hook_script_version": "v6",
+          "hook_script_version": "v8",
           "hook_script": "cursor-hook.sh",
           "hook_config_path_templates": [
             "~/.cursor/hooks.json"
@@ -273,6 +884,70 @@
           ],
           "supports_traceparent": true,
           "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "preToolUse"
+            ],
+            "authoritative_success_events": [
+              "postToolUse"
+            ],
+            "authoritative_failure_events": [
+              "postToolUseFailure"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "stop"
+            ],
+            "authoritative_terminal_events": [
+              "sessionEnd"
+            ],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "event-kind",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "preToolUse",
+                "beforeShellExecution",
+                "beforeMCPExecution",
+                "beforeReadFile",
+                "beforeTabFileRead"
+              ],
+              "result_content_events": [
+                "postToolUse",
+                "postToolUseFailure",
+                "afterShellExecution",
+                "afterMCPExecution",
+                "afterFileEdit",
+                "afterTabFileEdit"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "sessionStart",
+                "sessionEnd",
+                "subagentStart",
+                "subagentStop",
+                "stop",
+                "workspaceOpen"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://cursor.com/docs/hooks",
+              "https://cursor.com/docs/skills"
+            ],
+            "limitations": [
+              "Only generic preToolUse/postToolUse events carry the stable tool_use_id used for stateful pairing; specialized shell, MCP, and file hooks are direct-evaluation or result-content surfaces.",
+              "Hooks default to fail open unless failClosed is enabled, Tab has a separate partial hook surface, and cloud-agent hook coverage is not complete."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,
@@ -338,6 +1013,65 @@
           ],
           "supports_traceparent": true,
           "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "pre_read_code",
+              "pre_write_code",
+              "pre_run_command",
+              "pre_mcp_tool_use"
+            ],
+            "authoritative_success_events": [
+              "post_read_code",
+              "post_write_code",
+              "post_mcp_tool_use"
+            ],
+            "authoritative_failure_events": [],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "post_cascade_response",
+              "post_cascade_response_with_transcript"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "none",
+            "outcome_authority": "surface-specific",
+            "stateful_enforcement_level": "detection-only",
+            "routing": {
+              "structured_action_events": [
+                "pre_read_code",
+                "pre_write_code",
+                "pre_run_command",
+                "pre_mcp_tool_use"
+              ],
+              "result_content_events": [
+                "post_read_code",
+                "post_write_code",
+                "post_run_command",
+                "post_mcp_tool_use"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "post_cascade_response",
+                "post_cascade_response_with_transcript",
+                "post_setup_worktree"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://docs.devin.ai/desktop/cascade/hooks",
+              "https://docs.devin.ai/desktop/cascade/skills"
+            ],
+            "limitations": [
+              "Trajectory and execution identifiers are conversation/turn identifiers, not stable per-tool invocation IDs.",
+              "post_run_command exposes neither an authoritative exit status nor output; hook errors other than exit code 2 fail open."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -396,6 +1130,59 @@
           ],
           "supports_traceparent": true,
           "native_otlp": true,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "BeforeTool"
+            ],
+            "authoritative_success_events": [
+              "AfterTool"
+            ],
+            "authoritative_failure_events": [
+              "AfterTool"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "AfterAgent"
+            ],
+            "authoritative_terminal_events": [
+              "SessionEnd"
+            ],
+            "invocation_id_authority": "none",
+            "outcome_authority": "result-payload",
+            "stateful_enforcement_level": "detection-only",
+            "routing": {
+              "structured_action_events": [
+                "BeforeTool"
+              ],
+              "result_content_events": [
+                "AfterTool"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "SessionStart",
+                "AfterAgent",
+                "SessionEnd"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp",
+              "skills"
+            ],
+            "official_source_urls": [
+              "https://geminicli.com/docs/hooks/reference/",
+              "https://geminicli.com/docs/reference/tools/"
+            ],
+            "limitations": [
+              "Hook payloads provide a session identifier but no stable tool invocation identifier, so AfterTool cannot authorize a paired state transition.",
+              "AfterTool is shared by success and failure; consumers must inspect tool_response.error instead of treating the event name as success."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -456,7 +1243,71 @@
             "tool_result"
           ],
           "supports_traceparent": true,
-          "native_otlp": false,
+          "native_otlp": true,
+          "native_otlp_auth": "header-token",
+          "native_otlp_signals": [
+            "metrics",
+            "traces"
+          ],
+          "native_otlp_endpoint_template": "/v1/<signal>",
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "preToolUse",
+              "permissionRequest"
+            ],
+            "authoritative_success_events": [
+              "postToolUse"
+            ],
+            "authoritative_failure_events": [
+              "postToolUseFailure"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "agentStop"
+            ],
+            "authoritative_terminal_events": [
+              "sessionEnd"
+            ],
+            "invocation_id_authority": "none",
+            "outcome_authority": "event-kind",
+            "stateful_enforcement_level": "detection-only",
+            "routing": {
+              "structured_action_events": [
+                "preToolUse",
+                "permissionRequest"
+              ],
+              "result_content_events": [
+                "postToolUse",
+                "postToolUseFailure"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "sessionStart",
+                "sessionEnd",
+                "agentStop",
+                "subagentStart",
+                "subagentStop",
+                "errorOccurred"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://docs.github.com/en/copilot/reference/hooks-reference",
+              "https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills"
+            ],
+            "limitations": [
+              "Hook payloads do not expose a per-tool invocation ID, and general-purpose subagents expose no reliable parent lineage.",
+              "CLI hook timeouts and HTTP failures fail open; cloud agents expose only repository hooks, and skills have no invocation lifecycle event."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,
@@ -475,7 +1326,8 @@
           },
           "notes": [
             "GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
-            "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks."
+            "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+            "Copilot CLI can emit optional native traces and metrics through standard OTLP environment variables; DefenseClaw reports the required values but does not mutate shell startup files."
           ]
         }
       ]
@@ -488,7 +1340,7 @@
         {
           "contract_id": "antigravity-hooks-v2",
           "agent_version": {
-            "min_inclusive": "1.0.0",
+            "min_inclusive": "1.1.9",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
@@ -512,25 +1364,70 @@
           ],
           "supports_traceparent": true,
           "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [
+              "PostToolUse"
+            ],
+            "authoritative_failure_events": [
+              "PostToolUse"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "Stop"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "paired-sequence",
+            "outcome_authority": "result-payload",
+            "stateful_enforcement_level": "detection-only",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse"
+              ],
+              "result_content_events": [
+                "PostToolUse"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "PreInvocation",
+                "PostInvocation",
+                "Stop"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit"
+            ],
+            "official_source_urls": [
+              "https://www.antigravity.google/docs/hooks",
+              "https://github.com/google-antigravity/antigravity-cli/blob/21f650e7bb852f58562425ddd0c7d203c80e3d0e/CHANGELOG.md"
+            ],
+            "limitations": [
+              "conversationId plus stepIdx is a sequence rather than an opaque call ID, so it remains detection-only; CLI 1.1.9 or newer is required because it fixed spurious PostToolUse events and matcher handling.",
+              "PreInvocation can inject context but cannot block or ask; Stop only supports continue, MCP hook matcher coverage is undocumented, and skill expansion has no dedicated event."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,
             "ask_events": [
-              "PreInvocation",
               "PreToolUse"
             ],
             "block_events": [
-              "PreInvocation",
-              "PreToolUse",
-              "Stop"
+              "PreToolUse"
             ],
             "supports_fail_closed": false,
             "scope": "user"
           },
           "notes": [
-            "Hooks v2 expands to all five Antigravity 2.0 lifecycle events (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) per the published spec; v1 covered PreToolUse only. PreToolUse remains the only event empirically verified against agy v1.0.1 \u2014 the other four event branches are spec-conformant but gated on upstream agy implementation parity.",
-            "agy returning decision=ask bypasses --dangerously-skip-permissions, which is the strongest user-prompt primitive any DefenseClaw connector currently exposes. AskEvents covers PreInvocation and PreToolUse; agy does not recognize a literal \"force_ask\" decision so DefenseClaw emits \"ask\".",
-            "Stop's wire decision verb is \"block\" (matching agy's Claude-Code lineage) rather than the \"deny\" verb used by Pre* events; this aligns with the spec's \"block-terminating the agent if validation checks fail\" phrasing. PostToolUse and PostInvocation NEVER block \u2014 findings surface as additionalContext for next-turn ingestion.",
+            "Hooks v2 covers all five published lifecycle events and requires agy 1.1.9 or newer, which fixed PostToolUse firing on non-tool steps and matcher handling.",
+            "PreToolUse is the only event with native ask/deny. PreInvocation only injects context, Stop only supports decision=continue, and PostToolUse/PostInvocation are observe-only.",
             "Setup writes only the global ~/.gemini/config/hooks.json (the path agy v1.0.x actually evaluates; the marketing-facing ~/.gemini/antigravity-cli/hooks.json is silently ignored at runtime). agy merges all discovered hooks files (global, project, legacy ~/.gemini/hooks.json), so multiple writes cause duplicate firing. Doctor warns when defenseclaw-managed entries appear in more than one merged location, and separately warns when the legacy antigravity-cli path still holds defenseclaw-managed entries from a pre-v0.5.0 install."
           ]
         }
@@ -572,6 +1469,59 @@
           ],
           "supports_traceparent": true,
           "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "pre_tool_use"
+            ],
+            "authoritative_success_events": [
+              "post_tool_use"
+            ],
+            "authoritative_failure_events": [
+              "post_tool_use"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "stop"
+            ],
+            "authoritative_terminal_events": [
+              "session_end"
+            ],
+            "invocation_id_authority": "none",
+            "outcome_authority": "result-payload",
+            "stateful_enforcement_level": "detection-only",
+            "routing": {
+              "structured_action_events": [
+                "pre_tool_use"
+              ],
+              "result_content_events": [
+                "post_tool_use"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "session_start",
+                "stop",
+                "session_end"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp",
+              "skills"
+            ],
+            "official_source_urls": [
+              "https://github.com/OpenHands/software-agent-sdk/blob/6d597ff7d5d3c89ef8ba0c8e3b3c6a09169da07c/openhands-sdk/openhands/sdk/hooks/types.py",
+              "https://github.com/OpenHands/software-agent-sdk/blob/6d597ff7d5d3c89ef8ba0c8e3b3c6a09169da07c/openhands-sdk/openhands/sdk/hooks/conversation_hooks.py"
+            ],
+            "limitations": [
+              "Shell hook input omits the SDK's internal action ID, so PreToolUse and PostToolUse cannot be joined by an authoritative per-call identifier.",
+              "Success requires tool_response.is_error=false; hook errors, timeouts, non-2 exits, and asynchronous PreToolUse hooks fail open."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -604,7 +1554,7 @@
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
-          "hook_script_version": "v6",
+          "hook_script_version": "v7",
           "hook_script": "opencode-plugin.js",
           "hook_config_path_templates": [
             "~/.config/opencode/plugins/defenseclaw.js"
@@ -627,6 +1577,58 @@
           ],
           "supports_traceparent": false,
           "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "tool.execute.before"
+            ],
+            "authoritative_success_events": [
+              "tool.execute.after"
+            ],
+            "authoritative_failure_events": [],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "session.idle"
+            ],
+            "authoritative_terminal_events": [
+              "session.deleted"
+            ],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "result-payload",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "tool.execute.before"
+              ],
+              "result_content_events": [
+                "tool.execute.after"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "session.created",
+                "session.error",
+                "session.idle",
+                "session.deleted"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp",
+              "skills"
+            ],
+            "official_source_urls": [
+              "https://github.com/anomalyco/opencode/blob/e4bd9757a3a5dc7461d286000a19e9bd7df57c40/packages/plugin/src/index.ts",
+              "https://github.com/anomalyco/opencode/blob/e4bd9757a3a5dc7461d286000a19e9bd7df57c40/packages/opencode/src/session/tools.ts"
+            ],
+            "limitations": [
+              "Stateful success requires the v7 bridge, which forwards input.args plus the actual output and awaits delivery before returning to the agent.",
+              "Exceptions can skip tool.execute.after, and delegated-task paths can emit it without a result; only a validated result payload is authoritative success. Bash additionally requires metadata.exit=0."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -638,9 +1640,121 @@
             "scope": "user"
           },
           "notes": [
-            "opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws on a block decision, aborting the tool.",
+            "opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ \u2014 no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws on a block decision, aborting the tool.",
             "Block is the only active verdict; tool.execute.after is observe-only. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
             "Contract is unbounded (min 0.0.0): the plugin hook API is a stable contract rather than a versioned floor, matching the OpenHands precedent."
+          ]
+        }
+      ]
+    },
+    "amp": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "amp --version",
+      "docs_url": "https://ampcode.com/manual/plugin-api",
+      "contracts": [
+        {
+          "contract_id": "amp-plugin-v1",
+          "agent_version": {
+            "min_inclusive": "0.0.1785334225",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v2",
+          "hook_script": "amp-plugin.ts",
+          "hook_config_path_templates": [
+            "~/.config/amp/plugins/defenseclaw.ts",
+            "%USERPROFILE%\\.config\\amp\\plugins\\defenseclaw.ts"
+          ],
+          "response_field": "",
+          "events": [
+            "session.start",
+            "agent.start",
+            "tool.call",
+            "tool.result",
+            "agent.end"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result",
+            "event_content"
+          ],
+          "supports_traceparent": false,
+          "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "tool.call"
+            ],
+            "authoritative_success_events": [
+              "tool.result"
+            ],
+            "authoritative_failure_events": [
+              "tool.result"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "agent.end"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "result-payload",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "tool.call"
+              ],
+              "result_content_events": [
+                "tool.result"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "session.start",
+                "agent.start",
+                "agent.end"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://ampcode.com/manual/plugin-api",
+              "https://registry.npmjs.org/@ampcode/plugin/-/plugin-0.0.0-20260729002615-g8a974c9.tgz"
+            ],
+            "limitations": [
+              "toolUseID is Amp's stable per-invocation join; tool.result status must be exactly done, error, or cancelled, and missing, contradictory, or unknown statuses never prove success.",
+              "agent.end discards unfinished proposals for that turn but is not a documented session-end event; Amp exposes no terminal session or subagent-parent lifecycle boundary.",
+              "tool.result gating can withhold or replace model-bound content but cannot undo completed tool side effects; skill invocation and remote Orb execution do not have separately certified lifecycle coverage."
+            ]
+          },
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "tool.call",
+              "tool.result"
+            ],
+            "block_events": [
+              "tool.call",
+              "tool.result"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Amp auto-loads system TypeScript plugins from ~/.config/amp/plugins on macOS/Linux and %USERPROFILE%\\.config\\amp\\plugins on Windows. DefenseClaw installs a dependency-free owner-only policy plugin there.",
+            "tool.call is synchronous before execution; tool.result can replace unsafe output before model delivery but cannot undo completed side effects. Both support native confirmation only for the active foreground thread and reject safely when UI is unavailable.",
+            "session.start, agent.start, tool.call, tool.result, and agent.end feed Agent360, Galileo, audit, and generated hook telemetry. Amp documents no session.end or dedicated subagent lifecycle plugin event.",
+            "The plugin reports Amp's first-class custom-agent name/display/declared model or built-in mode when available; this metadata is not a stable agent ID, model request ID, trace context, or parent-thread link.",
+            "Oracle, Task/subagent launchers, MCP tools, and plugin tools remain policy-controlled at the tool.call delegation boundary. Child-thread events are ingested under their reported thread ID when Amp emits them.",
+            "Amp does not document arbitrary model-endpoint proxying, native customer OTLP, or W3C trace propagation from plugins.",
+            "Headless `amp -x` action-mode launches require `--plugin-ready-timeout 30` to guarantee plugin readiness and complete lifecycle capture before the turn; fail-closed cannot protect work that starts before Amp loads the plugin."
           ]
         }
       ]
@@ -681,6 +1795,51 @@
           ],
           "supports_traceparent": true,
           "native_otlp": true,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "PreToolUse"
+            ],
+            "authoritative_success_events": [],
+            "authoritative_failure_events": [],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "AfterAgentResponse"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "none",
+            "outcome_authority": "none",
+            "stateful_enforcement_level": "direct-only",
+            "routing": {
+              "structured_action_events": [
+                "PreToolUse"
+              ],
+              "result_content_events": [
+                "PostToolUse"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "AfterAgentResponse"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp",
+              "skills"
+            ],
+            "official_source_urls": [
+              "https://github.com/omnigent-ai/omnigent/blob/73657266ed68e50f30965a0202bc334f06507a30/omnigent/policies/schema.py",
+              "https://omnigent.ai/docs/policies/custom"
+            ],
+            "limitations": [
+              "PolicyEvent exposes no call, session, conversation, or parent identifier; tool_result repeats request data but does not report authoritative success or failure.",
+              "PostToolUse policy decisions can suppress or transform returned content but cannot undo side effects, so only direct pre-tool enforcement is enabled."
+            ]
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,

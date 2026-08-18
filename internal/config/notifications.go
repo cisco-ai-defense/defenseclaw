@@ -98,18 +98,16 @@ const NotificationsDefaultDedupWindow = 30 * time.Second
 const NotificationsDefaultMaxPerMinute = 12
 
 // DefaultNotificationsEnabled is the platform-conditional master
-// default for the notification dispatcher. Per the rollout step 1
-// of macos-block-and-hitl-notifications, darwin (the only platform
-// with a consumer-grade desktop notification surface every user
-// already has running) opts in by default; every other GOOS waits
-// for an explicit operator opt-in via `defenseclaw setup
-// notifications on`. Exposed as a package-level var (not a const
-// or runtime check) so tests and the Python config helper can
-// pin the matrix without taking a build-tag dependency.
-var DefaultNotificationsEnabled = runtime.GOOS == "darwin"
+// default for the notification dispatcher. macOS and native Windows both
+// provide an attended consumer desktop surface owned by the interactive user,
+// so fresh installs opt in there. Headless Linux and other GOOS values wait for
+// an explicit operator opt-in via `defenseclaw setup notifications on`.
+// Exposed as a package-level var so tests and the Python config helper can pin
+// the matrix without taking a build-tag dependency.
+var DefaultNotificationsEnabled = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
 
 // DefaultNotificationsConfig returns the recommended starting point
-// for fresh installs: master switch defaults to true on darwin and
+// for fresh installs: master switch defaults to true on macOS and Windows and
 // false elsewhere (see DefaultNotificationsEnabled). Categories
 // favor signal over noise — a fresh install only notifies for
 // things that ACTUALLY happened (enforced block, real native ask).

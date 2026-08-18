@@ -11,13 +11,42 @@
 package gateway
 
 import (
+	"context"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+func TestRunWatcherWithoutConfiguredDirectoriesRemainsHealthy(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Gateway.Watcher.Enabled = true
+	cfg.Gateway.Watcher.Skill.Enabled = false
+	cfg.Gateway.Watcher.Plugin.Enabled = false
+
+	health := NewSidecarHealth()
+	sidecar := &Sidecar{cfg: cfg, health: health}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := sidecar.runWatcher(ctx); err != nil {
+		t.Fatalf("runWatcher() error = %v", err)
+	}
+	snap := health.Snapshot()
+	if snap.Watcher.State != StateRunning {
+		t.Fatalf("watcher state = %q, want %q", snap.Watcher.State, StateRunning)
+	}
+	if snap.Watcher.LastError != "" {
+		t.Fatalf("watcher error = %q, want empty", snap.Watcher.LastError)
+	}
+	if got := snap.Watcher.Details["idle"]; got != "no directories configured" {
+		t.Fatalf("watcher idle detail = %v", got)
+	}
+}
 
 // TestResolveWatcherDirs_PerConnectorMatrix is the C4 / S1.3 matrix
 // test the plan calls for: prove that for every built-in connector,
@@ -204,6 +233,10 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     dedicated matrix rather than reusing the openclaw/zeptoclaw/
 //     claudecode/codex one above.
 func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
+	hermesSkillFragment := filepath.Join(".hermes", "skills")
+	if runtime.GOOS == "windows" {
+		hermesSkillFragment = filepath.Join("hermes", "skills")
+	}
 	cases := []struct {
 		name            string
 		ctor            func() connector.Connector
@@ -214,7 +247,7 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			name:            "hermes",
 			ctor:            func() connector.Connector { return connector.NewHermesConnector() },
 			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".hermes", "skills"),
+			expectSkillFrag: hermesSkillFragment,
 		},
 		{
 			name:            "cursor",
@@ -302,9 +335,89 @@ func TestResolveWatcherDirs_OpenHandsUsesPinnedWorkspace(t *testing.T) {
 	}
 }
 
+func TestResolveWatcherDirs_AMPUsesEffectiveSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(workspace, ".amp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{
+		"amp.skills.path": "team-skills",
+		"amp.skills.disableClaudeCodeSkills": true
+	}`
+	if err := os.WriteFile(filepath.Join(workspace, ".amp", "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{Claw: config.ClawConfig{WorkspaceDir: workspace}}
+	wcfg := config.GatewayWatcherConfig{}
+	wcfg.Skill.Enabled = true
+	wcfg.Plugin.Enabled = true
+
+	skillDirs, pluginDirs, src := resolveWatcherDirs(cfg, connector.NewAMPConnector(), wcfg)
+
+	if src.Skill != watcherDirsFromConnector || src.Plugin != watcherDirsFromConnector {
+		t.Fatalf("Amp watcher sources = %+v, want connector-resolved skills and plugins", src)
+	}
+	if !anyContains(skillDirs, filepath.Join(workspace, "team-skills")) {
+		t.Fatalf("Amp skill dirs = %v, missing relative amp.skills.path rooted at workspace", skillDirs)
+	}
+	for _, dir := range skillDirs {
+		if strings.Contains(dir, filepath.Join(".claude", "skills")) {
+			t.Fatalf("Amp skill dirs = %v, Claude-compatible roots must be disabled", skillDirs)
+		}
+	}
+	if !anyContains(pluginDirs, filepath.Join(workspace, ".amp", "plugins")) {
+		t.Fatalf("Amp plugin dirs = %v, missing workspace plugin root", pluginDirs)
+	}
+}
+
+func TestResolveWatcherDirs_AMPDoesNotMaterializeOptionalClaudeRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	workspace := filepath.Join(home, "repo")
+	existingWorkspaceRoot := filepath.Join(workspace, ".claude", "skills")
+	if err := os.MkdirAll(existingWorkspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{Claw: config.ClawConfig{WorkspaceDir: workspace}}
+	wcfg := config.GatewayWatcherConfig{}
+	wcfg.Skill.Enabled = true
+
+	skillDirs, _, src := resolveWatcherDirs(cfg, connector.NewAMPConnector(), wcfg)
+
+	if src.Skill != watcherDirsFromConnector {
+		t.Fatalf("Amp watcher skill source = %q, want %q", src.Skill, watcherDirsFromConnector)
+	}
+	if !containsExactPath(skillDirs, existingWorkspaceRoot) {
+		t.Fatalf("Amp skill dirs = %v, missing existing Claude-compatible root %q", skillDirs, existingWorkspaceRoot)
+	}
+	absentUserRoot := filepath.Join(home, ".claude", "skills")
+	if containsExactPath(skillDirs, absentUserRoot) {
+		t.Fatalf("Amp skill dirs = %v, retained absent optional root %q", skillDirs, absentUserRoot)
+	}
+	if _, err := os.Stat(absentUserRoot); !os.IsNotExist(err) {
+		t.Fatalf("optional Claude root was materialized during resolution: %v", err)
+	}
+}
+
 func anyContains(haystack []string, needle string) bool {
 	for _, h := range haystack {
 		if strings.Contains(h, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsExactPath(paths []string, want string) bool {
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if filepath.Clean(path) == want {
 			return true
 		}
 	}

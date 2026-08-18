@@ -102,7 +102,8 @@ func TestHookProfileForConnector(t *testing.T) {
 		// hermes has no Decode: its `extra` content is recovered by the
 		// generic decoder's ContentEnvelopeKey fallback.
 		{"hermes", "hermes", "hermes", false, true, true},
-		{"cursor", "cursor", "cursor", false, true, true},
+		{"cursor", "cursor", "cursor", true, true, true},
+		{"windsurf", "windsurf", "windsurf", true, true, true},
 		{"openhands", "openhands", "openhands", false, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
@@ -200,7 +201,7 @@ func jsonKeys(m map[string]interface{}) []string {
 // renderAgentHookResponseForProfile MUST project them onto the
 // JSON output map so hook scripts (and any downstream consumer
 // of the HTTP response body) can pivot on the same join key
-// surfaced via gateway.jsonl, scan_findings, and the audit DB
+// surfaced via canonical logs, scan_findings, and the audit DB
 // structured envelope.
 //
 // Regression guard: the original render projection built a

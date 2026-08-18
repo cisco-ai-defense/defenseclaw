@@ -24,6 +24,7 @@ fi
 
 VERSION="$1"
 OUT_DIR="$2"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     echo "version must be X.Y.Z (got: ${VERSION})" >&2
     exit 64
@@ -33,7 +34,7 @@ OUT_DIR="$2"
     exit 1
 }
 
-for command in codesign ditto hdiutil python3 shasum; do
+for command in cmp codesign ditto hdiutil python3 shasum; do
     command -v "${command}" >/dev/null || {
         echo "required command not found: ${command}" >&2
         exit 1
@@ -80,8 +81,14 @@ PAYLOAD="${DMG_APP}/Contents/Resources/RuntimePayload"
     echo "DMG Applications link is missing or incorrect" >&2
     exit 1
 }
-for relative in defenseclaw-gateway overrides.txt payload-manifest.json upgrade-manifest.json runtime-candidate-checksums.txt; do
+for relative in defenseclaw-gateway overrides.txt payload-manifest.json upgrade-manifest.json runtime-candidate-checksums.txt LICENSE NOTICE THIRD_PARTY_LICENSES.txt; do
     [[ -f "${PAYLOAD}/${relative}" ]] || { echo "runtime payload missing ${relative}" >&2; exit 1; }
+done
+for relative in LICENSE NOTICE THIRD_PARTY_LICENSES.txt; do
+    cmp -s "${ROOT}/${relative}" "${PAYLOAD}/${relative}" || {
+        echo "runtime payload ${relative} differs from the canonical source file" >&2
+        exit 1
+    }
 done
 
 INFO="${DMG_APP}/Contents/Info.plist"

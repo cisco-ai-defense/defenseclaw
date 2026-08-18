@@ -186,7 +186,7 @@ func TestDetectLocalAPIModelsOllamaTagsAndPS(t *testing.T) {
 				"size":1234,
 				"digest":"sha256:abc",
 				"modified_at":"2026-07-01T00:00:00Z",
-				"details":{"format":"gguf"}
+				"details":{"format":"gguf","family":"qwen2","families":["qwen2"],"parameter_size":"7.6B","quantization_level":"Q4_K_M"}
 			}]}`))
 		case "/api/ps":
 			_, _ = w.Write([]byte(`{"models":[{
@@ -194,7 +194,7 @@ func TestDetectLocalAPIModelsOllamaTagsAndPS(t *testing.T) {
 				"size":1234,
 				"size_vram":900,
 				"expires_at":"2026-07-09T12:00:00Z",
-				"details":{"format":"gguf"}
+				"details":{"format":"gguf","family":"qwen2","families":["qwen2"],"parameter_size":"7.6B","quantization_level":"Q4_K_M"}
 			}]}`))
 		default:
 			http.NotFound(w, r)
@@ -224,6 +224,11 @@ func TestDetectLocalAPIModelsOllamaTagsAndPS(t *testing.T) {
 	}
 	if installed.Model.Format != "gguf" || installed.Model.SizeBytes != 1234 || installed.Model.Provider != "ollama" {
 		t.Fatalf("installed = %+v", installed.Model)
+	}
+	if installed.Model.Provenance == nil || installed.Model.Provenance.Publisher != "Alibaba Cloud" ||
+		installed.Model.Provenance.CountryCode != "CN" || installed.Model.Provenance.Quantized == nil ||
+		!*installed.Model.Provenance.Quantized || installed.Model.Provenance.Quantization != "Q4_K_M" {
+		t.Fatalf("installed provenance = %+v", installed.Model.Provenance)
 	}
 	if loaded.Model.Status != "loaded" || loaded.Model.SizeBytes != 1234 {
 		t.Fatalf("loaded = %+v", loaded.Model)
@@ -797,7 +802,8 @@ func TestLocalModelAPILifecycleDistinguishesTransientFailureFromEmptyInventory(t
 		Enabled: true, Mode: "enhanced", IncludeNetworkDomains: true,
 		HomeDir: t.TempDir(), ScanRoots: []string{t.TempDir()}, DataDir: t.TempDir(),
 		MaxFilesPerScan: 20, MaxFileBytes: 64 << 10,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -859,7 +865,8 @@ func TestLocalModelAPILifecycleCompletesPagedInventoryBeforeMarkingRemoval(t *te
 		Enabled: true, Mode: "enhanced", IncludeNetworkDomains: true,
 		HomeDir: t.TempDir(), ScanRoots: []string{t.TempDir()}, DataDir: t.TempDir(),
 		MaxFilesPerScan: 20, MaxFileBytes: 64 << 10,
-	}, []AISignature{openAIAPITestSignature(server.URL)}, nil, nil)
+	}, []AISignature{openAIAPITestSignature(server.URL)})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	firstPage, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -931,13 +938,16 @@ func TestRunScanCancellationDoesNotPersistPartialModelInventory(t *testing.T) {
 		Enabled: true, Mode: "enhanced", IncludeNetworkDomains: true,
 		HomeDir: t.TempDir(), ScanRoots: []string{t.TempDir()}, DataDir: t.TempDir(),
 		MaxFilesPerScan: 20, MaxFileBytes: 64 << 10,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
 	durable := findModelSignal(t, first.Signals, "model_api", "durable-model")
 
+	observability := &captureAIDiscoveryV8{}
+	svc.BindObservabilityV8(observability)
 	block.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -953,6 +963,12 @@ func TestRunScanCancellationDoesNotPersistPartialModelInventory(t *testing.T) {
 	}
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled scan err = %v, want context.Canceled", err)
+	}
+	if observability.trace == nil || observability.trace.abortCall != 1 || len(observability.trace.ended) != 0 {
+		t.Fatalf("cancelled v8 observation was not aborted cleanly: %+v", observability.trace)
+	}
+	if len(observability.reports) != 0 {
+		t.Fatalf("cancelled scan emitted a partial v8 report: %+v", observability.reports)
 	}
 	stored, err := svc.store.Load()
 	if err != nil {
@@ -1005,10 +1021,11 @@ func TestDetectLocalAPIModelsDeduplicatesLemonadeCompatibilityEndpoints(t *testi
 func TestLocalEndpointsForSignatureAddsLemonadePresenceAndConfiguredPorts(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
 	t.Setenv("LEMONADE_PORT", "32124")
 	t.Setenv("LEMONADE_HOST", "127.0.0.1")
-	t.Setenv("LEMONADE_CACHE_DIR", "")
 	configDir := filepath.Join(tmp, ".cache", "lemonade")
+	t.Setenv("LEMONADE_CACHE_DIR", configDir)
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

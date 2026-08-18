@@ -78,10 +78,21 @@ def bundled_codeguard_dir() -> Path:
 
 def bundled_splunk_bridge_dir() -> Path:
     """Vendored Splunk local bridge runtime."""
-    return _first_existing(
-        _DATA_DIR / "splunk_local_bridge",
-        _REPO_ROOT / "bundles" / "splunk_local_bridge",
-    )
+    # The source checkout is authoritative during development; ``_data`` is
+    # build staging and may be stale. Installed wheels do not contain the
+    # repository ``bundles`` directory and therefore resolve packaged data.
+    repo_package = _REPO_ROOT / "cli" / "defenseclaw"
+    in_source_checkout = (_REPO_ROOT / "pyproject.toml").is_file()
+    try:
+        in_source_checkout = in_source_checkout and repo_package.resolve() == _PKG_DIR.resolve()
+    except OSError:
+        in_source_checkout = False
+    if in_source_checkout:
+        return _first_existing(
+            _REPO_ROOT / "bundles" / "splunk_local_bridge",
+            _DATA_DIR / "splunk_local_bridge",
+        )
+    return _DATA_DIR / "splunk_local_bridge"
 
 
 def bundled_local_observability_dir() -> Path:

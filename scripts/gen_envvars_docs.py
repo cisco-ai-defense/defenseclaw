@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Render docs/ENV-VARS.md and docs-site/.../env-vars.mdx from the
+# ruff: noqa: E501 -- Markdown templates intentionally preserve long rendered lines.
+"""Generate the Python package registry and website env-var catalog from the
 single source of truth at internal/envvars/registry.json.
 
-The script preserves hand-written prose outside the AUTOGEN sentinels.
-Each target file looks like::
+The script preserves hand-written MDX prose outside the AUTOGEN sentinels.
+The website target looks like::
 
     <hand-written intro and front-matter>
 
@@ -13,10 +14,17 @@ Each target file looks like::
 
     <hand-written footer (links, callouts)>
 
-Run with no arguments to regenerate both files in place. Pass
-``--check`` to fail the build if either file is out of date — this is
+Run with no arguments to synchronize the bundled registry and website page.
+``docs/ENV-VARS.md`` is a hand-maintained pointer and is intentionally outside
+this generator. Pass
+``--bundle-only`` from packaging flows that must not repair tracked docs,
+or ``--check`` to fail if any generated artifact is out of date — this is
 what the CI gate runs.
 """
+
+# Generated Markdown templates intentionally keep link destinations and
+# frontmatter prose on single lines for stable rendered output.
+# ruff: noqa: E501
 
 from __future__ import annotations
 
@@ -27,8 +35,8 @@ import textwrap
 from pathlib import Path
 
 # Make `defenseclaw` importable when invoked from the repo root without
-# an editable install. The registry-loader resolution at
-# defenseclaw.envvars.load_registry walks up to find registry.json.
+# an editable install. The generator still passes the authoritative source
+# path explicitly; import resolution cannot select the generated mirror.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "cli"))
 
@@ -45,7 +53,13 @@ from defenseclaw.envvars import (  # noqa: E402  (sys.path manipulated above)
     CATEGORY_TEST_FIXTURE,
     CATEGORY_UPGRADE_INTERNAL,
     EnvVar,
-    load_registry,
+    Registry,
+    load_registry_file,
+)
+
+_SOURCE_REGISTRY = _REPO_ROOT / "internal" / "envvars" / "registry.json"
+_TARGET_BUNDLED_REGISTRY = (
+    _REPO_ROOT / "cli" / "defenseclaw" / "_data" / "envvars" / "registry.json"
 )
 
 # Render order. Security-impacting categories first so they're visible
@@ -82,14 +96,7 @@ _CATEGORY_TITLES = {
 
 _SENTINEL_BEGIN_MDX = "{/* AUTOGEN-BEGIN: env-vars */}"
 _SENTINEL_END_MDX = "{/* AUTOGEN-END: env-vars */}"
-_SENTINEL_BEGIN_MD = "<!-- AUTOGEN-BEGIN: env-vars -->"
-_SENTINEL_END_MD = "<!-- AUTOGEN-END: env-vars -->"
 
-_AUTOGEN_NOTE_MD = (
-    "<!-- The block below is auto-generated from "
-    "`internal/envvars/registry.json` via `scripts/gen_envvars_docs.py`. "
-    "Edit the JSON, not this file. -->"
-)
 # MDX does not allow HTML comments inside JSX/MDX content; use a block comment.
 _AUTOGEN_NOTE_MDX = (
     "{/* The block below is auto-generated from "
@@ -190,14 +197,11 @@ def _first_sentence(text: str) -> str:
     return head
 
 
-def _render_table(category: str, *, mdx: bool) -> str:
-    """Render one category's table. ``mdx=True`` emits JSX-safe
-    ``<br/>`` line-breaks (required by MDX). ``mdx=False`` emits plain
-    ``<br>`` for vanilla markdown."""
-    reg = load_registry()
-    entries = sorted(reg.by_category(category), key=lambda e: e.name)
+def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
+    """Render one category's MDX-safe table."""
+    entries = sorted(registry.by_category(category), key=lambda e: e.name)
     if not entries:
-        return f"\n*(no entries in this category)*\n"
+        return "\n*(no entries in this category)*\n"
 
     br = "<br/>" if mdx else "<br>"
 
@@ -234,14 +238,15 @@ def _render_table(category: str, *, mdx: bool) -> str:
 
 def _render_block(*, mdx: bool) -> str:
     """Build the full auto-generated block (one section per category)."""
+    registry = load_registry_file(_SOURCE_REGISTRY)
     chunks: list[str] = []
-    chunks.append(_AUTOGEN_NOTE_MDX if mdx else _AUTOGEN_NOTE_MD)
+    chunks.append(_AUTOGEN_NOTE_MDX)
     chunks.append("")
     for category in _CATEGORY_ORDER:
         title = _CATEGORY_TITLES[category]
         chunks.append(f"## {title}")
         chunks.append("")
-        chunks.append(_render_table(category, mdx=mdx))
+        chunks.append(_render_table(category, mdx=mdx, registry=registry))
         chunks.append("")
     return "\n".join(chunks).rstrip() + "\n"
 
@@ -277,38 +282,7 @@ def _replace_between(
 
 
 # ---------------------------------------------------------------------------
-# Default templates used when the target file doesn't yet exist
-
-_DEFAULT_MD_TEMPLATE = textwrap.dedent(
-    """\
-    # DefenseClaw environment variables
-
-    Canonical list of every `DEFENSECLAW_*` env var consumed by the
-    codebase, generated from `internal/envvars/registry.json`.
-
-    > **Edit policy:** Do not hand-edit the auto-generated block below.
-    > Edit `internal/envvars/registry.json` and run
-    > `python3 scripts/gen_envvars_docs.py` to regenerate.
-
-    The CI gate at `cli/tests/test_envvars_codebase_coverage.py` fails
-    if any callsite references a `DEFENSECLAW_*` var not declared in
-    the registry — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
-    workflow.
-
-    Active overrides are also surfaced live by `defenseclaw doctor`
-    (the "Security Overrides" section).
-
-    {begin}
-    {payload}
-    {end}
-
-    ## When in doubt
-
-    Run `defenseclaw doctor`. It walks the same env-var resolution
-    code paths as the running gateway and surfaces effective values
-    plus any active opt-outs.
-    """
-)
+# Default template used when the website target doesn't yet exist
 
 _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
     """\
@@ -319,8 +293,6 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
       - DefenseClaw env vars
       - DEFENSECLAW_LLM_KEY
       - DEFENSECLAW_HOME
-      - DEFENSECLAW_DISABLE_REDACTION
-      - DEFENSECLAW_OTEL_ENABLED
       - DefenseClaw configuration
     ---
 
@@ -349,7 +321,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
     - [`cli/defenseclaw/envvars.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/envvars.py) — Python loader.
     - [`internal/envvars/registry.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.go) — Go loader.
     - [Reference → Keys](/docs/reference/keys) — credential resolution order.
-    - [Reference → Redaction](/docs/reference/redaction) — `DEFENSECLAW_DISABLE_REDACTION` / `DEFENSECLAW_REVEAL_PII`.
+    - [Reference → Redaction](/docs/reference/redaction) — v8 profiles and display-only `DEFENSECLAW_REVEAL_PII`.
     - [Reference → Fail modes](/docs/reference/fail-modes) — `DEFENSECLAW_FAIL_MODE` / `DEFENSECLAW_STRICT_AVAILABILITY`.
     """
 )
@@ -369,16 +341,6 @@ def render_mdx() -> str:
     )
 
 
-def render_md() -> str:
-    """Return the full content of docs/ENV-VARS.md."""
-    payload = _render_block(mdx=False)
-    return _DEFAULT_MD_TEMPLATE.format(
-        begin=_SENTINEL_BEGIN_MD,
-        end=_SENTINEL_END_MD,
-        payload=payload,
-    )
-
-
 def update_file(path: Path, payload: str, sentinel_begin: str, sentinel_end: str) -> str:
     """Update an existing file in place, preserving hand-written prose
     outside the sentinels. Returns the new contents."""
@@ -387,29 +349,37 @@ def update_file(path: Path, payload: str, sentinel_begin: str, sentinel_end: str
         new, found = _replace_between(old, sentinel_begin, sentinel_end, payload)
         if found:
             return new
-    # Fall back to writing from the default template.
-    if str(path).endswith(".mdx"):
-        return render_mdx()
-    return render_md()
+    return render_mdx()
 
 
-_TARGET_MD = _REPO_ROOT / "docs" / "ENV-VARS.md"
 _TARGET_MDX = _REPO_ROOT / "docs-site" / "content" / "docs" / "reference" / "env-vars.mdx"
 
 
-def write_all() -> dict[str, bool]:
-    """Regenerate both files. Returns ``{path: changed}``."""
-    results: dict[str, bool] = {}
+def write_bundled_registry() -> bool:
+    """Validate and synchronize the package-data registry mirror."""
+    # Validate before publishing the source bytes into package data.
+    load_registry_file(_SOURCE_REGISTRY)
+    source_bytes = _SOURCE_REGISTRY.read_bytes()
+    old_bundled = (
+        _TARGET_BUNDLED_REGISTRY.read_bytes()
+        if _TARGET_BUNDLED_REGISTRY.is_file()
+        else b""
+    )
+    if source_bytes != old_bundled:
+        _TARGET_BUNDLED_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        _TARGET_BUNDLED_REGISTRY.write_bytes(source_bytes)
+        return True
+    return False
 
-    payload_md = _render_block(mdx=False)
-    new_md = update_file(_TARGET_MD, payload_md, _SENTINEL_BEGIN_MD, _SENTINEL_END_MD)
-    old_md = _TARGET_MD.read_text(encoding="utf-8") if _TARGET_MD.is_file() else ""
-    if new_md != old_md:
-        _TARGET_MD.parent.mkdir(parents=True, exist_ok=True)
-        _TARGET_MD.write_text(new_md, encoding="utf-8")
-        results[str(_TARGET_MD)] = True
-    else:
-        results[str(_TARGET_MD)] = False
+
+def write_all() -> dict[str, bool]:
+    """Regenerate the package registry and website catalog.
+
+    Returns ``{path: changed}``.
+    """
+    results: dict[str, bool] = {
+        str(_TARGET_BUNDLED_REGISTRY): write_bundled_registry(),
+    }
 
     payload_mdx = _render_block(mdx=True)
     new_mdx = update_file(_TARGET_MDX, payload_mdx, _SENTINEL_BEGIN_MDX, _SENTINEL_END_MDX)
@@ -424,23 +394,31 @@ def write_all() -> dict[str, bool]:
 
 
 def check_only() -> int:
-    """Return 0 if both files are up to date; 1 otherwise. Used by CI."""
-    payload_md = _render_block(mdx=False)
+    """Return 0 if all generated artifacts are current; 1 otherwise."""
     payload_mdx = _render_block(mdx=True)
 
     drift = []
-    for target, payload, begin, end in (
-        (_TARGET_MD, payload_md, _SENTINEL_BEGIN_MD, _SENTINEL_END_MD),
-        (_TARGET_MDX, payload_mdx, _SENTINEL_BEGIN_MDX, _SENTINEL_END_MDX),
-    ):
-        new = update_file(target, payload, begin, end)
-        old = target.read_text(encoding="utf-8") if target.is_file() else ""
-        if new != old:
-            drift.append(str(target))
+    source_bytes = _SOURCE_REGISTRY.read_bytes()
+    bundled_bytes = (
+        _TARGET_BUNDLED_REGISTRY.read_bytes()
+        if _TARGET_BUNDLED_REGISTRY.is_file()
+        else b""
+    )
+    if bundled_bytes != source_bytes:
+        drift.append(str(_TARGET_BUNDLED_REGISTRY))
+    new_mdx = update_file(
+        _TARGET_MDX,
+        payload_mdx,
+        _SENTINEL_BEGIN_MDX,
+        _SENTINEL_END_MDX,
+    )
+    old_mdx = _TARGET_MDX.read_text(encoding="utf-8") if _TARGET_MDX.is_file() else ""
+    if new_mdx != old_mdx:
+        drift.append(str(_TARGET_MDX))
     if drift:
         print(
-            "env-vars docs out of date — regenerate with "
-            "`python3 scripts/gen_envvars_docs.py`. Out-of-date files: "
+            "env-var generated artifacts out of date — regenerate with "
+            "`python scripts/gen_envvars_docs.py`. Out-of-date files: "
             + ", ".join(drift),
             file=sys.stderr,
         )
@@ -450,14 +428,27 @@ def check_only() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--check",
         action="store_true",
-        help="Exit non-zero if either target file is out of date; do not write.",
+        help="Exit non-zero if any generated artifact is out of date; do not write.",
+    )
+    modes.add_argument(
+        "--bundle-only",
+        action="store_true",
+        help="Synchronize only the ignored package-data mirror; do not rewrite docs.",
     )
     args = parser.parse_args()
     if args.check:
         return check_only()
+    if args.bundle_only:
+        changed = write_bundled_registry()
+        print(
+            f"{'updated' if changed else 'unchanged'}: "
+            f"{_TARGET_BUNDLED_REGISTRY}"
+        )
+        return 0
     changed = write_all()
     for path, did_change in sorted(changed.items()):
         print(f"{'updated' if did_change else 'unchanged'}: {path}")

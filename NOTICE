@@ -15,9 +15,26 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Third-party dependencies are listed in go.mod (Go), pyproject.toml (Python),
-and package.json (TypeScript). Their respective licenses can be found in
-each dependency's source repository. Key dependencies include:
+Declared third-party dependencies are listed in go.mod/go.sum (Go) and
+pyproject.toml/uv.lock (Python). The shipped OpenClaw TypeScript plugin is built
+from extensions/defenseclaw/package.json and
+extensions/defenseclaw/openclaw.plugin.json; the runtime archive carries them
+as root package.json and openclaw.plugin.json files.
+extensions/defenseclaw/package-lock.json is its locked build input but is not
+placed in that runtime archive. The docs-site/package.json and
+docs-site/package-lock.json files belong to the separately deployed
+documentation site, not a DefenseClaw runtime artifact.
+
+Redistributed contents vary by artifact. GoReleaser archive Syft SBOM sidecars
+inventory the gateway archives. The Windows Setup merged SPDX 2.3 SBOM also
+derives its exact linked Go module inventory from `go version -m`.
+
+THIRD_PARTY_LICENSES.txt is a scoped attribution artifact for dependencies
+added by the structured command and semantic tool-call analysis work, not an
+exhaustive dependency inventory. Its header records the exact covered module
+versions, upstream license sources, and license-text digests. Additional
+license details can be found in each dependency's source repository. Key
+dependencies include:
 
   - Cobra (github.com/spf13/cobra) — Apache-2.0
   - Viper (github.com/spf13/viper) — MIT
@@ -27,8 +44,20 @@ each dependency's source repository. Key dependencies include:
   - Bifrost (github.com/maximhq/bifrost) — Apache-2.0
   - OPA (github.com/open-policy-agent/opa) — Apache-2.0
   - SQLite (modernc.org/sqlite) — BSD-3-Clause
+  - mvdan shell parser (mvdan.cc/sh/v3) — BSD-3-Clause
+  - CEL-Go (github.com/google/cel-go) — Apache-2.0 with BSD-3-Clause component
+  - CEL expression protobufs (cel.dev/expr) — Apache-2.0
+  - ANTLR4 Go runtime (github.com/antlr4-go/antlr/v4) — BSD-3-Clause
+  - Go experimental packages (golang.org/x/exp) — BSD-3-Clause
   - OpenTelemetry Go (go.opentelemetry.io/otel) — Apache-2.0
   - Lumberjack (gopkg.in/natefinch/lumberjack.v2) — MIT
   - UUID (github.com/google/uuid) — BSD-3-Clause
   - fsnotify (github.com/fsnotify/fsnotify) — BSD-3-Clause
   - gorilla/websocket (github.com/gorilla/websocket) — BSD-2-Clause
+  - Unicode Character Database 13.0 DerivedAge data — Unicode-DFS-2016
+
+The generated observability redaction repertoire includes data derived from the
+Unicode Character Database 13.0 `DerivedAge.txt` file.
+Copyright © 1991-2020 Unicode, Inc. All rights reserved.
+Distributed under the Unicode Data Files and Software License; see
+https://www.unicode.org/copyright.html.

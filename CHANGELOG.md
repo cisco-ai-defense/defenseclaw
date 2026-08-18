@@ -1,8 +1,12 @@
 # DefenseClaw Changelog
 
-All notable changes to this project are documented here. The format
-follows [Keep a Changelog](https://keepachangelog.com) and the
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+This file preserves development rollups and historical change notes. It is not
+a complete published-release index: the release workflow stamps isolated build
+checkouts, so repository source metadata and headings can lag published tags.
+Use [GitHub Releases](https://github.com/cisco-ai-defense/defenseclaw/releases)
+for released versions and assets, and the
+[documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
+for current behavior.
 
 ## [Unreleased] — Hook collector unification
 
@@ -13,6 +17,41 @@ There are **no new environment variables** — the unification is the
 default and only path; the V1 OTLP builders and the per-phase
 feature flags that existed in early review iterations have been
 deleted.
+
+### Observability v8
+
+- Replaces separate `otel`, `audit_sinks`, and global redaction policy with one
+  strict `config_version: 8` `observability` graph for bucket collection,
+  mandatory local SQLite history, redaction profiles, routing, retention,
+  sampling, metric policy, and every optional destination.
+- Fresh v8 is full fidelity: all registered logs, traces, and metrics collect;
+  local SQLite stores every collected log unredacted; and an enabled destination
+  with omitted `send`/`routes` exports every reviewed bucket and every signal its
+  kind supports under profile `none`. General OTLP sends logs/traces/metrics,
+  logs-only kinds send logs, Prometheus sends metrics, and Galileo sends traces.
+- Adds centralized per-destination field-class profiles (`none`, `sensitive`,
+  `content`, `strict`, and custom detect/whole/hash/remove policy), ordered
+  first-match routes, and independent queue/health/accounting for multi-backend
+  fan-out.
+- Preserves the full root-agent/subagent/turn/workflow/model/tool lifecycle and
+  the `local-observability-v1` Agent360/dashboard contract while expanding the
+  generated `galileo-rich-v2` trace projection.
+- One authenticated target-release resolver command automatically stages supported
+  POSIX v7 installations through the published `0.8.4` protocol-2 bridge, re-execs
+  under a fresh bridge controller, then backs up, converts, validates, and atomically
+  activates v8. It preserves narrower v7 signal/routing/redaction behavior, promotes
+  inline observability secrets to locked environment references, refreshes owned
+  local-dashboard assets without resetting volumes, and restores healthy `0.8.4`
+  state after a failed conversion, start, or health check. No separate migration
+  apply command is required; the v8 gateway does not rewrite v7 config at startup or
+  run both formats in parallel. Windows refuses before mutation because no Windows
+  `0.8.4` bridge was published.
+
+Breaking change: fresh-v8 telemetry is unredacted by default, and legacy
+`otel`, `audit_sinks`, `privacy.disable_redaction`, and associated ambient OTel
+policy variables are not accepted as v8 runtime policy. Review
+`defenseclaw observability plan` before enabling a destination across a trust
+boundary.
 
 ### Packaging / upgrade hotfix
 
@@ -30,17 +69,47 @@ deleted.
 
 ### Behaviour changes (no flag)
 
+- **Claude Code post-tool findings are advisory and provenance-aware**:
+  `PostToolUse` and `PostToolBatch` retain findings plus shadow `would_block`
+  telemetry without stopping the next model turn. Returned source text is no
+  longer evaluated as an executable command or sensitive-path request; typed
+  command/path enforcement remains on `PreToolUse`, and physically verified
+  standalone source reads reuse the Codex low-noise source boundary.
+- **Amp is now a first-class connector on macOS, Linux, and native Windows**:
+  setup installs an owner-only authenticated system policy plugin for Amp's five
+  documented callbacks; action mode gates `tool.call` before execution and can
+  withhold unsafe `tool.result` output before model delivery. CLI, TUI, macOS
+  app, native Windows setup, discovery, doctor, upgrade/uninstall, MCP, skills,
+  plugins, Agent360, Galileo, audit, and hook-generated observability all share
+  the same connector contract. Amp exposes no documented native OTLP,
+  `traceparent`, `session.end`, or dedicated subagent lifecycle callback, so
+  DefenseClaw correlates only source-backed thread events and governs delegation
+  tools at their `tool.call` boundary.
+- **`make all` is again the explicit same-checkout developer reinstall**:
+  markerless or older source-owned state may advance with the checkout for
+  local development. Foreign, newer, release-managed, and different-checkout
+  installations still refuse before mutation, and direct install targets do
+  not inherit the developer reclaim path. Running `make` or `make help` now
+  explains the source-build, developer-activation, and release-upgrade paths;
+  `make build` no longer directs developers into the strict install target.
 - **AI Discovery inventories Lemonade and local model artifacts**: the built-in
   catalog now recognizes Lemonade Server, bounded loopback metadata reads show
   installed/loaded models, and independent filesystem discovery covers GGUF,
   MLX/safetensors, ONNX, Core ML, TFLite, Q4NX, Hugging Face caches, Ollama
   stores, and contextual PyTorch model files without opening model binaries.
+- **Skill, MCP, and plugin scans now degrade cleanly when optional LLM
+  credentials are unavailable**: the local/static analyzers still complete,
+  the CLI and TUI show a nonfatal skip warning, and Setup/Keys identifies the
+  missing credential. Auto mode adds the LLM analyzer only when its model and
+  authentication are usable; local providers and Bedrock's AWS credential
+  chain remain supported without a DefenseClaw API key.
 - **Antigravity local surfaces now match the PR #365 contract**:
   MCP reads/writes `~/.gemini/config/mcp_config.json` and
   `<workspace>/.agents/mcp_config.json`; hooks remain global-only at
   `~/.gemini/config/hooks.json`; AgentSkills folder form is supported
-  while rules/plugins/plugin-contained agents remain discovery-only
-  unless Google documents a write contract.
+  while rules/plugin-contained agents remain discovery-only. Antigravity
+  plugins now install to Google's documented global/workspace plugin paths;
+  the Antigravity CLI staging directory remains an additional discovery path.
 - **W3C trace propagation is enabled for trusted hook routes**
   (`/api/v1/<connector>/hook`, `/api/v1/codex/notify`) when the
   caller is loopback and the connector route is registered. The
@@ -110,7 +179,7 @@ deleted.
   pipeline (vs. an out-of-tree handler registration that bypasses
   audit/metrics).
 - New audit action `connector-hook-synthetic` (Go +
-  `cli/defenseclaw/audit_actions.py` + `OBSERVABILITY-CONTRACT.md`)
+  `cli/defenseclaw/audit_actions.py` + `schemas/audit-event.json`)
   for the synthetic Stop visibility row.
 
 ### F6 audit-action parity

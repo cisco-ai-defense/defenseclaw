@@ -23,6 +23,7 @@ package connector
 import (
 	"context"
 	"net/http"
+	"os"
 )
 
 // ToolInspectionMode describes how a connector monitors tool calls.
@@ -65,13 +66,24 @@ type SetupOpts struct {
 	ProxyAddr string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr   string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken  string // gateway bearer token; baked into hook curl -H
+	// ConfigHome is an explicit, caller-validated connector-native config
+	// directory for lifecycle operations. It prevents privileged setup,
+	// repair, teardown, and verification from resolving a different user
+	// profile through mutable process environment. Connectors that support
+	// it define the directory's exact meaning; Amp uses its ~/.config/amp
+	// root. An empty value preserves normal interactive home discovery.
+	ConfigHome string
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks
 	// receive this connector-scoped token instead.
 	HookAPIToken       string
 	HookAPITokenScoped bool
-	Interactive        bool
+	// OTLPPathToken is a connector-scoped credential embedded only in the
+	// loopback /otlp/<connector>/<token>/v1/<signal> namespace. It must never
+	// be reused as a general API or hook bearer.
+	OTLPPathToken string
+	Interactive   bool
 	// ManagedEnterprise marks hook scripts installed by the privileged
 	// enterprise guardian. Managed scripts ignore user-controlled home and
 	// disable-sentinel overrides and derive their data directory from the
@@ -83,14 +95,15 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// HookFailMode is the operator-chosen response-layer fail mode
-	// baked into every hook script we write. Values: "open" (default,
-	// allow on response-layer failures) or "closed" (block on
-	// response-layer failures). The sidecar populates this from
-	// cfg.Guardrail.EffectiveHookFailMode(); empty string is treated as
-	// the default ("open"). Transport-layer failures (gateway unreachable /
-	// 5xx) are governed separately by DEFENSECLAW_STRICT_AVAILABILITY in
-	// the hook scripts themselves and are NOT controlled by this field.
+	// HookFailMode is the operator-chosen hook failure mode supplied to setup
+	// and hook-writing paths. Values: "open" (allow on response or
+	// transport failures) or "closed" (block on either failure class). Runtime
+	// setup populates it from cfg.EffectiveHookFailModeForConnector(conn.Name()).
+	// Hook-writing helpers normalize an empty or invalid value to the secure
+	// "closed" fallback. Profile-only callers may omit it; provider-specific
+	// profile defaults are separate from the hook-writing boundary.
+	// DEFENSECLAW_STRICT_AVAILABILITY remains
+	// an unconditional force-closed override in generated hooks.
 	HookFailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire
@@ -112,6 +125,28 @@ type SetupOpts struct {
 	// HookContract. Empty means "not probed"; it never implies latest.
 	AgentVersion string
 
+	// AgentExecutable is the absolute local agent binary selected by trusted
+	// discovery. Connectors use it only for passive, bounded inspection of the
+	// agent's own effective policy surface (for example Codex app-server's
+	// configRequirements/read RPC). Keeping the selected path beside the
+	// observed version prevents a stale or poisoned PATH entry from changing
+	// which client Setup validates.
+	AgentExecutable string
+
+	// HookExecutable pins the administrator-owned native hook launcher used by
+	// managed policy deployment. Ordinary per-user setup leaves this empty and
+	// resolves the packaged launcher through the installed-state contract.
+	// Enterprise installers must supply an absolute, independently trusted path
+	// so a privileged policy write never captures the caller's PATH or profile.
+	HookExecutable string
+
+	// ClaudeSettingsOverride is the exact file path or inline JSON supplied to
+	// Claude Code through --settings for the invocation being inspected. An
+	// empty value means no command-line settings source is part of that
+	// invocation. The passive guardian cannot infer flags for future processes;
+	// callers validating a concrete launch must pass the value explicitly.
+	ClaudeSettingsOverride string
+
 	// HookContractID optionally pins setup/profile resolution to a specific
 	// known contract. A non-empty value that does not match the resolved
 	// contract marks the profile incompatible instead of silently using a
@@ -127,6 +162,15 @@ type SetupOpts struct {
 
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
+}
+
+// ManagedHookPolicyProvider renders and verifies connector-owned settings for
+// a vendor's administrator policy tier. It is deliberately separate from
+// Setup: user-scoped configuration and machine-managed policy have different
+// ownership, rollback, and precedence contracts.
+type ManagedHookPolicyProvider interface {
+	ManagedHookPolicy(SetupOpts) ([]byte, error)
+	VerifyManagedHookPolicy([]byte, SetupOpts) error
 }
 
 // Connector is the contract every agent framework adapter implements.
@@ -162,6 +206,48 @@ type Connector interface {
 // the route dynamically at boot instead of hardcoding paths in api.go.
 type HookEndpoint interface {
 	HookAPIPath() string
+}
+
+// NotifyEndpoint is implemented by connectors that install an auxiliary
+// notification bridge alongside their primary lifecycle hook. Keeping the
+// path on the connector contract lets rotation readiness verify every scoped
+// route without hard-coding connector identities in the CLI.
+type NotifyEndpoint interface {
+	NotifyAPIPath() string
+}
+
+// HookConfigStub describes the bytes + mode a connector wants written
+// when its native hook config file is absent on a fresh target (the
+// agent binary was never launched by this user, so its default config
+// file doesn't exist yet). DefenseClaw is a customer endpoint product —
+// fresh Macs where the user hasn't opened Cursor / launched Claude Code
+// still need hooks wired at pkg-install time. Without a bootstrap the
+// guardian's per-target Install would refuse with
+// "hook config file missing" and enforcement never engages until the
+// user happens to launch each agent once.
+//
+// The stub bytes must be the minimal-valid config the agent will
+// accept unchanged. The connector's Setup() will subsequently patch
+// the DefenseClaw-owned entries in — the stub is only enough for the
+// installer's validateActivationSurfaces check to pass.
+//
+// Empty ContentPath signals "no bootstrap for this connector" — the
+// installer falls back to the strict "must exist" precondition.
+type HookConfigStub struct {
+	ContentPath string      // absolute path (must be one HookConfigPathsForConnector returned)
+	Contents    []byte      // minimal-valid config bytes
+	Mode        os.FileMode // file mode after write (typically 0o600)
+}
+
+// HookConfigBootstrap is the optional Connector-side hook. When a
+// connector implements it the installer calls DefaultHookConfigStub
+// under withOwnerCredentials, so the stub is written as the target
+// user with the correct uid/gid. Connectors that don't implement it
+// fall back to whatever DefaultHookConfigStubForConnector resolves in
+// the installer package (kept there so the three shipped connectors
+// don't each need a near-identical method).
+type HookConfigBootstrap interface {
+	DefaultHookConfigStub(opts SetupOpts) HookConfigStub
 }
 
 // HookCapability describes the actual lifecycle hook controls a connector
@@ -331,11 +417,11 @@ type HookCapabilityProvider interface {
 //     emission. nil when the connector does not emit native OTLP (cursor,
 //     windsurf, hermes today). Non-nil for codex (TOML), claudecode (env),
 //     geminicli (JSON + path-token), copilot (env).
-//   - Decode: optional decoder that translates a connector-specific raw
-//     payload into the shared HookProfileRequest shape. codex and
-//     claudecode set this so their bespoke per-connector evaluators
-//     can run from the unified handler with no extra HTTP surface.
-//     nil = caller uses the generic normalizeAgentHookRequest path.
+//   - Decode: optional decoder for connector-specific event/content/tool
+//     wire shape. Identity fields returned by Decode are advisory only and
+//     MUST NOT override Correlation bindings; the gateway accepts correlation
+//     identity exclusively from the resolved versioned CorrelationSpec.
+//     nil = caller uses the generic content decoder.
 //   - MapVerdict: optional verdict mapper for connectors whose mode →
 //     action translation deviates from the generic mapHookAction (codex
 //     never enforces alert; claudecode's "can enforce" gate covers
@@ -346,10 +432,16 @@ type HookCapabilityProvider interface {
 //     ("hook_output", "codex_output", "claude_code_output"). nil =
 //     caller uses hookOutputFor and the "hook_output" field.
 type HookProfile struct {
-	Name                    string
-	Capabilities            HookCapability
-	SupportsTraceparent     bool
-	NativeOTLP              *NativeOTLPSpec
+	Name                string
+	Capabilities        HookCapability
+	SupportsTraceparent bool
+	NativeOTLP          *NativeOTLPSpec
+	// Correlation is the versioned, connector-scoped identity map used by
+	// the unified hook normalizer. A zero/unknown profile intentionally falls
+	// back to exact canonical keys only; it never enables vendor-field
+	// guessing. ConnectorInstanceID is setup/authentication-owned and is not
+	// part of this payload mapping.
+	Correlation             CorrelationSpec
 	ContractID              string
 	HookScriptVersion       string
 	HookConfigPathTemplates []string
@@ -360,6 +452,10 @@ type HookProfile struct {
 	NormalizedAgentVersion  string
 	CompatibilityStatus     string
 	CompatibilityReason     string
+	// ToolCallLifecycle is the resolved, versioned routing and trust contract
+	// for structured tool proposals, result content, and lifecycle audit
+	// events. A zero value means the experimental stateful path is disabled.
+	ToolCallLifecycle ToolCallLifecycleContract
 
 	// ContentEnvelopeKey names the single nested payload object this
 	// connector hides inspectable content in (hermes nests prompt /
@@ -384,6 +480,21 @@ type HookProfile struct {
 	Respond    func(in HookRespondInput) HookRespondOutput
 }
 
+// ExperimentalToolLifecycleEligible reports whether the resolved upstream
+// schema is trusted for stateful enforcement. Unversioned connectors use their
+// explicitly reviewed default contract; a known version mismatch never does.
+func (profile HookProfile) ExperimentalToolLifecycleEligible() bool {
+	if profile.ToolCallLifecycle.Version != ToolCallLifecycleContractVersion {
+		return false
+	}
+	switch profile.CompatibilityStatus {
+	case HookCompatibilityKnown, HookCompatibilityUnversioned:
+		return true
+	default:
+		return false
+	}
+}
+
 // HookProfileRequest is the shared representation of a decoded hook
 // request used by the unified collector. Connector-specific payload
 // fields (codex's tool_response, claudecode's permission_mode,
@@ -396,33 +507,63 @@ type HookProfile struct {
 // keys are present. The unified collector treats empty fields as
 // "not provided" and falls back to generic-extraction helpers.
 type HookProfileRequest struct {
-	ConnectorName string
-	HookEventName string
-	SessionID     string
-	TurnID        string
-	AgentID       string
-	AgentName     string
-	AgentType     string
-	CWD           string
-	ToolName      string
-	Content       string
-	Direction     string
-	Model         string
-	Payload       map[string]interface{}
+	ConnectorName             string
+	HookEventName             string
+	SemanticEventID           string
+	LogicalEventID            string
+	ConnectorInstanceID       string
+	SessionID                 string
+	ThreadID                  string
+	TurnID                    string
+	MessageID                 string
+	AgentID                   string
+	AgentName                 string
+	AgentType                 string
+	RootAgentID               string
+	ParentAgentID             string
+	ChildAgentID              string
+	RootSessionID             string
+	ParentSessionID           string
+	ChildSessionID            string
+	ToolInvocationID          string
+	ModelRequestID            string
+	ModelResponseID           string
+	SourceEventID             string
+	SourceSequence            string
+	SourceTimestamp           string
+	SourceNamespace           string
+	SourceIDKind              string
+	ExecutionID               string
+	StepID                    string
+	CorrelationProfileVersion CorrelationProfileVersion
+	CorrelationCompleteness   CorrelationCompleteness
+	CorrelationSurface        CorrelationSurface
+	CorrelationOrigins        map[CorrelationTarget]CorrelationOrigin
+	CorrelationValues         map[CorrelationTarget]CorrelationValue
+	CorrelationIdentifiers    []CorrelationValue
+	SuppressCorrelationEmit   bool
+	CWD                       string
+	ToolName                  string
+	Content                   string
+	Direction                 string
+	Model                     string
+	Payload                   map[string]interface{}
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's
 // MapVerdict. RawAction is the normalized upstream verdict
 // ("allow", "block", "alert", "confirm"), Event is the hook event
 // name, Mode is the connector-resolved guardrail mode
-// ("observe" or "action"), and Caps is the connector's hook
-// capability matrix. MapVerdict returns the final action plus a
-// would_block flag.
+// ("observe" or "action"), Caps is the connector's hook capability
+// matrix, and Payload is the original hook payload when an event's
+// enforceability depends on request metadata. MapVerdict returns the
+// final action plus a would_block flag.
 type HookVerdictInput struct {
 	RawAction string
 	Event     string
 	Mode      string
 	Caps      HookCapability
+	Payload   map[string]interface{}
 }
 
 // HookVerdictOutput is MapVerdict's return value. Action is the
@@ -651,6 +792,45 @@ type HookScriptOwner interface {
 // pretending the connector owns a shell script.
 type HookConfigReferenceOwner interface {
 	HookConfigReferenceNeedles(opts SetupOpts) []string
+}
+
+// ScopedHookTokenRequirement is implemented by connector runtimes that depend
+// on a connector-scoped bearer credential. Such connectors must fail setup if
+// the least-privilege sidecar cannot be established; they may never fall back
+// to exposing the gateway master token to a host-agent runtime.
+type ScopedHookTokenRequirement interface {
+	RequiresScopedHookToken() bool
+}
+
+// ManagedPluginArtifactOwner identifies connector-managed plugin files that
+// host agents auto-load directly. Unlike shell hooks, these artifacts are
+// owner-readable policy/config files: they may be absent before first install,
+// remain mode 0600 as DefenseClaw-owned policy bridges, and are exclusively
+// written by DefenseClaw. Scoped credentials live in separate sidecars.
+type ManagedPluginArtifactOwner interface {
+	ManagedPluginArtifacts(opts SetupOpts) []string
+}
+
+// ManagedPluginArtifacts returns the connector's auto-loaded managed plugin
+// files, if any. The normalized list lets privileged installers distinguish a
+// plugin artifact from an executable hook even when legacy AgentPaths reports
+// the same file in HookScripts for lifecycle compatibility.
+func ManagedPluginArtifacts(conn Connector, opts SetupOpts) []string {
+	if conn == nil {
+		return nil
+	}
+	owner, ok := conn.(ManagedPluginArtifactOwner)
+	if !ok {
+		return nil
+	}
+	return uniqueNonEmptyStrings(owner.ManagedPluginArtifacts(opts))
+}
+
+// RequiresScopedHookToken reports whether conn must have a connector-scoped
+// credential before its managed runtime can be installed.
+func RequiresScopedHookToken(conn Connector) bool {
+	requirement, ok := conn.(ScopedHookTokenRequirement)
+	return ok && requirement.RequiresScopedHookToken()
 }
 
 // OwnsManagedHookRuntime reports whether the enterprise guardian can install

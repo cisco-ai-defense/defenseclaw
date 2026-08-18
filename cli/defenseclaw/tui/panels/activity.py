@@ -17,9 +17,59 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from defenseclaw.tui.services.gateway_events import ActivityMutation, load_gateway_activity, timestamp_label
+from defenseclaw.tui.services.event_models import ActivityMutation, timestamp_label
+from defenseclaw.tui.services.v8_event_history import (
+    V8EventHistoryRow,
+    load_v8_event_history,
+    payload_text,
+)
 
 ActivityTab = Literal["commands", "mutations"]
+
+
+def activity_mutations_from_v8_history(
+    rows: tuple[V8EventHistoryRow, ...],
+) -> tuple[ActivityMutation, ...]:
+    """Project Activity mutations without touching SQLite."""
+
+    return tuple(
+        ActivityMutation(
+            actor=payload_text(row.payload, "defenseclaw.operator.id", "enduser.id")
+            or row.actor
+            or row.source,
+            action=row.action or row.event_name,
+            target_type=row.bucket,
+            target_id=payload_text(
+                row.payload,
+                "defenseclaw.config.path",
+                "defenseclaw.policy.id",
+                "defenseclaw.approval.id",
+                "defenseclaw.enforcement.id",
+                "defenseclaw.finding.target_ref",
+            )
+            or row.event_name,
+            version_from=payload_text(
+                row.payload,
+                "defenseclaw.config.generation.previous",
+                "defenseclaw.policy.version.previous",
+            ),
+            version_to=payload_text(
+                row.payload,
+                "defenseclaw.config.generation",
+                "defenseclaw.policy.version",
+            ),
+            reason=payload_text(
+                row.payload,
+                "defenseclaw.guardrail.reason",
+                "defenseclaw.enforcement.failure_class",
+                "defenseclaw.error.summary",
+            )
+            or row.details,
+            timestamp=row.timestamp,
+        )
+        for row in rows
+        if row.bucket in {"compliance.activity", "enforcement.action"}
+    )
 
 
 @dataclass
@@ -85,8 +135,14 @@ class ActivityEntry:
 class ActivityPanelModel:
     """Pure activity panel state used by Textual widgets and tests."""
 
-    def __init__(self, data_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: Path | None = None,
+        *,
+        store: object | None = None,
+    ) -> None:
         self.data_dir = data_dir
+        self.store = store
         self.tab: ActivityTab = "commands"
         self.entries: list[ActivityEntry] = []
         self.cursor = 0
@@ -100,6 +156,9 @@ class ActivityPanelModel:
         """Late-bind the data dir so the app can wire it from config."""
 
         self.data_dir = Path(data_dir) if data_dir else None
+
+    def set_store(self, store: object | None) -> None:
+        self.store = store
 
     @property
     def count(self) -> int:
@@ -245,9 +304,18 @@ class ActivityPanelModel:
                 self.diff_open.add(self.mutation_cursor)
 
     def load_mutations(self) -> None:
-        if self.data_dir is None:
-            return
-        self.mutations = list(load_gateway_activity(self.data_dir / "gateway.jsonl"))
+        rows = load_v8_event_history(self.store, limit=500)
+        self.apply_v8_history(rows)
+
+    def apply_v8_history(self, rows: tuple[V8EventHistoryRow, ...]) -> None:
+        """Apply mutations projected from a shared canonical snapshot."""
+
+        self.apply_mutations(activity_mutations_from_v8_history(rows))
+
+    def apply_mutations(self, mutations: tuple[ActivityMutation, ...]) -> None:
+        """Apply pre-projected mutations without database or JSON work."""
+
+        self.mutations = list(mutations)
         if self.mutation_cursor >= len(self.mutations):
             self.mutation_cursor = max(len(self.mutations) - 1, 0)
 
@@ -292,7 +360,7 @@ class ActivityPanelModel:
 
     def _render_mutations(self, *, height: int) -> str:
         if not self.mutations:
-            return "  No activity events in gateway.jsonl yet."
+            return "  No activity events in canonical SQLite event history yet."
         lines: list[str] = []
         max_rows = max(height - 6, 5)
         start = max(0, self.mutation_cursor - max_rows + 1)

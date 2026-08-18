@@ -32,6 +32,13 @@ const (
 	SeverityInfo     Severity = "INFO"
 )
 
+// FindingTagDetectionOnly is the persisted provenance marker for a finding
+// that is useful as low-level detection telemetry but must not contribute to
+// enforcement or multi-step correlation. Observe mode is intentionally
+// independent: an enforcement-eligible finding observed without blocking does
+// not carry this tag.
+const FindingTagDetectionOnly = "detection-only"
+
 var severityRank = map[Severity]int{
 	SeverityCritical: 5,
 	SeverityHigh:     4,
@@ -41,14 +48,23 @@ var severityRank = map[Severity]int{
 }
 
 type Finding struct {
-	ID          string   `json:"id"`
-	Severity    Severity `json:"severity"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Location    string   `json:"location"`
-	Remediation string   `json:"remediation"`
-	Scanner     string   `json:"scanner"`
-	Tags        []string `json:"tags"`
+	ID string `json:"id"`
+	// FindingOccurrenceID is minted at the emission boundary for one observed
+	// occurrence. ID and RuleID retain their detector/rule compatibility
+	// meanings; neither is reused as the canonical occurrence identity.
+	FindingOccurrenceID string   `json:"finding_occurrence_id,omitempty"`
+	Severity            Severity `json:"severity"`
+	Title               string   `json:"title"`
+	Description         string   `json:"description"`
+	// EvidenceSummary is a bounded, source-backed matched excerpt or
+	// deterministic summary used by the canonical observability record. It is
+	// intentionally excluded from the legacy scanner JSON shape: v8 route
+	// projection, not a second scanner wire contract, owns its redaction.
+	EvidenceSummary string   `json:"-"`
+	Location        string   `json:"location"`
+	Remediation     string   `json:"remediation"`
+	Scanner         string   `json:"scanner"`
+	Tags            []string `json:"tags"`
 	// RuleID is the stable detection id (from upstream JSON or synthesized).
 	RuleID string `json:"rule_id,omitempty"`
 	// Category groups findings for synthesis when RuleID is absent.
@@ -74,10 +90,11 @@ type Finding struct {
 	// capability sequences across arbitrary MCP servers.
 	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
 
-	// ContentFingerprint is sha256(redacted_value)[:8] — a short hash of
-	// the sensitive value so we can match "same value appeared in
-	// sensitive_access AND egress_external" across turns without
-	// persisting the cleartext itself.
+	// ContentFingerprint is the first 8 lowercase hex characters of the
+	// installation-keyed hash-v1 evidence HMAC. The audit Logger replaces any
+	// producer value at its persistence boundary so the correlator can match the
+	// same value across sensitive_access and egress_external findings without an
+	// offline-enumerable cleartext hash.
 	ContentFingerprint string `json:"content_fingerprint,omitempty"`
 
 	// ExternalEndpoint is the host/URL for any network-touching finding.
@@ -99,6 +116,10 @@ type Finding struct {
 }
 
 type ScanResult struct {
+	// ScanID is an optional caller-minted correlation key. It is never
+	// serialized into scanner-owned raw evidence; EmitScanResult validates and
+	// reuses it so an enclosing trace can carry the same ID before persistence.
+	ScanID     string        `json:"-"`
 	Scanner    string        `json:"scanner"`
 	Target     string        `json:"target"`
 	Timestamp  time.Time     `json:"timestamp"`

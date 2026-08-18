@@ -21,7 +21,10 @@ import os
 import sys
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -102,7 +105,8 @@ class TestStatusCommand(unittest.TestCase):
     def test_status_accepts_openshell_sandbox_binary(self, mock_which, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
-        def fake_which(binary):
+        def fake_which(binary, *, path=None):
+            del path
             if binary == "openshell-sandbox":
                 return "/usr/local/bin/openshell-sandbox"
             return None
@@ -131,7 +135,8 @@ class TestStatusCommand(unittest.TestCase):
 
         self.app.cfg.openshell.binary = "/opt/operator/openshell"
 
-        def fake_which(binary):
+        def fake_which(binary, *, path=None):
+            del path
             if binary == "openshell-sandbox":
                 return "/usr/local/bin/openshell-sandbox"
             return None
@@ -179,9 +184,9 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_with_data(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
-        self.app.store.log_event(Event(action="scan", target="/skills/bad",
+        self.app.store.log_event(Event(action="scan-finding", target="/skills/bad",
                                        severity="HIGH", details="found issues"))
-        self.app.store.log_event(Event(action="scan", target="/skills/worse",
+        self.app.store.log_event(Event(action="scan-finding", target="/skills/worse",
                                        severity="CRITICAL", details="major vulnerability"))
 
         result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
@@ -194,7 +199,7 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
 
         for i in range(5):
-            self.app.store.log_event(Event(action="scan", target=f"/skills/s{i}",
+            self.app.store.log_event(Event(action="scan-finding", target=f"/skills/s{i}",
                                            severity="MEDIUM", details=f"issue {i}"))
 
         result = self.runner.invoke(alerts, ["--no-tui", "-n", "2"], obj=self.app,
@@ -216,7 +221,7 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_show_prints_full_detail(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
-        self.app.store.log_event(Event(action="scan", target="/skills/bad",
+        self.app.store.log_event(Event(action="scan-finding", target="/skills/bad",
                                        severity="HIGH",
                                        details="scanner=skill-scanner findings=2 max_severity=HIGH"))
 
@@ -230,7 +235,7 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_show_out_of_range(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
-        self.app.store.log_event(Event(action="scan", target="/skills/x",
+        self.app.store.log_event(Event(action="scan-finding", target="/skills/x",
                                        severity="LOW", details="scanner=skill-scanner findings=0"))
 
         result = self.runner.invoke(alerts, ["--no-tui", "--show", "99"], obj=self.app,
@@ -242,10 +247,10 @@ class TestAlertsCommand(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _seed_two_connectors(self):
-        self.app.store.log_event(Event(action="connector-hook", target="/a",
+        self.app.store.log_event(Event(action="scan-finding", target="/a",
                                        severity="HIGH",
                                        details="connector=codex marker_codexonly"))
-        self.app.store.log_event(Event(action="connector-hook", target="/b",
+        self.app.store.log_event(Event(action="scan-finding", target="/b",
                                        severity="HIGH",
                                        details="connector=claudecode marker_cconly"))
 
@@ -951,8 +956,106 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
 
 class TestSetupSplunkCommand(unittest.TestCase):
     def setUp(self):
+        self._environment = patch.dict(os.environ, {}, clear=False)
+        self._environment.start()
+        self.addCleanup(self._environment.stop)
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
+        self._native_local_splunk = patch(
+            "defenseclaw.commands.cmd_setup._native_windows_local_splunk",
+            return_value=False,
+        )
+        self._native_local_splunk.start()
+        self.addCleanup(self._native_local_splunk.stop)
+        self._write_v8_destinations([])
+        self._v8_validator = patch(
+            "defenseclaw.observability.v8_writer._validate_candidate"
+        )
+        self._v8_validator.start()
+        self.addCleanup(self._v8_validator.stop)
+        self._v8_status = patch(
+            "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
+            side_effect=self._operator_status,
+        )
+        self._v8_status.start()
+        self.addCleanup(self._v8_status.stop)
+
+    def _operator_status(self, data_dir: str) -> SimpleNamespace:
+        destinations = self._v8_destinations(data_dir)
+        return SimpleNamespace(
+            destinations=tuple(
+                SimpleNamespace(
+                    name=destination.get("name", ""),
+                    kind=destination.get("kind", ""),
+                    enabled=destination.get("enabled", True),
+                    endpoint=destination.get("endpoint", ""),
+                    selected_signals=tuple(
+                        (destination.get("send") or {}).get("signals")
+                        or (destination.get("signal_overrides") or {}).keys()
+                    ),
+                    buckets=("*",),
+                    redaction_label="unredacted (none)",
+                )
+                for destination in destinations
+            )
+        )
+
+    def _v8_destinations(self, data_dir: str | None = None) -> list[dict]:
+        from defenseclaw.observability.v8_config import load_validate_v8
+
+        path = os.path.join(data_dir or self.tmp_dir, "config.yaml")
+        with open(path, "rb") as stream:
+            raw = stream.read()
+        load_validate_v8(raw, source_name=path)
+        source = yaml.safe_load(raw)
+        return source.get("observability", {}).get("destinations", [])
+
+    def _write_v8_destinations(self, destinations: list[dict] | None = None) -> None:
+        with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "config_version": 8,
+                    "observability": {"destinations": destinations or []},
+                },
+                stream,
+            )
+
+    def _seed_splunk_destinations(self, *, o11y: bool = False, local: bool = False) -> None:
+        from defenseclaw.commands.cmd_setup_observability import (
+            _build_v8_preset_destination,
+        )
+        from defenseclaw.observability import PRESETS
+
+        destinations = []
+        if o11y:
+            destinations.append(
+                _build_v8_preset_destination(
+                    PRESETS["splunk-o11y"],
+                    {"realm": "us1"},
+                    name="splunk-o11y-test",
+                    enabled=True,
+                    signals=None,
+                    target=None,
+                )
+            )
+        if local:
+            destinations.append(
+                _build_v8_preset_destination(
+                    PRESETS["splunk-hec"],
+                    {
+                        "host": "127.0.0.1",
+                        "port": "8088",
+                        "index": "defenseclaw_local",
+                        "source": "defenseclaw",
+                        "sourcetype": "defenseclaw:json",
+                    },
+                    name="splunk-hec-local",
+                    enabled=True,
+                    signals=None,
+                    target=None,
+                )
+            )
+        self._write_v8_destinations(destinations)
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -992,15 +1095,18 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Splunk O11y configured", result.output)
         self.assertIn("eu0", result.output)
+        self.assertIn("Splunk Observability Cloud (OTLP)", result.output)
+        self.assertIn("Signals:     traces, metrics", result.output)
 
-        otel = self.app.cfg.otel
-        self.assertTrue(otel.enabled)
-        destination = next(d for d in otel.destinations if d.preset == "splunk-o11y")
-        self.assertEqual(destination.endpoint, "ingest.eu0.observability.splunkcloud.com")
-        self.assertEqual(destination.protocol, "http")
-        self.assertEqual(destination.traces.url_path, "/v2/trace/otlp")
-        self.assertEqual(destination.metrics.url_path, "/v2/datapoint/otlp")
-        self.assertEqual(destination.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
+        destination = next(
+            value for value in self._v8_destinations()
+            if value["endpoint"].endswith("observability.splunkcloud.com")
+        )
+        self.assertEqual(destination["endpoint"], "https://ingest.eu0.observability.splunkcloud.com")
+        self.assertEqual(destination["protocol"], "http/protobuf")
+        self.assertEqual(destination["signal_overrides"]["traces"]["path"], "/v2/trace/otlp")
+        self.assertEqual(destination["signal_overrides"]["metrics"]["path"], "/v2/datapoint/otlp")
+        self.assertEqual(destination["headers"]["X-SF-Token"], {"env": "SPLUNK_ACCESS_TOKEN"})
 
         dotenv_path = os.path.join(self.tmp_dir, ".env")
         self.assertTrue(os.path.exists(dotenv_path))
@@ -1041,8 +1147,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         endpoint = "https://splunk.example.com:8088/services/collector/event"
         with patch(
-            "defenseclaw.commands.cmd_setup_observability.probe_splunk_hec",
-            return_value=(True, "HEC responded 200 OK"),
+            "defenseclaw.commands.cmd_setup_observability._test_v8_destination",
         ) as mock_probe:
             result = self.runner.invoke(
                 setup,
@@ -1060,19 +1165,23 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Splunk Enterprise configured (HEC)", result.output)
         self.assertIn("Live HEC probe:", result.output)
-        self.assertIn("HEC responded 200 OK", result.output)
         mock_probe.assert_called_once_with(
             self.tmp_dir,
             "splunk-enterprise-splunk-example-com",
-            timeout=10.0,
+            10.0,
+            write_probe=False,
         )
         mock_license.assert_not_called()
         mock_preflight.assert_not_called()
         mock_bootstrap.assert_not_called()
 
-        self.assertTrue(self.app.cfg.splunk.enabled)
-        self.assertEqual(self.app.cfg.splunk.hec_endpoint, endpoint)
-        self.assertEqual(self.app.cfg.splunk.hec_token_env, "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        destination = next(
+            value for value in self._v8_destinations()
+            if value["name"] == "splunk-enterprise-splunk-example-com"
+        )
+        self.assertTrue(destination["enabled"])
+        self.assertEqual(destination["endpoint"], endpoint)
+        self.assertEqual(destination["token_env"], "DEFENSECLAW_SPLUNK_HEC_TOKEN")
 
         with open(os.path.join(self.tmp_dir, ".env")) as f:
             dotenv = f.read()
@@ -1095,7 +1204,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import setup
 
         endpoint = "https://splunk.example.com:8088/services/collector/event"
-        with patch("defenseclaw.commands.cmd_setup_observability.probe_splunk_hec") as mock_probe:
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability._test_v8_destination"
+        ) as mock_probe:
             result = self.runner.invoke(
                 setup,
                 [
@@ -1114,12 +1225,15 @@ class TestSetupSplunkCommand(unittest.TestCase):
         mock_probe.assert_not_called()
 
     def test_setup_splunk_enterprise_probe_warning_is_best_effort(self):
+        from click import ClickException
         from defenseclaw.commands.cmd_setup import setup
 
         endpoint = "https://splunk.example.com:8088/services/collector/event"
         with patch(
-            "defenseclaw.commands.cmd_setup_observability.probe_splunk_hec",
-            return_value=(False, "HTTP 401 Unauthorized check token/index permissions"),
+            "defenseclaw.commands.cmd_setup_observability._test_v8_destination",
+            side_effect=ClickException(
+                "HTTP 401 Unauthorized check token/index permissions"
+            ),
         ):
             result = self.runner.invoke(
                 setup,
@@ -1229,9 +1343,13 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(self.app.cfg.splunk.enabled)
-        self.assertEqual(self.app.cfg.splunk.hec_endpoint, "http://127.0.0.1:8088/services/collector/event")
-        self.assertEqual(self.app.cfg.splunk.hec_token_env, "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        destination = next(
+            value for value in self._v8_destinations()
+            if value["kind"] == "splunk_hec"
+        )
+        self.assertTrue(destination["enabled"])
+        self.assertEqual(destination["endpoint"], "http://127.0.0.1:8088/services/collector/event")
+        self.assertEqual(destination["token_env"], "DEFENSECLAW_SPLUNK_HEC_TOKEN")
         self.assertIn("Local Splunk is ready", result.output)
         self.assertIn("License: Free", result.output)
         self.assertIn("Splunk Web login:", result.output)
@@ -1371,23 +1489,38 @@ class TestSetupSplunkCommand(unittest.TestCase):
         # passthrough on the `up` invocation. The refresh + restart
         # cycle is exercised separately in
         # ``test_setup_refresh_bundle_wiring.py``.
-        contract = _bootstrap_bridge(
-            self.tmp_dir,
-            s3_export=True,
-            s3_bucket="agentwatch-demo",
-            s3_prefix="agentwatch/defenseclaw",
-            aws_region="us-west-2",
-            refresh_bundle=False,
-        )
+        with patch.dict(
+            os.environ,
+            {
+                "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
+                "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+            },
+        ):
+            contract = _bootstrap_bridge(
+                self.tmp_dir,
+                s3_export=True,
+                s3_bucket="agentwatch-demo",
+                s3_prefix="agentwatch/defenseclaw",
+                aws_region="us-west-2",
+                refresh_bundle=False,
+            )
 
         self.assertEqual(contract["hec_token"], "bootstrap-token")
-        mock_run.assert_called_once()
+        bridge_calls = [
+            call
+            for call in mock_run.call_args_list
+            if call.args
+            and call.args[0]
+            and call.args[0][0] == "/tmp/fake-splunk-claw-bridge"
+        ]
+        self.assertEqual(len(bridge_calls), 1)
+        bridge_call = bridge_calls[0]
         env_file = os.path.join(self.tmp_dir, "splunk-bridge", "env", ".env")
         self.assertEqual(
-            mock_run.call_args.args[0],
+            bridge_call.args[0],
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
-        kwargs = mock_run.call_args.kwargs
+        kwargs = bridge_call.kwargs
         self.assertEqual(kwargs["capture_output"], True)
         self.assertEqual(kwargs["text"], True)
         self.assertEqual(kwargs["timeout"], 300)
@@ -1395,6 +1528,8 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(kwargs["env"]["S3_BUCKET"], "agentwatch-demo")
         self.assertEqual(kwargs["env"]["S3_PREFIX"], "agentwatch/defenseclaw")
         self.assertEqual(kwargs["env"]["AWS_REGION"], "us-west-2")
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", kwargs["env"])
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", kwargs["env"])
 
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
@@ -1606,20 +1741,22 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Splunk O11y configured", result.output)
         self.assertIn("Local Splunk enablement cancelled.", result.output)
         self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)
-        self.assertTrue(self.app.cfg.otel.enabled)
-        self.assertFalse(self.app.cfg.splunk.enabled)
+        destinations = self._v8_destinations()
+        self.assertTrue(any(value["kind"] == "otlp" for value in destinations))
+        self.assertFalse(any(value["kind"] == "splunk_hec" for value in destinations))
         mock_preflight.assert_not_called()
 
         config_path = os.path.join(self.tmp_dir, "config.yaml")
         self.assertTrue(os.path.exists(config_path))
         with open(config_path) as f:
             content = f.read()
-        self.assertIn("otel:", content)
+        self.assertIn('"observability"', content)
+        self.assertNotIn("\notel:", content)
 
     def test_setup_splunk_disable_o11y(self):
         from defenseclaw.commands.cmd_setup import setup
 
-        self.app.cfg.otel.enabled = True
+        self._seed_splunk_destinations(o11y=True)
         result = self.runner.invoke(
             setup,
             ["splunk", "--disable", "--o11y"],
@@ -1633,7 +1770,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
     def test_setup_splunk_disable_logs(self):
         from defenseclaw.commands.cmd_setup import setup
 
-        self.app.cfg.splunk.enabled = True
+        self._seed_splunk_destinations(local=True)
         result = self.runner.invoke(
             setup,
             ["splunk", "--disable", "--logs"],
@@ -1647,8 +1784,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
     def test_setup_splunk_disable_both(self):
         from defenseclaw.commands.cmd_setup import setup
 
-        self.app.cfg.otel.enabled = True
-        self.app.cfg.splunk.enabled = True
+        self._seed_splunk_destinations(o11y=True, local=True)
         result = self.runner.invoke(
             setup,
             ["splunk", "--disable"],
@@ -1681,12 +1817,13 @@ class TestSetupSplunkCommand(unittest.TestCase):
             input=user_input, catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertTrue(self.app.cfg.otel.enabled)
         destination = next(
-            d for d in self.app.cfg.otel.destinations if d.preset == "splunk-o11y"
+            value for value in self._v8_destinations()
+            if value["endpoint"].endswith("observability.splunkcloud.com")
         )
-        self.assertEqual(destination.endpoint, "ingest.us1.observability.splunkcloud.com")
-        self.assertFalse(destination.logs.enabled)
+        self.assertEqual(destination["endpoint"], "https://ingest.us1.observability.splunkcloud.com")
+        self.assertEqual(destination["send"]["signals"], ["traces", "metrics"])
+        self.assertNotIn("logs", destination["signal_overrides"])
         mock_apply_dashboards.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup.apply_dashboards")

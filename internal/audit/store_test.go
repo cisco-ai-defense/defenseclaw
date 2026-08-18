@@ -17,11 +17,13 @@
 package audit
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -151,6 +153,7 @@ func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
 		TraceID:         "trace-42",
 		RequestID:       "req-42",
 		SessionID:       "sess-42",
+		TurnID:          "turn-42",
 		AgentName:       "openclaw",
 		AgentInstanceID: "instance-42",
 		PolicyID:        "strict",
@@ -178,6 +181,7 @@ func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
 		{"TraceID", got.TraceID, in.TraceID},
 		{"RequestID", got.RequestID, in.RequestID},
 		{"SessionID", got.SessionID, in.SessionID},
+		{"TurnID", got.TurnID, in.TurnID},
 		{"AgentName", got.AgentName, in.AgentName},
 		{"AgentInstanceID", got.AgentInstanceID, in.AgentInstanceID},
 		{"PolicyID", got.PolicyID, in.PolicyID},
@@ -189,6 +193,10 @@ func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s roundtrip: got %q want %q", c.name, c.got, c.want)
 		}
+	}
+	byTarget, err := store.ListEventsByTarget(in.Target, 10)
+	if err != nil || len(byTarget) != 1 || byTarget[0].TurnID != in.TurnID {
+		t.Fatalf("ListEventsByTarget turn roundtrip: events=%+v err=%v", byTarget, err)
 	}
 }
 
@@ -261,8 +269,9 @@ func TestStoreLogEventAutoPopulatesSidecarInstanceID(t *testing.T) {
 	}
 
 	logger := NewLogger(store)
+	logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary))
 	if err := logger.LogEvent(Event{
-		Action:   "gateway-tool-call",
+		Action:   string(ActionInstallClean),
 		Target:   "shell",
 		Severity: "INFO",
 	}); err != nil {
@@ -542,8 +551,8 @@ func TestInitIdempotent(t *testing.T) {
 	}
 }
 
-func TestAcknowledgeAlertsRemainInAuditHistoryButNotAlerts(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
+	store, err := NewStore(":memory:")
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -553,7 +562,8 @@ func TestAcknowledgeAlertsRemainInAuditHistoryButNotAlerts(t *testing.T) {
 	}
 
 	if err := store.LogEvent(Event{
-		Action:   "scan",
+		ID:       "eligible-alert",
+		Action:   "scan-finding",
 		Target:   "skill/test-skill",
 		Details:  "found suspicious behavior",
 		Severity: "HIGH",
@@ -561,42 +571,247 @@ func TestAcknowledgeAlertsRemainInAuditHistoryButNotAlerts(t *testing.T) {
 		t.Fatalf("LogEvent alert: %v", err)
 	}
 
-	n, err := store.AcknowledgeAlerts("all")
+	if err := store.LogEvent(Event{
+		ID: "ineligible-platform", Action: "sidecar-start", Target: "gateway",
+		Details: "healthy", Severity: "HIGH",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json
+	) VALUES
+		('v8-finding', '2026-07-07T10:00:00Z', 'scan-finding', 'scanner', 'finding',
+		 'HIGH', 'security.finding', 'finding.observed', '{}'),
+		('v8-platform', '2026-07-07T10:00:01Z', 'sink-failure', 'system', 'degraded',
+		 'HIGH', 'platform.health', 'subsystem.degraded', '{}'),
+		('v8-enforcement', '2026-07-07T10:00:02Z', 'allowed', 'gateway', 'blocked',
+		 'INFO', 'enforcement.action', 'enforcement.decision',
+		 '{"defenseclaw.enforcement.effective_action":"block"}'),
+		('v8-detection-only', '2026-07-07T10:00:03Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":["detection-only"]}'),
+		('v8-detection-only-padded-array', '2026-07-07T10:00:04Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":[" Detection-Only "]}'),
+		('v8-detection-only-padded-scalar', '2026-07-07T10:00:05Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":" \tDETECTION-ONLY\r\n"}')`); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
 	if err != nil {
-		t.Fatalf("AcknowledgeAlerts: %v", err)
+		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("RowsAffected = %d, want 1", n)
+	targetIDs := map[string]bool{}
+	for _, target := range targets {
+		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-
+	if len(targets) != 4 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
+		!targetIDs["v8-platform"] || !targetIDs["v8-enforcement"] ||
+		targetIDs["v8-detection-only"] || targetIDs["v8-detection-only-padded-array"] ||
+		targetIDs["v8-detection-only-padded-scalar"] {
+		t.Fatalf("targets=%+v", targets)
+	}
 	alerts, err := store.ListAlerts(10)
 	if err != nil {
-		t.Fatalf("ListAlerts: %v", err)
+		t.Fatal(err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("ListAlerts returned %d rows after acknowledgement, want 0", len(alerts))
+	alertIDs := map[string]bool{}
+	alertSeverities := map[string]string{}
+	for _, alert := range alerts {
+		alertIDs[alert.ID] = true
+		alertSeverities[alert.ID] = alert.Severity
 	}
-
-	events, err := store.ListEvents(10)
+	if len(alerts) != 4 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
+		!alertIDs["v8-platform"] || !alertIDs["v8-enforcement"] ||
+		alertIDs["v8-detection-only"] || alertIDs["v8-detection-only-padded-array"] ||
+		alertIDs["v8-detection-only-padded-scalar"] || alertSeverities["v8-enforcement"] != "HIGH" {
+		t.Fatalf("alerts=%+v", alerts)
+	}
+	counts, err := store.GetCounts()
 	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
+		t.Fatal(err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("ListEvents returned %d rows, want 2", len(events))
+	if counts.Alerts != len(alerts) {
+		t.Fatalf("active alert count=%d, REST alerts=%d", counts.Alerts, len(alerts))
 	}
+}
 
-	foundAck := false
-	for _, event := range events {
-		if event.Action == "acknowledge-alerts" {
-			foundAck = true
-			if event.Severity != "ACK" {
-				t.Fatalf("acknowledge-alerts severity = %q, want ACK", event.Severity)
-			}
+func TestAlertAcknowledgementTargetsSupportExactAndBroadSelectors(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	for _, event := range []Event{
+		{ID: "alert-a", Timestamp: base, Action: "scan-finding", Target: "skill://one", Severity: "HIGH", Connector: "codex"},
+		{ID: "alert-b", Timestamp: base.Add(time.Minute), Action: "scan-finding", Target: "skill://two", Severity: "LOW", Connector: "claudecode"},
+		{ID: "alert-c", Timestamp: base.Add(2 * time.Minute), Action: "scan-finding", Target: "skill://one", Severity: "HIGH", Connector: "codex"},
+	} {
+		if err := store.LogEvent(event); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !foundAck {
-		t.Fatal("expected acknowledge-alerts event to remain in audit history")
+	stamp := base.Add(3 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
+		alert_id, disposition, actor, disposition_at, projection_version,
+		source, source_event_id, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"alert-a", AlertDispositionAcknowledged, "test", stamp, 3,
+		"modern", "receipt-a", stamp,
+	); err != nil {
+		t.Fatal(err)
 	}
+
+	broad, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Connector: "CODEX", Target: "skill://one", Severity: "HIGH",
+		Since: base.Add(time.Minute), Before: base.Add(3 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(broad) != 1 || broad[0].AlertID != "alert-c" || broad[0].ProjectionVersion != 0 {
+		t.Fatalf("broad targets=%+v", broad)
+	}
+
+	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		AlertIDs: []string{"missing", "alert-c", "alert-a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact) != 2 || exact[0].AlertID != "alert-a" || exact[0].ProjectionVersion != 3 ||
+		exact[1].AlertID != "alert-c" || exact[1].ProjectionVersion != 0 {
+		t.Fatalf("exact targets=%+v", exact)
+	}
+
+	injected, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Target: "skill://one' OR 1=1 --", Severity: "HIGH",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(injected) != 0 {
+		t.Fatalf("selector value changed SQL semantics: %+v", injected)
+	}
+}
+
+func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json, enforced
+	) VALUES
+		('canonical-deny', '2026-07-17T12:00:00Z', 'enforcement', 'gateway', '',
+		 'INFO', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"deny"}', NULL),
+		('blank-severity-deny', '2026-07-17T12:00:00.5Z', 'enforcement', 'gateway', '',
+		 '', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"deny"}', NULL),
+		('canonical-egress', '2026-07-17T12:00:01Z', 'egress', 'gateway', '',
+		 'INFO', 'network.egress', 'egress.decided',
+		 '{"defenseclaw.network.decision":"block"}', NULL),
+		('health-error', '2026-07-17T12:00:02Z', 'sink-failure', 'gateway', '',
+		 'ERROR', 'platform.health', 'destination.export_failed', '{}', NULL),
+		('canonical-allow', '2026-07-17T12:00:03Z', 'enforcement', 'gateway', '',
+		 'INFO', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"allow"}', NULL),
+		('detection-only', '2026-07-17T12:00:04Z', 'scan-finding', 'scanner', '',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":["secret","detection-only"]}', NULL),
+		('malformed-finding', '2026-07-17T12:00:04.5Z', 'scan-finding', 'scanner', '',
+		 'HIGH', 'security.finding', 'finding.observed', '{not-json', NULL),
+		('legacy-block', '2026-07-17T12:00:05Z', 'connector-hook', 'gateway',
+		 'connector=codex action=block mode=action severity=INFO',
+		 'INFO', NULL, NULL, NULL, 0),
+		('legacy-clean-high', '2026-07-17T12:00:06Z', 'connector-hook', 'gateway',
+		 'connector=codex action=allow mode=observe severity=CRITICAL',
+		 'CRITICAL', NULL, NULL, NULL, 0),
+		('legacy-unrelated-high', '2026-07-17T12:00:07Z', 'sidecar-start', 'gateway',
+		 'healthy', 'HIGH', NULL, NULL, NULL, NULL)`); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]bool{
+		"blank-severity-deny": true,
+		"canonical-deny":      true,
+		"canonical-egress":    true,
+		"health-error":        true,
+		"malformed-finding":   true,
+		"legacy-block":        true,
+	}
+	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		AlertIDs: []string{
+			"blank-severity-deny", "canonical-deny", "canonical-egress", "health-error", "canonical-allow",
+			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
+			"legacy-unrelated-high",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact) != len(want) {
+		t.Fatalf("exact targets=%+v", exact)
+	}
+	for _, target := range exact {
+		if !want[target.AlertID] {
+			t.Fatalf("unexpected exact target=%+v", target)
+		}
+	}
+
+	broad, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(broad) != len(want) {
+		t.Fatalf("broad targets=%+v", broad)
+	}
+	for _, target := range broad {
+		if !want[target.AlertID] {
+			t.Fatalf("unexpected broad target=%+v", target)
+		}
+	}
+
+	high, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Severity: " high ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(high) != 4 || high[0].AlertID != "blank-severity-deny" ||
+		high[1].AlertID != "canonical-deny" || high[2].AlertID != "legacy-block" ||
+		high[3].AlertID != "malformed-finding" {
+		t.Fatalf("HIGH targets=%+v", high)
+	}
+	all, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Severity: " ALL ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(want) {
+		t.Fatalf("ALL targets=%+v", all)
+	}
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != 5 {
+		t.Fatalf("actionable alert count=%d, want blank-severity deny promoted into 5 total", counts.Alerts)
+	}
+
 }
 
 func TestMigrationFromFreshDB(t *testing.T) {

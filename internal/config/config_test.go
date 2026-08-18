@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -188,6 +189,29 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 	}
 }
 
+func TestLoadLegacySplunkPointsToReleaseUpgrade(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	configPath := filepath.Join(DefaultDataPath(), DefaultConfigName)
+	if err := os.WriteFile(configPath, []byte("config_version: 3\nsplunk:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error=nil, want legacy Splunk migration guidance")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "defenseclaw upgrade --yes") || !strings.Contains(message, "config v8") {
+		t.Fatalf("Load() error=%q, want release-upgrade config-v8 guidance", message)
+	}
+	if !strings.Contains(message, "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/") {
+		t.Fatalf("Load() error=%q, want canonical configuration documentation URL", message)
+	}
+	if strings.Contains(message, "migrate-splunk") || strings.Contains(message, "--apply") {
+		t.Fatalf("Load() error=%q still advertises the removed migration command", message)
+	}
+}
+
 func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) {
 	dir := t.TempDir()
 	if runtime.GOOS != "windows" {
@@ -261,6 +285,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.AIDiscovery.RequireTrustedBinaryPaths {
 		t.Error("ai_discovery.require_trusted_binary_paths = true, want false")
 	}
+	if cfg.AIDiscovery.LookupModelProvenanceOnline {
+		t.Error("ai_discovery.lookup_model_provenance_online = true, want false")
+	}
 	if len(cfg.AIDiscovery.TrustedBinaryPrefixes) != 0 {
 		t.Errorf("ai_discovery.trusted_binary_prefixes = %v, want empty", cfg.AIDiscovery.TrustedBinaryPrefixes)
 	}
@@ -305,6 +332,22 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Scanners.PluginScanner != "defenseclaw" {
 		t.Errorf("expected plugin scanner binary %q, got %q", "defenseclaw", cfg.Scanners.PluginScanner)
+	}
+}
+
+func TestLoadFromFileEnablesOnlineModelProvenanceOnlyWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigName)
+	raw := "config_version: 6\ndata_dir: " + dir + "\nai_discovery:\n  enabled: true\n  lookup_model_provenance_online: true\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if !cfg.AIDiscovery.LookupModelProvenanceOnline {
+		t.Fatal("lookup_model_provenance_online was not loaded")
 	}
 }
 
@@ -701,15 +744,16 @@ func TestParseMCPServersJSON_Empty(t *testing.T) {
 }
 
 func TestSkillDirsForOpenClaw_NoOpenclawJSON(t *testing.T) {
-	dirs := SkillDirsForOpenClaw("/tmp/nonexistent-home")
+	home := filepath.Join(t.TempDir(), "nonexistent-home")
+	dirs := SkillDirsForOpenClaw(home)
 	if len(dirs) < 2 {
 		t.Fatalf("expected workspace and global skill dirs, got %v", dirs)
 	}
-	if dirs[0] != "/tmp/nonexistent-home/workspace/skills" {
-		t.Errorf("first dir = %q, want /tmp/nonexistent-home/workspace/skills", dirs[0])
+	if want := filepath.Join(home, "workspace", "skills"); dirs[0] != want {
+		t.Errorf("first dir = %q, want %q", dirs[0], want)
 	}
-	if dirs[len(dirs)-1] != "/tmp/nonexistent-home/skills" {
-		t.Errorf("last dir = %q, want /tmp/nonexistent-home/skills", dirs[len(dirs)-1])
+	if want := filepath.Join(home, "skills"); dirs[len(dirs)-1] != want {
+		t.Errorf("last dir = %q, want %q", dirs[len(dirs)-1], want)
 	}
 }
 
@@ -800,7 +844,7 @@ func TestConfig_InstalledSkillCandidates(t *testing.T) {
 func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(root, "repo")
 	cfg := &Config{
 		Claw: ClawConfig{
@@ -915,14 +959,15 @@ func TestDefaultConfigPluginActions(t *testing.T) {
 }
 
 func TestConfig_PluginDirs(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "test-oc-home")
 	cfg := &Config{
-		Claw: ClawConfig{HomeDir: "/tmp/test-oc-home"},
+		Claw: ClawConfig{HomeDir: home},
 	}
 	dirs := cfg.PluginDirs()
 	if len(dirs) != 1 {
 		t.Fatalf("expected 1 plugin dir, got %d", len(dirs))
 	}
-	want := "/tmp/test-oc-home/extensions"
+	want := filepath.Join(home, "extensions")
 	if dirs[0] != want {
 		t.Errorf("PluginDirs()[0] = %q, want %q", dirs[0], want)
 	}

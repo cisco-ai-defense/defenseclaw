@@ -125,7 +125,7 @@ enum CatalogCLI {
         collection: String,
         using cli: CLIRunner
     ) async throws -> [(String, [String: Any])] {
-        let result = await cli.run(arguments: [resource, "list", "--json"])
+        let result = await cli.run(arguments: [resource, "list", "--json"], mutation: false)
         guard result.succeeded else {
             throw CatalogCLIError.commandFailed(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }

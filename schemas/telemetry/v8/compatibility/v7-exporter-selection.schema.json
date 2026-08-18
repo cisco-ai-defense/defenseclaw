@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/telemetry/v8/compatibility/v7-exporter-selection.schema.json",
+  "title": "DefenseClaw generated v7 exporter compatibility selection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "x-defenseclaw-generated",
+    "schema_version",
+    "source_config_version",
+    "registry_schema_version",
+    "projection_profile",
+    "collection",
+    "exporters",
+    "features",
+    "span_filter_operations",
+    "local_observability"
+  ],
+  "properties": {
+    "x-defenseclaw-generated": {"$ref": "#/$defs/generatedMarker"},
+    "schema_version": {"const": 1},
+    "source_config_version": {"const": 7},
+    "registry_schema_version": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "projection_profile": {"const": "legacy-v7"},
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["always", "otel.logs", "otel.traces", "otel.metrics"],
+      "properties": {
+        "always": {"$ref": "#/$defs/signalBuckets"},
+        "otel.logs": {"$ref": "#/$defs/signalBuckets"},
+        "otel.traces": {"$ref": "#/$defs/signalBuckets"},
+        "otel.metrics": {"$ref": "#/$defs/signalBuckets"}
+      }
+    },
+    "exporters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateway_jsonl", "gateway_console", "audit_sink", "generic_otlp", "galileo", "local_observability"],
+      "properties": {
+        "gateway_jsonl": {"$ref": "#/$defs/logExporter"},
+        "gateway_console": {"$ref": "#/$defs/logExporter"},
+        "audit_sink": {"$ref": "#/$defs/logExporter"},
+        "generic_otlp": {"$ref": "#/$defs/allSignalExporter"},
+        "galileo": {"$ref": "#/$defs/traceExporter"},
+        "local_observability": {"$ref": "#/$defs/allSignalExporter"}
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["otel_individual_findings"],
+      "properties": {"otel_individual_findings": {"$ref": "#/$defs/selectors"}}
+    },
+    "span_filter_operations": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 256,
+      "propertyNames": {"$ref": "#/$defs/token"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["required_attributes", "selectors"],
+        "properties": {
+          "required_attributes": {"$ref": "#/$defs/tokensAllowEmpty"},
+          "selectors": {"$ref": "#/$defs/selectors"}
+        }
+      }
+    },
+    "local_observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "complete"],
+      "properties": {
+        "profile_id": {"const": "local-observability-v1"},
+        "complete": {"const": true}
+      }
+    }
+  },
+  "$defs": {
+    "generatedMarker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "authority", "generator", "materialized_view_sha256", "registry_version"],
+      "properties": {
+        "artifact": {"const": "compatibility/v7-exporter-selection.json"},
+        "authority": {"const": "candidate-not-public-authority"},
+        "generator": {"const": "defenseclaw-telemetry-candidate-renderer-v1"},
+        "materialized_view_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "registry_version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "token": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!\\*$)[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+    "bucket": {
+      "enum": [
+        "compliance.activity", "security.finding", "guardrail.evaluation", "enforcement.action",
+        "model.io", "tool.activity", "asset.scan", "asset.lifecycle", "network.egress",
+        "agent.lifecycle", "ai.discovery", "telemetry.ingest", "platform.health", "diagnostic"
+      ]
+    },
+    "buckets": {"type": "array", "maxItems": 14, "uniqueItems": true, "items": {"$ref": "#/$defs/bucket"}},
+    "tokens": {"type": "array", "minItems": 1, "maxItems": 512, "uniqueItems": true, "items": {"$ref": "#/$defs/token"}},
+    "tokensAllowEmpty": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/token"}},
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "buckets": {"allOf": [{"$ref": "#/$defs/buckets"}, {"minItems": 1}]},
+        "sources": {"$ref": "#/$defs/tokens"},
+        "actions": {"$ref": "#/$defs/tokens"},
+        "event_names": {"$ref": "#/$defs/tokens"}
+      }
+    },
+    "selectors": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/selector"}},
+    "signalBuckets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logs", "traces", "metrics"],
+      "properties": {
+        "logs": {"$ref": "#/$defs/buckets"},
+        "traces": {"$ref": "#/$defs/buckets"},
+        "metrics": {"$ref": "#/$defs/buckets"}
+      }
+    },
+    "logExporter": {
+      "type": "object", "additionalProperties": false, "required": ["logs"],
+      "properties": {"logs": {"$ref": "#/$defs/selectors"}}
+    },
+    "traceExporter": {
+      "type": "object", "additionalProperties": false, "required": ["traces"],
+      "properties": {"traces": {"$ref": "#/$defs/selectors"}}
+    },
+    "allSignalExporter": {
+      "type": "object", "additionalProperties": false, "required": ["logs", "traces", "metrics"],
+      "properties": {
+        "logs": {"$ref": "#/$defs/selectors"},
+        "traces": {"$ref": "#/$defs/selectors"},
+        "metrics": {"$ref": "#/$defs/selectors"}
+      }
+    }
+  }
+}

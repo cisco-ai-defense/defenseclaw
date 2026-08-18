@@ -37,10 +37,10 @@ splunk:
             maxThreads: 4
           http://splunk_hec_token:
             disabled: 0
-            token: 00000000-0000-0000-0000-000000000001
-            index: defenseclaw_local
-            sourcetype: defenseclaw:json
-            source: defenseclaw
+            token: "{{ lookup('env', 'SPLUNK_HEC_TOKEN') }}"
+            index: "{{ lookup('env', 'DEFENSECLAW_INDEX') }}"
+            sourcetype: "{{ lookup('env', 'DEFENSECLAW_SOURCETYPE') }}"
+            source: "{{ lookup('env', 'DEFENSECLAW_SOURCE') }}"
     - key: outputs
       value:
         directory: /opt/splunk/etc/system/local

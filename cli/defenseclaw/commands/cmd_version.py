@@ -38,8 +38,13 @@ from pathlib import Path
 
 import click
 
-from defenseclaw import __version__, gateway, ux
+import defenseclaw
+from defenseclaw import gateway, ux
 from defenseclaw.paths import bundled_extensions_dir
+
+# Legacy upgrade processes inspect this mirror after reloading the module.
+# Runtime version reporting below intentionally reads the package dynamically.
+__version__ = defenseclaw.__version__
 
 
 # Matches the semantic version format we ship (MAJOR.MINOR.PATCH plus
@@ -64,7 +69,11 @@ def _cli_component() -> Component:
     """The Python CLI is definitional — its version is always known."""
     return Component(
         name="cli",
-        version=__version__,
+        # Read the package version at probe time. Upgrade tests temporarily
+        # replace ``defenseclaw.__version__`` while importing staged helpers;
+        # copying it at module import would leak that transient source version
+        # into later, otherwise clean ``defenseclaw version`` invocations.
+        version=defenseclaw.__version__,
         origin="defenseclaw (python)",
         detail="",
         status="ok",
@@ -89,7 +98,17 @@ def _gateway_component() -> Component:
     missing components are excluded from drift comparison, the command
     would falsely report no drift against the real binary (F-0001).
     """
-    bin_path = gateway.resolve_gateway_binary()
+    return _gateway_component_for_binary(gateway.resolve_gateway_binary())
+
+
+def _gateway_component_for_binary(bin_path: str | None) -> Component:
+    """Interrogate one exact gateway binary selected by a trusted caller.
+
+    Doctor lifecycle compatibility checks use this entrypoint so the version
+    evidence always describes the same controller binary that a repair would
+    execute.  The normal ``version`` command continues to use
+    :func:`_gateway_component`, which owns its general-purpose resolution.
+    """
     if not bin_path:
         return Component(
             name="gateway",

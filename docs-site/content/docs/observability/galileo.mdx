@@ -9,9 +9,12 @@ keywords:
   - defenseclaw setup galileo
 ---
 
-DefenseClaw sends OpenTelemetry GenAI spans to Galileo over OTLP
-HTTP/protobuf. Galileo is a **traces-only** destination; metrics and logs can
-continue flowing to the bundled local collector or another named OTLP backend.
+DefenseClaw sends its generated `galileo-rich-v2` trace projection to Galileo
+over OTLP HTTP/protobuf. Galileo is a **traces-only** destination; metrics and
+logs continue flowing to the bundled local collector or another destination.
+The projection retains root-agent/subagent topology, workflows, turns, model and
+tool operations, retrieval, guardrail/judge work, structural events/links, and
+stable lifecycle/execution correlation when those fields are present.
 
 ## Cloud setup
 
@@ -73,59 +76,76 @@ defenseclaw setup observability list
 The resulting configuration contains two independent destinations:
 
 ```yaml
-otel:
-  enabled: true
+config_version: 8
+observability:
   destinations:
     - name: local-observability
-      preset: local-otlp
-      enabled: true
+      kind: otlp
       protocol: grpc
       endpoint: 127.0.0.1:4317
-      traces: { enabled: true }
-      metrics: { enabled: true }
-      logs: { enabled: true }
+      network_safety:
+        allow_private_networks: true
 
     - name: galileo
+      kind: otlp
       preset: galileo
-      enabled: true
-      protocol: http
+      protocol: http/protobuf
       endpoint: https://api.galileo.ai/otel/traces
       batch:
         scheduled_delay_ms: 1000
       headers:
-        Galileo-API-Key: ${GALILEO_API_KEY}
+        Galileo-API-Key: {env: GALILEO_API_KEY}
         project: defenseclaw
         logstream: production
-      span_filter:
-        operations:
-          - name: chat
-            require_attributes:
-              - gen_ai.operation.name
-              - gen_ai.provider.name
-              - gen_ai.request.model
-              - gen_ai.input.messages
-              - gen_ai.output.messages
-          - name: invoke_agent
-            require_attributes:
-              - gen_ai.operation.name
-              - gen_ai.agent.name
-              - gen_ai.provider.name
-              - openinference.span.kind
-              - gen_ai.input.messages
-              - gen_ai.output.messages
-          - name: execute_tool
-            require_attributes:
-              - gen_ai.operation.name
-              - gen_ai.tool.name
-              - openinference.span.kind
-              - gen_ai.tool.call.arguments
-              - gen_ai.tool.call.result
-              - gen_ai.input.messages
-              - gen_ai.output.messages
-      traces: { enabled: true }
-      metrics: { enabled: false }
-      logs: { enabled: false }
 ```
+
+Omitted policy on `local-observability` selects all logs, traces, metrics, and
+buckets, unredacted. Omitted `send` and `routes` on `preset: galileo` have a more
+specific meaning: the compiler creates a traces-only `capability-default` route
+whose `event_names` are exactly the currently available families in the generated
+`galileo-rich-v2` compatibility profile. The setup command deliberately writes
+this omitted form. Do not add `send: {signals: [traces]}` merely to restate the
+default; that changes the policy from compiler-owned membership to operator intent.
+
+The capability-default Galileo projection is unredacted. To narrow one Galileo
+destination by bucket and redact it, author an explicit policy:
+
+```yaml
+observability:
+  destinations:
+    - name: galileo
+      kind: otlp
+      preset: galileo
+      protocol: http/protobuf
+      endpoint: https://api.galileo.ai/otel/traces
+      headers:
+        Galileo-API-Key: {env: GALILEO_API_KEY}
+        project: defenseclaw
+        logstream: production
+      routes:
+        - name: redacted-model-and-tool-spans
+          signals: [traces]
+          selector:
+            buckets: [model.io, tool.activity]
+            event_names: [span.model.chat, span.tool.execute]
+          action: send
+          redaction_profile: sensitive
+```
+
+Explicit `send` or advanced `routes` replace the generated capability-default
+route. DefenseClaw treats them as operator intent and does not silently intersect
+them with compatibility membership. If an explicit selector admits a nonmember,
+the Galileo projector rejects it as `unsupported_shape`; destination failure
+accounting and runtime health report it. Use the effective configuration view to
+read the generated profile's available families, then run `defenseclaw
+observability plan --signal traces --event-name NAME` to review each explicit
+family before activation. Recheck the effective membership after an upgrade if an
+advanced route enumerates event names.
+
+If the same redaction posture is acceptable for local history and every matching
+destination, a bucket-level `redaction_profile` can preserve Galileo's omitted
+capability-default route. Use destination policy, as above, when only Galileo must
+be narrowed or redacted.
 
 Each destination has its own bounded export queue. A Galileo outage does not
 stop local Tempo/Grafana export, and a local collector outage does not stop
@@ -166,22 +186,30 @@ defenseclaw setup observability add galileo \
   --logstream security
 ```
 
-The inventory distinguishes process-wide `otel` destinations from
-`audit_sinks` and prints each destination's enabled signal set.
+The inventory prints every v8 destination's kind, preset, enabled signal set,
+bucket coverage, and effective redaction profile.
 
-`test` asks the running gateway to emit canonical agent/chat spans, flushes the
-real destination processor, and prints the trace ID only after the Galileo
-exporter records an OTLP acknowledgement. Use `test --direct` only to isolate
-remote auth/connectivity; it bypasses filtering, batching, and fan-out.
+`test` uses an internal Go helper to resolve the gateway bearer and authenticate
+only to the loopback gateway API. The bearer is never placed in subprocess argv,
+helper stdout, or rendered output. The helper asks the running gateway to emit
+canonical agent/chat spans, flushes the real destination processor, and prints
+the trace ID only after the Galileo exporter records an OTLP acknowledgement.
+This is an external write: each invocation creates one content-free, two-span
+diagnostic trace in the selected Galileo project and Log stream.
 
 The TUI Overview includes a full-width **Observability Destinations · Runtime**
-panel. It lists every runtime-loaded named OTel route and audit sink with
+panel. It lists every runtime-loaded named v8 destination with
 target, process/global/connector scope, kind/preset, state, signals, schema
 eligibility, delivery/rejection/failure counts, and endpoint. Explicit
 per-connector suppression is visible too.
 Headers and credential values are never displayed. The compact Services row
 remains as a roll-up. `defenseclaw status` shows each destination, while
-`defenseclaw doctor` probes every enabled endpoint independently.
+`defenseclaw doctor` reads bounded runtime health for every destination and emits
+the same external two-span canary through the first four enabled Galileo routes
+in compiled-plan order. If more than four are enabled, doctor leaves their
+runtime-health checks in place and emits a bounded coverage warning instead of
+adding unbounded sequential network latency. Every doctor invocation can
+therefore create up to four diagnostic traces in Galileo.
 
 ## What you see in Galileo
 
@@ -226,8 +254,10 @@ for a final Stop event to see a multi-hour agent's progress.
 Open a chat row to compare the exact rendered input and assistant output,
 provider/model identity, latency, token usage, and cost when the connector
 reports them. Tool rows expose their structured call arguments and results.
-DefenseClaw applies the same persistent-sink redaction policy before this data
-leaves the gateway, so shared deployments should keep redaction enabled.
+DefenseClaw applies the Galileo route's v8 redaction profile before this data
+leaves the gateway. Fresh v8 destinations default to `none` (unredacted), so
+shared deployments should explicitly select `sensitive`, `content`, `strict`,
+or a reviewed custom profile.
 
 Galileo and Agent360 are complementary rather than competing views:
 
@@ -258,18 +288,20 @@ inference spans:
 | agent identity | `gen_ai.agent.*` |
 | tool name and call ID | `gen_ai.tool.*` |
 
-Prompt and response values follow DefenseClaw's persistent-sink redaction
-policy. They are correlation-safe redaction placeholders by default; raw
-content is exported only when redaction has been explicitly disabled for all
-sinks.
+Prompt, response, document, tool-argument, and tool-result values follow the
+Galileo destination's v8 profile. Fresh v8 configuration exports registered
+content unchanged under `none`; redacting profiles either replace detected
+sensitive substrings or transform/remove whole field classes.
 
-The Galileo preset writes a vendor-neutral per-destination `span_filter` that
-filters out policy, scanner, health, and other operational spans that do not
-satisfy Galileo's GenAI span requirements. Filtering is driven by this explicit
-contract, not by the destination or preset name. Those spans still flow
-unchanged to local-observability and other OTLP destinations. This avoids
-Galileo partial-success rejections without weakening the richer DefenseClaw
-schema.
+The Galileo preset binds the generated `galileo-rich-v2` compatibility profile.
+Eligibility, projected attributes, events, links, instrumentation scope, and
+content states come from the canonical telemetry registry rather than a
+hand-authored `span_filter`. Its omitted capability-default route selects only
+available profile members, so non-eligible operational spans still flow to local
+observability and other matching OTLP destinations without being offered to
+Galileo. Explicit `send` and advanced `routes` are not compatibility filters:
+when they select a nonmember, the projector rejects that span as
+`unsupported_shape` and destination health exposes the error.
 
 Hook connectors expose prompts, model completions, and tool calls as separate
 events. DefenseClaw gives each hook delivery a short canonical `invoke_agent`
@@ -286,18 +318,14 @@ immediately during long-running turns. Correlation caches and content are
 bounded, duplicate completions are suppressed, and restart gaps use explicit
 unavailable-input placeholders.
 
-The machine-readable contracts live under `schemas/otel/`:
-
-- `runtime-llm-span.schema.json`
-- `runtime-agent-span.schema.json`
-- `runtime-tool-span.schema.json`
-- `runtime-approval-span.schema.json`
-- `galileo-export-profile.schema.json`
-
-Runtime contract tests emit real spans and compare their name, kind, required
-attributes, and complete attribute set to these schemas. The schema checker
-also pins the Galileo preset to traces-only and keeps each operation branch
-aligned with its matching chat, agent, or tool runtime contract.
+The one authoring source is `schemas/telemetry/v8/registry.yaml`. It generates
+the v8 telemetry schema/catalog, builders, fixtures, and the logical
+`galileo-rich-v2.json` compatibility profile. Git stores the reproducible
+runtime JSON as deterministic gzip under `schemas/telemetry/runtime/`; release
+staging restores the exact raw JSON resource names. Runtime contract tests
+compare real exports to those generated artifacts, including
+name, kind, attributes, events, links, scope, topology, and dropped-structure
+accounting.
 
 ### Read the routing and delivery funnel
 
@@ -318,27 +346,27 @@ unverified until the trace appears in Galileo Logs. Protocol partial success
 increments `rejected`, while authentication, transport, TLS,
 timeout, and other exporter errors increment `failed`. `/health`, `setup
 galileo status`, and the TUI expose the same process-lifetime counters without
-headers or credentials.
+headers or credentials. Local compatibility rejection such as
+`unsupported_shape` is also a reported destination failure; it is never counted
+as a successful delivery or hidden as a policy drop.
 
-## Migrating a flat `otel:` configuration
+## Upgrade from v7
 
-`defenseclaw upgrade` automatically persists the legacy flat exporter as one
-named destination and preserves every named destination already present. The
-gateway also performs the same conversion in memory before validation, so an
-interrupted migration does not stop telemetry or prevent startup.
-
-Use the explicit command to preview the conversion, repair an installation
-that replaced binaries without running `defenseclaw upgrade`, or force the
-write before a planned restart:
+Run the ordinary upgrade command:
 
 ```bash
-defenseclaw setup observability migrate-otel
-defenseclaw setup observability migrate-otel --apply
+defenseclaw upgrade --yes
 ```
 
-The migration preserves global and signal-specific endpoints/protocols,
-headers, TLS settings, enabled signals, batch settings, process-wide sampling,
-and any existing named destinations. It writes
-`config.yaml.pre-observability-migration.bak`, then removes only the flat
-transport fields. It is idempotent: applying it again does not duplicate a
-route.
+The required migration converts legacy `otel` and `audit_sinks` settings into
+the v8 `observability` graph, preserves Galileo project/logstream headers,
+endpoint, explicit batching, routing, signal selection, and effective
+redaction posture, and keeps every other destination. The v8 Galileo preset
+uses a deliberate 1-second batch delay; an explicit v7 value is preserved, and
+the upgrade summary discloses when the old inherited 5-second default becomes
+the preset value.
+
+No separate apply command is required. The v8 gateway is strict and does not
+rewrite v7 configuration on startup or operate both formats in parallel. A
+failed required conversion restores the backed-up source and does not start the
+v8 gateway against a v7 file.

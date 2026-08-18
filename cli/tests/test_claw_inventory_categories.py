@@ -34,6 +34,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from tests.environment import isolated_home_env
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.inventory.claw_inventory import (
@@ -56,7 +58,7 @@ class _FakeCfg:
 class AgentsAdapterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dc-aibom-agents-")
-        self.env = patch.dict(os.environ, {"HOME": self.tmp}, clear=False)
+        self.env = patch.dict(os.environ, isolated_home_env(self.tmp), clear=False)
         self.env.start()
 
     def tearDown(self):
@@ -117,7 +119,7 @@ class AgentsAdapterTests(unittest.TestCase):
 class ToolsAdapterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dc-aibom-tools-")
-        self.env = patch.dict(os.environ, {"HOME": self.tmp}, clear=False)
+        self.env = patch.dict(os.environ, isolated_home_env(self.tmp), clear=False)
         self.env.start()
 
     def tearDown(self):
@@ -191,7 +193,7 @@ class ModelProvidersAdapterTests(unittest.TestCase):
         self.env = patch.dict(
             os.environ,
             {
-                "HOME": self.tmp,
+                **isolated_home_env(self.tmp),
                 "ANTHROPIC_API_KEY": "sk-ant-secret",
                 "ANTHROPIC_BASE_URL": "https://override.example.com",
                 "OPENAI_API_KEY": "sk-oai-secret",
@@ -270,7 +272,7 @@ class ModelProvidersAdapterTests(unittest.TestCase):
 class MemoryAdapterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dc-aibom-memory-")
-        self.env = patch.dict(os.environ, {"HOME": self.tmp}, clear=False)
+        self.env = patch.dict(os.environ, isolated_home_env(self.tmp), clear=False)
         self.env.start()
 
     def tearDown(self):

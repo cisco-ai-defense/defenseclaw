@@ -20,8 +20,8 @@ import (
 )
 
 // handleEgressEvent accepts a single EgressPayload from the TS fetch
-// interceptor and re-emits it through the same gatewaylog.Writer the
-// Go-side passthrough uses. The endpoint exists so the TS layer can
+// interceptor and emits it through the same canonical v8 producer the Go-side
+// passthrough uses. The endpoint exists so the TS layer can
 // report events the proxy never sees (known-provider fetches that
 // bypass the proxy because the host+port were listed directly, or
 // requests that the interceptor explicitly chose to pass through
@@ -70,8 +70,8 @@ func (p *GuardrailProxy) handleEgressEvent(w http.ResponseWriter, r *http.Reques
 	// hits /v1/events/egress is a cooperating integration (TS
 	// interceptor, tests); refusing text/plain / form encoded /
 	// octet-stream here makes the contract narrower and prevents
-	// a confused-deputy that expects form fields from writing into
-	// gateway.jsonl by accident. We accept bare "application/json"
+	// a confused-deputy that expects form fields from writing into the
+	// observability pipeline by accident. We accept bare "application/json"
 	// as well as parameterized variants like "application/json;
 	// charset=utf-8" and the vendor form "application/*+json".
 	if ct := r.Header.Get("Content-Type"); ct != "" {
@@ -111,13 +111,13 @@ func (p *GuardrailProxy) handleEgressEvent(w http.ResponseWriter, r *http.Reques
 	// cannot attest which peer net/http actually selected.
 	payload.ResolvedIP = ""
 	// Validate the branch/decision enums server-side so a malformed
-	// TS client can't push garbage into gateway.jsonl.
+	// TS client can't push garbage into canonical observability records.
 	if !validEgressBranch(payload.Branch) || !validEgressDecision(payload.Decision) {
 		http.Error(w, "invalid branch or decision", http.StatusBadRequest)
 		return
 	}
 
-	emitEgress(r.Context(), payload)
+	p.emitEgress(r.Context(), payload)
 	w.WriteHeader(http.StatusNoContent)
 }
 

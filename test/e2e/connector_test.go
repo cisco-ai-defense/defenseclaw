@@ -56,8 +56,14 @@ func TestRegistryAvailableMetadata(t *testing.T) {
 	reg := connector.NewDefaultRegistry()
 	avail := reg.Available()
 
-	if len(avail) < 4 {
-		t.Fatalf("expected at least 4 connectors in Available(), got %d", len(avail))
+	wantAvailable := 0
+	for _, name := range reg.Names() {
+		if connector.ConnectorSupportedOnHostOS(name) {
+			wantAvailable++
+		}
+	}
+	if len(avail) != wantAvailable {
+		t.Fatalf("Available() returned %d connectors, want %d supported on this host", len(avail), wantAvailable)
 	}
 
 	for _, info := range avail {

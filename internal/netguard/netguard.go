@@ -33,8 +33,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
 // ErrPrivateAddress is returned by Dial / CheckRedirect when an
@@ -192,39 +195,21 @@ func RejectInlineCredentials(u *url.URL) error {
 	return nil
 }
 
-// secretQueryKeys is the case-insensitive deny-list of query
-// parameters whose values are scrubbed before logging. Hand-curated
-// to cover the common provider/webhook/auth shapes.
-var secretQueryKeys = map[string]struct{}{
-	"key":                  {},
-	"api_key":              {},
-	"api-key":              {},
-	"apikey":               {},
-	"token":                {},
-	"access_token":         {},
-	"refresh_token":        {},
-	"id_token":             {},
-	"client_secret":        {},
-	"client_token":         {},
-	"signature":            {},
-	"x-amz-signature":      {},
-	"x-amz-credential":     {},
-	"x-amz-security-token": {},
-	"sig":                  {},
-	"auth":                 {},
-	"authorization":        {},
-	"password":             {},
-	"passwd":               {},
-	"pwd":                  {},
-	"secret":               {},
-	"routing_key":          {},
-	"webhook_token":        {},
-}
+const (
+	maxLoggedQueryBytes    = 64 * 1024
+	maxLoggedQueryPairs    = 256
+	maxDiagnosticTextBytes = 64 * 1024
+	maxDiagnosticURLs      = 256
+	redactedQueryValue     = "%3Credacted%3E"
+	redactedDiagnosticText = "<redacted-diagnostic-text>"
+)
+
+var diagnosticURLStart = regexp.MustCompile(`(?i)https?://`)
 
 // ScrubURL returns a string representation of u safe for logs:
 //
 //   - userinfo is removed entirely (no `user:pass@` prefix);
-//   - query parameters whose name is in secretQueryKeys (case-insensitive)
+//   - query parameters whose name is in the sensitive-query catalog
 //     have their value replaced with `<redacted>`;
 //   - the rest of the URL (scheme, host, port, path, fragment) is
 //     preserved so operators can still triage by host/path.
@@ -238,23 +223,71 @@ func ScrubURL(u *url.URL, extra ...string) string {
 	cp := *u
 	cp.User = nil
 	if cp.RawQuery != "" {
-		q := cp.Query()
-		for k := range q {
-			lk := strings.ToLower(k)
-			if _, ok := secretQueryKeys[lk]; ok {
-				q.Set(k, "<redacted>")
-				continue
+		cp.RawQuery = scrubRawQuery(cp.RawQuery, extra)
+	}
+	return cp.String()
+}
+
+func scrubRawQuery(raw string, extra []string) string {
+	if len(raw) > maxLoggedQueryBytes {
+		return "redacted=" + redactedQueryValue
+	}
+	extraKeys := make(map[string]struct{}, len(extra))
+	for _, key := range extra {
+		if canonical, valid := sensitivequery.Canonical(key); valid {
+			extraKeys[canonical] = struct{}{}
+		}
+	}
+
+	var result strings.Builder
+	result.Grow(len(raw))
+	start := 0
+	pairs := 0
+	for end := 0; end <= len(raw); end++ {
+		if end < len(raw) && raw[end] != '&' && raw[end] != ';' {
+			continue
+		}
+		pairs++
+		if pairs > maxLoggedQueryPairs {
+			return "redacted=" + redactedQueryValue
+		}
+		item := raw[start:end]
+		equals := strings.IndexByte(item, '=')
+		if equals < 0 {
+			sensitive, valid := sensitivequery.Classify(item)
+			if item != "" && (sensitive || !valid) {
+				result.WriteString("redacted=")
+				result.WriteString(redactedQueryValue)
+			} else {
+				result.WriteString(item)
 			}
-			for _, ex := range extra {
-				if strings.EqualFold(k, ex) {
-					q.Set(k, "<redacted>")
-					break
+		} else {
+			key := item[:equals]
+			sensitive, valid := sensitivequery.Classify(key)
+			if !valid {
+				result.WriteString("redacted=")
+				result.WriteString(redactedQueryValue)
+			} else {
+				if !sensitive {
+					if canonical, ok := sensitivequery.Canonical(key); ok {
+						_, sensitive = extraKeys[canonical]
+					}
+				}
+				result.WriteString(key)
+				result.WriteByte('=')
+				if sensitive {
+					result.WriteString(redactedQueryValue)
+				} else {
+					result.WriteString(item[equals+1:])
 				}
 			}
 		}
-		cp.RawQuery = q.Encode()
+		if end < len(raw) {
+			result.WriteByte(raw[end])
+		}
+		start = end + 1
 	}
-	return cp.String()
+	return result.String()
 }
 
 // ScrubURLString parses raw and applies ScrubURL. On parse failure
@@ -266,6 +299,52 @@ func ScrubURLString(raw string, extra ...string) string {
 		return "<unparseable-url>"
 	}
 	return ScrubURL(u, extra...)
+}
+
+// ScrubURLsInText sanitizes HTTP(S) URLs embedded in diagnostic text without
+// otherwise interpreting or rewriting that text.
+func ScrubURLsInText(value string) string {
+	if len(value) > maxDiagnosticTextBytes {
+		return redactedDiagnosticText
+	}
+	starts := diagnosticURLStart.FindAllStringIndex(value, maxDiagnosticURLs+1)
+	if len(starts) > maxDiagnosticURLs {
+		return redactedDiagnosticText
+	}
+	var result strings.Builder
+	result.Grow(len(value))
+	cursor := 0
+	for first := 0; first < len(starts); {
+		groupStart := starts[first][0]
+		groupEnd := groupStart
+		for groupEnd < len(value) && !isDiagnosticURLDelimiter(value[groupEnd]) {
+			groupEnd++
+		}
+		last := first + 1
+		for last < len(starts) && starts[last][0] < groupEnd {
+			last++
+		}
+		token := value[groupStart:groupEnd]
+		for nested := last - 1; nested >= first; nested-- {
+			start := starts[nested][0] - groupStart
+			token = token[:start] + ScrubURLString(token[start:])
+		}
+		result.WriteString(value[cursor:groupStart])
+		result.WriteString(token)
+		cursor = groupEnd
+		first = last
+	}
+	result.WriteString(value[cursor:])
+	return result.String()
+}
+
+func isDiagnosticURLDelimiter(b byte) bool {
+	switch b {
+	case ' ', '\t', '\r', '\n', '"', '\'', '<', '>':
+		return true
+	default:
+		return false
+	}
 }
 
 // EndpointForDisplay returns a URL safe for health/status surfaces. Unlike

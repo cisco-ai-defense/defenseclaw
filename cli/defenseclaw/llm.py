@@ -82,18 +82,7 @@ import json
 import os
 import sys
 import time
-from contextlib import contextmanager
 from typing import Any
-
-try:
-    from opentelemetry import trace as otel_trace
-except ImportError:
-    otel_trace = None  # type: ignore[assignment]
-
-try:
-    from opentelemetry import metrics as otel_metrics
-except ImportError:
-    otel_metrics = None  # type: ignore[assignment]
 
 from defenseclaw.gateway_error_codes import ERR_LLM_BRIDGE_ERROR
 
@@ -115,46 +104,48 @@ def _debug(msg: str) -> None:
         sys.stderr.write(f"[llm-bridge] {msg}\n")
 
 
-_bridge_hist = None
+def _emit_llm_bridge_observation(
+    *,
+    model: str,
+    provider: str,
+    status: str,
+    duration_ms: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    response_model: str = "",
+    response_id: str = "",
+    finish_reasons: list[str] | None = None,
+) -> None:
+    """Best-effort handoff to the process-owned generated v8 runtime.
 
+    The bridge remains usable by a stand-alone plugin scanner, where no
+    DefenseClaw configuration or gateway exists. With an active v8 install,
+    Python never owns an SDK provider: it submits source facts and the gateway
+    creates the canonical metric and model span.
+    """
 
-def _llm_bridge_histogram():
-    global _bridge_hist
-    if otel_metrics is None:
-        return None
-    if _bridge_hist is None:
-        meter = otel_metrics.get_meter("defenseclaw")
-        _bridge_hist = meter.create_histogram(
-            name="defenseclaw.llm_bridge.latency",
-            unit="ms",
-            description="LiteLLM bridge call latency",
-        )
-    return _bridge_hist
+    try:
+        from defenseclaw import config as config_module
+        from defenseclaw.logger import Logger
 
-
-def _record_llm_bridge_latency(model: str, status: str, duration_ms: float) -> None:
-    h = _llm_bridge_histogram()
-    if h is None:
-        return
-    attrs = {"status": status}
-    if model:
-        attrs["gen_ai.request.model"] = model
-    h.record(duration_ms, attributes=attrs)
-
-
-@contextmanager
-def _genai_span(model: str, provider_hint: str):
-    if otel_trace is None:
-        yield
-        return
-    tracer = otel_trace.get_tracer("defenseclaw.llm")
-    with tracer.start_as_current_span("gen_ai.chat.completions") as span:
-        span.set_attribute("gen_ai.operation.name", "chat")
-        if model:
-            span.set_attribute("gen_ai.request.model", model)
-        if provider_hint:
-            span.set_attribute("gen_ai.provider.name", provider_hint)
-        yield
+        config_module.require_v8_config()
+        logger = Logger.from_config(config_module.load())
+        try:
+            logger.log_llm_bridge(
+                model=model,
+                provider=provider,
+                status=status,
+                duration_ms=duration_ms,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_model=response_model,
+                response_id=response_id,
+                finish_reasons=finish_reasons,
+            )
+        finally:
+            logger.close()
+    except Exception as exc:
+        _debug(f"canonical v8 observability handoff unavailable: {exc!r}")
 
 
 def _log_bridge_error_json(status: str, message: str) -> None:
@@ -210,21 +201,20 @@ def _classify_llm_exception(exc: BaseException) -> str:
 #
 # Bedrock (``boto3``) is bundled in the base install — see
 # ``[project].dependencies`` in pyproject.toml. The entry is kept here
-# as a defensive net for the (rare) case where an operator has
-# manually uninstalled boto3 or is running off a stripped image; the
-# hint then tells them exactly what to put back.
+# as a defensive net for a damaged managed runtime or incomplete source
+# environment; recovery guidance must preserve the installation boundary.
 #
 # Vertex AI keeps the ``[vertex]`` extras gate because the SDK pulls
 # ~286 MB of transitive deps and most operators never touch Vertex.
 #
-# Each entry: provider prefix → (install hint, missing module pattern)
+# Each entry: provider prefix → (recovery hint, missing module pattern)
 _PROVIDER_INSTALL_HINT: dict[str, tuple[str, str]] = {
     "bedrock": (
-        "pip install boto3 (bundled by default; reinstall if removed)",
+        "Repair the managed installation; source checkouts: uv sync.",
         "boto3",
     ),
     "vertex_ai": (
-        "pip install 'defenseclaw[vertex]'",
+        "Source checkouts: uv sync --extra vertex. Do not modify a packaged runtime.",
         "google.cloud.aiplatform",
     ),
 }
@@ -237,7 +227,7 @@ def _missing_cloud_sdk(exc: BaseException, provider: str) -> str | None:
     Looks for the ``No module named 'X'`` shape that LiteLLM surfaces when
     its lazy ``import boto3`` / ``import google.cloud.aiplatform`` fails.
     The message is short enough to display in a wizard or doctor row and
-    tells the operator exactly which ``pip install`` to run.
+    points to the appropriate managed-runtime or source-checkout recovery.
     """
     text = str(exc)
     if "No module named" not in text:
@@ -245,12 +235,12 @@ def _missing_cloud_sdk(exc: BaseException, provider: str) -> str | None:
     prov = (provider or "").strip().lower()
     hint_for_prov = _PROVIDER_INSTALL_HINT.get(prov)
     if hint_for_prov is not None:
-        install_cmd, _module = hint_for_prov
-        return f"{prov} support requires an extra dependency. {install_cmd}"
+        recovery_hint, _module = hint_for_prov
+        return f"{prov} support requires an extra dependency. {recovery_hint}"
     # Provider unknown but module pattern matched — surface a generic hint.
-    for install_cmd, module_name in _PROVIDER_INSTALL_HINT.values():
+    for recovery_hint, module_name in _PROVIDER_INSTALL_HINT.values():
         if f"'{module_name.split('.')[0]}'" in text:
-            return f"missing cloud SDK ({module_name}). {install_cmd}"
+            return f"missing cloud SDK ({module_name}). {recovery_hint}"
     return None
 
 
@@ -279,6 +269,7 @@ def _load_plugin_llm_config() -> dict[str, Any]:
         # also keeps the import surface minimal for plugin scanner
         # subprocesses that don't need the whole ``Config`` class.
         from defenseclaw.config import load as _load_config
+        from defenseclaw.config import require_v8_config as _require_v8_config
         from defenseclaw.scanner._llm_env import (
             inject_llm_env,
             litellm_completion_kwargs,
@@ -288,6 +279,7 @@ def _load_plugin_llm_config() -> dict[str, Any]:
         return {}
 
     try:
+        _require_v8_config()
         cfg = _load_config()
     except Exception as exc:
         _debug(f"config.load() failed; check ~/.defenseclaw/config.yaml: {exc!r}")
@@ -423,10 +415,11 @@ def call_llm(request: dict) -> dict:
         return {
             "content": "",
             "model": request.get("model", ""),
-            "usage": {},
-            "error": (
-                "litellm not installed. Install with: pip install litellm "
-                "(bundled automatically with `defenseclaw` ≥ 0.5)"
+        "usage": {},
+        "error": (
+                "litellm not installed. Repair the managed DefenseClaw "
+                "installation; source checkouts: uv sync "
+                "(LiteLLM is bundled with DefenseClaw ≥ 0.5)"
             ),
             "error_code": None,
         }
@@ -464,21 +457,22 @@ def call_llm(request: dict) -> dict:
     kwargs["temperature"] = request.get("temperature", 0.0)
 
     t0 = time.perf_counter()
-    with _genai_span(model, provider_hint):
-        try:
-            response = litellm.completion(**kwargs)
-        except Exception as exc:
-            ms = (time.perf_counter() - t0) * 1000.0
-            st = _classify_llm_exception(exc)
-            _record_llm_bridge_latency(model, st, ms)
-            _log_bridge_error_json(st, f"{type(exc).__name__}: {exc}")
-            return {
-                "content": "",
-                "model": model,
-                "usage": {},
-                "error": f"{type(exc).__name__}: {exc}",
-                "error_code": ERR_LLM_BRIDGE_ERROR,
-            }
+    try:
+        response = litellm.completion(**kwargs)
+    except Exception as exc:
+        ms = (time.perf_counter() - t0) * 1000.0
+        st = _classify_llm_exception(exc)
+        _emit_llm_bridge_observation(
+            model=model, provider=provider_hint, status=st, duration_ms=ms
+        )
+        _log_bridge_error_json(st, f"{type(exc).__name__}: {exc}")
+        return {
+            "content": "",
+            "model": model,
+            "usage": {},
+            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": ERR_LLM_BRIDGE_ERROR,
+        }
 
     # LiteLLM normalizes responses to the OpenAI ChatCompletion shape
     # regardless of provider, so a single extraction path works for
@@ -491,7 +485,9 @@ def call_llm(request: dict) -> dict:
             content = getattr(msg, "content", "") or ""
     except Exception as exc:
         ms_bad = (time.perf_counter() - t0) * 1000.0
-        _record_llm_bridge_latency(model, "internal", ms_bad)
+        _emit_llm_bridge_observation(
+            model=model, provider=provider_hint, status="internal", duration_ms=ms_bad
+        )
         _log_bridge_error_json("internal", f"malformed LiteLLM response: {exc}")
         return {
             "content": "",
@@ -515,11 +511,27 @@ def call_llm(request: dict) -> dict:
             "total_tokens": total_tokens,
         }
 
-    _record_llm_bridge_latency(model, "success", (time.perf_counter() - t0) * 1000.0)
+    response_model = getattr(response, "model", "") or model
+    finish_reasons = [
+        str(getattr(choice, "finish_reason", ""))
+        for choice in (getattr(response, "choices", None) or [])
+        if getattr(choice, "finish_reason", "")
+    ]
+    _emit_llm_bridge_observation(
+        model=model,
+        provider=provider_hint,
+        status="success",
+        duration_ms=(time.perf_counter() - t0) * 1000.0,
+        input_tokens=int(usage.get("prompt_tokens", 0) or 0),
+        output_tokens=int(usage.get("completion_tokens", 0) or 0),
+        response_model=response_model,
+        response_id=str(getattr(response, "id", "") or ""),
+        finish_reasons=finish_reasons,
+    )
 
     return {
         "content": content,
-        "model": getattr(response, "model", "") or model,
+        "model": response_model,
         "usage": usage,
         "error": None,
         "error_code": None,
@@ -557,7 +569,11 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
     try:
         import litellm  # noqa: PLC0415
     except ImportError:
-        return (False, "litellm not installed — install defenseclaw with the cli extra")
+        return (
+            False,
+            "litellm not installed — repair the managed DefenseClaw "
+            "installation; source checkouts: uv sync",
+        )
 
     model = (getattr(llm_config, "model", "") or "").strip()
     if not model:

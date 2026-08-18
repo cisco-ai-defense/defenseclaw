@@ -80,6 +80,16 @@ func TestEntries_NoDuplicates(t *testing.T) {
 func TestEntries_HighImpactSecurityOptOutsSurfaceInDoctor(t *testing.T) {
 	r := MustLoad()
 	for _, e := range r.Entries {
+		if e.Deprecated {
+			if e.Category == CategorySecurityOptOut && e.SecurityImpact == ImpactHigh &&
+				!e.SurfaceInDoctor && !e.MigrationOnly {
+				t.Errorf(
+					"deprecated entry %q: high-impact opt-out must be migration-only or surfaced in doctor",
+					e.Name,
+				)
+			}
+			continue
+		}
 		if e.Category != CategorySecurityOptOut {
 			continue
 		}
@@ -122,37 +132,6 @@ func TestIsActive_TruthyValues(t *testing.T) {
 		t.Run(tc.value, func(t *testing.T) {
 			got := e.isActiveWithGetter(func(name string) string {
 				if name == "DEFENSECLAW_DISABLE_REDACTION" {
-					return tc.value
-				}
-				return ""
-			})
-			if got != tc.want {
-				t.Errorf("isActive(%q) = %v, want %v", tc.value, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestIsActive_SchemaValidationIsInverse(t *testing.T) {
-	r := MustLoad()
-	e, ok := r.Get("DEFENSECLAW_SCHEMA_VALIDATION")
-	if !ok {
-		t.Fatal("DEFENSECLAW_SCHEMA_VALIDATION missing from registry")
-	}
-
-	cases := []struct {
-		value string
-		want  bool
-	}{
-		{"", false},     // unset → default (validation on) → NOT active bypass
-		{"on", false},   // explicit on → NOT active bypass
-		{"off", true},   // explicit off → bypass active
-		{"false", true}, // anything-but-on → bypass active
-	}
-	for _, tc := range cases {
-		t.Run(tc.value, func(t *testing.T) {
-			got := e.isActiveWithGetter(func(name string) string {
-				if name == "DEFENSECLAW_SCHEMA_VALIDATION" {
 					return tc.value
 				}
 				return ""

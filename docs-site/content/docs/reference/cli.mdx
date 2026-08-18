@@ -14,6 +14,14 @@ keywords:
 
 Authoritative source for any flag is `defenseclaw <command> --help`. These groupings are curated for browsing.
 
+<Callout title="Command availability is platform-specific">
+A registered command or connector alias is not, by itself, a native Windows
+support claim. Native Windows certifies Codex, Claude Code, and Amp, and some
+commands require optional configuration or are unavailable there. Use the
+[native Windows command matrix](/docs/get-started/windows/capabilities-commands)
+for the certified Windows classification and safe examples.
+</Callout>
+
 DefenseClaw ships **two** binaries:
 
 - **`defenseclaw`** — the operator-facing Python CLI. Entry point for `init`, `setup`, `audit`, `policy`, `skill`/`mcp`/`plugin` scans, alerts, doctor, etc.
@@ -27,8 +35,48 @@ Tables below tag each row with the binary that owns it.
 | --- | --- |
 | `defenseclaw init` | Interactive first-run wizard. On a TTY, pre-selects installed hook connectors and lets you choose which ones stay observe vs action. Non-interactive multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. |
 | `defenseclaw quickstart` | Zero-prompt first-run for **one** connector with safe defaults. Pass `--connector <name>` when more than one connector is configured or detected. See [Quickstart](/docs/get-started/quickstart). |
-| `defenseclaw doctor` | Health check. Run this first whenever something feels off. |
+| `defenseclaw doctor` | Health and repair check. Run this first whenever something feels off; see [Doctor](#doctor) below. |
 | `defenseclaw status` | Enforcement flags and gateway state, plus a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. |
+
+## Doctor
+
+```text
+defenseclaw doctor [--json-output | --json] [--passive]
+defenseclaw doctor --fix [--dry-run] [--yes] [--fix-id REPAIR_ID]...
+```
+
+Common invocations:
+
+```bash
+defenseclaw doctor --json
+defenseclaw doctor --passive
+defenseclaw doctor --fix --dry-run
+defenseclaw doctor --fix --fix-id doctor.gateway.token.ensure
+```
+
+Doctor checks configuration, audit and identity state, component and active
+connector compatibility, scanner binaries, managed gateway health and
+authentication, configured guardrail and scanner services, credentials, and
+observability destination health.
+
+`--json-output` (also available as `--json`) emits schema v2. Health remains in
+`checks` and `summary`; repair attempts are independent records under `repairs`
+and `repair_summary`. Repair states are `applicable`, `noop`, `blocked`,
+`manual`, `requires_confirmation`, `declined`, `applied`, and `failed`. Each
+record also carries its stable repair ID, risk, dependencies, effects, blockers,
+restart potential, and platform. The top-level `outcome` and `exit_code`
+combine health and repair results without adding repair failures to health
+counters.
+
+Use `--passive` to suppress synthetic telemetry, LLM, and
+inspection-content-submitting probes. Every `--fix --dry-run` is passive and
+runs planners only, so it cannot mutate disk or restart a service.
+
+`--fix-id` is repeatable and selects exact work plus declared dependencies.
+`--yes` may approve eligible safe and disruptive repairs, but does not select
+policy or experimental work. A JSON repair must be a dry-run preview or include
+`--yes`. See [Reporting and diagnosis](/docs/reference/fail-modes#reporting-and-diagnosis)
+for token, audit, identity, compatibility, and recovery safety boundaries.
 
 ## Setup
 
@@ -49,6 +97,7 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup openhands` | Hook setup alias for OpenHands; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Returning `decision=ask` from the hook overrides agy's `--dangerously-skip-permissions` flag. |
 | `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup amp` | Direct-to-upstream system-policy setup for Amp; writes the TypeScript plugin. Defaults to observe; pass `--mode action` for synchronous `tool.call` execution gating and model-bound `tool.result` output gating. Native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding. |
 | `defenseclaw setup omnigent` | Hook setup alias for OmniGent; installs the custom Python policy bridge. Defaults to observe, pass `--mode action` for ALLOW/ASK/DENY enforcement. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
@@ -56,7 +105,9 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup galileo [status\|test\|enable\|disable\|remove]` | Configure and verify Galileo Cloud or self-hosted OTLP traces. |
 | `defenseclaw setup splunk` | Configure local Splunk in Docker, Splunk Enterprise HEC, or Splunk Observability Cloud. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
-| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP telemetry destinations and audit-log sinks. `migrate-otel` previews the upgrade-time configuration migration by default and `--apply` repairs/persists it manually. Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage config-v8 destinations across OTLP, Galileo, Splunk HEC, JSONL, HTTP JSONL, console, and Prometheus capabilities. Omitted destination policy means all supported signals/buckets, unredacted. Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup redaction [status\|remove-all\|apply\|defaults\|bucket\|profile\|destination\|route]` | Configure v8 redaction interactively or with scriptable subcommands. Bare invocation offers a simple baseline choice followed by **Show advanced settings?** for all buckets, profiles, destination policy, and ordered routes. Mutations preview the canonical effective diff; changed non-dry-run writes create a timestamped backup and verify the installed plan. |
+| `defenseclaw observability plan` | Print the masked effective v8 graph: generated local SQLite policy, collection, destination capabilities, routes, profiles, retention, and warnings. |
 
 For observability destinations, `name` is the stable identity: a new name adds,
 and an existing name updates only that destination. Run `list --json` for the
@@ -64,12 +115,39 @@ complete target/kind/signal inventory and `add ... --dry-run` for a safe preview
 The TUI mirrors the runtime-loaded inventory in **Overview → Observability
 Destinations** and exposes the wizard at **0 Setup → Observability / Galileo**.
 
+The quickest way to remove every configurable redaction override is:
+
+```bash
+defenseclaw setup redaction remove-all --dry-run
+```
+
+<Callout type="warn" title="Profile none permits governed content without redaction">
+`remove-all` can expose governed content to configured destinations. Confirm that
+each affected destination has an approved trust boundary before using `--yes`.
+</Callout>
+
+```bash
+defenseclaw setup redaction remove-all --yes
+```
+
+This selects profile `none` for configurable log and trace projections without
+changing collection or routing. It affects generated local SQLite, but never
+weakens the release-owned managed enterprise destination. See
+[Redaction](/docs/reference/redaction) for the full interactive walkthrough and
+advanced command examples.
+
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">
-Commands that execute local binaries or fetch remote content fail closed when the trust boundary is unclear. Connector version probes only run from trusted path prefixes; registry and scanner fetches reject loopback, link-local, cloud-metadata, and private-network targets unless explicitly allowed; `defenseclaw upgrade` verifies release artifacts before stopping the running gateway.
+Commands that fetch remote content fail closed when the trust boundary is
+unclear. Connector version probes enforce trusted path prefixes when
+`ai_discovery.require_trusted_binary_paths: true`; that gate defaults to
+`false` for on-demand discovery. Registry and scanner fetches reject loopback,
+link-local, cloud-metadata, and private-network targets unless explicitly
+allowed; `defenseclaw upgrade` verifies release artifacts before stopping the
+running gateway.
 </Callout>
 
 ## Guardrail
@@ -81,7 +159,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail status [--connector X]` | Read-only. Shows the resolved guardrail posture (enabled, mode, fail mode, HILT, block message) as one per-connector block for **every** active connector by default. Pass `--connector X` to narrow the view to one active connector. |
 | `defenseclaw guardrail enable [--connector X]` | Turn the guardrail on. Global, or re-enable a single previously-disabled connector (restores its hooks with no re-prompt). |
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
-| `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set the response-layer hook fail mode. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
+| `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set behavior for hook delivery, authentication, and invalid-response failures. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. |
 | `defenseclaw guardrail block-message "<text>" [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. |
 
@@ -122,8 +200,8 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
-| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
-| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
+| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` therefore returns the earliest N matching rows, not the newest N. Omit `--limit` and pipe to `tail` for the most recent rows. `--include-activity` also dumps `activity_events`. |
+| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail the optional v8 JSONL destination when configured at that path. Mandatory local history is SQLite; JSONL is not an implicit mirror. |
 
 ## AI discovery
 
@@ -131,10 +209,12 @@ These list/inventory verbs read across the full active roster:
 continuous scanner is a separate sidecar surface and is the one that inventories
 local model APIs, known model caches, and standalone model files.
 
+Enhanced mode expands the bounded roots searched for models; it does not relax what qualifies as a model. Outside recognized model stores, ambiguous ONNX/ORT, TFLite, PyTorch/checkpoint, and generic binary artifacts require explicit model context plus a meaningful, non-opaque identity. Known Chrome Optimization Guide cache payloads and opaque hash/version identities are suppressed, while high-signal formats and recognized model stores retain their established behavior.
+
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |
-| `defenseclaw agent discovery enable [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. |
+| `defenseclaw agent discovery enable [--mode passive\|enhanced] [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--lookup-model-provenance-online/--no-lookup-model-provenance-online] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. `passive` limits model-file coverage to known stores plus narrower configured roots and suppresses an exact user-home/`~` root; `enhanced` also honors the broad home root and adds bounded macOS application-storage and app-resource roots for unknown applications. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. Public Hugging Face lineage lookup is a separate opt-in because it transmits recovered model repository IDs. |
 | `defenseclaw agent discovery setup\|status\|scan\|disable` | Configure discovery interactively, inspect on-disk/live state, trigger a full scan, or disable the service. |
 | `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--json]` | Read the sidecar snapshot. Local-model rows show model ID, `installed`/`loaded` status, and format; `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
 | `defenseclaw agent processes [--refresh] [--json] [--limit N]` | List live AI process signals with PID, user, command name, and uptime. |
@@ -158,7 +238,7 @@ The Python CLI exposes one scan group per asset family — there is no top-level
 | --- | --- | --- |
 | `defenseclaw skill scan [target] [--connector X] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. A bare skill name searches matching configured connector copies; `--connector X` narrows. |
 | `defenseclaw mcp scan [target] [--connector X] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, every configured server with `--all`, or every server on one connector with `--connector X`. |
-| `defenseclaw plugin scan <name_or_path> [--connector X] [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan a plugin/extension package. `--connector X` narrows duplicate plugin names to one connector. |
+| `defenseclaw plugin scan [name_or_path] [--all] [--connector X] [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan one plugin/extension package, or all discovered plugins with `--all`. `--connector X` narrows discovery or duplicate plugin names to one connector. |
 | `defenseclaw aibom scan [--connector X] [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) for every active connector by default, or one connector when scoped. |
 | `defenseclaw registry sync [source...] [--all] [--scan]` | `defenseclaw` | Sync registries; with `--scan`, runs the scanner pipeline against every fetched entry. |
 | `defenseclaw codeguard {status,install,install-skill} [--connector X]` | `defenseclaw` | Manage the CodeGuard skill/rule install across active connectors by default, or one connector when scoped. |
@@ -187,7 +267,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway status` | `defenseclaw-gateway` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. |
 | `defenseclaw-gateway policy reload` | `defenseclaw-gateway` | Re-read OPA policies from disk without bouncing the daemon. |
 | `defenseclaw-gateway watchdog [start\|stop\|status]` | `defenseclaw-gateway` | Health-watchdog daemon that notifies when the gateway is down. |
-| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail the gateway's JSONL fan-out — every decision and event is appended here. There is **no** built-in `gateway logs` subcommand; the JSONL fan-out is the canonical decision log. |
+| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail a configured `kind: jsonl` destination. It contains only records selected for that destination; mandatory complete local log history remains SQLite. |
 
 ## TUI
 
@@ -199,7 +279,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw upgrade [--version X] [--yes]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. A coherent installed `0.8.4` bridge supports the `0.8.4 → 0.8.5` hard cut by first acquiring authenticated `0.8.4` rollback artifacts. A `0.8.3`-or-older built-in command safely refuses because it cannot learn the two-process bridge handoff retroactively; some frozen versions then print an obsolete raw-network hint that must not be executed. Use the authenticated current release-owned shell or PowerShell resolver in latest mode for that older path. Release `0.8.4` and later require `cosign`, and `--allow-unverified` cannot bypass that boundary. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw upgrade [--version X] [--yes]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. The immutable `0.8.4` built-in command cannot parse the truthful `0.8.5` manifest because that manifest has an empty Windows bridge matrix; a `0.8.3`-or-older built-in command also cannot learn the two-process bridge handoff retroactively. To cross into `0.8.5`, use the authenticated target-release POSIX resolver in latest mode without a version override. That resolver, and built-in controllers from `0.8.5` onward for later compatible manifests, can authenticate a temporary pinned Cosign when no system Cosign exists. `--allow-unverified` cannot bypass provenance. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
 | `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
 | `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
 | `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |

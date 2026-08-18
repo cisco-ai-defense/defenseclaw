@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Guardrail policy decisions for hook connectors: inspect evaluations by action/severity, shadow blocks (would_block in observe mode), and internet egress inferred from tool commands. OPA/proxy-specific labels (policy_domain, policy_verdict) are not emitted in hook-only mode.",
+  "description": "Guardrail and OPA policy decisions across hook connectors and the local policy API: inspect evaluations by action/severity, policy-domain verdicts, shadow blocks (would_block in observe mode), and internet egress inferred from tool commands.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -42,7 +42,7 @@
       {
         "name": "connector",
         "label": "Connector",
-        "description": "Optional connector filter. Sourced from defenseclaw_connector_hook_invocations_total{connector}. Applied to the inspect/guardrail panels (block-list + multi-turn) which carry the tool=<connector>:<event> label via tool=~\"$connector:.*\". OPA and egress panels stay global (policy_evaluations/egress_events do not carry a connector label; egress 'source' is the go/ts tier, not a connector). Defaults to All (.+) so single-connector installs are unaffected.",
+        "description": "Optional connector filter. Sourced from defenseclaw_connector_hook_invocations_total{connector}. Applied directly to the first-class connector label on inspect/guardrail panels (block-list + multi-turn). OPA and egress panels stay global because those series do not carry connector identity. Defaults to All (.+).",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -184,7 +184,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\"}[$__rate_interval])) * 60 or vector(0)",
+          "expr": "(sum(rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\"}[$__rate_interval])) + sum(rate(defenseclaw_policy_evaluations_total[$__rate_interval]))) * 60 or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -193,7 +193,7 @@
           "instant": true
         }
       ],
-      "description": "Inspect pipeline evaluations per minute across selected connectors."
+      "description": "Generated v8 inspect evaluations across selected connectors plus global OPA policy-API evaluations per minute."
     },
     {
       "type": "stat",
@@ -241,7 +241,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"https?://\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" |~ \"https?://\" [$__range])) or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -251,7 +251,7 @@
           "queryType": "instant"
         }
       ],
-      "description": "Log lines containing http(s) URLs in tool commands. In local dev most refs are localhost (Grafana/Loki/Prometheus); external host panels filter those out."
+      "description": "Selected-connector projected log payloads containing HTTP(S) URL references. Redaction may remove references, and a reference does not prove network access."
     },
     {
       "type": "stat",
@@ -435,8 +435,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Gateway events / sec by type",
-      "description": "Spikes here while the system is otherwise stable mean the watcher is restarting OPA on noisy filesystem events.",
+      "title": "Policy reloads / sec by status",
+      "description": "Canonical v8 OPA policy reload counter grouped by its generated local-observability-v1 policy_status label. Spikes while the system is otherwise stable can indicate noisy policy filesystem events. Source family: metric.defenseclaw.policy.reloads.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -449,8 +449,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_type) (rate(defenseclaw_gateway_events_emitted_total[$__rate_interval]))",
-          "legendFormat": "{{event_type}}",
+          "expr": "sum by (policy_status) (rate(defenseclaw_policy_reloads_total[$__rate_interval]))",
+          "legendFormat": "{{policy_status}}",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -479,7 +479,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
+          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A",
@@ -502,7 +502,7 @@
               "service_namespace": true
             },
             "renameByName": {
-              "Value": "denies/1h"
+              "Value": "references"
             }
           }
         }
@@ -522,7 +522,7 @@
     {
       "type": "timeseries",
       "title": "URL references by host (live)",
-      "description": "branch ∈ {known, shape, passthrough}; decision ∈ {allow, block}. passthrough+allow indicates a destination DefenseClaw cannot classify — review for silent bypass.",
+      "description": "HTTP(S) URL references found in selected-connector projected log payloads over time. Use structured egress events for authoritative allow/block decisions.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -535,7 +535,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw\"} |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" [$__interval]))",
+          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__interval]))",
           "legendFormat": "{{host}}",
           "refId": "A",
           "datasource": {
@@ -601,7 +601,7 @@
     {
       "type": "timeseries",
       "title": "Evaluation actions over time",
-      "description": "Hook evaluation outcomes by action. This metric does not carry a detector-stage label, so the panel intentionally makes no block-list or multi-turn attribution.",
+      "description": "Hook evaluation outcomes by action plus global OPA policy-API outcomes by policy domain and exact verdict. Neither metric invents detector-stage attribution.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -614,9 +614,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\"}[$__rate_interval]))",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\"}[$__rate_interval]))",
           "legendFormat": "{{action}}",
           "refId": "A"
+        },
+        {
+          "expr": "sum by (policy_domain, policy_verdict) (rate(defenseclaw_policy_evaluations_total[$__rate_interval]))",
+          "legendFormat": "OPA {{policy_domain}} · {{policy_verdict}}",
+          "refId": "B"
         }
       ],
       "fieldConfig": {
@@ -633,8 +638,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Evaluations with classified severity",
-      "description": "Hook evaluations with a non-NONE severity, grouped by action and severity. An allow action can still carry a classified severity; detector-stage attribution is available only where the emitted event carries it.",
+      "title": "Non-allow evaluations by severity",
+      "description": "Hook evaluations with a non-allow action, grouped by action and canonical severity. Clean source-level NONE values normalize to INFO, so action—not severity—separates clean evaluations.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -647,7 +652,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{severity!=\"NONE\", tool=~\"$connector:.*\"}[$__rate_interval]))",
+          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", connector=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{action}} · {{severity}}",
           "refId": "A"
         }
@@ -674,7 +679,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (defenseclaw_tool_name) (count_over_time({service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_gateway_event_type=\"tool_invocation\" [$__range])))",
+          "expr": "topk(20, sum by (tool_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=\"tool.invocation.completed\" | label_format tool_name=\"{{.body_gen_ai_tool_name}}\" [$__range])))",
           "instant": true,
           "refId": "A",
           "format": "table",
@@ -726,6 +731,7 @@
     {
       "type": "logs",
       "title": "Recent OPA + egress events",
+      "description": "Connector-scoped tool, finding, failure, and guardrail-evaluation events follow the Connector selection. Policy update and reload-rejection events are process-global control-plane records without a connector, so they remain visible for every Connector selection.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -739,8 +745,24 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_gateway_event_type=~\"tool_invocation|scan_finding|error\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"tool[.]invocation[.].*|finding[.](observed|correlated)|.*failed\"",
           "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        },
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)\"",
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        },
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"policy[.](updated|reload[.]rejected)\"",
+          "refId": "C",
           "datasource": {
             "type": "loki",
             "uid": "defenseclaw-loki"
@@ -772,6 +794,6 @@
   "timezone": "",
   "title": "DefenseClaw — Policy decisions",
   "uid": "defenseclaw-policy-decisions",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

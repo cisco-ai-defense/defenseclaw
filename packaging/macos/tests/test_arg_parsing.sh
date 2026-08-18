@@ -11,9 +11,16 @@ t_install_help() {
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--mode {observe|action}" "mode flag in help"
   assert_contains "${out}" "--connector LIST"        "connector flag in help"
-  assert_contains "${out}" "--disable-redaction"     "disable redaction flag in help"
+  assert_contains "${out}" "amp, codex, claudecode, cursor" "Amp listed as supported"
+  assert_not_contains "${out}" "--disable-redaction" "removed global redaction flag"
   assert_contains "${out}" "comma-separated"         "comma-separated note in help"
   assert_contains "${out}" "Per-user hook wiring"    "per-user section header"
+}
+
+t_install_accepts_amp_as_auto_wire_connector() {
+  local out rc=0
+  out="$("${INSTALL_SH}" --connector "amp" 2>&1)" || rc=$?
+  assert_not_contains "${out}" "is not in the auto-wire list" "Amp must be auto-wired"
 }
 
 t_install_bad_mode_exits_nonzero() {
@@ -77,28 +84,6 @@ t_uninstall_help_omits_service_user() {
   assert_not_contains "${out}" "--service-user" "uninstall --help must not mention --service-user (root-mode daemon)"
 }
 
-t_install_default_redaction_is_on() {
-  # Parse install.sh's own defaults section directly so we're asserting
-  # the actual install-time contract, not just what render_config emits
-  # when handed a value. If a future edit flips this back to
-  # "true" (redaction off by default), this test catches it before
-  # anything ships.
-  local default
-  default="$(awk '
-    /^DISABLE_REDACTION=/ {
-      # DISABLE_REDACTION="false"
-      match($0, /"([^"]+)"/, m)
-      print m[1]
-      exit
-    }' "${INSTALL_SH}" 2>/dev/null)"
-  # awk on macOS has no `match` capture — fall back to a portable parse.
-  if [[ -z "${default}" ]]; then
-    default="$(grep -E '^DISABLE_REDACTION=' "${INSTALL_SH}" | head -1 \
-      | sed -E 's/^DISABLE_REDACTION="?([^"]+)"?.*/\1/')"
-  fi
-  assert_eq "${default}" "false" "install.sh DISABLE_REDACTION default is false (redaction ON)"
-}
-
 t_install_bad_port_exits_nonzero() {
   local out rc=0
   out="$("${INSTALL_SH}" --port 99999 2>&1)" || rc=$?
@@ -117,6 +102,19 @@ t_uninstall_help() {
   assert_contains "${out}" "config + runtime"        "purge target preserved-state note"
   assert_contains "${out}" "--keep-agent-configs"    "scrub opt-out documented"
   assert_contains "${out}" "scrub DefenseClaw"        "scrub behavior documented"
+  assert_contains "${out}" ".config/amp/plugins/defenseclaw.ts" "Amp plugin cleanup documented"
+  assert_contains "${out}" "connector_backups/amp/config.json" "Amp backup authority documented"
+}
+
+t_uninstall_routes_amp_through_backup_authority() {
+  local body
+  body="$(cat "${UNINSTALL_SH}")"
+  assert_contains "${body}" "scrub_agent_config amp" \
+    "purge invokes the Amp-specific scrub handler"
+  assert_contains "${body}" '/.config/amp/plugins/defenseclaw.ts' \
+    "purge targets only Amp's documented system plugin"
+  assert_contains "${body}" '/.defenseclaw/connector_backups/amp/config.json' \
+    "purge supplies Amp's structured backup authority"
 }
 
 t_install_help_documents_env() {
@@ -141,6 +139,9 @@ t_install_help_documents_override_endpoint() {
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--override-endpoint URL" "override-endpoint flag in help"
   assert_contains "${out}" "Takes precedence"        "override-endpoint precedence note in help"
+  assert_contains "${out}" "HTTPS origin"            "override-endpoint HTTPS requirement in help"
+  assert_contains "${out}" "Paths, credentials, query, and fragments are refused" \
+    "override-endpoint bare-origin restriction in help"
 }
 
 t_install_bad_override_endpoint_exits_nonzero() {
@@ -150,7 +151,33 @@ t_install_bad_override_endpoint_exits_nonzero() {
   local out rc=0
   out="$("${INSTALL_SH}" --override-endpoint "not-a-url" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "malformed --override-endpoint should exit non-zero"
-  assert_contains "${out}" "--override-endpoint must be a full http(s) URL" "explains override URL requirement"
+  assert_contains "${out}" "--override-endpoint must be an HTTPS bare origin" "explains override URL requirement"
+}
+
+t_install_plaintext_override_rejected_before_mutation() {
+  # The deliberately invalid port is a no-side-effect backstop if endpoint
+  # validation ever regresses. The expected endpoint error proves plaintext
+  # is rejected first, before even the remaining argument validation, root
+  # preflight, config rendering, or installed-file writes.
+  local out rc=0
+  out="$("${INSTALL_SH}" --override-endpoint "http://localhost:8080" --port invalid 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "plaintext --override-endpoint should exit non-zero"
+  assert_contains "${out}" "--override-endpoint must be an HTTPS bare origin" \
+    "plaintext override rejected at endpoint validation"
+  assert_not_contains "${out}" "--port must be" "endpoint rejection precedes later argument validation"
+  assert_not_contains "${out}" "installing binary" "endpoint rejection precedes installed-file mutation"
+}
+
+t_install_https_override_accepted_before_preflight() {
+  # Pair with the plaintext case using the same invalid-port backstop. Reaching
+  # the port error proves the HTTPS bare origin passed installer validation;
+  # the backstop guarantees the test cannot reach root or filesystem mutation.
+  local out rc=0
+  out="$("${INSTALL_SH}" --override-endpoint "https://aid.example.test:8443/" --port invalid 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "HTTPS override test should stop at invalid-port backstop"
+  assert_contains "${out}" "--port must be" "HTTPS bare origin accepted by installer validation"
+  assert_not_contains "${out}" "--override-endpoint must be" "HTTPS bare origin is not rejected"
+  assert_not_contains "${out}" "installing binary" "test backstop precedes installed-file mutation"
 }
 
 t_install_default_env_is_prod() {
@@ -163,6 +190,40 @@ t_install_default_env_is_prod() {
     return 1
   fi
   assert_eq "${default}" "prod" "install.sh DEFAULT_ENV must be prod"
+}
+
+t_install_userspace_ownership_stays_descriptor_anchored() {
+  # The multi-user rewrite (26.7.3 → main) replaced the inline
+  # `prepare_userspace_for` single-user call with a machine-wide
+  # `targets.yaml` manifest reconciled by the hook-guardian
+  # LaunchDaemon. The guardian's per-target Install (Go code)
+  # is what now creates hook-config stubs — via bootstrap.go's
+  # `withOwnerCredentials` closure which sets ruid/rgid on the
+  # writing thread, so file creation happens AS the target user
+  # (kernel-enforced ownership). No descriptor-anchored
+  # prepare_userspace_for call survives in install.sh, and no
+  # pathname-based chown appears either. The original security
+  # invariants (no pathname-based chown, no DC_AGENT_TARGETS
+  # list) are still asserted below.
+  local body
+  body="$(cat "${INSTALL_SH}")"
+  assert_contains "${body}" "render_targets_manifest" \
+    "installer renders a machine-wide targets.yaml manifest (multi-user rewrite)"
+  assert_contains "${body}" "enumerate_local_users" \
+    "installer enumerates every eligible local user (multi-user rewrite)"
+  assert_contains "${body}" "com.cisco.secureclient.defenseclaw.hook-guardian" \
+    "installer bootstraps the hook-guardian LaunchDaemon"
+  assert_contains "${body}" "com.cisco.secureclient.defenseclaw.hook-enumerator" \
+    "installer bootstraps the hook-enumerator LaunchDaemon"
+  assert_not_contains "${body}" 'chown -h "${TARGET_UID}:${TARGET_GID}"' \
+    "installer never applies connector ownership by pathname"
+  assert_not_contains "${body}" "DC_AGENT_TARGETS" \
+    "installer has no post-preparation pathname ownership list"
+  # And the single-user prepare_userspace_for call that this test
+  # originally guarded is gone — the guardian's Go installer handles
+  # hook-config stub creation now (see internal/enterprisehooks/bootstrap.go).
+  assert_not_contains "${body}" 'prepare_userspace_for "${c}" "${TARGET_HOME}"' \
+    "installer no longer calls the single-user prepare_userspace_for shell helper"
 }
 
 t_uninstall_unknown_flag() {
@@ -190,13 +251,17 @@ run_case "install --bogus"                t_install_unknown_flag_exits_nonzero
 run_case "install --connector cursor,,X"  t_install_empty_connector_entry_exits_nonzero
 run_case "install --port out-of-range"    t_install_bad_port_exits_nonzero
 run_case "install unsupported connector"  t_install_warns_unsupported_connector
+run_case "install Amp connector is auto-wired" t_install_accepts_amp_as_auto_wire_connector
 run_case "install non-root rejected"      t_install_requires_root
-run_case "install default redaction on"   t_install_default_redaction_is_on
 run_case "install --env flag documented"  t_install_help_documents_env
 run_case "install --env garbage rejected" t_install_bad_env_exits_nonzero
 run_case "install --override-endpoint documented" t_install_help_documents_override_endpoint
 run_case "install --override-endpoint garbage rejected" t_install_bad_override_endpoint_exits_nonzero
+run_case "install plaintext --override-endpoint rejected before mutation" t_install_plaintext_override_rejected_before_mutation
+run_case "install HTTPS --override-endpoint accepted before preflight" t_install_https_override_accepted_before_preflight
 run_case "install DEFAULT_ENV=prod"       t_install_default_env_is_prod
+run_case "install userspace ownership is descriptor-anchored" t_install_userspace_ownership_stays_descriptor_anchored
 run_case "uninstall --help"               t_uninstall_help
+run_case "uninstall Amp cleanup uses backup authority" t_uninstall_routes_amp_through_backup_authority
 run_case "uninstall --bogus"              t_uninstall_unknown_flag
 run_case "uninstall non-root rejected"    t_uninstall_requires_root

@@ -62,7 +62,7 @@ type ollamaAdapter struct{}
 // Name implements FormatAdapter.
 func (ollamaAdapter) Name() string { return "ollama" }
 
-// InjectionSite is the gateway.jsonl label for InjectSystem success.
+// InjectionSite is the canonical observability label for InjectSystem success.
 // Reuses the chat-completions/messages site string because Ollama's
 // /api/chat shape is literally Chat Completions minus the SSE wrapper
 // — keeping the label identical avoids dashboard fragmentation when

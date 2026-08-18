@@ -42,6 +42,8 @@ from defenseclaw.config import (
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
     _admission_verdict,
+    _amp_custom_agent_definitions,
+    _amp_registered_agent_modes,
     _build_actions_map_for_type,
     _build_scan_map_for_type,
     _build_summary,
@@ -49,6 +51,7 @@ from defenseclaw.inventory.claw_inventory import (
     _fetch_all,
     _format_scan,
     _format_verdict,
+    _mask_ts_for_amp_agent_discovery,
     _parse_mcp,
     _parse_plugins,
     _parse_skills,
@@ -63,6 +66,67 @@ from defenseclaw.inventory.claw_inventory import (
     format_claw_aibom_human,
 )
 from defenseclaw.models import ActionEntry
+
+from tests.helpers import seed_cached_plugin
+
+
+class TestAmpStaticAgentModeParser(unittest.TestCase):
+    def test_register_agent_mode_accepts_literal_24_character_boundary(self) -> None:
+        key = "abcdefghijklmnopqrstuvwx"
+        label = "ABCDEFGHIJKLMNOPQRSTUVWX"
+        source = (
+            "amp.registerAgentMode({\n"
+            "  metadata: { key: 'nested-mode', label: 'Nested Mode' },\n"
+            f"  label: '{label}',\n"
+            f"  key: '{key}',\n"
+            "})\n"
+        )
+        masked, _comments = _mask_ts_for_amp_agent_discovery(source)
+
+        self.assertEqual(
+            _amp_registered_agent_modes(source, masked),
+            [(key, label)],
+        )
+
+    def test_register_agent_mode_ignores_noncode_dynamic_and_overlong_examples(self) -> None:
+        source = (
+            "// amp.registerAgentMode({ key: 'comment', label: 'Comment' })\n"
+            "/* amp.registerAgentMode({ key: 'block', label: 'Block' }) */\n"
+            "const docs = \"amp.registerAgentMode({ key: 'string', label: 'String' })\"\n"
+            "const template = `amp.registerAgentMode({ key: 'template', label: 'Template' })`\n"
+            "amp.registerAgentMode({ key: dynamicKey, label: 'Dynamic Key' })\n"
+            "amp.registerAgentMode({ key: 'dynamic-label', label: makeLabel() })\n"
+            "amp.registerAgentMode({ key: 'abcdefghijklmnopqrstuvwxy', label: 'Too Long' })\n"
+            "amp.registerAgentMode({ key: 'too-long-label-key', label: 'ABCDEFGHIJKLMNOPQRSTUVWXY' })\n"
+        )
+        masked, _comments = _mask_ts_for_amp_agent_discovery(source)
+
+        self.assertEqual(_amp_registered_agent_modes(source, masked), [])
+
+    def test_create_agent_requires_spawn_evidence_for_subagent_classification(self) -> None:
+        source = (
+            "const modeAgent = amp.createAgent({ name: 'architect', model: 'openai/test', "
+            "instructions: 'mode' })\n"
+            "const reviewer = amp.experimental.createAgent({ name: 'reviewer', model: 'openai/test', "
+            "instructions: 'review' })\n"
+            "const background = amp.createAgent({ name: 'background', model: 'openai/test', "
+            "instructions: 'background' })\n"
+            "const docs = \"reviewer.run('not executable')\"\n"
+            "background.run('standalone command', { show: true })\n"
+            "reviewer.run(request, { parentThreadID: ctx.thread.id })\n"
+            "amp.createAgent({ name: 'unbound', model: 'openai/test', instructions: 'plain' })\n"
+        )
+        masked, _comments = _mask_ts_for_amp_agent_discovery(source)
+
+        self.assertEqual(
+            _amp_custom_agent_definitions(source, masked),
+            [
+                ("architect", "custom-agent"),
+                ("reviewer", "subagent"),
+                ("background", "custom-agent"),
+                ("unbound", "custom-agent"),
+            ],
+        )
 
 # ---------------------------------------------------------------------------
 # Fixtures — canonical JSON payloads returned by ``openclaw … --json``
@@ -927,6 +991,97 @@ class TestCLIIntegration(unittest.TestCase):
         stderr = result.stderr if getattr(result, "stderr_bytes", None) is not None else result.output
         self.assertIn("Warning", stderr)
         self.assertIn("failed", stderr)
+
+    def test_codex_and_claude_limitations_keep_cli_successful(self):
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        runner = CliRunner()
+        with patch.object(Config, "active_connectors", return_value=["codex", "claudecode"]), \
+             patch.object(Config, "skill_dirs", return_value=[]), \
+             patch.object(Config, "plugin_dirs", return_value=[]), \
+             patch.object(Config, "mcp_servers", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            for connector in ("codex", "claudecode"):
+                with self.subTest(connector=connector):
+                    result = runner.invoke(
+                        aibom, ["scan", "--json", "--connector", connector], obj=self.app,
+                    )
+                    self.assertEqual(result.exit_code, 0, result.output)
+                    data = json.loads(result.stdout)
+                    self.assertEqual(data["errors"], [])
+                    self.assertEqual(len(data["limitations"]), 4)
+                    self.assertNotIn("failed", result.stderr.lower())
+
+    def test_combined_codex_claude_has_four_limitations_without_warning(self):
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        runner = CliRunner()
+        with patch.object(
+            Config, "active_connectors", return_value=["codex", "claudecode"],
+        ), patch(
+            "defenseclaw.inventory.claw_inventory._model_providers_for_connector",
+            return_value=[],
+        ), patch(
+            "defenseclaw.inventory.claw_inventory._memory_for_connector",
+            return_value=[],
+        ):
+            result = runner.invoke(
+                aibom, ["scan", "--json", "--only", "models,memory"], obj=self.app,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+        self.assertEqual(len(data), 2)
+        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 4)
+        self.assertTrue(all(inv["errors"] == [] for inv in data))
+        self.assertNotIn("failed", result.stderr.lower())
+
+    def test_human_limitations_are_informational_not_warning(self):
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        runner = CliRunner()
+        with patch.object(Config, "active_connectors", return_value=["codex"]), \
+             patch.object(Config, "skill_dirs", return_value=[]), \
+             patch.object(Config, "plugin_dirs", return_value=[]), \
+             patch.object(Config, "mcp_servers", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            result = runner.invoke(aibom, ["scan", "--connector", "codex"], obj=self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Unsupported inventory capabilities", result.stdout)
+        self.assertIn("informational", result.stdout)
+        self.assertNotIn("command(s) failed", result.output)
+
+    def test_mixed_real_failure_warns_once_and_keeps_limitations_separate(self):
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        runner = CliRunner()
+        with patch.object(Config, "active_connectors", return_value=["codex"]), patch(
+            "defenseclaw.inventory.claw_inventory._enumerate_skills_filesystem",
+            side_effect=PermissionError("skills directory denied"),
+        ), patch.object(Config, "plugin_dirs", return_value=[]), \
+             patch.object(Config, "mcp_servers", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            result = runner.invoke(
+                aibom, ["scan", "--json", "--connector", "codex"], obj=self.app,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        json_start = result.stdout.find("{")
+        self.assertGreaterEqual(json_start, 0)
+        data = json.loads(result.stdout[json_start:])
+        self.assertEqual(len(data["errors"]), 1)
+        self.assertEqual(len(data["limitations"]), 4)
+        self.assertIn("1 connector inventory command(s) failed", result.output)
 
 
 class TestLiveIsFalse(unittest.TestCase):
@@ -2114,6 +2269,130 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(inv["plugins"][0]["id"], "ext1")
         self.assertEqual(inv["plugins"][0]["manifest"], ".codex-plugin/plugin.json")
 
+    def test_amp_catalogs_direct_plugins_agent_modes_and_subagents_statically(self):
+        """Amp plugin source is inventoried without importing or executing TS."""
+        cfg = _make_cfg_for_connector(self.tmp, "amp")
+        plugin_root = os.path.join(self.tmp, ".config", "amp", "plugins")
+        os.makedirs(plugin_root, exist_ok=True)
+        mode_path = os.path.join(plugin_root, "architect-mode.ts")
+        # Force CRLF on every platform: Amp plugins commonly originate on
+        # native Windows, and the static annotation parser must not lose
+        # metadata at the carriage return before a multiline end anchor.
+        with open(mode_path, "w", encoding="utf-8", newline="\r\n") as handle:
+            handle.write(
+                "// @amp-agent-mode {\"key\":\"architect\",\"label\":\"Architect\"}\n"
+                "// @amp-agent-mode {not-json}\n"
+                "const fakeMode = `\n"
+                "// @amp-agent-mode {\"key\":\"string-mode\",\"label\":\"String Mode\"}\n"
+                "`\n"
+                "// amp.registerAgentMode({ key: 'comment-mode', label: 'Comment' })\n"
+                "/* amp.registerAgentMode({ key: 'block-mode', label: 'Block' }) */\n"
+                "const modeDocs = \"amp.registerAgentMode({ key: 'string-register-mode', "
+                "label: 'String' })\"\n"
+                "const modeTemplate = `amp.registerAgentMode({ key: 'template-mode', "
+                "label: 'Template' })`\n"
+                "// amp.createAgent({ name: 'comment-agent' })\n"
+                "/* amp.createAgent({ name: 'block-comment-agent' }) */\n"
+                "const docs = \"amp.createAgent({ name: 'string-agent' })\"\n"
+                "const template = `amp.createAgent({ name: 'template-agent' })`\n"
+                "throw new Error('inventory must never execute plugin code')\n"
+                "export default function register(amp) {\n"
+                "  amp.registerAgentMode({\n"
+                "    metadata: { key: 'nested-mode', label: 'Nested' },\n"
+                "    key: 'abcdefghijklmnopqrstuvwx',\n"
+                "    label: 'ABCDEFGHIJKLMNOPQRSTUVWX',\n"
+                "  })\n"
+                "  amp.registerAgentMode({\n"
+                "    key: 'abcdefghijklmnopqrstuvwxy',\n"
+                "    label: 'over-limit',\n"
+                "  })\n"
+                "  amp.registerAgentMode({\n"
+                "    key: 'over-label',\n"
+                "    label: 'ABCDEFGHIJKLMNOPQRSTUVWXY',\n"
+                "  })\n"
+                "  amp.registerAgentMode({ key: dynamicKey, label: 'Dynamic Key' })\n"
+                "  amp.registerAgentMode({ key: 'dynamic-label', label: makeLabel() })\n"
+                "  const architectAgent = amp.createAgent({\n"
+                "    name: 'architect',\n"
+                "    instructions: 'Design a safe implementation',\n"
+                "  })\n"
+                "  const reviewer = amp.experimental.createAgent({\n"
+                "    name: \"focused-reviewer\",\n"
+                "    instructions: 'Review only the requested change',\n"
+                "  })\n"
+                "  amp.createAgent({\n"
+                "    metadata: { name: 'nested-object-agent' },\n"
+                "    // name: 'comment-property-agent',\n"
+                "    name: 'literal-agent',\n"
+                "  })\n"
+                "  reviewer.run('review', { parentThreadID: ctx.thread.id })\n"
+                "}\n"
+            )
+        defenseclaw_path = os.path.join(plugin_root, "defenseclaw.ts")
+        with open(defenseclaw_path, "w", encoding="utf-8") as handle:
+            handle.write("export default function defenseclaw() {}\n")
+
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory.subprocess.run") as mock_sub:
+            inv = build_claw_aibom(
+                cfg,
+                live=True,
+                categories={"plugins", "agents"},
+            )
+            mock_sub.assert_not_called()
+
+        plugins = {row["id"]: row for row in inv["plugins"]}
+        self.assertEqual(set(plugins), {"architect-mode", "defenseclaw"})
+        self.assertEqual(plugins["architect-mode"]["path"], mode_path)
+        self.assertEqual(plugins["architect-mode"]["manifest"], "architect-mode.ts")
+        self.assertEqual(plugins["architect-mode"]["status"], "loaded")
+        self.assertEqual(plugins["defenseclaw"]["path"], defenseclaw_path)
+
+        agents = {row["id"]: row for row in inv["agents"]}
+        self.assertEqual(
+            set(agents),
+            {
+                "architect",
+                "abcdefghijklmnopqrstuvwx",
+                "focused-reviewer",
+                "literal-agent",
+            },
+        )
+        self.assertEqual(agents["architect"]["name"], "Architect")
+        self.assertEqual(agents["architect"]["kind"], "agent-mode")
+        self.assertEqual(agents["architect"]["mode_key"], "architect")
+        self.assertEqual(
+            agents["abcdefghijklmnopqrstuvwx"]["name"],
+            "ABCDEFGHIJKLMNOPQRSTUVWX",
+        )
+        self.assertEqual(agents["focused-reviewer"]["kind"], "subagent")
+        self.assertEqual(agents["focused-reviewer"]["plugin"], "architect-mode")
+        self.assertEqual(agents["literal-agent"]["kind"], "custom-agent")
+        self.assertTrue(all(row["source"] == mode_path for row in agents.values()))
+        self.assertNotIn("agents", {item["category"] for item in inv["limitations"]})
+
+    def test_codex_inventory_expands_system_skill_container(self):
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        skill_root = os.path.join(self.tmp, ".codex", "skills")
+        system_root = os.path.join(skill_root, ".system")
+        _seed_skill(system_root, "skill-installer", body="# Built in")
+        os.makedirs(os.path.join(system_root, "cache"), exist_ok=True)
+
+        with self._patch_skill_dirs([skill_root]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        by_id = {row["id"]: row for row in inv["skills"]}
+        self.assertNotIn(".system", by_id)
+        self.assertNotIn("cache", by_id)
+        self.assertEqual(set(by_id), {"skill-installer"})
+        self.assertTrue(by_id["skill-installer"]["bundled"])
+        self.assertEqual(by_id["skill-installer"]["source"], system_root)
+        self.assertTrue(by_id["skill-installer"]["eligible"])
+
     def test_codex_inventory_carries_connector_paths(self):
         """G3: non-OpenClaw inventories carry connector_home /
         connector_config_files / connector_skill_dirs / connector_plugin_dirs
@@ -2223,7 +2502,11 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
                 f,
             )
 
-        with patch.dict(os.environ, {"HOME": home}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"HOME": home, "USERPROFILE": home},
+            clear=False,
+        ):
             inv = build_claw_aibom(cfg, live=True)
 
         self.assertEqual(inv["connector"], "opencode")
@@ -2251,7 +2534,11 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         with open(os.path.join(command_dir, "triage.md"), "w", encoding="utf-8") as f:
             f.write("---\ndescription: Triage issues\n---\n")
 
-        with patch.dict(os.environ, {"HOME": home}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"HOME": home, "USERPROFILE": home},
+            clear=False,
+        ):
             inv = build_claw_aibom(cfg, live=True)
 
         self.assertEqual(inv["connector"], "antigravity")
@@ -2261,21 +2548,63 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertIn("triage", {row["id"] for row in inv["tools"]})
         self.assertNotIn("antigravity:tools", {e["command"] for e in inv["errors"]})
 
-    def test_openclaw_only_categories_return_empty_with_notes(self):
+    def test_codex_expected_limitations_are_not_errors(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         with self._patch_skill_dirs([]), \
              self._patch_plugin_dirs([]), \
-             self._patch_mcp([]):
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
             inv = build_claw_aibom(cfg, live=True)
         self.assertEqual(inv["agents"], [])
         self.assertEqual(inv["tools"], [])
         self.assertEqual(inv["model_providers"], [])
         self.assertEqual(inv["memory"], [])
-        commands = {e["command"] for e in inv["errors"]}
-        self.assertIn("codex:agents", commands)
-        self.assertIn("codex:tools", commands)
-        self.assertIn("codex:models", commands)
-        self.assertIn("codex:memory", commands)
+        self.assertEqual(inv["errors"], [])
+        self.assertEqual(inv["summary"]["errors"], 0)
+        self.assertEqual(inv["summary"]["limitations"], 4)
+        self.assertEqual(
+            {item["category"] for item in inv["limitations"]},
+            {"agents", "tools", "models", "memory"},
+        )
+        self.assertTrue(all(item["connector"] == "codex" for item in inv["limitations"]))
+        self.assertTrue(all(item["status"] == "unsupported" for item in inv["limitations"]))
+
+    def test_claudecode_expected_limitations_are_not_errors(self):
+        cfg = _make_cfg_for_connector(self.tmp, "claudecode")
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual(inv["errors"], [])
+        self.assertEqual(len(inv["limitations"]), 4)
+        self.assertTrue(all(item["connector"] == "claudecode" for item in inv["limitations"]))
+
+    def test_real_collection_failure_stays_separate_from_limitations(self):
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        with patch(
+            "defenseclaw.inventory.claw_inventory._enumerate_skills_filesystem",
+            side_effect=PermissionError("skills directory denied"),
+        ), self._patch_plugin_dirs([]), self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory._agents_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._tools_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._model_providers_for_connector", return_value=[]), \
+             patch("defenseclaw.inventory.claw_inventory._memory_for_connector", return_value=[]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual(len(inv["errors"]), 1)
+        self.assertEqual(inv["errors"][0]["command"], "codex:skills")
+        self.assertIn("denied", inv["errors"][0]["error"])
+        self.assertEqual(len(inv["limitations"]), 4)
+        self.assertEqual(inv["summary"]["errors"], 1)
+        self.assertEqual(inv["summary"]["limitations"], 4)
 
     def test_skill_eligibility_requires_marker(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
@@ -2363,6 +2692,72 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             inv = build_claw_aibom(cfg, live=True)
         ids = [p["id"] for p in inv["plugins"]]
         self.assertEqual(ids, ["real"])
+
+    def test_codex_cache_inventory_uses_manifest_roots_and_active_metadata(self):
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        codex_home = os.path.join(self.tmp, ".codex")
+        plugin_root = os.path.join(codex_home, "plugins")
+        cache = os.path.join(plugin_root, "cache")
+        _seed_plugin(plugin_root, "clean-plugin", manifest="plugin.json")
+
+        browser = seed_cached_plugin(
+            cache, "openai-bundled", "browser", "2.0.0"
+        )
+        sites = seed_cached_plugin(
+            cache, "openai-bundled", "sites", "1.2.0"
+        )
+        seed_cached_plugin(cache, "openai-curated-remote", "sites", "9.0.0")
+        github = seed_cached_plugin(
+            cache, "openai-curated-remote", "github", "0.2.0"
+        )
+        os.makedirs(codex_home, exist_ok=True)
+        with open(
+            os.path.join(codex_home, "config.toml"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(
+                "[plugins.'browser@openai-bundled']\n"
+                "enabled = true\n"
+                "[plugins.'sites@openai-bundled']\n"
+                "enabled = true\n"
+            )
+
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root, cache]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        by_id = {plugin["id"]: plugin for plugin in inv["plugins"]}
+        self.assertEqual(set(by_id), {"clean-plugin", "browser", "github", "sites"})
+        self.assertNotIn("openai-bundled", by_id)
+        self.assertNotIn("openai-curated-remote", by_id)
+        self.assertEqual(by_id["browser"]["path"], browser)
+        self.assertTrue(by_id["browser"]["enabled"])
+        self.assertEqual(by_id["sites"]["path"], sites)
+        self.assertTrue(by_id["sites"]["enabled"])
+        self.assertEqual(by_id["github"]["path"], github)
+        self.assertFalse(by_id["github"]["enabled"])
+        self.assertEqual(inv["summary"]["plugins"]["count"], 4)
+        self.assertEqual(inv["summary"]["plugins"]["disabled"], 1)
+
+    def test_hidden_and_staging_plugin_dirs_are_skipped(self):
+        """Hidden activation state must not surface as enabled plugins."""
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        plugin_root = os.path.join(self.tmp, "plugins")
+        os.makedirs(plugin_root, exist_ok=True)
+        _seed_plugin(plugin_root, ".plugin-appserver", manifest="plugin.json")
+        _seed_plugin(
+            plugin_root,
+            "..plugin-appserver.staging-123",
+            manifest="plugin.json",
+        )
+        _seed_plugin(plugin_root, "real", manifest="plugin.json")
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual([p["id"] for p in inv["plugins"]], ["real"])
 
     def test_mcp_servers_passed_through(self):
         from defenseclaw.connector_paths import MCPServerEntry

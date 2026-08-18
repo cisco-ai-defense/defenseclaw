@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
 
@@ -52,6 +51,15 @@ func TestPrivateUpstreamAuditUsesConnectedPeerNotPreflightDNS(t *testing.T) {
 	allowedIP := net.ParseIP("10.50.2.100")
 	netguard.SetAllowedPrivateIPs([]net.IP{allowedIP})
 	t.Cleanup(func() { netguard.SetAllowedPrivateIPs(nil) })
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	proxy := &GuardrailProxy{}
+	fixture.sidecar.setGuardrailProxy(proxy)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+		t.Context(), fixture.configPath, fixture.raw,
+	)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t err=%v", bound, err)
+	}
 
 	originalClient := providerHTTPClient
 	providerHTTPClient = &http.Client{Transport: privateUpstreamRoundTripper{
@@ -61,27 +69,13 @@ func TestPrivateUpstreamAuditUsesConnectedPeerNotPreflightDNS(t *testing.T) {
 
 	originalCounter := incEgressCounter
 	var counterCalls int
-	var emitted gatewaylog.EgressPayload
 	incEgressCounter = func(context.Context, string, string, string) { counterCalls++ }
-	writer, err := gatewaylog.New(gatewaylog.Config{})
-	if err != nil {
-		t.Fatalf("new event writer: %v", err)
-	}
-	writer.WithFanout(func(event gatewaylog.Event) {
-		if event.Egress != nil {
-			emitted = *event.Egress
-		}
-	})
-	originalWriter := EventWriter()
-	SetEventWriter(writer)
 	t.Cleanup(func() {
 		incEgressCounter = originalCounter
-		SetEventWriter(originalWriter)
-		_ = writer.Close()
 	})
 
 	incoming := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	if blocked := guardUpstreamTargetURL(
+	if blocked := proxy.guardUpstreamTargetURL(
 		httptest.NewRecorder(), incoming, "https://10.50.2.100/v1/chat/completions",
 	); blocked {
 		t.Fatal("allowlisted private upstream was blocked during preflight")
@@ -96,20 +90,34 @@ func TestPrivateUpstreamAuditUsesConnectedPeerNotPreflightDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := doProviderRequest(req)
+	resp, err := doProviderRequest(req, proxy.emitEgress)
 	if err != nil {
 		t.Fatalf("doProviderRequest: %v", err)
 	}
 	_ = resp.Body.Close()
 
-	if counterCalls != 1 {
-		t.Fatalf("connected peer emitted %d audit events; want one", counterCalls)
+	if counterCalls != 0 {
+		t.Fatalf("authoritative v8 audit used legacy metric path %d times", counterCalls)
 	}
-	if emitted.Branch != "private-upstream" || emitted.Decision != "allow" {
-		t.Fatalf("audit branch/decision = %q/%q", emitted.Branch, emitted.Decision)
+	rows, err := fixture.store.ListEvents(10)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if emitted.TargetHost != "llm.internal" || emitted.ResolvedIP != "10.50.2.100" {
-		t.Fatalf("audit target = host %q peer %q", emitted.TargetHost, emitted.ResolvedIP)
+	var auditBody map[string]any
+	for _, row := range rows {
+		if row.Action == "egress" {
+			auditBody = row.Structured
+			break
+		}
+	}
+	if auditBody == nil {
+		t.Fatalf("authoritative v8 SQLite rows omitted private-upstream audit: %+v", rows)
+	}
+	if auditBody["defenseclaw.network.branch"] != "private-upstream" ||
+		auditBody["defenseclaw.network.decision"] != "allow" ||
+		auditBody["defenseclaw.network.target_ref"] != "llm.internal" ||
+		auditBody["defenseclaw.network.resolved_ip"] != "10.50.2.100" {
+		t.Fatalf("private-upstream canonical audit=%#v", auditBody)
 	}
 }
 

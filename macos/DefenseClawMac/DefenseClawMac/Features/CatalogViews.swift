@@ -345,14 +345,25 @@ struct ToolsView: View {
     }
 
     private func load() async {
+        let installationGeneration = appState.installationGeneration
         do {
             let cliItems = try await CatalogCLI.tools(using: appState.cli)
-            items = cliItems.isEmpty ? await appState.audit.toolOverrideRows() : cliItems
+            guard installationGeneration == appState.installationGeneration else { return }
+            let freshItems: [ToolItem]
+            if cliItems.isEmpty {
+                freshItems = await appState.audit.toolOverrideRows()
+                guard installationGeneration == appState.installationGeneration else { return }
+            } else {
+                freshItems = cliItems
+            }
+            items = freshItems
             error = nil
         } catch {
+            let failure = error.localizedDescription
             let fallback = await appState.audit.toolOverrideRows()
+            guard installationGeneration == appState.installationGeneration else { return }
             items = fallback
-            self.error = fallback.isEmpty ? error.localizedDescription : nil
+            self.error = fallback.isEmpty ? failure : nil
         }
         loaded = true
     }
@@ -401,8 +412,10 @@ private struct CatalogCommandSheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
     @State private var phase: Phase = .ready
-    @State private var output = ""
+    @State private var runID: UUID?
+    @State private var finalOutput = ""
     @State private var exitCode: Int32?
+    @State private var finalStatus: CommandActivityStatus?
 
     private enum Phase { case ready, running, done }
 
@@ -415,6 +428,8 @@ private struct CatalogCommandSheet: View {
                 Spacer()
                 Button { dismiss() } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless)
+                    .disabled(phase == .running)
+                    .help(phase == .running ? "Cancel the command before closing" : "Close")
             }
 
             Text(invocation.detail).font(.callout).foregroundStyle(.secondary)
@@ -429,13 +444,13 @@ private struct CatalogCommandSheet: View {
                 HStack {
                     if phase == .running { ProgressView().controlSize(.small) }
                     if phase == .done {
-                        Image(systemName: exitCode == 0 ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundStyle(exitCode == 0 ? Cisco.green : Cisco.red)
+                        Image(systemName: terminalSystemImage)
+                            .foregroundStyle(terminalColor)
                     }
                     Text(statusText).font(.subheadline.weight(.semibold))
                 }
                 ScrollView {
-                    Text(output.isEmpty ? "Waiting for output…" : output)
+                    Text(displayedOutput.isEmpty ? "Waiting for output…" : displayedOutput)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -449,6 +464,11 @@ private struct CatalogCommandSheet: View {
                       systemImage: "exclamationmark.shield")
                     .font(.caption)
                     .foregroundStyle(invocation.destructive ? Cisco.red : Cisco.orange)
+                if let reason = appState.installationReadOnlyReason {
+                    Label(reason, systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
@@ -460,6 +480,13 @@ private struct CatalogCommandSheet: View {
                         .buttonStyle(.borderedProminent)
                         .tint(invocation.destructive ? Cisco.red : Cisco.blue)
                         .keyboardShortcut(.defaultAction)
+                        .disabled(
+                            invocation.requiresConfirmation
+                                && !appState.installationMutationsAllowed
+                        )
+                } else if phase == .running {
+                    Button(runningActionTitle) { cancel() }
+                        .disabled(activityEntry?.status != .running)
                 } else if phase == .done {
                     Button("Close") { dismiss() }.keyboardShortcut(.defaultAction)
                 }
@@ -470,36 +497,93 @@ private struct CatalogCommandSheet: View {
         .task {
             if !invocation.requiresConfirmation && phase == .ready { run() }
         }
+        .interactiveDismissDisabled(phase == .running)
+    }
+
+    private var activityEntry: CommandActivityEntry? {
+        guard let runID else { return nil }
+        return appState.activity.entries.first(where: { $0.id == runID })
+    }
+
+    private var displayedOutput: String {
+        let liveOutput = activityEntry?.output ?? ""
+        return liveOutput.isEmpty ? finalOutput : liveOutput
+    }
+
+    private var displayedStatus: CommandActivityStatus? {
+        activityEntry?.status ?? finalStatus
+    }
+
+    private var runningActionTitle: String {
+        switch activityEntry?.status {
+        case .running: "Cancel Command"
+        case .cancelling: "Cancelling…"
+        case .finishing: "Finishing…"
+        case .succeeded, .failed, .cancelled: "Finishing…"
+        case nil: "Starting…"
+        }
+    }
+
+    private var terminalSystemImage: String {
+        switch displayedStatus {
+        case .succeeded: "checkmark.circle.fill"
+        case .cancelled: "stop.circle.fill"
+        default: "xmark.circle.fill"
+        }
+    }
+
+    private var terminalColor: Color {
+        switch displayedStatus {
+        case .succeeded: Cisco.green
+        case .cancelled: .secondary
+        default: Cisco.red
+        }
     }
 
     private var statusText: String {
         switch phase {
         case .ready: "Ready"
+        case .running where displayedStatus == .cancelling: "Cancelling…"
+        case .running where displayedStatus == .finishing: "Finishing…"
         case .running: "Running…"
-        case .done where exitCode == 0: "Completed"
+        case .done where displayedStatus == .succeeded: "Completed"
+        case .done where displayedStatus == .cancelled: "Cancelled"
         case .done: "Failed (exit \(exitCode ?? -1))"
         }
     }
 
     private func run() {
         guard phase == .ready else { return }
+        let commandID = UUID()
+        runID = commandID
         phase = .running
         Task {
             let result = await appState.runCommand(
+                runID: commandID,
                 title: invocation.title,
                 arguments: invocation.arguments,
+                mutation: invocation.requiresConfirmation,
                 category: "catalog",
                 origin: "Catalog",
                 refreshOnSuccess: true
             )
-            if let entry = appState.activity.entries.first(where: { $0.id == appState.activity.selectedID }) {
-                output = entry.output
+            if let entry = appState.activity.entries.first(where: { $0.id == commandID }) {
+                finalOutput = entry.output
+                finalStatus = entry.status
             }
             exitCode = result.exitCode
-            if output.isEmpty { output = result.output }
+            if finalOutput.isEmpty { finalOutput = result.output }
+            if finalStatus == nil {
+                finalStatus = result.cancelled ? .cancelled : (result.succeeded ? .succeeded : .failed)
+            }
             phase = .done
             if result.succeeded { onComplete() }
         }
+    }
+
+    private func cancel() {
+        guard phase == .running, let runID else { return }
+        appState.activity.cancel(runID)
     }
 }
 
@@ -588,6 +672,7 @@ private struct CatalogInstallSheet: View {
     let onReview: (CatalogInvocation) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
     @State private var target = ""
     @State private var connector = "all"
     @State private var force = false
@@ -612,6 +697,11 @@ private struct CatalogInstallSheet: View {
                 Toggle("Apply configured enforcement policy after scanning", isOn: $applyPolicy)
             }
             .formStyle(.grouped)
+            if let reason = appState.installationReadOnlyReason {
+                Label(reason, systemImage: "lock.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             HStack {
                 Spacer()
@@ -620,7 +710,7 @@ private struct CatalogInstallSheet: View {
                     .buttonStyle(.borderedProminent)
                     .tint(Cisco.blue)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedTarget.isEmpty)
+                    .disabled(trimmedTarget.isEmpty || !appState.installationMutationsAllowed)
             }
         }
         .padding(18)

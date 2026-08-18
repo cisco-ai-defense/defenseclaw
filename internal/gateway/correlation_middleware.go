@@ -266,9 +266,8 @@ func destinationAppFromHeaders(h http.Header) string {
 // The W3C spec is traceparent: version-traceid-spanid-flags where
 // traceid is 32 lowercase hex characters. This helper performs the
 // minimum shape check needed to extract the trace id for audit
-// envelope use; proper end-to-end traceparent parsing happens in
-// the OTel HTTP middleware (otelhttp.NewHandler) which wraps this
-// chain.
+// envelope use; strict end-to-end traceparent parsing happens in the
+// scoped propagation middleware before this chain.
 func traceIDFromHeaders(h http.Header) string {
 	v := strings.TrimSpace(h.Get("traceparent"))
 	if v == "" {
@@ -306,7 +305,7 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			inboundAgent := strings.TrimSpace(r.Header.Get(AgentIDHeader))
 			// Adopt the inbound W3C traceparent into the audit
 			// envelope ONLY for callers we trust to declare a
-			// trace id. The OTel HTTP middleware wraps OUTSIDE
+			// trace id. The propagation middleware wraps OUTSIDE
 			// tokenAuth, so an unauthenticated, non-loopback
 			// caller reaches this middleware before the auth
 			// check. Mirroring the inbound traceparent into the
@@ -322,7 +321,7 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			// Note this is INTENTIONALLY broader than the gate
 			// `shouldExtractHookTrace` enforces in
 			// `extractIncomingTraceContext` (which scopes the
-			// OTel server span's parent extraction to
+			// generated span parent extraction to
 			// `/api/v1/<connector>/hook` + `/api/v1/codex/notify`).
 			// The audit envelope's trace_id is a single field on
 			// each persisted row; it does not propagate into
@@ -339,10 +338,8 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			// gateway leg in dev workflows. A cross-network
 			// caller has no legitimate reason to declare a
 			// trace id on ANY route; for them we drop the
-			// parent and fall back below to the local OTel
-			// span's trace id (which is always server-issued
-			// and matches whatever the OTel HTTP middleware
-			// decided for the server span).
+			// parent and fall back below to any already-active
+			// generated operation's trace id.
 			if connector.IsLoopback(r) {
 				if tid := traceIDFromHeaders(r.Header); tid != "" {
 					ctx = ContextWithTraceID(ctx, tid)
@@ -392,8 +389,6 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			} else if inboundAgent != "" {
 				w.Header().Set(ResponseAgentIDHeader, inboundAgent)
 			}
-
-			enrichHTTPSpanFromContext(ctx)
 
 			// v7 closure: snapshot the resolved envelope into an
 			// audit-package context key so every downstream

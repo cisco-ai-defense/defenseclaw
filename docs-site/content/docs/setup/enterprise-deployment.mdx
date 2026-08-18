@@ -209,13 +209,18 @@ stat -c '%U:%G %a %n' \
 Create `/etc/defenseclaw/config.yaml`:
 
 ```yaml
-config_version: 7
+config_version: 8
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw
-audit_db: /var/lib/defenseclaw/audit.db
-judge_bodies_db: /var/lib/defenseclaw/judge_bodies.db
 plugin_dir: /var/lib/defenseclaw/plugins
 policy_dir: /var/lib/defenseclaw/policies
+observability:
+  local:
+    path: /var/lib/defenseclaw/audit.db
+    judge_bodies_path: /var/lib/defenseclaw/judge_bodies.db
+    retention_days: 90
+  defaults:
+    redaction_profile: sensitive
 gateway:
   device_key_file: /var/lib/defenseclaw/device.key
   api_bind: 127.0.0.1
@@ -230,7 +235,17 @@ application_protection:
   enabled: false
 ```
 
-For an initial rollout, use `guardrail.mode: observe`, validate telemetry and guardian coverage, then change to `action` through the administrator-owned file and restart the service. Do not use a user-writable overlay config to stage enterprise policy.
+The packaged macOS installer (`packaging/macos/install.sh`) defaults `guardrail.mode` to `action` for managed_enterprise deployments so hooks enforce their verdict from the first tick. Pass `--mode observe` on the initial rollout if you want a logging-only pilot; validate telemetry and guardian coverage, then change back to `action` through the administrator-owned file and restart the service. Do not use a user-writable overlay config to stage enterprise policy.
+
+The AI Defense endpoint (`cisco_ai_defense.endpoint` in the emitted `config.yaml`) is sourced from a static JSON file that the Cisco Secure Client (AVC) module drops at `/opt/cisco/secureclient/defenseclaw/env_config.json`:
+
+```json
+{
+  "cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"
+}
+```
+
+`install.sh` reads only the `cisco_ai_defense_endpoint` field; extra keys are ignored for forward compatibility. The file must be root-owned with no group/other write bits and no write-capable macOS ACL — the installer walks every ancestor and applies the same checks before reading. Override with `--config-file PATH` (fleet-specific staging) or `--override-endpoint URL` (adhoc / preview testing). If the default `env_config.json` is missing or malformed, the installer emits a warning and falls back to the US-production AI Defense endpoint so the enrollment is not blocked; only failed ownership, permission, or ACL trust checks on a present file still fail the installer closed.
 
 Set ownership and start the service:
 
@@ -266,6 +281,87 @@ DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
 `DEFENSECLAW_CONFIG` lets the service keep administrator policy in `/etc` while runtime state remains in `/var/lib`.
 
 The unit also pins `StateDirectoryMode=0750`, `RuntimeDirectoryMode=0750`, and `LogsDirectoryMode=0750`; do not rely on systemd's default directory modes for secret-bearing runtime state. It enables a restrictive service sandbox (`ProtectSystem=strict`, `ProtectHome=true`, private devices/tmp, kernel and control-group protections, hidden non-service `/proc` entries, the `@system-service` syscall allow-list, no realtime scheduling, no SUID/namespace escalation, and an empty capability bounding set). If your deployment needs host-wide user discovery or hook repair, run that as the enterprise guardian component rather than widening the gateway service sandbox.
+
+## Native Windows Claude Code managed hooks
+
+Native Windows supports administrator-managed Claude Code hooks without
+writing `~/.claude/settings.json`. Run the installed gateway from an elevated
+PowerShell window (or as LocalSystem) for each approved interactive user:
+
+The gateway and sibling `defenseclaw-hook.exe` must first be deployed in an
+Administrator-, LocalSystem-, or TrustedInstaller-owned machine path (normally
+under `C:\Program Files`) with no standard-user write ACEs. The per-user public
+installer under `%LOCALAPPDATA%` is deliberately rejected as an enterprise
+policy command source; elevating a user-writable executable would make the
+machine policy unsafe.
+
+```powershell
+defenseclaw-gateway enterprise hooks install `
+  --user alice `
+  --connector claudecode `
+  --agent-version "2.1.187 (Claude Code)" `
+  --json
+```
+
+The command validates the target profile's exact SID, rejects service/system
+identities, unsafe DACLs, foreign owners, symlinks, junctions, and other
+reparse points, then writes the user's scoped runtime beneath
+`<profile>\.defenseclaw`. The native hook resolves that runtime from the
+invoking process SID; it does not use the administrator account's install data
+root or project-controlled environment. The administrator policy is published
+atomically as:
+
+```text
+C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json
+```
+
+The adjacent protected `.defenseclaw-managed-hooks.state` binds the exact
+policy digest, native hook executable, and allow-listed target SIDs. Claude
+loads hooks from this tier when `allowManagedHooksOnly: true`; no manual hook
+trust prompt is required. Users not present in the protected SID allow-list
+receive a verified no-op from the shared machine hook. Invalid or tampered
+ownership metadata fails closed for registered hook invocations.
+
+Native Windows managed hooks deliberately pin their per-user runtime to
+`<profile>\.defenseclaw`. `--data-dir` may only repeat that exact path; custom
+DefenseClaw data directories are rejected because a standard-user hook cannot
+securely discover an administrator-selected redirect. The managed hook also
+ignores inherited `DEFENSECLAW_HOME` and `CLAUDE_CONFIG_DIR`. The latter may
+relocate Claude's user configuration, but it does not relocate the machine
+policy under `C:\Program Files\ClaudeCode`, so no user or project environment
+can redirect this managed registration.
+
+DefenseClaw refuses to overwrite a foreign drop-in, an administrator-edited
+policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or
+a file policy superseded by `policyHelper`. It also refuses installation when
+an HKLM `Settings` policy has higher precedence. In those environments, merge
+the DefenseClaw hook matrix through the active GPO/MDM/policy-helper source;
+local file installation cannot override it. Remotely delivered policy is an
+external management boundary and must likewise include the hook matrix at its
+authoritative source.
+
+Remove one owned target registration with the same elevated identity:
+
+```powershell
+defenseclaw-gateway enterprise hooks uninstall `
+  --user alice `
+  --connector claudecode `
+  --json
+```
+
+If the account and profile have already been removed, pass the recorded
+`--sid S-1-5-21-...` without `--user` or `--user-home` to remove the stale
+allow-list entry.
+
+Cleanup verifies the protected digest and ownership metadata before mutation.
+It removes the machine drop-in after the last target and otherwise updates the
+SID allow-list atomically. Per-user runtime files remain as inert repair and
+forensic evidence; a removed SID is no longer activated by the shared policy.
+Re-running install repairs those files and re-registers the SID.
+
+This endpoint hook-policy support does not turn the public Windows package
+into the private `managed-enterprise` distribution flavor or provide private
+CMID credentials; those release/provider boundaries remain unchanged.
 
 ## Per-user hook guardian
 
@@ -370,7 +466,7 @@ targets:
     agent_version: "2.1.187 (Claude Code)"
   - user: alice
     connector: claudecode
-    agent_version: "Claude Code v2.1.144"
+    agent_version: "Claude Code v2.1.152"
   - user: disabled-user
     connector: codex
     enabled: false
@@ -413,8 +509,13 @@ The watcher ignores its own lock-file housekeeping, and the installer preserves 
 
 - A malformed, unreadable, or untrusted service-side scoped token makes that connector's guardrail health error and rejects hook authentication.
 - Connector-scoped token failure is isolated: a Codex token problem does not authorize or invalidate Claude Code's route.
-- Response-layer failures follow the configured hook fail mode. Action-mode deployments normally use fail closed.
-- Gateway-unreachable and missing-token behavior follows the documented availability contract. The default avoids bricking the agent; `DEFENSECLAW_STRICT_AVAILABILITY=1` opts into stricter behavior but is not a durable anti-tamper control if the user can change its own environment.
+- Delivery, missing-token/authentication, and invalid-response failures follow
+  the connector's effective hook fail mode. Fresh configuration defaults to
+  fail closed; a migrated installation can retain an explicit fail-open
+  setting.
+  `DEFENSECLAW_STRICT_AVAILABILITY=1` additionally forces the transport and
+  missing-token subset closed, but is not a durable anti-tamper control if the
+  user can change its own environment.
 - A user-owned token or hook may be changed before the guardian repairs it. Use endpoint controls when the required property is prevention rather than bounded recovery.
 
 Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defenseclaw status` reads that file and reports the last manifest path, run time, target counts, and per-user repair failures under `Hook guardian`.
@@ -442,7 +543,7 @@ sudo ./packaging/launchd/install-enterprise.sh \
   --manifest /path/to/approved-targets.yaml
 ```
 
-The installer refuses symlinked sources or managed destinations, verifies the root-owned macOS system path chain, unloads any existing DefenseClaw jobs, and installs through same-directory temporary files. Before launchd is allowed to start either job, it verifies these postconditions:
+The installer is idempotent: running it twice on the same host reconciles the machine-wide layout in place rather than refusing on existing state. It refuses symlinked sources or destinations, verifies the root-owned macOS system path chain, unloads any existing DefenseClaw jobs (including pre-Cisco-path legacy labels), relocates legacy directories under `/Library/Logs/Cisco/SecureClient/DefenseClaw/` with a timestamped `.pre-<version>-<timestamp>` suffix (rather than deleting them), and installs through same-directory temporary files. Runtime state (`audit.db`, `judge_bodies.db`, `device.key`, and the hook-guardian authorization directory) is preserved across reinstalls; user-scope `~/.defenseclaw/` is left untouched and reconciled by the hook-guardian daemon on its 60 s tick. Before launchd is allowed to start either job, it verifies these postconditions:
 
 | Path | Owner | Mode |
 | --- | --- | --- |
@@ -457,7 +558,7 @@ The installer refuses symlinked sources or managed destinations, verifies the ro
 | `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` | `0750` |
 | `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw*.plist` | `root:wheel` | `0644` |
 
-Before replacing files, the installer snapshots the existing deployment and records which LaunchDaemons are loaded. A failure after jobs are stopped restores the previous binary, config, manifest, and plists, then re-bootstraps only the jobs that were loaded before the attempt. A failed fresh install removes files created by that attempt instead of leaving persistent LaunchDaemon plists.
+Before replacing files, the installer snapshots the existing deployment and records which LaunchDaemons are loaded. A failure after jobs are stopped restores the previous binary, config, manifest, and plists, then re-bootstraps only the jobs that were loaded before the attempt.
 
 Use `--no-start` when MDM or a package transaction must install and verify the files before a separate orchestration step loads the jobs. Even in that mode, an already loaded DefenseClaw job is unloaded before replacement and remains stopped until the administrator starts it.
 

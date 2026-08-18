@@ -15,7 +15,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Synchronized with DefenseClaw mainline cli/defenseclaw/tui/registry_data.py.
-// Keep these 226 entries aligned when the TUI command palette changes.
+// Keep these 227 entries aligned when the TUI command palette changes.
 
 import Foundation
 
@@ -69,7 +69,14 @@ struct CommandDefinition: Identifiable, Hashable, Sendable {
     }
 
     var changesState: Bool {
-        !["info", "scan"].contains(category)
+        let tokens = arguments.map { $0.lowercased() }
+        // Scan commands refresh on-disk caches, and doctor always rewrites
+        // doctor_cache.json even when it only reports checks. Treat those as
+        // mutations so managed/invalid installations cannot bypass the
+        // lower-level CLIRunner gate through the command palette.
+        if category == "scan" || tokens.first == "doctor" { return true }
+        if tokens.starts(with: ["agent", "discover"]) { return true }
+        return category != "info"
     }
 
     var requiresTerminal: Bool {
@@ -139,7 +146,7 @@ struct CommandExecutionPlan: Equatable, Sendable {
 }
 
 enum CommandRegistry {
-    static let sourceCount = 226
+    static let sourceCount = 227
     static let all: [CommandDefinition] = [
         CommandDefinition(id: 0, title: "init", binary: "defenseclaw", arguments: ["init"], summary: "Initialize DefenseClaw", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 1, title: "init first-run", binary: "defenseclaw", arguments: ["init", "--non-interactive", "--yes", "--verify"], summary: "Run guided first-run backend with defaults", category: "setup", requiresInput: false, usage: ""),
@@ -161,10 +168,11 @@ enum CommandRegistry {
         CommandDefinition(id: 17, title: "setup openhands", binary: "defenseclaw", arguments: ["setup", "openhands", "--yes"], summary: "Configure OpenHands observability hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 18, title: "setup antigravity", binary: "defenseclaw", arguments: ["setup", "antigravity", "--yes"], summary: "Configure Antigravity observability hooks", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 19, title: "setup opencode", binary: "defenseclaw", arguments: ["setup", "opencode", "--yes"], summary: "Configure OpenCode observability hooks", category: "setup", requiresInput: false, usage: ""),
+        CommandDefinition(id: 226, title: "setup amp", binary: "defenseclaw", arguments: ["setup", "amp", "--yes"], summary: "Configure Amp synchronous policy plugin", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 20, title: "setup rotate-token", binary: "defenseclaw", arguments: ["setup", "rotate-token", "--yes"], summary: "Rotate the gateway token", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 21, title: "setup gateway", binary: "defenseclaw", arguments: ["setup", "gateway"], summary: "Configure gateway connection (interactive)", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 22, title: "setup guardrail", binary: "defenseclaw", arguments: ["setup", "guardrail"], summary: "Configure LLM guardrail", category: "setup", requiresInput: false, usage: ""),
-        CommandDefinition(id: 23, title: "setup redaction", binary: "defenseclaw", arguments: ["setup", "redaction"], summary: "Show/toggle redaction state", category: "setup", requiresInput: true, usage: "<status|on|off> [--yes]"),
+        CommandDefinition(id: 23, title: "setup redaction", binary: "defenseclaw", arguments: ["setup", "redaction"], summary: "Configure v8 redaction policy", category: "setup", requiresInput: true, usage: "[status|remove-all|apply|defaults|bucket|profile|destination|route] [flags]"),
         CommandDefinition(id: 24, title: "setup notifications", binary: "defenseclaw", arguments: ["setup", "notifications"], summary: "Show/toggle desktop notifications", category: "setup", requiresInput: true, usage: "<status|on|off> [--yes]"),
         CommandDefinition(id: 25, title: "setup splunk", binary: "defenseclaw", arguments: ["setup", "splunk"], summary: "Configure Splunk / O11y", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 26, title: "setup local-observability up", binary: "defenseclaw", arguments: ["setup", "local-observability", "up"], summary: "Start local Prom/Loki/Tempo/Grafana stack", category: "setup", requiresInput: false, usage: ""),

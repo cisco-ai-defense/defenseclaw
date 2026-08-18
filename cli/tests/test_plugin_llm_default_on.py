@@ -14,11 +14,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""P-F: the plugin LLM lane is default-ON when a model is configured.
+"""P-F: the plugin LLM lane is default-ON when a usable model is configured.
 
 ``PluginScannerWrapper.scan(use_llm=...)`` is tri-state:
-  * None  → auto: enable the LLM analyzer iff a model resolves.
-  * True  → force on; loud-degrade (stderr) to static when no model.
+  * None  → auto: enable the LLM analyzer iff a model and auth resolve.
+  * True  → request it; loud-degrade (stderr) when unavailable.
   * False → force off (``--no-llm``).
 """
 
@@ -48,7 +48,8 @@ class PluginLLMDefaultOnTests(unittest.TestCase):
             captured["options"] = options
             return _StubResult()
 
-        with patch("defenseclaw.scanner.plugin.scan_plugin", fake_scan_plugin), \
+        with patch.dict(os.environ, {"DEFENSECLAW_LLM_KEY": ""}), \
+                patch("defenseclaw.scanner.plugin.scan_plugin", fake_scan_plugin), \
                 redirect_stderr(stderr):
             PluginScannerWrapper(llm=llm).scan("/tmp/x", use_llm=use_llm)
         captured["stderr"] = stderr.getvalue()
@@ -64,6 +65,20 @@ class PluginLLMDefaultOnTests(unittest.TestCase):
         self.assertFalse((cap["options"].llm_override or {}).get("enabled"))
         # auto-off is the expected state, not a degrade — no warning.
         self.assertEqual(cap["stderr"], "")
+
+    def test_auto_with_cloud_model_but_no_key_warns_and_runs_static(self):
+        llm = LLMConfig(model="claude-3-5-haiku", provider="anthropic")
+        cap = self._run(llm, None)
+        self.assertFalse((cap["options"].llm_override or {}).get("enabled"))
+        self.assertIn("LLM analyzer skipped", cap["stderr"])
+        self.assertIn("continuing with local analyzers", cap["stderr"])
+
+    def test_explicit_on_with_cloud_model_but_no_key_degrades_loudly(self):
+        llm = LLMConfig(model="claude-3-5-haiku", provider="anthropic")
+        cap = self._run(llm, True)
+        self.assertFalse((cap["options"].llm_override or {}).get("enabled"))
+        self.assertIn("running static", cap["stderr"])
+        self.assertIn("DEFENSECLAW_LLM_KEY is not configured", cap["stderr"])
 
     def test_explicit_off_disables_even_with_model(self):
         llm = LLMConfig(model="claude-3-5-haiku", provider="anthropic", api_key="k")

@@ -254,6 +254,7 @@ struct MainWindow: View {
                     .controlSize(.small)
                     .buttonStyle(.borderedProminent)
                     .tint(Cisco.green)
+                    .disabled(!appState.installationMutationsAllowed)
                 if let url = appState.availableRuntimeUpdate.flatMap({ URL(string: $0.htmlURL) }) {
                     Link("Release notes", destination: url)
                         .font(.caption)

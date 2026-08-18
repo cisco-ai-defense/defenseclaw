@@ -32,9 +32,11 @@ from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.analyzer_factory import build_analyzers
 from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts
 from defenseclaw.scanner.plugin_scanner.helpers import (
+    PathLinkStatus,
     audit_skipped_dirs_for_native,
     build_result,
     deduplicate_findings,
+    inspect_path_link,
     make_finding,
 )
 from defenseclaw.scanner.plugin_scanner.policy import (
@@ -242,14 +244,14 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
     """Read and JSON-parse a manifest candidate without following symlinks.
 
     A third-party plugin can ship a manifest-named path (``package.json``,
-    ``.codex-plugin/plugin.json`` …) that is actually a symlink to an
+    ``.codex-plugin/plugin.json`` …) that is actually a link to an
     arbitrary host file. A plain ``open()`` follows it and copies outside
     file contents into manifest metadata (and downstream finding
     evidence) — arbitrary file read (F-0361). We:
 
       * require the realpath of the candidate to stay inside the plugin
         root (blocks ``..``/symlink escapes via intermediate components);
-      * reject a symlinked final component outright (``lstat``);
+      * reject a symlinked or reparse-point final component outright;
       * open with ``O_NOFOLLOW`` so a final-component symlink that races
         in between the checks and the open also fails.
 
@@ -257,14 +259,13 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
     unsafe, unreadable, or not a JSON object.
     """
     try:
-        real = os.path.realpath(candidate)
+        real = os.path.normcase(os.path.realpath(candidate))
     except OSError:
         return None
     if real != scan_root and not real.startswith(scan_root + os.sep):
         return None
-    try:
-        st = os.lstat(candidate)
-    except OSError:
+    link_status, st = inspect_path_link(candidate)
+    if link_status is not PathLinkStatus.PLAIN or st is None:
         return None
     if not stat.S_ISREG(st.st_mode):
         # Symlinks (S_ISLNK), directories, fifos, devices, etc. are not
@@ -295,6 +296,27 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
     except (json.JSONDecodeError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _manifest_parent_is_safe(directory: str, rel_path: str, scan_root: str) -> bool:
+    """Require nested manifest parents to be real, contained directories."""
+    parent_rel = os.path.dirname(rel_path)
+    if not parent_rel:
+        return True
+    parent = os.path.join(directory, parent_rel)
+    link_status, info = inspect_path_link(parent)
+    if link_status is not PathLinkStatus.PLAIN or info is None:
+        return False
+    try:
+        real = os.path.normcase(os.path.realpath(parent))
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    try:
+        return os.path.commonpath((scan_root, real)) == scan_root
+    except ValueError:
+        return False
 
 
 def _manifest_permissions(raw: dict) -> list[str]:
@@ -351,10 +373,12 @@ def _manifest_entrypoints(raw: dict) -> list[str]:
 
 
 def _load_manifest(directory: str) -> PluginManifest | None:
-    scan_root = os.path.realpath(directory)
+    scan_root = os.path.normcase(os.path.realpath(directory))
 
     parsed: list[tuple[dict, str]] = []
     for rel_path, source_label in _MANIFEST_CANDIDATES:
+        if not _manifest_parent_is_safe(directory, rel_path, scan_root):
+            continue
         candidate = os.path.join(directory, rel_path)
         raw = _safe_read_manifest(candidate, scan_root)
         if raw is None:

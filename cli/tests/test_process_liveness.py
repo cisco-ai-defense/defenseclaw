@@ -20,7 +20,8 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from subprocess import CompletedProcess
+from unittest.mock import mock_open, patch
 
 from defenseclaw import process_liveness
 from defenseclaw.process_liveness import pid_alive, pid_file_alive, read_pid_file
@@ -68,6 +69,33 @@ class TestReadPidFile(unittest.TestCase):
     def test_json_without_pid_key(self):
         self.assertIsNone(read_pid_file(self._write(json.dumps({"foo": 1}))))
 
+    def test_oversized_pid_file_is_rejected(self):
+        self.assertIsNone(read_pid_file(self._write("1" * (process_liveness._MAX_PID_FILE_BYTES + 1))))
+
+    def test_non_utf8_pid_file_is_rejected(self):
+        with tempfile.NamedTemporaryFile(suffix=".pid", delete=False) as fh:
+            fh.write(b"\xff")
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        self.assertIsNone(read_pid_file(path))
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not generally available on Windows")
+    def test_symlink_pid_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "target.pid")
+            link = os.path.join(directory, "gateway.pid")
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("4321")
+            os.symlink(target, link)
+            self.assertIsNone(read_pid_file(link))
+
+    @unittest.skipIf(os.name == "nt", "FIFOs are unavailable on Windows")
+    def test_fifo_pid_file_is_rejected_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = os.path.join(directory, "gateway.pid")
+            os.mkfifo(fifo)
+            self.assertIsNone(read_pid_file(fifo))
+
 
 class TestPidFileAlive(unittest.TestCase):
     def _write(self, content: str) -> str:
@@ -92,11 +120,110 @@ class TestPidFileAlive(unittest.TestCase):
 
 
 class TestProcessIdentity(unittest.TestCase):
+    def test_macos_fallback_preserves_spaces_in_executable_path(self):
+        ps_result = CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="/Users/Test User/.local/bin/defenseclaw-gateway\n",
+            stderr="",
+        )
+        with (
+            patch.object(process_liveness.sys, "platform", "darwin"),
+            patch("builtins.open", mock_open()) as proc_open,
+            patch.object(
+                process_liveness.subprocess,
+                "run",
+                return_value=ps_result,
+            ) as run,
+        ):
+            proc_open.side_effect = FileNotFoundError
+            self.assertEqual(
+                process_liveness.process_argv0_basename(1234),
+                "defenseclaw-gateway",
+            )
+
+        run.assert_called_once_with(
+            ["/bin/ps", "-p", "1234", "-o", "comm="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+            stdin=process_liveness.subprocess.DEVNULL,
+            env={"LC_ALL": "C", "LANG": "C"},
+        )
+
+    def test_macos_fallback_rejects_near_match_with_spaces(self):
+        ps_result = CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="/Users/Test User/.local/bin/defenseclaw-gateway-helper\n",
+            stderr="",
+        )
+        with (
+            patch.object(process_liveness.sys, "platform", "darwin"),
+            patch("builtins.open", side_effect=FileNotFoundError),
+            patch.object(
+                process_liveness.subprocess,
+                "run",
+                return_value=ps_result,
+            ) as run,
+        ):
+            self.assertFalse(process_liveness.process_is_gateway(1234))
+
+        run.assert_called_once_with(
+            ["/bin/ps", "-p", "1234", "-o", "comm="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+            stdin=process_liveness.subprocess.DEVNULL,
+            env={"LC_ALL": "C", "LANG": "C"},
+        )
+
+    def test_macos_ps_helper_does_not_inherit_path_or_gateway_token(self):
+        ps_result = CompletedProcess(
+            args=["/bin/ps"],
+            returncode=0,
+            stdout="/opt/defenseclaw/defenseclaw-gateway\n",
+            stderr="",
+        )
+        with (
+            patch.object(process_liveness.sys, "platform", "darwin"),
+            patch("builtins.open", side_effect=FileNotFoundError),
+            patch.dict(
+                os.environ,
+                {
+                    "PATH": "/tmp/attacker-controlled",
+                    "DEFENSECLAW_GATEWAY_TOKEN": "must-not-reach-ps",
+                },
+                clear=True,
+            ),
+            patch.object(
+                process_liveness.subprocess,
+                "run",
+                return_value=ps_result,
+            ) as run,
+        ):
+            self.assertEqual(
+                process_liveness.process_argv0_basename(1234),
+                "defenseclaw-gateway",
+            )
+
+        command = run.call_args.args[0]
+        helper_env = run.call_args.kwargs["env"]
+        self.assertEqual(command[0], "/bin/ps")
+        self.assertEqual(helper_env, {"LC_ALL": "C", "LANG": "C"})
+        self.assertNotIn("PATH", helper_env)
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", helper_env)
+
     def test_windows_image_path_uses_windows_basename_rules(self):
-        with patch.object(process_liveness.sys, "platform", "win32"), patch.object(
-            process_liveness,
-            "_process_image_path_windows",
-            return_value=r"C:\Program Files\DefenseClaw\DEFENSECLAW-GATEWAY.EXE",
+        with (
+            patch.object(process_liveness.sys, "platform", "win32"),
+            patch.object(
+                process_liveness,
+                "_process_image_path_windows",
+                return_value=r"C:\Program Files\DefenseClaw\DEFENSECLAW-GATEWAY.EXE",
+            ),
         ):
             self.assertEqual(
                 process_liveness.process_argv0_basename(1234),

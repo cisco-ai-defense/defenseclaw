@@ -14,7 +14,7 @@ OpenClaw is the connector DefenseClaw was designed against. It is also the only 
 
 <Video
   src="openclaw"
-  caption="Plugin install + first guardrail. The DefenseClaw plugin loads inside OpenClaw, the gateway picks up the correlation header, and policy decisions stream back through the chat UI."
+  caption="Plugin install + first guardrail. The DefenseClaw plugin loads inside OpenClaw, routes supported traffic through the sidecar, and returns policy decisions through OpenClaw's native surfaces."
 />
 
 ## Components
@@ -32,40 +32,58 @@ The DefenseClaw gateway client speaks the OpenClaw WebSocket handshake across th
 ## End-to-end flow
 
 <Sequence
-  caption="Three interception points let DefenseClaw inspect every interesting moment in OpenClaw's lifecycle and surface HITL approvals back through the chat origin. Plugin is the bundled DefenseClaw plugin; Gateway is defenseclaw-gateway; Operator is the DefenseClaw TUI."
+  caption="The plugin proxies LLM fetches through the guardrail and sends before_tool_call events to the sidecar. Native approval requests are returned to OpenClaw; OpenClaw owns the operator decision."
   participants={[
-    { id: 'u',  label: 'User',                kind: 'operator' },
+    { id: 'u',  label: 'User / approver',     kind: 'operator' },
     { id: 'oc', label: 'OpenClaw',            kind: 'agent' },
-    { id: 'p',  label: 'Plugin',   kind: 'connector' },
-    { id: 'g',  label: 'Gateway',  kind: 'gateway' },
-    { id: 'op', label: 'Operator', kind: 'operator' },
+    { id: 'p',  label: 'DefenseClaw plugin',  kind: 'connector' },
+    { id: 'g',  label: 'DefenseClaw sidecar', kind: 'gateway' },
+    { id: 'm',  label: 'Model provider',       kind: 'agent' },
   ]}
 >
   <Message from="u"  to="oc" label="prompt" />
   <Message from="oc" to="p"  label="fetch (LLM request)" />
-  <Message from="p"  to="g"  label="POST /v1/inspect + correlation ID" />
-  <Message from="g"  to="p"  kind="return" label="allow / block / pause" />
-  <Message from="p"  to="oc" label="publish approval prompt (when paused)" />
-  <Message from="oc" to="op" label="approval request in chat" />
-  <Message from="op" to="oc" kind="return" label="approve / deny" />
-  <Message from="oc" to="p"  kind="return" label="approval response" />
-  <Message from="p"  to="g"  label="resolve approval" />
-  <Message from="g"  to="p"  kind="return" label="resolved verdict" />
-  <Message from="p"  to="oc" kind="return" label="forward (or reject)" />
+  <Message from="p"  to="g"  label="redirect through guardrail proxy" />
+  <Message from="g"  to="m"  label="forward allowed request" />
+  <Message from="m"  to="g"  kind="return" label="model response" />
+  <Message from="g"  to="p"  kind="return" label="scanned response (or block)" />
+  <Message from="p"  to="oc" kind="return" label="fetch response" />
   <Message from="oc" to="p"  label="before_tool_call(name, args)" />
-  <Message from="p"  to="g"  label="POST /v1/tool/inspect" />
-  <Message from="g"  to="p"  kind="return" label="verdict" />
-  <Message from="p"  to="oc" kind="return" label="allow / block" />
+  <Message from="p"  to="g"  label="POST /api/v1/inspect/tool" />
+  <Message from="g"  to="p"  kind="return" label="allow / block / confirm" />
+  <Message from="p"  to="oc" kind="return" label="allow / block / requireApproval" />
+  <Message from="oc" to="u"  label="native approval request (confirm only)" />
+  <Message from="u"  to="oc" kind="return" label="approve / deny" />
+  <Message from="oc" to="p"  label="resolution callback (log only)" />
   <Message from="oc" to="u"  label="response" />
 </Sequence>
 
 ## Correlation headers
 
-Every plugin → gateway request carries `X-DefenseClaw-Correlation-Id` so the audit log can stitch a tool call back to the prompt that triggered it. The plugin generates one ID per OpenClaw turn; the gateway re-uses it for every downstream verdict.
+There is no `X-DefenseClaw-Correlation-Id` header. Depending on the available
+context, plugin requests use the shared header vocabulary
+`X-DefenseClaw-Run-Id`, `X-DefenseClaw-Session-Id`,
+`X-DefenseClaw-Trace-Id`, `X-DefenseClaw-Agent-Id`,
+`X-DefenseClaw-Agent-Name`, `X-DefenseClaw-Policy-Id`,
+`X-DefenseClaw-Agent-Instance-Id`, and
+`X-DefenseClaw-Sidecar-Instance-Id`; the HTTP client also identifies itself
+with `X-DefenseClaw-Client`.
+
+Optional fields are omitted when OpenClaw has not supplied their context. The
+fetch interceptor mints a fresh trace ID for each intercepted LLM call and
+reuses the most recently observed tool context for run/session attribution.
+The sidecar can echo sticky agent/sidecar instance IDs so later requests
+converge on the same runtime identities.
 
 ## HITL: the only connector with plugin-mediated approval
 
-OpenClaw provides a native, plugin-mediated approval flow in its chat origin, so the operator approves or denies without leaving OpenClaw. Other native-ask connectors use their own host hook UI instead of this plugin path.
+OpenClaw provides a native, plugin-mediated approval flow in its chat origin,
+so the operator approves or denies without leaving OpenClaw. For an action-mode
+`confirm` verdict, the plugin returns OpenClaw's `requireApproval` object with
+a deny-on-timeout policy. OpenClaw applies the decision. The plugin's
+`onResolution` callback logs the resolution; it does not send a separate
+"resolve approval" request to the DefenseClaw gateway. Other native-ask
+connectors use their own host hook UI instead of this plugin path.
 
 Connectors and hook events without native ask apply their documented alert/allow/context fallback. Their events remain visible in audit and `defenseclaw tui`, but the TUI cannot resume the original call. See the [HITL page](/docs/hitl) for the per-connector matrix.
 
@@ -86,7 +104,12 @@ Connectors and hook events without native ask apply their documented alert/allow
   </Folder>
 </Files>
 
-DefenseClaw never touches anything outside `extensions/defenseclaw/` and the `allow` / `load` arrays in `openclaw.json`. Backups are byte-for-byte; teardown either restores the file or surgically removes only DefenseClaw entries when the file has drifted.
+In normal, non-sandbox plugin setup, DefenseClaw limits its OpenClaw-tree
+changes to `extensions/defenseclaw/` and its managed allow/load entries in
+`openclaw.json`. Backups are byte-for-byte; teardown either restores the file
+or surgically removes only DefenseClaw entries when the file has drifted.
+The experimental [OpenShell sandbox](/docs/setup/sandbox) has a separate,
+explicit ownership, pairing, networking, and config-patching lifecycle.
 
 ## When this is the right connector
 

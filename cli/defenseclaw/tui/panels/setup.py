@@ -21,6 +21,32 @@ from enum import IntEnum
 from typing import Any, Literal
 
 from defenseclaw import config as dc_config
+from defenseclaw.connector_contracts import normalize_connector
+from defenseclaw.notification_capabilities import desktop_notification_capability
+from defenseclaw.observability.v8_config import (
+    BUCKETS as REDACTION_BUCKETS,
+)
+from defenseclaw.observability.v8_config import (
+    DETECTOR_GROUPS as REDACTION_DETECTOR_GROUPS,
+)
+from defenseclaw.observability.v8_config import (
+    FIELD_CLASSES as REDACTION_FIELD_CLASSES,
+)
+from defenseclaw.observability.v8_config import (
+    FIELD_MODES as REDACTION_FIELD_MODES,
+)
+from defenseclaw.observability.v8_config import (
+    SEVERITIES as REDACTION_SEVERITIES,
+)
+from defenseclaw.observability.v8_redaction_policy import (
+    CUSTOM_PROFILE_BASES as REDACTION_CUSTOM_PROFILE_BASES,
+)
+from defenseclaw.observability.v8_status import V8OperatorStatus
+from defenseclaw.platform_support import (
+    LOCAL_OBSERVABILITY_UNSUPPORTED_REASON,
+    local_observability_stack_supported,
+    local_splunk_stack_supported,
+)
 from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
     AI_DISCOVERY_MODES,
@@ -59,6 +85,7 @@ from defenseclaw.tui.services.setup_state import (
     CredentialSnapshot,
     RestartQueue,
     SetupCommandIntent,
+    SetupPreviewRisk,
     ValidationResult,
     apply_config_field,
     build_readiness_checks,
@@ -85,6 +112,10 @@ _WIZARD_LLM_PROVIDERS = _CHOICE_WIZARD_LLM_PROVIDERS
 LLM_PROVIDERS = _CHOICE_LLM_PROVIDERS
 LLM_OVERRIDE_PROVIDERS = _CHOICE_LLM_OVERRIDE_PROVIDERS
 
+_GUARDRAIL_SCOPE_CONNECTOR = "selected-connector"
+_GUARDRAIL_SCOPE_GLOBAL = "global-all-active"
+_GUARDRAIL_SCOPES = (_GUARDRAIL_SCOPE_CONNECTOR, _GUARDRAIL_SCOPE_GLOBAL)
+
 
 class SetupWizard(IntEnum):
     CONNECTOR_SETUP = 0
@@ -107,6 +138,7 @@ class SetupWizard(IntEnum):
     SPLUNK_DASHBOARDS = 17
     TRUSTED_PATHS = 18
     GUARDRAIL_ACTIONS = 19
+    REDACTION = 20
 
 
 WIZARD_NAMES: tuple[str, ...] = (
@@ -130,6 +162,7 @@ WIZARD_NAMES: tuple[str, ...] = (
     "Splunk Dashboards",
     "Trusted Paths",
     "Guardrail Actions",
+    "Redaction Policy",
 )
 
 WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
@@ -163,6 +196,7 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.SPLUNK_DASHBOARDS: ("setup", "splunk", "dashboards", "apply"),
     SetupWizard.TRUSTED_PATHS: ("setup", "trusted-paths", "list"),
     SetupWizard.GUARDRAIL_ACTIONS: ("guardrail", "status"),
+    SetupWizard.REDACTION: ("setup", "redaction"),
 }
 
 NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
@@ -180,14 +214,14 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "List, check, fill, or set env-backed credentials.",
     "Configure the unified LLM block non-interactively.",
     "Inspect and manage the bundled local observability stack.",
-    "Rotate the gateway token and refresh connector hooks.",
+    "Transactionally rotate the gateway and connector-scoped hook credentials.",
     "Manage the custom provider overlay.",
     "Configure skill scanner analyzers and policy.",
     "Configure MCP scanner analyzers and scan targets.",
     "Configure gateway host, ports, TLS, and auth.",
     "Configure the LLM guardrail proxy and judge.",
     "Configure Splunk HEC or local Splunk integration.",
-    "Add and manage Galileo, unified OTel, and audit sink destinations.",
+    "Add and manage canonical v8 observability destinations.",
     "Add chat or incident notifier webhooks.",
     "Initialize and configure OpenShell sandbox policy.",
     "Register an external skill or MCP catalog source.",
@@ -196,6 +230,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Apply or destroy Splunk O11y dashboards.",
     "Manage trusted connector-binary discovery prefixes.",
     "Run connector-scoped guardrail status and policy quick actions.",
+    "Inspect or change canonical v8 bucket, profile, destination, and route redaction.",
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
@@ -204,7 +239,7 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup llm --non-interactive. Need provider, model, optional base URL, and API key env or value.",
     "Runs: defenseclaw setup local-observability <action>. "
     "Need Docker for up/reset; status/url require no credentials.",
-    "Runs: defenseclaw setup rotate-token --yes. Need connector override only when auto-detect is not enough.",
+    "Runs: defenseclaw setup rotate-token --yes. Rotates every configured scoped-hook credential transactionally.",
     "Runs: defenseclaw setup provider add|remove|list|show. Need provider name and domains for add/remove.",
     "Runs: defenseclaw setup skill-scanner. Need optional LLM, VirusTotal, or Cisco AI Defense credentials.",
     "Runs: defenseclaw setup mcp-scanner. Need analyzer list and prompt/resource/instruction scan choices.",
@@ -221,6 +256,10 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup splunk dashboards apply|destroy --yes. Requires the Splunk O11y realm + API token.",
     "Runs: defenseclaw setup trusted-paths list|add|remove. Need a directory for add/remove.",
     "Runs: defenseclaw guardrail status|enable|disable|fail-mode|hilt|block-message with optional --connector.",
+    (
+        "Runs: defenseclaw setup redaction. Quick actions are non-interactive; the guided workflow exposes every "
+        "advanced bucket, profile, destination, and ordered-route setting."
+    ),
 )
 
 OBSERVABILITY_PRESETS: tuple[tuple[str, str], ...] = (
@@ -263,9 +302,7 @@ class WizardFormField:
     # Excluded from equality/repr so existing argv/parity tests that
     # compare fields by their data values stay stable when a predicate is
     # attached.
-    visible_when: Callable[[Mapping[str, str]], bool] | None = dataclass_field(
-        default=None, compare=False, repr=False
-    )
+    visible_when: Callable[[Mapping[str, str]], bool] | None = dataclass_field(default=None, compare=False, repr=False)
     # Optional model-picker hook. When set, pressing Enter on this field
     # opens the searchable ModelPickerScreen instead of submitting the
     # form. The string is the picker mode (currently only ``"llm"``).
@@ -481,8 +518,16 @@ class UninstallModalState:
 class SetupPanelModel:
     """Data-only Setup model. Textual widgets can bind to this without owning IO."""
 
-    def __init__(self, cfg: object | Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        cfg: object | Mapping[str, Any] | None = None,
+        *,
+        os_name: str | None = None,
+    ) -> None:
         self.config = cfg
+        self.observability_status: V8OperatorStatus | None = None
+        self.observability_status_error = ""
+        self.os_name = os_name
         self.mode: SetupMode = "wizards"
         self.active_wizard = SetupWizard.CONNECTOR_SETUP
         self.active_section = 0
@@ -493,7 +538,12 @@ class SetupPanelModel:
         self.restart_queue = RestartQueue()
         self.last_saved_at: datetime | None = None
         self.readiness_checks = build_readiness_checks(cfg, None, None, (), self.restart_queue)
-        self.sections = build_setup_sections(cfg)
+        self.sections = build_setup_sections(
+            cfg,
+            self.os_name,
+            observability_status=self.observability_status,
+            observability_status_error=self.observability_status_error,
+        )
         self.wizard_status: dict[SetupWizard, str] = {}
         self._wizard_run_started: dict[SetupWizard, datetime] = {}
         self.form_fields: list[WizardFormField] = []
@@ -501,6 +551,10 @@ class SetupPanelModel:
         self.form_active = False
         self.form_reveal = False
         self.form_error = ""
+        # Set when disk changes while the operator has an unsaved wizard form
+        # or config-editor draft. The authoritative config/readiness state
+        # still advances, but the draft remains intact until run/cancel/revert.
+        self.disk_change_pending = False
         # Goal-first entry layer: a contextual "what do you want to do?" menu
         # that sits in front of the wizard form. ``active_goal`` is carried
         # into the form so its preset filter survives dependent rebuilds.
@@ -509,23 +563,64 @@ class SetupPanelModel:
         self.goals: tuple[WizardGoal, ...] = ()
         self.active_goal: WizardGoal | None = None
 
-    def set_config(self, cfg: object | Mapping[str, Any] | None) -> None:
+    def set_config(
+        self,
+        cfg: object | Mapping[str, Any] | None,
+        *,
+        external: bool = False,
+    ) -> None:
         active_name = self.sections[self.active_section].name if self.sections else ""
+        preserve_config_draft = external and self.mode == "config" and self.has_changes()
+        preserve_wizard_draft = external and self.form_active
         self.config = cfg
-        self.sections = build_setup_sections(cfg)
-        if active_name:
-            for index, section in enumerate(self.sections):
-                if section.name == active_name:
-                    self.active_section = index
-                    break
-        self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
-        self.active_line = self.first_editable_line()
-        self.config_scroll = 0
+        self.observability_status = None
+        self.observability_status_error = ""
+        if not preserve_config_draft:
+            self.sections = build_setup_sections(cfg, self.os_name, observability_status=None)
+            if active_name:
+                for index, section in enumerate(self.sections):
+                    if section.name == active_name:
+                        self.active_section = index
+                        break
+            self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
+            self.active_line = self.first_editable_line()
+            self.config_scroll = 0
+        self.disk_change_pending = preserve_config_draft or preserve_wizard_draft
         # Readiness rows depend on cfg.gateway / cfg.guardrail / cfg.audit /
         # cfg.observability, so rebuild them whenever the cached config
         # changes; otherwise we keep showing rows derived from the
         # snapshot captured at __init__ time even after `setup` runs.
         self.rebuild_readiness_checks()
+
+    def set_observability_status(
+        self,
+        status: V8OperatorStatus | None,
+        *,
+        error: str = "",
+    ) -> None:
+        """Install the masked canonical v8 plan without losing config edits."""
+
+        self.observability_status = status
+        self.observability_status_error = error.strip()
+        active_name = self.sections[self.active_section].name if self.sections else ""
+        rebuilt = build_setup_sections(
+            self.config,
+            self.os_name,
+            observability_status=status,
+            observability_status_error=self.observability_status_error,
+        )
+        existing = {section.name: section for section in self.sections}
+        self.sections = tuple(
+            section if section.name == "Observability" else existing.get(section.name, section) for section in rebuilt
+        )
+        if active_name:
+            self.active_section = next(
+                (index for index, section in enumerate(self.sections) if section.name == active_name),
+                self.active_section,
+            )
+        self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
+        current = self.current_section()
+        self.active_line = _clamp(self.active_line, 0, max(0, len(current.fields) - 1) if current else 0)
 
     def rebuild_readiness_checks(
         self,
@@ -533,6 +628,7 @@ class SetupPanelModel:
         health: Any = None,
         doctor: Any = None,
         credentials: tuple[Any, ...] | None = None,
+        gateway_status: Any = None,
     ) -> None:
         """Re-evaluate Setup readiness rows from the current inputs.
 
@@ -553,6 +649,7 @@ class SetupPanelModel:
             doctor,
             rows,
             self.restart_queue,
+            gateway_status,
         )
 
     def wizard_infos(self, *, now: datetime | None = None) -> tuple[SetupWizardInfo, ...]:
@@ -563,7 +660,11 @@ class SetupPanelModel:
                 command=WIZARD_COMMANDS[wizard],
                 description=WIZARD_DESCRIPTIONS[int(wizard)],
                 how_to=WIZARD_HOW_TO[int(wizard)],
-                status=self._formatted_wizard_status(wizard, now=now),
+                status=(
+                    "unsupported"
+                    if not self.wizard_available(wizard)
+                    else self._formatted_wizard_status(wizard, now=now)
+                ),
             )
             for wizard in SetupWizard
         )
@@ -578,9 +679,7 @@ class SetupPanelModel:
 
         return bool(self._wizard_run_started)
 
-    def _formatted_wizard_status(
-        self, wizard: SetupWizard, *, now: datetime | None = None
-    ) -> str:
+    def _formatted_wizard_status(self, wizard: SetupWizard, *, now: datetime | None = None) -> str:
         """Return the user-facing status badge for a wizard row.
 
         The raw ``wizard_status`` value is a state machine string
@@ -610,8 +709,19 @@ class SetupPanelModel:
             command=WIZARD_COMMANDS[wizard],
             description=WIZARD_DESCRIPTIONS[int(wizard)],
             how_to=WIZARD_HOW_TO[int(wizard)],
-            status=self._formatted_wizard_status(wizard, now=now),
+            status=(
+                "unsupported" if not self.wizard_available(wizard) else self._formatted_wizard_status(wizard, now=now)
+            ),
         )
+
+    def wizard_available(self, wizard: SetupWizard | int) -> bool:
+        return not (
+            SetupWizard(wizard) == SetupWizard.LOCAL_OBSERVABILITY
+            and not local_observability_stack_supported(self.os_name)
+        )
+
+    def wizard_unavailable_reason(self, wizard: SetupWizard | int) -> str:
+        return "" if self.wizard_available(wizard) else LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
 
     def section_labels(self) -> tuple[SetupSectionLabel, ...]:
         return tuple(
@@ -838,12 +948,12 @@ class SetupPanelModel:
             section = self.current_section()
             if field is None:
                 return SetupFocusedRowAction("config", "none", "", "No config row is focused.")
-            if section is not None and section.name == "Audit Sinks":
+            if section is not None and section.name == "Observability":
                 return SetupFocusedRowAction(
                     "config",
-                    "open_audit_sinks_editor",
+                    "open_observability_editor",
                     "E",
-                    "Open the interactive Audit Sinks editor for list entries.",
+                    "Open the canonical destination editor.",
                 )
             if section is not None and section.name == "Webhooks":
                 return SetupFocusedRowAction(
@@ -924,15 +1034,22 @@ class SetupPanelModel:
             for field in section.fields:
                 if field.value != field.original:
                     apply_config_field(self.config, field.key, field.value)
-        self.sections = tuple(
-            ConfigSection(
-                section.name,
-                tuple(_field_with_original(field, field.value) for field in section.fields),
-                section.summary,
-                section.help,
+        if self.disk_change_pending:
+            # The draft was based on an older disk generation. Changed fields
+            # were just merged into the latest authoritative object; rebuild
+            # so externally changed, untouched fields are visible too.
+            self.sections = build_setup_sections(self.config, self.os_name)
+            self.disk_change_pending = False
+        else:
+            self.sections = tuple(
+                ConfigSection(
+                    section.name,
+                    tuple(_field_with_original(field, field.value) for field in section.fields),
+                    section.summary,
+                    section.help,
+                )
+                for section in self.sections
             )
-            for section in self.sections
-        )
 
     def first_editable_line(self) -> int:
         if not self.sections:
@@ -1008,6 +1125,11 @@ class SetupPanelModel:
 
         if wizard is not None:
             self.active_wizard = SetupWizard(wizard)
+        if not self.wizard_available(self.active_wizard):
+            self.form_active = False
+            self.goal_active = False
+            self.form_error = LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
+            return False
         self.goals = wizard_goals(self.active_wizard, self.config)
         if len(self.goals) <= 1:
             self.open_wizard_form(self.active_wizard, goal=self.goals[0] if self.goals else None)
@@ -1063,6 +1185,7 @@ class SetupPanelModel:
         self.goal_active = False
         self.form_reveal = False
         self.form_error = ""
+        self.disk_change_pending = False
         self._place_form_cursor()
 
     def _place_form_cursor(self) -> None:
@@ -1084,6 +1207,7 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals = ()
         self.active_goal = None
+        self.disk_change_pending = False
 
     def recompute_dependent_fields(self) -> None:
         """Rebuild the active form when a driver field (provider/role/action)
@@ -1100,6 +1224,47 @@ class SetupPanelModel:
         if rebuild is None:
             return
         overrides = _field_value_overrides(self.form_fields)
+        if self.active_wizard == SetupWizard.REDACTION:
+            # Action/route-action changes rebuild this dynamic form. Never
+            # carry a prior live-write choice into the newly selected policy
+            # operation; the operator must opt out of dry-run again.
+            overrides["--dry-run"] = "yes"
+            overrides["--restart"] = "no"
+        if self.active_wizard == SetupWizard.GUARDRAIL:
+            scope = wizard_field_value(self.form_fields, "Scope")
+            disable_label = next(
+                (field.label for field in self.form_fields if field.flag == "--disable"),
+                "",
+            )
+            scope_changed = (scope == _GUARDRAIL_SCOPE_GLOBAL and disable_label == "Disable Selected Connector") or (
+                scope == _GUARDRAIL_SCOPE_CONNECTOR and disable_label == "Disable Guardrail Globally"
+            )
+            if scope_changed:
+                # The connector and global toggles intentionally share the
+                # CLI flag, but their values must not cross a scope rebuild.
+                overrides.pop("--disable", None)
+        if self.active_wizard in {SetupWizard.CONNECTOR_SETUP, SetupWizard.GUARDRAIL}:
+            connector_field = next(
+                (field for field in self.form_fields if field.flag == "--connector" or field.label == "Connector"),
+                None,
+            )
+            if connector_field is not None and connector_field.value != connector_field.default:
+                # Connector-scoped rows must be re-seeded from the newly
+                # selected peer. Carrying these values across a connector
+                # change can display (and then write) another peer's policy.
+                connector_scoped_flags = (
+                    ("@Guardrail Mode",)
+                    if self.active_wizard == SetupWizard.CONNECTOR_SETUP
+                    else (
+                        "--mode",
+                        "--rule-pack",
+                        "--block-message",
+                        "--human-approval",
+                        "--hilt-min-severity",
+                    )
+                )
+                for flag in connector_scoped_flags:
+                    overrides.pop(flag, None)
         # Re-seed any preset the goal filter may have hidden so it persists
         # across the rebuild even when its row is not currently visible.
         if self.active_goal is not None:
@@ -1161,6 +1326,17 @@ class SetupPanelModel:
 
         best: SetupWizard | None = None
         best_len = 0
+        connector_mode_prefixes = (("setup", "codex"), ("setup", "claude-code"))
+        if (
+            any(tuple(args[: len(prefix)]) == prefix for prefix in connector_mode_prefixes)
+            and self.wizard_status.get(SetupWizard.GUARDRAIL) == "running..."
+        ):
+            # The focused Guardrail mode workflow deliberately executes an
+            # existing connector-specific setup command. Prefer the wizard
+            # that actually started the run over CONNECTOR_SETUP's generic
+            # one-token ``setup`` prefix.
+            best = SetupWizard.GUARDRAIL
+            best_len = 2
         for wizard, command in WIZARD_COMMANDS.items():
             if len(command) > len(args):
                 continue
@@ -1184,6 +1360,10 @@ class SetupPanelModel:
             if looks_like_secret_value(env_name):
                 self.form_error = "Env Name looks like a secret value. Use an env var name such as DEFENSECLAW_LLM_KEY."
                 return SetupPanelAction(True)
+        if self.active_wizard in {SetupWizard.GUARDRAIL, SetupWizard.GUARDRAIL_ACTIONS}:
+            if error := _guardrail_connector_selection_error(self.config, self.form_fields):
+                self.form_error = error
+                return SetupPanelAction(True)
         # Notifications routing fans out one CLI call per *changed*
         # slot. With no changes there is nothing to apply; emitting the
         # bare ``setup notifications-set`` prefix here would run a
@@ -1198,13 +1378,14 @@ class SetupPanelModel:
                 return SetupPanelAction(True)
         args = build_wizard_args(self.active_wizard, self.form_fields, self.config)
         name = WIZARD_NAMES[int(self.active_wizard)]
+        if self.active_wizard == SetupWizard.GUARDRAIL:
+            connector = wizard_field_value(self.form_fields, "Connector")
+            if connector:
+                name += f" ({connector})"
         # Credentials "set" feeds the secret over stdin (hidden prompt) so
         # it never lands in the child's argv. See F-0801.
         secret_stdin: str | None = None
-        if (
-            self.active_wizard == SetupWizard.CREDENTIALS
-            and wizard_field_value(self.form_fields, "Action") == "set"
-        ):
+        if self.active_wizard == SetupWizard.CREDENTIALS and wizard_field_value(self.form_fields, "Action") == "set":
             secret_value = wizard_field_value(self.form_fields, "Secret Value", raw=True)
             if secret_value:
                 secret_stdin = secret_value + "\n"
@@ -1218,6 +1399,12 @@ class SetupPanelModel:
             # slots run as follow_ups in order. The "no changes" path
             # is already short-circuited above.
             follow_up = notifications_routing_intents(self.form_fields)[1:]
+        redaction_action = wizard_field_value(self.form_fields, "Action") or "status"
+        risk: SetupPreviewRisk = (
+            "setup"
+            if self.active_wizard == SetupWizard.REDACTION and redaction_action == "interactive"
+            else "read-only"
+        )
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()
@@ -1231,12 +1418,17 @@ class SetupPanelModel:
                 origin="setup-wizard",
                 follow_up=follow_up,
                 secret_stdin=secret_stdin,
+                risk=risk,
             ),
         )
 
 
 def build_setup_sections(
-    cfg: object | Mapping[str, Any] | None, os_name: str | None = None
+    cfg: object | Mapping[str, Any] | None,
+    os_name: str | None = None,
+    *,
+    observability_status: V8OperatorStatus | None = None,
+    observability_status_error: str = "",
 ) -> tuple[ConfigSection, ...]:
     """Return the Go Setup config section/field catalog.
 
@@ -1279,22 +1471,20 @@ def build_setup_sections(
             "Logical agent identity used for aggregation, webhooks, and enterprise reporting.",
         ),
         ConfigSection(
-            "Privacy",
-            (
-                _field(
-                    cfg,
-                    "Disable Redaction",
-                    "privacy.disable_redaction",
-                    "bool",
-                    hint="true stores raw content in all sinks.",
-                ),
-            ),
-            "Redaction and privacy controls for audit DB, OTel, Splunk, webhooks, and terminal logs.",
-        ),
-        ConfigSection(
             "Notifications",
             (
-                _field(cfg, "Enabled", "notifications.enabled", "bool", hint="Master desktop notification switch."),
+                (
+                    _field(cfg, "Enabled", "notifications.enabled", "bool", hint="Master desktop notification switch.")
+                    if desktop_notification_capability(os_name).supported
+                    else ConfigField(
+                        "Enabled (native desktop unsupported on Windows)",
+                        "notifications.enabled",
+                        "header",
+                        str(get_config_value(cfg, "notifications.enabled", False)).lower(),
+                        str(get_config_value(cfg, "notifications.enabled", False)).lower(),
+                        hint="Read-only legacy setting; Windows toast delivery is inactive.",
+                    )
+                ),
                 _header(".. Categories .."),
                 _field(
                     cfg,
@@ -1348,7 +1538,11 @@ def build_setup_sections(
                     hint="Global notification rate cap.",
                 ),
             ),
-            "User-session desktop toasts for blocks, would-blocks, and HITL approvals.",
+            (
+                "User-session desktop toasts for blocks, would-blocks, and HITL approvals."
+                if desktop_notification_capability(os_name).supported
+                else "Native Windows desktop/toast notifications are unsupported; delivery is inactive."
+            ),
             "Restart the gateway after editing; the dispatcher snapshots config at boot.",
         ),
         ConfigSection(
@@ -1424,9 +1618,13 @@ def build_setup_sections(
             ),
             "Health-check loop that restarts the gateway process when it becomes unresponsive.",
         ),
-        ConfigSection("Audit Sinks", tuple(_audit_sink_summary_fields(cfg)), "Read-only audit sink summary."),
+        ConfigSection(
+            "Observability",
+            _v8_observability_fields(observability_status, error=observability_status_error),
+            "Canonical v8 collection, retention, routing, and per-route redaction policy.",
+            "Read-only effective plan; press E to manage destinations through setup observability.",
+        ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
-        ConfigSection("OTel", tuple(_otel_fields(cfg)), "OpenTelemetry exporter config."),
         ConfigSection(
             "Skill Actions", tuple(action_matrix_fields("skill_actions", cfg)), "Skill admission response matrix."
         ),
@@ -1547,7 +1745,6 @@ def _local_observability_wizard_fields() -> tuple[WizardFormField, ...]:
         WizardFormField("No Config", "bool", value="no", default="no"),
         WizardFormField("Signals", "string", value="traces,metrics,logs", default="traces,metrics,logs"),
         WizardFormField("Service Name", "string", value="defenseclaw", default="defenseclaw"),
-        WizardFormField("Audit Sink", "bool", value="yes", default="yes"),
         WizardFormField("Confirm Reset", "bool", value="no", default="no"),
         WizardFormField("Service", "string"),
         WizardFormField("Follow", "bool", value="no", default="no"),
@@ -1578,16 +1775,39 @@ def _trusted_paths_wizard_fields() -> tuple[WizardFormField, ...]:
     )
 
 
-def _guardrail_actions_wizard_fields() -> tuple[WizardFormField, ...]:
-    return (
+def _guardrail_actions_wizard_fields(
+    overrides: Mapping[str, str] | None = None,
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[WizardFormField, ...]:
+    overrides = overrides or {}
+    scope = (overrides.get("@Scope") or _GUARDRAIL_SCOPE_GLOBAL).strip()
+    if scope not in _GUARDRAIL_SCOPES:
+        scope = _GUARDRAIL_SCOPE_GLOBAL
+
+    def connector_scope(dv: Mapping[str, str]) -> bool:
+        return dv.get("scope") == _GUARDRAIL_SCOPE_CONNECTOR
+
+    candidates = (
+        WizardFormField(
+            "Scope",
+            "choice",
+            value=scope,
+            default=_GUARDRAIL_SCOPE_GLOBAL,
+            options=_GUARDRAIL_SCOPES,
+            hint=(
+                "global-all-active affects every active connector; selected-connector changes only the chosen member."
+            ),
+        ),
         WizardFormField(
             "Connector",
             "choice",
             "--connector",
             value="",
             default="",
-            options=("", *CONNECTORS),
-            hint="Optional: scope this guardrail action to one connector; blank keeps CLI global/all-active behavior.",
+            options=_guardrail_connector_choices(cfg),
+            hint="Active connector this action should change.",
+            required=True,
+            visible_when=connector_scope,
         ),
         WizardFormField(
             "Action",
@@ -1626,6 +1846,7 @@ def _guardrail_actions_wizard_fields() -> tuple[WizardFormField, ...]:
         WizardFormField("Clear Message", "bool", value="no", default="no", hint="Clear the custom block message."),
         WizardFormField("Restart Gateway", "bool", "--restart", "--no-restart", value="yes", default="yes"),
     )
+    return _apply_dynamic_fields(candidates, overrides, {"scope": scope})
 
 
 def _custom_action_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
@@ -1656,9 +1877,7 @@ def _custom_providers_fields_for(overrides: Mapping[str, str] | None = None) -> 
     candidates: tuple[WizardFormField, ...] = (
         WizardFormField("Action", "choice", value="list", default="list", options=("list", "show", "add", "remove")),
         WizardFormField("Name", "string", visible_when=is_add_or_remove, required=True),
-        WizardFormField(
-            "Domains", "string", hint="LLM allow-list domains, comma-separated.", visible_when=is_add
-        ),
+        WizardFormField("Domains", "string", hint="LLM allow-list domains, comma-separated.", visible_when=is_add),
         WizardFormField(
             "Base Provider Type",
             "choice",
@@ -1726,9 +1945,7 @@ def _custom_providers_fields_for(overrides: Mapping[str, str] | None = None) -> 
         WizardFormField("Vertex AI", "section", visible_when=is_vertex),
         WizardFormField("Project ID", "string", "--vertex-project-id", visible_when=is_vertex),
         WizardFormField("Region", "string", "--vertex-region", visible_when=is_vertex),
-        WizardFormField(
-            "Auth Mode", "choice", "--vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=is_vertex
-        ),
+        WizardFormField("Auth Mode", "choice", "--vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=is_vertex),
         WizardFormField(
             "Service Account JSON Env", "string", "--vertex-service-account-json-env", visible_when=is_vertex
         ),
@@ -1751,6 +1968,513 @@ def _custom_providers_fields_for(overrides: Mapping[str, str] | None = None) -> 
 
 def _custom_providers_wizard_fields() -> tuple[WizardFormField, ...]:
     return _custom_providers_fields_for({})
+
+
+_REDACTION_ACTIONS: tuple[str, ...] = (
+    "interactive",
+    "status",
+    "remove-all",
+    "apply-all",
+    "apply-defaults",
+    "defaults-set",
+    "defaults-reset",
+    "bucket-list",
+    "bucket-set",
+    "bucket-reset",
+    "profile-list",
+    "profile-show",
+    "profile-set",
+    "profile-remove",
+    "destination-show",
+    "destination-send",
+    "destination-inherit",
+    "route-list",
+    "route-add",
+    "route-set",
+    "route-move",
+    "route-remove",
+)
+_REDACTION_MUTATION_ACTIONS = frozenset(
+    {
+        "remove-all",
+        "apply-all",
+        "apply-defaults",
+        "defaults-set",
+        "defaults-reset",
+        "bucket-set",
+        "bucket-reset",
+        "profile-set",
+        "profile-remove",
+        "destination-send",
+        "destination-inherit",
+        "route-add",
+        "route-set",
+        "route-move",
+        "route-remove",
+    }
+)
+
+
+def _redaction_action_is(*actions: str) -> Callable[[Mapping[str, str]], bool]:
+    selected = frozenset(actions)
+    return lambda values: values.get("action", "status") in selected
+
+
+def _redaction_wizard_fields_for(
+    overrides: Mapping[str, str] | None = None,
+) -> tuple[WizardFormField, ...]:
+    """Action-dependent TUI form for the complete v8 redaction CLI surface."""
+
+    overrides = overrides or {}
+    action = overrides.get("@Action", "status")
+    route_action = overrides.get("--route-action", "send")
+    mutation = _redaction_action_is(*_REDACTION_MUTATION_ACTIONS)
+    profile_actions = _redaction_action_is(
+        "apply-all",
+        "apply-defaults",
+        "defaults-set",
+        "bucket-set",
+        "destination-send",
+        "route-add",
+        "route-set",
+    )
+
+    def profile_visible(values: Mapping[str, str]) -> bool:
+        if not profile_actions(values):
+            return False
+        return not (values.get("action") in {"route-add", "route-set"} and values.get("route_action", "send") == "drop")
+
+    candidates: list[WizardFormField] = [
+        WizardFormField(
+            "Action",
+            "choice",
+            value=action,
+            default="status",
+            options=_REDACTION_ACTIONS,
+            required=True,
+        ),
+        WizardFormField("Policy", "section"),
+        WizardFormField(
+            "Profile",
+            "string",
+            "--profile",
+            value=overrides.get("--profile", "sensitive"),
+            default="sensitive",
+            visible_when=profile_visible,
+            hint="Built-in (none, sensitive, content, strict) or custom profile name.",
+        ),
+        WizardFormField(
+            "Collect Logs",
+            "choice",
+            "--logs",
+            value=overrides.get("--logs", "keep"),
+            default="keep",
+            options=("keep", "on", "off"),
+            visible_when=_redaction_action_is("defaults-set", "bucket-set"),
+        ),
+        WizardFormField(
+            "Collect Traces",
+            "choice",
+            "--traces",
+            value=overrides.get("--traces", "keep"),
+            default="keep",
+            options=("keep", "on", "off"),
+            visible_when=_redaction_action_is("defaults-set", "bucket-set"),
+        ),
+        WizardFormField(
+            "Collect Metrics",
+            "choice",
+            "--metrics",
+            value=overrides.get("--metrics", "keep"),
+            default="keep",
+            options=("keep", "on", "off"),
+            visible_when=_redaction_action_is("defaults-set", "bucket-set"),
+        ),
+        WizardFormField(
+            "Bucket",
+            "choice",
+            value=overrides.get("@Bucket", REDACTION_BUCKETS[0]),
+            default=REDACTION_BUCKETS[0],
+            options=REDACTION_BUCKETS,
+            required=True,
+            visible_when=_redaction_action_is("bucket-set", "bucket-reset"),
+        ),
+        WizardFormField(
+            "Inherit Bucket Profile",
+            "bool",
+            "--inherit-profile",
+            value=overrides.get("--inherit-profile", "no"),
+            default="no",
+            visible_when=_redaction_action_is("bucket-set"),
+            hint="Remove the bucket profile override; leave Profile blank when enabled.",
+        ),
+        WizardFormField("Custom Profile", "section"),
+        WizardFormField(
+            "Custom Profile Name",
+            "string",
+            value=overrides.get("@Custom Profile Name", ""),
+            required=True,
+            visible_when=_redaction_action_is("profile-show", "profile-set", "profile-remove"),
+        ),
+        WizardFormField(
+            "Extends",
+            "choice",
+            "--extends",
+            value=overrides.get("--extends", "sensitive"),
+            default="sensitive",
+            options=REDACTION_CUSTOM_PROFILE_BASES,
+            visible_when=_redaction_action_is("profile-set"),
+        ),
+        WizardFormField(
+            "Detector Groups (CSV)",
+            "string",
+            "--detector",
+            value=overrides.get("--detector", ",".join(REDACTION_DETECTOR_GROUPS)),
+            default=",".join(REDACTION_DETECTOR_GROUPS),
+            visible_when=_redaction_action_is("profile-set"),
+        ),
+    ]
+    for field_class in REDACTION_FIELD_CLASSES:
+        flag = f"--field-{field_class}"
+        candidates.append(
+            WizardFormField(
+                f"Field: {field_class}",
+                "choice",
+                flag,
+                value=overrides.get(flag, "inherit"),
+                default="inherit",
+                options=("inherit", *REDACTION_FIELD_MODES),
+                visible_when=_redaction_action_is("profile-set"),
+            )
+        )
+    candidates.extend(
+        (
+            WizardFormField(
+                "Replace With",
+                "string",
+                "--replace-with",
+                value=overrides.get("--replace-with", ""),
+                default="",
+                visible_when=_redaction_action_is("profile-remove"),
+                hint="Leave blank to remove only an unreferenced profile.",
+            ),
+            WizardFormField("Destination / Route", "section"),
+            WizardFormField(
+                "Destination",
+                "string",
+                value=overrides.get("@Destination", ""),
+                required=True,
+                visible_when=_redaction_action_is(
+                    "destination-show",
+                    "destination-send",
+                    "destination-inherit",
+                    "route-list",
+                    "route-add",
+                    "route-set",
+                    "route-move",
+                    "route-remove",
+                ),
+            ),
+            WizardFormField(
+                "Route Name",
+                "string",
+                value=overrides.get("@Route Name", ""),
+                required=True,
+                visible_when=_redaction_action_is("route-add", "route-set", "route-move", "route-remove"),
+            ),
+            WizardFormField(
+                "Signals (CSV)",
+                "string",
+                "--signal",
+                value=overrides.get("--signal", "logs"),
+                default="logs",
+                required=True,
+                visible_when=_redaction_action_is("destination-send", "route-add", "route-set"),
+            ),
+            WizardFormField(
+                "Buckets (CSV)",
+                "string",
+                "--bucket",
+                value=overrides.get("--bucket", "*"),
+                default="*",
+                required=True,
+                visible_when=_redaction_action_is("destination-send", "route-add", "route-set"),
+            ),
+            WizardFormField(
+                "Sources (CSV)",
+                "string",
+                "--source",
+                value=overrides.get("--source", ""),
+                visible_when=_redaction_action_is("route-add", "route-set"),
+            ),
+            WizardFormField(
+                "Connectors (CSV)",
+                "string",
+                "--connector",
+                value=overrides.get("--connector", ""),
+                visible_when=_redaction_action_is("route-add", "route-set"),
+            ),
+            WizardFormField(
+                "Producer Actions (CSV)",
+                "string",
+                "--producer-action",
+                value=overrides.get("--producer-action", ""),
+                visible_when=_redaction_action_is("route-add", "route-set"),
+            ),
+            WizardFormField(
+                "Event Names (CSV)",
+                "string",
+                "--event-name",
+                value=overrides.get("--event-name", ""),
+                visible_when=_redaction_action_is("route-add", "route-set"),
+            ),
+            WizardFormField(
+                "Minimum Severity",
+                "choice",
+                "--min-severity",
+                value=overrides.get("--min-severity", ""),
+                options=("", *REDACTION_SEVERITIES),
+                visible_when=_redaction_action_is("route-add", "route-set"),
+            ),
+            WizardFormField(
+                "Route Action",
+                "choice",
+                "--route-action",
+                value=route_action,
+                default="send",
+                options=("send", "drop"),
+                visible_when=_redaction_action_is("route-add", "route-set"),
+            ),
+            WizardFormField(
+                "Position",
+                "int",
+                "--position",
+                value=overrides.get("--position", "1"),
+                default="1",
+                required=True,
+                visible_when=_redaction_action_is("route-add", "route-move"),
+            ),
+            WizardFormField("Execution", "section"),
+            # The CLI intentionally has no --json option on bucket list or
+            # destination show; keep this predicate aligned with Click.
+            WizardFormField(
+                "JSON Output",
+                "bool",
+                "--json",
+                value=overrides.get("--json", "no"),
+                default="no",
+                visible_when=_redaction_action_is(
+                    "status",
+                    "profile-list",
+                    "profile-show",
+                    "route-list",
+                    *_REDACTION_MUTATION_ACTIONS,
+                ),
+            ),
+            WizardFormField(
+                "Dry Run",
+                "bool",
+                "--dry-run",
+                value=overrides.get("--dry-run", "yes"),
+                default="yes",
+                visible_when=mutation,
+                hint="On by default. Toggle off only after reviewing the command and consequences.",
+            ),
+            WizardFormField(
+                "Restart Gateway",
+                "bool",
+                "--restart",
+                value=overrides.get("--restart", "no"),
+                default="no",
+                visible_when=mutation,
+            ),
+        )
+    )
+    return _apply_dynamic_fields(
+        candidates,
+        overrides,
+        {"action": action, "route_action": route_action},
+    )
+
+
+def redaction_wizard_fields(
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[WizardFormField, ...]:
+    del cfg
+    return _redaction_wizard_fields_for({})
+
+
+def _redaction_csv(fields: Sequence[WizardFormField], label: str) -> tuple[str, ...]:
+    return tuple(value.strip() for value in wizard_field_value(fields, label).split(",") if value.strip())
+
+
+def _append_redaction_repeated(args: list[str], flag: str, values: Sequence[str]) -> None:
+    for value in values:
+        args.extend((flag, value))
+
+
+def _append_redaction_mutation_flags(args: list[str], fields: Sequence[WizardFormField]) -> None:
+    # The TUI command-preview screen is the attended confirmation boundary.
+    # Defaulting Dry Run to yes keeps every mutation preview-only until the
+    # operator explicitly toggles it off; --yes prevents a hidden stdin prompt
+    # on native Windows once the command has been approved.
+    args.append("--yes")
+    if wizard_bool_value(fields, "Dry Run", "yes") == "yes":
+        args.append("--dry-run")
+    if wizard_bool_value(fields, "JSON Output", "no") == "yes":
+        args.append("--json")
+    if wizard_bool_value(fields, "Restart Gateway", "no") == "yes":
+        args.append("--restart")
+
+
+_REDACTION_COLLECT_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("Collect Logs", "--logs", "--no-logs"),
+    ("Collect Traces", "--traces", "--no-traces"),
+    ("Collect Metrics", "--metrics", "--no-metrics"),
+)
+
+
+def _append_redaction_collect_flags(args: list[str], fields: Sequence[WizardFormField]) -> None:
+    for label, enabled, disabled in _REDACTION_COLLECT_FLAGS:
+        value = wizard_field_value(fields, label)
+        if value == "on":
+            args.append(enabled)
+        elif value == "off":
+            args.append(disabled)
+
+
+def _build_redaction_apply_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    args.extend(
+        (
+            "apply",
+            "--scope",
+            "all-configurable" if action == "apply-all" else "defaults",
+        )
+    )
+    if profile := wizard_field_value(fields, "Profile"):
+        args.extend(("--profile", profile))
+
+
+def _build_redaction_defaults_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("defaults-")
+    args.extend(("defaults", verb))
+    if verb != "set":
+        return
+    if profile := wizard_field_value(fields, "Profile"):
+        args.extend(("--profile", profile))
+    _append_redaction_collect_flags(args, fields)
+
+
+def _build_redaction_bucket_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("bucket-")
+    args.extend(("bucket", verb))
+    if verb == "list":
+        return
+    args.append(wizard_field_value(fields, "Bucket"))
+    if verb != "set":
+        return
+    if wizard_bool_value(fields, "Inherit Bucket Profile", "no") == "yes":
+        args.append("--inherit-profile")
+    elif profile := wizard_field_value(fields, "Profile"):
+        args.extend(("--profile", profile))
+    _append_redaction_collect_flags(args, fields)
+
+
+def _build_redaction_profile_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("profile-")
+    args.extend(("profile", verb))
+    if verb == "list":
+        return
+    args.append(wizard_field_value(fields, "Custom Profile Name"))
+    if verb == "set":
+        args.extend(("--extends", wizard_field_value(fields, "Extends")))
+        _append_redaction_repeated(args, "--detector", _redaction_csv(fields, "Detector Groups (CSV)"))
+        for field_class in REDACTION_FIELD_CLASSES:
+            mode = wizard_field_value(fields, f"Field: {field_class}")
+            if mode and mode != "inherit":
+                args.extend(("--field", f"{field_class}={mode}"))
+    elif verb == "remove" and (replacement := wizard_field_value(fields, "Replace With")):
+        args.extend(("--replace-with", replacement))
+
+
+def _build_redaction_destination_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("destination-")
+    args.extend(("destination", verb, wizard_field_value(fields, "Destination")))
+    if verb != "send":
+        return
+    _append_redaction_repeated(args, "--signal", _redaction_csv(fields, "Signals (CSV)"))
+    _append_redaction_repeated(args, "--bucket", _redaction_csv(fields, "Buckets (CSV)"))
+    if profile := wizard_field_value(fields, "Profile"):
+        args.extend(("--profile", profile))
+
+
+def _append_redaction_route_selectors(args: list[str], fields: Sequence[WizardFormField]) -> None:
+    _append_redaction_repeated(args, "--signal", _redaction_csv(fields, "Signals (CSV)"))
+    _append_redaction_repeated(args, "--bucket", _redaction_csv(fields, "Buckets (CSV)"))
+    for label, flag in (
+        ("Sources (CSV)", "--source"),
+        ("Connectors (CSV)", "--connector"),
+        ("Producer Actions (CSV)", "--producer-action"),
+        ("Event Names (CSV)", "--event-name"),
+    ):
+        _append_redaction_repeated(args, flag, _redaction_csv(fields, label))
+    if severity := wizard_field_value(fields, "Minimum Severity"):
+        args.extend(("--min-severity", severity))
+
+
+def _build_redaction_route_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("route-")
+    destination = wizard_field_value(fields, "Destination")
+    args.extend(("route", verb, destination))
+    if verb == "list":
+        return
+    args.append(wizard_field_value(fields, "Route Name"))
+    if verb == "move":
+        args.extend(("--position", wizard_field_value(fields, "Position")))
+        return
+    if verb == "remove":
+        return
+    _append_redaction_route_selectors(args, fields)
+    route_action = wizard_field_value(fields, "Route Action") or "send"
+    args.extend(("--route-action", route_action))
+    profile = wizard_field_value(fields, "Profile")
+    if route_action == "send" and profile:
+        args.extend(("--profile", profile))
+    if verb == "add" and (position := wizard_field_value(fields, "Position")):
+        args.extend(("--position", position))
+
+
+_REDACTION_ARG_BUILDERS: tuple[tuple[str, Callable[[list[str], str, Sequence[WizardFormField]], None]], ...] = (
+    ("apply-", _build_redaction_apply_args),
+    ("defaults-", _build_redaction_defaults_args),
+    ("bucket-", _build_redaction_bucket_args),
+    ("profile-", _build_redaction_profile_args),
+    ("destination-", _build_redaction_destination_args),
+    ("route-", _build_redaction_route_args),
+)
+
+
+def _build_redaction_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    action = wizard_field_value(fields, "Action") or "status"
+    if action == "interactive":
+        return ("setup", "redaction")
+
+    args: list[str] = ["setup", "redaction"]
+    simple = {"status": "status", "remove-all": "remove-all"}.get(action)
+    if simple is not None:
+        args.append(simple)
+    else:
+        builder = next((value for prefix, value in _REDACTION_ARG_BUILDERS if action.startswith(prefix)), None)
+        if builder is None:
+            raise ValueError(f"unknown redaction action: {action}")
+        builder(args, action, fields)
+
+    if action in {"status", "profile-list", "profile-show", "route-list"}:
+        if wizard_bool_value(fields, "JSON Output", "no") == "yes":
+            args.append("--json")
+    elif action in _REDACTION_MUTATION_ACTIONS:
+        _append_redaction_mutation_flags(args, fields)
+    return tuple(args)
 
 
 def wizard_form_defs(
@@ -1858,7 +2582,7 @@ def wizard_form_defs(
     if wizard == SetupWizard.SPLUNK:
         return splunk_wizard_fields()
     if wizard == SetupWizard.OBSERVABILITY:
-        return observability_wizard_fields("splunk-o11y")
+        return observability_wizard_fields("splunk-o11y", cfg)
     if wizard == SetupWizard.WEBHOOKS:
         return webhook_wizard_fields("slack")
     if wizard == SetupWizard.SANDBOX:
@@ -1897,14 +2621,15 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.CUSTOM_PROVIDERS: lambda cfg=None: _custom_providers_wizard_fields(),
     SetupWizard.GUARDRAIL: lambda cfg=None: guardrail_wizard_fields(cfg),
     SetupWizard.SPLUNK: lambda cfg=None: splunk_wizard_fields(),
-    SetupWizard.OBSERVABILITY: lambda cfg=None: observability_wizard_fields("splunk-o11y"),
+    SetupWizard.OBSERVABILITY: lambda cfg=None: observability_wizard_fields("splunk-o11y", cfg),
     SetupWizard.WEBHOOKS: lambda cfg=None: webhook_wizard_fields("slack"),
     SetupWizard.REGISTRIES: lambda cfg=None: registry_wizard_fields(),
     SetupWizard.NOTIFICATIONS_ROUTING: lambda cfg=None: notifications_routing_wizard_fields(cfg),
     SetupWizard.AI_DISCOVERY: lambda cfg=None: ai_discovery_wizard_fields(cfg),
     SetupWizard.SPLUNK_DASHBOARDS: lambda cfg=None: splunk_dashboards_wizard_fields(),
     SetupWizard.TRUSTED_PATHS: lambda cfg=None: _trusted_paths_wizard_fields(),
-    SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(),
+    SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
+    SetupWizard.REDACTION: lambda cfg=None: redaction_wizard_fields(cfg),
 }
 
 
@@ -1913,6 +2638,10 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
 # current values, and returns the filtered field list for the new driver
 # selection. Lambdas keep resolution lazy so the builders can live anywhere.
 _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
+    SetupWizard.CONNECTOR_SETUP: lambda overrides, cfg: connector_setup_wizard_fields(
+        cfg,
+        overrides=overrides,
+    ),
     SetupWizard.LLM: lambda overrides, cfg: _llm_wizard_fields_for(
         provider=overrides.get("--provider", "anthropic"),
         role=overrides.get("--role", "unified"),
@@ -1920,7 +2649,9 @@ _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
         cfg=cfg,
     ),
     SetupWizard.GUARDRAIL: lambda overrides, cfg: _guardrail_wizard_fields_for(overrides, cfg),
+    SetupWizard.GUARDRAIL_ACTIONS: lambda overrides, cfg: _guardrail_actions_wizard_fields(overrides, cfg),
     SetupWizard.CUSTOM_PROVIDERS: lambda overrides, cfg: _custom_providers_fields_for(overrides),
+    SetupWizard.REDACTION: lambda overrides, _cfg: _redaction_wizard_fields_for(overrides),
 }
 
 
@@ -1980,6 +2711,52 @@ def _active_connector_names_for_setup(cfg: object | Mapping[str, Any] | None) ->
 
     singular = _active_connector(cfg)
     return [singular] if singular else []
+
+
+def _guardrail_connector_choices(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Connector choices for Guardrail forms.
+
+    A populated multi-connector roster is authoritative: policy forms may only
+    target its active members. Fresh and legacy single-connector setup keeps
+    the full catalog so an operator can still choose the first connector.
+    """
+
+    active = _active_connector_names_for_setup(cfg)
+    if len(active) <= 1:
+        return ("", *CONNECTORS)
+    return ("", *dict.fromkeys(active))
+
+
+def _guardrail_default_scope(cfg: object | Mapping[str, Any] | None) -> str:
+    """Prefer a selected-connector policy form only when a real fleet exists."""
+
+    if len(_active_connector_names_for_setup(cfg)) > 1:
+        return _GUARDRAIL_SCOPE_CONNECTOR
+    return _GUARDRAIL_SCOPE_GLOBAL
+
+
+def _guardrail_form_scope(fields: Sequence[WizardFormField]) -> str:
+    scope = wizard_field_value(fields, "Scope")
+    return scope if scope in _GUARDRAIL_SCOPES else _GUARDRAIL_SCOPE_CONNECTOR
+
+
+def _guardrail_connector_selection_error(
+    cfg: object | Mapping[str, Any] | None,
+    fields: Sequence[WizardFormField],
+) -> str:
+    """Reject a non-member target when the active roster is authoritative."""
+
+    if _guardrail_form_scope(fields) != _GUARDRAIL_SCOPE_CONNECTOR:
+        return ""
+    requested = wizard_field_value(fields, "Connector").strip()
+    active = _active_connector_names_for_setup(cfg)
+    if not requested or len(active) <= 1:
+        return ""
+    wanted = normalize_connector(requested)
+    members = {normalize_connector(name) for name in active}
+    if wanted in members:
+        return ""
+    return f"Connector {requested!r} is not active. Active connectors: {', '.join(active)}."
 
 
 def _connector_is_proxy(connector: str) -> bool:
@@ -2062,14 +2839,15 @@ def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
             "mode",
             "Switch enforcement mode (observe / action)",
             summary="Toggle log-only (observe) vs blocking (action) enforcement.",
-            fields=("Mode", "Scanner Mode"),
+            fields=("Mode",),
         ),
         WizardGoal(
             "judge",
             "Set up / change the LLM Judge",
-            summary="Choose the judge provider, model, and detection strategy.",
-            presets={"--detection-strategy": "regex_judge"},
+            summary="Configure global judge settings shared by all active connectors.",
+            presets={"@Scope": _GUARDRAIL_SCOPE_GLOBAL, "--detection-strategy": "regex_judge"},
             fields=(
+                "Scope",
                 "Provider",
                 "--judge-model",
                 "--judge-api-key-env",
@@ -2082,8 +2860,9 @@ def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
         WizardGoal(
             "cisco",
             "Connect Cisco AI Defense",
-            summary="Point the guardrail at a Cisco AI Defense endpoint.",
-            fields=("--cisco-endpoint", "--cisco-api-key-env", "--cisco-timeout-ms"),
+            summary="Configure global Cisco settings shared by all active connectors.",
+            presets={"@Scope": _GUARDRAIL_SCOPE_GLOBAL},
+            fields=("Scope", "--cisco-endpoint", "--cisco-api-key-env", "--cisco-timeout-ms"),
         ),
         WizardGoal(
             "hitl",
@@ -2094,9 +2873,16 @@ def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
         ),
         WizardGoal(
             "detection",
-            "Tune detection strategy / rule pack",
-            summary="Adjust the regex/judge strategy and rule pack.",
-            fields=("--detection-strategy", "--rule-pack"),
+            "Tune global detection strategy",
+            summary="Change the detection strategy for all active connectors.",
+            presets={"@Scope": _GUARDRAIL_SCOPE_GLOBAL},
+            fields=("Scope", "--detection-strategy"),
+        ),
+        WizardGoal(
+            "rule-pack",
+            "Change a connector rule pack",
+            summary="Change only one active connector's rule pack override.",
+            fields=("Connector", "--rule-pack"),
         ),
     )
 
@@ -2198,7 +2984,7 @@ def _local_observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[
             "Start the local stack",
             summary="Bring up the bundled OTel stack (needs Docker).",
             presets={"@Action": "up"},
-            fields=("Action", "Timeout", "Signals", "Audit Sink", "No Wait"),
+            fields=("Action", "Timeout", "Signals", "No Wait"),
         ),
         WizardGoal(
             "url",
@@ -2237,7 +3023,7 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
         WizardGoal(
             "auto",
             "Rotate shared token for active connectors",
-            summary="Rotate the gateway token and refresh every active connector hook.",
+            summary="Rotate gateway and distinct connector-scoped hook credentials with exact rollback.",
             fields=("Refresh Hooks",),
         ),
         WizardGoal(
@@ -2393,6 +3179,7 @@ def _splunk_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, .
             summary="Spin up a local Splunk via Docker for logs.",
             presets={"@Mode": "local-docker"},
             fields=("Mode", "Accept Splunk License", "Traces", "Metrics", "Logs Export"),
+            available_when=lambda _cfg: local_splunk_stack_supported(),
         ),
         WizardGoal(
             "enterprise",
@@ -2410,30 +3197,30 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
         WizardGoal(
             "list",
             "List destinations",
-            summary="List global destinations or one connector's per-connector sinks.",
+            summary="List canonical process-wide destinations.",
             presets={"@Action": "list"},
-            fields=("Action", "Connector", "JSON Output"),
+            fields=("Action", "JSON Output"),
         ),
         WizardGoal(
             "enable",
             "Enable a destination",
-            summary="Enable a global or per-connector audit sink by name.",
+            summary="Enable a canonical destination by name.",
             presets={"@Action": "enable"},
-            fields=("Action", "Name", "Connector"),
+            fields=("Action", "Name"),
         ),
         WizardGoal(
             "disable",
             "Disable a destination",
-            summary="Disable a global or per-connector audit sink by name.",
+            summary="Disable a canonical destination by name.",
             presets={"@Action": "disable"},
-            fields=("Action", "Name", "Connector"),
+            fields=("Action", "Name"),
         ),
         WizardGoal(
             "remove",
             "Remove a destination",
-            summary="Remove a global or per-connector audit sink by name.",
+            summary="Remove a canonical destination by name.",
             presets={"@Action": "remove"},
-            fields=("Action", "Name", "Connector"),
+            fields=("Action", "Name"),
         ),
         WizardGoal(
             "splunk-o11y",
@@ -2723,42 +3510,120 @@ def _guardrail_actions_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wi
             "Show guardrail status",
             summary="Show the full active connector roster, or narrow to one connector.",
             presets={"@Action": "status"},
-            fields=("Connector", "Action"),
+            fields=("Scope", "Connector", "Action"),
         ),
         WizardGoal(
             "enable",
             "Enable guardrail",
             summary="Enable globally or re-enable one connector override.",
             presets={"@Action": "enable"},
-            fields=("Connector", "Action", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "Restart Gateway"),
         ),
         WizardGoal(
             "disable",
             "Disable guardrail",
             summary="Disable globally or disable one connector override.",
             presets={"@Action": "disable"},
-            fields=("Connector", "Action", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "Restart Gateway"),
         ),
         WizardGoal(
             "fail-mode",
             "Set fail mode",
             summary="Set fail-open/fail-closed globally or for one connector.",
             presets={"@Action": "fail-mode"},
-            fields=("Connector", "Action", "Fail Mode", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "Fail Mode", "Restart Gateway"),
         ),
         WizardGoal(
             "hilt",
             "Set human approval",
             summary="Toggle HILT and severity globally or for one connector.",
             presets={"@Action": "hilt"},
-            fields=("Connector", "Action", "HITL State", "Approval Min Severity", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "HITL State", "Approval Min Severity", "Restart Gateway"),
         ),
         WizardGoal(
             "block-message",
             "Set block message",
             summary="Set or clear the custom block message globally or for one connector.",
             presets={"@Action": "block-message"},
-            fields=("Connector", "Action", "Block Message", "Clear Message", "Restart Gateway"),
+            fields=("Scope", "Connector", "Action", "Block Message", "Clear Message", "Restart Gateway"),
+        ),
+    )
+
+
+_REDACTION_ADVANCED_FIELDS: tuple[str, ...] = (
+    "Action",
+    "Profile",
+    "Collect Logs",
+    "Collect Traces",
+    "Collect Metrics",
+    "Bucket",
+    "Inherit Bucket Profile",
+    "Custom Profile Name",
+    "Extends",
+    "Detector Groups (CSV)",
+    *(f"Field: {field_class}" for field_class in REDACTION_FIELD_CLASSES),
+    "Replace With",
+    "Destination",
+    "Route Name",
+    "Signals (CSV)",
+    "Buckets (CSV)",
+    "Sources (CSV)",
+    "Connectors (CSV)",
+    "Producer Actions (CSV)",
+    "Event Names (CSV)",
+    "Minimum Severity",
+    "Route Action",
+    "Position",
+    "JSON Output",
+    "Dry Run",
+    "Restart Gateway",
+)
+
+
+def _redaction_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "status",
+            "Inspect effective redaction",
+            summary=f"Show compiler-owned destination and {len(REDACTION_BUCKETS)}-bucket policy.",
+            presets={"@Action": "status"},
+            fields=("Action", "JSON Output"),
+        ),
+        WizardGoal(
+            "remove-all",
+            "Remove all configurable redaction",
+            summary="Select profile none everywhere; dry-run is on by default.",
+            presets={"@Action": "remove-all"},
+            fields=("Action", "Dry Run", "JSON Output", "Restart Gateway"),
+        ),
+        WizardGoal(
+            "apply-all",
+            "Apply one profile everywhere",
+            summary="Clear narrower overrides and use one profile on every configurable projection.",
+            presets={"@Action": "apply-all"},
+            fields=("Action", "Profile", "Dry Run", "JSON Output", "Restart Gateway"),
+        ),
+        WizardGoal(
+            "baseline",
+            "Change the global baseline",
+            summary="Set the inherited default profile without replacing narrower overrides.",
+            presets={"@Action": "apply-defaults"},
+            fields=("Action", "Profile", "Dry Run", "JSON Output", "Restart Gateway"),
+        ),
+        WizardGoal(
+            "advanced",
+            "Show advanced settings",
+            summary="Buckets, collection, custom profiles, destinations, selectors, and ordered routes.",
+            presets={"@Action": "bucket-set"},
+            fields=_REDACTION_ADVANCED_FIELDS,
+        ),
+        WizardGoal(
+            "interactive",
+            "Open the complete guided workflow",
+            summary="Run the CLI wizard in Activity with prompts and staged review.",
+            presets={"@Action": "interactive"},
+            fields=("Action",),
         ),
     )
 
@@ -2787,12 +3652,11 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.SPLUNK_DASHBOARDS: _splunk_dashboards_goals,
     SetupWizard.TRUSTED_PATHS: _trusted_paths_goals,
     SetupWizard.GUARDRAIL_ACTIONS: _guardrail_actions_goals,
+    SetupWizard.REDACTION: _redaction_goals,
 }
 
 
-def wizard_goals(
-    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None
-) -> tuple[WizardGoal, ...]:
+def wizard_goals(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardGoal, ...]:
     """Resolve the goal menu for ``wizard``.
 
     Goals whose ``available_when`` predicate is False for the current config
@@ -2824,11 +3688,10 @@ def _seed_parametrized_fields(
     presets and Webhook channel types). Returns ``None`` when no swap applies.
     """
 
-    del cfg
     if wizard == SetupWizard.OBSERVABILITY:
         preset_id = (presets.get("@Preset") or "").strip()
         if preset_id:
-            return observability_wizard_fields(preset_id)
+            return observability_wizard_fields(preset_id, cfg)
     if wizard == SetupWizard.WEBHOOKS:
         channel = (presets.get("@Type") or "").strip()
         if channel:
@@ -2836,9 +3699,7 @@ def _seed_parametrized_fields(
     return None
 
 
-def wizard_state_summary(
-    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None
-) -> str:
+def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
     Returns an empty string for wizards without a useful summary so the
@@ -2855,6 +3716,9 @@ def wizard_state_summary(
         connector_summary = ", ".join(connectors) if connectors else "none"
         role = "judge+agent available" if _any_active_connector_is_proxy(cfg) else "judge only"
         return f"Main: {main}  ·  Judge: {judge}  ·  Connectors: {connector_summary} ({role})"
+    if wizard == SetupWizard.REDACTION:
+        profile = _cfg_str(cfg, "observability.defaults.redaction_profile", "none") or "none"
+        return f"Default profile: {profile}  ·  Effective overrides come from the canonical v8 plan"
     if wizard == SetupWizard.GUARDRAIL:
         mode = _cfg_str(cfg, "guardrail.mode", "observe") or "observe"
         enabled = "on" if _guardrail_enabled(cfg) else "off"
@@ -2995,15 +3859,15 @@ def ai_discovery_wizard_fields(
             value=_cfg_bool("include_network_domains", True),
             default=_cfg_bool("include_network_domains", True),
         ),
-        WizardFormField("Output / Privacy", "section"),
         WizardFormField(
-            "Emit OTel",
+            "Online Model Provenance",
             "bool",
-            "--emit-otel",
-            "--no-emit-otel",
-            value=_cfg_bool("emit_otel", True),
-            default=_cfg_bool("emit_otel", True),
+            "--lookup-model-provenance-online",
+            "--no-lookup-model-provenance-online",
+            value=_cfg_bool("lookup_model_provenance_online", False),
+            default=_cfg_bool("lookup_model_provenance_online", False),
         ),
+        WizardFormField("Output / Privacy", "section"),
         WizardFormField(
             "Honor Workspace Signatures",
             "bool",
@@ -3080,7 +3944,11 @@ def _build_ai_discovery_args(fields: Sequence[WizardFormField]) -> tuple[str, ..
         ("Package Manifests", "--include-package-manifests", "--no-include-package-manifests"),
         ("Env Var Names", "--include-env-var-names", "--no-include-env-var-names"),
         ("Network Domains", "--include-network-domains", "--no-include-network-domains"),
-        ("Emit OTel", "--emit-otel", "--no-emit-otel"),
+        (
+            "Online Model Provenance",
+            "--lookup-model-provenance-online",
+            "--no-lookup-model-provenance-online",
+        ),
         ("Honor Workspace Signatures", "--allow-workspace-signatures", "--no-allow-workspace-signatures"),
         ("Store Raw Local Paths", "--store-raw-local-paths", "--no-store-raw-local-paths"),
     )
@@ -3197,9 +4065,7 @@ def notifications_routing_wizard_fields(
         else:
             current = bool(get_config_value(cfg, f"notifications.{slot}", fallback == "yes"))
         value = "yes" if current else "no"
-        fields.append(
-            WizardFormField(label, "bool", value=value, default=value)
-        )
+        fields.append(WizardFormField(label, "bool", value=value, default=value))
     fields.append(
         WizardFormField(
             "Restart Gateway After",
@@ -3356,7 +4222,9 @@ def _build_webhook_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
 
 def _build_guardrail_actions_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     action = wizard_field_value(fields, "Action") or "status"
-    connector = wizard_field_value(fields, "Connector")
+    connector = (
+        wizard_field_value(fields, "Connector") if _guardrail_form_scope(fields) == _GUARDRAIL_SCOPE_CONNECTOR else ""
+    )
     restart = wizard_bool_value(fields, "Restart Gateway", "yes")
 
     if action == "status":
@@ -3390,6 +4258,100 @@ def _build_guardrail_actions_args(fields: Sequence[WizardFormField]) -> tuple[st
     return tuple(args)
 
 
+_GUARDRAIL_CONNECTOR_SETUP_FLAGS: frozenset[str] = frozenset(
+    {
+        "--connector",
+        "--mode",
+        "--rule-pack",
+        "--rule-pack-dir",
+        "--block-message",
+        "--human-approval",
+        "--hilt-min-severity",
+        "--restart",
+        "--verify",
+    }
+)
+
+
+def _build_guardrail_setup_args(
+    fields: Sequence[WizardFormField],
+    cfg: object | Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Build a Guardrail setup argv without crossing the selected scope.
+
+    Connector scope is an allow-list: process-global scanner, port, Cisco,
+    strategy, judge, LLM-role, and redaction flags cannot leak into the argv
+    even if stale/injected form rows are present. Global scope omits a
+    connector on multi-connector installs so its all-active effect is explicit.
+    """
+
+    scope = _guardrail_form_scope(fields)
+    connector = wizard_field_value(fields, "Connector").strip()
+    disable = any(field.flag == "--disable" and field.value == "yes" for field in fields)
+    restart = wizard_bool_value(fields, "Restart After", "yes")
+
+    if disable:
+        args = ["guardrail", "disable", "--yes"]
+        if scope == _GUARDRAIL_SCOPE_CONNECTOR and connector:
+            args.extend(("--connector", connector))
+        if restart == "no":
+            args.append("--no-restart")
+        return tuple(args)
+
+    active = _active_connector_names_for_setup(cfg)
+    base: list[str] = ["setup", "guardrail", "--non-interactive"]
+    judge_provider = ""
+    judge_model = ""
+    judge_dirty = False
+    for field in fields:
+        if field.kind == "section" or field.flag == "--disable":
+            continue
+        if scope == _GUARDRAIL_SCOPE_CONNECTOR and field.flag and field.flag not in _GUARDRAIL_CONNECTOR_SETUP_FLAGS:
+            continue
+        if scope == _GUARDRAIL_SCOPE_GLOBAL and field.flag == "--connector" and len(active) > 1:
+            continue
+        if field.label == "Provider" and field.flag == "":
+            judge_provider = field.value
+            judge_dirty = judge_dirty or field.value != field.default
+            continue
+        if field.label == "Model" and field.flag == "--judge-model":
+            judge_model = field.value
+            judge_dirty = judge_dirty or field.value != field.default
+            continue
+        if field.kind == "bool":
+            if field.flag in {"--human-approval", "--disable-redaction"}:
+                if field.value == "yes" and field.flag:
+                    base.append(field.flag)
+                elif field.value == "no" and field.no_flag:
+                    base.append(field.no_flag)
+                continue
+            if field.value == field.default:
+                continue
+            if field.value == "yes" and field.flag:
+                base.append(field.flag)
+            elif field.value == "no" and field.no_flag:
+                base.append(field.no_flag)
+            continue
+        if field.kind not in {"string", "int", "choice", "password"} or not field.flag:
+            continue
+        if field.flag == "--block-message" and field.value != field.default:
+            base.extend((field.flag, field.value))
+            continue
+        if not field.value or (field.value == field.default and not field.required):
+            continue
+        if field.flag in _GUARDRAIL_REPEATABLE_FLAGS:
+            for item in (chunk.strip() for chunk in field.value.split(",")):
+                if item:
+                    base.extend((field.flag, item))
+            continue
+        base.extend((field.flag, field.value))
+
+    if judge_dirty and judge_model:
+        combined = f"{judge_provider}/{judge_model}" if judge_provider else judge_model
+        base.extend(("--judge-model", combined))
+    return tuple(base)
+
+
 def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     intents = notifications_routing_intents(fields)
     if intents:
@@ -3407,6 +4369,32 @@ _GUARDRAIL_REPEATABLE_FLAGS: frozenset[str] = frozenset(
 )
 
 
+def _connector_guardrail_mode_args(fields: Sequence[WizardFormField]) -> tuple[str, ...] | None:
+    """Build the focused Guardrail mode workflow for hook connectors.
+
+    ``setup codex`` and ``setup claude-code`` own additive, per-connector
+    roster updates. Keep every other Guardrail workflow on ``setup guardrail``
+    because judge, Cisco, scanner, and other global settings do not belong on
+    these connector-specific commands.
+    """
+
+    form_labels = {field.label for field in fields if field.kind != "section"}
+    if form_labels != {"Connector", "Mode"}:
+        return None
+    connector = wizard_field_value(fields, "Connector").strip().lower()
+    command = {
+        "claude-code": "claude-code",
+        "claudecode": "claude-code",
+        "codex": "codex",
+    }.get(connector)
+    if command is None:
+        return None
+    mode = wizard_field_value(fields, "Mode").strip().lower()
+    if mode not in {"observe", "action"}:
+        mode = "observe"
+    return ("setup", command, "--yes", "--mode", mode)
+
+
 def build_wizard_args(
     wizard: SetupWizard | int,
     fields: Sequence[WizardFormField],
@@ -3420,8 +4408,18 @@ def build_wizard_args(
     over per-wizard field metadata.
     """
 
-    del cfg
     wizard = SetupWizard(wizard)
+    if wizard in {SetupWizard.GUARDRAIL, SetupWizard.GUARDRAIL_ACTIONS}:
+        if error := _guardrail_connector_selection_error(cfg, fields):
+            raise ValueError(error)
+    if wizard == SetupWizard.GUARDRAIL:
+        connector_mode_args = _connector_guardrail_mode_args(fields)
+        if connector_mode_args is not None:
+            return connector_mode_args
+        return _build_guardrail_setup_args(fields, cfg)
+    if wizard == SetupWizard.GUARDRAIL_ACTIONS:
+        return _build_guardrail_actions_args(fields)
+    del cfg
     builder = _WIZARD_ARG_BUILDERS.get(wizard)
     if builder is not None:
         return builder(fields)
@@ -3462,8 +4460,7 @@ def build_wizard_args(
         splunk_mode_value = wizard_field_value(fields, "Mode")
     splunk_pipeline_labels = {"Enable O11y", "Enable Local Logs", "Enable Enterprise"}
     webhook_hmac_disabled = (
-        wizard == SetupWizard.WEBHOOKS
-        and wizard_bool_value(fields, "Enable HMAC Signing", "yes") == "no"
+        wizard == SetupWizard.WEBHOOKS and wizard_bool_value(fields, "Enable HMAC Signing", "yes") == "no"
     )
     for field in fields:
         if field.kind in {"section", "preset", "whtype", "regid"}:
@@ -3474,7 +4471,10 @@ def build_wizard_args(
                 continue
             if field.label == "Apply Dashboards After":
                 continue
-            if splunk_mode_value in {"splunk-o11y", "local-docker", "enterprise"} and field.label in splunk_pipeline_labels:
+            if (
+                splunk_mode_value in {"splunk-o11y", "local-docker", "enterprise"}
+                and field.label in splunk_pipeline_labels
+            ):
                 continue
         if wizard == SetupWizard.WEBHOOKS:
             # ``Enable HMAC Signing`` is a wizard-only toggle (no flag).
@@ -3491,13 +4491,10 @@ def build_wizard_args(
             judge_dirty = judge_dirty or field.value != field.default
             continue
         if field.kind == "bool":
-            # ``--human-approval`` / ``--disable-redaction`` are tri-state on
+            # ``--human-approval`` is tri-state on
             # the CLI (default=None), so emit the explicit on/off form rather
             # than relying on the "skip when value==default" shortcut.
-            if wizard == SetupWizard.GUARDRAIL and field.flag in {
-                "--human-approval",
-                "--disable-redaction",
-            }:
+            if wizard == SetupWizard.GUARDRAIL and field.flag == "--human-approval":
                 if field.value == "yes" and field.flag:
                     base.append(field.flag)
                 elif field.value == "no" and field.no_flag:
@@ -3548,6 +4545,7 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.SPLUNK_DASHBOARDS: lambda fields: _build_splunk_dashboards_args(fields),
     SetupWizard.TRUSTED_PATHS: lambda fields: _build_trusted_paths_args(fields),
     SetupWizard.GUARDRAIL_ACTIONS: lambda fields: _build_guardrail_actions_args(fields),
+    SetupWizard.REDACTION: lambda fields: _build_redaction_args(fields),
 }
 
 
@@ -3565,16 +4563,26 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
             missing.append("Name")
         # ``setup provider add`` accepts either a domain allow-list or a
         # --base-url; require at least one rather than mandating Domains.
-        if (
-            action == "add"
-            and not wizard_field_value(fields, "Domains")
-            and not wizard_field_value(fields, "Base URL")
-        ):
+        if action == "add" and not wizard_field_value(fields, "Domains") and not wizard_field_value(fields, "Base URL"):
             missing.append("Domains or Base URL")
     if wizard == SetupWizard.TRUSTED_PATHS:
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Directory"):
             missing.append("Directory")
+    if wizard == SetupWizard.REDACTION:
+        action = wizard_field_value(fields, "Action") or "status"
+        if action in {"apply-all", "apply-defaults"} and not wizard_field_value(fields, "Profile"):
+            missing.append("Profile")
+        if action in {"profile-show", "profile-set", "profile-remove"} and not wizard_field_value(
+            fields, "Custom Profile Name"
+        ):
+            missing.append("Custom Profile Name")
+        if action.startswith(("destination-", "route-")) and not wizard_field_value(fields, "Destination"):
+            missing.append("Destination")
+        if action in {"route-add", "route-set", "route-move", "route-remove"} and not wizard_field_value(
+            fields, "Route Name"
+        ):
+            missing.append("Route Name")
     if wizard == SetupWizard.CONNECTOR_SETUP:
         action = wizard_field_value(fields, "Action") or "setup"
         if action in {"setup", "remove"} and not wizard_field_value(fields, "Connector"):
@@ -3617,9 +4625,7 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
     return mask_secret(field.value)
 
 
-def mask_wizard_secret_values(
-    fields: Sequence[WizardFormField], args: Sequence[str]
-) -> tuple[str, ...]:
+def mask_wizard_secret_values(fields: Sequence[WizardFormField], args: Sequence[str]) -> tuple[str, ...]:
     """Redact password-field values from a rendered wizard command preview.
 
     The wizard header echoes the exact ``defenseclaw …`` argv it will run.
@@ -3646,33 +4652,6 @@ def mask_wizard_secret_values(
     return tuple(masked)
 
 
-def redaction_desired_action(currently_disabled: bool) -> str:
-    return "on" if currently_disabled else "off"
-
-
-def redaction_toggle_intent(currently_disabled: bool) -> SetupCommandIntent:
-    action = redaction_desired_action(currently_disabled)
-    return SetupCommandIntent(
-        label=f"setup redaction {action}",
-        args=("setup", "redaction", action, "--yes"),
-        category="setup",
-        origin="redaction-modal",
-    )
-
-
-def redaction_consequence_copy(currently_disabled: bool) -> tuple[str, ...]:
-    if currently_disabled:
-        return (
-            "Re-enables redaction - placeholders return on the next sidecar boot.",
-            "Existing already-emitted audit rows, Splunk events, OTel logs, and webhooks stay as written.",
-        )
-    return (
-        "Disabling redaction writes RAW content to SQLite audit DB.",
-        "RAW content also reaches Splunk HEC, OTel log exporters, webhooks, gateway.log, and the Logs panel.",
-        "Only proceed if every downstream sink lives in the same trust boundary as this install.",
-    )
-
-
 def notifications_desired_action(currently_enabled: bool) -> str:
     return "off" if currently_enabled else "on"
 
@@ -3691,7 +4670,7 @@ def notifications_consequence_copy(currently_enabled: bool) -> tuple[str, ...]:
     if currently_enabled:
         return (
             "Turning notifications OFF stops the toaster.",
-            "Audit DB, Splunk, OTel, and webhooks are NOT affected.",
+            "Event history, telemetry destinations, and webhooks are NOT affected.",
         )
     return (
         "Turning notifications ON surfaces hook, guardrail, and asset-policy blocks.",
@@ -3719,18 +4698,40 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
 
 
 def connector_setup_wizard_fields(
-    cfg: object | Mapping[str, Any] | None = None, os_name: str | None = None
+    cfg: object | Mapping[str, Any] | None = None,
+    os_name: str | None = None,
+    *,
+    overrides: Mapping[str, str] | None = None,
 ) -> tuple[WizardFormField, ...]:
+    overrides = dict(overrides or {})
     choices = supported_connector_choices(os_name)
-    connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip() or "openclaw"
-    # The stored ``claw.mode`` can name a proxy connector that this OS can't
-    # run (e.g. a config copied from macOS opened on Windows); fall back to
-    # the first supported connector rather than offering an unusable default.
+    if "@Connector" in overrides:
+        connector = str(overrides.get("@Connector", "") or "").strip()
+    else:
+        connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
+        if not connector:
+            connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip()
+    connector = connector or "openclaw"
+    # A stored compatibility mirror can name a proxy connector that this OS
+    # can't run (e.g. a config copied from macOS opened on Windows); fall back
+    # to the first supported connector rather than offering an unusable default.
     if connector not in choices:
         connector = choices[0] if choices else connector
-    mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
+    action = str(overrides.get("@Action", "setup") or "setup").strip().lower()
+    mode = (
+        str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
+        if action == "batch"
+        else _effective_guardrail_value(cfg, connector, "effective_mode", "guardrail.mode")
+    )
+    mode = mode.strip().lower()
+    if mode not in {"observe", "action"}:
+        mode = "observe"
+    # Rebuilders run only after Connector/Action driver changes. Re-seed this
+    # connector-scoped value instead of carrying a prior connector's mode (or
+    # a single-connector mode into intentional bare batch reconciliation).
+    overrides.pop("@Guardrail Mode", None)
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
-    return (
+    fields = (
         WizardFormField("Connector", "choice", value=connector, default=connector, options=choices),
         WizardFormField(
             "Connectors (CSV)",
@@ -3786,6 +4787,7 @@ def connector_setup_wizard_fields(
             hint="Allow removing the final connector and fully unconfiguring enforcement.",
         ),
     )
+    return _overlay_field_overrides(fields, overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -3964,9 +4966,7 @@ def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardForm
     return tuple(out)
 
 
-def _filter_fields_for_goal(
-    fields: Sequence[WizardFormField], goal: WizardGoal | None
-) -> tuple[WizardFormField, ...]:
+def _filter_fields_for_goal(fields: Sequence[WizardFormField], goal: WizardGoal | None) -> tuple[WizardFormField, ...]:
     """Narrow ``fields`` to the rows relevant for ``goal``.
 
     A row is kept when it is a required selector (so driver rows like
@@ -4092,7 +5092,9 @@ def _llm_wizard_fields_for(
         ),
         WizardFormField("Vertex AI", "section", visible_when=is_vertex),
         WizardFormField("Project ID", "string", "--vertex-project-id", visible_when=is_vertex),
-        WizardFormField("Region", "string", "--vertex-region", hint="GCP location, e.g. us-central1.", visible_when=is_vertex),
+        WizardFormField(
+            "Region", "string", "--vertex-region", hint="GCP location, e.g. us-central1.", visible_when=is_vertex
+        ),
         WizardFormField("Auth Mode", "choice", "--vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=is_vertex),
         WizardFormField(
             "Service Account JSON Env", "string", "--vertex-service-account-json-env", visible_when=is_vertex
@@ -4201,15 +5203,38 @@ def _guardrail_wizard_fields_for(
     cfg: object | Mapping[str, Any] | None = None,
 ) -> tuple[WizardFormField, ...]:
     overrides = overrides or {}
-    active_connectors = _guardrail_connector_keys(cfg)
-    connector = str(get_config_value(cfg, "guardrail.connector", "") or "")
-    if not connector:
-        connector = str(get_config_value(cfg, "claw.mode", "") or "")
-    if len(active_connectors) > 1 and "--connector" not in overrides:
+    active_connectors = _active_connector_names_for_setup(cfg)
+    scope = (overrides.get("@Scope") or _guardrail_default_scope(cfg)).strip()
+    if scope not in _GUARDRAIL_SCOPES:
+        scope = _guardrail_default_scope(cfg)
+    connector_policy = scope == _GUARDRAIL_SCOPE_CONNECTOR
+    if "--connector" in overrides:
+        connector = str(overrides.get("--connector", "") or "").strip()
+    else:
+        connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
+        if not connector:
+            connector = str(get_config_value(cfg, "claw.mode", "") or "").strip()
+        if connector_policy and len(active_connectors) > 1:
+            connector = ""
+    if not connector_policy and len(active_connectors) > 1:
+        # A global/all-active form has no selected-connector presentation.
         connector = ""
-    mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
+    mode = (
+        _effective_guardrail_value(cfg, connector, "effective_mode", "guardrail.mode")
+        if connector_policy and connector
+        else str(get_config_value(cfg, "guardrail.mode", "observe"))
+    )
+    mode = mode.strip().lower() or "observe"
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
+    rule_pack_dir = (
+        _effective_guardrail_value(cfg, connector, "effective_rule_pack_dir", "guardrail.rule_pack_dir")
+        if connector_policy and connector
+        else str(get_config_value(cfg, "guardrail.rule_pack_dir", "") or "")
+    )
+    rule_pack = os.path.basename(rule_pack_dir.rstrip("/\\")).strip().lower() if rule_pack_dir else "default"
+    if rule_pack not in {"default", "strict", "permissive"}:
+        rule_pack = "default"
     judge_provider = "bedrock"
     judge_model = ""
     judge_provider_default = "bedrock"
@@ -4254,10 +5279,33 @@ def _guardrail_wizard_fields_for(
     judge_bedrock_auth_mode = (
         overrides.get("--judge-bedrock-auth-mode") or judge_bedrock_auth_mode
     ).strip().lower() or "api_key"
-    hilt = "yes" if bool(get_config_value(cfg, "guardrail.hilt.enabled", False)) else "no"
-    redaction = "yes" if bool(get_config_value(cfg, "privacy.disable_redaction", False)) else "no"
+    effective_hilt = (
+        _effective_hilt_block(cfg, connector)
+        if connector_policy and connector
+        else get_config_value(cfg, "guardrail.hilt", None)
+    )
+    hilt = "yes" if bool(get_config_value(effective_hilt, "enabled", False)) else "no"
+    hilt_min_severity = str(get_config_value(effective_hilt, "min_severity", "HIGH") or "HIGH").upper()
+    block_message = (
+        _effective_guardrail_value(cfg, connector, "effective_block_message", "guardrail.block_message")
+        if connector_policy and connector
+        else str(get_config_value(cfg, "guardrail.block_message", "") or "")
+    )
+
+    def connector_scope(dv: Mapping[str, str]) -> bool:
+        return dv.get("scope") == _GUARDRAIL_SCOPE_CONNECTOR
+
+    def global_scope(dv: Mapping[str, str]) -> bool:
+        return dv.get("scope") == _GUARDRAIL_SCOPE_GLOBAL
+
+    def connector_or_bootstrap_target(dv: Mapping[str, str]) -> bool:
+        return connector_scope(dv) or (global_scope(dv) and len(active_connectors) <= 1)
+
     def j_strategy(dv: Mapping[str, str]) -> bool:
-        return (dv.get("strategy", "") or "").strip().lower() in {"regex_judge", "judge_first"}
+        return global_scope(dv) and (dv.get("strategy", "") or "").strip().lower() in {
+            "regex_judge",
+            "judge_first",
+        }
 
     def j_provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
         provider_visible = _provider_is(*names)
@@ -4277,18 +5325,34 @@ def _guardrail_wizard_fields_for(
     j_azure = j_provider_is("azure")
     j_region_opts = _llm_catalog_regions(judge_provider)
     candidates: tuple[WizardFormField, ...] = (
-        WizardFormField("Core", "section"),
+        WizardFormField("Operation Scope", "section"),
+        WizardFormField(
+            "Scope",
+            "choice",
+            value=scope,
+            default=_guardrail_default_scope(cfg),
+            options=_GUARDRAIL_SCOPES,
+            hint=(
+                "selected-connector exposes only connector policy; "
+                "global-all-active exposes process-global settings affecting every active connector."
+            ),
+        ),
+        WizardFormField("Connector Policy (selected active member)", "section", visible_when=connector_scope),
+        WizardFormField("Global Settings (affects all active connectors)", "section", visible_when=global_scope),
         WizardFormField(
             "Connector",
             "choice",
             "--connector",
             value=connector,
             default=connector,
-            options=("", *CONNECTORS),
+            options=_guardrail_connector_choices(cfg),
             required=True,
-            hint="Choose the connector peer this guardrail setup should update.",
+            hint=(
+                "Choose an active connector policy target. On fresh/single setup this also selects the setup target."
+            ),
+            visible_when=connector_or_bootstrap_target,
         ),
-        WizardFormField("Mode", "choice", "--mode", value=mode, default="observe", options=("observe", "action")),
+        WizardFormField("Mode", "choice", "--mode", value=mode, default=mode, options=("observe", "action")),
         WizardFormField(
             "Scanner Mode",
             "choice",
@@ -4296,9 +5360,16 @@ def _guardrail_wizard_fields_for(
             value=scanner_mode,
             default="local",
             options=("local", "remote", "both"),
+            visible_when=global_scope,
         ),
-        WizardFormField("Proxy Port", "int", "--port", value=str(get_config_value(cfg, "guardrail.port", "") or "")),
-        WizardFormField("Detection", "section"),
+        WizardFormField(
+            "Proxy Port",
+            "int",
+            "--port",
+            value=str(get_config_value(cfg, "guardrail.port", "") or ""),
+            visible_when=global_scope,
+        ),
+        WizardFormField("Detection", "section", visible_when=global_scope),
         WizardFormField(
             "Strategy",
             "choice",
@@ -4307,14 +5378,23 @@ def _guardrail_wizard_fields_for(
             default="regex_only",
             options=("regex_only", "regex_judge", "judge_first"),
             hint="Rule/regex scanning is the baseline; judge strategies add LLM review on top.",
+            visible_when=global_scope,
         ),
         WizardFormField(
             "Rule Pack",
             "choice",
             "--rule-pack",
-            value="default",
-            default="default",
+            value=rule_pack,
+            default=rule_pack,
             options=("default", "strict", "permissive"),
+        ),
+        WizardFormField(
+            "Block Message",
+            "string",
+            "--block-message",
+            value=block_message,
+            default=block_message,
+            hint="Custom message for the selected connector, or every connector in global scope.",
         ),
         WizardFormField("LLM Judge", "section", visible_when=j_strategy),
         WizardFormField(
@@ -4424,7 +5504,9 @@ def _guardrail_wizard_fields_for(
             "Endpoint", "string", "--judge-azure-endpoint", hint="https://name.openai.azure.com", visible_when=j_azure
         ),
         WizardFormField("API Version", "string", "--judge-azure-api-version", visible_when=j_azure),
-        WizardFormField("Auth Mode", "choice", "--judge-azure-auth-mode", options=AZURE_AUTH_MODES, visible_when=j_azure),
+        WizardFormField(
+            "Auth Mode", "choice", "--judge-azure-auth-mode", options=AZURE_AUTH_MODES, visible_when=j_azure
+        ),
         WizardFormField(
             "Deployment Aliases (CSV)",
             "string",
@@ -4449,24 +5531,27 @@ def _guardrail_wizard_fields_for(
             hint="Disable TLS verification for the judge (lab use only).",
             visible_when=j_provider_regional_or_custom,
         ),
-        WizardFormField("Cisco AI Defense", "section"),
+        WizardFormField("Cisco AI Defense (global)", "section", visible_when=global_scope),
         WizardFormField(
             "Endpoint",
             "string",
             "--cisco-endpoint",
             value=str(get_config_value(cfg, "cisco_ai_defense.endpoint", "") or ""),
+            visible_when=global_scope,
         ),
         WizardFormField(
             "API Key Env",
             "string",
             "--cisco-api-key-env",
             value=str(get_config_value(cfg, "cisco_ai_defense.api_key_env", "") or ""),
+            visible_when=global_scope,
         ),
         WizardFormField(
             "Timeout (ms)",
             "int",
             "--cisco-timeout-ms",
             value=str(get_config_value(cfg, "cisco_ai_defense.timeout_ms", "") or ""),
+            visible_when=global_scope,
         ),
         WizardFormField("Advanced", "section"),
         WizardFormField("Human Approval", "bool", "--human-approval", "--no-human-approval", value=hilt, default=hilt),
@@ -4474,17 +5559,31 @@ def _guardrail_wizard_fields_for(
             "Approval Min Severity",
             "choice",
             "--hilt-min-severity",
-            value=str(get_config_value(cfg, "guardrail.hilt.min_severity", "HIGH") or "HIGH").upper(),
-            default=str(get_config_value(cfg, "guardrail.hilt.min_severity", "HIGH") or "HIGH").upper(),
+            value=hilt_min_severity,
+            default=hilt_min_severity,
             options=("HIGH", "MEDIUM", "LOW", "CRITICAL"),
-        ),
-        WizardFormField(
-            "Disable Redaction", "bool", "--disable-redaction", "--enable-redaction", value=redaction, default=redaction
         ),
         WizardFormField("Post-Setup", "section"),
         WizardFormField("Restart After", "bool", "--restart", "--no-restart", value="yes", default="yes"),
         WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
-        WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
+        WizardFormField(
+            "Disable Selected Connector",
+            "bool",
+            "--disable",
+            value="no",
+            default="no",
+            hint="Uses guardrail disable --connector; peer connectors remain enabled.",
+            visible_when=connector_scope,
+        ),
+        WizardFormField(
+            "Disable Guardrail Globally",
+            "bool",
+            "--disable",
+            value="no",
+            default="no",
+            hint="Explicit global kill switch: affects every active connector.",
+            visible_when=global_scope,
+        ),
     )
     return _apply_dynamic_fields(
         candidates,
@@ -4493,6 +5592,7 @@ def _guardrail_wizard_fields_for(
             "provider": judge_provider,
             "bedrock_auth_mode": judge_bedrock_auth_mode,
             "strategy": strategy,
+            "scope": scope,
         },
     )
 
@@ -4504,8 +5604,14 @@ def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tu
 SPLUNK_PIPELINE_OPTIONS: tuple[str, ...] = ("splunk-o11y", "local-docker", "enterprise", "custom")
 
 
-def splunk_wizard_fields() -> tuple[WizardFormField, ...]:
-    return (
+def splunk_wizard_fields(os_name: str | None = None) -> tuple[WizardFormField, ...]:
+    local_available = local_splunk_stack_supported(os_name)
+    options = (
+        SPLUNK_PIPELINE_OPTIONS
+        if local_available
+        else tuple(option for option in SPLUNK_PIPELINE_OPTIONS if option != "local-docker")
+    )
+    fields = (
         WizardFormField("Pipeline", "section"),
         WizardFormField(
             "Mode",
@@ -4513,7 +5619,7 @@ def splunk_wizard_fields() -> tuple[WizardFormField, ...]:
             "",
             value="splunk-o11y",
             default="splunk-o11y",
-            options=SPLUNK_PIPELINE_OPTIONS,
+            options=options,
         ),
         WizardFormField(
             "Apply Dashboards After",
@@ -4546,6 +5652,10 @@ def splunk_wizard_fields() -> tuple[WizardFormField, ...]:
         WizardFormField("Show Credentials", "bool", "--show-credentials", value="no", default="no"),
         WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
     )
+    if local_available:
+        return fields
+    local_labels = {"Enable Local Logs", "Accept Splunk License", "Show Credentials"}
+    return tuple(field for field in fields if field.label not in local_labels)
 
 
 def splunk_wizard_follow_up_intents(
@@ -4566,7 +5676,13 @@ def splunk_wizard_follow_up_intents(
     )
 
 
-def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
+def observability_wizard_fields(
+    preset_id: str,
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[WizardFormField, ...]:
+    preset_options = tuple(
+        preset for preset, _ in OBSERVABILITY_PRESETS if preset != "local-otlp" or local_observability_stack_supported()
+    )
     fields: list[WizardFormField] = [
         WizardFormField(
             "Action",
@@ -4581,19 +5697,10 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
             "preset",
             value=preset_id,
             default=preset_id,
-            options=tuple(preset for preset, _ in OBSERVABILITY_PRESETS),
+            options=preset_options,
         ),
         WizardFormField("Name", "string", "--name", hint="Optional for add; required for enable/disable/remove."),
         WizardFormField("Enabled", "bool", "--enabled", "--disabled", value="yes", default="yes"),
-        WizardFormField(
-            "Connector",
-            "choice",
-            "--connector",
-            value="",
-            default="",
-            options=("", *CONNECTORS),
-            hint="Optional: scope this audit sink to one connector; blank keeps the CLI default/global behavior.",
-        ),
         WizardFormField("JSON Output", "bool", value="no", default="no", hint="For list actions."),
         WizardFormField("Dry Run", "bool", "--dry-run", value="no", default="no"),
     ]
@@ -4703,9 +5810,6 @@ def observability_wizard_fields(preset_id: str) -> tuple[WizardFormField, ...]:
                 WizardFormField("Endpoint", "string", "--endpoint", required=True),
                 WizardFormField(
                     "Protocol", "choice", "--protocol", value="grpc", default="grpc", options=("grpc", "http")
-                ),
-                WizardFormField(
-                    "Target", "choice", "--target", value="otel", default="otel", options=("otel", "audit_sinks")
                 ),
                 WizardFormField(
                     "Signals", "string", "--signals", value="traces,metrics,logs", default="traces,metrics,logs"
@@ -4990,8 +6094,6 @@ def _build_local_observability_args(fields: Sequence[WizardFormField]) -> tuple[
             args.extend(("--signals", signals))
         if (service := wizard_field_value(fields, "Service Name")) and service != "defenseclaw":
             args.extend(("--service-name", service))
-        if wizard_bool_value(fields, "Audit Sink", "yes") == "no":
-            args.append("--no-audit-sink")
     elif action == "reset" and wizard_bool_value(fields, "Confirm Reset", "no") == "yes":
         args.append("--yes")
     elif action == "logs":
@@ -5081,9 +6183,7 @@ def _guardrail_connector_keys(cfg: object | Mapping[str, Any] | None) -> list[st
             names = []
     overrides = get_config_value(cfg, "guardrail.connectors", None)
     override_keys = (
-        [str(k).strip() for k in overrides.keys() if str(k).strip()]
-        if isinstance(overrides, Mapping)
-        else []
+        [str(k).strip() for k in overrides.keys() if str(k).strip()] if isinstance(overrides, Mapping) else []
     )
     # Merge, preserving active-set order then any override-only keys.
     seen: set[str] = set()
@@ -5107,12 +6207,48 @@ def _effective_guardrail_value(
     """
 
     guardrail = getattr(cfg, "guardrail", None)
+    if (
+        method_name == "effective_hook_fail_mode"
+        and connector in {"claudecode", "codex", "amp"}
+        and hasattr(cfg, "data_dir")
+    ):
+        try:
+            from defenseclaw.fail_mode import connector_fail_mode_report
+
+            report = connector_fail_mode_report(
+                cfg,
+                connector,
+                inspect_effective_policy=False,
+            )
+            detail = f"provenance: {report['provenance']}"
+            if report["drift"]:
+                detail += f"; status: {', '.join(report['drift'])}"
+            return f"{report['effective']} ({detail})"
+        except Exception:  # noqa: BLE001 - config editor must remain available during drift.
+            pass
     resolver = getattr(guardrail, method_name, None) if guardrail is not None else None
     if callable(resolver):
         try:
             return str(resolver(connector) or "")
         except Exception:  # noqa: BLE001 - degrade to the raw global value.
             pass
+    leaf = {
+        "effective_mode": "mode",
+        "effective_hook_fail_mode": "hook_fail_mode",
+        "effective_block_message": "block_message",
+        "effective_rule_pack_dir": "rule_pack_dir",
+    }.get(method_name, "")
+    overrides = get_config_value(cfg, "guardrail.connectors", None)
+    if connector and leaf and isinstance(overrides, Mapping):
+        normalized = connector.strip().lower().replace("-", "").replace("_", "")
+        for name, entry in overrides.items():
+            candidate = str(name).strip().lower().replace("-", "").replace("_", "")
+            if candidate != normalized:
+                continue
+            value = get_config_value(entry, leaf, "")
+            if str(value or "").strip():
+                return str(value)
+            break
     return str(get_config_value(cfg, fallback_path, "") or "")
 
 
@@ -5162,7 +6298,18 @@ def _effective_hilt_block(cfg: object | Mapping[str, Any] | None, connector: str
             return resolver(connector)
         except Exception:  # noqa: BLE001 - degrade to the raw global block.
             pass
-    return getattr(guardrail, "hilt", None) if guardrail is not None else None
+    overrides = get_config_value(cfg, "guardrail.connectors", None)
+    if connector and isinstance(overrides, Mapping):
+        normalized = connector.strip().lower().replace("-", "").replace("_", "")
+        for name, entry in overrides.items():
+            candidate = str(name).strip().lower().replace("-", "").replace("_", "")
+            if candidate != normalized:
+                continue
+            block = get_config_value(entry, "hilt", None)
+            if block is not None:
+                return block
+            break
+    return get_config_value(cfg, "guardrail.hilt", None)
 
 
 def _effective_judge_hook_state(cfg: object | Mapping[str, Any] | None, connector: str) -> str:
@@ -5268,19 +6415,17 @@ def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> l
                 _effective_guardrail_bool(cfg, connector, "effective_enabled", "", default=True),
             )
         )
-        # E4d: hook-response fail mode (open=allow on failure, closed=block).
-        fail_field = _field(
-            cfg,
-            "Hook Fail Mode",
-            f"guardrail.connectors.{connector}.hook_fail_mode",
-            "choice",
-            ("open", "closed"),
-            f"Per-connector hook fail mode for {connector} (inherits the global mode when unset).",
-        )
+        # Fail-mode writes must use the Guardrail action so config and the
+        # installed registration are updated transactionally. Keep the live
+        # effective value visible here, but do not expose a raw config edit.
+        fail_value = _effective_guardrail_value(cfg, connector, "effective_hook_fail_mode", "guardrail.hook_fail_mode")
         rows.append(
-            _field_with_original(
-                fail_field,
-                _effective_guardrail_value(cfg, connector, "effective_hook_fail_mode", "guardrail.hook_fail_mode"),
+            ConfigField(
+                label="Hook Fail Mode (use Guardrail action)",
+                key=f"guardrail.connectors.{connector}.hook_fail_mode",
+                kind="header",
+                value=fail_value,
+                original=fail_value,
             )
         )
         # E4d: human-in-the-loop approval. A per-connector hilt block fully
@@ -5353,13 +6498,10 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         _header(".. Core .."),
         _field(cfg, "Enabled", "guardrail.enabled", "bool", hint="Master guardrail switch."),
         _field(cfg, "Mode", "guardrail.mode", "choice", ("observe", "action"), "observe=log only; action=block."),
-        _field(
-            cfg,
-            "Hook Fail Mode",
+        _header(
+            "Hook Fail Mode (use Guardrail action)",
             "guardrail.hook_fail_mode",
-            "choice",
-            ("open", "closed"),
-            "open=allow hook response failures; closed=block.",
+            _value(cfg, "guardrail.hook_fail_mode"),
         ),
         _field(
             cfg,
@@ -5569,9 +6711,15 @@ def _ai_discovery_section(cfg: object | Mapping[str, Any] | None) -> ConfigSecti
         _field(
             cfg, "Provider Domains", "ai_discovery.include_network_domains", "bool", hint="Detect provider domains."
         ),
+        _field(
+            cfg,
+            "Online Model Provenance",
+            "ai_discovery.lookup_model_provenance_online",
+            "bool",
+            hint="Send recovered public model repository IDs to Hugging Face for lineage enrichment.",
+        ),
         _field(cfg, "Max Files", "ai_discovery.max_files_per_scan", "int", hint="Max files per scan."),
         _field(cfg, "Max File Bytes", "ai_discovery.max_file_bytes", "int", hint="Skip larger files."),
-        _field(cfg, "Emit OTel", "ai_discovery.emit_otel", "bool", hint="Emit sanitized AI visibility telemetry."),
         _field(
             cfg,
             "Store Raw Local Paths",
@@ -5661,53 +6809,6 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
     )
 
 
-def _otel_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
-    return (
-        _header(".. Process-wide policy .."),
-        _field(cfg, "Enabled", "otel.enabled", "bool", hint="Master OpenTelemetry export switch."),
-        _header(".. Traces .."),
-        _field(
-            cfg,
-            "Sampler",
-            "otel.traces.sampler",
-            "choice",
-            (
-                "always_on",
-                "always_off",
-                "traceidratio",
-                "parentbased_always_on",
-                "parentbased_always_off",
-                "parentbased_traceidratio",
-            ),
-            "Trace sampler.",
-        ),
-        _field(cfg, "Sampler Arg", "otel.traces.sampler_arg", hint="Trace sampler argument."),
-        _header(".. Logs .."),
-        _field(
-            cfg,
-            "Emit individual findings",
-            "otel.logs.emit_individual_findings",
-            "bool",
-            hint="One record per finding.",
-        ),
-        _header(".. Metrics .."),
-        _field(
-            cfg, "Export interval (s)", "otel.metrics.export_interval_s", "int", hint="Seconds between metric pushes."
-        ),
-        _field(
-            cfg, "Temporality", "otel.metrics.temporality", "choice", ("delta", "cumulative"), "Metric temporality."
-        ),
-        _header(".. Batch .."),
-        _field(
-            cfg, "Max export batch size", "otel.batch.max_export_batch_size", "int", hint="Max records per request."
-        ),
-        _field(cfg, "Scheduled delay (ms)", "otel.batch.scheduled_delay_ms", "int", hint="Batch flush delay."),
-        _field(cfg, "Max queue size", "otel.batch.max_queue_size", "int", hint="In-memory queue size."),
-        _header(".. Resource .."),
-        _field(cfg, "Attributes", "otel.resource.attributes", hint="CSV resource attributes."),
-    )
-
-
 def _asset_policy_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
     fields = [
         _field(cfg, "Enabled", "asset_policy.enabled", "bool", hint="Master asset admission switch."),
@@ -5774,9 +6875,7 @@ def _asset_policy_connector_keys(cfg: object | Mapping[str, Any] | None) -> list
     names = _active_connector_names_for_setup(cfg)
     overrides = get_config_value(cfg, "asset_policy.connectors", None)
     override_keys = (
-        [str(key).strip().lower() for key in overrides if str(key).strip()]
-        if isinstance(overrides, Mapping)
-        else []
+        [str(key).strip().lower() for key in overrides if str(key).strip()] if isinstance(overrides, Mapping) else []
     )
     seen: set[str] = set()
     merged: list[str] = []
@@ -5916,6 +7015,72 @@ def _connector_hook_map_fields(cfg: object | Mapping[str, Any] | None) -> tuple[
     return tuple(out)
 
 
+def _v8_observability_fields(
+    status: V8OperatorStatus | None,
+    *,
+    error: str = "",
+) -> tuple[ConfigField, ...]:
+    """Render the masked compiler-owned v8 plan as read-only config rows."""
+
+    how_to = _header(
+        "How to edit",
+        "observability.hint",
+        "press E to manage destinations; collection, routes, redaction, and retention live in config.yaml",
+    )
+    if status is None:
+        return (
+            _header("Status", "observability.status", error.strip() or "loading canonical effective plan..."),
+            how_to,
+        )
+
+    retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
+    fields: list[ConfigField] = [
+        _header("Plan Digest", "observability.plan_digest", status.plan_digest[:12]),
+        _header("Bucket Catalog", "observability.bucket_catalog_version", str(status.bucket_catalog_version)),
+        _header("Local SQLite", "observability.local.path", status.local_path or "(default)"),
+        _header("Retention", "observability.local.retention_days", retention),
+        _header(
+            "Judge Bodies",
+            "observability.local.judge_bodies_path",
+            ("enabled · " if status.judge_bodies_enabled else "disabled · ")
+            + (status.judge_bodies_path or "(default)"),
+        ),
+        _header(".. Destinations .."),
+    ]
+    if not status.destinations:
+        fields.append(_header("Destinations", "observability.destinations", "none configured"))
+    for destination in status.destinations:
+        signals = ",".join(destination.selected_signals) or "none"
+        buckets = ",".join(destination.buckets) or "none"
+        state = "enabled" if destination.enabled else "disabled"
+        summary = (
+            f"{destination.kind} · {state} · signals={signals} · "
+            f"redaction={destination.redaction_label} · buckets={buckets} · "
+            f"limits={destination.delivery_limits_label}"
+        )
+        if destination.endpoint:
+            summary += f" · {destination.endpoint}"
+        fields.append(_header(destination.name, f"observability.destinations.{destination.name}", summary))
+    fields.append(_header(".. Collection Buckets .."))
+    for bucket in status.buckets:
+        signals = ",".join(bucket.collected_signals) or "disabled"
+        fields.append(
+            _header(
+                bucket.name,
+                f"observability.buckets.{bucket.name}",
+                f"collect={signals} · local_redaction={bucket.redaction_profile}",
+            )
+        )
+    if status.warnings:
+        fields.append(_header(".. Warnings .."))
+        fields.extend(
+            _header(code, f"observability.warnings.{index}", f"{path}: {summary}")
+            for index, (code, path, summary) in enumerate(status.warnings)
+        )
+    fields.append(how_to)
+    return tuple(fields)
+
+
 def _llm_override_fields(
     cfg: object | Mapping[str, Any] | None,
     label: str,
@@ -5931,36 +7096,6 @@ def _llm_override_fields(
         _field(cfg, "Timeout (s)", prefix + ".timeout", "int", hint="Per-request timeout."),
         _field(cfg, "Max Retries", prefix + ".max_retries", "int", hint="Retry count."),
     )
-
-
-def _audit_sink_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
-    sinks = get_config_value(cfg, "audit_sinks", ()) or ()
-    hint = ConfigField(
-        "How to edit",
-        "audit_sinks.hint",
-        "header",
-        "press E to open the interactive editor",
-        "press E to open the interactive editor",
-    )
-    if not sinks:
-        return (
-            ConfigField("Status", "audit_sinks.summary", "header", "no sinks configured", "no sinks configured"),
-            hint,
-        )
-    out = []
-    for sink in sinks:
-        name = str(_mapping_or_attr(sink, "name", "sink"))
-        kind = str(_mapping_or_attr(sink, "kind", ""))
-        enabled = bool(_mapping_or_attr(sink, "enabled", True))
-        # ``kind`` is the audit-sink type (``stdout``, ``file``,
-        # ``splunk_hec``, …) — every lowercase value would be parsed
-        # as a Rich style and the kind/state would silently drop
-        # from the summary. Escape both bracket pairs.
-        state = "enabled" if enabled else "disabled"
-        summary = f"{name} \\[{kind}] \\[{state}]"
-        out.append(ConfigField(name, "audit_sinks." + name, "header", summary, summary))
-    out.append(hint)
-    return tuple(out)
 
 
 def _webhook_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
@@ -6125,7 +7260,21 @@ def _connector_setup_alias(wire: str) -> str:
     normalized = wire.strip().lower().replace("_", "-")
     if normalized in {"claudecode", "claude-code"}:
         return "claude-code"
-    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}:
+    if normalized in {
+        "openclaw",
+        "zeptoclaw",
+        "codex",
+        "hermes",
+        "cursor",
+        "windsurf",
+        "geminicli",
+        "copilot",
+        "openhands",
+        "antigravity",
+        "opencode",
+        "amp",
+        "omnigent",
+    }:
         return normalized
     return ""
 

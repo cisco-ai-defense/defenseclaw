@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"time"
 )
 
 const maxAgentDiscoveryAgents = 32
@@ -64,19 +64,21 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&report); err != nil {
-		if a.otel != nil {
-			a.otel.RecordAgentDiscovery(r.Context(), "unknown", false, "malformed", 0, 0, 0)
-			a.otel.EmitAgentDiscoverySummaryLog(r.Context(), "unknown", false, "malformed", 0, 0, 0)
-		}
+		a.emitAgentDiscoverySummary(r.Context(), agentDiscoveryTelemetrySummary{
+			source: "unknown", result: "malformed",
+		})
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
 
 	dropped, err := a.validateAgentDiscoveryReport(&report)
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordAgentDiscovery(r.Context(), discoverySourceOrUnknown(report.Source), report.CacheHit, "rejected", float64(report.DurationMs), len(report.Agents), 0)
-			a.otel.EmitAgentDiscoverySummaryLog(r.Context(), discoverySourceOrUnknown(report.Source), report.CacheHit, "rejected", float64(report.DurationMs), len(report.Agents), 0)
+		a.emitAgentDiscoverySummary(r.Context(), agentDiscoveryTelemetrySummary{
+			source: discoverySourceOrUnknown(report.Source), cacheHit: report.CacheHit,
+			result: "rejected", durationMs: report.DurationMs, agentsTotal: len(report.Agents),
+		})
+		if len(dropped) > 0 {
+			_ = a.emitManagedAgentInventory(r.Context(), &report, 0, true)
 		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -90,9 +92,7 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 	// counter so the silent drop is visible to operators triaging
 	// "why isn't agent X showing up?".
 	for _, name := range dropped {
-		if a.otel != nil {
-			a.otel.RecordAgentDiscoveryError(r.Context(), name, "unknown_connector")
-		}
+		a.emitAgentDiscoveryError(r.Context(), discoverySourceOrUnknown(report.Source), name, "unknown_connector")
 	}
 
 	source := discoverySourceOrUnknown(report.Source)
@@ -101,33 +101,20 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 		if signal.Installed {
 			installed++
 		}
-		if a.otel != nil {
-			probeStatus := normalizeDiscoveryProbeStatus(signal.VersionProbeStatus)
-			a.otel.RecordAgentDiscoverySignal(r.Context(), name, signal.Installed, signal.HasConfig, signal.HasBinary, probeStatus)
-			a.otel.EmitAgentDiscoverySignalLog(r.Context(), name, signal.Installed, signal.HasConfig, signal.HasBinary, probeStatus)
-			if reason := normalizeDiscoveryErrorClass(signal.ErrorClass); reason != "" {
-				a.otel.RecordAgentDiscoveryError(r.Context(), name, reason)
-			}
+		probeStatus := normalizeDiscoveryProbeStatus(signal.VersionProbeStatus)
+		a.emitAgentDiscoverySignal(r.Context(), source, name, signal, probeStatus)
+		if reason := normalizeDiscoveryErrorClass(signal.ErrorClass); reason != "" {
+			a.emitAgentDiscoveryError(r.Context(), source, name, reason)
 		}
 	}
-	if a.otel != nil {
-		a.otel.RecordAgentDiscovery(r.Context(), source, report.CacheHit, "ok", float64(report.DurationMs), len(report.Agents), installed)
-		a.otel.EmitAgentDiscoverySummaryLog(r.Context(), source, report.CacheHit, "ok", float64(report.DurationMs), len(report.Agents), installed)
-	}
-
-	emitLifecycle(r.Context(), "agent_discovery", "completed", map[string]string{
-		"source":          source,
-		"cache_hit":       strconv.FormatBool(report.CacheHit),
-		"agents_total":    strconv.Itoa(len(report.Agents)),
-		"installed_total": strconv.Itoa(installed),
-		"duration_ms":     fmt.Sprintf("%d", report.DurationMs),
+	a.emitAgentDiscoverySummary(r.Context(), agentDiscoveryTelemetrySummary{
+		source: source, cacheHit: report.CacheHit, result: "ok", durationMs: report.DurationMs,
+		agentsTotal: len(report.Agents), installedTotal: installed,
 	})
-
-	// managed_enterprise: ship the installed-agent roster to AI Defense
-	// as an agent_inventory discovery event. Built from the validated
-	// (sanitized) report we already hold — no new scan or store. No-op
-	// outside managed mode.
-	a.emitAgentInventory(r.Context(), &report, installed)
+	// Managed inventory is a separate ai.discovery snapshot. It remains
+	// available when the operator disables the agent.lifecycle family and the
+	// generated managed plan prevents it from reaching sibling destinations.
+	_ = a.emitManagedAgentInventory(r.Context(), &report, installed, len(dropped) > 0)
 
 	a.writeJSON(w, http.StatusOK, agentDiscoveryResponse{
 		Status:    "ok",
@@ -153,10 +140,15 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 	if strings.TrimSpace(report.ScannedAt) == "" || len(report.ScannedAt) > 64 {
 		return nil, fmt.Errorf("scanned_at is required")
 	}
+	scannedAt, err := time.Parse(time.RFC3339Nano, report.ScannedAt)
+	if err != nil {
+		return nil, fmt.Errorf("scanned_at must be RFC3339")
+	}
+	report.ScannedAt = scannedAt.UTC().Format(time.RFC3339Nano)
 	if report.DurationMs < 0 {
 		return nil, fmt.Errorf("duration_ms must be non-negative")
 	}
-	if len(report.Agents) == 0 {
+	if report.Agents == nil {
 		return nil, fmt.Errorf("agents is required")
 	}
 	if len(report.Agents) > maxAgentDiscoveryAgents {
@@ -172,6 +164,7 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 		reg = getFallbackConnectorRegistry()
 	}
 	var dropped []string
+	validatedAgents := make(map[string]agentDiscoverySignal, len(report.Agents))
 	for name, signal := range report.Agents {
 		normalized := strings.TrimSpace(strings.ToLower(name))
 		if normalized == "" {
@@ -182,14 +175,18 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 			// the whole batch. Caller surfaces this as an OTel signal
 			// so the drop isn't invisible.
 			dropped = append(dropped, normalized)
-			delete(report.Agents, name)
 			continue
 		}
 		if err := validateDiscoverySignal(signal); err != nil {
 			return nil, fmt.Errorf("%s: %w", normalized, err)
 		}
+		if _, duplicate := validatedAgents[normalized]; duplicate {
+			return nil, fmt.Errorf("duplicate connector name")
+		}
+		validatedAgents[normalized] = signal
 	}
-	if len(report.Agents) == 0 {
+	report.Agents = validatedAgents
+	if len(report.Agents) == 0 && len(dropped) > 0 {
 		// Every entry was unknown — preserve the historical 400 so a
 		// CLI that ONLY reports unknown connectors gets a clear error
 		// (otherwise the operator-side telemetry shows agent_discovery=ok
@@ -201,12 +198,21 @@ func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) (
 }
 
 func validateDiscoverySignal(signal agentDiscoverySignal) error {
+	if !signal.HasConfig && (signal.ConfigBasename != "" || signal.ConfigPathHash != "") {
+		return fmt.Errorf("configuration metadata requires has_config")
+	}
+	if !signal.HasBinary && (signal.BinaryBasename != "" || signal.BinaryPathHash != "" || signal.Version != "") {
+		return fmt.Errorf("binary metadata requires has_binary")
+	}
 	for _, v := range []string{signal.ConfigBasename, signal.BinaryBasename} {
 		if len(v) > 128 {
 			return fmt.Errorf("basename too long")
 		}
 		if v != "" && (filepath.Base(v) != v || strings.ContainsAny(v, `/\`)) {
 			return fmt.Errorf("basename must not contain path separators")
+		}
+		if v != "" && inventorySafeBasename(v) != v {
+			return fmt.Errorf("basename contains unsafe characters")
 		}
 	}
 	for _, v := range []string{signal.ConfigPathHash, signal.BinaryPathHash} {
@@ -216,6 +222,10 @@ func validateDiscoverySignal(signal agentDiscoverySignal) error {
 	}
 	if len(signal.Version) > 200 {
 		return fmt.Errorf("version too long")
+	}
+	if signal.Version != "" && (inventorySafeBounded(signal.Version, 200) != signal.Version ||
+		!endpointInventoryVersionPattern.MatchString(signal.Version)) {
+		return fmt.Errorf("version must be a safe version label")
 	}
 	if normalizeDiscoveryProbeStatus(signal.VersionProbeStatus) != signal.VersionProbeStatus && signal.VersionProbeStatus != "" {
 		return fmt.Errorf("unsupported version_probe_status")

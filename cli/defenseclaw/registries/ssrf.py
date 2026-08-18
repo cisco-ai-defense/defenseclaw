@@ -19,21 +19,28 @@ need to ingest from a private host must opt in with ``--allow-private``;
 the flag is plumbed all the way through the CLI surface so an
 "oops, my URL was internal" mistake stays explicit.
 
-This module is intentionally pure-Python and stdlib-only so it can be
-unit-tested without network access — :func:`guard_url` performs DNS
-resolution via :func:`socket.getaddrinfo`, but that lookup can be
-mocked in tests by passing a custom ``resolver`` callback.
+DNS resolution is dependency-injected so the guard can be unit-tested
+without network access. :func:`guard_url` uses
+:func:`socket.getaddrinfo` by default, but tests can pass a custom
+``resolver`` callback.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import contextvars
+import functools
 import ipaddress
 import os
 import socket
 import threading
-from collections.abc import Callable, Iterator
+import weakref
+from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import dataclass
 from urllib.parse import urlparse
+
+import idna
 
 # RFC 6598 carrier-grade NAT range. Python's ``ipaddress.is_private``
 # does NOT include this block — it predates RFC 6598 — so we have to
@@ -122,6 +129,35 @@ class SSRFError(ValueError):
 Resolver = Callable[[str], list[str]]
 
 
+def _canonical_dns_host(host: str | bytes | None) -> str:
+    """Return the ASCII hostname representation used by AnyIO."""
+    if isinstance(host, bytes):
+        try:
+            value = host.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise SSRFError("DNS host contains non-ASCII bytes") from exc
+    elif isinstance(host, str):
+        value = host
+    else:
+        raise SSRFError("DNS host must be text or ASCII bytes")
+
+    value = value.strip()
+    if not value:
+        raise SSRFError("DNS host is empty")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise SSRFError("DNS host contains control characters")
+
+    try:
+        encoded = value.encode("ascii")
+    except UnicodeEncodeError:
+        try:
+            encoded = idna.encode(value, uts46=True)
+        except idna.IDNAError as exc:
+            raise SSRFError(f"invalid internationalized DNS host {value!r}") from exc
+
+    return encoded.decode("ascii").lower()
+
+
 def _default_resolver(host: str) -> list[str]:
     """Resolve *host* via getaddrinfo, returning a list of literal IPs.
 
@@ -196,9 +232,10 @@ def resolve_and_pin(
         raise SSRFError(
             f"unsupported URL scheme {scheme!r}; expected http or https"
         )
-    host = (parsed.hostname or "").strip().lower()
-    if not host:
+    parsed_host = parsed.hostname
+    if not parsed_host or not parsed_host.strip():
         raise SSRFError("URL is missing a host component")
+    host = _canonical_dns_host(parsed_host)
 
     if host in {"localhost", "ip6-localhost"} and not allow_private:
         raise SSRFError("refusing to fetch from localhost (use --allow-private to opt in)")
@@ -273,6 +310,119 @@ def resolve_and_pin(
 # :func:`socket.getaddrinfo`, so pinning there covers every client.
 
 _GETADDRINFO_PIN_LOCK = threading.Lock()
+_MISSING_LOOP_RESOLVER = object()
+
+
+@dataclass(frozen=True)
+class _AnalyzerDNSPolicy:
+    trusted_hosts: frozenset[str]
+    loopback_only_hosts: frozenset[str]
+
+
+@dataclass
+class _AsyncResolverPinState:
+    users: int
+    original_override: object
+
+
+_ANALYZER_DNS_POLICY: contextvars.ContextVar[_AnalyzerDNSPolicy | None] = (
+    contextvars.ContextVar(
+        "defenseclaw_analyzer_dns_policy",
+        default=None,
+    )
+)
+_ASYNC_RESOLVER_STATES: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, _AsyncResolverPinState
+] = weakref.WeakKeyDictionary()
+_ASYNC_RESOLVER_STATE_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def analyzer_dns_resolution(
+    *trusted_hosts: str | bytes,
+    loopback_only_hosts: tuple[str | bytes, ...] = (),
+) -> Iterator[None]:
+    """Allow analyzer DNS without opening a private-network bypass.
+
+    Explicitly configured analyzer endpoint hosts are trusted, including
+    private endpoints selected by the operator. Implicit local-provider hosts
+    may be marked loopback-only so poisoned ``localhost`` answers cannot reach
+    another private or metadata address. Other hosts (for example a redirect)
+    may resolve only to public addresses. The task-local policy keeps
+    concurrent MCP transport lookups fail closed.
+    """
+    current = _ANALYZER_DNS_POLICY.get()
+    inherited = current.trusted_hosts if current is not None else frozenset()
+    trusted = inherited.union(_canonical_dns_host(host) for host in trusted_hosts)
+    inherited_loopback = (
+        current.loopback_only_hosts if current is not None else frozenset()
+    )
+    loopback_only = inherited_loopback.union(
+        _canonical_dns_host(host) for host in loopback_only_hosts
+    ).difference(trusted)
+    token = _ANALYZER_DNS_POLICY.set(
+        _AnalyzerDNSPolicy(trusted, loopback_only)
+    )
+    try:
+        yield
+    finally:
+        _ANALYZER_DNS_POLICY.reset(token)
+
+
+@contextlib.asynccontextmanager
+async def pinned_async_getaddrinfo() -> AsyncIterator[None]:
+    """Route the active event loop's resolver through the socket pin."""
+    loop = asyncio.get_running_loop()
+
+    async def _through_socket(
+        host,
+        port,
+        *,
+        family=0,
+        type=0,
+        proto=0,
+        flags=0,
+    ):
+        resolve = functools.partial(
+            socket.getaddrinfo,
+            host,
+            port,
+            family,
+            type,
+            proto,
+            flags,
+        )
+        return await asyncio.to_thread(resolve)
+
+    with _ASYNC_RESOLVER_STATE_LOCK:
+        state = _ASYNC_RESOLVER_STATES.get(loop)
+        if state is None:
+            original_override = vars(loop).get(
+                "getaddrinfo",
+                _MISSING_LOOP_RESOLVER,
+            )
+            loop.getaddrinfo = _through_socket  # type: ignore[method-assign]
+            state = _AsyncResolverPinState(1, original_override)
+            _ASYNC_RESOLVER_STATES[loop] = state
+        else:
+            state.users += 1
+
+    # There is no await between registering this scope and yielding it, so
+    # cancellation cannot strand a registered-but-unentered user. Once the
+    # caller enters, normal task cancellation and BaseException paths unwind
+    # the scope through this finally block.
+    try:
+        yield
+    finally:
+        with _ASYNC_RESOLVER_STATE_LOCK:
+            state.users -= 1
+            if state.users == 0:
+                if state.original_override is _MISSING_LOOP_RESOLVER:
+                    if "getaddrinfo" in vars(loop):
+                        del loop.getaddrinfo
+                else:
+                    loop.getaddrinfo = state.original_override  # type: ignore[method-assign]
+                del _ASYNC_RESOLVER_STATES[loop]
 
 
 @contextlib.contextmanager
@@ -285,36 +435,103 @@ def pinned_getaddrinfo(host: str, port: int, ip: str) -> Iterator[None]:
     *different* port is also re-pointed at the vetted IP (clients may dial
     a derived port). A lookup for any *other* host raises :class:`SSRFError`
     so a library cannot side-channel a request to an unvetted destination
-    during the pinned operation.
+    during the pinned operation. Configured analyzers can opt into their
+    normal resolver in a task-local scope; MCP redirects and proxy lookups
+    stay pinned.
 
     Held under a process-wide lock for the duration of the block because it
     monkeypatches a module global; concurrent pinned fetches serialise on
     connect, matching the adapter ``_PinnedConnect`` contract.
     """
-    target_host = (host or "").strip().lower()
+    target_host = _canonical_dns_host(host)
     family_ip = ipaddress.ip_address(ip)
+    pinned_family = socket.AF_INET6 if family_ip.version == 6 else socket.AF_INET
     with _GETADDRINFO_PIN_LOCK:
         original = socket.getaddrinfo
 
-        def _pinned(node, service, *args, **kwargs):  # type: ignore[no-untyped-def]
-            asked = (str(node).strip().lower() if node is not None else "")
-            if asked == target_host:
-                # Resolve to the vetted IP literal. Preserve the requested
-                # service/port so a derived port still connects correctly;
-                # the Host header / TLS SNI continue to carry the hostname
-                # because those travel independently of the dial address.
-                fam = socket.AF_INET6 if family_ip.version == 6 else socket.AF_INET
-                return original(ip, service, fam, *args[1:], **kwargs)
-            # An IP literal that equals our pin is fine (some clients
-            # pre-resolve and re-call getaddrinfo with the IP).
+        def _pinned(  # type: ignore[no-untyped-def]
+            host,
+            port,
+            family=0,
+            type=0,
+            proto=0,
+            flags=0,
+        ):
+            asked = _canonical_dns_host(host)
+            matches_pin = asked == target_host
             try:
-                if ipaddress.ip_address(asked) == family_ip:
-                    return original(ip, service, *args, **kwargs)
+                matches_pin = matches_pin or ipaddress.ip_address(asked) == family_ip
             except ValueError:
                 pass
-            raise SSRFError(
-                f"unexpected DNS resolution for {asked!r} during pinned "
-                f"fetch of {target_host!r} (possible DNS rebinding)"
+            if not matches_pin:
+                analyzer_policy = _ANALYZER_DNS_POLICY.get()
+                if analyzer_policy is not None:
+                    results = original(
+                        host,
+                        port,
+                        family,
+                        type,
+                        proto,
+                        flags,
+                    )
+                    if asked in analyzer_policy.trusted_hosts:
+                        return results
+
+                    for result in results:
+                        try:
+                            resolved = _normalize_ip(
+                                ipaddress.ip_address(str(result[4][0]))
+                            )
+                        except (IndexError, TypeError, ValueError) as exc:
+                            raise SSRFError(
+                                f"analyzer DNS for {asked!r} returned an invalid address"
+                            ) from exc
+                        if asked in analyzer_policy.loopback_only_hosts:
+                            if not resolved.is_loopback:
+                                raise SSRFError(
+                                    f"implicit local analyzer host {asked!r} "
+                                    f"resolved to non-loopback address {resolved}"
+                                )
+                            continue
+                        if (
+                            resolved.is_loopback
+                            or resolved.is_link_local
+                            or resolved.is_private
+                            or resolved.is_multicast
+                            or resolved.is_unspecified
+                            or resolved.is_reserved
+                            or resolved in _CLOUD_METADATA_IPS
+                            or (
+                                resolved.version == 4
+                                and resolved in _CGNAT_NETWORK
+                            )
+                        ):
+                            raise SSRFError(
+                                f"analyzer DNS for unconfigured host {asked!r} "
+                                f"resolved to disallowed address {resolved}"
+                            )
+                    return results
+                raise SSRFError(
+                    f"unexpected DNS resolution for {asked!r} during pinned "
+                    f"fetch of {target_host!r} (possible DNS rebinding)"
+                )
+
+            requested_family = int(family)
+            if requested_family not in (socket.AF_UNSPEC, pinned_family):
+                raise socket.gaierror(
+                    socket.EAI_FAMILY,
+                    "address family does not match the pinned IP",
+                )
+
+            # The numeric address prevents a second DNS query. Host headers
+            # and TLS SNI are carried separately by the HTTP client.
+            return original(
+                str(family_ip),
+                port,
+                pinned_family,
+                type,
+                proto,
+                flags,
             )
 
         socket.getaddrinfo = _pinned  # type: ignore[assignment]

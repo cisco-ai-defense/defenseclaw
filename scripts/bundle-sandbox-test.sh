@@ -252,8 +252,12 @@ bold "--- T6: Gateway sidecar on veth IP ---"
 
 # Write minimal config (gateway reads from ~/.defenseclaw/config.yaml; backed up on entry)
 cat > "${DATA_DIR}/config.yaml" << YAML
+config_version: 8
 data_dir: ${DATA_DIR}
-audit_db: ${DATA_DIR}/audit.db
+observability:
+  local:
+    path: ${DATA_DIR}/audit.db
+    judge_bodies_path: ${DATA_DIR}/judge_bodies.db
 openshell:
   mode: standalone
   sandbox_home: ${SANDBOX_HOME}

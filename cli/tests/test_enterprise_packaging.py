@@ -2,11 +2,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
+import os
 import plistlib
 import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -160,24 +163,209 @@ def test_launchd_hook_guardian_is_separate_privileged_job():
 
     assert payload["Label"] == "com.cisco.secureclient.defenseclaw.hook-guardian"
     assert "UserName" not in payload
-    assert payload["ProgramArguments"][1:4] == ["enterprise", "hooks", "reconcile"]
+    # Guardian runs the long-running `enterprise hooks watch` command, not
+    # the one-shot `reconcile` — fsnotify-driven auto-heal (~1 s) with a
+    # 60 s periodic backstop, restart-managed via KeepAlive rather than
+    # StartInterval. See internal/cli/enterprise_hooks.go runEnterpriseHooksWatch
+    # for the loop's design (settle window + Stat-based rename-tail detection).
+    assert payload["ProgramArguments"][1:4] == ["enterprise", "hooks", "watch"]
+    # --interval 60s is the periodic backstop for tamper vectors the fsnotify
+    # path intentionally cannot catch (SharedWriter Write/Chmod on native
+    # agent configs, shared-across-connector generic scripts). Any drift in
+    # this value should be a deliberate policy change, not an accidental edit.
+    args = payload["ProgramArguments"]
+    assert "--interval" in args, "guardian must pass --interval flag"
+    interval_idx = args.index("--interval")
+    # The value must immediately follow the flag, otherwise the CLI
+    # will misparse the argv (a lone "60s" later in the vector would
+    # bind to a different flag or be ignored).
+    assert interval_idx + 1 < len(args), "--interval has no value argument"
+    assert args[interval_idx + 1] == "60s", (
+        f"guardian --interval value must be 60s, got {args[interval_idx + 1]!r}"
+    )
     assert payload["EnvironmentVariables"]["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
     assert (
         payload["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
         == "/opt/cisco/secureclient/defenseclaw/hook-guardian-state"
     )
-    assert payload["StartInterval"] == 300
+    # Long-running watch mode is kept alive by KeepAlive, NOT StartInterval.
+    # StartInterval would pointlessly relaunch the process every N seconds
+    # (and possibly spawn duplicates); KeepAlive relaunches only on exit.
+    assert "StartInterval" not in payload
+    assert payload.get("KeepAlive") is True
 
 
 def test_release_archives_ship_enterprise_packaging_assets():
     config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
-    archive_files = config["archives"][0]["files"]
+    for archive in config["archives"]:
+        archive_files = archive["files"]
+        assert "packaging/**/*" in archive_files
+        assert "LICENSE*" in archive_files
+        assert "NOTICE" in archive_files
+        assert "THIRD_PARTY_LICENSES.txt" in archive_files
+        assert "README*" in archive_files
 
-    assert "packaging/**/*" in archive_files
-    assert "LICENSE*" in archive_files
-    assert "README*" in archive_files
+
+def test_third_party_license_text_and_platform_packaging_contracts():
+    third_party = (ROOT / "THIRD_PARTY_LICENSES.txt").read_text(encoding="utf-8")
+    section_separator = "=" * 78
+    heading, first_section, _ = third_party.partition(f"{section_separator}\n")
+    assert first_section
+    assert "not an exhaustive inventory" in " ".join(heading.split())
+
+    def exact_section(title: str) -> str:
+        marker = f"{section_separator}\n{title}\n{section_separator}\n\n"
+        assert third_party.count(marker) == 1
+        remainder = third_party.partition(marker)[2]
+        body, next_section, _ = remainder.partition(f"\n{section_separator}\n")
+        return body if next_section else remainder
+
+    section_digests = {
+        "mvdan.cc/sh/v3 v3.13.1 (BSD-3-Clause)": (
+            "ce63850f77649f00d1394045e2794ffb09a5596beabac51c9548edd958845d7c"
+        ),
+        "github.com/google/cel-go v0.30.0 (LICENSE)": (
+            "4cdb9af102dfbb0ca03d87d6f650a505df098646a4080f4665b389ad9c6caa02"
+        ),
+        "github.com/antlr4-go/antlr/v4 v4.13.1 (LICENSE)": (
+            "683fcd416d83b64781e229a3c2a598462fbf55c5c9fea54be244766b22c033cf"
+        ),
+        "golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 (LICENSE)": (
+            "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        ),
+        "golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 (PATENTS)": (
+            "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        ),
+    }
+    for title, digest in section_digests.items():
+        assert digest in heading
+        assert hashlib.sha256(exact_section(title).encode()).hexdigest() == digest
+
+    provenance_urls = (
+        "https://github.com/mvdan/sh/blob/v3.13.1/LICENSE",
+        "https://github.com/google/cel-go/blob/v0.30.0/LICENSE",
+        "https://github.com/antlr4-go/antlr/blob/v4.13.1/LICENSE",
+        "https://github.com/golang/exp/blob/"
+        "9b4947da3948bdd8d6ae728bc4ba72b93f61e841/LICENSE",
+        "https://github.com/golang/exp/blob/"
+        "9b4947da3948bdd8d6ae728bc4ba72b93f61e841/PATENTS",
+    )
+    for provenance_url in provenance_urls:
+        assert provenance_url in heading
+    assert "cel.dev/expr v0.25.1 is Apache-2.0-only" in heading
+
+    go_mod = (ROOT / "go.mod").read_text(encoding="utf-8")
+    go_sum = (ROOT / "go.sum").read_text(encoding="utf-8")
+    go_mod_requirements = (
+        "\tgithub.com/google/cel-go v0.30.0\n",
+        "\tmvdan.cc/sh/v3 v3.13.1\n",
+        "\tcel.dev/expr v0.25.1 // indirect\n",
+        "\tgithub.com/antlr4-go/antlr/v4 v4.13.1 // indirect\n",
+        "\tgolang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect\n",
+    )
+    for requirement in go_mod_requirements:
+        assert requirement in go_mod
+
+    go_module_sums = (
+        "cel.dev/expr v0.25.1 h1:1KrZg61W6TWSxuNZ37Xy49ps13NUovb66QLprthtwi4=",
+        "github.com/antlr4-go/antlr/v4 v4.13.1 "
+        "h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=",
+        "github.com/google/cel-go v0.30.0 "
+        "h1:ll54AkzKunWkBn9wSoiUXbFZXYZTkdJGNXTBXUoolGo=",
+        "golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 "
+        "h1:kx6Ds3MlpiUHKj7syVnbp57++8WpuKPcR5yjLBjvLEA=",
+        "mvdan.cc/sh/v3 v3.13.1 "
+        "h1:DP3TfgZhDkT7lerUdnp6PTGKyxxzz6T+cOlY/xEvfWk=",
+    )
+    for module_sum in go_module_sums:
+        assert f"{module_sum}\n" in go_sum
+
+    notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
+    notice_words = " ".join(notice.split())
+    assert "GoReleaser archive Syft SBOM sidecars" in notice
+    assert "Windows Setup merged SPDX 2.3 SBOM" in notice
+    assert "not an exhaustive dependency inventory" in notice_words
+    notice_dependencies = (
+        "CEL-Go (github.com/google/cel-go) — Apache-2.0 with BSD-3-Clause component",
+        "CEL expression protobufs (cel.dev/expr) — Apache-2.0",
+        "ANTLR4 Go runtime (github.com/antlr4-go/antlr/v4) — BSD-3-Clause",
+        "Go experimental packages (golang.org/x/exp) — BSD-3-Clause",
+    )
+    for dependency in notice_dependencies:
+        assert dependency in notice
+    manifest_paths = (
+        "extensions/defenseclaw/package.json",
+        "extensions/defenseclaw/openclaw.plugin.json",
+        "extensions/defenseclaw/package-lock.json",
+        "docs-site/package.json",
+        "docs-site/package-lock.json",
+    )
+    for manifest_path in manifest_paths:
+        assert (ROOT / manifest_path).is_file()
+        assert manifest_path in notice
+        assert manifest_path in heading
+    assert "the runtime archive carries them as root package.json" in notice_words
+    assert "is not placed in that runtime archive" in notice_words
+    assert "not a DefenseClaw runtime artifact" in notice_words
+
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    dist_plugin = makefile[
+        makefile.index("\ndist-plugin:") : makefile.index("\ndist-sandbox:")
+    ]
+    assert "package.json openclaw.plugin.json dist/" in dist_plugin
+    assert "package-lock.json" not in dist_plugin
+
+    manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
+    for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"):
+        assert f"include {name}" in manifest
+
+    bundle_builder = (ROOT / "scripts/build-macos-bundle.sh").read_text(encoding="utf-8")
+    app_builder = (ROOT / "scripts/build-macos-app-release.sh").read_text(encoding="utf-8")
+    app_verifier = (ROOT / "scripts/verify-macos-app-release.sh").read_text(encoding="utf-8")
+    windows_builder = (ROOT / "scripts/windows-native-ci.ps1").read_text(encoding="utf-8-sig")
+    windows_installer = (ROOT / "scripts/build-windows-installer.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    windows_gateway_license_staging = """\
+    foreach ($file in @('LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt')) {
+        foreach ($targetRoot in @($gatewayVerificationStage, $stage)) {
+            Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) -Destination $targetRoot -Force
+        }
+    }"""
+    for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"):
+        assert f'cp {name} ' in bundle_builder
+        assert f'cp "${{ROOT}}/{name}" ' in app_builder
+    assert windows_gateway_license_staging in windows_builder
+    assert (
+        "foreach ($file in @('pyproject.toml', 'README.md', 'LICENSE', 'NOTICE', "
+        "'THIRD_PARTY_LICENSES.txt', 'MANIFEST.in'))"
+    ) in windows_builder
+    assert (
+        "Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) "
+        "-Destination $packageStage -Force"
+    ) in windows_builder
+    assert 'cmp -s "${ROOT}/${relative}" "${PAYLOAD}/${relative}"' in app_verifier
+    assert (
+        """\
+        '--source', $stage,
+        '--output', $gatewayArchive,"""
+        in windows_builder
+    )
+    assert (
+        """\
+        '--source', $gatewayVerificationStage,
+        '--output', $gatewayArchiveVerification,"""
+        in windows_builder
+    )
+    assert "gateway ZIP must contain exactly one root $file file" in windows_builder
+    assert "gateway ZIP $file differs from the canonical source file" in windows_builder
+    assert "Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir" in (
+        windows_installer
+    )
+    assert "Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip" in windows_installer
 
 
+@pytest.mark.skipif(os.name == "nt", reason="launchd installer POSIX ownership and executable-bit contract")
 def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     installer = ROOT / "packaging" / "launchd" / "install-enterprise.sh"
 
@@ -244,10 +432,22 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     present = sorted(value for value in stale_service_identity_contract if value in text)
     assert not present
 
-    assert "existing DefenseClaw installation detected at" in text
-    assert "no changes were made. This installer is fresh-install-only" in text
-    assert "remain on the current version" in text
-    assert 'local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"' in text
+    # Idempotent-reinstall contract: the installer no longer refuses on
+    # existing markers. It logs a reconcile message, unloads any current-
+    # generation launchd labels, and relocates legacy paths under LOG_DIR.
+    # Per-user ~/.defenseclaw is informational only — the hook-guardian
+    # daemon owns per-user reconciliation, so the installer must not
+    # abort or delete on those markers.
+    assert "reconciling existing DefenseClaw installation in place" in text
+    assert "idempotent reinstall" in text
+    assert "fresh managed_enterprise install" in text
+    assert "will be reconciled by hook-guardian" in text
+    assert "moved legacy path aside" in text
+    # Old refusal strings must NOT be present — they were the exact
+    # symptoms the reinstall rework fixes.
+    assert "no changes were made. This installer is fresh-install-only" not in text
+    assert "remain on the current version" not in text
+    assert '/usr/bin/dscl . -list /Users' in text
     assert '/usr/bin/dscl . -read "/Users/${local_user}" NFSHomeDirectory' in text
     assert '"${local_home}/.defenseclaw"' in text
     assert '"${local_home}/.local/bin/defenseclaw"' in text
@@ -258,45 +458,69 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     assert "LEGACY_GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist" in text
     assert "com.defenseclaw.gateway" in text
     assert "com.defenseclaw.hook-guardian" in text
-    guard_offset = text.index("existing DefenseClaw installation detected at")
-    user_scan_offset = text.index('local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"')
-    assert guard_offset < text.index(directory_creation)
-    assert guard_offset < text.index('ROLLBACK_DIR="$(/usr/bin/mktemp -d')
-    assert user_scan_offset < text.index('assert_trusted_file_source "$CONFIG_SOURCE"')
+    # Reconcile happens before any mutation: bootout / rebootstrap the
+    # current-gen labels and relocate legacy paths before the ROLLBACK
+    # snapshot arms so an interrupted reinstall rolls back cleanly.
+    reconcile_offset = text.index("reconciling existing DefenseClaw installation in place")
+    assert reconcile_offset < text.index('ROLLBACK_DIR="$(/usr/bin/mktemp -d')
+    assert reconcile_offset < text.index('assert_trusted_file_source "$CONFIG_SOURCE"')
+    # Pre-mutation logs-chain trust check MUST run before the early
+    # mkdir/mv relocation block. Without this a symlinked /Library/Logs
+    # ancestor or an ACL-writable LOG_DIR ancestor could let the
+    # `mkdir -p` + `mv` steps below relocate legacy config / audit
+    # material into an attacker-controlled target before the later
+    # validation (line ~582) has a chance to fire. Mirrors the
+    # `_assert_trusted_logs_chain_or_die` gate in packaging/macos/install.sh.
+    logs_chain_gate = text.index("Ancestor trust check: before ANY mkdir/chown/chmod on the")
+    early_mkdir_landing = text.index("Ensure LOG_DIR exists early so the legacy relocation below")
+    legacy_relocation = text.index("moved legacy path aside")
+    assert logs_chain_gate < early_mkdir_landing
+    assert logs_chain_gate < legacy_relocation
+    # The gate must call the primitive assertions against every
+    # /Library/Logs/... ancestor, not just LOG_DIR itself.
+    gate_block = text[logs_chain_gate:early_mkdir_landing]
+    assert 'assert_trusted_system_dir /Library' in gate_block
+    assert 'assert_existing_secure_dir_or_absent /Library/Logs' in gate_block
+    assert 'assert_existing_secure_dir_or_absent "$LOG_VENDOR_DIR"' in gate_block
+    assert 'assert_existing_secure_dir_or_absent "$LOG_PRODUCT_DIR"' in gate_block
+    assert 'assert_existing_secure_dir_or_absent "$LOG_DIR"' in gate_block
+    # install_file_atomic uses mv -f (rename(2), atomic replace) so an
+    # existing regular destination is overwritten cleanly on reinstall.
+    # ln (hardlink) would fail with EEXIST on the second run.
     atomic_install = text[
         text.index("install_file_atomic() {") : text.index("plist_pins_managed_mode() {")
     ]
-    assert '/bin/mv -f -- "$temporary" "$destination"' not in atomic_install
-    assert '/bin/ln -- "$temporary" "$destination"' in atomic_install
-    assert "appeared concurrently and was preserved" in text
-    assert guard_offset < text.index("ROLLBACK_ARMED=true")
-    assert guard_offset < text.index('stop_job_if_loaded "$GUARDIAN_LABEL"')
+    assert '/bin/mv -f -- "$temporary" "$destination"' in atomic_install
+    assert '/bin/ln -- "$temporary" "$destination"' not in atomic_install
     assert '/bin/launchctl enable "system/${GATEWAY_LABEL}"' in text
     assert '/bin/launchctl kickstart -k "system/${GATEWAY_LABEL}"' in text
-    assert "system/com.defenseclaw.gateway" not in text
-    assert "system/com.defenseclaw.hook-guardian" not in text
+    # Legacy launchd labels are unloaded (via bootout) so their stale
+    # plists don't keep spawn-and-crashing; the current-gen labels are
+    # ALSO booted out before rebootstrap during a reinstall.
+    assert '/bin/launchctl bootout "system/${_legacy_label}"' in text
 
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "macos-enterprise-packaging:" in workflow
     assert "./scripts/test-macos-enterprise-packaging.sh" in workflow
 
     smoke = (ROOT / "scripts" / "test-macos-enterprise-packaging.sh").read_text(encoding="utf-8")
-    assert "everyone allow add_file,add_subdirectory,delete_child" in smoke
-    assert "fresh-install-only enterprise package accepted a write-capable existing root" in smoke
+    # Smoke test asserts the reinstall contract end-to-end.
     assert "managed_root=\"/opt/cisco/secureclient/defenseclaw\"" in smoke
     assert "config_dest=\"${managed_root}/etc/config.yaml\"" in smoke
     assert "log_dir=/Library/Logs/Cisco/SecureClient/DefenseClaw" in smoke
     assert "assert_no_defenseclaw_identity()" in smoke
-    assert smoke.count("assert_no_defenseclaw_identity \"") == 5
-    assert "dscl . -create" not in smoke
     assert 'legacy_managed_root="/Library/Application Support/DefenseClaw"' in smoke
     assert "legacy_binary_root=/Library/DefenseClaw" in smoke
-    assert "fresh-install-only enterprise package overwrote an existing deployment" in smoke
-    assert "enterprise package ignored a per-user DefenseClaw installation" in smoke
-    assert "per-user refusal did not name the dscl-resolved home marker" in smoke
-    assert "per-user refusal mutated managed destination" in smoke
-    assert "existing-install refusal modified managed config" in smoke
-    assert "enterprise package repaired/overwrote existing damaged metadata" in smoke
+    # Reinstall-contract-specific expectations:
+    assert "Reinstall reconciles machine-wide state" in smoke
+    assert "idempotent reinstall failed" in smoke
+    assert "reinstall did not restore config to freshly-rendered content" in smoke
+    assert "reinstall did not emit legacy-relocation log line" in smoke
+    assert "reconciling existing DefenseClaw installation in place" in smoke
+    # Untrusted config source is still refused (trust contract unchanged
+    # by the reinstall rework):
+    assert "installer accepted writable config source (source-trust contract broken)" in smoke
+    assert "untrusted source refusal did not identify managed config trust" in smoke
     assert 'trusted_fixture="/Library/DefenseClawPackagingSmoke.$$"' in smoke
 
 
@@ -316,7 +540,13 @@ def test_launchd_enterprise_installer_matches_cisco_plist_layout():
     home = gateway["EnvironmentVariables"]["DEFENSECLAW_HOME"]
     config = gateway["EnvironmentVariables"]["DEFENSECLAW_CONFIG"]
     auth_dir = gateway["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
-    manifest = guardian["ProgramArguments"][-1]
+    # The manifest path follows the --manifest flag; explicit lookup instead
+    # of positional indexing (ProgramArguments[-1] used to be the manifest
+    # under `hooks reconcile --manifest <path>`, but the current watch-mode
+    # args add `--interval 60s` after the manifest, making index -1 wrong).
+    guardian_args = guardian["ProgramArguments"]
+    manifest_flag = guardian_args.index("--manifest")
+    manifest = guardian_args[manifest_flag + 1]
 
     assert f"BINARY_ROOT={home}" in text
     assert f'CONFIG_DEST="{config}"' in text

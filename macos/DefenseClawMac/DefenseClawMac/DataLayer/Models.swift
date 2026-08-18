@@ -17,6 +17,7 @@
 // DefenseClaw for macOS — data models mirroring the TUI's service-layer dataclasses.
 // Apache-2.0; companion to cisco-ai-defense/defenseclaw.
 
+import CoreFoundation
 import Foundation
 
 // MARK: - Severity / state
@@ -223,6 +224,7 @@ func friendlyConnectorName(_ connector: String) -> String {
     case "openhands": return "OpenHands"
     case "antigravity": return "Antigravity"
     case "opencode": return "OpenCode"
+    case "amp": return "Amp"
     case "omnigent": return "OmniGent"
     case let value where !value.isEmpty:
         return value.prefix(1).uppercased() + value.dropFirst()
@@ -615,6 +617,36 @@ enum AIConfidence {
     ) -> Int {
         DCSafeNumbers.intTruncating((clampedUnit(value) * 100).rounded(roundingRule)) ?? 0
     }
+
+    /// Decode a confidence value while preserving the distinction between an
+    /// omitted field and an explicitly reported zero. The distinction matters
+    /// for compatibility: model rows from older gateways can fall back to the
+    /// signal confidence, while a new gateway's explicit zero remains low.
+    static func optionalNormalized(_ raw: Any?) -> Double? {
+        guard let raw, !(raw is NSNull) else { return nil }
+        if let number = raw as? NSNumber {
+            // Swift bridges both JSON booleans and numeric 0/1 through
+            // NSNumber. Runtime type IDs preserve that distinction.
+            guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            let value = number.doubleValue
+            guard value.isFinite else { return nil }
+            return clampedUnit(value > 1 ? value / 100 : value)
+        }
+        guard !(raw is Bool) else { return nil }
+        let value: Double?
+        switch raw {
+        case let number as Double:
+            value = number
+        case let number as Int:
+            value = Double(number)
+        case let text as String:
+            value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        default:
+            value = nil
+        }
+        guard let value, value.isFinite else { return nil }
+        return clampedUnit(value > 1 ? value / 100 : value)
+    }
 }
 
 enum AIPresenceAxis {
@@ -639,13 +671,92 @@ struct AIUsageSnapshot: Sendable {
     var signals: [AISignal] = []
     // Overview box inputs (TUI ai_discovery_box)
     var enabled: Bool = true
+    /// Runtime opt-in reported by the currently running gateway generation.
+    var lookupModelProvenanceOnline: Bool = false
     var newSignals: Int = 0
     var changedSignals: Int = 0
     var goneSignals: Int = 0
     var privacyMode: String = ""
+    /// Completion state for the most recent scan (`ok`, `partial`, or
+    /// `disabled`). Empty means an older gateway did not report it.
+    var result: String = ""
+    var errors: Int = 0
+    var detectorErrors: [String: String] = [:]
 
-    /// Grouped one-row-per-product view, exactly as the TUI presents it.
+    var isPartial: Bool {
+        result.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("partial") == .orderedSame
+            || errors > 0
+            || !detectorErrors.isEmpty
+    }
+
+    var reportedDiscoveryErrorCount: Int {
+        max(errors, detectorErrors.count)
+    }
+
+    var discoveryIssueLabel: String {
+        let count = reportedDiscoveryErrorCount
+        if count > 0 { return "\(count) error\(count == 1 ? "" : "s")" }
+        return isPartial ? "Scan did not complete" : "0 errors"
+    }
+
+    var partialDiscoveryDescription: String {
+        let count = reportedDiscoveryErrorCount
+        if count > 0 {
+            return "\(count) error\(count == 1 ? "" : "s") occurred during discovery."
+        }
+        return "The scan did not complete, so results may be incomplete."
+    }
+
+    /// Non-model discoveries stay in the existing one-row-per-product table.
     var rows: [AIDiscoveryRow] { AIDiscoveryGrouping.rows(from: signals) }
+
+    /// TUI `header_parts`: a reported zero remains `active=0`; churn counters
+    /// only appear when non-zero.
+    var discoveryHeaderParts: [String] {
+        var parts = ["active=\(activeSignals)"]
+        if newSignals != 0 { parts.append("new=\(newSignals)") }
+        if changedSignals != 0 { parts.append("changed=\(changedSignals)") }
+        if goneSignals != 0 { parts.append("gone=\(goneSignals)") }
+        parts.append("files=\(filesScanned)")
+        parts.append("model-lookup=\(lookupModelProvenanceOnline ? "online" : "offline")")
+        return parts
+    }
+
+    /// Local model signals use a dedicated compact table so high-cardinality
+    /// model IDs and lineage metadata do not crowd the product inventory.
+    var modelRows: [AIModelDiscoveryRow] { AIDiscoveryGrouping.modelRows(from: signals) }
+}
+
+/// The diagnostic subset of an AI-discovery summary. Keeping coercion in the
+/// model layer makes the REST client and focused Swift harnesses share the same
+/// compatibility behavior.
+struct AIDiscoveryDiagnostics: Sendable, Hashable {
+    var result: String = ""
+    var errors: Int = 0
+    var detectorErrors: [String: String] = [:]
+
+    static func fromMapping(_ raw: [String: Any]) -> AIDiscoveryDiagnostics {
+        let errors = Int(clamping: AIUsageValueDecoding.nonnegativeInt64(raw["errors"]))
+        let detectorErrors: [String: String]
+        if let values = raw["detector_errors"] as? [String: String] {
+            detectorErrors = values.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        } else if let values = raw["detector_errors"] as? [String: Any] {
+            detectorErrors = values.reduce(into: [:]) { decoded, entry in
+                guard let message = entry.value as? String,
+                      !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return }
+                decoded[entry.key] = message
+            }
+        } else {
+            detectorErrors = [:]
+        }
+        return AIDiscoveryDiagnostics(
+            result: (raw["result"] as? String) ?? "",
+            errors: errors,
+            detectorErrors: detectorErrors
+        )
+    }
 }
 
 struct AIComponent: Identifiable, Sendable, Hashable {
@@ -659,10 +770,207 @@ struct AIComponent: Identifiable, Sendable, Hashable {
     var id: String { "\(ecosystem)/\(name)@\(version)" }
 }
 
+/// Curated lineage for one locally observed model. Flags are intentionally
+/// derived by clients from the ISO country code instead of crossing the wire.
+struct AIModelProvenance: Sendable, Hashable {
+    var publisher: String = ""
+    var countryCode: String = ""
+    var rootModel: String = ""
+    var baseModels: [String] = []
+    /// nil means the catalog could not establish whether this is quantized.
+    var quantized: Bool? = nil
+    var quantization: String = ""
+    /// nil means the catalog could not establish whether this is distilled.
+    var distilled: Bool? = nil
+    var derivation: String = ""
+    var source: String = ""
+    var confidence: String = ""
+
+    static func fromMapping(_ raw: [String: Any]?) -> AIModelProvenance? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let bases: [String]
+        if let values = raw["base_models"] as? [String] {
+            bases = values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        } else if let values = raw["base_models"] as? [Any] {
+            bases = values.compactMap { $0 as? String }
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        } else if let value = raw["base_models"] as? String,
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            bases = [value]
+        } else {
+            bases = []
+        }
+        return AIModelProvenance(
+            publisher: (raw["publisher"] as? String) ?? "",
+            countryCode: normalizedCountryCode((raw["country_code"] as? String) ?? ""),
+            rootModel: (raw["root_model"] as? String) ?? "",
+            baseModels: bases,
+            quantized: optionalBool(raw["quantized"]),
+            quantization: (raw["quantization"] as? String) ?? "",
+            distilled: optionalBool(raw["distilled"]),
+            derivation: (raw["derivation"] as? String) ?? "",
+            source: (raw["source"] as? String) ?? "",
+            confidence: (raw["confidence"] as? String) ?? ""
+        )
+    }
+
+    /// Text remains useful when the platform cannot render the flag glyph.
+    var countryDisplay: String {
+        guard !countryCode.isEmpty else { return "" }
+        let flag = countryFlag
+        return flag.isEmpty ? countryCode : "\(countryCode) \(flag)"
+    }
+
+    var countryFlag: String {
+        guard countryCode.unicodeScalars.count == 2 else { return "" }
+        let regionalIndicatorOffset: UInt32 = 127_397
+        return countryCode.unicodeScalars.compactMap { scalar in
+            UnicodeScalar(regionalIndicatorOffset + scalar.value)
+        }.map { String($0) }.joined()
+    }
+
+    var rootDisplay: String {
+        if !rootModel.isEmpty { return rootModel }
+        if !baseModels.isEmpty { return "ambiguous (\(baseModels.count))" }
+        return ""
+    }
+
+    var derivationDisplay: String {
+        var parts: [String] = []
+        if !derivation.isEmpty {
+            parts.append(derivation)
+        } else if quantized == true, distilled == true {
+            parts.append("distilled+quantized")
+        } else if quantized == true {
+            parts.append("quantized")
+        } else if distilled == true {
+            parts.append("distilled")
+        } else if quantized == false, distilled == false {
+            parts.append("base")
+        }
+        if !quantization.isEmpty,
+           !parts.contains(where: { $0.caseInsensitiveCompare(quantization) == .orderedSame }) {
+            parts.append(quantization)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func normalizedCountryCode(_ raw: String) -> String {
+        let code = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard code.unicodeScalars.count == 2,
+              code.unicodeScalars.allSatisfy({ (65...90).contains(Int($0.value)) })
+        else { return "" }
+        return code
+    }
+
+    private static func optionalBool(_ raw: Any?) -> Bool? {
+        if let value = raw as? Bool { return value }
+        if let value = raw as? NSNumber, value.doubleValue == 0 || value.doubleValue == 1 {
+            return value.boolValue
+        }
+        if let value = raw as? String {
+            switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes", "on": return true
+            case "false", "0", "no", "off": return false
+            default: return nil
+            }
+        }
+        return nil
+    }
+}
+
+/// Model metadata emitted by the local model API and artifact detectors.
+struct AIUsageModel: Sendable, Hashable {
+    var id: String = ""
+    var status: String = ""
+    var format: String = ""
+    var provider: String = ""
+    var recipe: String = ""
+    var modality: String = ""
+    var device: String = ""
+    var sizeBytes: Int64 = 0
+    var pinned: Bool = false
+    var provenance: AIModelProvenance? = nil
+    /// Owning desktop application when the scanner can safely attribute it.
+    var ownerApplication: String = ""
+    /// Scanner classification: primary, supporting, embedded, or unknown.
+    var relevance: String = ""
+    /// nil means an older gateway did not report model-specific confidence.
+    var discoveryConfidence: Double? = nil
+
+    static func fromMapping(_ raw: [String: Any]?) -> AIUsageModel? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return AIUsageModel(
+            id: (raw["id"] as? String) ?? "",
+            status: (raw["status"] as? String) ?? "",
+            format: (raw["format"] as? String) ?? "",
+            provider: (raw["provider"] as? String) ?? "",
+            recipe: (raw["recipe"] as? String) ?? "",
+            modality: (raw["modality"] as? String) ?? "",
+            device: (raw["device"] as? String) ?? "",
+            sizeBytes: AIUsageValueDecoding.nonnegativeInt64(raw["size_bytes"]),
+            pinned: AIUsageValueDecoding.boolean(raw["pinned"]),
+            provenance: AIModelProvenance.fromMapping(raw["provenance"] as? [String: Any]),
+            ownerApplication: (raw["owner_application"] as? String) ?? "",
+            relevance: (raw["relevance"] as? String) ?? "",
+            discoveryConfidence: AIConfidence.optionalNormalized(raw["discovery_confidence"])
+        )
+    }
+}
+
+private enum AIUsageValueDecoding {
+    static func nonnegativeInt64(_ raw: Any?) -> Int64 {
+        // JSON booleans bridge through NSNumber, so reject Bool first.
+        if raw is Bool { return 0 }
+        let value: Int64?
+        switch raw {
+        case let number as Int:
+            value = Int64(exactly: number)
+        case let number as Int64:
+            value = number
+        case let number as NSNumber:
+            let double = number.doubleValue
+            guard double.isFinite, let exact = Int64(exactly: double) else { return 0 }
+            value = exact
+        case let text as String:
+            value = Int64(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        default:
+            value = nil
+        }
+        guard let value, value >= 0 else { return 0 }
+        return value
+    }
+
+    static func boolean(_ raw: Any?) -> Bool {
+        if let value = raw as? Bool { return value }
+        if let value = raw as? NSNumber {
+            if value == 0 { return false }
+            if value == 1 { return true }
+            return false
+        }
+        guard let text = raw as? String else { return false }
+        switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "1", "yes", "on": return true
+        default: return false
+        }
+    }
+}
+
 struct ConfidencePoint: Identifiable, Sendable {
     var timestamp: Date
     var confidence: Double
     var id: Date { timestamp }
+}
+
+/// Sanitized process metadata for a discovered AI runtime. The gateway never
+/// includes argv, prompts, or workspace paths in this block.
+struct AIUsageRuntime: Sendable, Hashable {
+    var pid: Int = 0
+    var ppid: Int = 0
+    var startedAt: Date?
+    var uptimeSeconds: Int64 = 0
+    var user: String = ""
+    var command: String = ""
 }
 
 /// One raw detection signal from /api/v1/ai-usage (ai_discovery_state.AIUsageSignal).
@@ -693,10 +1001,94 @@ struct AISignal: Sendable, Hashable {
     var supportedConnector: String = ""
     var signalID: String = ""
     var signatureID: String = ""
+    var model: AIUsageModel? = nil
+    var runtime: AIUsageRuntime? = nil
+    var evidenceTypes: [String] = []
 
     func hasEligiblePresence(minimum: Double) -> Bool {
         !presenceAxisReported || presenceScore >= minimum
     }
+}
+
+/// Pure decoding shared by the gateway client and focused Swift harnesses.
+/// Keeping JSON coercion here prevents view code from reinterpreting the wire
+/// format and mirrors the TUI's `AIUsageSignal.from_mapping` boundary.
+enum AISignalDecoding {
+    /// Decode array members independently. A single malformed compatible-
+    /// gateway row must not erase every valid discovery signal in the batch.
+    static func signalMappings(from raw: Any?) -> [[String: Any]] {
+        (raw as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+    }
+
+    static func decode(_ raw: [String: Any]) -> AISignal {
+        let component = nonemptyDictionary(raw["component"])
+        let model = decodeModel(nonemptyDictionary(raw["model"]))
+        let runtime = decodeRuntime(nonemptyDictionary(raw["runtime"]))
+        let presenceBand = string(raw["presence_band"])
+        let presenceAxisReported = AIPresenceAxis.wasReported(
+            rawScore: raw["presence_score"],
+            band: presenceBand
+        )
+
+        return AISignal(
+            state: string(raw["state"]),
+            product: string(raw["product"]),
+            vendor: string(raw["vendor"]),
+            category: string(raw["category"]),
+            detector: string(raw["detector"]),
+            version: string(component?["version"]).nonEmpty ?? string(raw["version"]),
+            ecosystem: string(component?["ecosystem"]),
+            componentName: string(component?["name"]),
+            source: string(raw["source"]),
+            confidence: AIConfidence.normalize(raw["confidence"]),
+            identityScore: AIConfidence.normalize(raw["identity_score"]),
+            identityBand: string(raw["identity_band"]),
+            presenceScore: AIConfidence.normalize(raw["presence_score"]),
+            presenceBand: presenceBand,
+            presenceAxisReported: presenceAxisReported,
+            firstSeen: DCDates.parse(raw["first_seen"]),
+            lastSeen: DCDates.parse(raw["last_seen"]),
+            lastActive: DCDates.parse(raw["last_active_at"]),
+            name: string(raw["name"]),
+            supportedConnector: string(raw["supported_connector"]),
+            signalID: string(raw["signal_id"]).nonEmpty ?? string(raw["id"]),
+            signatureID: string(raw["signature_id"]),
+            model: model,
+            runtime: runtime,
+            evidenceTypes: stringList(raw["evidence_types"])
+        )
+    }
+
+    private static func decodeModel(_ raw: [String: Any]?) -> AIUsageModel? {
+        AIUsageModel.fromMapping(raw)
+    }
+
+    private static func decodeRuntime(_ raw: [String: Any]?) -> AIUsageRuntime? {
+        guard let raw else { return nil }
+        return AIUsageRuntime(
+            pid: Int(clamping: AIUsageValueDecoding.nonnegativeInt64(raw["pid"])),
+            ppid: Int(clamping: AIUsageValueDecoding.nonnegativeInt64(raw["ppid"])),
+            startedAt: DCDates.parse(raw["started_at"]),
+            uptimeSeconds: AIUsageValueDecoding.nonnegativeInt64(raw["uptime_sec"]),
+            user: string(raw["user"]),
+            command: string(raw["comm"])
+        )
+    }
+
+    private static func nonemptyDictionary(_ raw: Any?) -> [String: Any]? {
+        guard let value = raw as? [String: Any], !value.isEmpty else { return nil }
+        return value
+    }
+
+    private static func string(_ raw: Any?) -> String {
+        raw as? String ?? ""
+    }
+
+    private static func stringList(_ raw: Any?) -> [String] {
+        if let value = raw as? String { return value.isEmpty ? [] : [value] }
+        return (raw as? [Any])?.compactMap { $0 as? String } ?? []
+    }
+
 }
 
 /// Grouped product row — exact port of the TUI's AIDiscoveryRow (_rebuild()).
@@ -707,6 +1099,9 @@ struct AIDiscoveryRow: Identifiable, Sendable, Hashable {
     var ecosystem: String
     var component: String
     var version: String
+    var model: String
+    var modelStatuses: [String]
+    var modelFormats: [String]
     var categories: [String]
     var detectors: [String]
     var count: Int
@@ -717,12 +1112,354 @@ struct AIDiscoveryRow: Identifiable, Sendable, Hashable {
     var lastActive: Date?
     var signals: [AISignal]
 
-    var id: String { "\(state)|\(product)|\(vendor)|\(ecosystem)|\(component)|\(version)" }
+    /// Length-prefix every user-controlled field so embedded separators cannot
+    /// make two different rows share a SwiftUI selection identity.
+    var id: String {
+        [state, product, vendor, ecosystem, component, version, model]
+            .map { "\($0.utf8.count):\($0)" }
+            .joined()
+    }
 
     var maxConfidence: Double { signals.map(\.confidence).max() ?? 0 }
+
+    var componentLabel: String {
+        if !ecosystem.isEmpty, !component.isEmpty { return "\(component) (\(ecosystem))" }
+        return component
+    }
+}
+
+struct AIModelDiscoveryRowID: Sendable, Hashable {
+    var normalizedModelID: String
+}
+
+enum AIModelModality: String, CaseIterable, Identifiable, Sendable {
+    case generative
+    case speech
+    case vision
+    case embedding
+    case audio
+    case unknown
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .generative: "Generative"
+        case .speech: "Speech"
+        case .vision: "Vision"
+        case .embedding: "Embedding"
+        case .audio: "Audio"
+        case .unknown: "Unknown"
+        }
+    }
+
+    static func classify(_ raw: String) -> AIModelModality {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "generative", "text", "chat", "language", "llm": .generative
+        case "speech", "speech_to_text", "speech-to-text", "stt", "transcription": .speech
+        case "vision", "image", "computer_vision", "computer-vision": .vision
+        case "embedding", "embeddings": .embedding
+        case "audio": .audio
+        default: .unknown
+        }
+    }
+}
+
+enum AIModelRelevance: String, CaseIterable, Identifiable, Sendable {
+    case primary
+    case supporting
+    case embedded
+    case unknown
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .primary: "Primary"
+        case .supporting: "Supporting"
+        case .embedded: "Embedded"
+        case .unknown: "Unknown"
+        }
+    }
+
+    static func classify(_ raw: String) -> AIModelRelevance {
+        AIModelRelevance(
+            rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        ) ?? .unknown
+    }
+}
+
+enum AIModelModalityFilter: String, CaseIterable, Identifiable, Sendable {
+    case all
+    case generative
+    case speech
+    case vision
+    case embedding
+    case audio
+    case unknown
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        self == .all
+            ? "All Modalities"
+            : (AIModelModality(rawValue: rawValue)?.displayName ?? AIModelModality.unknown.displayName)
+    }
+
+    var modality: AIModelModality? { AIModelModality(rawValue: rawValue) }
+}
+
+enum AIModelRelevanceFilter: String, CaseIterable, Identifiable, Sendable {
+    case all
+    case primary
+    case supporting
+    case embedded
+    case unknown
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        self == .all
+            ? "All Relevance"
+            : (AIModelRelevance(rawValue: rawValue)?.displayName ?? AIModelRelevance.unknown.displayName)
+    }
+
+    var relevance: AIModelRelevance? { AIModelRelevance(rawValue: rawValue) }
+}
+
+/// A model-centric row aggregated across artifact, API, and runtime sources.
+struct AIModelDiscoveryRow: Identifiable, Sendable, Hashable {
+    var state: String
+    var modelID: String
+    var statuses: [String]
+    var formats: [String]
+    var providers: [String]
+    var products: [String]
+    var vendors: [String]
+    var detectors: [String]
+    var count: Int
+    var provenance: AIModelProvenance?
+    var lastActive: Date?
+    var signals: [AISignal]
+
+    var id: AIModelDiscoveryRowID {
+        AIModelDiscoveryRowID(
+            normalizedModelID: AIDiscoveryGrouping.normalizedModelID(modelID)
+        )
+    }
+
+    var maxSizeBytes: Int64 { signals.compactMap(\.model).map(\.sizeBytes).max() ?? 0 }
+    var isPinned: Bool { signals.compactMap(\.model).contains { $0.pinned } }
+    var maxConfidence: Double { signals.map(\.confidence).max() ?? 0 }
+
+    var ownerApplications: [String] {
+        uniqueModelValues { $0.ownerApplication }
+    }
+
+    var modalities: [AIModelModality] {
+        let values = signals.compactMap(\.model).map { AIModelModality.classify($0.modality) }
+        let known = unique(values.filter { $0 != .unknown })
+        return known.isEmpty ? [.unknown] : known
+    }
+
+    var relevances: [AIModelRelevance] {
+        let values = signals.compactMap(\.model).map { AIModelRelevance.classify($0.relevance) }
+        let known = unique(values.filter { $0 != .unknown })
+        return known.isEmpty ? [.unknown] : known
+    }
+
+    /// Prefer the most actionable classification when artifact and runtime
+    /// sources report the same model with different levels of context.
+    var effectiveModality: AIModelModality {
+        let preference: [AIModelModality] = [.generative, .speech, .vision, .embedding, .audio, .unknown]
+        let available = modalities
+        return preference.first(where: { available.contains($0) }) ?? .unknown
+    }
+
+    var effectiveRelevance: AIModelRelevance {
+        let preference: [AIModelRelevance] = [.primary, .supporting, .embedded, .unknown]
+        let available = relevances
+        return preference.first(where: { available.contains($0) }) ?? .unknown
+    }
+
+    var reportedDiscoveryConfidence: Double? {
+        signals.compactMap(\.model).compactMap(\.discoveryConfidence).max()
+    }
+
+    var hasLocalModelAPISignal: Bool {
+        detectors.contains {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("model_api") == .orderedSame
+        }
+    }
+
+    var hasLocalModelAPISignalWithoutDiscoveryConfidence: Bool {
+        signals.contains { signal in
+            signal.detector.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("model_api") == .orderedSame
+                && signal.model?.discoveryConfidence == nil
+        }
+    }
+
+    var hasModelClassificationMetadata: Bool {
+        signals.contains { signal in
+            guard let model = signal.model else { return false }
+            return model.discoveryConfidence != nil
+                || !model.ownerApplication.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !model.relevance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    /// New gateways report model-specific confidence. For display and older
+    /// gateway compatibility, fall back to the strongest signal score.
+    var effectiveDiscoveryConfidence: Double {
+        reportedDiscoveryConfidence ?? maxConfidence
+    }
+
+    var confidenceDisplayLabel: String {
+        if reportedDiscoveryConfidence == nil, hasLocalModelAPISignal {
+            return "API"
+        }
+        let percent = AIConfidence.percent(
+            effectiveDiscoveryConfidence,
+            roundingRule: .toNearestOrAwayFromZero
+        )
+        return reportedDiscoveryConfidence == nil ? "\(percent)% signal" : "\(percent)%"
+    }
+
+    var confidenceAccessibilityLabel: String {
+        if reportedDiscoveryConfidence == nil, hasLocalModelAPISignal {
+            return "Local model API; discovery confidence not reported"
+        }
+        let percent = AIConfidence.percent(
+            effectiveDiscoveryConfidence,
+            roundingRule: .toNearestOrAwayFromZero
+        )
+        let source = reportedDiscoveryConfidence == nil ? "Signal" : "Discovery"
+        return "\(source) confidence \(percent) percent"
+    }
+
+    func matches(_ query: String) -> Bool {
+        guard !query.isEmpty else { return true }
+        let provenanceParts = provenance.map {
+            [$0.publisher, $0.countryCode, $0.countryDisplay, $0.rootModel, $0.quantization,
+             $0.derivation, $0.source, $0.confidence] + $0.baseModels
+        } ?? []
+        var parts = [state, modelID]
+        parts.append(contentsOf: statuses)
+        parts.append(contentsOf: formats)
+        parts.append(contentsOf: providers)
+        parts.append(contentsOf: products)
+        parts.append(contentsOf: vendors)
+        parts.append(contentsOf: detectors)
+        parts.append(contentsOf: ownerApplications)
+        let modelModalities = modalities
+        let modelRelevances = relevances
+        parts.append(contentsOf: modelModalities.map(\.rawValue))
+        parts.append(contentsOf: modelRelevances.map(\.rawValue))
+        parts.append(contentsOf: provenanceParts)
+        return parts.joined(separator: " ").localizedCaseInsensitiveContains(query)
+    }
+
+    private func uniqueModelValues(_ value: (AIUsageModel) -> String) -> [String] {
+        var seen = Set<String>()
+        return signals.compactMap(\.model).compactMap { model in
+            let candidate = value(model).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !candidate.isEmpty else { return nil }
+            let key = candidate.folding(
+                options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX")
+            ).lowercased()
+            guard seen.insert(key).inserted else { return nil }
+            return candidate
+        }
+    }
+
+    private func unique<Value: Hashable>(_ values: [Value]) -> [Value] {
+        var seen = Set<Value>()
+        return values.filter { seen.insert($0).inserted }
+    }
+}
+
+/// Durable UI filtering semantics kept independent of SwiftUI so focused
+/// tests can pin the default safety/noise policy.
+struct AIModelDiscoveryFilter: Sendable, Hashable {
+    static let focusedMinimumConfidence = 0.8
+
+    var showAllModels: Bool = false
+    var modality: AIModelModalityFilter = .all
+    var relevance: AIModelRelevanceFilter = .all
+
+    /// Older gateways do not provide enough metadata to separate primary
+    /// models from embedded artifacts. Match the TUI by preserving the
+    /// historical all-model scope only when the entire snapshot is legacy.
+    /// Explicit modality/relevance choices remain active because `includes`
+    /// applies them even when `showAllModels` is true.
+    func preservingLegacySnapshot(_ rows: [AIModelDiscoveryRow]) -> Self {
+        guard !rows.isEmpty,
+              !rows.contains(where: \.hasModelClassificationMetadata)
+        else { return self }
+        var compatible = self
+        compatible.showAllModels = true
+        return compatible
+    }
+
+    func includes(_ row: AIModelDiscoveryRow) -> Bool {
+        if !showAllModels {
+            let unqualifiedLocalAPI = row.hasLocalModelAPISignalWithoutDiscoveryConfidence
+            if !unqualifiedLocalAPI {
+                if let reportedConfidence = row.reportedDiscoveryConfidence {
+                    guard reportedConfidence >= Self.focusedMinimumConfidence else { return false }
+                } else if !row.hasLocalModelAPISignal {
+                    guard row.maxConfidence >= Self.focusedMinimumConfidence else { return false }
+                }
+
+                // The recommended classification scope applies only while neither
+                // picker expresses user intent. Once either picker is explicit,
+                // its `.all` peer means unrestricted, so choosing Speech alone can
+                // reveal supporting speech models such as Superwhisper.
+                if modality == .all, relevance == .all {
+                    switch row.effectiveRelevance {
+                    case .primary:
+                        break
+                    case .supporting:
+                        let ownerAttributed = !row.ownerApplications.isEmpty
+                        let supportingModalities: Set<AIModelModality> = [
+                            .speech, .audio, .vision, .embedding,
+                        ]
+                        guard ownerAttributed,
+                              supportingModalities.contains(row.effectiveModality)
+                        else { return false }
+                    case .embedded, .unknown:
+                        return false
+                    }
+                }
+            }
+        }
+        if let requestedModality = modality.modality,
+           !row.modalities.contains(requestedModality) {
+            return false
+        }
+        if let requestedRelevance = relevance.relevance,
+           !row.relevances.contains(requestedRelevance) {
+            return false
+        }
+        return true
+    }
 }
 
 enum AIDiscoveryGrouping {
+    static let detailSignalLimit = 50
+
+    private struct GroupKey: Hashable {
+        var state: String
+        var product: String
+        var vendor: String
+        var ecosystem: String
+        var component: String
+        var version: String
+        var model: String
+    }
+
     /// TUI state_weight(): new < changed < active < seen < gone < other.
     static func stateWeight(_ state: String) -> Int {
         switch state.trimmingCharacters(in: .whitespaces).lowercased() {
@@ -751,21 +1488,130 @@ enum AIDiscoveryGrouping {
         return band.isEmpty ? "\(pct)%" : "\(band) (\(pct)%)"
     }
 
-    /// Port of AIDiscoveryPanelModel._rebuild(): group by
+    static func hasModels(in rows: [AIDiscoveryRow]) -> Bool {
+        rows.contains { !$0.model.isEmpty }
+    }
+
+    /// TUI `_apply_filter`: model identity participates in search, while
+    /// status/format remain presentation-only aggregate columns.
+    static func matches(_ row: AIDiscoveryRow, query: String) -> Bool {
+        guard !query.isEmpty else { return true }
+        let haystack = ([
+            row.state, row.product, row.vendor, row.ecosystem, row.component,
+            row.version, row.model, row.identityBand, row.presenceBand,
+        ] + row.categories + row.detectors).joined(separator: " ").lowercased()
+        return haystack.contains(query.lowercased())
+    }
+
+    static func signalIdentifier(_ signal: AISignal) -> String {
+        for candidate in [signal.signatureID, signal.name, signal.signalID] {
+            let value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+        return "(unknown)"
+    }
+
+    static func modelDetail(_ model: AIUsageModel) -> String {
+        let modelID = model.id.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "(unknown)"
+        var parts = ["model: id=\(modelID)"]
+        for (label, value) in [
+            ("status", model.status), ("format", model.format),
+            ("recipe", model.recipe), ("modality", model.modality),
+            ("relevance", model.relevance), ("owner", model.ownerApplication),
+            ("device", model.device),
+        ] {
+            let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { parts.append("\(label)=\(value)") }
+        }
+        if let confidence = model.discoveryConfidence {
+            let percent = AIConfidence.percent(
+                confidence,
+                roundingRule: .toNearestOrAwayFromZero
+            )
+            parts.append("discovery_confidence=\(percent)%")
+        }
+        if model.sizeBytes > 0 { parts.append("size_bytes=\(model.sizeBytes)") }
+        if model.pinned { parts.append("pinned=true") }
+        return parts.joined(separator: " ")
+    }
+
+    static func runtimeDetail(_ runtime: AIUsageRuntime) -> String {
+        guard runtime.pid > 0 else { return "" }
+        var parts = ["runtime: pid=\(runtime.pid)"]
+        let user = runtime.user.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !user.isEmpty { parts.append("user=\(user)") }
+        if runtime.uptimeSeconds > 0 {
+            parts.append("up=\(humanizeDuration(seconds: runtime.uptimeSeconds))")
+        }
+        let command = runtime.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !command.isEmpty { parts.append("comm=\(command)") }
+        return parts.joined(separator: " ")
+    }
+
+    static func activityDetail(_ signal: AISignal, now: Date = Date()) -> String {
+        if let lastActive = signal.lastActive,
+           let seconds = safeElapsedSeconds(from: lastActive, to: now) {
+            return "last active: \(humanizeDuration(seconds: seconds)) ago"
+        }
+        if let lastSeen = signal.lastSeen,
+           let seconds = safeElapsedSeconds(from: lastSeen, to: now) {
+            return "last seen: \(humanizeDuration(seconds: seconds)) ago"
+        }
+        return ""
+    }
+
+    static func humanizeDuration(seconds rawSeconds: Int64) -> String {
+        let seconds = max(rawSeconds, 0)
+        if seconds < 1 { return "0s" }
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 {
+            let remainder = minutes - hours * 60
+            return remainder == 0 ? "\(hours)h" : "\(hours)h\(remainder)m"
+        }
+        let days = hours / 24
+        let remainder = hours % 24
+        return remainder == 0 ? "\(days)d" : "\(days)d\(remainder)h"
+    }
+
+    private static func safeElapsedSeconds(from date: Date, to now: Date) -> Int64? {
+        let delta = abs(now.timeIntervalSince(date))
+        guard let seconds = DCSafeNumbers.intTruncating(delta) else { return nil }
+        return Int64(exactly: seconds)
+    }
+
+    /// Port of AIDiscoveryPanelModel._rebuild(): group non-model signals by
     /// (state, product, vendor, ecosystem, component, version); aggregate
     /// unique categories/detectors in first-seen order; sort by state
-    /// weight, then count desc, then product.
+    /// weight, then count desc, then product. Identified `local_model` signals
+    /// move to `modelRows(from:)`; compatible non-local signals that happen to
+    /// carry model metadata remain product rows.
     static func rows(from signals: [AISignal]) -> [AIDiscoveryRow] {
-        var groups: [String: AIDiscoveryRow] = [:]
-        var order: [String] = []
+        var groups: [GroupKey: AIDiscoveryRow] = [:]
+        var order: [GroupKey] = []
         for signal in signals {
-            let key = [signal.state, signal.product, signal.vendor,
-                       signal.ecosystem.lowercased(), signal.componentName.lowercased(),
-                       signal.version].joined(separator: "|")
+            if signal.category == "local_model",
+               let model = signal.model,
+               !model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                continue
+            }
+            let modelID = ""
+            let key = GroupKey(
+                state: signal.state,
+                product: signal.product,
+                vendor: signal.vendor,
+                ecosystem: signal.ecosystem.lowercased(),
+                component: signal.componentName.lowercased(),
+                version: signal.version,
+                model: modelID
+            )
             var row = groups[key] ?? AIDiscoveryRow(
                 state: signal.state, product: signal.product, vendor: signal.vendor,
                 ecosystem: signal.ecosystem, component: signal.componentName,
-                version: signal.version, categories: [], detectors: [], count: 0,
+                version: signal.version, model: modelID, modelStatuses: [], modelFormats: [],
+                categories: [], detectors: [], count: 0,
                 identityScore: 0, identityBand: "", presenceScore: 0, presenceBand: "",
                 lastActive: nil, signals: []
             )
@@ -777,6 +1623,14 @@ enum AIDiscoveryGrouping {
             }
             if !signal.detector.isEmpty, !row.detectors.contains(signal.detector) {
                 row.detectors.append(signal.detector)
+            }
+            if let model = signal.model {
+                if !model.status.isEmpty, !row.modelStatuses.contains(model.status) {
+                    row.modelStatuses.append(model.status)
+                }
+                if !model.format.isEmpty, !row.modelFormats.contains(model.format) {
+                    row.modelFormats.append(model.format)
+                }
             }
             if row.identityBand.isEmpty, !signal.identityBand.isEmpty {
                 row.identityBand = signal.identityBand
@@ -791,9 +1645,254 @@ enum AIDiscoveryGrouping {
             }
             groups[key] = row
         }
-        return order.compactMap { groups[$0] }.sorted {
-            (stateWeight($0.state), -$0.count, $0.product) < (stateWeight($1.state), -$1.count, $1.product)
+        return order.enumerated().compactMap { offset, key in
+            groups[key].map { (offset, $0) }
+        }.sorted { lhs, rhs in
+            let lhsKey = (stateWeight(lhs.1.state), -lhs.1.count, lhs.1.product, lhs.1.model)
+            let rhsKey = (stateWeight(rhs.1.state), -rhs.1.count, rhs.1.product, rhs.1.model)
+            return lhsKey == rhsKey ? lhs.0 < rhs.0 : lhsKey < rhsKey
+        }.map(\.1)
+    }
+}
+
+/// TUI-equivalent ordering and evidence deduplication for the Overview card.
+/// The card is explicitly agent-only; local models stay visible in the full
+/// AI Discovery table and never consume its eight-row agent cap.
+enum AIOverviewGrouping {
+    private struct OverviewKey: Hashable {
+        var kind: String
+        var value: String
+    }
+
+    static func agentSignals(from signals: [AISignal]) -> [AISignal] {
+        signals.filter { $0.category != "local_model" }
+    }
+
+    static func summaryParts(
+        from signals: [AISignal],
+        lastScan: Date?,
+        privacyMode: String,
+        now: Date = Date()
+    ) -> [String] {
+        let agents = agentSignals(from: signals)
+        let states = agents.map {
+            $0.state.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }
+        var parts = ["\(states.filter { $0 != "gone" }.count) active"]
+        let newCount = states.filter { $0 == "new" }.count
+        let changedCount = states.filter { $0 == "changed" }.count
+        let goneCount = states.filter { $0 == "gone" }.count
+        if newCount != 0 { parts.append("\(newCount) new") }
+        if changedCount != 0 { parts.append("\(changedCount) changed") }
+        if goneCount != 0 { parts.append("\(goneCount) gone") }
+        if let lastScan { parts.append("scanned \(formatScanAge(lastScan, now: now))") }
+        if let mode = trimmed(privacyMode).nonEmpty { parts.append("mode \(mode)") }
+        return parts
+    }
+
+    static func sortedSignals(_ signals: [AISignal]) -> [AISignal] {
+        signals.enumerated().sorted { lhsEntry, rhsEntry in
+            let lhs = lhsEntry.element
+            let rhs = rhsEntry.element
+            let lhsState = stateRank(lhs.state)
+            let rhsState = stateRank(rhs.state)
+            if lhsState != rhsState { return lhsState < rhsState }
+
+            let lhsModel = lhs.model?.status == "loaded" ? 0 : 1
+            let rhsModel = rhs.model?.status == "loaded" ? 0 : 1
+            if lhsModel != rhsModel { return lhsModel < rhsModel }
+            if lhs.confidence != rhs.confidence { return lhs.confidence > rhs.confidence }
+
+            let lhsSeen = lhs.lastSeen?.timeIntervalSince1970 ?? 0
+            let rhsSeen = rhs.lastSeen?.timeIntervalSince1970 ?? 0
+            if lhsSeen != rhsSeen { return lhsSeen > rhsSeen }
+            let lhsName = displayName(lhs).lowercased()
+            let rhsName = displayName(rhs).lowercased()
+            return lhsName == rhsName ? lhsEntry.offset < rhsEntry.offset : lhsName < rhsName
+        }.map(\.element)
+    }
+
+    static func uniqueSignals(_ signals: [AISignal]) -> [AISignal] {
+        var seen = Set<OverviewKey>()
+        var rows: [AISignal] = []
+        for signal in signals {
+            guard seen.insert(key(for: signal)).inserted else { continue }
+            rows.append(signal)
+        }
+        return rows
+    }
+
+    static func displayName(_ signal: AISignal) -> String {
+        for candidate in [
+            signal.model?.id ?? "", signal.name, signal.product,
+            signal.signatureID, signal.signalID,
+        ] {
+            let value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+        return "(unknown)"
+    }
+
+    static func displayVendor(_ signal: AISignal) -> String {
+        let vendor = trimmed(signal.vendor).nonEmpty ?? trimmed(signal.category).nonEmpty ?? "-"
+        var label = signal.version.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+            .map { "\(vendor) \($0)" } ?? vendor
+        if let connector = trimmed(signal.supportedConnector).nonEmpty {
+            label += " (\(connector))"
+        }
+        if let model = signal.model {
+            let details = [trimmed(model.status), trimmed(model.format)].filter { !$0.isEmpty }
+            if !details.isEmpty { label += " (\(details.joined(separator: ", ")))" }
+        }
+        return label
+    }
+
+    static func rowID(_ signal: AISignal) -> String {
+        let identity = key(for: signal)
+        return [identity.kind, identity.value]
+            .map { "\($0.utf8.count):\($0)" }
+            .joined()
+    }
+
+    private static func stateRank(_ state: String) -> Int {
+        switch trimmed(state).lowercased() {
+        case "new": 0
+        case "changed": 1
+        case "active", "": 2
+        case "gone": 3
+        default: 4
+        }
+    }
+
+    private static func formatScanAge(_ date: Date, now: Date) -> String {
+        let delta = now.timeIntervalSince(date)
+        guard delta.isFinite else { return "-" }
+        if delta < 0 { return "now" }
+        guard let seconds = DCSafeNumbers.intTruncating(delta) else { return "-" }
+        if seconds < 60 { return "\(seconds)s ago" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        return "\(hours / 24)d ago"
+    }
+
+    private static func key(for signal: AISignal) -> OverviewKey {
+        if let connector = trimmed(signal.supportedConnector).nonEmpty {
+            return OverviewKey(kind: "connector", value: connector.lowercased())
+        }
+        let ecosystem = trimmed(signal.ecosystem).lowercased()
+        let component = trimmed(signal.componentName).lowercased()
+        if !ecosystem.isEmpty || !component.isEmpty {
+            return OverviewKey(kind: "component", value: identityValue([ecosystem, component]))
+        }
+        if let model = signal.model, let modelID = trimmed(model.id).nonEmpty {
+            let provider = trimmed(model.provider).nonEmpty ?? trimmed(signal.vendor)
+            return OverviewKey(
+                kind: "model",
+                value: identityValue([provider.lowercased(), modelID.lowercased()])
+            )
+        }
+        return OverviewKey(
+            kind: "display",
+            value: identityValue([
+                displayVendor(signal).lowercased(),
+                displayName(signal).lowercased(),
+            ])
+        )
+    }
+
+    private static func identityValue(_ fields: [String]) -> String {
+        fields.map { "\($0.utf8.count):\($0)" }.joined()
+    }
+
+    private static func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+}
+
+extension AIDiscoveryGrouping {
+
+    /// Collapse case variants of the same local-model ID across file, API, and
+    /// runtime detectors, surfacing the most actionable lifecycle state.
+    static func modelRows(from signals: [AISignal]) -> [AIModelDiscoveryRow] {
+        var groups: [AIModelDiscoveryRowID: AIModelDiscoveryRow] = [:]
+        var order: [AIModelDiscoveryRowID] = []
+        for signal in signals {
+            guard signal.category == "local_model",
+                  let model = signal.model
+            else { continue }
+            let modelID = model.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !modelID.isEmpty else { continue }
+            let key = AIModelDiscoveryRowID(
+                normalizedModelID: normalizedModelID(modelID)
+            )
+            var row = groups[key] ?? AIModelDiscoveryRow(
+                state: signal.state,
+                modelID: modelID,
+                statuses: [], formats: [], providers: [], products: [], vendors: [], detectors: [],
+                count: 0, provenance: nil, lastActive: nil, signals: []
+            )
+            if groups[key] == nil { order.append(key) }
+            if stateWeight(signal.state) < stateWeight(row.state) {
+                row.state = signal.state
+            }
+            row.count += 1
+            row.signals.append(signal)
+            appendUnique(model.status, to: &row.statuses)
+            appendUnique(model.format, to: &row.formats)
+            appendUnique(model.provider, to: &row.providers)
+            appendUnique(signal.product, to: &row.products)
+            appendUnique(signal.vendor, to: &row.vendors)
+            appendUnique(signal.detector, to: &row.detectors)
+            if prefersModelProvenance(model.provenance, over: row.provenance) {
+                let provenance = model.provenance
+                row.provenance = provenance
+            }
+            if let active = signal.lastActive, row.lastActive.map({ active > $0 }) ?? true {
+                row.lastActive = active
+            }
+            groups[key] = row
+        }
+        return order.compactMap { groups[$0] }.sorted {
+            (stateWeight($0.state), normalizedModelID($0.modelID))
+                < (stateWeight($1.state), normalizedModelID($1.modelID))
+        }
+    }
+
+    static func normalizedModelID(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        ).lowercased()
+    }
+
+    private static func appendUnique(_ value: String, to values: inout [String]) {
+        guard !value.isEmpty, !values.contains(value) else { return }
+        values.append(value)
+    }
+
+    private static func prefersModelProvenance(
+        _ candidate: AIModelProvenance?,
+        over current: AIModelProvenance?
+    ) -> Bool {
+        guard let candidate else { return false }
+        guard let current else { return true }
+        let confidenceRank = ["low": 1, "medium": 2, "high": 3]
+        func score(_ provenance: AIModelProvenance) -> (Int, Int) {
+            let populated = [
+                !provenance.publisher.isEmpty,
+                !provenance.countryCode.isEmpty,
+                !provenance.rootModel.isEmpty,
+                !provenance.baseModels.isEmpty,
+                !provenance.quantization.isEmpty,
+                !provenance.derivation.isEmpty,
+                !provenance.source.isEmpty,
+            ].filter { $0 }.count
+            return (confidenceRank[provenance.confidence.lowercased(), default: 0], populated)
+        }
+        return score(candidate) > score(current)
     }
 }
 

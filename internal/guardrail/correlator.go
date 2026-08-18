@@ -61,7 +61,9 @@ type CorrelationPattern struct {
 	SeverityOnMatch string           `yaml:"severity_on_match"`
 	AllOf           []PatternClause  `yaml:"all_of,omitempty"`
 	Sequence        []SequenceClause `yaml:"sequence,omitempty"`
-	FingerprintLink []PatternClause  `yaml:"fingerprint_chain,omitempty"`
+	// FingerprintLink is an ordered chain of distinct findings that must share
+	// one non-empty content fingerprint. Clause order is temporal order.
+	FingerprintLink []PatternClause `yaml:"fingerprint_chain,omitempty"`
 	// Ordered, when set on an `all_of` pattern, requires the clauses to
 	// match distinct findings in temporal (arrival) order rather than
 	// as an unordered conjunction. Default false preserves the legacy
@@ -231,33 +233,54 @@ func (p *CorrelationPattern) matchSequence(window []CorrelationFinding) []Correl
 }
 
 func (p *CorrelationPattern) matchFingerprintLink(window []CorrelationFinding) []CorrelationFinding {
-	// Each clause independently matches some finding; the link fires
-	// only when all matched findings share a non-empty content_fingerprint.
-	matched := make([]*CorrelationFinding, 0, len(p.FingerprintLink))
-	for _, clause := range p.FingerprintLink {
-		var hit *CorrelationFinding
-		for i := range window {
-			if clauseMatches(clause, &window[i]) && window[i].ContentFingerprint != "" {
-				hit = &window[i]
+	if len(p.FingerprintLink) == 0 {
+		return nil
+	}
+	// Window is newest-first. Search oldest-first so YAML clause order is
+	// strict temporal order (for the built-in rule: sensitive access, then
+	// external egress). Trying each possible first clause avoids a newer
+	// unrelated value hiding an older valid chain.
+	ordered := make([]CorrelationFinding, len(window))
+	for index := range window {
+		ordered[len(window)-1-index] = window[index]
+	}
+	for start := range ordered {
+		first := ordered[start]
+		if first.ID == "" || first.ContentFingerprint == "" ||
+			!clauseMatches(p.FingerprintLink[0], &first) {
+			continue
+		}
+		matched := []CorrelationFinding{first}
+		seenIDs := map[string]struct{}{first.ID: {}}
+		next := start + 1
+		complete := true
+		for clauseIndex := 1; clauseIndex < len(p.FingerprintLink); clauseIndex++ {
+			found := false
+			for candidateIndex := next; candidateIndex < len(ordered); candidateIndex++ {
+				candidate := ordered[candidateIndex]
+				if candidate.ID == "" || candidate.ContentFingerprint != first.ContentFingerprint ||
+					!clauseMatches(p.FingerprintLink[clauseIndex], &candidate) {
+					continue
+				}
+				if _, duplicate := seenIDs[candidate.ID]; duplicate {
+					continue
+				}
+				seenIDs[candidate.ID] = struct{}{}
+				matched = append(matched, candidate)
+				next = candidateIndex + 1
+				found = true
+				break
+			}
+			if !found {
+				complete = false
 				break
 			}
 		}
-		if hit == nil {
-			return nil
-		}
-		matched = append(matched, hit)
-	}
-	sharedFP := matched[0].ContentFingerprint
-	for _, m := range matched[1:] {
-		if m.ContentFingerprint != sharedFP {
-			return nil
+		if complete {
+			return matched
 		}
 	}
-	out := make([]CorrelationFinding, len(matched))
-	for i, m := range matched {
-		out[i] = *m
-	}
-	return out
+	return nil
 }
 
 func clauseMatches(c PatternClause, f *CorrelationFinding) bool {

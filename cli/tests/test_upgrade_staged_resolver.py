@@ -20,14 +20,26 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from defenseclaw import resolver_hint
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
+_STAGED_COSIGN_SHA256_BY_ASSET = {
+    "cosign-darwin-arm64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
+    "cosign-linux-amd64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
+    "cosign-linux-arm64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],
+}
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="upgrade.sh staged-resolver contracts require a native POSIX shell; Windows upgrades use the native installer",
+)
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -56,7 +68,15 @@ def _manifest(version: str) -> dict[str, object]:
     windows_sources = ["0.8.3", "0.8.2", "0.8.1", "0.8.0"]
     if version == "0.8.5":
         published_sources.insert(0, "0.8.4")
-        windows_sources.insert(0, "0.8.4")
+        windows_sources = []
+    elif version in {"0.8.6", "0.8.7", "0.8.8"}:
+        post_cut_sources = ["0.8.5", "0.8.4"]
+        if version in {"0.8.7", "0.8.8"}:
+            post_cut_sources.insert(0, "0.8.6")
+        if version == "0.8.8":
+            post_cut_sources.insert(0, "0.8.7")
+        published_sources[0:0] = post_cut_sources
+        windows_sources = [item for item in post_cut_sources if item not in {"0.8.5", "0.8.4"}]
     gateways = {
         platform_name: {
             arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")
@@ -78,7 +98,7 @@ def _manifest(version: str) -> dict[str, object]:
         "tested_source_versions": published_sources,
         "platform_tested_source_versions": {"windows": windows_sources},
     }
-    if version == "0.8.5":
+    if version in {"0.8.5", "0.8.6", "0.8.7", "0.8.8"}:
         payload.update(
             {
                 "min_upgrade_protocol": 2,
@@ -108,10 +128,54 @@ def _manifest(version: str) -> dict[str, object]:
     return payload
 
 
-def _release_provenance(bridge_checksums_sha256: str) -> dict[str, object]:
+def _protected(payload: bytes) -> bytes:
+    return b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n" + bytes(value ^ 0xA5 for value in payload)
+
+
+def _source_gateway_payload(version: str) -> bytes:
+    assert version in {"0.8.6", "0.8.7"}
+    return (
+        b"#!/usr/bin/env bash\n"
+        + f'if [[ "${{1:-}}" == "--version" ]]; then echo \'DefenseClaw gateway {version}\'; exit 0; fi\n'.encode()
+        + b"exit 0\n"
+    )
+
+
+def _source_package_files(version: str) -> dict[str, bytes]:
+    assert version in {"0.8.6", "0.8.7"}
+    return {
+        "defenseclaw/__init__.py": f'__version__ = "{version}"\n'.encode(),
+        "defenseclaw/config.py": (
+            b"import json, os\n"
+            b"from types import SimpleNamespace\n"
+            b"def load():\n"
+            b"    home = os.environ['DEFENSECLAW_HOME']\n"
+            b"    with open(os.environ.get('DEFENSECLAW_CONFIG', os.path.join(home, 'config.yaml')), encoding='utf-8') as stream:\n"
+            b"        config = json.load(stream)\n"
+            b"    return SimpleNamespace(data_dir=config.get('data_dir', home), audit_db=config.get('audit_db', ''), "
+            b"claw=SimpleNamespace(home_dir=os.path.join(os.environ['HOME'], '.openclaw')))\n"
+        ),
+        "defenseclaw/observability/__init__.py": b"",
+        "defenseclaw/observability/v8_config.py": (
+            b"import copy, json\n"
+            b"class Validated:\n"
+            b"    def __init__(self, source): self._source = source\n"
+            b"    @property\n"
+            b"    def source(self): return copy.deepcopy(self._source)\n"
+            b"def load_validate_v8(data, *, source_name='config.yaml'):\n"
+            b"    if isinstance(data, bytes): data = data.decode('utf-8')\n"
+            b"    source = json.loads(data) if isinstance(data, str) else dict(data)\n"
+            b"    if type(source.get('config_version')) is not int or source['config_version'] != 8: raise ValueError('invalid v8 config')\n"
+            b"    return Validated(source)\n"
+        ),
+        "defenseclaw/_data/local_observability_stack/README.md": (f"authenticated clean {version} stack\n".encode()),
+    }
+
+
+def _release_provenance(version: str, bridge_checksums_sha256: str) -> dict[str, object]:
     return {
         "schema_version": 1,
-        "release_version": "0.8.5",
+        "release_version": version,
         "source_commit": "1" * 40,
         "source_tree": "2" * 40,
         "policy_commit": "3" * 40,
@@ -119,7 +183,7 @@ def _release_provenance(bridge_checksums_sha256: str) -> dict[str, object]:
         "release_source_map_sha256": "5" * 64,
         "source_install_identity": {
             "schema_version": 1,
-            "source_release": "0.8.5",
+            "source_release": version,
             "source_install_compatibility_epoch": 2,
             "runtime_config_version": 8,
         },
@@ -143,16 +207,34 @@ def resolver_env(tmp_path: Path):
         home.mkdir(exist_ok=True)
 
         bridge_checksums_sha256 = ""
-        for version in ("0.8.4", "0.8.5"):
+        for version in ("0.8.4", "0.8.5", "0.8.6", "0.8.7", "0.8.8"):
             release_dir = fixtures / version
             release_dir.mkdir(exist_ok=True)
-            manifest = json.dumps(_manifest(version), sort_keys=True).encode()
+            manifest_payload = _manifest(version)
+            manifest = json.dumps(manifest_payload, sort_keys=True).encode()
             (release_dir / "upgrade-manifest.json").write_bytes(manifest)
             checksum_rows = [f"{hashlib.sha256(manifest).hexdigest()}  upgrade-manifest.json"]
-            if version == "0.8.5":
+            release_artifacts = manifest_payload["release_artifacts"]
+            assert isinstance(release_artifacts, dict)
+            wheel_name = release_artifacts["wheel"]
+            assert isinstance(wheel_name, str)
+            wheel = release_dir / wheel_name
+            wheel_payload = b"resolver target wheel fixture"
+            wheel.write_bytes(_protected(wheel_payload))
+            checksum_rows.append(f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}")
+            gateways = release_artifacts["gateways"]
+            assert isinstance(gateways, dict)
+            for platform_gateways in gateways.values():
+                assert isinstance(platform_gateways, dict)
+                for gateway_name in platform_gateways.values():
+                    assert isinstance(gateway_name, str)
+                    gateway = release_dir / gateway_name
+                    gateway.write_bytes(f"gateway fixture {gateway_name}\n".encode())
+                    checksum_rows.append(f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}")
+            if version in {"0.8.5", "0.8.6", "0.8.7", "0.8.8"}:
                 provenance = (
                     json.dumps(
-                        _release_provenance(bridge_checksums_sha256),
+                        _release_provenance(version, bridge_checksums_sha256),
                         indent=2,
                         sort_keys=True,
                     )
@@ -188,6 +270,29 @@ def resolver_env(tmp_path: Path):
             '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${COSIGN_LOG}"\nexit 0\n',
         )
         _write_executable(
+            fake_bin / "sha256sum",
+            """#!/usr/bin/env bash
+set -euo pipefail
+case "${1##*/}" in
+__COSIGN_DIGEST_CASES__
+    *)
+        sha="$(python3 - "$1" <<'PY'
+import hashlib
+import sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)"
+        ;;
+esac
+printf '%s  %s\n' "${sha}" "$1"
+""".replace(
+                "__COSIGN_DIGEST_CASES__",
+                "\n".join(
+                    f"    {asset}) sha='{digest}' ;;" for asset, digest in _STAGED_COSIGN_SHA256_BY_ASSET.items()
+                ),
+            ),
+        )
+        _write_executable(
             fake_bin / "curl",
             """#!/usr/bin/env bash
 set -euo pipefail
@@ -205,20 +310,32 @@ for arg in "$@"; do
         want_out=0
         continue
     fi
-    if [[ "${arg}" == '-o' ]]; then
+    if [[ "${arg}" == '-o' || "${arg}" == '--output' ]]; then
         want_out=1
     elif [[ "${arg}" == http* ]]; then
         url="${arg}"
     fi
 done
 if [[ "${url}" == */releases/latest ]]; then
-    printf '{"tag_name":"0.8.5"}\n'
+    printf '{"tag_name":"0.8.7"}\n'
+    exit 0
+fi
+if [[ "${url}" == https://github.com/sigstore/cosign/releases/download/* ]]; then
+    [[ -n "${out}" ]] || exit 95
+    cat > "${out}" <<'COSIGN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${COSIGN_LOG}"
+exit 0
+COSIGN
     exit 0
 fi
 version=''
 case "${url}" in
     */releases/download/0.8.4/*) version='0.8.4' ;;
     */releases/download/0.8.5/*) version='0.8.5' ;;
+    */releases/download/0.8.6/*) version='0.8.6' ;;
+    */releases/download/0.8.7/*) version='0.8.7' ;;
+    */releases/download/0.8.8/*) version='0.8.8' ;;
 esac
 [[ -n "${version}" && -n "${out}" ]] || exit 96
 name="${url##*/}"
@@ -230,6 +347,13 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         curl_log = tmp_path / "curl.log"
         cosign_log = tmp_path / "cosign.log"
         env = os.environ.copy()
+        for name in tuple(env):
+            if name in {
+                "DEFENSECLAW_DISABLE_REDACTION",
+                "DEFENSECLAW_JSONL_DISABLE",
+                "DEFENSECLAW_PERSIST_JUDGE",
+            } or name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_")):
+                env.pop(name)
         env.update(
             {
                 "PATH": f"{fake_bin}:{env['PATH']}",
@@ -239,6 +363,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 "MUTATION_LOG": str(mutation_log),
                 "CURL_LOG": str(curl_log),
                 "COSIGN_LOG": str(cosign_log),
+                "DEFENSECLAW_UPGRADE_TEST_MODE": "1",
                 "NO_COLOR": "1",
             }
         )
@@ -247,9 +372,90 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
     return build
 
 
+def test_resolver_env_excludes_ambient_observability_decisions(
+    resolver_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
+        "OPENCLAW_OTEL_TLS_INSECURE",
+        "DEFENSECLAW_DISABLE_REDACTION",
+    )
+    for name in names:
+        monkeypatch.setenv(name, "ambient")
+
+    env, _mutation_log, _curl_log = resolver_env("0.8.6")
+
+    assert all(name not in env for name in names)
+
+
+def _install_release_owned_missing_cursor_state(
+    env: dict[str, str],
+    version: str,
+) -> tuple[Path, Path]:
+    assert version in {"0.8.6", "0.8.7"}
+    data_home = Path(env["DEFENSECLAW_HOME"])
+    data_home.mkdir()
+    config_path = data_home / "config.yaml"
+    clean_config = {
+        "cisco_ai_defense": {"api_key_env": "CISCO_AI_DEFENSE_API_KEY"},
+        "claw": {"mode": "codex"},
+        "guardrail": {
+            "connector": "codex",
+            "enabled": True,
+            "scanner_mode": "local",
+        },
+        "llm": {"api_key_env": "DEFENSECLAW_LLM_KEY"},
+        "config_version": 8,
+        "observability": {},
+        "gateway": {"token_env": "DEFENSECLAW_GATEWAY_TOKEN"},
+    }
+    config_path.write_text(
+        json.dumps(clean_config, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    stack = data_home / "observability-stack"
+
+    site_packages = data_home / ".venv" / "lib" / "python3.12" / "site-packages"
+    package_root = site_packages / "defenseclaw"
+    package_root.mkdir(parents=True)
+    for name, payload in _source_package_files(version).items():
+        relative = Path(name).relative_to("defenseclaw")
+        destination = package_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    python_wrapper = data_home / ".venv" / "bin" / "python"
+    python_wrapper.parent.mkdir(parents=True)
+    _write_executable(
+        python_wrapper,
+        "#!/usr/bin/env bash\n"
+        f"export PYTHONPATH={str(site_packages)!r}\n"
+        "args=()\n"
+        # The fake 0.8.6 wheel is an unpacked fixture, not an installed
+        # interpreter environment. Drop -I only in this wrapper so the fixture
+        # package on PYTHONPATH models the published source controller.
+        'for arg in "$@"; do [[ "${arg}" == "-I" ]] || args+=("${arg}"); done\n'
+        f'exec {str(sys.executable)!r} "${{args[@]}}"\n',
+    )
+
+    gateway = Path(env["HOME"]) / ".local" / "bin" / "defenseclaw-gateway"
+    gateway.write_bytes(_source_gateway_payload(version))
+    gateway.chmod(0o755)
+    return config_path, stack
+
+
 def _run(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return _run_script(UPGRADE_SCRIPT, env, *args)
+
+
+def _run_script(
+    script: Path,
+    env: dict[str, str],
+    *args: str,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(UPGRADE_SCRIPT), "--yes", *args],
+        ["bash", str(script), "--yes", *args],
         cwd=ROOT,
         env=env,
         text=True,
@@ -323,25 +529,46 @@ def _rewrite_manifest(env: dict[str, str], version: str, payload: dict[str, obje
     )
 
 
-def test_explicit_hard_cut_from_0_8_3_refuses_before_mutation(resolver_env) -> None:
-    env, mutation_log, _curl_log = resolver_env("0.8.3")
+@pytest.mark.parametrize("current_version", ("0.8.3", "0.8.0"))
+def test_explicit_final_target_still_resolves_verified_two_hop_plan(
+    resolver_env,
+    current_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env(current_version)
 
     result = _run(env, "--version", "0.8.5", "--plan")
 
     output = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "0.8.5 requires the 0.8.4 upgrade bridge" in output
+    assert result.returncode == 0, output
+    assert f"{current_version} → 0.8.4 bridge → fresh controller → 0.8.5" in output
     assert "No changes were made" in output
-    assert "there is intentionally no --version argument" in output
-    assert "defenseclaw-upgrade.XXXXXX" in output
-    assert "releases/download/0.8.5/" in output
-    assert "defenseclaw-upgrade.sh" in output
-    assert "cosign verify-blob" in output
-    assert "DefenseClaw upgrade resolver complete v1" in output
-    assert 'bash "$d/defenseclaw-upgrade.sh" --yes' in output
-    assert "upgrade.sh | bash" not in output
     assert not mutation_log.exists()
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
+
+
+@pytest.mark.parametrize("target_version", ("0.8.7", "0.8.8"))
+@pytest.mark.parametrize("current_version", ("0.8.3", "0.7.1"))
+def test_explicit_post_cut_target_stages_hard_cut_release(
+    resolver_env,
+    current_version: str,
+    target_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env(current_version)
+
+    result = _run(env, "--version", target_version, "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"{current_version} → 0.8.4 bridge → fresh controller → 0.8.5 → {target_version}" in output
+    assert "No changes were made" in output
+    assert not mutation_log.exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert f"/releases/download/{target_version}/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
 
 
 def test_bridge_manifest_runtime_config_boundary_is_fail_closed(resolver_env) -> None:
@@ -383,11 +610,12 @@ def test_normal_latest_resolves_verified_two_hop_plan(resolver_env) -> None:
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "0.8.3 → 0.8.4 bridge → fresh controller → 0.8.5" in output
+    assert "0.8.3 → 0.8.4 bridge → fresh controller → 0.8.5 → 0.8.7" in output
     assert "No changes were made" in output
     assert not mutation_log.exists()
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
     downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.7/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
     assert "defenseclaw_0.8.5_protocol2_" in downloads
@@ -426,6 +654,26 @@ def test_explicit_bridge_from_unpublished_source_fails_closed(resolver_env) -> N
     assert "No changes were made" in output
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
     assert not mutation_log.exists()
+
+
+@pytest.mark.parametrize("target_version", ("0.7.2", "0.8.3"))
+def test_explicit_pre_bridge_target_fails_before_download_or_mutation(
+    resolver_env,
+    target_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env("0.5.0")
+
+    result = _run(env, "--version", target_version, "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert (
+        f"Target release {target_version} predates the oldest reviewed final-target readiness contract (0.8.4)"
+    ) in output
+    assert "No changes were made" in output
+    assert not curl_log.exists()
+    assert not mutation_log.exists()
+    assert not Path(env["DEFENSECLAW_HOME"]).exists()
 
 
 @pytest.mark.parametrize(
@@ -513,30 +761,226 @@ def test_manual_hard_cut_artifacts_over_v7_state_refuse_before_release_download(
     assert not curl_log.exists()
 
 
-def test_bridge_source_resolves_direct_hard_cut(resolver_env) -> None:
+@pytest.mark.parametrize(
+    ("local_stack", "unrelated_change"),
+    ((False, False), (True, False), (False, True)),
+    ids=("no-stack", "replaceable-local-stack", "configured-v8-state"),
+)
+@pytest.mark.parametrize("source_version", ("0.8.6", "0.8.7"))
+def test_public_cursorless_first_run_authorizes_recovery_without_mutation(
+    resolver_env,
+    local_stack: bool,
+    unrelated_change: bool,
+    source_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env(source_version)
+    config_path, stack = _install_release_owned_missing_cursor_state(env, source_version)
+    if local_stack:
+        stack.mkdir()
+        (stack / "README.md").write_bytes(f"authenticated clean {source_version} stack\n".encode())
+    if unrelated_change:
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+        document["llm"]["model"] = "operator-selected-model"
+        document["observability"] = {"destinations": [{"name": "operator-selected"}]}
+        config_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    before = config_path.read_bytes()
+
+    result = _run(env, "--version", "0.8.8", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"Accepted exact public {source_version} cursorless first-run state" in output
+    assert f"{source_version} → 0.8.8" in output
+    assert config_path.read_bytes() == before
+    assert not (Path(env["DEFENSECLAW_HOME"]) / ".migration_state.json").exists()
+    assert not mutation_log.exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.8/release-provenance.json" in downloads
+    assert f"/releases/download/{source_version}/" not in downloads
+
+
+@pytest.mark.parametrize("path_kind", ("relative", "absolute"))
+def test_staged_runtime_resolves_configured_audit_path_like_source_controller(
+    resolver_env,
+    tmp_path: Path,
+    path_kind: str,
+) -> None:
+    env, mutation_log, _curl_log = resolver_env("0.8.6")
+    config_path, _stack = _install_release_owned_missing_cursor_state(env, "0.8.6")
+    data_home = Path(env["DEFENSECLAW_HOME"])
+    (data_home / ".migration_state.json").write_text(
+        '{"schema":1,"applied":["0.8.5"]}\n',
+        encoding="utf-8",
+    )
+    configured_audit_db = (
+        "audit-state/custom.sqlite"
+        if path_kind == "relative"
+        else str(tmp_path / "absolute-audit-state" / "custom.sqlite")
+    )
+    expected_audit_db = data_home / configured_audit_db if path_kind == "relative" else Path(configured_audit_db)
+    expected_audit_db.parent.mkdir(parents=True)
+    connection = sqlite3.connect(expected_audit_db)
+    try:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        connection.execute("PRAGMA wal_autocheckpoint=0")
+        connection.execute("CREATE TABLE audit_path_fixture (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO audit_path_fixture VALUES ('configured-path-probe')")
+        connection.commit()
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+        document["audit_db"] = configured_audit_db
+        config_path.write_text(json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8")
+
+        result = _run(env, "--version", "0.8.7", "--plan")
+        output = result.stdout + result.stderr
+    finally:
+        connection.close()
+
+    assert result.returncode == 0, output
+    assert "0.8.6 → 0.8.7" in output
+    assert "active audit database has a WAL" in output
+    assert expected_audit_db.is_file()
+    assert not (data_home / "audit.db").exists()
+    assert config_path.is_file()
+    assert not mutation_log.exists()
+
+
+def test_same_version_086_cursor_bootstrap_preserves_unrelated_v8_config_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from defenseclaw.migrations import run_migrations
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    config_path = data_home / "config.yaml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 8,
+                "llm": {
+                    "api_key_env": "DEFENSECLAW_LLM_KEY",
+                    "model": "operator-selected-model",
+                },
+                "observability": {},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    before = config_path.read_bytes()
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+
+    count = run_migrations(
+        "0.8.6",
+        "0.8.6",
+        str(tmp_path / "openclaw"),
+        str(data_home),
+        upgrade_handles_local_bundle=True,
+    )
+
+    assert count == 0
+    assert config_path.read_bytes() == before
+    cursor = json.loads((data_home / ".migration_state.json").read_text(encoding="utf-8"))
+    assert "0.8.5" in cursor["applied"]
+
+
+@pytest.mark.parametrize(
+    "near_miss",
+    (
+        "cursor",
+        "migration-backup",
+        "pending-cursor-retry",
+        "receipt",
+    ),
+)
+def test_clean_086_missing_cursor_recovery_rejects_near_miss_state(
+    resolver_env,
+    near_miss: str,
+) -> None:
+    env, mutation_log, _curl_log = resolver_env("0.8.6")
+    config_path, _stack = _install_release_owned_missing_cursor_state(env, "0.8.6")
+    if near_miss == "cursor":
+        (Path(env["DEFENSECLAW_HOME"]) / ".migration_state.json").write_text("{broken", encoding="utf-8")
+    elif near_miss == "migration-backup":
+        Path(f"{config_path}.pre-observability-migration.bak").write_bytes(b"residue\n")
+    elif near_miss == "pending-cursor-retry":
+        (Path(env["DEFENSECLAW_HOME"]) / ".migration_state.fresh.pending.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+    else:
+        (Path(env["DEFENSECLAW_HOME"]) / ".upgrade-receipts").mkdir()
+    before = config_path.read_bytes()
+
+    result = _run(env, "--version", "0.8.7", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert (
+        "config-v8 migration state is absent or invalid" in output
+        if near_miss == "cursor"
+        else "not the supported public cursorless first-run shape" in output
+    )
+    assert config_path.read_bytes() == before
+    assert not mutation_log.exists()
+
+
+def test_bridge_source_refreshes_before_direct_hard_cut(resolver_env) -> None:
     env, mutation_log, curl_log = resolver_env("0.8.4")
+
+    result = _run(env, "--version", "0.8.5", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Refresh authenticated 0.8.4 bridge → fresh controller → 0.8.5" in output
+    assert not mutation_log.exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+
+
+@pytest.mark.parametrize("target_version", ("0.8.7", "0.8.8"))
+def test_bridge_source_stages_hard_cut_before_post_cut_target(resolver_env, target_version: str) -> None:
+    env, mutation_log, curl_log = resolver_env("0.8.4")
+
+    result = _run(env, "--version", target_version, "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"Refresh authenticated 0.8.4 bridge → fresh controller → 0.8.5 → {target_version}" in output
+    assert not mutation_log.exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert f"/releases/download/{target_version}/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX release-owned resolver")
+def test_modern_resolver_bootstraps_cosign_before_mutation(resolver_env) -> None:
+    env, mutation_log, _curl_log = resolver_env("0.8.3")
+    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+    (fake_bin / "cosign").unlink()
+    controlled_system_bin = fake_bin.parent / "system-bin"
+    controlled_system_bin.mkdir()
+    for directory in os.defpath.split(os.pathsep):
+        source_directory = Path(directory)
+        if not source_directory.is_dir():
+            continue
+        for candidate in source_directory.iterdir():
+            destination = controlled_system_bin / candidate.name
+            if candidate.name == "cosign" or destination.exists() or not os.access(candidate, os.X_OK):
+                continue
+            destination.symlink_to(candidate)
+    env["PATH"] = f"{fake_bin}:{controlled_system_bin}"
+    assert shutil.which("cosign", path=env["PATH"]) is None
 
     result = _run(env, "--plan")
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "0.8.4 → 0.8.5" in output
-    assert "bridge → fresh controller" not in output
-    assert not mutation_log.exists()
-    downloads = curl_log.read_text(encoding="utf-8")
-    assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
-
-
-def test_modern_resolver_requires_cosign_before_mutation(resolver_env) -> None:
-    env, mutation_log, _curl_log = resolver_env("0.8.3")
-    (Path(env["PATH"].split(os.pathsep, 1)[0]) / "cosign").unlink()
-
-    result = _run(env, "--plan")
-
-    output = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "requires Sigstore provenance verification" in output
-    assert "No changes were made" in output
+    assert "Cosign was not found; authenticating temporary Cosign 2.6.3" in output
+    assert "Temporary Cosign verifier authenticated" in output
     assert not mutation_log.exists()
 
 

@@ -32,6 +32,7 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
 from defenseclaw.inventory import agent_discovery, ai_signatures
@@ -128,6 +129,7 @@ def discover(
     _load_dotenv_into_os(str(default_data_path()))
     started = time.monotonic()
     disc = agent_discovery.discover_agents(use_cache=not no_cache, refresh=refresh)
+    _apply_discovery_config_state(app, disc)
     duration_ms = int((time.monotonic() - started) * 1000)
 
     otel_result = {"attempted": False, "emitted": False, "error": ""}
@@ -375,7 +377,10 @@ def processes(
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     raw_signals = payload.get("signals", []) or []
-    process_signals = [s for s in raw_signals if s.get("runtime")]
+    process_signals = [
+        s for s in raw_signals
+        if s.get("runtime") and str(s.get("state", "")).lower() != "gone"
+    ]
     # Most-recently-seen first so an operator hunting a runaway agent
     # sees fresh activity at the top.
     process_signals.sort(
@@ -383,9 +388,21 @@ def processes(
         reverse=True,
     )
 
+    process_error = str(
+        ((payload.get("summary") or {}).get("detector_errors") or {}).get("process", "")
+    )
+
     if as_json:
-        click.echo(json.dumps({"processes": process_signals}, indent=2, sort_keys=True))
+        output: dict[str, Any] = {"processes": process_signals}
+        if process_error:
+            output["errors"] = [{"detector": "process", "message": process_error}]
+        click.echo(json.dumps(output, indent=2, sort_keys=True))
+        if process_error:
+            raise click.exceptions.Exit(1)
         return
+
+    if process_error:
+        raise click.ClickException(f"process snapshot failed: {process_error}")
 
     click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
 
@@ -986,10 +1003,13 @@ def discovery() -> None:
     ),
 )
 @click.option(
-    "--emit-otel/--no-emit-otel",
-    "emit_otel",
+    "--lookup-model-provenance-online/--no-lookup-model-provenance-online",
+    "lookup_model_provenance_online",
     default=None,
-    help="Forward sanitized discovery telemetry through the sidecar (default: on).",
+    help=(
+        "Send trusted exact model repository IDs to the fixed Hugging Face "
+        "API for lineage enrichment (default: off)."
+    ),
 )
 @click.option(
     "--allow-workspace-signatures/--no-allow-workspace-signatures",
@@ -1036,7 +1056,7 @@ def discovery_enable(
     include_package_manifests: bool | None,
     include_env_var_names: bool | None,
     include_network_domains: bool | None,
-    emit_otel: bool | None,
+    lookup_model_provenance_online: bool | None,
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     restart: bool,
@@ -1074,7 +1094,7 @@ def discovery_enable(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
-        emit_otel=emit_otel,
+        lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1152,7 +1172,10 @@ def discovery_enable(
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
+    connectors = _resolve_connectors_for_restart(cfg)
     connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
     if restart:
         from defenseclaw.commands import cmd_setup
 
@@ -1161,8 +1184,16 @@ def discovery_enable(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=connector,
+            connectors=connectors,
         )
-        ux.ok("Sidecar restarted; AI discovery is live.", indent="  ")
+        if len(connectors) > 1:
+            ux.ok(
+                f"Sidecar restarted for {len(connectors)} active connectors "
+                f"({', '.join(connectors)}); AI discovery is live.",
+                indent="  ",
+            )
+        else:
+            ux.ok("Sidecar restarted; AI discovery is live.", indent="  ")
         click.echo()
 
         if scan:
@@ -1179,7 +1210,8 @@ def discovery_enable(
         action=f"ai_discovery-{action_suffix}",
         details=(
             f"mode={ad.mode} scan_interval_min={ad.scan_interval_min} "
-            f"restart={restart} scan={scan} changes={len(diff)}"
+            f"restart={restart} scan={scan} changes={len(diff)} "
+            f"connectors={','.join(connectors) or 'none'}"
         ),
     )
 
@@ -1232,6 +1264,10 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
+    connectors = _resolve_connectors_for_restart(cfg)
+    connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
     if restart:
         from defenseclaw.commands import cmd_setup
 
@@ -1239,15 +1275,23 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
             cfg.data_dir,
             cfg.gateway.host,
             cfg.gateway.port,
-            connector=_resolve_connector_for_restart(cfg),
+            connector=connector,
+            connectors=connectors,
         )
-        ux.ok("Sidecar restarted; AI discovery is stopped.", indent="  ")
+        if len(connectors) > 1:
+            ux.ok(
+                f"Sidecar restarted for {len(connectors)} active connectors "
+                f"({', '.join(connectors)}); AI discovery is stopped.",
+                indent="  ",
+            )
+        else:
+            ux.ok("Sidecar restarted; AI discovery is stopped.", indent="  ")
         click.echo()
 
     _log_discovery_action(
         app,
         action="ai_discovery-disable",
-        details=f"restart={restart}",
+        details=f"restart={restart} connectors={','.join(connectors) or 'none'}",
     )
 
 
@@ -1270,10 +1314,10 @@ def discovery_status(
 ) -> None:
     """Show on-disk + live AI discovery status.
 
-    Reports the value persisted in ``config.yaml`` *and* what the
-    running sidecar reports via ``GET /api/v1/ai-usage`` so operators
-    can spot the "configured-on, sidecar-stale" drift that produces
-    the HTTP 503 from ``defenseclaw agent usage --refresh``.
+    Reports values persisted in ``config.yaml`` alongside the fields
+    the running sidecar exposes via ``GET /api/v1/ai-usage``. Drift is
+    evaluated only for fields present in the live response; the JSON
+    comparison block identifies settings that could not be verified.
     """
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
@@ -1287,10 +1331,18 @@ def discovery_status(
         "include_package_manifests": bool(ad.include_package_manifests),
         "include_env_var_names": bool(ad.include_env_var_names),
         "include_network_domains": bool(ad.include_network_domains),
-        "emit_otel": bool(ad.emit_otel),
+        "lookup_model_provenance_online": bool(
+            ad.lookup_model_provenance_online
+        ),
     }
 
-    live: dict[str, Any] = {"reachable": False, "enabled": None, "summary": None, "error": ""}
+    live: dict[str, Any] = {
+        "reachable": False,
+        "enabled": None,
+        "lookup_model_provenance_online": None,
+        "summary": None,
+        "error": "",
+    }
     try:
         client = _usage_client(
             app,
@@ -1301,7 +1353,16 @@ def discovery_status(
         try:
             payload = client.ai_usage()
             live["reachable"] = True
-            live["enabled"] = bool(payload.get("enabled", False))
+            enabled = payload.get("enabled")
+            if isinstance(enabled, bool):
+                live["enabled"] = enabled
+            lookup_model_provenance_online = payload.get(
+                "lookup_model_provenance_online"
+            )
+            if isinstance(lookup_model_provenance_online, bool):
+                live["lookup_model_provenance_online"] = (
+                    lookup_model_provenance_online
+                )
             live["summary"] = payload.get("summary") or {}
         except requests.ConnectionError as exc:
             live["error"] = f"sidecar unavailable: {exc}"
@@ -1313,15 +1374,29 @@ def discovery_status(
     except click.ClickException as exc:
         live["error"] = str(exc.message)
 
-    drift = (
-        live["reachable"]
-        and live["enabled"] is not None
-        and live["enabled"] != on_disk["enabled"]
+    checked_fields = tuple(
+        key
+        for key in ("enabled", "lookup_model_provenance_online")
+        if live[key] is not None
     )
+    drift_fields = tuple(
+        key for key in checked_fields if live[key] != on_disk[key]
+    )
+    unverified_fields = tuple(key for key in on_disk if key not in checked_fields)
+    drift = bool(drift_fields)
 
     if as_json:
         click.echo(json.dumps(
-            {"on_disk": on_disk, "live": live, "drift": drift},
+            {
+                "on_disk": on_disk,
+                "live": live,
+                "drift": drift,
+                "comparison": {
+                    "checked_fields": checked_fields,
+                    "drift_fields": drift_fields,
+                    "unverified_fields": unverified_fields,
+                },
+            },
             indent=2,
             sort_keys=True,
         ))
@@ -1334,6 +1409,11 @@ def discovery_status(
     ux.kv("Mode", on_disk["mode"] or "(unset)", indent="  ")
     ux.kv("Scan roots", ", ".join(on_disk["scan_roots"]) or "(none)", indent="  ")
     ux.kv("Scan interval", f"{on_disk['scan_interval_min']} min", indent="  ")
+    ux.kv(
+        "Online model provenance",
+        "enabled" if on_disk["lookup_model_provenance_online"] else "disabled",
+        indent="  ",
+    )
 
     click.echo()
     ux.section("Live (sidecar)")
@@ -1345,16 +1425,36 @@ def discovery_status(
             indent="  ",
         )
     else:
-        ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
+        if live["enabled"] is None:
+            ux.kv("Service", "not reported", indent="  ")
+        else:
+            ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
         summary = live["summary"] or {}
         ux.kv("Last scan", str(summary.get("scanned_at") or "-"), indent="  ")
         ux.kv("Active signals", str(summary.get("active_signals", 0)), indent="  ")
         ux.kv("New signals", str(summary.get("new_signals", 0)), indent="  ")
+        if live["lookup_model_provenance_online"] is None:
+            ux.kv(
+                "Online model provenance",
+                "not reported (live setting unverified)",
+                indent="  ",
+            )
+        else:
+            ux.kv(
+                "Online model provenance",
+                (
+                    "enabled"
+                    if live["lookup_model_provenance_online"]
+                    else "disabled"
+                ),
+                indent="  ",
+            )
 
     if drift:
         click.echo()
         ux.warn(
-            "Drift: config and sidecar disagree — restart the gateway "
+            "Drift: sidecar disagrees with on-disk config for "
+            f"{', '.join(drift_fields)} — restart the gateway "
             "('defenseclaw-gateway restart') to sync.",
             indent="  ",
         )
@@ -1489,14 +1589,14 @@ def discovery_setup(
         "  Inspect provider domains and vetted loopback model metadata APIs?",
         default=bool(ad.include_network_domains),
     )
-
-    # ----- Output ---------------------------------------------------------
-    click.echo()
-    ux.section("Output")
-    emit_otel = click.confirm(
-        "  Forward sanitized telemetry through the sidecar (OTel)?",
-        default=bool(ad.emit_otel),
+    lookup_model_provenance_online = click.confirm(
+        "  Look up trusted exact model IDs on Hugging Face for provenance?",
+        default=bool(ad.lookup_model_provenance_online),
     )
+
+    # ----- Safety ---------------------------------------------------------
+    click.echo()
+    ux.section("Safety")
     allow_workspace_signatures = click.confirm(
         "  Honor signature packs found inside scanned workspaces? "
         "(off is safer)",
@@ -1520,7 +1620,7 @@ def discovery_setup(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
-        emit_otel=emit_otel,
+        lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1720,7 +1820,7 @@ def _build_discovery_overrides(
     include_package_manifests: bool | None = None,
     include_env_var_names: bool | None = None,
     include_network_domains: bool | None = None,
-    emit_otel: bool | None = None,
+    lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
 ) -> dict[str, Any]:
@@ -1758,8 +1858,10 @@ def _build_discovery_overrides(
         overrides["include_env_var_names"] = bool(include_env_var_names)
     if include_network_domains is not None:
         overrides["include_network_domains"] = bool(include_network_domains)
-    if emit_otel is not None:
-        overrides["emit_otel"] = bool(emit_otel)
+    if lookup_model_provenance_online is not None:
+        overrides["lookup_model_provenance_online"] = bool(
+            lookup_model_provenance_online
+        )
     if allow_workspace_signatures is not None:
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
@@ -1815,20 +1917,48 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
     try:
         active = cfg.active_connector()
         if active:
-            return str(active).strip().lower()
+            return normalize_connector(str(active))
     except Exception:
         pass
     gc = getattr(cfg, "guardrail", None)
     if gc is not None:
         connector = getattr(gc, "connector", "")
         if connector:
-            return str(connector).strip().lower()
+            return normalize_connector(str(connector))
     claw = getattr(cfg, "claw", None)
     if claw is not None:
         mode = getattr(claw, "mode", "")
         if mode:
-            return str(mode).strip().lower()
+            return normalize_connector(str(mode))
     return "openclaw"
+
+
+def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
+    """Return the authoritative active connector roster for a restart.
+
+    Config.active_connectors() is authoritative when present, including its
+    explicit empty-list result for an unconfigured install. The singular
+    resolver remains only as compatibility for older Config-like objects.
+    """
+    resolver = getattr(cfg, "active_connectors", None)
+    if callable(resolver):
+        try:
+            raw_connectors = resolver()
+        except Exception:
+            pass
+        else:
+            roster: list[str] = []
+            seen: set[str] = set()
+            for raw in raw_connectors or []:
+                connector = normalize_connector(str(raw))
+                if not connector or connector in seen:
+                    continue
+                seen.add(connector)
+                roster.append(connector)
+            return roster
+
+    connector = normalize_connector(_resolve_connector_for_restart(cfg))
+    return [connector] if connector else []
 
 
 def _trigger_post_enable_scan(
@@ -1972,7 +2102,7 @@ def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
 @pass_ctx
 def signatures_disable(app: AppContext, signature_id: str) -> None:
     """Disable one signature id in ai_discovery.disabled_signature_ids."""
-    cfg = _load_config_best_effort(app)
+    cfg = _require_loaded_config(app)
     normalized = ai_signatures.normalize_signature_id(signature_id)
     if not normalized:
         raise click.ClickException("signature id must not be empty")
@@ -1989,7 +2119,7 @@ def signatures_disable(app: AppContext, signature_id: str) -> None:
 @pass_ctx
 def signatures_enable(app: AppContext, signature_id: str) -> None:
     """Re-enable one signature id previously disabled in config."""
-    cfg = _load_config_best_effort(app)
+    cfg = _require_loaded_config(app)
     normalized = ai_signatures.normalize_signature_id(signature_id)
     disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     if normalized in disabled:
@@ -2010,6 +2140,37 @@ def _load_config_best_effort(app: AppContext):
         cfg = cfg_mod.default_config()
     app.cfg = cfg
     return cfg
+
+
+def _apply_discovery_config_state(
+    app: AppContext,
+    disc: agent_discovery.AgentDiscovery,
+) -> agent_discovery.AgentDiscovery:
+    """Annotate discovery with active/mode state when config.yaml exists.
+
+    ``agent discover`` remains safe before ``init``: a missing or invalid
+    config simply leaves every connector inactive instead of manufacturing
+    the default OpenClaw state.
+    """
+    cfg = getattr(app, "cfg", None)
+    if cfg is None:
+        from defenseclaw import config as cfg_mod  # noqa: PLC0415
+
+        cfg_path = cfg_mod.default_data_path() / cfg_mod.CONFIG_FILE_NAME
+        if not cfg_path.is_file():
+            return disc
+        try:
+            # Discovery should not mix unrelated migration/deprecation prose
+            # into its table or JSON output. Config loading is read-only here;
+            # any warning remains available on commands that manage config.
+            from contextlib import redirect_stderr  # noqa: PLC0415
+            from io import StringIO  # noqa: PLC0415
+
+            with redirect_stderr(StringIO()):
+                cfg = cfg_mod.load()
+        except Exception:
+            return disc
+    return agent_discovery.apply_config_state(disc, cfg)
 
 
 def _require_loaded_config(app: AppContext):
@@ -2034,10 +2195,15 @@ def _require_loaded_config(app: AppContext):
     """
     cfg = getattr(app, "cfg", None)
     if cfg is not None:
+        if getattr(cfg, "_source_config_version", None) != 8:
+            raise click.ClickException(
+                "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+            )
         return cfg
     from defenseclaw import config as cfg_mod
 
     try:
+        cfg_mod.require_v8_config()
         cfg = cfg_mod.load()
     except Exception as exc:
         raise click.ClickException(
@@ -2673,6 +2839,40 @@ def _format_csv_truncated(items: list[str], *, limit: int = 2) -> str:
     return sample
 
 
+def _format_ai_usage_scan_diagnostics(summary: dict[str, Any]) -> str:
+    """Render bounded detector failures without hiding successful discoveries."""
+
+    result = str(summary.get("result", "") or "").strip().lower()
+    detector_errors = _mapping_block(summary.get("detector_errors"))
+    try:
+        error_count = max(0, int(summary.get("errors", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        error_count = 0
+    if result not in {"partial", "failed", "error"} and error_count == 0 and not detector_errors:
+        return ""
+
+    label = result if result in {"partial", "failed", "error"} else "partial"
+    count = max(error_count, len(detector_errors))
+    note = f" Scan {label}"
+    if count:
+        note += f": {count} detector {_pluralize(count, 'error', 'errors')}"
+    details: list[str] = []
+    ordered_errors = sorted(detector_errors.items(), key=lambda item: str(item[0]))
+    for detector, message in ordered_errors[:3]:
+        one_line = " ".join(str(message).split())
+        if len(one_line) > 256:
+            one_line = one_line[:253] + "..."
+        if one_line:
+            details.append(f"{detector}: {one_line}")
+    if details:
+        note += " (" + "; ".join(details)
+        hidden = len(detector_errors) - len(details)
+        if hidden > 0:
+            note += f"; +{hidden} more"
+        note += ")"
+    return note + "."
+
+
 def _render_ai_usage_table(
     payload: dict[str, Any],
     *,
@@ -2868,6 +3068,7 @@ def _render_ai_usage_table(
         )
         if hidden > 0:
             footer += f" {hidden} more hidden by --limit; raise it or use --json for the full list."
+        footer += _format_ai_usage_scan_diagnostics(summary)
         console.print(footer)
         return stream.getvalue()
 
@@ -2967,6 +3168,7 @@ def _render_ai_usage_table(
     hidden = len(full_groups) - len(displayed_full)
     if hidden > 0:
         footer += f" {hidden} more {_pluralize(hidden, 'group', 'groups')} hidden by --limit."
+    footer += _format_ai_usage_scan_diagnostics(summary)
     footer += (
         " Use --detail for per-signal rows, --by-detector to split by "
         "category/detector, --json for raw, --state/--category/--product"
@@ -3078,6 +3280,9 @@ def _render_ai_usage_plain(
         f"changed={summary.get('changed_signals', 0)} "
         f"gone={summary.get('gone_signals', 0)}"
     )
+    diagnostic = _format_ai_usage_scan_diagnostics(summary).strip()
+    if diagnostic:
+        lines.append(diagnostic)
     return "\n".join(lines) + "\n"
 
 
@@ -3520,8 +3725,7 @@ def _render_component_show(
                 cells.append(str(loc.get("raw_path", "")))
             plain.append(" | ".join(cells))
         if not has_raw:
-            plain.append("(raw paths hidden — flip privacy.disable_redaction "
-                         "and ai_discovery.store_raw_local_paths to surface them)")
+            plain.append("(raw paths hidden — set ai_discovery.store_raw_local_paths=true to surface them)")
         return "\n".join(plain) + "\n"
 
     from io import StringIO
@@ -3554,10 +3758,7 @@ def _render_component_show(
         table.add_row(*cells)
     console.print(table)
     if not has_raw:
-        console.print(
-            "(raw paths hidden — flip privacy.disable_redaction and "
-            "ai_discovery.store_raw_local_paths to surface them)"
-        )
+        console.print("(raw paths hidden — set ai_discovery.store_raw_local_paths=true to surface them)")
     return stream.getvalue()
 
 

@@ -12,10 +12,19 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+from defenseclaw.observability.v8_config import BUCKETS
+from defenseclaw.observability.v8_status import (
+    V8BucketStatus,
+    V8DestinationStatus,
+    V8OperatorStatus,
+)
+from defenseclaw.tui.command_line import infer_command_risk
 from defenseclaw.tui.panels.setup import (
     CONNECTORS,
     WIZARD_DESCRIPTIONS,
@@ -26,6 +35,7 @@ from defenseclaw.tui.panels.setup import (
     WizardGoal,
     _custom_providers_fields_for,
     _filter_fields_for_goal,
+    _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
     action_matrix_fields,
@@ -40,9 +50,7 @@ from defenseclaw.tui.panels.setup import (
     notifications_desired_action,
     notifications_toggle_intent,
     observability_wizard_fields,
-    redaction_consequence_copy,
-    redaction_desired_action,
-    redaction_toggle_intent,
+    redaction_wizard_fields,
     render_wizard_value,
     uninstall_args_for_option,
     uninstall_intent,
@@ -53,6 +61,7 @@ from defenseclaw.tui.panels.setup import (
     wizard_state_summary,
 )
 from defenseclaw.tui.screens.model_picker import filter_models, picker_rows
+from defenseclaw.tui.services.cli_choices import supported_connector_choices
 from defenseclaw.tui.services.setup_state import (
     ConfigDiffEntry,
     ConfigField,
@@ -92,7 +101,6 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
     assert names == (
         "General",
         "Agent",
-        "Privacy",
         "Notifications",
         "Claw",
         "Agent Hooks",
@@ -104,9 +112,8 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "AI Discovery",
         "Gateway Watcher",
         "Gateway Watchdog",
-        "Audit Sinks",
+        "Observability",
         "Webhooks",
-        "OTel",
         "Skill Actions",
         "MCP Actions",
         "Plugin Actions",
@@ -117,6 +124,269 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Firewall",
         "Trusted Paths",
     )
+
+
+def test_exact_v8_setup_replaces_legacy_observability_editors_with_effective_plan() -> None:
+    model = SetupPanelModel({"config_version": 8, "privacy": {"disable_redaction": True}})
+    names = tuple(section.name for section in model.sections)
+
+    assert "Privacy" not in names
+    assert "Audit Sinks" not in names
+    assert "OTel" not in names
+    assert "Observability" in names
+
+    status = V8OperatorStatus(
+        source="config.yaml",
+        data_dir="/tmp/dc",
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=30,
+        local_path="/tmp/dc/audit.db",
+        judge_bodies_path="/tmp/dc/judge.db",
+        destinations=(
+            V8DestinationStatus(
+                name="collector",
+                kind="otlp",
+                enabled=True,
+                generated=False,
+                capabilities=("logs", "traces", "metrics"),
+                selected_signals=("logs", "traces", "metrics"),
+                policy_form="capability_default",
+                endpoint="https://collector.example/v1/traces",
+                route_count=1,
+                buckets=("guardrail.evaluation",),
+                redaction_profiles=("none",),
+            ),
+        ),
+        buckets=(V8BucketStatus("guardrail.evaluation", ("logs", "traces"), "none"),),
+        warnings=(),
+    )
+    model.set_observability_status(status)
+    section = _section(model.sections, "Observability")
+    values = {field.label: field.value for field in section.fields}
+
+    assert values["Retention"] == "30 days"
+    assert "signals=logs,traces,metrics" in values["collector"]
+    assert "redaction=unredacted (none)" in values["collector"]
+    assert values["guardrail.evaluation"] == "collect=logs,traces · local_redaction=none"
+    model.mode = "config"
+    model.active_section = names.index("Observability")
+    assert model.focused_row_action().action == "open_observability_editor"
+
+    assert "Disable Redaction" not in {field.label for field in guardrail_wizard_fields({"config_version": 8})}
+    otlp_fields = observability_wizard_fields("otlp", {"config_version": 8})
+    assert "Connector" not in {field.label for field in otlp_fields}
+    assert "Target" not in {field.label for field in otlp_fields}
+
+
+def test_local_observability_wizard_has_no_retired_audit_sink_flag() -> None:
+    fields = wizard_form_defs(SetupWizard.LOCAL_OBSERVABILITY)
+    assert "Audit Sink" not in {field.label for field in fields}
+
+    up_fields = _with_field(fields, "Action", "up")
+    argv = build_wizard_args(SetupWizard.LOCAL_OBSERVABILITY, up_fields)
+    assert "--no-audit-sink" not in argv
+
+
+def test_redaction_is_first_class_setup_wizard_with_safe_quick_actions() -> None:
+    model = SetupPanelModel({"config_version": 8, "observability": {"defaults": {"redaction_profile": "content"}}})
+    info = next(item for item in model.wizard_infos() if item.wizard == SetupWizard.REDACTION)
+
+    assert info.name == "Redaction Policy"
+    assert info.command == ("setup", "redaction")
+    assert "Default profile: content" in wizard_state_summary(SetupWizard.REDACTION, model.config)
+    assert [goal.label for goal in wizard_goals(SetupWizard.REDACTION, model.config)] == [
+        "Inspect effective redaction",
+        "Remove all configurable redaction",
+        "Apply one profile everywhere",
+        "Change the global baseline",
+        "Show advanced settings",
+        "Open the complete guided workflow",
+        "Advanced — show all settings",
+    ]
+    assert wizard_goals(SetupWizard.REDACTION, model.config)[0].summary == (
+        f"Show compiler-owned destination and {len(BUCKETS)}-bucket policy."
+    )
+
+    model.open_goal_menu(SetupWizard.REDACTION)
+    model.goal_cursor = next(index for index, goal in enumerate(model.goals) if goal.id == "remove-all")
+    model.select_active_goal()
+    assert build_wizard_args(SetupWizard.REDACTION, model.form_fields) == (
+        "setup",
+        "redaction",
+        "remove-all",
+        "--yes",
+        "--dry-run",
+    )
+    action = model.submit_wizard_form()
+    assert action.intent is not None
+    assert action.intent.risk == "read-only"
+    assert infer_command_risk(action.intent.category, action.intent.args) == "setup"
+
+
+def test_redaction_interactive_tui_action_explicitly_uses_setup_risk() -> None:
+    model = SetupPanelModel({"config_version": 8})
+    model.open_goal_menu(SetupWizard.REDACTION)
+    model.goal_cursor = next(index for index, goal in enumerate(model.goals) if goal.id == "interactive")
+    model.select_active_goal()
+
+    action = model.submit_wizard_form()
+
+    assert action.intent is not None
+    assert action.intent.args == ("setup", "redaction")
+    assert action.intent.risk == "setup"
+
+
+def test_redaction_action_change_rearms_dry_run_and_disables_restart() -> None:
+    model = SetupPanelModel({"config_version": 8})
+    model.open_wizard_form(SetupWizard.REDACTION)
+    model.form_fields = list(_with_field(model.form_fields, "Action", "remove-all"))
+    model.recompute_dependent_fields()
+    assert wizard_field_value(model.form_fields, "Dry Run") == "yes"
+
+    model.form_fields = list(_with_field(model.form_fields, "Dry Run", "no"))
+    model.form_fields = list(_with_field(model.form_fields, "Restart Gateway", "yes"))
+    model.form_fields = list(_with_field(model.form_fields, "Action", "apply-all"))
+    model.recompute_dependent_fields()
+
+    assert wizard_field_value(model.form_fields, "Dry Run") == "yes"
+    assert wizard_field_value(model.form_fields, "Restart Gateway") == "no"
+
+
+def test_redaction_apply_requires_an_explicit_nonempty_profile() -> None:
+    from defenseclaw.tui.panels.setup import _redaction_wizard_fields_for
+
+    fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "apply-all",
+            "--profile": "",
+        }
+    )
+
+    assert missing_required_fields(SetupWizard.REDACTION, fields) == ("Profile",)
+    assert build_wizard_args(SetupWizard.REDACTION, fields) == (
+        "setup",
+        "redaction",
+        "apply",
+        "--scope",
+        "all-configurable",
+        "--yes",
+        "--dry-run",
+    )
+
+
+def test_redaction_advanced_tui_form_covers_bucket_profile_destination_and_route_commands() -> None:
+    from defenseclaw.tui.panels.setup import _redaction_wizard_fields_for
+
+    bucket_fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "bucket-set",
+            "@Bucket": "model.io",
+            "--profile": "content",
+            "--logs": "off",
+            "--dry-run": "no",
+        }
+    )
+    assert build_wizard_args(SetupWizard.REDACTION, bucket_fields) == (
+        "setup",
+        "redaction",
+        "bucket",
+        "set",
+        "model.io",
+        "--profile",
+        "content",
+        "--no-logs",
+        "--yes",
+    )
+
+    profile_fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "profile-set",
+            "@Custom Profile Name": "soc",
+            "--extends": "strict",
+            "--detector": "pii,secrets",
+            "--field-path": "hash",
+        }
+    )
+    profile_argv = build_wizard_args(SetupWizard.REDACTION, profile_fields)
+    assert profile_argv[:6] == ("setup", "redaction", "profile", "set", "soc", "--extends")
+    assert tuple(profile_argv[-4:-2]) == ("--field", "path=hash")
+    assert profile_argv[-2:] == ("--yes", "--dry-run")
+
+    route_fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "route-add",
+            "@Destination": "collector",
+            "@Route Name": "critical",
+            "--signal": "logs,traces",
+            "--bucket": "security.finding,enforcement.action",
+            "--connector": "codex,claude-code",
+            "--min-severity": "HIGH",
+            "--route-action": "send",
+            "--profile": "strict",
+            "--position": "2",
+        }
+    )
+    route_argv = build_wizard_args(SetupWizard.REDACTION, route_fields)
+    assert route_argv[:6] == ("setup", "redaction", "route", "add", "collector", "critical")
+    assert route_argv.count("--signal") == 2
+    assert route_argv.count("--bucket") == 2
+    assert route_argv.count("--connector") == 2
+    assert tuple(route_argv[-4:-2]) == ("--position", "2")
+    assert route_argv[-2:] == ("--yes", "--dry-run")
+
+
+def test_redaction_drop_route_hides_and_omits_profile() -> None:
+    from defenseclaw.tui.panels.setup import _redaction_wizard_fields_for
+
+    fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "route-add",
+            "@Destination": "collector",
+            "@Route Name": "discard",
+            "--signal": "logs",
+            "--route-action": "drop",
+            "--profile": "strict",
+            "--position": "1",
+        }
+    )
+
+    assert "Profile" not in {field.label for field in fields}
+    argv = build_wizard_args(SetupWizard.REDACTION, fields)
+    assert "--profile" not in argv
+    assert tuple(argv[argv.index("--route-action") : argv.index("--route-action") + 2]) == (
+        "--route-action",
+        "drop",
+    )
+
+
+def test_redaction_tui_default_form_is_read_only_status() -> None:
+    fields = redaction_wizard_fields()
+
+    assert build_wizard_args(SetupWizard.REDACTION, fields) == ("setup", "redaction", "status")
+
+
+def test_redaction_profile_remove_does_not_default_to_a_replacement() -> None:
+    from defenseclaw.tui.panels.setup import _redaction_wizard_fields_for
+
+    fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "profile-remove",
+            "@Custom Profile Name": "soc",
+        }
+    )
+
+    argv = build_wizard_args(SetupWizard.REDACTION, fields)
+    assert argv == (
+        "setup",
+        "redaction",
+        "profile",
+        "remove",
+        "soc",
+        "--yes",
+        "--dry-run",
+    )
+    assert "--replace-with" not in argv
 
 
 def test_notifications_fields_preserve_config_editor_catalog() -> None:
@@ -137,6 +407,29 @@ def test_notifications_fields_preserve_config_editor_catalog() -> None:
     assert fields["notifications.enabled"].kind == "bool"
     assert fields["notifications.dedup_window"].hint
     assert fields["notifications.max_per_minute"].kind == "int"
+
+
+def test_ai_discovery_config_editor_exposes_online_provenance_opt_in() -> None:
+    field = _field_by_key(
+        build_setup_sections({}),
+        "ai_discovery.lookup_model_provenance_online",
+    )
+
+    assert field.kind == "bool"
+    assert "Hugging Face" in field.hint
+
+
+def test_windows_notifications_enabled_field_is_native_and_editable() -> None:
+    section = _section(
+        build_setup_sections({"notifications": {"enabled": True}}, os_name="windows"),
+        "Notifications",
+    )
+    fields = {field.key: field for field in section.fields if field.key}
+    enabled = fields["notifications.enabled"]
+    assert enabled.interactive is True
+    assert enabled.kind == "bool"
+    assert "unsupported" not in enabled.label.lower()
+    assert "desktop toasts" in section.summary.lower()
 
 
 def test_action_matrix_has_header_and_severity_triplets() -> None:
@@ -361,8 +654,24 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "openhands",
         "antigravity",
         "opencode",
+        "amp",
         "omnigent",
     }
+
+
+def test_connector_wizard_builds_amp_action_setup_argv() -> None:
+    fields = connector_setup_wizard_fields({})
+    assert "amp" in _wizard_options(fields, "Connector")
+    fields = _with_field(fields, "Connector", "amp")
+    fields = _with_field(fields, "Guardrail Mode", "action")
+
+    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
+        "setup",
+        "amp",
+        "--yes",
+        "--mode",
+        "action",
+    )
 
 
 def test_connector_setup_wizard_is_lifecycle_only() -> None:
@@ -400,6 +709,7 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
     assert "openclaw" not in win_options
     assert "zeptoclaw" not in win_options
     assert "codex" in win_options and "claudecode" in win_options
+    assert "amp" in win_options
     assert wizard_field_value(win_fields, "Connector") not in {"openclaw", "zeptoclaw"}
 
     # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) is
@@ -527,16 +837,14 @@ def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
         "--force",
         "--json",
     )
-    assert missing_required_fields(SetupWizard.TRUSTED_PATHS, _with_field(fields, "Directory", "")) == (
-        "Directory",
-    )
+    assert missing_required_fields(SetupWizard.TRUSTED_PATHS, _with_field(fields, "Directory", "")) == ("Directory",)
 
 
 def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
     fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fields) == ("guardrail", "status")
 
-    scoped_status = _with_field(fields, "Connector", "codex")
+    scoped_status = _guardrail_actions_wizard_fields({"@Scope": "selected-connector", "--connector": "codex"})
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, scoped_status) == (
         "guardrail",
         "status",
@@ -555,8 +863,8 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    fail_mode = _with_field(fields, "Action", "fail-mode")
-    fail_mode = _with_field(fail_mode, "Connector", "hermes")
+    fail_mode = _guardrail_actions_wizard_fields({"@Scope": "selected-connector", "--connector": "hermes"})
+    fail_mode = _with_field(fail_mode, "Action", "fail-mode")
     fail_mode = _with_field(fail_mode, "Fail Mode", "closed")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fail_mode) == (
         "guardrail",
@@ -581,10 +889,10 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    block = _with_field(fields, "Action", "block-message")
+    block = _guardrail_actions_wizard_fields({"@Scope": "selected-connector", "--connector": "antigravity"})
+    block = _with_field(block, "Action", "block-message")
     assert missing_required_fields(SetupWizard.GUARDRAIL_ACTIONS, block) == ("Block Message or Clear Message",)
     block = _with_field(block, "Block Message", "Blocked by policy.")
-    block = _with_field(block, "Connector", "antigravity")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, block) == (
         "guardrail",
         "block-message",
@@ -722,9 +1030,8 @@ def test_observability_and_webhook_wizards_pass_positionals_and_defaults() -> No
         "--token",
         "token-123",
     )
-    obs = _with_field(obs, "Connector", "codex")
     obs_argv = build_wizard_args(SetupWizard.OBSERVABILITY, obs)
-    assert _pair_after(obs_argv, "--connector") == "codex"
+    assert "--connector" not in obs_argv
 
     webhook = webhook_wizard_fields("pagerduty")
     assert missing_required_fields(SetupWizard.WEBHOOKS, webhook) == ("URL",)
@@ -752,32 +1059,26 @@ def test_observability_and_webhook_wizards_pass_positionals_and_defaults() -> No
     assert _pair_after(webhook_argv, "--connector") == "hermes"
 
 
-def test_observability_and_webhook_wizards_manage_connector_scoped_entries() -> None:
+def test_observability_is_process_wide_while_webhooks_remain_connector_scoped() -> None:
     obs = observability_wizard_fields("splunk-hec")
     obs_list = _with_field(obs, "Action", "list")
-    obs_list = _with_field(obs_list, "Connector", "codex")
     obs_list = _with_field(obs_list, "JSON Output", "yes")
     assert missing_required_fields(SetupWizard.OBSERVABILITY, obs_list) == ()
     assert build_wizard_args(SetupWizard.OBSERVABILITY, obs_list) == (
         "setup",
         "observability",
         "list",
-        "--connector",
-        "codex",
         "--json",
     )
 
     obs_remove = _with_field(obs, "Action", "remove")
     assert missing_required_fields(SetupWizard.OBSERVABILITY, obs_remove) == ("Name",)
     obs_remove = _with_field(obs_remove, "Name", "codex-hec")
-    obs_remove = _with_field(obs_remove, "Connector", "codex")
     assert build_wizard_args(SetupWizard.OBSERVABILITY, obs_remove) == (
         "setup",
         "observability",
         "remove",
         "codex-hec",
-        "--connector",
-        "codex",
         "--yes",
     )
 
@@ -806,13 +1107,11 @@ def test_observability_and_webhook_wizards_manage_connector_scoped_entries() -> 
 
 
 def test_modal_toggle_and_uninstall_state_match_go_args_and_copy() -> None:
-    assert redaction_desired_action(currently_disabled=True) == "on"
-    assert redaction_toggle_intent(currently_disabled=True).args == ("setup", "redaction", "on", "--yes")
-    assert "RAW content" in redaction_consequence_copy(currently_disabled=False)[0]
-
     assert notifications_desired_action(currently_enabled=True) == "off"
     assert notifications_toggle_intent(currently_enabled=False).args == ("setup", "notifications", "on", "--yes")
-    assert "Audit DB" in notifications_consequence_copy(currently_enabled=True)[1]
+    consequence = notifications_consequence_copy(currently_enabled=True)[1]
+    assert "Event history" in consequence
+    assert "telemetry destinations" in consequence
 
     modal = UninstallModalState()
     modal.show()
@@ -880,7 +1179,7 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
 
     assert _field_by_key(sections, "llm.api_key").kind == "password"
     assert _field_by_key(sections, "openshell.auto_pair").options == ("", "true", "false")
-    assert _field_by_key(sections, "claw.mode").options == CONNECTORS
+    assert _field_by_key(sections, "claw.mode").options == supported_connector_choices()
 
 
 def test_setup_wizard_info_and_form_field_hints_are_complete() -> None:
@@ -918,9 +1217,9 @@ def test_setup_section_and_focused_row_metadata_exposes_actions_and_restart_hint
             "Notification controls.",
         ),
         ConfigSection(
-            "Audit Sinks",
-            (ConfigField("Status", "audit_sinks.summary", "header", "no sinks configured", "no sinks configured"),),
-            "Read-only audit sink summary.",
+            "Observability",
+            (ConfigField("Status", "observability.summary", "header", "canonical v8", "canonical v8"),),
+            "Read-only canonical destination summary.",
         ),
     )
     model.active_section = 0
@@ -970,13 +1269,13 @@ def test_setup_section_and_focused_row_metadata_exposes_actions_and_restart_hint
     assert "Restart pending: config saved from Textual TUI" in hints.restart_hint
 
     for index, section in enumerate(model.sections):
-        if section.name == "Audit Sinks":
+        if section.name == "Observability":
             model.active_section = index
             model.active_line = 0
             break
     focused = model.focused_row_metadata()
     assert focused.action is not None
-    assert focused.action.action == "open_audit_sinks_editor"
+    assert focused.action.action == "open_observability_editor"
     assert focused.action.hotkey == "E"
 
 
@@ -1015,18 +1314,14 @@ def test_setup_section_tabs_wrap_hit_test_and_field_actions() -> None:
 
 def test_setup_review_save_action_and_saved_hint_are_model_level() -> None:
     model = SetupPanelModel({})
-    model.sections = (
-        ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "70000", "9090"),), ""),
-    )
+    model.sections = (ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "70000", "9090"),), ""),)
 
     invalid = model.review_save_action()
     assert invalid.handled is True
     assert invalid.open_diff is False
     assert "Fix config validation" in invalid.hint
 
-    model.sections = (
-        ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "9091", "9090"),), ""),
-    )
+    model.sections = (ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "9091", "9090"),), ""),)
     review = model.review_save_action()
     assert review.handled is True
     assert review.open_diff is True
@@ -1194,8 +1489,12 @@ def test_scanner_wizards_offer_unified_llm_provider_list() -> None:
     mcp_fields = _with_field(mcp_fields, "API Key Env", "CISCO_AI_DEFENSE_API_KEY")
     mcp_fields = _with_field(mcp_fields, "API Timeout (ms)", "5000")
     argv = build_wizard_args(SetupWizard.MCP_SCANNER, mcp_fields)
-    assert ("--api-endpoint", "https://example.cisco.com/v1") == argv[argv.index("--api-endpoint") : argv.index("--api-endpoint") + 2]
-    assert ("--api-key-env", "CISCO_AI_DEFENSE_API_KEY") == argv[argv.index("--api-key-env") : argv.index("--api-key-env") + 2]
+    assert ("--api-endpoint", "https://example.cisco.com/v1") == argv[
+        argv.index("--api-endpoint") : argv.index("--api-endpoint") + 2
+    ]
+    assert ("--api-key-env", "CISCO_AI_DEFENSE_API_KEY") == argv[
+        argv.index("--api-key-env") : argv.index("--api-key-env") + 2
+    ]
     assert ("--api-timeout-ms", "5000") == argv[argv.index("--api-timeout-ms") : argv.index("--api-timeout-ms") + 2]
 
 
@@ -1254,9 +1553,7 @@ def test_guardrail_wizard_argv_is_accepted_by_real_cli() -> None:
 
     bedrock = list(_guardrail_wizard_fields_for({"@Provider": "bedrock"}, None))
     bedrock = [
-        f.with_value("us.anthropic.claude-sonnet-4-6")
-        if f.label == "Model" and f.flag == "--judge-model"
-        else f
+        f.with_value("us.anthropic.claude-sonnet-4-6") if f.label == "Model" and f.flag == "--judge-model" else f
         for f in bedrock
     ]
     assert_options_known(bedrock)
@@ -1282,6 +1579,7 @@ def test_ai_discovery_wizard_maps_to_enable_or_disable() -> None:
     assert "--mode" in argv
     assert "--scan-interval-min" in argv
     assert "--include-shell-history" in argv  # default-on bool
+    assert "--no-lookup-model-provenance-online" in argv  # privacy-safe default
     # Defaults match the CLI's defaults so the wizard only emits the
     # opt-out variant when the operator flips a toggle.
     assert "--no-restart" not in argv
@@ -1302,6 +1600,13 @@ def test_ai_discovery_wizard_maps_to_enable_or_disable() -> None:
     argv = _build_ai_discovery_args(flipped)
     assert "--no-include-shell-history" in argv
     assert "--include-shell-history" not in argv
+
+    # The network lookup is a separate, explicit opt-in. The wizard must
+    # forward both sides of the toggle instead of silently dropping it.
+    online = _with_field(fields, "Online Model Provenance", "yes")
+    argv = _build_ai_discovery_args(online)
+    assert "--lookup-model-provenance-online" in argv
+    assert "--no-lookup-model-provenance-online" not in argv
 
 
 def test_splunk_dashboards_wizard_apply_destroy_round_trips() -> None:
@@ -1558,9 +1863,7 @@ def test_every_wizard_arg_builder_returns_non_empty_argv_for_defaults() -> None:
         assert argv, f"{wizard.name}: build_wizard_args returned empty argv for defaults"
         prefix = WIZARD_COMMANDS.get(wizard)
         if prefix is not None and prefix:
-            assert tuple(argv[: len(prefix)]) == prefix, (
-                f"{wizard.name}: expected argv prefix {prefix!r}, got {argv!r}"
-            )
+            assert tuple(argv[: len(prefix)]) == prefix, f"{wizard.name}: expected argv prefix {prefix!r}, got {argv!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -1604,9 +1907,7 @@ def test_llm_wizard_emits_role_and_non_interactive() -> None:
 
 
 def test_llm_wizard_bedrock_group_visible_and_repeatable_deployment() -> None:
-    fields = _llm_wizard_fields_for(
-        provider="bedrock", role="unified", overrides={"--provider": "bedrock"}, cfg=None
-    )
+    fields = _llm_wizard_fields_for(provider="bedrock", role="unified", overrides={"--provider": "bedrock"}, cfg=None)
     labels = {f.label for f in fields}
     # Bedrock rows are visible, vertex/azure rows are filtered out.
     assert "Bedrock" in labels
@@ -1663,7 +1964,10 @@ def test_llm_wizard_tls_visible_for_regional_and_custom_only() -> None:
     assert "TLS" not in openai
 
     for prov in ("bedrock", "vertex_ai", "azure", "custom"):
-        labels = {f.label for f in _llm_wizard_fields_for(provider=prov, role="unified", overrides={"--provider": prov}, cfg=None)}
+        labels = {
+            f.label
+            for f in _llm_wizard_fields_for(provider=prov, role="unified", overrides={"--provider": prov}, cfg=None)
+        }
         assert "TLS" in labels, prov
 
 
@@ -1727,9 +2031,7 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
 
     fields = _set_by_flag(fields, "--judge-bedrock-region", "us-west-2")
     fields = _set_by_flag(fields, "--llm-role", "judge_and_agent")
-    fields = [
-        f.with_value("us.anthropic.claude-sonnet-4-6") if f.flag == "--judge-model" else f for f in fields
-    ]
+    fields = [f.with_value("us.anthropic.claude-sonnet-4-6") if f.flag == "--judge-model" else f for f in fields]
     argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
     assert _pair_after(argv, "--judge-bedrock-region") == "us-west-2"
     assert _pair_after(argv, "--llm-role") == "judge_and_agent"
@@ -1737,13 +2039,13 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
     assert _pair_after(argv, "--judge-model") == "bedrock/us.anthropic.claude-sonnet-4-6"
 
 
-def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_auth_rows() -> None:
+def test_guardrail_wizard_exposes_block_message_and_scopes_bedrock_auth_rows() -> None:
     fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge", "@Provider": "bedrock"}, None)
     labels = {f.label for f in fields}
     flags = {f.flag for f in fields}
 
-    assert "Block Message" not in labels
-    assert "--block-message" not in flags
+    assert "Block Message" in labels
+    assert "--block-message" in flags
     assert "--judge-bedrock-auth-mode" in flags
     assert "--judge-bedrock-secret-key-env" not in flags
     assert "--judge-bedrock-profile-name" not in flags
@@ -1812,9 +2114,7 @@ def test_custom_provider_base_type_drives_family_visibility() -> None:
         ("vertex_ai", "Vertex AI", "Azure"),
         ("azure", "Azure", "Bedrock"),
     ):
-        labels = {
-            f.label for f in _custom_providers_fields_for({"@Action": "add", "--base-provider-type": base_type})
-        }
+        labels = {f.label for f in _custom_providers_fields_for({"@Action": "add", "--base-provider-type": base_type})}
         assert shown in labels, base_type
         assert hidden not in labels, base_type
     # ``list`` hides every add-only row.
@@ -1852,6 +2152,46 @@ def test_every_setup_wizard_emits_only_real_cli_options() -> None:
             continue
         result = runner.invoke(cmd_setup.setup, argv[1:], catch_exceptions=True)
         assert "No such option" not in (result.output or ""), f"{wizard.name}: {result.output}"
+
+
+def test_every_redaction_tui_action_maps_to_the_registered_cli_surface() -> None:
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.tui.panels.setup import (
+        _REDACTION_ACTIONS,
+        _REDACTION_MUTATION_ACTIONS,
+        _redaction_wizard_fields_for,
+    )
+
+    runner = CliRunner()
+    seed = {
+        "@Custom Profile Name": "soc",
+        "@Destination": "collector",
+        "@Route Name": "critical",
+        "--signal": "logs",
+        "--bucket": "*",
+        "--position": "1",
+    }
+    with runner.isolated_filesystem() as isolated_dir:
+        for action in _REDACTION_ACTIONS:
+            fields = _redaction_wizard_fields_for({**seed, "@Action": action})
+            assert missing_required_fields(SetupWizard.REDACTION, fields) == (), action
+            argv = build_wizard_args(SetupWizard.REDACTION, fields)
+            if action == "interactive":
+                assert argv == ("setup", "redaction")
+                continue
+            if action in _REDACTION_MUTATION_ACTIONS:
+                assert "--dry-run" in argv, action
+            result = runner.invoke(
+                cmd_setup.setup,
+                argv[1:],
+                catch_exceptions=True,
+                env={"DEFENSECLAW_HOME": isolated_dir},
+            )
+            assert result.exit_code != 2, f"{action}: {result.output}\n{result.exception!r}"
+            assert result.exception is None or isinstance(result.exception, SystemExit), (
+                f"{action}: {result.output}\n{result.exception!r}"
+            )
 
 
 def test_model_picker_filter_and_freeform_row() -> None:
@@ -2238,7 +2578,13 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # codex pins its own overrides — the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith("closed (provenance: config; status:")
+    policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
+    if os.name == "nt":
+        assert "policy-unverified" in policy_status
+    else:
+        assert "policy-unverified" not in policy_status
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
     assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"
     assert fields["guardrail.connectors.codex.hilt.min_severity"].value == "LOW"
@@ -2302,6 +2648,66 @@ def test_per_connector_hook_fail_mode_normalizes() -> None:
     # Anything that is not "closed" normalizes to "open".
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "open")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_guardrail_editor_uses_runtime_fail_mode_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    report = {"effective": "open", "provenance": "process-env", "drift": []}
+    calls: list[dict[str, object]] = []
+
+    def resolve(*_args, **kwargs):
+        calls.append(kwargs)
+        return report
+
+    monkeypatch.setattr("defenseclaw.fail_mode.connector_fail_mode_report", resolve)
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == ("open (provenance: process-env)")
+    assert calls and all(call == {"inspect_effective_policy": False} for call in calls)
+
+
+def test_guardrail_editor_uses_amp_plugin_runtime_fail_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    cfg = _multi_connector_cfg()
+    cfg.guardrail.connectors["amp"] = PerConnectorGuardrailConfig(hook_fail_mode="closed")
+    cfg.data_dir = "runtime-state"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def resolve(_cfg, connector, **kwargs):
+        calls.append((connector, kwargs))
+        return {
+            "effective": "closed" if connector == "amp" else "open",
+            "provenance": "amp-plugin" if connector == "amp" else "hook-script",
+            "drift": [],
+        }
+
+    monkeypatch.setattr("defenseclaw.fail_mode.connector_fail_mode_report", resolve)
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+
+    assert fields["guardrail.connectors.amp.hook_fail_mode"].value == ("closed (provenance: amp-plugin)")
+    assert ("amp", {"inspect_effective_policy": False}) in calls
+
+
+def test_guardrail_editor_surfaces_passive_policy_uncertainty(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    monkeypatch.setattr(
+        "defenseclaw.fail_mode.connector_fail_mode_report",
+        lambda *_args, **_kwargs: {
+            "effective": "closed",
+            "provenance": "windows-sidecar",
+            "drift": ["policy-unverified"],
+        },
+    )
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == (
+        "closed (provenance: windows-sidecar; status: policy-unverified)"
+    )
 
 
 def test_per_connector_block_message_writes_string() -> None:

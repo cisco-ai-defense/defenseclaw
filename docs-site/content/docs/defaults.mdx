@@ -31,7 +31,10 @@ defenseclaw setup guardrail --rule-pack default                    # Guardrail l
 ```
 
 <Callout type="warn">
-`defenseclaw policy activate strict` does **not** change `guardrail.rule_pack_dir`, and vice versa. If you want strict everywhere, flip both. See [`docs/GUARDRAIL_RULE_PACKS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/GUARDRAIL_RULE_PACKS.md) for the rationale.
+`defenseclaw policy activate strict` does **not** change
+`guardrail.rule_pack_dir`, and vice versa. If you want strict everywhere,
+flip both. [Policies](/docs/policies) explains why admission policy and
+in-flight guardrail detection are independent layers.
 </Callout>
 
 ## OPA admission policy — what each profile ships
@@ -69,6 +72,13 @@ All three packs share the same [severity rubric](/docs/policies#shared-severity-
 
 ## What `setup guardrail` actually writes
 
+<Callout type="info">
+The OpenClaw examples in this section are for supported macOS/Linux host
+topologies. Native Windows DefenseClaw is hook-only and rejects the OpenClaw
+proxy connector; use the [Windows connector matrix](/docs/get-started/windows/connectors-enforcement)
+there.
+</Callout>
+
 After `defenseclaw init`, an explicit `defenseclaw setup guardrail --connector openclaw --mode action --rule-pack default --non-interactive` produces the relevant configuration below (unrelated generated fields omitted):
 
 ```yaml title="~/.defenseclaw/config.yaml (relevant fields after setup)"
@@ -86,10 +96,7 @@ guardrail:
     enabled: false                    # opt in via --human-approval
     min_severity: HIGH
 
-privacy:
-  disable_redaction: false
-
-audit_sinks: []                        # no external audit sink; local SQLite + JSONL still write
+observability: {}                       # all signals collected; local SQLite logs unredacted
 webhooks: []                           # add via `defenseclaw setup webhook add ...`
 
 claude_code:
@@ -102,7 +109,8 @@ Three things to notice that contradict folklore:
 
 - **The LLM judge is OFF by default.** It only flips on if you pass `--judge-model` to `setup guardrail` or answer "yes" to the interactive judge prompt. The schema default is `guardrail.judge.enabled = false` in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go). Keeping it off keeps cost predictable; flip it on once you have a `DEFENSECLAW_LLM_KEY` configured.
 - **HILT is OFF by default.** The shipped severity floor is `HIGH`, but `enabled: false` means it never prompts. `--human-approval` flips it on; `--hilt-min-severity` adjusts the floor.
-- **The built-in local stores still write.** `audit_sinks: []` means no external audit-event destination. SQLite `audit_events` powers `defenseclaw alerts`, the TUI, and audit export; `~/.defenseclaw/gateway.jsonl` remains the live structured runtime log. Wire external sinks via [`setup splunk`](/docs/observability/splunk) or [`setup local-observability`](/docs/observability/local-observability).
+- **The built-in local store still writes.** `observability: {}` means no optional destination, not no telemetry. V8 collects every registered signal and mandatory SQLite stores every collected log unredacted. Add a `kind: jsonl` destination if a file stream is required; add remote destinations via [`setup splunk`](/docs/observability/splunk) or [`setup local-observability`](/docs/observability/local-observability).
+- **Fresh v8 telemetry is unredacted.** An enabled destination with omitted policy sends every capability and bucket under profile `none`. Configure `sensitive`, `content`, `strict`, or a custom profile before exporting into a less-trusted boundary.
 
 ## Tuning by risk tolerance
 
@@ -120,7 +128,7 @@ defenseclaw setup guardrail \
   --non-interactive
 ```
 
-Observe mode prevents enforcement even though the permissive policy's action-mode block threshold remains CRITICAL. Everything still flows to the audit log and JSONL so you can review what *would* have happened. Recommended first week of any rollout.
+Observe mode prevents enforcement even though the permissive policy's action-mode block threshold remains CRITICAL. Everything still flows to mandatory SQLite and any matching configured destinations so you can review what *would* have happened. Recommended first week of any rollout.
 
 ### "Move fast, stop only the obvious harm"
 
@@ -173,20 +181,25 @@ Then re-activate so OPA picks up the change:
 defenseclaw policy activate default
 ```
 
-## What `defenseclaw init` doesn't change
+## Defaults `defenseclaw init` does not ask about
 
-A few defaults are intentionally fixed unless you edit `~/.defenseclaw/config.yaml` directly:
+`init` does not prompt for the following lower-level defaults. Use the
+documented setup/guardrail command when it exposes the knob; otherwise edit
+`~/.defenseclaw/config.yaml` and validate the result.
 
 | Knob | Default | Why fixed |
 | --- | --- | --- |
-| `~/.defenseclaw/gateway.jsonl` (JSONL fallback path) | always written | Reliability fallback — the gateway must always have a writable place to log when external sinks fail |
-| `guardrail.hook_fail_mode` | `closed` on new installs | Malformed/unauthorized hook responses fail closed; upgrades from the pre-change default are migrated to `open` for compatibility |
+| `observability.local` SQLite history | always present | Mandatory local durability for collected logs and the compliance floor |
+| `guardrail.hook_fail_mode` | `closed` on new installs | Delivery, authentication, and invalid-response failures fail closed where the connector can block; upgrades from the pre-change default are migrated to `open` for compatibility |
 | `guardrail.judge.timeout` | `30s` | Hot-path latency budget for the judge |
 | `guardrail.judge.adjudication_timeout` | `5s` | Per-prompt adjudication budget |
 | `guardrail.detection_strategy` | `regex_judge` | Tested baseline — regex first, judge for medium+ findings |
 | Bifrost retry policy | `3 attempts, exp backoff` | Tested LLM-routing baseline |
 
-If you need to change any of these, edit `~/.defenseclaw/config.yaml` directly and `defenseclaw config validate` confirms the schema.
+`defenseclaw setup llm --max-retries`, `defenseclaw setup guardrail
+--detection-strategy`, and `defenseclaw guardrail fail-mode` provide supported
+CLI paths for three of these controls. Run `defenseclaw config validate` after
+any direct edit.
 
 ## Per-connector overrides (`guardrail.connectors`)
 
@@ -217,7 +230,7 @@ claude_code:
   fail_mode: open                # LEGACY hint, NOT consumed by hooks; see Reference → Fail modes
 ```
 
-These are still parsed for backward compatibility, but `fail_mode` here does **nothing** at runtime (see [Reference → Fail modes](/docs/reference/fail-modes#foot-gun-claude_codefail_mode-and-codexfail_mode-legacy-not-consumed-by-hook-scripts)). Prefer `guardrail.connectors.<name>` for new configuration — it's the surface the per-connector CLI writes and the gateway resolves at request time.
+These are still parsed for backward compatibility, but `fail_mode` here does **nothing** at runtime (see [Reference → Fail modes](/docs/reference/fail-modes#legacy-connector-fields)). Prefer `guardrail.connectors.<name>` for new configuration — it's the surface the per-connector CLI writes and the gateway resolves at request time.
 </Callout>
 
 ## Inspect the active defaults
@@ -228,7 +241,10 @@ defenseclaw policy list                  # all policies on disk + which is activ
 defenseclaw policy show default          # normalized summary of one named policy
 ```
 
-`config show` always renders the *resolved* configuration — base + env-var overlay — so you can see the effective values without spelunking. Use `--reveal` to also show resolved secret values (still masked in the output for safety).
+For configuration v8, `config show` renders the canonical effective
+observability view by default; use `--source` for the masked source document,
+or `--effective --provenance` for explicit compiler annotations. V8 rejects
+`--reveal`; neither source nor effective output resolves secret values.
 
 `policy show <name>` prints a normalized summary of the named file (`default`,
 `strict`, `permissive`, or any custom `policies/<name>.yaml` you've added).
@@ -250,12 +266,18 @@ defenseclaw setup guardrail --rule-pack default --no-human-approval
 defenseclaw policy activate default
 ```
 
-**Hard reset (start from zero)** — `defenseclaw uninstall` archives `~/.defenseclaw/` to a timestamped backup, so you can roll back:
+**Reset user state** — first make your own private backup if you need one,
+then use the destructive reset command. It deletes resettable state; it does
+not create a rollback archive. The managed runtime and installed plugin are
+retained so `quickstart` can reinstall. This shell example is for macOS/Linux
+source installations; native Windows lifecycle is owned by the authenticated
+[Setup package](/docs/get-started/windows/install-lifecycle).
 
 ```bash
-defenseclaw uninstall
-defenseclaw init
-defenseclaw setup guardrail
+umask 077
+cp -a "$HOME/.defenseclaw" "$HOME/.defenseclaw.before-reset"
+defenseclaw reset
+defenseclaw quickstart
 ```
 
 ## See also
@@ -265,4 +287,3 @@ defenseclaw setup guardrail
 - [HITL](/docs/hitl) — what `guardrail.hilt.enabled` and `min_severity` actually change for the operator
 - [Reference → Fail modes](/docs/reference/fail-modes) — the three "fail open vs closed" knobs disambiguated
 - [Reference → Configuration](/docs/reference/configuration) — every key surfaced here, with type and default
-- [`docs/GUARDRAIL_RULE_PACKS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/GUARDRAIL_RULE_PACKS.md) — the canonical engineering doc on the OPA-vs-rule-pack split

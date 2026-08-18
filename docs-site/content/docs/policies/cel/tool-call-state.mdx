@@ -1,0 +1,362 @@
+---
+title: Stateful connector lifecycle
+description: How authenticated connector hooks prove outcomes, commit ordered tool-call state, and preserve conservative enforcement guarantees.
+keywords:
+  - DefenseClaw connector lifecycle
+  - stateful tool-call guardrails
+  - dangerous tool-call chains
+  - connector hook outcomes
+  - tool-call state
+---
+
+This page defines the experimental connector contract behind ordered tool-call
+state. For single-call matching, rule fields, and runtime fallback, start with
+[CEL policies](/docs/policies/cel), [Authoring CEL rules](/docs/policies/cel/authoring),
+and the [CEL engine](/docs/policies/cel/engine).
+
+<Cards>
+  <Card
+    title="CEL engine"
+    href="/docs/policies/cel/engine"
+    description="Understand ActionFacts, semantic ownership, fallback, and detection-versus-enforcement behavior."
+  />
+  <Card
+    title="Author CEL rules"
+    href="/docs/policies/cel/authoring"
+    description="Write portable single-action matchers and validate their connector coverage."
+  />
+</Cards>
+
+<Callout type="warning" title="Experimental contract">
+This is the rollout contract for experimental stateful tool-call protection.
+It does not make every connector stateful, change existing policy defaults, or
+turn an observe-only connector into an enforcement surface. A connector stays
+at the most conservative level in the matrix until its hook identity, outcome,
+and native-host behavior pass automated and live tests.
+</Callout>
+
+DefenseClaw uses this path to stop supported unsafe tool calls at a connector's
+last synchronous, block-capable hook before execution and to remember only
+actions that later have trustworthy evidence of success. The initial rollout
+targets higher true-positive coverage for destructive actions and ordered
+chains while paired controls and shadow/detection-only modes guard against
+false-positive regressions.
+
+## No separate public endpoint
+
+The feature reuses each connector's existing authenticated hook transport. The
+server resolves the connector and its versioned hook contract, then classifies
+the event from the connector's documented lifecycle name. A remote payload
+cannot opt itself into the trusted path by setting a `structured` or `tool_call`
+flag.
+
+| Resolved event | Route | Purpose |
+| --- | --- | --- |
+| Recognized pre-tool proposal | Structured action | Normalize tool name, arguments, command operations, paths, endpoints, and data flow into private `ActionFacts`; evaluate semantic CEL owners and block only when the connector declares a synchronous enforcement surface. |
+| Recognized post-tool result | Result content / outcome | Inspect returned content and, only where the connector contract proves identity and success, resolve a pending action. It cannot undo the completed tool. |
+| Connector-proven typed lifecycle change | State transition (reserved) | No current connector qualifies. This route stays unavailable until an official contract exposes an exact, authenticated security-state change; it is never inferred from event text. |
+| Prompt, model, stop, session, and subagent lifecycle | Existing prompt/result or audit route | Preserve the current connector behavior; these events are neither tool proposals nor typed state transitions. |
+| Unsupported, partial, ambiguous, or malformed action schema | Owner-local regex fallback | Preserve compatible detection without granting the payload semantic authority it did not prove. |
+
+Structured action routing uses the [CEL engine's exclusive semantic-owner
+contract](/docs/policies/cel/engine#runtime-results). Authoritative facts use
+CEL; unsupported or ambiguous projection and evaluation errors use that
+owner's compatible regex fallback. The two routes do not produce duplicate
+owner findings, and unrelated rules continue normally.
+
+The state-transition route is a closed, versioned extension point, and its list
+is currently empty for every connector. It can be populated only when an
+official connector contract exposes typed fields that prove the exact security
+state change. Claude Code `ConfigChange` exposes source, file path, and common
+hook context, which is not proof of a guardrail-state transition, so it remains
+outside this route. Similarly named events, free-form content, and
+payload-provided flags cannot opt themselves in.
+
+Static tool/MCP blocks, explicit allows, CodeGuard, managed-enterprise policy,
+and the existing OPA policy role remain separate controls. CEL is not a second
+standalone policy engine and is not run on ordinary prompts or tool-result text.
+
+## Covered tool surfaces
+
+The structured route understands these closed families; an absent family is
+not inferred from a similarly named tool:
+
+- shell execution, including POSIX shell, PowerShell, and `cmd.exe` where the
+  parser can establish a conservative dialect;
+- direct file read, write, edit, append, delete, move, and copy arguments;
+- generic built-in tools with a reviewed argument shape;
+- MCP tools when their server/tool identity and arguments are present; and
+- skill invocation only when the connector exposes it as a real tool event.
+
+Opaque SaaS, mail, calendar, or custom MCP arguments still receive server/tool
+policy and compatible fallback scanning. They do not gain guessed file,
+network, or data-flow semantics until a narrow schema adapter is reviewed.
+Likewise, loading a `SKILL.md`, expanding a slash command, and a skill's later
+shell call are different events; only the actual tool call enters this path.
+
+## Pending to successful state
+
+A pre-tool hook describes intent, not execution. If DefenseClaw allows a
+proposal on a connector with authoritative pairing, it stores a bounded,
+content-free pending marker or predecessor projection keyed by the connector
+instance, authenticated session, and strongest invocation identity.
+
+<Sequence
+  caption="Intent becomes durable history only after the same connector contract proves identity and success. Failure, cancellation, ambiguity, expiry, and turn cutoffs discard the pending proposal."
+  participants={[
+    { id: 'agent', label: 'Agent runtime', kind: 'agent' },
+    { id: 'hook', label: 'Connector hooks', kind: 'connector' },
+    { id: 'gateway', label: 'DefenseClaw gateway', kind: 'gateway' },
+    { id: 'ledger', label: 'State ledger', kind: 'datastore' },
+  ]}
+>
+  <Message from="agent" to="hook" label="tool proposal" />
+  <Message from="hook" to="gateway" label="authenticated pre-tool event + call ID" />
+  <Message from="gateway" to="ledger" label="store content-free pending marker" />
+  <Message from="gateway" to="hook" kind="return" label="allow / alert / confirm / block" />
+  <Message from="agent" to="hook" label="tool outcome" />
+  <Message from="hook" to="gateway" label="matching authoritative result" />
+  <Message from="gateway" to="ledger" label="commit successful predecessor" />
+</Sequence>
+
+Only authenticated native `/api/v1/{connector}/hook` events can advance this
+ledger. Inspect, proxy, router, and OTLP traffic may produce single-call
+findings but never create or commit ordered state.
+
+```text
+pre-tool proposal -> standalone/chain decision -> pending
+pending + matching successful post-tool result -> durable successful step
+pending + failure/cancel/unknown/expiry -> discard, never advance state
+pending + matching typed denial -> discard the action; record only denial state
+```
+
+Pending rows do not satisfy an ordered chain. An exact replay returns the same
+decision without duplicating state or telemetry. A ruleset change, expired
+window, mismatched session, conflicting ID, or ambiguous join cannot promote
+the proposal. Successful steps and deduplication receipts live in DefenseClaw's
+SQLite store so reviewed chains can span turns and gateway restarts while still
+respecting wall-clock and event-count windows.
+
+The six ordered chains are a fixed compiled catalog; CEL/YAML rule authoring
+does not define new sequences. Custom CEL rules remain single-action matchers.
+
+The fixed catalog contains six ordered chain definitions: guardrails-off then
+egress, permission denial then bypass, privilege discovery then elevation,
+secret read then egress, secret-manager read then egress, and workload identity
+then lateral execution. Five currently have production projection paths. Of
+those, permission-denial then bypass and privilege-discovery then elevation are
+block-capable when both steps carry exact enforcement evidence. Secret read,
+secret-manager read, and workload identity followed by their respective second
+steps are detection-only because temporal proximity does not prove data flow.
+Guardrails-off then egress is reserved and dormant: no current connector exposes
+the exact authenticated state transition needed for its first step, and
+DefenseClaw does not infer it from configuration text. Coincidental steps may
+produce detection telemetry, but only enforcement-safe facts can contribute to
+a synchronous block. A later risky proposal may be blocked using already
+committed predecessors; the blocked proposal is never recorded as successful.
+
+## Connector outcome and identity matrix
+
+State levels have strict meanings:
+
+The stateful route is enabled only for a known compatible agent version or an
+explicitly reviewed unversioned default contract. A detected version mismatch,
+unknown pin, or missing lifecycle contract disables state mutation and artifact
+enforcement even if older hook fields still happen to parse. Compatibility loss
+also clears pending state in the exact authenticated session, and the persisted
+fingerprint binds the resolved contract so an older proposal cannot cross a
+contract or agent-version boundary.
+
+- `paired-outcomes` — a pre proposal can become pending and only an exact,
+  authoritative matching result can commit it;
+- `detection-only` — pre and post events can be inspected, but post events do
+  not authorize a durable cross-event transition; and
+- `direct-only` — only the current pre-tool proposal is enforceable; there is
+  no trustworthy post outcome for state.
+
+| Connector / primary contract | Structured proposal events | Result / outcome evidence | Invocation identity | State level |
+| --- | --- | --- | --- | --- |
+| [Codex](https://learn.chatgpt.com/docs/hooks) | `PreToolUse`; `PermissionRequest` is a direct decision only and never creates pending state | `PostToolUse`; exact `apply_patch` scalar success and MCP `CallToolResult` success/failure are authoritative, while shell and generic responses are unknown | paired `tool_use_id` on `PreToolUse`/`PostToolUse`; none on `PermissionRequest` | `paired-outcomes` only for the exact `apply_patch` and MCP response shapes |
+| [Claude Code](https://code.claude.com/docs/en/hooks) | `PreToolUse`; `PermissionRequest` is direct-only | `PostToolUse` success; `PostToolUseFailure` failure; `PermissionDenied` denial | paired `tool_use_id` on tool-use events; none on `PermissionRequest` | `paired-outcomes` |
+| [Hermes](https://github.com/NousResearch/hermes-agent/blob/126ff7071b6b755055879648f4e859b3187d0fac/agent/shell_hooks.py) | `pre_tool_call` | `post_tool_call`; only `extra.status=ok` succeeds, while `error` and `blocked` discard | paired `extra.tool_call_id` | `paired-outcomes` |
+| [Cursor](https://cursor.com/docs/hooks) | generic `preToolUse`; specialized shell, MCP, and read hooks remain direct | generic `postToolUse` success and `postToolUseFailure` failure; specialized after-hooks are result content | paired `tool_use_id` only on the generic tool lifecycle | `paired-outcomes` for generic events |
+| [Windsurf / Cascade](https://docs.devin.ai/desktop/cascade/hooks) | `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` | successful read/write/MCP post surfaces; `post_run_command` has no authoritative exit status or output | `trajectory_id` and `execution_id` identify conversation/turn, not a tool call | `detection-only` |
+| [Gemini CLI](https://geminicli.com/docs/hooks/reference/) | `BeforeTool` | `AfterTool`; inspect `tool_response.error` because the event covers both outcomes | session ID only; no stable hook tool-call ID | `detection-only` |
+| [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/hooks-reference) | `preToolUse`, `permissionRequest` | `postToolUse` has `resultType=success`; `postToolUseFailure` is failure | session ID only; no per-tool invocation ID | `detection-only` |
+| [OpenHands](https://docs.openhands.dev/sdk/guides/hooks) | `pre_tool_use` | `post_tool_use`; only `tool_response.is_error=false` succeeds | the shell-hook payload omits the SDK's internal action ID | `detection-only` |
+| [Antigravity](https://www.antigravity.google/docs/hooks) | `PreToolUse` | `PostToolUse`; success requires an absent/empty error | paired `(conversationId, stepIdx)` sequence, not an opaque call ID | `detection-only` |
+| [OpenCode](https://github.com/anomalyco/opencode/blob/e4bd9757a3a5dc7461d286000a19e9bd7df57c40/packages/plugin/src/index.ts) | `tool.execute.before` | v7 awaits `tool.execute.after` with the executed args and validated result; `bash` additionally requires numeric `metadata.exit=0` | paired `(sessionID, callID)` | `paired-outcomes` |
+| [Amp](https://ampcode.com/manual/plugin-api) | `tool.call` | terminal `tool.result`; `status=done` succeeds, `error` fails, and `cancelled` discards | paired `toolUseID` on both events | `paired-outcomes` |
+| [OmniGent](https://omnigent.ai/docs/policies/custom) | `tool_call` mapped to `PreToolUse` | `tool_result` repeats request data but has no authoritative success/failure field | no stable call or session ID in `PolicyEvent` | `direct-only` |
+
+Turn-completion events such as Codex, Claude Code, or Cursor `Stop`, OpenCode
+`session.idle`, and Amp `agent.end` discard only unfinished proposals. They
+deliberately preserve successful predecessor history so a reviewed chain can
+span user turns; a late result cannot promote work left pending when the turn
+ended. True session-end, deletion, or reset events atomically discard pending
+intent and close the exact session's committed chain window. Bounded,
+content-free cutoffs make both
+operations replay-safe: a turn cutoff suppresses only stale pending proposals,
+while a session cutoff also suppresses stale committed events. Neither kind of
+boundary implies that an unfinished tool succeeded. Native OTel IDs may enrich
+correlation, but they do not upgrade a hook contract unless the upstream source
+proves the same identity on both rails.
+
+The exact cutoff catalogs are capped. If a catalog saturates, a fixed durable
+received-time barrier summarizes the evicted cutoff identity while the current
+boundary still clears only its own session. Existing unrelated pending and
+committed predecessors remain intact; a delayed event received at or before the
+barrier can be conservatively suppressed instead of re-arming stale state. This
+can reduce experimental chain detection under extreme session churn, but it
+cannot create a new chain block, and direct single-action rules are unaffected.
+
+Subagent-stop events do not clear session-wide pending state: current ledgers do
+not carry an exact child-scope digest on every connector, so treating a child
+stop as a session terminal could erase concurrent parent or sibling calls.
+
+## Tool-surface matrix
+
+`Skills` means a connector exposes a skill as a tool/lifecycle event. It does
+not mean DefenseClaw watches every skill file read. No reviewed connector has a
+dedicated mail lifecycle: email, calendar, SaaS, and similar actions enter only
+through the connector's generic or MCP tool event, with the exact reported tool
+identity and arguments. DefenseClaw does not guess that a custom tool is mail.
+This is a cross-platform contract catalog, not a promise that every connector
+is available on Windows. DefenseClaw enables and tests only the connectors in
+the [native Windows connector matrix](/docs/get-started/windows#certified-connector-scope)
+and does not create hook integrations for clients that are not installed or
+supported there.
+
+A `yes` in this matrix means the connector emits a reviewed event for that
+surface. It does not guarantee paired outcome identity, every `ActionFacts`
+field, or enforcement eligibility; use the outcome matrix above for those
+claims.
+
+| Connector | Generic | Shell | File read | File write/edit | MCP | Skills | Mail / SaaS |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Codex | `>=0.135.0` local functions | yes | no reviewed coverage | yes | yes | no dedicated lifecycle | generic (`>=0.135.0`) or MCP only |
+| Claude Code | yes | yes | yes | yes | yes | yes, with slash-expansion gaps | generic or MCP only |
+| Hermes | yes | yes | yes | yes | yes | yes | generic or MCP only |
+| Cursor | yes | yes | yes | yes | yes | no dedicated lifecycle | generic or MCP only |
+| Windsurf / Cascade | no generic event | yes | yes | yes | yes | no dedicated lifecycle | MCP only |
+| Gemini CLI | yes | yes | yes | yes | yes | yes | generic or MCP only |
+| GitHub Copilot CLI | yes | yes | yes | yes | yes when emitted as a tool | no dedicated lifecycle | generic or MCP only |
+| OpenHands | yes | yes | yes | yes | yes | yes (`InvokeSkill`) | generic or MCP only |
+| Antigravity | yes | yes | yes | yes | undocumented | no dedicated lifecycle | generic only; MCP undocumented |
+| OpenCode | yes | yes | yes | yes | yes | yes | generic or MCP only |
+| Amp | yes | yes | yes | yes | yes | no dedicated lifecycle | generic or MCP only |
+| OmniGent | yes | yes | yes | yes | yes | yes | generic or MCP only |
+
+## Files written now and executed later
+
+DefenseClaw intentionally does not watch or rescan every file mutation on the
+host. Direct file-write/edit hooks inspect the proposed path and content they
+actually receive, while shell-mediated writes are represented by the shell
+facts available at that boundary. Write-time fragments are not assumed to be
+executable or malicious.
+
+The reviewed `apply_patch`, `applypatch`, and `apply-patch` tool family has a
+narrow structured adapter for the standard `*** Begin Patch` / `*** End Patch`
+envelope in `command`, `patch`, `patchText`, or `patch_text`. Exact add and
+update directives project writes; delete directives project deletes; and an
+update followed by `*** Move to` projects a source delete plus destination
+write. Only relative paths qualify, and they resolve from the trusted
+invocation working directory. Unknown,
+conflicting, oversized, or malformed envelopes stay non-authoritative and use
+the compatible rule fallback; DefenseClaw does not retain patch contents in
+semantic facts or durable chain state. Codex's authenticated hook shape is
+documented in the upstream
+[structured `apply_patch` hook contract](https://github.com/openai/codex/pull/18391).
+
+When a later blockable shell proposal executes, sources, or loads a local
+script, the experimental artifact-promotion gate can reopen that exact path at
+the execution boundary and analyze its current bytes. The initial gate is
+deliberately narrow: an absolute regular file, no final-component symlink, a
+stable file identity, size, and modification time throughout the bounded read,
+a recognized shell/shebang dialect, and a maximum of 64 KiB. This catches
+“write harmless-looking fragments across turns, then run the assembled script”
+without creating a global filesystem watcher or treating every generated
+source file as an imminent command.
+
+The proven inner script facts feed the same chain projection as the outer tool
+call. A chain-relevant action inside an allowed script remains pending until
+that exact script invocation succeeds, while a chain-ending action inside the
+script can use only already committed predecessors. Outer control-flow or
+artifact uncertainty clears the enforcement projection but retains detection.
+
+The gate skips work when the standalone decision already blocks. Reads use a
+small global concurrency bound and sub-second hook budget so a stalled mount
+cannot create unbounded gateway work; Windows UNC/device paths are excluded.
+Direct execution also requires a recognized shebang, a matching explicit
+interpreter, or an ambient PowerShell/`cmd.exe` grammar that proves its own
+script suffix. A filename suffix without that execution context proves
+nothing. Relative paths inside the script are resolved from the trusted caller
+working directory inherited by the interpreter, not from the script's own
+directory.
+
+This check is best-effort rather than an immutable-execution guarantee. The
+agent executes the pathname after the hook returns, so another process could
+replace or modify it after inspection. Closing that final race requires the
+agent to execute a DefenseClaw-owned immutable snapshot or file descriptor,
+which is outside this experimental contract.
+
+## Low-false-positive invariants
+
+- The authenticated connector route and pinned hook contract establish the
+  event; untrusted payload fields cannot claim a stronger boundary.
+- The typed state-transition route is closed and currently unavailable for all
+  connectors. If a future official source qualifies, the event still cannot
+  produce `ActionFacts`, masquerade as a tool proposal, or create a pending
+  tool call.
+- A semantic rule owner takes one route: authoritative `ActionFacts` plus CEL,
+  or its compatible fallback, never duplicate owner findings.
+- Ambiguous, preview-only, unsupported, or malformed facts cannot be promoted
+  into authoritative semantic execution. The sole exception is one static,
+  top-level opaque script path whose final bytes replace exactly that one
+  uncertainty at the execution boundary; any additional parse issue remains
+  detection-only. A top-level POSIX `exec` before a later sibling command also
+  stays detection-only because the later command is not unconditionally
+  reachable.
+- Proposal, denial, failure, cancellation, timeout, unknown outcome, and
+  success are distinct states. Only proven success advances action-derived
+  history. A matching connector-authenticated denial may advance only the
+  denial-specific chain; an unmatched reported ID remains detection-only.
+- Durable pending-to-success promotion requires an exact connector-owned opaque
+  call ID. Reviewed sequences may aid detection correlation but cannot promote
+  state; DefenseClaw does not fuzzy-join calls by tool name, arguments, or time.
+- Detection-only evidence may alert, but cannot become an enforcement-safe
+  chain predecessor merely because two suspicious events occurred nearby.
+- State is partitioned by connector instance and authenticated session, bounded
+  by time/event windows, deduplicated, and stores projections/digests rather
+  than raw tool content.
+- Result hooks never claim to undo side effects. Blocking happens only at a
+  connector-declared synchronous pre-action surface.
+- The experimental lane does not change existing connector modes, rule-pack
+  defaults, fail modes, or native ask capabilities.
+
+## Current rollout holds
+
+- **OpenCode:** paired state requires the v7 bridge, which forwards `input.args`
+  and the actual result, awaits delivery, and rejects missing delegated-task
+  results. Bash success additionally requires numeric `metadata.exit=0`;
+  nonzero exits fail and missing/null exits remain unknown. Exceptions can
+  still skip the after-hook and therefore never imply success.
+- **Antigravity:** CLI `1.1.9` or newer is required because that release fixed
+  spurious `PostToolUse` and matcher behavior. Its `(conversationId, stepIdx)`
+  sequence is not accepted as an exact opaque invocation ID, so state remains
+  detection-only. MCP coverage remains undocumented.
+- **Codex:** `0.124.0` through `0.134.x` expose only the reviewed shell,
+  file-write/edit, and MCP local-function surfaces; generic local-function
+  payloads start at `0.135.0`. Hosted tools, file reads, and `write_stdin` do
+  not have complete hook coverage. Shell and generic `PostToolUse` payloads do
+  not prove success, so they cannot advance ordered state. Only the exact
+  `apply_patch` scalar response and MCP `CallToolResult` shape currently do.
+- **Windsurf, Gemini CLI, Copilot CLI, and OpenHands:** post-tool inspection is
+  useful, but absent per-call identity keeps cross-event state detection-only.
+- **OmniGent:** no authoritative tool outcome exists in the policy event, so
+  only direct pre-tool decisions are eligible for enforcement.
+
+These holds are intentional. Coverage moves upward only after the connector's
+official contract, bridge fixtures, and smoke evidence on every applicable
+certified host all agree; missing evidence reduces capability instead of
+guessing success.

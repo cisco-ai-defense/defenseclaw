@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
 
 func newTestStore(t *testing.T) (*Store, func()) {
@@ -110,17 +112,25 @@ func TestNetworkEgressEvent_effectiveSeverity(t *testing.T) {
 }
 
 func TestNetworkEgressEventToRowRedactsURLCredentials(t *testing.T) {
+	rawURL := "https://alice:secret@api.example.test/v1/data?api_key=secret&region=us#fragment"
 	event := NetworkEgressEvent{
 		Hostname:      "api.example.test",
-		URL:           "https://alice:secret@api.example.test/v1/data?api_key=secret&region=us#fragment",
+		URL:           rawURL,
 		PolicyOutcome: "allowed",
+		Details:       "allowed outbound request to " + rawURL,
 	}
 	row := event.toRow()
 	if strings.Contains(row.URL, "alice") || strings.Contains(row.URL, "secret") {
 		t.Fatalf("persisted URL leaked credentials: %q", row.URL)
 	}
+	if strings.Contains(row.Details, "alice") || strings.Contains(row.Details, "secret") {
+		t.Fatalf("persisted details leaked credentials: %q", row.Details)
+	}
 	if !strings.Contains(row.URL, "api_key=%3Credacted%3E") || !strings.Contains(row.URL, "region=us") {
 		t.Fatalf("persisted URL did not retain safe diagnostic context: %q", row.URL)
+	}
+	if !strings.Contains(row.Details, "api_key=%3Credacted%3E") || !strings.Contains(row.Details, "region=us") {
+		t.Fatalf("persisted details did not retain safe diagnostic context: %q", row.Details)
 	}
 }
 
@@ -143,6 +153,59 @@ func TestStore_InsertNetworkEgressEventRedactsURLInDetails(t *testing.T) {
 	}
 	if !strings.Contains(rows[0].Details, "%3Credacted%3E") {
 		t.Fatalf("persisted details did not retain redacted URL context: %q", rows[0].Details)
+	}
+}
+
+func TestStore_InsertNetworkEgressEventKeepsTruncatedURLConsistentInDetails(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	rawURL := "https://alice:secret@api.example.test/" + strings.Repeat("a", 600)
+	const prefix = "allowed outbound request to "
+	if err := store.InsertNetworkEgressEvent(NetworkEgressRow{
+		Hostname: "api.example.test", URL: rawURL, PolicyOutcome: "allowed",
+		Details: prefix + rawURL,
+	}); err != nil {
+		t.Fatalf("InsertNetworkEgressEvent: %v", err)
+	}
+	rows, err := store.QueryNetworkEgressEvents(NetworkEgressFilter{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("QueryNetworkEgressEvents rows=%d err=%v", len(rows), err)
+	}
+	if len(rows[0].URL) != 512 || rows[0].Details != prefix+rows[0].URL {
+		t.Fatalf("persisted details URL differs from truncated URL: url=%q details=%q", rows[0].URL, rows[0].Details)
+	}
+}
+
+func TestNetworkEgressDetailsScrubURLsIndependently(t *testing.T) {
+	const sentinel = "details-only-secret"
+	event := NetworkEgressEvent{
+		Hostname:      "api.example.test",
+		PolicyOutcome: "blocked",
+		Details: "first https://api.example.test/a?tok%65n=" + sentinel +
+			" then https://api.example.test/b?api%5Fkey=" + sentinel,
+	}
+	row := event.toRow()
+	if strings.Contains(row.Details, sentinel) {
+		t.Fatalf("toRow details leaked embedded URL credentials: %q", row.Details)
+	}
+	if strings.Count(row.Details, "%3Credacted%3E") != 2 {
+		t.Fatalf("toRow details did not retain two redacted URL contexts: %q", row.Details)
+	}
+}
+
+func TestNetworkEgressWhitespaceURLRemainsEmpty(t *testing.T) {
+	event := NetworkEgressEvent{
+		Hostname:      "api.example.test",
+		URL:           "   ",
+		PolicyOutcome: "allowed",
+		Details:       "safe diagnostic spacing",
+	}
+	row := event.toRow()
+	if row.URL != "" {
+		t.Fatalf("toRow URL = %q, want empty for whitespace-only input", row.URL)
+	}
+	if row.Details != event.Details {
+		t.Fatalf("toRow details = %q, want %q", row.Details, event.Details)
 	}
 }
 
@@ -398,12 +461,123 @@ func TestStore_GetCounts_IncludesBlockedEgress(t *testing.T) {
 	}
 }
 
+// TestStore_GetCounts_AlertsUseActiveActionableSemantics pins the IPC
+// ActiveAlerts surface to the same semantic queue operators see and can
+// acknowledge. High-severity audit telemetry alone is not an alert.
+func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+
+	// Unrelated high-severity telemetry must not inflate ActiveAlerts.
+	if err := store.LogEvent(Event{
+		ID:       "unrelated-high",
+		Action:   "guardrail-inspection",
+		Target:   "gpt-5",
+		Severity: "HIGH",
+	}); err != nil {
+		t.Fatalf("LogEvent guardrail: %v", err)
+	}
+
+	// Benign connector-hook row: column=INFO, envelope severity=NONE.
+	// Must NOT count as an alert.
+	if err := store.LogEvent(Event{
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Structured: map[string]any{
+			"schema":   "defenseclaw.hook.v1",
+			"severity": "NONE",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent hook NONE: %v", err)
+	}
+
+	// Real blocks from hooks remain actionable even though their outer
+	// severity is INFO.
+	if err := store.LogEvent(Event{
+		ID:       "hook-high",
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Details:  "connector=codex action=block mode=action severity=HIGH",
+		Enforced: true,
+		Structured: map[string]any{
+			"schema":   "defenseclaw.hook.v1",
+			"severity": "HIGH",
+			"action":   "block",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent hook HIGH: %v", err)
+	}
+
+	if err := store.LogEvent(Event{
+		ID:       "hook-critical",
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Details:  "connector=codex action=block mode=action severity=CRITICAL",
+		Enforced: true,
+		Structured: map[string]any{
+			"schema":   "defenseclaw.hook.v1",
+			"severity": "CRITICAL",
+			"action":   "block",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent hook CRITICAL: %v", err)
+	}
+	if err := store.LogEvent(Event{
+		ID: "legacy-finding", Action: "scan-finding", Target: "skill:test", Severity: "HIGH",
+	}); err != nil {
+		t.Fatalf("LogEvent legacy finding: %v", err)
+	}
+	if err := store.LogEvent(Event{
+		ID: "reviewed-finding", Action: "scan-finding", Target: "skill:reviewed", Severity: "CRITICAL",
+	}); err != nil {
+		t.Fatalf("LogEvent reviewed finding: %v", err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
+		alert_id, disposition, actor, disposition_at, projection_version,
+		source, source_event_id, updated_at
+	) VALUES ('reviewed-finding', 'dismissed', 'test', ?, 1, 'modern',
+		'receipt-reviewed', ?)`, stamp, stamp); err != nil {
+		t.Fatalf("insert reviewed projection: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json
+	) VALUES
+		('canonical-deny', ?, 'enforcement', 'gateway', '', 'INFO',
+		 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"deny"}'),
+		('health-error', ?, 'sink-failure', 'gateway', '', 'ERROR',
+		 'platform.health', 'destination.export_failed', '{}'),
+		('detection-only', ?, 'scan-finding', 'scanner', '', 'HIGH',
+		 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":["secret","detection-only"]}')`,
+		stamp, stamp, stamp); err != nil {
+		t.Fatalf("insert canonical alert fixtures: %v", err)
+	}
+
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatalf("GetCounts: %v", err)
+	}
+	// Two enforced hooks, one legacy finding, one canonical deny, and one
+	// important health failure. Clean/unrelated/detection-only/reviewed rows
+	// are excluded.
+	if counts.Alerts != 5 {
+		t.Errorf("Alerts = %d, want 5 active actionable alerts", counts.Alerts)
+	}
+}
+
 // --- Logger ---
 
 func TestLogger_LogNetworkEgress(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logger := NewLogger(store)
+	logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary))
 	ctx := context.Background()
 
 	t.Run("allowed call stored, no alert", func(t *testing.T) {
@@ -425,10 +599,10 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 		if rows[0].Severity != "INFO" {
 			t.Errorf("severity = %q, want INFO", rows[0].Severity)
 		}
-		alerts, _ := store.ListAlerts(10)
-		for _, a := range alerts {
+		events, _ := store.ListEvents(10)
+		for _, a := range events {
 			if a.Action == "network-egress-blocked" {
-				t.Error("unexpected blocked alert for allowed egress call")
+				t.Error("unexpected blocked projection for allowed egress call")
 			}
 		}
 	})
@@ -453,15 +627,15 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 		if rows[0].Severity != "HIGH" {
 			t.Errorf("severity = %q, want HIGH", rows[0].Severity)
 		}
-		alerts, _ := store.ListAlerts(10)
+		events, _ := store.ListEvents(10)
 		var found bool
-		for _, a := range alerts {
-			if a.Action == "network-egress-blocked" && a.Target == "exfil.bad" {
+		for _, a := range events {
+			if a.Action == "network-egress-blocked" && a.Structured["defenseclaw.network.target_ref"] == "exfil.bad" {
 				found = true
 			}
 		}
 		if !found {
-			t.Error("expected a network-egress-blocked alert in audit_events")
+			t.Error("expected a canonical network-egress-blocked event-history projection")
 		}
 	})
 
@@ -507,16 +681,14 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 	})
 }
 
-func TestLogger_LogNetworkEgress_BlockedAlertFansOutWithCorrelationDefaults(t *testing.T) {
+func TestLogger_LogNetworkEgress_BlockedProjectionHasDefaultsWithoutLegacyFanout(t *testing.T) {
 	t.Setenv("DEFENSECLAW_RUN_ID", "network-egress-run")
 
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 
 	logger := NewLogger(store)
-	sink := installCaptureSink(t, logger)
-	emitter := &captureEmitter{}
-	logger.SetStructuredEmitter(emitter)
+	logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary))
 
 	err := logger.LogNetworkEgress(context.Background(), NetworkEgressEvent{
 		Hostname:      "blocked.example",
@@ -531,29 +703,11 @@ func TestLogger_LogNetworkEgress_BlockedAlertFansOutWithCorrelationDefaults(t *t
 		t.Fatalf("LogNetworkEgress: %v", err)
 	}
 
-	sinkEvents := sink.snapshot()
-	if len(sinkEvents) != 1 {
-		t.Fatalf("sink events = %d, want 1", len(sinkEvents))
-	}
-	if sinkEvents[0].Action != "network-egress-blocked" {
-		t.Fatalf("sink action = %q, want network-egress-blocked", sinkEvents[0].Action)
-	}
-	if sinkEvents[0].Target != "blocked.example" {
-		t.Fatalf("sink target = %q, want blocked.example", sinkEvents[0].Target)
-	}
-	if sinkEvents[0].ID == "" || sinkEvents[0].RunID == "" || sinkEvents[0].Actor == "" {
-		t.Fatalf("sink event missing defaults: %+v", sinkEvents[0])
-	}
-
-	emitted := emitter.snapshot()
-	if len(emitted) != 1 {
-		t.Fatalf("structured events = %d, want 1", len(emitted))
-	}
-	if emitted[0].Action != "network-egress-blocked" {
-		t.Fatalf("structured action = %q, want network-egress-blocked", emitted[0].Action)
-	}
-	if emitted[0].ID == "" || emitted[0].RunID == "" || emitted[0].Actor == "" {
-		t.Fatalf("structured event missing defaults: %+v", emitted[0])
+	events, listErr := store.ListEvents(10)
+	if listErr != nil || len(events) != 1 || events[0].Action != "network-egress-blocked" ||
+		events[0].Structured["defenseclaw.network.target_ref"] != "blocked.example" ||
+		events[0].ID == "" || events[0].RunID == "" || events[0].Actor == "" {
+		t.Fatalf("local canonical projection = %#v error=%v", events, listErr)
 	}
 }
 
@@ -577,7 +731,17 @@ func TestAgent360NetworkEgressMigrationUpgradesAlreadyMigratedDatabase(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	for version := 1; version < len(migrations); version++ {
+	agent360Version := 0
+	for index, candidate := range migrations {
+		if candidate.description == "agent360: correlate network egress with root agent, parent agent, and root session" {
+			agent360Version = index + 1
+			break
+		}
+	}
+	if agent360Version == 0 {
+		t.Fatal("agent360 migration not found")
+	}
+	for version := 1; version < agent360Version; version++ {
 		if _, err := db.Exec(`INSERT INTO schema_version(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, version); err != nil {
 			t.Fatal(err)
 		}
@@ -591,8 +755,12 @@ func TestAgent360NetworkEgressMigrationUpgradesAlreadyMigratedDatabase(t *testin
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if err := store.Init(); err != nil {
-		t.Fatalf("Init upgrade: %v", err)
+	// This is deliberately a table-scoped component fixture, not a production
+	// audit database. Apply the migration under test directly; Store.Init now
+	// enforces the mandatory v8 audit_events readiness anchor and correctly
+	// rejects partial schemas.
+	if err := store.applyMigration(agent360Version, migrations[agent360Version-1]); err != nil {
+		t.Fatalf("apply agent360 upgrade: %v", err)
 	}
 	for _, column := range []string{"root_agent_id", "parent_agent_id", "root_session_id"} {
 		exists, err := store.hasColumn("network_egress_events", column)

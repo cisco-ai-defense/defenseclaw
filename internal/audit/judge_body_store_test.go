@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -276,6 +277,105 @@ func TestJudgeBodyStore_BatchCommitsAllRows(t *testing.T) {
 	}
 	if len(rows) != n {
 		t.Fatalf("want %d rows after batch commit, got %d", n, len(rows))
+	}
+}
+
+func TestJudgeBodyStore_BatchInsertHonorsTransactionCancellation(t *testing.T) {
+	store, err := NewJudgeBodyStore(filepath.Join(t.TempDir(), "judge_bodies.db"))
+	if err != nil {
+		t.Fatalf("NewJudgeBodyStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	batch, err := store.BeginJudgeBatch(ctx)
+	if err != nil {
+		t.Fatalf("BeginJudgeBatch: %v", err)
+	}
+	cancel()
+	started := time.Now()
+	if err := batch.InsertJudgeResponse(JudgeResponse{
+		ID:   "cancelled-batch-row",
+		Kind: "llm-judge",
+		Raw:  `{}`,
+	}); err == nil {
+		t.Fatal("cancelled transaction accepted a batch insert")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cancelled batch insert took %s", elapsed)
+	}
+	_ = batch.Rollback()
+
+	var count int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM judge_responses WHERE id=?`, "cancelled-batch-row").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("cancelled batch persisted %d rows", count)
+	}
+}
+
+// TestJudgeBodyStore_BatchConcurrentFinalizersReleaseRuntimeOnce pins the
+// JudgeBatch lifecycle contract: concurrent Commit/Rollback retries are safe,
+// and the runtime read lock held by a dedicated-store batch is released exactly
+// once. A duplicate release panics in sync.RWMutex; a missed release prevents
+// cutover from ever acquiring the writer lock.
+func TestJudgeBodyStore_BatchConcurrentFinalizersReleaseRuntimeOnce(t *testing.T) {
+	store, err := NewJudgeBodyStore(filepath.Join(t.TempDir(), "judge_bodies.db"))
+	if err != nil {
+		t.Fatalf("NewJudgeBodyStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	batch, err := store.BeginJudgeBatch(t.Context())
+	if err != nil {
+		t.Fatalf("BeginJudgeBatch: %v", err)
+	}
+	originalRelease := batch.release
+	var releaseCalls atomic.Int32
+	batch.release = func() {
+		releaseCalls.Add(1)
+		originalRelease()
+	}
+
+	const finalizers = 64
+	start := make(chan struct{})
+	errs := make(chan error, finalizers)
+	var wg sync.WaitGroup
+	for i := 0; i < finalizers; i++ {
+		wg.Add(1)
+		go func(commit bool) {
+			defer wg.Done()
+			<-start
+			if commit {
+				errs <- batch.Commit()
+				return
+			}
+			errs <- batch.Rollback()
+		}(i%2 == 0)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent finalizer: %v", err)
+		}
+	}
+	if got := releaseCalls.Load(); got != 1 {
+		t.Fatalf("runtime release calls = %d, want 1", got)
+	}
+
+	lockAcquired := make(chan struct{})
+	go func() {
+		store.cutoverMu.Lock()
+		store.cutoverMu.Unlock()
+		close(lockAcquired)
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cutover writer lock remained blocked after batch finalization")
 	}
 }
 

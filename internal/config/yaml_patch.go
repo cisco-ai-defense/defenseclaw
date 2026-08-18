@@ -196,7 +196,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("config: close temp %s: %w", tmpName, err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceConfigFile(tmpName, path); err != nil {
 		return fmt.Errorf("config: replace %s: %w", path, err)
 	}
 	return nil

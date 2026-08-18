@@ -47,7 +47,7 @@ func TestProfilePosture_InjectionJudge(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, tc.profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, tc.profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", tc.profile)
 				return
@@ -84,7 +84,7 @@ func TestGuardrailPolicyProfilesHaveGoCompatibleRegexes(t *testing.T) {
 	for _, profile := range []string{"strict", "default", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", profile)
 			}
@@ -112,7 +112,7 @@ func TestProfilePosture_InjectionLabelingIsUnified(t *testing.T) {
 	profiles := []string{"strict", "default", "permissive"}
 	var first *guardrail.JudgeYAML
 	for _, profile := range profiles {
-		ij := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile)).InjectionJudge()
+		ij := mustLoadRulePack(t, filepath.Join(policiesRoot, profile)).InjectionJudge()
 		if ij == nil {
 			t.Fatalf("profile=%s missing injection judge config", profile)
 		}
@@ -147,7 +147,7 @@ func TestProfilePosture_SSNIsCriticalOnlyInStrict(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, tc.profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, tc.profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", tc.profile)
 			}
@@ -189,7 +189,7 @@ func TestProfilePosture_ExactCredentialSignalsAreCriticalAcrossProfiles(t *testi
 	for _, profile := range []string{"strict", "default", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", profile)
 			}
@@ -222,7 +222,7 @@ func TestProfilePosture_InjectionJudgeDocumentsFPExclusions(t *testing.T) {
 	for _, profile := range []string{"strict", "default", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, profile))
 			if rp == nil || rp.InjectionJudge() == nil {
 				t.Fatalf("LoadRulePack(%s) missing injection judge", profile)
 			}
@@ -239,4 +239,304 @@ func TestProfilePosture_InjectionJudgeDocumentsFPExclusions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGeneratedDefaultRuleCatalogMatchesShippedYAML(t *testing.T) {
+	defaultPack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "default"))
+	if defaultPack == nil {
+		t.Fatal("LoadRulePack(default) returned nil")
+	}
+
+	yamlCategories := make(map[string]*guardrail.RulesFileYAML, len(defaultPack.RuleFiles))
+	for _, file := range defaultPack.RuleFiles {
+		if file == nil || file.Category == "" {
+			continue
+		}
+		if _, exists := yamlCategories[file.Category]; exists {
+			t.Fatalf("default YAML contains duplicate category %q", file.Category)
+		}
+		yamlCategories[file.Category] = file
+	}
+	if got, want := len(defaultRuleCategories), len(yamlCategories); got != want {
+		t.Fatalf("generated category count = %d, default YAML count = %d", got, want)
+	}
+
+	seenCategories := make(map[string]bool, len(defaultRuleCategories))
+	seenIDs := make(map[string]bool)
+	for _, generatedCategory := range defaultRuleCategories {
+		if seenCategories[generatedCategory.Name] {
+			t.Fatalf("generated catalog contains duplicate category %q", generatedCategory.Name)
+		}
+		seenCategories[generatedCategory.Name] = true
+
+		yamlCategory := yamlCategories[generatedCategory.Name]
+		if yamlCategory == nil {
+			t.Fatalf("generated category %q is absent from default YAML", generatedCategory.Name)
+		}
+
+		enabledRules := make([]guardrail.RuleDefYAML, 0, len(yamlCategory.Rules))
+		for _, rule := range yamlCategory.Rules {
+			if rule.Enabled != nil && !*rule.Enabled {
+				continue
+			}
+			enabledRules = append(enabledRules, rule)
+		}
+		if got, want := len(generatedCategory.Rules), len(enabledRules); got != want {
+			t.Fatalf("category %s generated rule count = %d, enabled YAML count = %d",
+				generatedCategory.Name, got, want)
+		}
+
+		for index, generatedRule := range generatedCategory.Rules {
+			yamlRule := enabledRules[index]
+			if seenIDs[generatedRule.ID] {
+				t.Fatalf("generated catalog contains duplicate rule id %q", generatedRule.ID)
+			}
+			seenIDs[generatedRule.ID] = true
+			if generatedRule.Expression != yamlRule.Expression ||
+				generatedRule.ToolCallOnly != yamlRule.ToolCallOnly {
+				t.Fatalf(
+					"generated rule %s semantic metadata = (%q, %t), YAML = (%q, %t)",
+					generatedRule.ID,
+					generatedRule.Expression,
+					generatedRule.ToolCallOnly,
+					yamlRule.Expression,
+					yamlRule.ToolCallOnly,
+				)
+			}
+			if generatedRule.ID != yamlRule.ID ||
+				generatedRule.Pattern.String() != yamlRule.Pattern ||
+				generatedRule.Title != yamlRule.Title ||
+				generatedRule.Severity != yamlRule.Severity ||
+				generatedRule.Confidence != yamlRule.Confidence ||
+				strings.Join(generatedRule.Tags, "\x00") != strings.Join(yamlRule.Tags, "\x00") {
+				t.Fatalf(
+					"generated rule %s/%d differs from default YAML:\n generated=%s %q %q %s %.4f %v\n      yaml=%s %q %q %s %.4f %v",
+					generatedCategory.Name,
+					index,
+					generatedRule.ID,
+					generatedRule.Pattern.String(),
+					generatedRule.Title,
+					generatedRule.Severity,
+					generatedRule.Confidence,
+					generatedRule.Tags,
+					yamlRule.ID,
+					yamlRule.Pattern,
+					yamlRule.Title,
+					yamlRule.Severity,
+					yamlRule.Confidence,
+					yamlRule.Tags,
+				)
+			}
+		}
+	}
+}
+
+func TestProfilePosture_EnterpriseRuleEnablement(t *testing.T) {
+	cases := []struct {
+		profile string
+		wantIDs []string
+	}{
+		{
+			profile: "default",
+			wantIDs: []string{
+				"ENT-BULK-SSN",
+				"ENT-CC-VISA",
+				"ENT-CC-MC",
+				"ENT-CC-AMEX",
+				"ENT-CC-DISCOVER",
+				"ENT-IBAN",
+				"ENT-MEDICAL-RECORD",
+				"ENT-DOB-PATTERN",
+				"ENT-BULK-CSV-PII",
+				"ENT-BULK-JSON-PII",
+			},
+		},
+		{
+			profile: "strict",
+			wantIDs: []string{
+				"ENT-BULK-SSN",
+				"ENT-BULK-SSN-NOHYPHEN",
+				"ENT-CC-VISA",
+				"ENT-CC-MC",
+				"ENT-CC-AMEX",
+				"ENT-CC-DISCOVER",
+				"ENT-IBAN",
+				"ENT-US-PHONE",
+				"ENT-EMAIL-BULK",
+				"ENT-PASSPORT-US",
+				"ENT-DL-CA",
+				"ENT-MEDICAL-RECORD",
+				"ENT-DOB-PATTERN",
+				"ENT-NHS-NUMBER",
+				"ENT-BULK-CSV-PII",
+				"ENT-BULK-JSON-PII",
+			},
+		},
+		{
+			profile: "permissive",
+			wantIDs: []string{
+				"ENT-BULK-SSN",
+				"ENT-CC-VISA",
+				"ENT-CC-MC",
+				"ENT-CC-AMEX",
+				"ENT-CC-DISCOVER",
+				"ENT-MEDICAL-RECORD",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.profile, func(t *testing.T) {
+			pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), tc.profile))
+			var gotIDs []string
+			for _, file := range pack.RuleFiles {
+				if file == nil || file.Category != "enterprise-data" {
+					continue
+				}
+				for _, rule := range file.Rules {
+					if rule.Enabled == nil || *rule.Enabled {
+						gotIDs = append(gotIDs, rule.ID)
+					}
+				}
+			}
+			if strings.Join(gotIDs, "\x00") != strings.Join(tc.wantIDs, "\x00") {
+				t.Fatalf("%s enabled enterprise rules = %v, want %v", tc.profile, gotIDs, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func TestShippedProfilesContainUnicodeObfuscationRule(t *testing.T) {
+	const (
+		ruleID      = "OBFUSC-UNICODE-ZWSP"
+		wantPattern = `(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}`
+	)
+	for _, profile := range []string{"default", "strict", "permissive"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+			var matches []guardrail.RuleDefYAML
+			for _, file := range pack.RuleFiles {
+				for _, rule := range file.Rules {
+					if rule.ID == ruleID {
+						matches = append(matches, rule)
+					}
+				}
+			}
+			if len(matches) != 1 {
+				t.Fatalf("%s contains %d copies of %s, want exactly one", profile, len(matches), ruleID)
+			}
+			rule := matches[0]
+			if rule.Enabled != nil && !*rule.Enabled {
+				t.Fatalf("%s disables %s", profile, ruleID)
+			}
+			if rule.Pattern != wantPattern ||
+				rule.Title != "Zero-width character obfuscation" ||
+				rule.Severity != "HIGH" ||
+				rule.Confidence != 0.95 ||
+				strings.Join(rule.Tags, "\x00") != "prompt-injection\x00obfuscation" {
+				t.Fatalf("%s %s metadata differs: %+v", profile, ruleID, rule)
+			}
+		})
+	}
+}
+
+func TestShippedProfilesKeepSharedDriftCorrections(t *testing.T) {
+	cases := []struct {
+		id      string
+		pattern string
+	}{
+		{
+			id:      "SEC-AWS-KEY",
+			pattern: `\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}`,
+		},
+		{
+			id:      "CMD-ENV-DUMP",
+			pattern: `(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)`,
+		},
+	}
+
+	for _, profile := range []string{"default", "strict", "permissive"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+			for _, tc := range cases {
+				var patterns []string
+				for _, file := range pack.RuleFiles {
+					for _, rule := range file.Rules {
+						if rule.ID == tc.id {
+							patterns = append(patterns, rule.Pattern)
+						}
+					}
+				}
+				if len(patterns) != 1 || patterns[0] != tc.pattern {
+					t.Fatalf("%s %s patterns = %q, want exactly %q", profile, tc.id, patterns, tc.pattern)
+				}
+			}
+		})
+	}
+}
+
+func TestUnicodeObfuscationRuleThresholdAndAdjacency(t *testing.T) {
+	const (
+		ruleID = "OBFUSC-UNICODE-ZWSP"
+		zwsp   = "\u200b"
+		zwnj   = "\u200c"
+		zwj    = "\u200d"
+		bom    = "\ufeff"
+	)
+	cases := []struct {
+		name      string
+		text      string
+		wantMatch bool
+	}{
+		{
+			name:      "ten mixed zero-width characters",
+			text:      "a" + zwsp + "b" + zwnj + "c" + zwj + "d" + bom + "e" + zwsp + "f" + zwnj + "g" + zwj + "h" + bom + "i" + zwsp + "j" + zwnj,
+			wantMatch: true,
+		},
+		{
+			name:      "nine occurrences",
+			text:      strings.Repeat("a"+zwsp, 9),
+			wantMatch: false,
+		},
+		{
+			name:      "single copied zero-width character",
+			text:      "copy" + zwsp + "paste",
+			wantMatch: false,
+		},
+		{
+			name:      "emoji ZWJ sequence",
+			text:      strings.Repeat("👩"+zwj+"💻", 10),
+			wantMatch: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			found := false
+			for _, finding := range ScanAllRules(tc.text, "read_file") {
+				if finding.RuleID == ruleID {
+					found = true
+					if finding.Severity != "HIGH" || finding.Confidence != 0.95 {
+						t.Fatalf("%s finding metadata = %+v", ruleID, finding)
+					}
+				}
+			}
+			if found != tc.wantMatch {
+				t.Fatalf("%s match = %v, want %v", ruleID, found, tc.wantMatch)
+			}
+		})
+	}
+}
+
+func guardrailPoliciesRoot(t *testing.T) string {
+	t.Helper()
+	_, selfPath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve caller path")
+	}
+	return filepath.Join(filepath.Dir(selfPath), "..", "..", "policies", "guardrail")
 }

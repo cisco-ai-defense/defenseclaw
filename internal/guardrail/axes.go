@@ -90,9 +90,8 @@ func AxesForRuleID(ruleID string) []DataAxis {
 		return []DataAxis{AxisIngressUntrusted}
 	case strings.HasPrefix(ruleID, "CMD-DESTRUCTIVE"),
 		strings.HasPrefix(ruleID, "SHELL-DESTRUCTIVE"):
-		// Destructive commands aren't one of the three trifecta
-		// axes; the DESTRUCTIVE-FLOW correlator pattern matches on
-		// tool_capability_class + rule_id instead.
+		// Destructive commands aren't one of the three trifecta axes;
+		// keep their execution capability separate from data movement.
 		return nil
 	}
 	return nil
@@ -190,6 +189,44 @@ func axesFromTags(tags []string) []DataAxis {
 // labels. Kept as a plain map (not YAML) so the compiler catches
 // typos and a reviewer can audit the full list in one place.
 var ruleAxes = map[string][]DataAxis{
+	"secrets.cloud_credential_read":               {AxisSensitiveAccess},
+	"secrets.browser_session_store_read":          {AxisSensitiveAccess},
+	"secrets.cloud_secret_manager_read":           {AxisSensitiveAccess},
+	"secrets.workload_identity_token_read":        {AxisSensitiveAccess},
+	"exfil.secret_read_and_egress_oneliner":       {AxisSensitiveAccess, AxisEgressExternal},
+	"exec.reverse_tunnel":                         {AxisEgressExternal},
+	"exec.agent_runtime_bypass_flags":             nil,
+	"integrity.git_hooks_bypass":                  nil,
+	"integrity.history_tamper":                    nil,
+	"recon.network_sweep":                         {AxisEgressExternal},
+	"privilege.container_host_escape":             nil,
+	"privilege.container_runtime_socket_access":   nil,
+	"privilege.host_namespace_entry":              nil,
+	"lateral.workload_exec":                       nil,
+	"impact.cryptomining_launch":                  nil,
+	"impact.fork_bomb":                            nil,
+	"impact.mass_process_termination":             nil,
+	"source.git_remote_tamper":                    nil,
+	"source.git_config_exec":                      nil,
+	"tamper.detector_state_write":                 nil,
+	"tamper.guardrails_off":                       nil,
+	"persistence.shell_profile_write":             nil,
+	"persistence.git_hook_write":                  nil,
+	"persistence.ssh_authorized_keys_command":     nil,
+	"persistence.privileged_account_change":       nil,
+	"chain.guardrails_off_then_egress":            {AxisEgressExternal},
+	"chain.permission_denied_then_runtime_bypass": nil,
+	"chain.privilege_discovery_then_elevation":    nil,
+	"chain.secret_manager_read_then_egress": {
+		AxisSensitiveAccess,
+		AxisEgressExternal,
+	},
+	"chain.secret_read_then_egress": {
+		AxisSensitiveAccess,
+		AxisEgressExternal,
+	},
+	"chain.workload_identity_then_lateral_execution": {AxisSensitiveAccess},
+
 	// Sensitive data access (credentials, PII, system secrets)
 	"CRED-AWS-FILE":       {AxisSensitiveAccess},
 	"CRED-AWS-KEY":        {AxisSensitiveAccess},
@@ -234,6 +271,7 @@ var ruleAxes = map[string][]DataAxis{
 	"INJ-DAN-MODE":          {AxisIngressUntrusted},
 	"INJ-OVERRIDE":          {AxisIngressUntrusted},
 	"INJ-DELIMITER-HIJACK":  {AxisIngressUntrusted},
+	"OBFUSC-UNICODE-ZWSP":   {AxisIngressUntrusted},
 	"TRUST-AUTHORITY-CLAIM": {AxisIngressUntrusted},
 	"TRUST-NEW-INSTRUCTION": {AxisIngressUntrusted},
 	"TRUST-SAFETY-OVERRIDE": {AxisIngressUntrusted},
@@ -252,7 +290,7 @@ var ruleAxes = map[string][]DataAxis{
 	"CMD-WGET-POST":   {AxisEgressExternal},
 	"CMD-PIPE-CURL":   {AxisEgressExternal},
 	"CMD-PIPE-WGET":   {AxisEgressExternal},
-	"CMD-ENV-DUMP":    {AxisSensitiveAccess},
+	"CMD-ENV-DUMP":    {AxisSensitiveAccess, AxisEgressExternal},
 
 	// Cloud metadata C2 endpoints read instance credentials (sensitive)
 	// over an outbound call (egress) — both axes. The C2- prefix

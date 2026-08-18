@@ -22,6 +22,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -71,6 +74,41 @@ func TestExtractIncomingTraceContext_HookRoute(t *testing.T) {
 	}
 	if !sc.IsRemote() {
 		t.Errorf("expected SpanContext.IsRemote=true (header-sourced span)")
+	}
+}
+
+func TestInboundTraceContextMiddlewarePreservesRemoteParentWithoutLegacyServerSpan(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter), sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previous)
+		_ = provider.Shutdown(context.Background())
+	})
+
+	var captured trace.SpanContext
+	handler := inboundTraceContextMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = trace.SpanContextFromContext(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	header := http.Header{}
+	header.Set("traceparent", wellFormedTraceparent)
+	header.Set("tracestate", wellFormedTracestate)
+	request := hookReq(t, "/api/v1/codex/hook", header)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if !captured.IsValid() || !captured.IsRemote() {
+		t.Fatalf("captured parent = %#v, want valid remote W3C parent", captured)
+	}
+	if got, want := captured.TraceID().String(), "0af7651916cd43dd8448eb211c80319c"; got != want {
+		t.Fatalf("trace id = %q, want %q", got, want)
+	}
+	if spans := exporter.GetSpans(); len(spans) != 0 {
+		t.Fatalf("middleware emitted %d direct SDK spans, want none", len(spans))
 	}
 }
 
@@ -130,13 +168,13 @@ func TestExtractIncomingTraceContext_OutOfScopeRoute(t *testing.T) {
 }
 
 // TestExtractIncomingTraceContext_NonLoopbackRejected is the
-// security regression test for the H1 loopback gate. The OTel HTTP
+// security regression test for the H1 loopback gate. The propagation
 // middleware wraps OUTSIDE tokenAuth, so a non-loopback caller can
 // reach extractIncomingTraceContext before the auth check runs.
 // Hook scripts only POST from loopback, so any non-loopback caller
 // hitting a hook route MUST NOT splice their attacker-supplied
-// traceparent into the gateway's trace tree — the parent context
-// is dropped and the server span is born as a fresh root.
+// traceparent into the gateway's trace tree; the parent context is dropped
+// before any generated span can start.
 func TestExtractIncomingTraceContext_NonLoopbackRejected(t *testing.T) {
 	hostileRemotes := []string{
 		"203.0.113.5:443",   // TEST-NET-3

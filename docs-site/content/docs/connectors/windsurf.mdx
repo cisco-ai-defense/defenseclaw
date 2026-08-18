@@ -15,17 +15,34 @@ The Windsurf connector wires DefenseClaw into [Codeium's Cascade hooks](https://
 defenseclaw setup windsurf
 ```
 
-`setup windsurf` is shorthand for `setup guardrail --connector windsurf`: it adds or reconfigures Windsurf and wires hooks against `~/.codeium/windsurf/hooks.json`. DefenseClaw discovers existing MCP / rules but never auto-creates workspace configuration. **There is no proxy-enforcement path** for Windsurf — blocking happens hook-side via Cascade's `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use` events. Windsurf has no native ask surface, so confirm verdicts use its explicit non-pausing fallback with `raw_action` preserved for audit.
+<Callout type="warning">
+Windsurf setup is supported on macOS and Linux. The DefenseClaw connector is
+not certified on native Windows x64, so setup rejects it there.
+</Callout>
+
+`setup windsurf` is the dedicated Windsurf alias. It uses the shared guardrail
+setup backend and wires hooks against `~/.codeium/windsurf/hooks.json`.
+DefenseClaw discovers existing MCP and rules surfaces but never auto-creates
+workspace configuration. **There is no proxy-enforcement path** — blocking
+happens hook-side via Cascade's `pre_user_prompt`, `pre_read_code`,
+`pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use`. Windsurf has no
+native ask surface, so confirm verdicts use its non-pausing fallback with
+`raw_action` preserved for audit.
 
 #### What `setup windsurf` actually does
 
-The wrapper accepts exactly three flags. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+The table highlights convenience options rather than the complete alias
+surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
+approval, block-message, add/replace, workspace, and rule-pack-directory
+options. See the [quick-alias reference](/docs/setup/guardrail/aliases); use
+[full guardrail setup](/docs/setup/guardrail) for scanner, detection-strategy,
+and judge-provider configuration.
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--yes / -y` | off | Skip the confirmation prompt (alias: `--non-interactive`, `--accept-defaults`). |
+| `--yes / -y` | off | Skip the confirmation prompt. |
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
-| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
+| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
 
 The alias defaults Windsurf to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Windsurf after install, keep using [`defenseclaw setup guardrail --connector windsurf`](/docs/setup/guardrail) — see the variations below.
 
@@ -39,7 +56,7 @@ The alias defaults Windsurf to observe mode and can join an existing hook-connec
 defenseclaw setup windsurf
 ```
 
-Confirms once, wires the hooks against `~/.codeium/windsurf/hooks.json`, restarts the gateway. Findings flow to `~/.defenseclaw/gateway.jsonl` and the TUI; no traffic is intercepted, no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Confirms once, wires the hooks against `~/.codeium/windsurf/hooks.json`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
 
 </Tab>
 
@@ -49,7 +66,7 @@ Confirms once, wires the hooks against `~/.codeium/windsurf/hooks.json`, restart
 defenseclaw setup windsurf --yes --with-local-stack
 ```
 
-Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo/Grafana come up locally for ad-hoc dashboards. See [Local observability](/docs/observability/local-observability).
+Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo/Grafana come up locally for ad-hoc dashboards. That command writes the export destination after the alias has already restarted the gateway, so run its printed `defenseclaw-gateway restart` step before expecting exports. See [Local observability](/docs/observability/local-observability).
 
 </Tab>
 
@@ -62,30 +79,32 @@ defenseclaw setup windsurf                                # base alias first
 defenseclaw setup guardrail \
   --connector windsurf \
   --rule-pack strict \
-  --scanner-mode both \
+  --scanner-mode local \
   --detection-strategy regex_judge \
   --judge-model anthropic/claude-sonnet-4-20250514 \
   --judge-api-key-env DEFENSECLAW_LLM_KEY \
+  --judge-hook-connectors windsurf \
   --restart
 ```
 
-The alias selects Windsurf; the follow-up `setup guardrail --connector windsurf` swaps in the strict rule pack, runs both local + [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
+The alias selects Windsurf; the follow-up `setup guardrail --connector windsurf` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/setup/guardrail), which validates its endpoint and API-key environment variable.
 
 </Tab>
 
 <Tab value="Hook-side enforcement">
 
-Windsurf has no proxy enforcement, but its hooks themselves can block. After `setup windsurf`, edit `~/.defenseclaw/config.yaml` and set the per-connector hook mode:
+Windsurf has no proxy enforcement, but its pre-action hooks can enforce
+directly:
 
-```yaml
-connector_hooks:
-  windsurf:
-    enabled: true
-    mode: action          # observe (default) | action
-    fail_mode: open       # open | closed
+```bash
+defenseclaw setup windsurf --mode action
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Cascade hooks block when policy returns `block`. Because Windsurf has no native ask surface, `confirm` uses its explicit fallback; operators can review the result in audit or the TUI, but cannot resume it there.
+With `mode=action`, the five declared pre-hooks block when policy returns
+`block`. A `confirm` verdict uses Windsurf's non-pausing fallback because the
+agent has no native ask surface. Windsurf does not provide a fail-closed hook
+transport surface, so `--fail-mode closed` cannot make an unavailable hook
+block the agent.
 
 </Tab>
 
@@ -95,13 +114,13 @@ Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, Ca
 
 <Cards>
   <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Windsurf has no native ask; confirm uses an immediate fallback preserved in audit." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector windsurf` when tuning Windsurf." />
+  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector windsurf`." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ## Files DefenseClaw will modify
@@ -132,5 +151,5 @@ Windsurf has no native human-approval surface. Confirm verdicts use an immediate
 ## Disable
 
 ```bash
-defenseclaw setup guardrail --disable
+defenseclaw guardrail disable --connector windsurf --yes
 ```

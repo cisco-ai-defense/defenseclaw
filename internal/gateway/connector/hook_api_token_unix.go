@@ -16,6 +16,26 @@ import (
 	"syscall"
 )
 
+// Unix custody is represented by the existing owner/mode/ACL checks. Windows
+// carries an additional exact owner/DACL witness in this platform slot.
+type hookAPITokenPublishProtection struct{}
+
+func captureHookAPITokenPublishProtectionPlatform(
+	file *os.File, info os.FileInfo,
+) (hookAPITokenPublishProtection, bool, error) {
+	return hookAPITokenPublishProtection{}, otlpValidatePerm(file.Name(), info) == nil, nil
+}
+
+func applyHookAPITokenPublishProtectionPlatform(
+	_ *os.File, _ hookAPITokenPublishProtection,
+) error {
+	return nil
+}
+
+func hookAPITokenPublishProtectionIsZero(hookAPITokenPublishProtection) bool { return true }
+
+func hookAPITokenPublishProtectionsEqual(_, _ hookAPITokenPublishProtection) bool { return true }
+
 func hookAPIValidateOwner(path string, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -24,7 +44,10 @@ func hookAPIValidateOwner(path string, info os.FileInfo) error {
 	if hookAPITrustedOwner(stat.Uid) {
 		return nil
 	}
-	return fmt.Errorf("hook API token %s uid %d is not root, current uid %d, or the defenseclaw service uid", path, stat.Uid, os.Getuid())
+	return fmt.Errorf(
+		"hook API token %s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid",
+		path, stat.Uid, os.Geteuid(), os.Getuid(),
+	)
 }
 
 func hookAPIValidateDirectory(path string) error {
@@ -132,7 +155,10 @@ func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowSticky
 		return fmt.Errorf("%s has group/other writable mode %04o", path, mode)
 	}
 	if !hookAPITrustedOwner(stat.Uid) {
-		return fmt.Errorf("%s uid %d is not root, current uid %d, or the defenseclaw service uid", path, stat.Uid, os.Getuid())
+		return fmt.Errorf(
+			"%s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid",
+			path, stat.Uid, os.Geteuid(), os.Getuid(),
+		)
 	}
 	if err := hookAPIValidateDirectoryACL(path); err != nil {
 		return err
@@ -141,13 +167,12 @@ func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowSticky
 }
 
 func hookAPITrustedOwner(uid uint32) bool {
-	// Current-UID ownership is intentional for unmanaged/OSS installs, where
-	// the gateway and ~/.defenseclaw belong to the interactive user. Managed
-	// mode is separately pinned to the packaged defenseclaw service account and
-	// validates the entire data-dir chain during config load before this token
-	// helper is reachable; in that mode current UID is therefore the trusted
-	// defenseclaw service UID, not an arbitrary desktop user.
-	if uid == 0 || int(uid) == os.Getuid() {
+	// Real/effective-UID ownership is intentional for unmanaged installs and
+	// privileged enterprise reconciliation. The latter keeps real uid 0 while
+	// temporarily dropping effective uid to the manifest-pinned target user;
+	// files that user just created must be validated against the effective uid.
+	// Accepting both preserves the unmanaged/setuid compatibility contract.
+	if hookAPITrustedRuntimeOwner(uid, os.Getuid(), os.Geteuid()) {
 		return true
 	}
 	serviceUser, err := user.Lookup("defenseclaw")
@@ -156,4 +181,8 @@ func hookAPITrustedOwner(uid uint32) bool {
 	}
 	serviceUID, err := strconv.ParseUint(serviceUser.Uid, 10, 32)
 	return err == nil && uid == uint32(serviceUID)
+}
+
+func hookAPITrustedRuntimeOwner(uid uint32, realUID, effectiveUID int) bool {
+	return uid == 0 || int(uid) == realUID || int(uid) == effectiveUID
 }

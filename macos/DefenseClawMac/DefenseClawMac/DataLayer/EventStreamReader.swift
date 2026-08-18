@@ -59,9 +59,9 @@ actor EventStreamReader {
     private let bufferCap = 20_000
 
     init(
-        url: URL = ConfigStore.gatewayJSONLURL,
-        gatewayLogURL: URL = ConfigStore.gatewayLogURL,
-        watchdogLogURL: URL = ConfigStore.watchdogLogURL
+        url: URL,
+        gatewayLogURL: URL,
+        watchdogLogURL: URL
     ) {
         self.url = url
         self.gatewayLogURL = gatewayLogURL

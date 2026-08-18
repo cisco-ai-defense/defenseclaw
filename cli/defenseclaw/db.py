@@ -23,14 +23,33 @@ can share the same database file.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import stat
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from defenseclaw.models import ActionEntry, ActionState, Counts, Event, TargetSnapshot
+from defenseclaw.alert_semantics import (
+    ALERT_ACTIONABLE_SEVERITIES,
+    ALERT_ALL_SEVERITIES,
+    ALERT_LEGACY_FINDING_ACTIONS,
+    ALERT_NON_ALLOW_OUTCOMES,
+)
+from defenseclaw.hook_metrics import (
+    aggregate_connector_hook_decision,
+    connector_hook_connector,
+)
+from defenseclaw.models import (
+    ActionEntry,
+    ActionState,
+    Counts,
+    Event,
+    QuarantineRecord,
+    TargetSnapshot,
+)
 
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -81,6 +100,31 @@ CREATE TABLE IF NOT EXISTS actions (
     connector TEXT NOT NULL DEFAULT ''
 );
 
+-- Physical quarantine provenance is separate from logical action state.
+-- Removing one connector's action must not orphan files still in quarantine.
+CREATE TABLE IF NOT EXISTS quarantine_records (
+    id TEXT PRIMARY KEY,
+    target_type TEXT NOT NULL,
+    target_name TEXT NOT NULL,
+    original_path TEXT NOT NULL,
+    quarantine_path TEXT NOT NULL UNIQUE,
+    content_hash TEXT NOT NULL,
+    reason TEXT,
+    state TEXT NOT NULL DEFAULT 'pending',
+    ownership_json TEXT NOT NULL DEFAULT '{}',
+    restore_path TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quarantine_record_connectors (
+    quarantine_id TEXT NOT NULL,
+    connector TEXT NOT NULL DEFAULT '',
+    associated_at DATETIME NOT NULL,
+    PRIMARY KEY (quarantine_id, connector),
+    FOREIGN KEY (quarantine_id) REFERENCES quarantine_records(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS network_egress_events (
     id TEXT PRIMARY KEY,
     timestamp DATETIME NOT NULL,
@@ -115,6 +159,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_action_timestamp ON audit_events(action, ti
 CREATE INDEX IF NOT EXISTS idx_audit_severity_timestamp ON audit_events(severity, timestamp);
 CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 CREATE INDEX IF NOT EXISTS idx_scan_timestamp ON scan_results(timestamp);
+CREATE INDEX IF NOT EXISTS idx_scan_scanner_target_timestamp
+    ON scan_results(scanner, target, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 -- The actions uniqueness index is connector-aware (target_type, target_name,
@@ -123,6 +169,10 @@ CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 -- so a 2-column UNIQUE index declared here would be recreated each open and
 -- would reject per-connector rows (SK-4).
 CREATE INDEX IF NOT EXISTS idx_egress_timestamp ON network_egress_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_quarantine_target
+    ON quarantine_records(target_type, target_name, state);
+CREATE INDEX IF NOT EXISTS idx_quarantine_connector
+    ON quarantine_record_connectors(connector, quarantine_id);
 CREATE INDEX IF NOT EXISTS idx_egress_hostname ON network_egress_events(hostname);
 CREATE INDEX IF NOT EXISTS idx_egress_blocked ON network_egress_events(blocked);
 CREATE INDEX IF NOT EXISTS idx_egress_session ON network_egress_events(session_id);
@@ -200,13 +250,42 @@ def _validate(field: str, value: str) -> None:
 
 
 class Store:
-    def __init__(self, db_path: str) -> None:
-        newly_created = self._db_will_be_created(db_path)
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        read_only: bool = False,
+        timeout: float = 5.0,
+    ) -> None:
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("audit: SQLite timeout must be finite and non-negative")
+        busy_timeout_ms = int(timeout * 1000)
+
+        self.read_only = read_only
+        self._scan_results_has_retention_timestamp: bool | None = None
+        self._audit_schema_version: int | None = None
+        self._audit_event_columns_cache: frozenset[str] = frozenset()
+        self._audit_tables_cache: frozenset[str] = frozenset()
+        newly_created = not read_only and self._db_will_be_created(db_path)
+        connect_path = self._read_only_uri(db_path) if read_only else db_path
         self.db = sqlite3.connect(
-            db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=5.0,
+            connect_path,
+            detect_types=sqlite3.PARSE_DECLTYPES,
+            timeout=timeout,
+            uri=read_only,
         )
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA foreign_keys=ON")
+        self.db.create_function("dc_hook_connector", 3, connector_hook_connector)
+        self.db.create_function("dc_hook_decision", 3, aggregate_connector_hook_decision)
+        if read_only:
+            # ``mode=ro`` prevents file writes while ``query_only`` also
+            # rejects accidental mutations through writable attached DBs.
+            # In particular, do not run the journal-mode pragma here: a TUI
+            # reader must never attempt to change writer-owned journal state.
+            self.db.execute("PRAGMA query_only=ON")
+        else:
+            self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         # The audit DB stores audit events, scan results, findings, raw
         # scanner JSON, target paths, and action decisions, so it must be
         # private to the operator / service account. sqlite3.connect()
@@ -214,14 +293,38 @@ class Store:
         # world- or group-readable (F-0083). Pin the file to owner-only
         # (0600) and, for a DB we just created, drop world access on the
         # parent directory so a different local user cannot traverse to it.
-        self._harden_permissions(db_path, newly_created)
+        if not read_only:
+            self._harden_permissions(db_path, newly_created)
+
+    @classmethod
+    def open_read_only(cls, db_path: str, *, timeout: float = 0.1) -> Store:
+        """Open an existing audit database for latency-bounded UI reads.
+
+        The connection is deliberately not initialized or migrated. The
+        gateway/writable CLI store owns schema and journal configuration.
+        Create this Store in the worker thread that will use it because the
+        standard sqlite3 same-thread safety check remains enabled.
+        """
+
+        return cls(db_path, read_only=True, timeout=timeout)
+
+    @classmethod
+    def _read_only_uri(cls, db_path: str) -> str:
+        if not cls._is_disk_path(db_path):
+            raise ValueError("audit: read-only Store requires an on-disk database")
+        if db_path.startswith("file:"):
+            base, _, raw_query = db_path.partition("?")
+            query = [item for item in raw_query.split("&") if item and not item.lower().startswith("mode=")]
+            query.append("mode=ro")
+            return f"{base}?{'&'.join(query)}"
+        return f"{Path(os.path.abspath(db_path)).as_uri()}?mode=ro"
 
     @staticmethod
     def _is_disk_path(db_path: str) -> bool:
         """True for an on-disk DB path (not an in-memory database)."""
         if not db_path or db_path == ":memory:":
             return False
-        if db_path.startswith("file:") and "mode=memory" in db_path:
+        if db_path.startswith("file:") and (db_path.startswith("file::memory:") or "mode=memory" in db_path):
             return False
         return True
 
@@ -236,10 +339,9 @@ class Store:
         # Always tighten the DB file itself to owner read/write only.
         # This is functionally safe for pre-existing DBs (the owner keeps
         # full access) while closing the world/group-readable hole.
-        try:
-            os.chmod(db_path, 0o600)
-        except OSError:
-            pass
+        from defenseclaw.file_permissions import protect_private_file
+
+        protect_private_file(db_path)
         # Only adjust the parent directory when we just created the DB,
         # so we never mutate an unrelated directory a caller pointed us
         # at (e.g. a shared temp root holding a pre-existing file).
@@ -248,18 +350,26 @@ class Store:
         parent = os.path.dirname(os.path.abspath(db_path))
         if not parent:
             return
-        try:
-            current = stat.S_IMODE(os.stat(parent).st_mode)
-            hardened = current & ~stat.S_IRWXO
-            if hardened != current:
-                os.chmod(parent, hardened)
-        except OSError:
-            pass
+        if os.name == "nt":
+            from defenseclaw.file_permissions import make_private_directory
+
+            make_private_directory(parent)
+        else:
+            try:
+                current = stat.S_IMODE(os.stat(parent).st_mode)
+                hardened = current & ~stat.S_IRWXO
+                if hardened != current:
+                    os.chmod(parent, hardened)
+            except OSError:
+                pass
 
     def init(self) -> None:
+        if self.read_only:
+            raise sqlite3.OperationalError("audit: read-only Store cannot initialize schema")
         self.db.executescript(SCHEMA)
         self._ensure_run_id_columns()
         self._ensure_audit_connector_columns()
+        self._ensure_v8_alert_projection_schema()
         # Add the per-connector column + swap the actions uniqueness index to
         # (target_type, target_name, connector) BEFORE migrating the legacy
         # block/allow lists, so the INSERT OR REPLACE block-last-wins ordering
@@ -275,13 +385,9 @@ class Store:
     # -- Old list migration (matches Go migrateOldLists) --
 
     def _migrate_old_lists(self) -> None:
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'"
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'")
         block_exists = cur.fetchone()[0] > 0
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'"
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'")
         allow_exists = cur.fetchone()[0] > 0
 
         if not block_exists and not allow_exists:
@@ -314,17 +420,11 @@ class Store:
 
     def _ensure_run_id_columns(self) -> None:
         for table in ("audit_events", "scan_results"):
-            columns = {
-                row[1]
-                for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()
-            }
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()}
             if "run_id" in columns:
                 continue
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
-        audit_columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
-        }
+        audit_columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
         if "structured_json" not in audit_columns:
             self.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
@@ -334,10 +434,7 @@ class Store:
     def _ensure_audit_connector_columns(self) -> None:
         """Mirror Go's additive audit_events connector columns and indexes."""
 
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
-        }
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
         for column, ddl in (
             ("connector", "ALTER TABLE audit_events ADD COLUMN connector TEXT"),
             ("step_idx", "ALTER TABLE audit_events ADD COLUMN step_idx INTEGER"),
@@ -350,6 +447,38 @@ class Store:
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp "
             "ON audit_events(action, connector, timestamp DESC)"
+        )
+        self.db.commit()
+
+    def _ensure_v8_alert_projection_schema(self) -> None:
+        """Install the read-only v8 fields used by Python alert views.
+
+        The gateway remains the only writer for protected disposition state.
+        This exact additive shape lets a first-run CLI open the shared database
+        before the Go process without creating an incompatible placeholder.
+        """
+
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
+        for column in ("bucket", "event_name", "payload_json"):
+            if column not in columns:
+                self.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        self.db.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_audit_bucket_timestamp
+                ON audit_events(bucket, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_audit_event_name_timestamp
+                ON audit_events(event_name, timestamp);
+            CREATE TABLE IF NOT EXISTS alert_acknowledgement_projection (
+                alert_id TEXT PRIMARY KEY,
+                disposition TEXT NOT NULL CHECK (disposition IN ('acknowledged','dismissed')),
+                actor TEXT NOT NULL,
+                disposition_at DATETIME NOT NULL,
+                projection_version INTEGER NOT NULL CHECK (projection_version > 0),
+                source TEXT NOT NULL CHECK (source IN ('modern','legacy_ack')),
+                source_event_id TEXT NOT NULL,
+                updated_at DATETIME NOT NULL
+            );
+            """
         )
         self.db.commit()
 
@@ -369,14 +498,9 @@ class Store:
         ``(target_type, target_name, connector)`` so a target can carry one
         global entry plus one entry per connector without colliding.
         """
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(actions)").fetchall()
-        }
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(actions)").fetchall()}
         if "connector" not in columns:
-            self.db.execute(
-                "ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''"
-            )
+            self.db.execute("ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''")
         # Swap the legacy 2-column uniqueness index for the connector-aware one.
         # DROP first so an upgraded DB cannot keep both (the old one would
         # reject per-connector rows). Both statements are guarded so re-running
@@ -478,10 +602,18 @@ class Store:
                 id, timestamp, action, target, actor, details,
                 structured_json, severity, run_id, connector
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event.id, event.timestamp.isoformat(), event.action,
-             event.target or None, event.actor, event.details or None,
-             structured_json, event.severity or None, event.run_id or None,
-             connector or None),
+            (
+                event.id,
+                event.timestamp.isoformat(),
+                event.action,
+                event.target or None,
+                event.actor,
+                event.details or None,
+                structured_json,
+                event.severity or None,
+                event.run_id or None,
+                connector or None,
+            ),
         )
         self.db.commit()
 
@@ -543,34 +675,45 @@ class Store:
         return [self._row_to_event(r) for r in cur.fetchall()]
 
     def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
-        """Return all-time connector-hook counters grouped by connector.
+        """Return exact all-time hook counters grouped by connector.
 
-        The Overview chart still uses a bounded event window for sparklines
-        and target breakdowns, but the CONNECTORS table's ``CALLS`` column
-        must not look frozen just because that window is full. Newer sidecar
-        schemas populate ``audit_events.connector`` and index it, so use a
-        grouped aggregate instead of loading every hook row into the TUI.
+        Current rows use indexed connector identity; the SQLite callbacks also
+        classify legacy rows whose identity or decision only exists in the
+        structured envelope or exact ``key=value`` detail tokens.
         """
-
-        details_expr = "' ' || COALESCE(details, '') || ' '"
         cur = self.db.execute(
-            f"""SELECT connector AS connector_name,
-                       COUNT(*) AS calls,
-                       SUM(CASE
-                             WHEN {details_expr} LIKE '% action=block %'
-                               OR {details_expr} LIKE '% action=deny %'
-                             THEN 1 ELSE 0
-                           END) AS blocks,
-                       SUM(CASE
-                             WHEN {details_expr} LIKE '% action=alert %'
-                               OR {details_expr} LIKE '% action=warn %'
-                             THEN 1 ELSE 0
-                           END) AS alerts,
-                       MAX(timestamp) AS newest
-                FROM audit_events
-                WHERE action = 'connector-hook'
-                  AND connector <> ''
-                GROUP BY connector"""
+            """WITH source AS (
+                   SELECT CASE
+                              WHEN TRIM(COALESCE(connector, '')) <> ''
+                                  THEN LOWER(TRIM(connector))
+                              ELSE COALESCE(
+                                  NULLIF(
+                                      dc_hook_connector(connector, structured_json, details),
+                                      ''
+                                  ),
+                                  '__unattributed__'
+                              )
+                          END AS connector_name,
+                          details,
+                          structured_json,
+                          enforced,
+                          timestamp
+                     FROM audit_events
+                    WHERE action = ?
+               ), classified AS (
+                   SELECT connector_name,
+                          dc_hook_decision(details, structured_json, enforced) AS decision,
+                          timestamp
+                     FROM source
+               )
+               SELECT connector_name,
+                      COUNT(*) AS calls,
+                      SUM(CASE WHEN decision = 'block' THEN 1 ELSE 0 END) AS blocks,
+                      SUM(CASE WHEN decision = 'alert' THEN 1 ELSE 0 END) AS alerts,
+                      MAX(timestamp) AS newest
+                 FROM classified
+                GROUP BY connector_name""",
+            ("connector-hook",),
         )
         stats: dict[str, dict[str, Any]] = {}
         for connector, calls, blocks, alerts, newest in cur.fetchall():
@@ -585,13 +728,35 @@ class Store:
                 entry["newest"] = newest
         return stats
 
+    def audit_data_version(self) -> tuple[int, int]:
+        """Return a cheap token that changes for external or local writes."""
+        data_version = int(self.db.execute("PRAGMA data_version").fetchone()[0])
+        return data_version, int(self.db.total_changes)
+
     def count_scan_results_since(self, since: datetime | None) -> int:
         """Count scan results in the active Overview session window."""
 
         if since is None:
-            return int(
-                self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0
-            )
+            return int(self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0)
+        if self._scan_results_supports_retention_timestamp():
+            cutoff_unix_nano = _datetime_unix_nano(since)
+            if -(2**63) <= cutoff_unix_nano <= (2**63) - 1:
+                # Current gateway schemas maintain this indexed integer from
+                # ``timestamp``. The second branch preserves correctness while
+                # a legacy database's additive timestamp backfill is running;
+                # the same index restricts that branch to NULL rows.
+                return int(
+                    self.db.execute(
+                        """SELECT
+                               (SELECT COUNT(*) FROM scan_results
+                                WHERE retention_timestamp_unix_nano >= ?)
+                             + (SELECT COUNT(*) FROM scan_results
+                                WHERE retention_timestamp_unix_nano IS NULL
+                                  AND datetime(timestamp) >= datetime(?))""",
+                        (cutoff_unix_nano, since.isoformat()),
+                    ).fetchone()[0]
+                    or 0
+                )
         return int(
             self.db.execute(
                 "SELECT COUNT(*) FROM scan_results WHERE datetime(timestamp) >= datetime(?)",
@@ -600,12 +765,210 @@ class Store:
             or 0
         )
 
+    def _scan_results_supports_retention_timestamp(self) -> bool:
+        cached = self._scan_results_has_retention_timestamp
+        if cached is not None:
+            return cached
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(scan_results)").fetchall()}
+        supported = "retention_timestamp_unix_nano" in columns
+        self._scan_results_has_retention_timestamp = supported
+        return supported
+
+    def _audit_projection_schema(self) -> tuple[frozenset[str], frozenset[str]]:
+        """Return cached audit columns/tables for compatibility-safe reads."""
+
+        schema_version = int(self.db.execute("PRAGMA schema_version").fetchone()[0])
+        if schema_version != self._audit_schema_version:
+            self._audit_event_columns_cache = frozenset(
+                str(row[1]) for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
+            )
+            self._audit_tables_cache = frozenset(
+                str(row[0]) for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            )
+            self._audit_schema_version = schema_version
+        return self._audit_event_columns_cache, self._audit_tables_cache
+
+    @staticmethod
+    def _sql_string_values(values: tuple[str, ...]) -> str:
+        """Render a fixed internal vocabulary as SQL string literals."""
+
+        return ",".join(f"'{value}'" for value in values)
+
+    @staticmethod
+    def _safe_json_extract(column: str, path: str) -> str:
+        """Return a malformed-JSON-safe extraction expression."""
+
+        return f"CASE WHEN json_valid(COALESCE({column}, '')) THEN json_extract({column}, '{path}') END"
+
+    def _legacy_explicit_alert_clause(self, columns: frozenset[str]) -> str:
+        outcome_values = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
+        structured = "structured_json" if "structured_json" in columns else "NULL"
+        enforced = "enforced" if "enforced" in columns else "NULL"
+        details = "COALESCE(details, '')" if "details" in columns else "''"
+        legacy_decision = f"dc_hook_decision({details}, {structured}, {enforced})"
+        return f"""(
+            LOWER(COALESCE(action, '')) IN ({outcome_values})
+            OR LOWER(COALESCE(action, '')) LIKE '%-failure'
+            OR LOWER(COALESCE(action, '')) LIKE '%-failed'
+            OR {legacy_decision} = 'block'
+        )"""
+
+    def _canonical_alert_outcome_expression(
+        self,
+        columns: frozenset[str],
+    ) -> str:
+        outcome_expressions: list[str] = []
+        if "payload_json" in columns:
+            outcome_expressions.extend(
+                self._safe_json_extract("payload_json", path)
+                for path in (
+                    '$."defenseclaw.enforcement.effective_action"',
+                    '$."defenseclaw.guardrail.decision"',
+                    '$."defenseclaw.network.decision"',
+                    '$."defenseclaw.network.policy_outcome"',
+                    '$."defenseclaw.scan.verdict"',
+                )
+            )
+        if "projected_record_json" in columns:
+            outcome_expressions.append(self._safe_json_extract("projected_record_json", "$.outcome"))
+        outcome_expressions.extend(("action", "''"))
+        return "LOWER(COALESCE(" + ",".join(outcome_expressions) + "))"
+
+    def _alert_display_severity_sql(self) -> str:
+        """Promote explicit INFO outcomes to visible alert severities."""
+
+        columns, _tables = self._audit_projection_schema()
+        legacy_explicit = self._legacy_explicit_alert_clause(columns)
+        if {"bucket", "event_name"}.issubset(columns):
+            outcomes = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
+            canonical_outcome = self._canonical_alert_outcome_expression(columns)
+            return f"""CASE
+                WHEN UPPER(COALESCE(severity, 'INFO')) <> 'INFO' THEN severity
+                WHEN bucket = 'network.egress'
+                 AND {canonical_outcome} IN ({outcomes}) THEN 'WARNING'
+                WHEN bucket = 'enforcement.action'
+                 AND {canonical_outcome} IN ({outcomes}) THEN 'HIGH'
+                WHEN bucket IS NULL AND {legacy_explicit} THEN 'HIGH'
+                ELSE COALESCE(severity, 'INFO')
+            END"""
+        return f"""CASE
+            WHEN UPPER(COALESCE(severity, 'INFO')) = 'INFO'
+             AND {legacy_explicit} THEN 'HIGH'
+            ELSE COALESCE(severity, 'INFO')
+        END"""
+
+    def _alert_where_clause(self, *, actionable: bool) -> str:
+        """Build the one alert-eligibility predicate used by lists/counts.
+
+        The gateway performs additive migrations, while read-only CLI/TUI
+        processes may briefly observe an older schema. Optional v8 fields are
+        therefore included only when present. Legacy explicit blocks remain
+        alerts even when their historical outer severity was INFO.
+        """
+
+        columns, tables = self._audit_projection_schema()
+        severities = ALERT_ACTIONABLE_SEVERITIES if actionable else ALERT_ALL_SEVERITIES
+        severity_values = self._sql_string_values(severities)
+        outcome_values = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
+        severity_clause = f"UPPER(COALESCE(severity, '')) IN ({severity_values})"
+
+        legacy_explicit = self._legacy_explicit_alert_clause(columns)
+        legacy_actions = self._sql_string_values(ALERT_LEGACY_FINDING_ACTIONS)
+        legacy_finding = f"""(
+            {severity_clause}
+            AND LOWER(COALESCE(action, '')) IN ({legacy_actions})
+        )"""
+
+        if {"bucket", "event_name"}.issubset(columns):
+            finding = f"""(
+                bucket = 'security.finding'
+                AND event_name = 'finding.observed'
+                AND {severity_clause}
+            )"""
+
+            canonical_outcome = self._canonical_alert_outcome_expression(columns)
+            canonical_priority = "1 = 1"
+            if actionable:
+                canonical_priority = f"""(
+                    {severity_clause}
+                    OR (
+                        bucket = 'enforcement.action'
+                        AND UPPER(COALESCE(severity, 'INFO')) = 'INFO'
+                    )
+                )"""
+            canonical_action = f"""(
+                bucket IN ('enforcement.action', 'network.egress')
+                AND {canonical_outcome} IN ({outcome_values})
+                AND {canonical_priority}
+            )"""
+            health_failure = f"""(
+                bucket IN ('platform.health', 'diagnostic')
+                AND UPPER(COALESCE(severity, '')) IN (
+                    {self._sql_string_values(ALERT_ACTIONABLE_SEVERITIES)}
+                )
+            )"""
+            legacy = f"""(
+                bucket IS NULL
+                AND ({legacy_finding} OR {legacy_explicit})
+            )"""
+            eligible = f"({finding} OR {canonical_action} OR {health_failure} OR {legacy})"
+        else:
+            eligible = f"({legacy_finding} OR {legacy_explicit})"
+
+        predicates = [eligible, "action NOT LIKE 'dismiss%'"]
+        if "payload_json" in columns:
+            predicates.append(
+                """NOT EXISTS (
+                    SELECT 1
+                    FROM json_each(
+                        CASE
+                            WHEN json_valid(COALESCE(payload_json, ''))
+                             AND json_type(
+                                     payload_json,
+                                     '$."defenseclaw.finding.tags"'
+                                 ) = 'array'
+                            THEN json_extract(
+                                payload_json,
+                                '$."defenseclaw.finding.tags"'
+                            )
+                            ELSE '[]'
+                        END
+                    ) AS finding_tag
+                    WHERE LOWER(TRIM(
+                        CAST(finding_tag.value AS TEXT),
+                        CHAR(9, 10, 11, 12, 13, 32)
+                    )) = 'detection-only'
+                )"""
+            )
+            safe_text_tags = self._safe_json_extract(
+                "payload_json",
+                '$."defenseclaw.finding.tags"',
+            )
+            predicates.append(
+                f"""LOWER(TRIM(
+                    COALESCE({safe_text_tags}, ''),
+                    CHAR(9, 10, 11, 12, 13, 32)
+                )) <> 'detection-only'"""
+            )
+        if "alert_acknowledgement_projection" in tables:
+            predicates.append(
+                """NOT EXISTS (
+                    SELECT 1
+                    FROM alert_acknowledgement_projection AS projection
+                    WHERE projection.alert_id = audit_events.id
+                )"""
+            )
+        return " AND ".join(f"({predicate})" for predicate in predicates)
+
     def list_alerts(self, limit: int = 100) -> list[Event]:
+        where = self._alert_where_clause(actionable=False)
+        display_severity = self._alert_display_severity_sql()
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
+            f"""SELECT id, timestamp, action, target, actor, details,
+                      {display_severity} AS severity,
+                      run_id, structured_json, connector
                FROM audit_events
-               WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
-                 AND action NOT LIKE 'dismiss%'
+               WHERE {where}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
@@ -614,13 +977,15 @@ class Store:
     def list_alert_summaries(self, limit: int = 100) -> list[Event]:
         """List alert rows without loading large structured payloads."""
 
+        where = self._alert_where_clause(actionable=False)
+        display_severity = self._alert_display_severity_sql()
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector
+                      {display_severity} AS severity,
+                      run_id, NULL AS structured_json, connector
                FROM audit_events
-               WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
-                 AND action NOT LIKE 'dismiss%'
+               WHERE {where}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -629,22 +994,15 @@ class Store:
     def list_actionable_alert_summaries(self, limit: int = 100) -> list[Event]:
         """List high-signal alert rows for the default TUI view."""
 
+        where = self._alert_where_clause(actionable=True)
+        display_severity = self._alert_display_severity_sql()
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector
+                      {display_severity} AS severity,
+                      run_id, NULL AS structured_json, connector
                FROM audit_events
-               WHERE (
-                   severity IN ('CRITICAL','HIGH','ERROR')
-                   OR (
-                       action = 'connector-hook'
-                       AND (
-                           details LIKE '%severity=CRITICAL%'
-                           OR details LIKE '%severity=HIGH%'
-                       )
-                   )
-               )
-                 AND action NOT LIKE 'dismiss%'
+               WHERE {where}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -661,53 +1019,55 @@ class Store:
             return None
         return self._row_to_event(row)
 
-    def acknowledge_alerts(self, severity_filter: str = "all") -> int:
-        """Mirror internal/audit/store.go AcknowledgeAlerts — rows updated."""
-        if severity_filter in ("", "all"):
-            cur = self.db.execute(
-                """UPDATE audit_events SET severity = 'ACK'
-                   WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')""",
-            )
-        else:
-            cur = self.db.execute(
-                "UPDATE audit_events SET severity = 'ACK' WHERE severity = ?",
-                (severity_filter,),
-            )
-        self.db.commit()
-        return int(cur.rowcount or 0)
-
-    def dismiss_alerts_visible(self, severity_filter: str = "all") -> int:
-        """Clear visible alerts by downgrading severity (parity with acknowledge for SQLite schema)."""
-        return self.acknowledge_alerts(severity_filter)
-
     # -- Scan results --
 
     def insert_scan_result(
-        self, scan_id: str, scanner: str, target: str,
-        ts: datetime, duration_ms: int, finding_count: int,
-        max_severity: str, raw_json: str,
+        self,
+        scan_id: str,
+        scanner: str,
+        target: str,
+        ts: datetime,
+        duration_ms: int,
+        finding_count: int,
+        max_severity: str,
+        raw_json: str,
     ) -> None:
         run_id = _current_run_id()
         self.db.execute(
             """INSERT INTO scan_results
                (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (scan_id, scanner, target, ts.isoformat(), duration_ms,
-             finding_count, max_severity, raw_json, run_id or None),
+            (
+                scan_id,
+                scanner,
+                target,
+                ts.isoformat(),
+                duration_ms,
+                finding_count,
+                max_severity,
+                raw_json,
+                run_id or None,
+            ),
         )
         self.db.commit()
 
     def insert_finding(
-        self, finding_id: str, scan_id: str, severity: str,
-        title: str, description: str, location: str,
-        remediation: str, scanner: str, tags: str,
+        self,
+        finding_id: str,
+        scan_id: str,
+        severity: str,
+        title: str,
+        description: str,
+        location: str,
+        remediation: str,
+        scanner: str,
+        tags: str,
     ) -> None:
         self.db.execute(
             """INSERT INTO findings
                (id, scan_id, severity, title, description, location, remediation, scanner, tags)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (finding_id, scan_id, severity, title, description,
-             location, remediation, scanner, tags),
+            (finding_id, scan_id, severity, title, description, location, remediation, scanner, tags),
         )
         self.db.commit()
 
@@ -723,29 +1083,34 @@ class Store:
             """SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
                       sr.max_severity, sr.raw_json
                FROM scan_results sr
-               INNER JOIN (
-                   SELECT target, MAX(timestamp) as max_ts
-                   FROM scan_results
-                   WHERE scanner = ?
-                   GROUP BY target
-               ) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
-               WHERE sr.scanner = ?""",
-            (scanner_name, scanner_name),
+               WHERE sr.scanner = ?
+                 AND sr.rowid = (
+                     SELECT candidate.rowid FROM scan_results candidate
+                     WHERE candidate.scanner = sr.scanner
+                       AND candidate.target = sr.target
+                     ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                     LIMIT 1
+                 )""",
+            (scanner_name,),
         )
         results: list[dict[str, Any]] = []
         for row in cur.fetchall():
-            results.append({
-                "id": row[0],
-                "target": row[1],
-                "timestamp": _parse_ts(row[2]),
-                "finding_count": row[3] or 0,
-                "max_severity": row[4] or "INFO",
-                "raw_json": row[5] or "",
-            })
+            results.append(
+                {
+                    "id": row[0],
+                    "target": row[1],
+                    "timestamp": _parse_ts(row[2]),
+                    "finding_count": row[3] or 0,
+                    "max_severity": row[4] or "INFO",
+                    "raw_json": row[5] or "",
+                }
+            )
         return results
 
     def get_severity_counts_for_target(
-        self, target: str, scanner: str,
+        self,
+        target: str,
+        scanner: str,
     ) -> dict[str, int]:
         """Return {severity: count} from the most recent scan for target+scanner."""
         cur = self.db.execute(
@@ -755,7 +1120,7 @@ class Store:
                WHERE sr.id = (
                    SELECT id FROM scan_results
                    WHERE target = ? AND scanner = ?
-                   ORDER BY timestamp DESC LIMIT 1
+                   ORDER BY timestamp DESC, rowid DESC LIMIT 1
                )
                GROUP BY f.severity""",
             (target, scanner),
@@ -763,7 +1128,9 @@ class Store:
         return {row[0]: row[1] for row in cur.fetchall()}
 
     def get_findings_for_target(
-        self, target: str, scanner: str,
+        self,
+        target: str,
+        scanner: str,
     ) -> list[dict[str, Any]]:
         """Return findings from the most recent scan for target+scanner."""
         cur = self.db.execute(
@@ -773,17 +1140,14 @@ class Store:
                WHERE sr.id = (
                    SELECT id FROM scan_results
                    WHERE target = ? AND scanner = ?
-                   ORDER BY timestamp DESC LIMIT 1
+                   ORDER BY timestamp DESC, rowid DESC LIMIT 1
                )
                ORDER BY CASE f.severity
                    WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
                    WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END""",
             (target, scanner),
         )
-        return [
-            {"severity": r[0], "title": r[1], "location": r[2] or ""}
-            for r in cur.fetchall()
-        ]
+        return [{"severity": r[0], "title": r[1], "location": r[2] or ""} for r in cur.fetchall()]
 
     # -- Actions --
     #
@@ -798,8 +1162,12 @@ class Store:
     # admission layer composes the two exact-match lookups it needs.
 
     def set_action(
-        self, target_type: str, target_name: str,
-        source_path: str, state: ActionState, reason: str,
+        self,
+        target_type: str,
+        target_name: str,
+        source_path: str,
+        state: ActionState,
+        reason: str,
         connector: str = "",
     ) -> None:
         actions_json = json.dumps(state.to_dict())
@@ -815,14 +1183,17 @@ class Store:
                  reason = excluded.reason,
                  updated_at = excluded.updated_at,
                  source_path = COALESCE(excluded.source_path, source_path)""",
-            (aid, target_type, target_name, source_path or None,
-             actions_json, reason, now, connector),
+            (aid, target_type, target_name, source_path or None, actions_json, reason, now, connector),
         )
         self.db.commit()
 
     def set_action_field(
-        self, target_type: str, target_name: str,
-        field: str, value: str, reason: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
+        value: str,
+        reason: str,
         connector: str = "",
     ) -> None:
         _validate(field, value)
@@ -844,7 +1215,10 @@ class Store:
         self.db.commit()
 
     def clear_action_field(
-        self, target_type: str, target_name: str, field: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
         connector: str = "",
     ) -> None:
         _validate(field, "")
@@ -857,23 +1231,42 @@ class Store:
         )
         self.db.execute(
             """DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?
-               AND actions_json IN ('{}', 'null', '')""",
+               AND actions_json IN ('{}', 'null', '') AND source_path IS NULL""",
             (target_type, target_name, connector),
         )
         self.db.commit()
 
     def set_source_path(
-        self, target_type: str, target_name: str, path: str,
+        self,
+        target_type: str,
+        target_name: str,
+        path: str,
         connector: str = "",
     ) -> None:
         self.db.execute(
-            "UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ? AND connector = ?",
-            (path, target_type, target_name, connector),
+            """INSERT INTO actions (
+                 id, target_type, target_name, source_path, actions_json, reason,
+                 updated_at, connector)
+               VALUES (?, ?, ?, ?, '{}', '', ?, ?)
+               ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
+                 source_path = excluded.source_path,
+                 updated_at = excluded.updated_at""",
+            (
+                str(uuid.uuid4()),
+                target_type,
+                target_name,
+                path,
+                datetime.now(timezone.utc).isoformat(),
+                connector,
+            ),
         )
         self.db.commit()
 
     def remove_action(
-        self, target_type: str, target_name: str, connector: str = "",
+        self,
+        target_type: str,
+        target_name: str,
+        connector: str = "",
     ) -> None:
         self.db.execute(
             "DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?",
@@ -882,7 +1275,10 @@ class Store:
         self.db.commit()
 
     def get_action(
-        self, target_type: str, target_name: str, connector: str = "",
+        self,
+        target_type: str,
+        target_name: str,
+        connector: str = "",
     ) -> ActionEntry | None:
         cur = self.db.execute(
             """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
@@ -895,7 +1291,11 @@ class Store:
         return self._row_to_action(row)
 
     def has_action(
-        self, target_type: str, target_name: str, field: str, value: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
+        value: str,
         connector: str = "",
     ) -> bool:
         _validate(field, value)
@@ -918,7 +1318,10 @@ class Store:
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_by_action_and_type(
-        self, field: str, value: str, target_type: str,
+        self,
+        field: str,
+        value: str,
+        target_type: str,
     ) -> list[ActionEntry]:
         _validate(field, value)
         cur = self.db.execute(
@@ -930,7 +1333,9 @@ class Store:
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_actions_by_type(
-        self, target_type: str, connector: str | None = None,
+        self,
+        target_type: str,
+        connector: str | None = None,
     ) -> list[ActionEntry]:
         """List action entries for a target type.
 
@@ -960,24 +1365,260 @@ class Store:
         )
         return [self._row_to_action(r) for r in cur.fetchall()]
 
+    # -- Physical quarantine provenance --
+
+    def create_quarantine_record(
+        self,
+        target_type: str,
+        target_name: str,
+        original_path: str,
+        quarantine_path: str,
+        content_hash: str,
+        reason: str,
+        connector: str = "",
+        *,
+        ownership_json: str = "{}",
+        state: str = "pending",
+    ) -> QuarantineRecord:
+        """Create durable provenance before any filesystem move.
+
+        Re-registering one physical quarantine path associates another
+        connector instead of creating a competing record for the same files.
+        """
+        if state not in {"pending", "active", "restoring"}:
+            raise ValueError(f"invalid quarantine state {state!r}")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db:
+            row = self.db.execute(
+                """SELECT id, target_type, target_name, original_path, content_hash
+                   FROM quarantine_records WHERE quarantine_path = ?""",
+                (quarantine_path,),
+            ).fetchone()
+            if row is None:
+                record_id = str(uuid.uuid4())
+                self.db.execute(
+                    """INSERT INTO quarantine_records (
+                         id, target_type, target_name, original_path,
+                         quarantine_path, content_hash, reason, state,
+                         ownership_json, restore_path, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                    (
+                        record_id,
+                        target_type,
+                        target_name,
+                        original_path,
+                        quarantine_path,
+                        content_hash,
+                        reason,
+                        state,
+                        ownership_json or "{}",
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                record_id = str(row[0])
+                if (
+                    str(row[1]) != target_type
+                    or str(row[2]) != target_name
+                    or os.path.normcase(str(row[3])) != os.path.normcase(original_path)
+                    or str(row[4]) != content_hash
+                ):
+                    raise ValueError("quarantine path already belongs to a different asset")
+                self.db.execute(
+                    """UPDATE quarantine_records
+                       SET reason = CASE WHEN ? != '' THEN ? ELSE reason END,
+                           ownership_json = CASE WHEN ? != '{}' THEN ? ELSE ownership_json END,
+                           updated_at = ?
+                       WHERE id = ?""",
+                    (reason, reason, ownership_json, ownership_json, now, record_id),
+                )
+            self.db.execute(
+                """INSERT OR IGNORE INTO quarantine_record_connectors
+                     (quarantine_id, connector, associated_at)
+                   VALUES (?, ?, ?)""",
+                (record_id, connector, now),
+            )
+        record = self.get_quarantine_record(record_id)
+        if record is None:  # pragma: no cover - defensive against external DB mutation.
+            raise RuntimeError("quarantine provenance write did not persist")
+        return record
+
+    def associate_quarantine_connector(self, record_id: str, connector: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db:
+            exists = self.db.execute(
+                "SELECT 1 FROM quarantine_records WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+            if exists is None:
+                raise ValueError("quarantine record does not exist")
+            self.db.execute(
+                """INSERT OR IGNORE INTO quarantine_record_connectors
+                     (quarantine_id, connector, associated_at)
+                   VALUES (?, ?, ?)""",
+                (record_id, connector, now),
+            )
+            self.db.execute(
+                "UPDATE quarantine_records SET updated_at = ? WHERE id = ?",
+                (now, record_id),
+            )
+
+    def update_quarantine_record_state(
+        self,
+        record_id: str,
+        state: str,
+        *,
+        restore_path: str = "",
+    ) -> None:
+        if state not in {"pending", "active", "restoring"}:
+            raise ValueError(f"invalid quarantine state {state!r}")
+        cur = self.db.execute(
+            """UPDATE quarantine_records
+               SET state = ?, restore_path = ?, updated_at = ?
+               WHERE id = ?""",
+            (
+                state,
+                restore_path or None,
+                datetime.now(timezone.utc).isoformat(),
+                record_id,
+            ),
+        )
+        self.db.commit()
+        if cur.rowcount != 1:
+            raise ValueError("quarantine record does not exist")
+
+    def get_quarantine_record(self, record_id: str) -> QuarantineRecord | None:
+        row = self.db.execute(
+            """SELECT id, target_type, target_name, original_path,
+                      quarantine_path, content_hash, reason, state,
+                      ownership_json, restore_path, created_at, updated_at
+               FROM quarantine_records WHERE id = ?""",
+            (record_id,),
+        ).fetchone()
+        return self._row_to_quarantine_record(row) if row is not None else None
+
+    def list_quarantine_records(
+        self,
+        target_type: str,
+        target_name: str = "",
+        connector: str | None = None,
+    ) -> list[QuarantineRecord]:
+        params: list[str] = [target_type]
+        where = ["q.target_type = ?"]
+        if target_name:
+            where.append("q.target_name = ?")
+            params.append(target_name)
+        if connector is not None:
+            where.append(
+                "EXISTS (SELECT 1 FROM quarantine_record_connectors c WHERE c.quarantine_id = q.id AND c.connector = ?)"
+            )
+            params.append(connector)
+        rows = self.db.execute(
+            """SELECT q.id, q.target_type, q.target_name, q.original_path,
+                      q.quarantine_path, q.content_hash, q.reason, q.state,
+                      q.ownership_json, q.restore_path, q.created_at, q.updated_at
+               FROM quarantine_records q
+               WHERE """
+            + " AND ".join(where)
+            + " ORDER BY q.created_at, q.id",
+            tuple(params),
+        ).fetchall()
+        return [self._row_to_quarantine_record(row) for row in rows]
+
+    def delete_quarantine_record(self, record_id: str) -> None:
+        with self.db:
+            self.db.execute(
+                "DELETE FROM quarantine_record_connectors WHERE quarantine_id = ?",
+                (record_id,),
+            )
+            self.db.execute("DELETE FROM quarantine_records WHERE id = ?", (record_id,))
+
+    def complete_quarantine_restore(self, record_id: str, destination: str) -> None:
+        """Retire provenance and reconcile logical file state atomically."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db:
+            row = self.db.execute(
+                """SELECT target_type, target_name FROM quarantine_records
+                   WHERE id = ?""",
+                (record_id,),
+            ).fetchone()
+            if row is None:
+                return
+            target_type, target_name = str(row[0]), str(row[1])
+            connectors = [
+                str(item[0])
+                for item in self.db.execute(
+                    """SELECT connector FROM quarantine_record_connectors
+                       WHERE quarantine_id = ? ORDER BY connector""",
+                    (record_id,),
+                ).fetchall()
+            ]
+            for connector in connectors:
+                self.db.execute(
+                    """INSERT INTO actions (
+                         id, target_type, target_name, source_path, actions_json,
+                         reason, updated_at, connector)
+                       VALUES (?, ?, ?, ?, '{}', '', ?, ?)
+                       ON CONFLICT(target_type, target_name, connector) DO UPDATE SET
+                         source_path = excluded.source_path,
+                         actions_json = json_remove(actions_json, '$.file'),
+                         updated_at = excluded.updated_at""",
+                    (
+                        str(uuid.uuid4()),
+                        target_type,
+                        target_name,
+                        destination,
+                        now,
+                        connector,
+                    ),
+                )
+            self.db.execute(
+                "DELETE FROM quarantine_record_connectors WHERE quarantine_id = ?",
+                (record_id,),
+            )
+            self.db.execute("DELETE FROM quarantine_records WHERE id = ?", (record_id,))
+
+    def _row_to_quarantine_record(self, row: Any) -> QuarantineRecord:
+        connectors = tuple(
+            str(item[0])
+            for item in self.db.execute(
+                """SELECT connector FROM quarantine_record_connectors
+                   WHERE quarantine_id = ? ORDER BY connector""",
+                (row[0],),
+            ).fetchall()
+        )
+        return QuarantineRecord(
+            id=str(row[0]),
+            target_type=str(row[1]),
+            target_name=str(row[2]),
+            original_path=str(row[3]),
+            quarantine_path=str(row[4]),
+            content_hash=str(row[5]),
+            reason=str(row[6] or ""),
+            state=str(row[7] or "active"),
+            ownership_json=str(row[8] or "{}"),
+            restore_path=str(row[9] or ""),
+            created_at=_parse_ts(row[10]),
+            updated_at=_parse_ts(row[11]),
+            connectors=connectors,
+        )
+
     def get_counts(self) -> Counts:
         def _count(sql: str) -> int:
             return self.db.execute(sql).fetchone()[0]
 
         q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
         q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        alert_where = self._alert_where_clause(actionable=False)
         return Counts(
             blocked_skills=_count(q_skill + "'block'"),
             allowed_skills=_count(q_skill + "'allow'"),
             blocked_mcps=_count(q_mcp + "'block'"),
             allowed_mcps=_count(q_mcp + "'allow'"),
-            alerts=_count(
-                "SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"
-            ),
+            alerts=_count(f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}"),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count(
-                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
-            ),
+            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
         )
 
     def get_enforcement_counts(self) -> Counts:
@@ -992,17 +1633,35 @@ class Store:
         def _count(sql: str) -> int:
             return self.db.execute(sql).fetchone()[0]
 
-        q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
-        q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        action_counts = self.db.execute(
+            """SELECT
+                   COALESCE(SUM(CASE
+                       WHEN target_type = 'skill'
+                        AND json_extract(actions_json, '$.install') = 'block'
+                       THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE
+                       WHEN target_type = 'skill'
+                        AND json_extract(actions_json, '$.install') = 'allow'
+                       THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE
+                       WHEN target_type = 'mcp'
+                        AND json_extract(actions_json, '$.install') = 'block'
+                       THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE
+                       WHEN target_type = 'mcp'
+                        AND json_extract(actions_json, '$.install') = 'allow'
+                       THEN 1 ELSE 0 END), 0)
+               FROM actions
+               WHERE target_type IN ('skill', 'mcp')"""
+        ).fetchone()
+        blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (int(value or 0) for value in action_counts)
         return Counts(
-            blocked_skills=_count(q_skill + "'block'"),
-            allowed_skills=_count(q_skill + "'allow'"),
-            blocked_mcps=_count(q_mcp + "'block'"),
-            allowed_mcps=_count(q_mcp + "'allow'"),
+            blocked_skills=blocked_skills,
+            allowed_skills=allowed_skills,
+            blocked_mcps=blocked_mcps,
+            allowed_mcps=allowed_mcps,
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count(
-                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
-            ),
+            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
         )
 
     # -- Row converters --
@@ -1030,9 +1689,7 @@ class Store:
             connector=(row[9] or "") if len(row) > 9 else "",
         )
 
-    def get_target_snapshot(
-        self, target_type: str, target_path: str
-    ) -> TargetSnapshot | None:
+    def get_target_snapshot(self, target_type: str, target_path: str) -> TargetSnapshot | None:
         row = self.db.execute(
             "SELECT id, target_type, target_path, content_hash,"
             " dependency_hashes, config_hashes, network_endpoints,"
@@ -1154,6 +1811,18 @@ def _parse_ts(val: Any) -> datetime:
             except ValueError:
                 continue
     return datetime.now(timezone.utc)
+
+
+def _datetime_unix_nano(value: datetime) -> int:
+    """Convert a datetime to Unix nanoseconds without float precision loss."""
+
+    if value.tzinfo is None:
+        normalized = value.replace(tzinfo=timezone.utc)
+    else:
+        normalized = value.astimezone(timezone.utc)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = normalized - epoch
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
 
 
 def _current_run_id() -> str:

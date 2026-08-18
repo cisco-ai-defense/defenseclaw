@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -83,8 +84,12 @@ func validateTrustedWindowsPathElement(path string, wantDir bool, label string) 
 	if !wantDir && !info.Mode().IsRegular() {
 		return fmt.Errorf("%s: expected regular %s file", path, label)
 	}
+	extendedPath, err := winpath.Extended(path)
+	if err != nil {
+		return fmt.Errorf("%s: encode extended Windows path: %w", path, err)
+	}
 	sd, err := windows.GetNamedSecurityInfo(
-		path,
+		extendedPath,
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)

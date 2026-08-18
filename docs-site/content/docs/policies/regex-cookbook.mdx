@@ -71,33 +71,25 @@ judge for confirmation — the regex is the cheap pre-filter.
   severity: CRITICAL
 ```
 
-### Unicode obfuscation (ZWSP / RTL / homoglyph)
+### Unicode zero-width obfuscation
 
-Attackers slip zero-width characters and bidi controls inside otherwise-benign strings to defeat
-keyword matchers (`i​gnore previous` reads identically to the eye but `i\u200Bgnore` slips past
-`(?i)ignore`). Two layers cover this:
+The shipped rule looks for sustained insertion of zero-width characters after ASCII letters or
+digits. Requiring ten insertions catches deliberately split tokens while avoiding isolated
+formatting artifacts and ordinary emoji ZWJ sequences.
 
 ```yaml
 - id: OBFUSC-UNICODE-ZWSP
-  title: Zero-width whitespace inside text
-  pattern: '[\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{FEFF}]'
-  severity: MEDIUM
-  signal_strength: high
-  tags: [obfuscation, unicode]
-- id: OBFUSC-CYRILLIC-LATIN-MIX
-  title: Cyrillic letter inside an otherwise-ASCII word
-  pattern: '\b[a-zA-Z]*[\x{0430}-\x{044F}][a-zA-Z]+\b'
-  severity: MEDIUM
-  signal_strength: medium
-  tags: [obfuscation, homoglyph]
+  pattern: '(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}'
+  title: Zero-width character obfuscation
+  severity: HIGH
+  confidence: 0.95
+  tags: [prompt-injection, obfuscation]
 ```
 
-<Callout type="warn" title="Why MEDIUM and not HIGH">
-A single ZWSP isn't proof of malice — copy-pasting from Word or PDF leaks them all the time.
-But the same finding inside the same session as a sensitive-access or injection finding is what the
-Layer-5 correlator promotes to CRITICAL via the <code>signal_strength: high</code> axis. Keep the
-base severity at MEDIUM so you don't drown in false positives, and let the correlator do the
-work. See [Layer 5 — Session correlator](./#layer-5--session-correlator).
+<Callout type="info" title="What counts toward the threshold">
+The counted characters are U+200B (zero-width space), U+200C (zero-width non-joiner), U+200D
+(zero-width joiner), and U+FEFF (byte-order mark). Each must immediately follow an ASCII
+alphanumeric character. Nine insertions do not match, and a ZWJ between two emoji does not count.
 </Callout>
 
 ### Exfiltration markers
@@ -117,7 +109,7 @@ to alert before allowing the output downstream:
 ### Enterprise data shape
 
 Numeric-only patterns are the easiest to false-positive. Always pair them with a `condition`
-in your finding suppressions (see [the suppression cookbook](./suppression-cookbook)).
+in your finding suppressions (see [the suppression cookbook](/docs/policies/suppression-cookbook)).
 
 ```yaml
 - id: PII-SSN

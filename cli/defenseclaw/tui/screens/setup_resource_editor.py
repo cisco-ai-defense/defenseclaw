@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native Setup editors for Audit Sinks and Webhooks."""
+"""Native Setup editors for canonical destinations and webhooks."""
 
 from __future__ import annotations
 
@@ -23,10 +23,11 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Static
 
+from defenseclaw.observability.v8_status import V8OperatorStatus
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 TOKENS = DEFAULT_TOKENS
-ResourceKind = Literal["audit_sinks", "webhooks"]
+ResourceKind = Literal["observability", "webhooks"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,9 @@ class SetupResourceRow:
     kind: str
     endpoint: str
     enabled: bool
+    signals: str = ""
+    buckets: str = ""
+    redaction: str = ""
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,6 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
         Binding("r", "remove", "Remove", show=False),
         Binding("t", "test", "Test", show=False),
         Binding("s", "show", "Show", show=False),
-        Binding("m", "migrate", "Migrate", show=False),
         Binding("enter", "default", "Default", show=False),
     ]
 
@@ -116,7 +119,9 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
 
     @property
     def dialog_title(self) -> str:
-        return "Audit Sinks Editor" if self.resource_kind == "audit_sinks" else "Webhooks Editor"
+        if self.resource_kind == "observability":
+            return "Observability Destinations"
+        return "Webhooks Editor"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="resource-editor-dialog"):
@@ -128,17 +133,24 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
                 yield Button("Enable", id="resource-enable", variant="success")
                 yield Button("Disable", id="resource-disable", variant="warning")
                 yield Button("Test", id="resource-test", variant="default")
-                yield Button("Show", id="resource-show", variant="default")
+                if self.resource_kind == "webhooks":
+                    yield Button("Show", id="resource-show", variant="default")
                 yield Button("Remove", id="resource-remove", variant="error")
-                if self.resource_kind == "audit_sinks":
-                    yield Button("Migrate Splunk", id="resource-migrate", variant="default")
                 yield Button("Close", id="resource-close", variant="default")
 
     def on_mount(self) -> None:
         table = self.query_one("#resource-editor-table", DataTable)
-        table.add_columns("Name", "Kind", "State", "Endpoint")
+        table.add_columns("Name", "Kind", "State", "Signals", "Redaction", "Buckets", "Endpoint")
         for row in self.rows:
-            table.add_row(row.name, row.kind, "enabled" if row.enabled else "disabled", row.endpoint)
+            table.add_row(
+                row.name,
+                row.kind,
+                "enabled" if row.enabled else "disabled",
+                row.signals or "—",
+                row.redaction or "—",
+                row.buckets or "—",
+                row.endpoint,
+            )
         if self.rows:
             table.move_cursor(row=0, column=0, animate=False)
         table.focus()
@@ -147,7 +159,7 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
         self.dismiss(None)
 
     def action_add(self) -> None:
-        wizard = "observability" if self.resource_kind == "audit_sinks" else "webhooks"
+        wizard = "observability" if self.resource_kind == "observability" else "webhooks"
         label = "Observability" if wizard == "observability" else "Webhook"
         self.dismiss(SetupResourceResult("add", opens_wizard=wizard, hint=f"{label} setup wizard opened."))
 
@@ -164,28 +176,17 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
         self._dispatch_row_action("test")
 
     def action_show(self) -> None:
-        self._dispatch_row_action("show")
-
-    def action_migrate(self) -> None:
-        if self.resource_kind != "audit_sinks":
-            self._set_status("Migrate is only available for Audit Sinks.")
+        if self.resource_kind != "webhooks":
+            self._set_status("Destination details are shown in the table.")
             return
-        args = ("setup", "observability", "migrate-splunk", "--apply")
-        self.dismiss(
-            SetupResourceResult(
-                "migrate",
-                args=args,
-                display_name="setup observability migrate-splunk",
-                hint="Migrate legacy Splunk config into audit_sinks[].",
-            )
-        )
+        self._dispatch_row_action("show")
 
     def action_default(self) -> None:
         if self.resource_kind == "webhooks":
             # Webhooks default to a read-only ``show`` — safe on Enter/click.
             self.action_show()
             return
-        # Audit sinks: Enter / row-click must NOT fire a live outbound test
+        # Destinations: Enter / row-click must NOT fire a live outbound test
         # (that's a real network call). Activating only selects; testing
         # stays behind the explicit ``t`` / Test button so a reflexive Enter
         # can't trigger an outbound request.
@@ -216,8 +217,6 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
                 self.action_show()
             case "resource-remove":
                 self.action_remove()
-            case "resource-migrate":
-                self.action_migrate()
             case "resource-close":
                 self.action_cancel()
 
@@ -251,22 +250,27 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
         self.query_one("#resource-editor-status", Static).update(message)
 
     def _status_text(self) -> str:
-        if self.resource_kind == "audit_sinks":
-            return "a add · e enable · d disable · t test · r remove · m migrate · Enter test · Esc close"
+        if self.resource_kind == "observability":
+            return "a add · e enable · d disable · t test · r remove · Enter select · Esc close"
         return "a add · e enable · d disable · s show · t test · r remove · Enter show · Esc close"
 
 
-def audit_sink_rows_from_config(config: object | Mapping[str, Any] | None) -> tuple[SetupResourceRow, ...]:
-    """Build Audit Sink editor rows from the loaded config object."""
+def observability_rows_from_status(status: V8OperatorStatus | None) -> tuple[SetupResourceRow, ...]:
+    """Build secret-free destination rows from the compiler-owned v8 plan."""
 
+    if status is None:
+        return ()
     return tuple(
         SetupResourceRow(
-            name=str(_value(sink, "name", "sink") or "sink"),
-            kind=str(_value(sink, "kind", "") or _value(sink, "preset_id", "") or ""),
-            endpoint=str(_value(sink, "endpoint", "") or _value(sink, "url", "") or ""),
-            enabled=bool(_value(sink, "enabled", True)),
+            name=destination.name,
+            kind=destination.kind,
+            endpoint=destination.endpoint,
+            enabled=destination.enabled,
+            signals=",".join(destination.selected_signals),
+            buckets=",".join(destination.buckets),
+            redaction=destination.redaction_label,
         )
-        for sink in _sequence(_config_value(config, "audit_sinks", ()))
+        for destination in status.destinations
     )
 
 
@@ -289,7 +293,7 @@ def webhook_rows_from_config(config: object | Mapping[str, Any] | None) -> tuple
 
 
 def _command_args(resource_kind: ResourceKind, action: str, name: str) -> tuple[str, ...]:
-    if resource_kind == "audit_sinks":
+    if resource_kind == "observability":
         args = ("setup", "observability", action, name)
     else:
         args = ("setup", "webhook", action, name)

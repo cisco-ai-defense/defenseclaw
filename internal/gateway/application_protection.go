@@ -94,7 +94,11 @@ func newApplicationProtectionController(s *Sidecar, registry *connector.Registry
 		guards:     map[string]*HookConfigGuard{},
 		lastErrors: map[string]string{},
 	}
-	for _, row := range loadApplicationProtectionState(s.cfg.DataDir).Active {
+	dataDir := ""
+	if cfg := s.currentConfig(); cfg != nil {
+		dataDir = cfg.DataDir
+	}
+	for _, row := range loadApplicationProtectionState(dataDir).Active {
 		if row.Source != "automatic" {
 			continue
 		}
@@ -124,13 +128,16 @@ func (c *applicationProtectionController) UpdateRuntime(registry *connector.Regi
 }
 
 func (c *applicationProtectionController) OnDiscoveryReport(ctx context.Context, report inventory.AIDiscoveryReport) {
-	if c == nil || c.sidecar == nil || c.sidecar.cfg == nil {
+	if c == nil || c.sidecar == nil {
+		return
+	}
+	cfg := c.sidecar.currentConfig()
+	if cfg == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	cfg := c.sidecar.cfg
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		state := applicationProtectionState{
 			Version:    1,
@@ -363,17 +370,23 @@ func (c *applicationProtectionController) refreshActiveLocked(name string, sig i
 }
 
 func (c *applicationProtectionController) startGuardLocked(ctx context.Context, conn connector.Connector) {
-	if c == nil || c.sidecar == nil || c.sidecar.cfg == nil || conn == nil {
+	if c == nil || c.sidecar == nil || conn == nil {
 		return
 	}
-	if !c.sidecar.cfg.Guardrail.HookSelfHeal {
+	cfg := c.sidecar.currentConfig()
+	if cfg == nil {
+		return
+	}
+	if !cfg.Guardrail.HookSelfHeal {
 		return
 	}
 	if _, exists := c.guards[conn.Name()]; exists {
 		return
 	}
-	debounce := time.Duration(c.sidecar.cfg.Guardrail.HookSelfHealDebounceMs) * time.Millisecond
-	guard := NewHookConfigGuard(c.sidecar.logger, c.sidecar.otel, debounce)
+	debounce := time.Duration(cfg.Guardrail.HookSelfHealDebounceMs) * time.Millisecond
+	metricRuntime, _ := c.sidecar.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	guard := NewHookConfigGuard(c.sidecar.logger, metricRuntime, debounce)
+	c.sidecar.bindHookRuntimePolicyResolver(guard)
 	guard.SetHealNotifier(c.sidecar.notifyHookHealed)
 	opts, err := c.sidecar.connectorSetupOptsChecked(conn, c.apiToken, c.proxyAddr, c.apiAddr)
 	if err != nil {
@@ -400,15 +413,19 @@ func (c *applicationProtectionController) teardownAutoConnectorLocked(ctx contex
 	if err := conn.VerifyClean(opts); err != nil {
 		return fmt.Errorf("connector %s teardown left stale state: %w", name, err)
 	}
+	RemoveConnectorRulePackOverrides(name)
 	emitLifecycle(ctx, "application_protection", "removed", map[string]string{"connector": name})
 	return nil
 }
 
 func (c *applicationProtectionController) hookContractPreflightLocked(conn connector.Connector, opts connector.SetupOpts) (bool, string, string) {
-	if c == nil || c.sidecar == nil || c.sidecar.cfg == nil || conn == nil {
+	if c == nil || c.sidecar == nil || conn == nil {
 		return true, "", ""
 	}
-	cfg := c.sidecar.cfg
+	cfg := c.sidecar.currentConfig()
+	if cfg == nil {
+		return true, "", ""
+	}
 	mode := cfg.EffectiveGuardrailModeForConnector(conn.Name())
 	if !strings.EqualFold(mode, "action") || os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
 		return true, "", ""
@@ -427,17 +444,21 @@ func (c *applicationProtectionController) hookContractPreflightLocked(conn conne
 }
 
 func (c *applicationProtectionController) shouldRemoveGoneConnector(sig inventory.AISignal, now time.Time) bool {
-	if c == nil || c.sidecar == nil || c.sidecar.cfg == nil {
+	if c == nil || c.sidecar == nil {
 		return false
 	}
-	cfg := c.sidecar.cfg.ApplicationProtection
-	if !cfg.RemoveWhenGone {
+	cfg := c.sidecar.currentConfig()
+	if cfg == nil {
+		return false
+	}
+	apCfg := cfg.ApplicationProtection
+	if !apCfg.RemoveWhenGone {
 		return false
 	}
 	if sig.LastSeen.IsZero() {
-		return cfg.GoneAfterMin == 0
+		return apCfg.GoneAfterMin == 0
 	}
-	return now.Sub(sig.LastSeen) >= time.Duration(cfg.GoneAfterMin)*time.Minute
+	return now.Sub(sig.LastSeen) >= time.Duration(apCfg.GoneAfterMin)*time.Minute
 }
 
 func (c *applicationProtectionController) activeRowsLocked() []applicationProtectionActiveRow {
@@ -456,18 +477,22 @@ func (c *applicationProtectionController) activeRowsLocked() []applicationProtec
 }
 
 func (c *applicationProtectionController) publishStateLocked(state applicationProtectionState, healthState SubsystemState, lastErr string) {
-	if c == nil || c.sidecar == nil || c.sidecar.health == nil || c.sidecar.cfg == nil {
+	if c == nil || c.sidecar == nil || c.sidecar.health == nil {
 		return
 	}
-	if err := saveApplicationProtectionState(c.sidecar.cfg.DataDir, state); err != nil {
+	cfg := c.sidecar.currentConfig()
+	if cfg == nil {
+		return
+	}
+	if err := saveApplicationProtectionState(cfg.DataDir, state); err != nil {
 		lastErr = err.Error()
 		healthState = StateError
 	}
 	guardrailMode := "observe"
 	assetPolicyMode := "observe"
-	if c.sidecar.cfg.ApplicationProtection.Enabled {
-		guardrailMode = c.sidecar.cfg.EffectiveGuardrailModeForConnector("__automatic__")
-		assetPolicyMode = c.sidecar.cfg.EffectiveAssetPolicyModeForConnector("__automatic__")
+	if cfg.ApplicationProtection.Enabled {
+		guardrailMode = cfg.EffectiveGuardrailModeForConnector("__automatic__")
+		assetPolicyMode = cfg.EffectiveAssetPolicyModeForConnector("__automatic__")
 	}
 	details := map[string]interface{}{
 		"enabled":                      state.Enabled,
@@ -476,11 +501,11 @@ func (c *applicationProtectionController) publishStateLocked(state applicationPr
 		"active":                       state.Active,
 		"skipped":                      state.Skipped,
 		"last_errors":                  state.LastErrors,
-		"state_file":                   filepath.Join(c.sidecar.cfg.DataDir, applicationProtectionStateFile),
+		"state_file":                   filepath.Join(cfg.DataDir, applicationProtectionStateFile),
 		"guardrail_mode":               guardrailMode,
 		"asset_policy_mode":            assetPolicyMode,
-		"require_trusted_binary_paths": c.sidecar.cfg.AIDiscovery.RequireTrustedBinaryPaths,
-		"trusted_binary_prefixes":      append([]string{}, c.sidecar.cfg.AIDiscovery.TrustedBinaryPrefixes...),
+		"require_trusted_binary_paths": cfg.AIDiscovery.RequireTrustedBinaryPaths,
+		"trusted_binary_prefixes":      append([]string{}, cfg.AIDiscovery.TrustedBinaryPrefixes...),
 	}
 	c.sidecar.health.SetApplicationProtection(healthState, lastErr, details)
 }

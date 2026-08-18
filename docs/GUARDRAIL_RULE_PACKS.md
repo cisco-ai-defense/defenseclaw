@@ -1,152 +1,56 @@
-# Guardrail Rule Packs & Suppressions
+# Guardrail rule-pack engineering contract
 
-Use this guide when the guardrail is working, but you need to tune a false
-positive without turning off the entire judge. The most common example is a
-real application username being flagged as `JUDGE-PII-USER`.
+Operator CEL authoring and engine behavior are maintained in the published
+[CEL authoring guide](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/cel/authoring/)
+and [CEL engine reference](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/cel/engine/).
+Recipes, suppressions, and verification steps remain in the broader
+[policies documentation](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/).
 
-## Two layers control guardrail behavior
+## Two policy layers
 
-DefenseClaw splits guardrail behavior across two separate layers:
+DefenseClaw deliberately ships two distinct policy mechanisms:
 
-| Layer | What it controls | Typical way to change it |
-|---|---|---|
-| OPA policy | Block / alert thresholds, severity-to-action behavior, enforcement rules | `defenseclaw policy activate default|strict|permissive` |
-| Guardrail rule pack | Judge prompts, PII category severity, pre-judge strips, `suppressions.yaml`, sensitive tool rules | `guardrail.rule_pack_dir` in `~/.defenseclaw/config.yaml` |
+| Layer | Repository authority | Purpose |
+| --- | --- | --- |
+| Admission and policy domains | [`../policies/rego/`](../policies/rego/) | OPA decisions for admission, guardrail actions, firewall, audit, sandbox, and skill actions |
+| Guardrail rule packs | [`../policies/guardrail/`](../policies/guardrail/) | Trusted tool-call CEL rules with bounded regex fallback, unstructured runtime rules, sensitive-tool metadata, judge prompts, and suppressions |
 
-The important gotcha is that these are **not the same switch**.
+Activating an admission policy does not select a rule-pack directory, and
+selecting `guardrail.rule_pack_dir` does not activate an admission policy. Keep
+that separation explicit in code and tests.
 
-`defenseclaw policy activate strict` updates the OPA-backed policy data, but it
-does **not** change `guardrail.rule_pack_dir`. If you want the strict rule
-pack, point `guardrail.rule_pack_dir` at the strict profile as well.
+## Implementation ownership
 
-## Where the files live
+- Go parsing and evaluation inputs:
+  [`../internal/guardrail/rulepack.go`](../internal/guardrail/rulepack.go) and
+  [`../internal/guardrail/suppress.go`](../internal/guardrail/suppress.go).
+- Reload-aware caching:
+  [`../internal/guardrail/rulepack_cache.go`](../internal/guardrail/rulepack_cache.go).
+- Effective global/per-connector lookup:
+  [`../internal/config/config.go`](../internal/config/config.go) and
+  [`../internal/config/application_protection.go`](../internal/config/application_protection.go).
+- Python scanner overlay:
+  [`../cli/defenseclaw/scanner/rulepack.py`](../cli/defenseclaw/scanner/rulepack.py).
+- Bundled profile data:
+  [`../policies/guardrail/default/`](../policies/guardrail/default/),
+  [`../policies/guardrail/permissive/`](../policies/guardrail/permissive/), and
+  [`../policies/guardrail/strict/`](../policies/guardrail/strict/).
 
-The active rule pack is selected by `guardrail.rule_pack_dir` in
-`~/.defenseclaw/config.yaml`.
+Any format or precedence change must update both language implementations and
+their focused tests.
 
-Common built-in locations are:
+## Trusted tool-call boundary
 
-- `~/.defenseclaw/policies/guardrail/default/`
-- `~/.defenseclaw/policies/guardrail/strict/`
-- `~/.defenseclaw/policies/guardrail/permissive/`
+CEL expressions run only inside the existing authenticated tool-call
+evaluation path. They do not replace OPA, scan arbitrary prompt or result
+text, or expose another policy endpoint. `tool_call_only` independently limits
+the rule's regex fallback to that path; omitting it preserves legacy
+prompt/result regex coverage while CEL remains tool-call scoped.
+Authoritative ActionFacts own the semantic decision; unsupported or ambiguous
+input keeps the legacy fallback. Each migrated owner emits one canonical
+finding rather than independent regex and CEL findings.
 
-Inside each profile directory you will usually see:
-
-- `judge/*.yaml` for category prompts and severities
-- `sensitive_tools.yaml` for tool-level rules
-- `suppressions.yaml` for false-positive tuning
-
-DefenseClaw ships built-in defaults for these files. In a normal install,
-`defenseclaw init` seeds editable copies under `~/.defenseclaw/policies/`.
-If your install does not have a guardrail directory yet, create the active
-profile directory and add `suppressions.yaml` yourself.
-
-## Check which rule pack is active
-
-Look at `guardrail.rule_pack_dir` in `~/.defenseclaw/config.yaml`.
-
-```bash
-grep -n "rule_pack_dir" ~/.defenseclaw/config.yaml
-```
-
-If it is missing, DefenseClaw defaults to the `default` rule pack under your
-data directory.
-
-To use the strict rule pack, set the value to the full path for your machine,
-for example:
-
-```yaml
-guardrail:
-  rule_pack_dir: /home/alice/.defenseclaw/policies/guardrail/strict
-```
-
-Use the matching profile path if you want `default` or `permissive` instead.
-
-## Add a targeted suppression
-
-If the active profile already has a `suppressions.yaml`, keep the file and add
-just the new item under `finding_suppressions:`.
-
-If the file does not exist yet, create it with this shape:
-
-```yaml
-version: 1
-
-pre_judge_strips: []
-
-finding_suppressions:
-  - id: SUPP-APP-USERNAME
-    finding_pattern: JUDGE-PII-USER
-    entity_pattern: '^(REPLACE_WITH_ESCAPED_USERNAME)$'
-    reason: "Allowed application username"
-
-tool_suppressions: []
-```
-
-What each field means:
-
-- `finding_pattern`: the judge finding to suppress
-- `entity_pattern`: a regular expression for the exact value to allow
-- `reason`: why this is safe in your environment
-
-For a username false positive, prefer a narrow exact-match regex like
-`'^(REPLACE_WITH_ESCAPED_USERNAME)$'` instead of a broad pattern that could
-hide real findings.
-
-Replace `REPLACE_WITH_ESCAPED_USERNAME` with the literal username. If the
-username contains regex characters like `.`, `+`, `?`, `(`, or `)`, escape
-them first. For example, `john.doe` should become `'^(john\.doe)$'`.
-
-## Restart after editing
-
-Restart the gateway so the sidecar reloads the rule pack:
-
-```bash
-defenseclaw-gateway restart
-```
-
-If the binary is not on your `PATH`, use the installed path instead:
-
-```bash
-~/.local/bin/defenseclaw-gateway restart
-```
-
-Then replay the original prompt that was being blocked.
-
-## Which lever should you use?
-
-Use a targeted suppression when:
-
-- one known-safe value is noisy
-- you still want the judge enabled for everything else
-- the false positive is tied to a specific entity such as a username, host,
-  or internal ID
-
-Switch from `strict` to `default` or `permissive` when:
-
-- the whole profile is too aggressive for your environment
-- you want broader changes to severity and blocking behavior
-
-Disable only prompt-side PII judging when:
-
-- prompt-side PII blocks are the issue
-- you still want completion-side PII inspection
-
-Example:
-
-```yaml
-guardrail:
-  judge:
-    pii: true
-    pii_prompt: false
-    pii_completion: true
-```
-
-## Common gotchas
-
-- `policy activate strict` does not switch `guardrail.rule_pack_dir`
-- editing `default/suppressions.yaml` has no effect if the active rule pack is
-  `strict`
-- if the file is missing on disk, built-in defaults can still load, so create
-  the file if you want a persistent local override
-- restart `defenseclaw-gateway` after changing rule pack files
+Durable ordered-chain enforcement is limited to authenticated connector hooks
+with canonical connector/session correlation. The audit store persists only
+bounded masks and fingerprints, never raw commands, arguments, paths, URLs, or
+ActionFacts.
