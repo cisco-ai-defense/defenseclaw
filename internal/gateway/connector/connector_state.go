@@ -39,13 +39,18 @@ const hookContractLockFile = "hook_contract_lock.json"
 const agentSelectionFile = "agent_selection.json"
 
 const (
-	agentSelectionSchemaVersion              = 1
-	agentSelectionMaxBytes                   = 64 << 10
-	hookContractLockMaxBytes                 = 2 << 20
-	hookRuntimeEvidenceMaxBytes              = 64 << 10
-	agentSelectionMaxLifetime                = 15 * time.Minute
-	agentSelectionClockSkew                  = 5 * time.Minute
-	managedHookContractLockMaxBytes    int64 = 4 << 20
+	agentSelectionSchemaVersion = 1
+	agentSelectionMaxBytes      = 64 << 10
+	hookContractLockMaxBytes    = 2 << 20
+	hookRuntimeEvidenceMaxBytes = 64 << 10
+	agentSelectionMaxLifetime   = 15 * time.Minute
+	agentSelectionClockSkew     = 5 * time.Minute
+	// managedHookContractLockMaxBytes is kept in lock-step with
+	// hookContractLockMaxBytes so the managed save path and the registration
+	// verification path agree on the maximum acceptable lock-file size. A
+	// larger managed cap would write records the base verifier permanently
+	// rejects.
+	managedHookContractLockMaxBytes    int64 = hookContractLockMaxBytes
 	managedHookRuntimeArtifactMaxBytes int64 = 4 << 20
 	managedProtectedArtifactMaxBytes   int64 = 1 << 30
 )

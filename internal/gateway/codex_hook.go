@@ -38,6 +38,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -525,17 +526,7 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 	if mode != "action" && guardrailSeverityRank(severity) < severityHigh {
 		return ""
 	}
-	lead := "DefenseClaw observed"
-	finding := fmt.Sprintf("a %s Codex hook finding", severity)
-	if wouldBlock {
-		// A full clause cannot take the article that follows "observed".
-		lead = "DefenseClaw would block this in action mode:"
-		finding = fmt.Sprintf("%s Codex hook finding", severity)
-	}
-	if reason == "" {
-		return fmt.Sprintf("%s %s.", lead, finding)
-	}
-	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
+	return connector.BuildCodexAdditionalContext(rawAction, severity, reason, wouldBlock)
 }
 
 // codexObserveContextEnforcementEligible keeps the in-chat Observe warning

@@ -19,12 +19,28 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"strings"
 )
+
+// envConfigSkipTrustEnv gates fail-closed trust validation for
+// LoadEnvConfigEndpoint. It is honored only under a test binary, so a
+// production gateway that inherits the variable can never disable trust:
+// only `go test` (via testing.Init) registers the `test.v` flag.
+const envConfigSkipTrustEnv = "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST"
+
+// envConfigTrustWaived reports whether the caller opted out of trust
+// validation. The waiver is intentionally test-binary-only.
+func envConfigTrustWaived() bool {
+	if os.Getenv(envConfigSkipTrustEnv) != "1" {
+		return false
+	}
+	return flag.Lookup("test.v") != nil
+}
 
 // ResolveDefaultEnvConfigPath returns the canonical location AVC drops the
 // DefenseClaw env config for each managed install. The file is authored (and re-
@@ -209,7 +225,7 @@ func trustEnvConfigFile(info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("must be a regular file")
 	}
-	if os.Getenv("DEFENSECLAW_ENV_CONFIG_SKIP_TRUST") == "1" {
+	if envConfigTrustWaived() {
 		return nil
 	}
 	return trustEnvConfigFilePlatform(info)

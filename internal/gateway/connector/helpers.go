@@ -102,7 +102,10 @@ const windowsSafePATHCommandPrefix = "set NoDefaultCurrentDirectoryInExePath=1&&
 // defenseclawHookBinaryOverride is a test seam for exercising generated
 // Windows configs with an installed launcher path that contains spaces. It is
 // intentionally package-private and empty in production.
-var defenseclawHookBinaryOverride string
+var (
+	defenseclawHookBinaryOverrideMu sync.RWMutex
+	defenseclawHookBinaryOverride   string
+)
 
 // hookInvocationCommand returns the command string an agent runtime is
 // configured to run for a DefenseClaw hook.
@@ -170,8 +173,11 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 // ~/.local/bin fallback, so generated config never points at a movable checkout
 // merely because that checkout is currently running setup.
 func defenseclawHookBinary() string {
-	if strings.TrimSpace(defenseclawHookBinaryOverride) != "" {
-		return defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverrideMu.RLock()
+	override := strings.TrimSpace(defenseclawHookBinaryOverride)
+	defenseclawHookBinaryOverrideMu.RUnlock()
+	if override != "" {
+		return override
 	}
 	if runtime.GOOS == "windows" {
 		if executable, err := os.Executable(); err == nil {
@@ -213,9 +219,15 @@ func PinNativeHookExecutableForTest(path string) func() {
 	if flag.Lookup("test.v") == nil {
 		panic("connector: PinNativeHookExecutableForTest is test-only")
 	}
+	defenseclawHookBinaryOverrideMu.Lock()
 	previous := defenseclawHookBinaryOverride
 	defenseclawHookBinaryOverride = path
-	return func() { defenseclawHookBinaryOverride = previous }
+	defenseclawHookBinaryOverrideMu.Unlock()
+	return func() {
+		defenseclawHookBinaryOverrideMu.Lock()
+		defenseclawHookBinaryOverride = previous
+		defenseclawHookBinaryOverrideMu.Unlock()
+	}
 }
 
 type nativeWindowsInstallState struct {

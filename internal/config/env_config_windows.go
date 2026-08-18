@@ -95,7 +95,9 @@ func trustEnvConfigFilePlatform(_ os.FileInfo) error {
 // shouldEnforceEnvConfigTrust is fail-closed for every production caller. The
 // gateway intentionally runs as a restricted virtual service account, whose
 // token is not elevated; elevation therefore cannot define this trust
-// boundary. Tests explicitly opt out for parser-only temporary fixtures.
+// boundary. Tests explicitly opt out for parser-only temporary fixtures; the
+// waiver is honored only under a test binary so a production gateway that
+// inherits DEFENSECLAW_ENV_CONFIG_SKIP_TRUST can never disable trust.
 func shouldEnforceEnvConfigTrust() bool {
-	return os.Getenv("DEFENSECLAW_ENV_CONFIG_SKIP_TRUST") != "1"
+	return !envConfigTrustWaived()
 }

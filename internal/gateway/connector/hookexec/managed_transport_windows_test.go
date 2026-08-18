@@ -235,7 +235,15 @@ func restoreManagedTransportSeams(
 	oldConnected := managedEnterpriseConnectedPID
 	managedEnterpriseQueryServicePID = query
 	managedEnterpriseConnectedPID = connected
+	// The seam pointers are process-global. Callers hold
+	// managedTransportTestMu across the test body, but t.Cleanup runs AFTER
+	// the test's defer-based Unlock, so a naive restore could overwrite the
+	// seams a sibling test has already installed. Re-acquire the mutex
+	// inside the cleanup so the restore stays inside the same critical
+	// section it was set up under.
 	t.Cleanup(func() {
+		managedTransportTestMu.Lock()
+		defer managedTransportTestMu.Unlock()
 		managedEnterpriseQueryServicePID = oldQuery
 		managedEnterpriseConnectedPID = oldConnected
 	})

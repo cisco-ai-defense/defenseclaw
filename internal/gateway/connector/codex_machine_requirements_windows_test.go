@@ -107,6 +107,18 @@ func TestResolveWindowsCodexManagedRuntimeRegistryWaitsForMachinePolicyLock(t *t
 		)
 		resolved <- resolveErr
 	}()
+	// Registered AFTER the hook-restoring cleanup so t.Cleanup runs it FIRST
+	// (LIFO order): a leaked resolver goroutine would otherwise still hold
+	// windowsCodexMachineProcessMu and race the hook restore, turning a single
+	// clean assertion failure into a package-wide timeout.
+	t.Cleanup(func() {
+		_ = release()
+		select {
+		case <-resolved:
+		case <-time.After(15 * time.Second):
+			t.Error("resolver goroutine did not finish; it still holds windowsCodexMachineProcessMu")
+		}
+	})
 
 	select {
 	case <-lockAttempted:

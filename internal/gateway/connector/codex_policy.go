@@ -32,7 +32,31 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// validateCodexManagedAgentExecutable enforces the managed-executable trust
+// rule shared by every platform: reject a symlink or non-regular file, then
+// require the trusted-file ancestor walk. Keeping one definition here (rather
+// than one per build tag) prevents the two managed-executable rules from
+// drifting apart.
+func validateCodexManagedAgentExecutable(path string, managedEnterprise bool) error {
+	if !managedEnterprise {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect selected managed Codex executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("selected managed Codex executable is not a regular file: %s", path)
+	}
+	if err := managed.ValidateTrustedFilePath(path, "selected managed Codex executable"); err != nil {
+		return fmt.Errorf("selected managed Codex executable is untrusted: %w", err)
+	}
+	return nil
+}
 
 const (
 	codexPolicyInspectionTimeout = 20 * time.Second

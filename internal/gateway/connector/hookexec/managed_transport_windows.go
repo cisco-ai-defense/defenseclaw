@@ -307,6 +307,12 @@ func readTCP4OwnerPIDTable() ([]mibTCPRowOwnerPID, error) {
 }
 
 func callGetExtendedTCPTable(buffer []byte, size *uint32) error {
+	// LazyProc.Call panics if the DLL or the exported symbol cannot be
+	// resolved. Surface that as a normal error so the managed transport
+	// path degrades gracefully instead of taking the whole process down.
+	if err := getExtendedTCPTableProc.Find(); err != nil {
+		return fmt.Errorf("resolve GetExtendedTcpTable: %w", err)
+	}
 	var pointer uintptr
 	if len(buffer) > 0 {
 		pointer = uintptr(unsafe.Pointer(&buffer[0]))

@@ -237,11 +237,19 @@ func Run(ctx context.Context, opts Options) int {
 
 	token := opts.Token
 	if scopedTokenFile || token == "" {
-		token = readTokenFileForMode(
+		loaded, readErr := readTokenFileForModeE(
 			tokenFile,
 			scopedTokenFile,
 			opts.ManagedEnterprise,
 		)
+		if readErr != nil && opts.ManagedEnterprise {
+			// Managed enterprise mode must not silently omit Authorization when
+			// the token sidecar is present but unreadable, malformed, or fails a
+			// stability/identity check. Fail closed so unauthenticated loopback
+			// requests never sneak past connector-side auth.
+			return failUnreachable(opts, sp, "closed", "managed hook token unreadable")
+		}
+		token = loaded
 	}
 
 	return doRequest(ctx, opts, sp, failMode, payload, token)
@@ -345,7 +353,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if err != nil {
 		reason := "gateway unreachable"
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
-			reason = managedGatewayPeerUnverifiedReason
+			// Managed peer-verification failure must fail closed on the transport
+			// surface too, mirroring the up-front client-build path. A managed
+			// hook launched with FailMode="open" must not let an unverified
+			// gateway peer surface as an allow-by-default.
+			return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -744,6 +756,19 @@ func readTokenFileForMode(
 	allowRaw bool,
 	managedEnterprise bool,
 ) string {
+	token, _ := readTokenFileForModeE(path, allowRaw, managedEnterprise)
+	return token
+}
+
+// readTokenFileForModeE reports the underlying read error alongside the
+// parsed token so managed callers can distinguish an unreadable/rejected
+// sidecar from a legitimately empty file. Non-managed callers continue to
+// treat any error as an empty token (loopback no-auth path).
+func readTokenFileForModeE(
+	path string,
+	allowRaw bool,
+	managedEnterprise bool,
+) (string, error) {
 	var (
 		data []byte
 		err  error
@@ -754,9 +779,9 @@ func readTokenFileForMode(
 		data, err = os.ReadFile(path)
 	}
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return parseTokenFile(data, allowRaw)
+	return parseTokenFile(data, allowRaw), nil
 }
 
 func parseTokenFile(data []byte, allowRaw bool) string {

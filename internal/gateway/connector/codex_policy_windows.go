@@ -28,23 +28,6 @@ func codexSystemRequirementsPath() (string, error) {
 	return filepath.Join(programData, "OpenAI", "Codex", "requirements.toml"), nil
 }
 
-func validateCodexManagedAgentExecutable(path string, managedEnterprise bool) error {
-	if !managedEnterprise {
-		return nil
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("inspect selected managed Codex executable: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("selected managed Codex executable is not a regular file: %s", path)
-	}
-	if err := managed.ValidateTrustedFilePath(path, "selected managed Codex executable"); err != nil {
-		return fmt.Errorf("selected managed Codex executable is untrusted: %w", err)
-	}
-	return nil
-}
-
 func readCodexSystemRequirements(path string, managedEnterprise bool) ([]byte, bool, error) {
 	if !managedEnterprise {
 		return readLegacyCodexSystemRequirements(path)

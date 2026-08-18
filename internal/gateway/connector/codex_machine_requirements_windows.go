@@ -285,12 +285,12 @@ func VerifyWindowsCodexMachineRequirements(
 			report.Error = err.Error()
 			return report, err
 		}
-		present, err := windowsCodexMachineAnyArtifactPathExists(opts)
+		absent, err := windowsCodexMachineArtifactsAbsentUnlocked(opts)
 		if err != nil {
 			report.Error = err.Error()
 			return report, err
 		}
-		if !present {
+		if absent {
 			report.OK = true
 			report.Disposition = "disabled_noop"
 			report.SafeToRemoveBinary = true
@@ -444,13 +444,16 @@ func RemoveWindowsCodexMachineRequirements(
 	}
 	// The locked path below requires the Codex machine-policy directory, which
 	// exists only once a target has been enrolled. No artifact means nothing to
-	// remove, which is the same result that path reports for this state.
-	present, err := windowsCodexMachineAnyArtifactPathExists(opts)
+	// remove, which is the same result that path reports for this state. The
+	// bracketed lock-existence checks in
+	// windowsCodexMachineArtifactsAbsentUnlocked close the race a plain scan
+	// would leave open against a concurrent Reconcile.
+	absent, err := windowsCodexMachineArtifactsAbsentUnlocked(opts)
 	if err != nil {
 		report.Error = err.Error()
 		return report, err
 	}
-	if !present {
+	if absent {
 		report.OK = true
 		report.Disposition = "ownership_absent"
 		report.SafeToRemoveBinary = true
@@ -915,6 +918,41 @@ func windowsCodexMachinePathExists(path string) (bool, error) {
 		return false, fmt.Errorf("Codex managed artifact is not a regular non-link file: %s", path)
 	}
 	return true, nil
+}
+
+// windowsCodexMachineArtifactsAbsentUnlocked reports whether every managed
+// Codex artifact — and the machine policy lock file — is absent. It uses the
+// same lock-observation-lock pattern ResolveWindowsCodexManagedRuntimeRegistry
+// applies: two lock-existence probes bracket the artifact check so a
+// concurrent writer that publishes between the artifact scan and the caller's
+// "nothing to remove" conclusion cannot slip through unseen.
+func windowsCodexMachineArtifactsAbsentUnlocked(
+	opts WindowsCodexMachineRequirementsOptions,
+) (bool, error) {
+	lockPath := filepath.Join(filepath.Dir(opts.RequirementsPath), windowsCodexManagedLockFile)
+	lockExists, err := windowsCodexMachinePathExists(lockPath)
+	if err != nil {
+		return false, err
+	}
+	if lockExists {
+		return false, nil
+	}
+	present, err := windowsCodexMachineAnyArtifactPathExists(opts)
+	if err != nil {
+		return false, err
+	}
+	// Close the writer-first-install race before trusting the artifact scan.
+	// The Reconcile path always creates the protected lock before publishing
+	// policy, so a lock that materialized during the scan means a writer is
+	// mid-flight and the caller must defer to the locked path.
+	lockExists, err = windowsCodexMachinePathExists(lockPath)
+	if err != nil {
+		return false, err
+	}
+	if lockExists {
+		return false, nil
+	}
+	return !present, nil
 }
 
 func verifyWindowsCodexMachineRequirementsLocked(

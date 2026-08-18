@@ -953,53 +953,58 @@ func TestManagedGuardianCoverageRejectsInvalidAuthorizationLedger(t *testing.T) 
 	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
 	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+	// Structural-validation fixtures must survive the freshness pre-check so
+	// the intended structural rejection is what fires. Using a fixed
+	// timestamp would eventually flip these cases into freshness-failing
+	// tests after HookGuardianMaxAge elapses.
+	fresh := time.Now().UTC().Format(time.RFC3339)
 
 	tests := []struct {
 		name string
 		data string
 	}{
 		{name: "corrupt", data: `{"version":`},
-		{name: "partial", data: `{
-			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":false,
+		{name: "partial", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":false,
 			"target_count":2,"success_count":1,"failure_count":1,
 			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
-		}`},
-		{name: "stale_extra_target", data: `{
-			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+		}`, fresh)},
+		{name: "stale_extra_target", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
 			"target_count":1,"success_count":1,"failure_count":0,
 			"protected_targets":[
 				{"user":"alice","connector":"codex","ok":true},
 				{"user":"retired","connector":"codex","ok":true}
 			]
-		}`},
-		{name: "duplicate_target", data: `{
-			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+		}`, fresh)},
+		{name: "duplicate_target", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
 			"target_count":2,"success_count":2,"failure_count":0,
 			"protected_targets":[
 				{"sid":"S-1-5-21-1-2-3-1001","connector":"codex","ok":true},
 				{"sid":"s-1-5-21-1-2-3-1001","connector":"codex","ok":true}
 			]
-		}`},
-		{name: "unsuccessful_target", data: `{
-			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+		}`, fresh)},
+		{name: "unsuccessful_target", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
 			"target_count":1,"success_count":1,"failure_count":0,
 			"protected_targets":[{"user":"alice","connector":"codex","ok":false,"error":"tampered"}]
-		}`},
-		{name: "incomplete_target", data: `{
-			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+		}`, fresh)},
+		{name: "incomplete_target", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
 			"target_count":1,"success_count":1,"failure_count":0,
 			"protected_targets":[{"connector":"codex","ok":true}]
-		}`},
-		{name: "unknown_field", data: `{
-			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+		}`, fresh)},
+		{name: "unknown_field", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
 			"target_count":1,"success_count":1,"failure_count":0,"unexpected":true,
 			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
-		}`},
-		{name: "trailing_content", data: `{
-			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+		}`, fresh)},
+		{name: "trailing_content", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
 			"target_count":1,"success_count":1,"failure_count":0,
 			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
-		}{}`},
+		}{}`, fresh)},
 	}
 	tests = append(tests,
 		struct {
