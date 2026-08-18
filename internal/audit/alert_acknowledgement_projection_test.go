@@ -130,8 +130,8 @@ type closingAlertHealthReporter struct {
 	errs  chan error
 }
 
-func (reporter *closingAlertHealthReporter) ReportEventHistoryHealth(code EventHistoryHealthCode) {
-	reporter.codes <- code
+func (reporter *closingAlertHealthReporter) ReportEventHistoryHealth(transition EventHistoryHealthTransition) {
+	reporter.codes <- transition.Code
 	reporter.errs <- reporter.store.Close()
 }
 

@@ -1377,45 +1377,55 @@ def _coerce_alert_event(event: object) -> AlertEvent:
 def _list_findings_by_run_id(store: object | None, run_id: str) -> tuple[AlertFinding, ...]:
     if store is None or not run_id:
         return ()
-    if hasattr(store, "list_findings_by_run_id"):
-        return tuple(_coerce_finding(item) for item in store.list_findings_by_run_id(run_id))  # type: ignore[attr-defined]
-    db = getattr(store, "db", None)
-    if db is None:
-        return ()
-    rows = db.execute(
-        """SELECT id, scan_id, severity, title, description, location, remediation, scanner
-           FROM findings WHERE scan_id = ? ORDER BY severity DESC""",
-        (run_id,),
-    ).fetchall()
-    return tuple(
-        AlertFinding(
-            id=str(row[0]),
-            scan_id=str(row[1]),
-            severity=str(row[2]),
-            title=str(row[3]),
-            description=str(row[4] or ""),
-            location=str(row[5] or ""),
-            remediation=str(row[6] or ""),
-            scanner=str(row[7] or ""),
+    try:
+        if hasattr(store, "list_findings_by_run_id"):
+            return tuple(
+                _coerce_finding(item) for item in store.list_findings_by_run_id(run_id)  # type: ignore[attr-defined]
+            )
+        db = getattr(store, "db", None)
+        if db is None:
+            return ()
+        rows = db.execute(
+            """SELECT id, scan_id, severity, title, description, location, remediation, scanner
+               FROM findings WHERE scan_id = ? ORDER BY severity DESC""",
+            (run_id,),
+        ).fetchall()
+        return tuple(
+            AlertFinding(
+                id=str(row[0]),
+                scan_id=str(row[1]),
+                severity=str(row[2]),
+                title=str(row[3]),
+                description=str(row[4] or ""),
+                location=str(row[5] or ""),
+                remediation=str(row[6] or ""),
+                scanner=str(row[7] or ""),
+            )
+            for row in rows
         )
-        for row in rows
-    )
+    except Exception:  # noqa: BLE001 - detail enrichment must not hide the selected row.
+        return ()
 
 
 def _list_events_by_target(store: object | None, target: str, limit: int) -> tuple[AlertEvent, ...]:
     if store is None or not target:
         return ()
-    if hasattr(store, "list_events_by_target"):
-        return tuple(_coerce_alert_event(item) for item in store.list_events_by_target(target, limit))  # type: ignore[attr-defined]
-    db = getattr(store, "db", None)
-    if db is None:
+    try:
+        if hasattr(store, "list_events_by_target"):
+            return tuple(
+                _coerce_alert_event(item) for item in store.list_events_by_target(target, limit)  # type: ignore[attr-defined]
+            )
+        db = getattr(store, "db", None)
+        if db is None:
+            return ()
+        rows = db.execute(
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id
+               FROM audit_events WHERE target = ? ORDER BY timestamp DESC LIMIT ?""",
+            (target, max(limit, 1)),
+        ).fetchall()
+        return tuple(_alert_event_from_row(row) for row in rows)
+    except Exception:  # noqa: BLE001 - detail enrichment must not hide the selected row.
         return ()
-    rows = db.execute(
-        """SELECT id, timestamp, action, target, actor, details, severity, run_id
-           FROM audit_events WHERE target = ? ORDER BY timestamp DESC LIMIT ?""",
-        (target, max(limit, 1)),
-    ).fetchall()
-    return tuple(_alert_event_from_row(row) for row in rows)
 
 
 def _get_alert_event_by_id(store: object | None, event_id: str) -> AlertEvent | None:

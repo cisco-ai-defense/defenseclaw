@@ -49,8 +49,9 @@ defenseclaw guardrail status
 ```
 
 Action mode is not a promise that a post-action hook can undo a completed side
-effect. `PostToolUse` and other result surfaces can record a finding or stop a
-later agentic step, but the original tool action has already occurred.
+effect. Result-surface behavior is connector-specific: some can withhold a
+result or stop a later step, while advisory surfaces only record findings and
+shadow `would_block` telemetry. The original tool action has already occurred.
 
 ## Codex
 
@@ -105,15 +106,17 @@ rather than every source edit.
 The declared block-capable events are:
 
 `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`,
-`PermissionRequest`, `PostToolBatch`, `TaskCreated`, `TaskCompleted`,
-`TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`,
-`Elicitation`, and `ElicitationResult`.
+`PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`,
+`SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, and
+`ElicitationResult`.
 
 `PreToolUse` is the only native ask surface. A `confirm` verdict can become a
-Claude Code permission prompt there. `PostToolUse` is advisory because the
-tool already ran; `PostToolBatch` can stop the loop before another model call.
-`ConfigChange` cannot override Claude Code's higher-authority policy-settings
-source.
+Claude Code permission prompt there. `PostToolUse` and `PostToolBatch` are
+advisory: they scan returned content and preserve findings and shadow
+`would_block` telemetry, but do not stop the next model call. Command and path
+literals in those returned bytes are not treated as typed execution requests;
+any command Claude proposes later is enforced at `PreToolUse`. `ConfigChange`
+cannot override Claude Code's higher-authority policy-settings source.
 
 ## Amp
 
