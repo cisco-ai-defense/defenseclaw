@@ -1434,8 +1434,15 @@ services:
 ```powershell
 # These three variables (also used in the install and verify blocks) MUST be
 # defined in the same session before running this block — copying just the
-# invocation without them fails with an empty -File argument.
-$PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+# invocation without them fails with an empty -File argument. Resolve
+# powershell.exe through [Environment]::GetFolderPath('System') rather than
+# $env:SystemRoot so an elevated shell that inherited a poisoned SystemRoot
+# cannot redirect this launch to an attacker-controlled powershell.exe
+# before install-enterprise.ps1's own checks run.
+$PowerShell = [IO.Path]::Combine(
+    [Environment]::GetFolderPath('System'),
+    'WindowsPowerShell\v1.0\powershell.exe'
+)
 $Installer = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install-enterprise.ps1'
 $Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw'
 
@@ -1560,8 +1567,13 @@ Get-Service DefenseClawGateway, DefenseClawHookGuardian
 
 # Define $PowerShell and $Installer alongside the block-local $Gateway and
 # $Manifest so this section can be copied on its own without depending on
-# earlier sections.
-$PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+# earlier sections. See the install block above: resolve powershell.exe
+# through the known-folder API so a poisoned $env:SystemRoot cannot redirect
+# the launch.
+$PowerShell = [IO.Path]::Combine(
+    [Environment]::GetFolderPath('System'),
+    'WindowsPowerShell\v1.0\powershell.exe'
+)
 $Installer = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install-enterprise.ps1'
 $Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
 $Manifest = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml'

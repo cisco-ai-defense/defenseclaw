@@ -832,6 +832,12 @@ packaging-managed-windows-bundle: packaging-windows-managed-gateway-zip
 #   per-user DefenseClawSetup-x64.exe transaction.
 #
 # Prereqs on the Windows box:
+#   - MSYS2 / Git-for-Windows Bash on PATH. Neither this target's own recipe
+#     nor `packaging-windows-managed-gateway-zip` runs under cmd.exe-backed
+#     make: both rely on POSIX shell features and, in the gateway-zip case,
+#     on a shebang-driven `.sh` invocation. Invoke Make from a Git Bash /
+#     MSYS shell (`make packaging-windows-enterprise-installer`), or drive
+#     `scripts/build-windows-enterprise-installer.ps1` directly from PowerShell.
 #   - pwsh, git, and the Go toolchain required by go.mod.
 #   - $(DIST_DIR) staged with the gateway zip + gateway-source-commit.txt
 #     from the macOS/Linux managed gateway step above.
@@ -843,15 +849,18 @@ packaging-managed-windows-bundle: packaging-windows-managed-gateway-zip
 WINDOWS_ENTERPRISE_INSTALLER_OUT   ?= $(DIST_DIR)/windows-enterprise-installer
 WINDOWS_ENTERPRISE_INSTALLER_STATE ?= $(DIST_DIR)/windows-enterprise-installer-state
 WINDOWS_ENTERPRISE_SKIP_SIGNING    ?=
+# Signing-mode diagnostic. Uses Make's own $(if $(filter ...)) rather than a
+# POSIX shell test so the target does not require MSYS just for the diagnostic
+# (the recipe's `.sh` and `[`-based invocations elsewhere still do — see the
+# prereq block above). Comma-in-argument constructs need a helper variable
+# because commas inside `$(if ...)` split its arguments.
+_WINDOWS_ENTERPRISE_SIGNING_LABEL := $(if $(filter 1 true yes,$(WINDOWS_ENTERPRISE_SKIP_SIGNING)),SKIPPED (WINDOWS_ENTERPRISE_SKIP_SIGNING set),ENFORCED (production Cisco Authenticode variables required))
+
 packaging-windows-enterprise-installer:
 	@# Print the resolved signing mode into the build log so an accidental
 	# `WINDOWS_ENTERPRISE_SKIP_SIGNING=1` (only valid for the exact
 	# disposable-certification scope) shows up during release triage.
-	@if [ -n "$$(printf '%s' '$(WINDOWS_ENTERPRISE_SKIP_SIGNING)' | grep -E '^(1|true|yes)$$' || true)" ]; then \
-	    echo "packaging-windows-enterprise-installer: signing = SKIPPED (WINDOWS_ENTERPRISE_SKIP_SIGNING=$(WINDOWS_ENTERPRISE_SKIP_SIGNING))"; \
-	else \
-	    echo "packaging-windows-enterprise-installer: signing = ENFORCED (production Cisco Authenticode variables required)"; \
-	fi
+	@echo "packaging-windows-enterprise-installer: signing = $(_WINDOWS_ENTERPRISE_SIGNING_LABEL)"
 	@pwsh -NoProfile -File scripts/build-windows-enterprise-installer.ps1 \
 	    -DistRoot "$(DIST_DIR)" \
 	    -OutRoot "$(WINDOWS_ENTERPRISE_INSTALLER_OUT)" \

@@ -314,9 +314,14 @@ class CliSmokeTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
+            # A skip here would report the trusted-path subprocess contract as
+            # "not verified" when the real problem is a broken gateway build.
+            # Only skip when Go itself is missing (handled above); a nonzero
+            # `go build` exit or a missing output binary must fail loudly.
             if build.returncode != 0 or not built.is_file():
-                self.skipTest(
-                    "gateway build failed: " + (build.stderr or build.stdout).strip(),
+                self.fail(
+                    "gateway build failed (go on PATH but produced no binary): "
+                    + (build.stderr or build.stdout).strip(),
                 )
             gateway = built
 
