@@ -28,9 +28,16 @@ func runEmitManifest(args []string) error {
 	schemaVersion := fs.Int("schema-version", 1, "manifest schema version")
 	version := fs.String("version", "", "release version, e.g. 0.9.0")
 	sourceCommit := fs.String("source-commit", "", "40-char lowercase git commit sha")
-	distributionFlavor := fs.String("distribution-flavor", "managed-enterprise", "distribution flavor tag")
+	distributionFlavor := fs.String("distribution-flavor", defaultDistributionFlavor, "distribution flavor tag")
 	payloadDir := fs.String("payload-dir", "", "directory whose regular-file children are hashed")
 	out := fs.String("out", "", "output path for manifest.json")
+	// --unsigned stamps `"unsigned": true` into the manifest and appends
+	// "-unsigned" to distribution_flavor unless the caller explicitly
+	// passes --distribution-flavor. Used by the spec 002 assemble path
+	// when running under --allow-unsigned for the local developer loop;
+	// the runtime hash gate at stageEnterprisePayload keys off the
+	// same field to refuse non-disposable-scope installs.
+	unsigned := fs.Bool("unsigned", false, "mark this manifest as an unsigned developer build")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -62,11 +69,27 @@ func runEmitManifest(args []string) error {
 			"size":   f.size,
 		})
 	}
+	// Detect whether --distribution-flavor was passed explicitly. Doing
+	// this via `fs.Visit` after Parse (rather than comparing against
+	// the default) is the only correct way; an explicit
+	// `--distribution-flavor managed-enterprise --unsigned` needs to
+	// stay `managed-enterprise`, not be re-suffixed. See CR
+	// spec-002:PRRT_kwDORuAK-s6ahAB9.
+	explicitFlavor := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "distribution-flavor" {
+			explicitFlavor = true
+		}
+	})
+	// Single source of truth for the flavor-and-unsigned rule shared
+	// with emit-provenance; see cmd/windows-repro-manifest/flavor.go.
+	flavor := resolveDistributionFlavor(*distributionFlavor, *unsigned, explicitFlavor)
 	doc := map[string]any{
-		"distribution_flavor": *distributionFlavor,
+		"distribution_flavor": flavor,
 		"files":               entries,
 		"schema_version":      *schemaVersion,
 		"source_commit":       *sourceCommit,
+		"unsigned":            *unsigned,
 		"version":             *version,
 	}
 	return writeSortedJSON(*out, doc)

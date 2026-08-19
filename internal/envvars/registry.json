@@ -3284,6 +3284,20 @@
         {"location": ".github/workflows/windows-deterministic-build.yml", "description": "Set in the reproducibility CI fan-out for the emitter build"}
       ],
       "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_CISCO_CA_BUNDLE",
+      "category": "test_fixture",
+      "purpose": "CI/test-only trust-root override for the POSIX Cisco Authenticode signature check in packaging/scripts/lib/assert-cisco-signature.sh. When set, `osslsigncode verify -CAfile <bundle>` uses the supplied bundle instead of the system trust store — the Workstream A round-trip CI test sets this to a disposable CA that signs a `Cisco Systems, Inc.` CN so the assemble.sh flow can be exercised on Linux runners without a real production certificate. MUST remain unset for production AVC assembly and any release build; a rogue bundle here would let a non-Cisco signer pass the signature preflight (`assert-cisco-signature`). Enforced by convention only — there is no runtime check that refuses set-when-in-production because the assembler is not aware of environment class.",
+      "default": "unset",
+      "accepted_values": ["<path to PEM bundle>", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "packaging/scripts/lib/assert-cisco-signature.sh", "description": "Passed to osslsigncode verify -CAfile when set (POSIX signature check)"},
+        {"location": ".github/workflows/windows-deterministic-build.yml", "description": "Set to a disposable CA in the assemble-linux / assemble-macos jobs so a Cisco-CN dummy cert can pass the check for the byte-identity gate"}
+      ],
+      "since": "0.9.0"
     }
   ]
 }

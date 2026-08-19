@@ -21,10 +21,13 @@ on:
   pull_request:
     paths:
       - cmd/windows-repro-manifest/**
-      - packaging/scripts/lib/repro-flags.*
+      - cmd/defenseclaw-enterprise-setup/**
+      - packaging/scripts/lib/**
+      - packaging/scripts/build-managed-windows-bundle.sh
       - internal/build-repro/testdata/**
       - scripts/check-go-mod-no-toolchain.sh
       - scripts/check-repro-flags-parity.sh
+      - scripts/check-assemble-parity.sh
       - scripts/generate-repro-fixture.sh
       - .github/workflows/windows-deterministic-build.yml
       # setup-go@v5 reads go.mod; check-go-mod-no-toolchain.sh polices it.
@@ -36,10 +39,13 @@ on:
       - main
     paths:
       - cmd/windows-repro-manifest/**
-      - packaging/scripts/lib/repro-flags.*
+      - cmd/defenseclaw-enterprise-setup/**
+      - packaging/scripts/lib/**
+      - packaging/scripts/build-managed-windows-bundle.sh
       - internal/build-repro/testdata/**
       - scripts/check-go-mod-no-toolchain.sh
       - scripts/check-repro-flags-parity.sh
+      - scripts/check-assemble-parity.sh
       - scripts/generate-repro-fixture.sh
       - .github/workflows/windows-deterministic-build.yml
       - go.mod
@@ -72,6 +78,8 @@ jobs:
         run: scripts/check-go-mod-no-toolchain.sh
       - name: Run check-repro-flags-parity.sh
         run: scripts/check-repro-flags-parity.sh
+      - name: Run check-assemble-parity.sh
+        run: scripts/check-assemble-parity.sh
 
   emit-linux:
     name: emit JSON artefacts (ubuntu-latest)
@@ -235,6 +243,167 @@ jobs:
           name: repro-artefacts-macos
           path: artifacts/
           retention-days: 7
+
+  # Full assemble.sh round trip on the fixture — spec 002 AC-05 + AC-10.
+  # Runs the six-step assembler under --allow-unsigned (the fixture is
+  # dummy-unsigned by design; the signature preflight is exercised in
+  # spec 002's Go-level tests, not here). Both runners produce the outer
+  # DefenseClawSetup-Enterprise-x64.exe from the same source tree +
+  # signed-payload fixture bytes; the compare-assemble job at the end
+  # asserts byte-identical SHA-256s across the two runners.
+  assemble-linux:
+    name: assemble.sh --allow-unsigned (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: repro-lints
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Prepare payload from fixture + vendor tree
+        run: |
+          set -euo pipefail
+          workdir="$(pwd)/.assemble-work"
+          mkdir -p "$workdir"
+          zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
+            | tar -x -C "$workdir"
+          # The fixture ships 5 tiny placeholder files under payload/.
+          # assemble.sh checks for exactly these five names.
+          ls "$workdir/payload"
+          # go build -mod=vendor (from repro-flags.sh) requires a vendor/
+          # tree. The outer Setup EXE has no external deps (stdlib only
+          # per spec 001 deps_test), so `go mod vendor` produces the
+          # minimum vendor/ needed for -mod=vendor to succeed.
+          go mod vendor
+      - name: Run assemble.sh --allow-unsigned
+        env:
+          SOURCE_DATE_EPOCH: '1700000000'
+        run: |
+          set -euo pipefail
+          workdir="$(pwd)/.assemble-work"
+          mkdir -p "$workdir/out"
+          # The source tree assemble.sh points at is the current repo
+          # (checkout above). --allow-unsigned skips the Cisco-signature
+          # step so the placeholder fixture bytes are accepted.
+          bash packaging/scripts/lib/assemble.sh \
+            --payload-dir "$workdir/payload" \
+            --source-dir  "$(pwd)" \
+            --out-dir     "$workdir/out" \
+            --source-commit 1111222233334444555566667777888899990000 \
+            --version 0.0.0-repro-fixture \
+            --cmid-pseudo-version v0.0.0-19700101000000-000000000000 \
+            --allow-unsigned
+          # Record SHA-256s for the compare job.
+          (cd "$workdir/out" && sha256sum \
+              DefenseClawSetup-Enterprise-x64.exe \
+              DefenseClawSetup-Enterprise-x64.exe.provenance.json) \
+            > "$workdir/out/sha256sums.txt"
+          cp -R "$workdir/out" assemble-artifacts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: assemble-artefacts-linux
+          path: assemble-artifacts/
+          retention-days: 7
+
+  assemble-macos:
+    name: assemble.sh --allow-unsigned (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    needs: repro-lints
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Prepare payload from fixture + vendor tree
+        run: |
+          set -euo pipefail
+          workdir="$(pwd)/.assemble-work"
+          mkdir -p "$workdir"
+          zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
+            | tar -x -C "$workdir"
+          # go build -mod=vendor (from repro-flags.sh) requires a vendor/
+          # tree. The outer Setup EXE has no external deps (stdlib only
+          # per spec 001 deps_test), so `go mod vendor` produces the
+          # minimum vendor/ needed for -mod=vendor to succeed. Matches
+          # the assemble-linux "Prepare payload from fixture + vendor
+          # tree" step — CR spec-002:PRRT_kwDORuAK-s6af8iG.
+          go mod vendor
+      - name: Run assemble.sh --allow-unsigned
+        env:
+          SOURCE_DATE_EPOCH: '1700000000'
+        run: |
+          set -euo pipefail
+          workdir="$(pwd)/.assemble-work"
+          mkdir -p "$workdir/out"
+          bash packaging/scripts/lib/assemble.sh \
+            --payload-dir "$workdir/payload" \
+            --source-dir  "$(pwd)" \
+            --out-dir     "$workdir/out" \
+            --source-commit 1111222233334444555566667777888899990000 \
+            --version 0.0.0-repro-fixture \
+            --cmid-pseudo-version v0.0.0-19700101000000-000000000000 \
+            --allow-unsigned
+          (cd "$workdir/out" && shasum -a 256 \
+              DefenseClawSetup-Enterprise-x64.exe \
+              DefenseClawSetup-Enterprise-x64.exe.provenance.json) \
+            > "$workdir/out/sha256sums.txt"
+          cp -R "$workdir/out" assemble-artifacts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: assemble-artefacts-macos
+          path: assemble-artifacts/
+          retention-days: 7
+
+  compare-assemble:
+    name: assemble.sh byte-identity (linux vs macos)
+    needs: [assemble-linux, assemble-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: assemble-artefacts-linux
+          path: linux/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: assemble-artefacts-macos
+          path: macos/
+      - name: Assert byte-identical outer Setup EXE + provenance
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in DefenseClawSetup-Enterprise-x64.exe \
+                   DefenseClawSetup-Enterprise-x64.exe.provenance.json; do
+            if ! diff -q "linux/$f" "macos/$f" >/dev/null 2>&1; then
+              echo "::error::$f differs between linux and macos runners"
+              echo "--- linux $f (first 512B) ---"
+              xxd -l 512 "linux/$f" || true
+              echo "--- macos $f (first 512B) ---"
+              xxd -l 512 "macos/$f" || true
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "The outer DefenseClawSetup-Enterprise-x64.exe MUST be"
+            echo "byte-identical across CI runners — spec 002 REQ-21 +"
+            echo "spec 001 § reproducibility contract. See"
+            echo "docs/specs/002-windows-avc-packaging/design.md § Risks."
+            exit 1
+          fi
+          echo "assemble.sh produced byte-identical output across ubuntu + macos."
+          echo ""
+          echo "Recorded SHA-256s:"
+          echo "--- linux ---"
+          cat linux/sha256sums.txt
+          echo "--- macos ---"
+          cat macos/sha256sums.txt
 
   compare:
     name: compare cross-platform SHA-256s

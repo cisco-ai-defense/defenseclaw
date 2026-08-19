@@ -29,24 +29,35 @@ func readEnterpriseSetupContractFile(t *testing.T, relative string) string {
 	return string(body)
 }
 
-func TestEnterpriseBuilderProducesOnlyTheMachineWideBootstrap(t *testing.T) {
-	builder := readEnterpriseSetupContractFile(t, "scripts/build-windows-enterprise-installer.ps1")
+// TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap asserts
+// the AVC-facing assembler (docs/specs/002-windows-avc-packaging/)
+// keys off the exact machine-wide bootstrap contract: same output
+// filename, same source package, same payload set, no relabeling of
+// the per-user Setup as managed-enterprise. Replaces the retired
+// TestEnterpriseBuilderProducesOnlyTheMachineWideBootstrap that read
+// scripts/build-windows-enterprise-installer.ps1 (deleted in the same
+// PR that landed this test — the old builder's contract has moved
+// into packaging/scripts/lib/assemble.{sh,ps1}).
+func TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap(t *testing.T) {
+	assembler := readEnterpriseSetupContractFile(t, "packaging/scripts/lib/assemble.sh")
 	for _, required := range []string{
 		"DefenseClawSetup-Enterprise-x64.exe",
 		"./cmd/defenseclaw-enterprise-setup",
-		"'managed-enterprise'",
-		"'enterprise-setup'",
 		"defenseclaw-gateway.exe",
 		"defenseclaw-hook.exe",
 		"install-enterprise.ps1",
 		"DefenseClawEnterprise.psm1",
 	} {
-		if !strings.Contains(builder, required) {
-			t.Errorf("enterprise builder is missing %q", required)
+		if !strings.Contains(assembler, required) {
+			t.Errorf("assembler is missing %q", required)
 		}
 	}
-	if strings.Contains(builder, "-DistributionFlavor managed-enterprise") {
-		t.Fatal("enterprise builder still relabels the ordinary per-user Setup")
+	// The AVC-driven flow does not touch the per-user Setup — that
+	// path stays under scripts/build-windows-installer.ps1 with its
+	// own ValidateSet('oss') gate. Assert the assembler cannot
+	// accidentally target it.
+	if strings.Contains(assembler, "./cmd/defenseclaw-setup") {
+		t.Fatal("assembler must not target the per-user Setup command")
 	}
 }
 
@@ -63,7 +74,7 @@ func TestOrdinarySetupBuilderCannotBeRelabeledAsEnterprise(t *testing.T) {
 func TestEnterpriseWorkflowValidatesPublicContractsWithoutPrivateRepositoryAccess(t *testing.T) {
 	workflow := readEnterpriseSetupContractFile(t, ".github/workflows/windows-enterprise-setup.yml")
 	for _, required := range []string{
-		"scripts/build-windows-enterprise-installer.ps1",
+		"packaging/scripts/lib/assemble.ps1",
 		"DefenseClawSetup-Enterprise-x64.exe",
 		"Validate public enterprise Setup contracts",
 		"pull_request:",
