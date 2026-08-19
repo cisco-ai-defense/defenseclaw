@@ -54,10 +54,10 @@ Semantic-only rules use the intentionally never-matching RE2 sentinel `a^`
 when a raw command mention cannot safely serve as fallback evidence.
 
 All trusted-action findings cross a final same-rule proof gate before they can
-affect a block decision. Complete, code-owned semantic, CodeGuard, exact
-fallback proof may authorize enforcement. Raw regex matches, parser-shadow
-evidence, partial or invalid facts, and proof for another rule remain
-detection-only and auditable.
+affect a block decision. A complete, code-owned semantic proof, CodeGuard
+proof, or exact fallback proof may independently authorize enforcement. Raw
+regex matches, parser-shadow evidence, partial or invalid facts, and proof for
+another rule remain detection-only and auditable.
 
 Durable ordered-chain enforcement is limited to authenticated connector hooks
 with canonical connector/session correlation. The audit store persists only
