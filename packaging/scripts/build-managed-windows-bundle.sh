@@ -421,12 +421,17 @@ touch    "${KIT_DIR}/source/cmd/defenseclaw-enterprise-setup/payload/.keep"
 #   - Otherwise, run go mod vendor at REPO_ROOT, mv it into the kit,
 #     and rely on restore_overlay's EXIT trap to leave a clean tree.
 # See CR spec-002:PRRT_kwDORuAK-s6af8io.
-if [[ -d "${REPO_ROOT}/vendor" ]]; then
+# -e follows symlinks (catches a linked vendor tree); -L catches
+# dangling symlinks that -e would miss. `go mod vendor` would replace
+# any of those three shapes with a fresh directory, and the mv would
+# then remove it from the working tree. See CR spec-002:PRRT_kwDORuAK-s6ahACI.
+if [[ -e "${REPO_ROOT}/vendor" || -L "${REPO_ROOT}/vendor" ]]; then
   echo "build-managed-windows-bundle: refusing to run — ${REPO_ROOT}/vendor already exists." >&2
   echo "  The bundler needs to run 'go mod vendor' and then move the result" >&2
-  echo "  into the AVC kit. Moving an already-populated vendor tree would" >&2
-  echo "  destroy work you may not have committed. Delete or move" >&2
-  echo "  ${REPO_ROOT}/vendor first, then rerun." >&2
+  echo "  into the AVC kit. Moving an already-populated vendor tree (or a" >&2
+  echo "  vendor symlink, or a stale vendor file) would destroy work you" >&2
+  echo "  may not have committed. Delete or move ${REPO_ROOT}/vendor" >&2
+  echo "  first, then rerun." >&2
   exit 1
 fi
 

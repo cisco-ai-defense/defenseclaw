@@ -69,9 +69,21 @@ func runEmitManifest(args []string) error {
 			"size":   f.size,
 		})
 	}
+	// Detect whether --distribution-flavor was passed explicitly. Doing
+	// this via `fs.Visit` after Parse (rather than comparing against
+	// the default) is the only correct way; an explicit
+	// `--distribution-flavor managed-enterprise --unsigned` needs to
+	// stay `managed-enterprise`, not be re-suffixed. See CR
+	// spec-002:PRRT_kwDORuAK-s6ahAB9.
+	explicitFlavor := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "distribution-flavor" {
+			explicitFlavor = true
+		}
+	})
 	// Single source of truth for the flavor-and-unsigned rule shared
 	// with emit-provenance; see cmd/windows-repro-manifest/flavor.go.
-	flavor := resolveDistributionFlavor(*distributionFlavor, *unsigned)
+	flavor := resolveDistributionFlavor(*distributionFlavor, *unsigned, explicitFlavor)
 	doc := map[string]any{
 		"distribution_flavor": flavor,
 		"files":               entries,

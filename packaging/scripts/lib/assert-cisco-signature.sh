@@ -108,41 +108,70 @@ ${verify_output}"
         die 4 "assert-cisco-signature: could not decode PKCS#7 from ${path}"
     fi
 
-    # `openssl pkcs7 -print_certs` emits repeated "subject=...\nissuer=
-    # ...\n-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
-    # blocks. Extract every subject line's CN and require the required
-    # publisher CN to appear at least once. This is robust against the
-    # chain order osslsigncode picks and matches the pwsh helper's
-    # X509Certificate2.GetNameInfo(SimpleName) semantics — publisher
-    # match is what matters, not chain position.
-    local subject_cns
-    subject_cns=$(awk -F'CN[[:space:]]*=[[:space:]]*' '
-        /^subject=/ && NF>1 {
-            cn = $2
-            # CN may be followed by a comma-separated attribute; strip
-            # everything from the first comma or slash onward.
-            sub(/,.*$/, "", cn)
-            sub(/\/.*$/, "", cn)
-            print cn
-        }
-    ' "${certs_pem}")
-
-    if [ -z "${subject_cns}" ]; then
-        die 4 "assert-cisco-signature: no certificate subjects found in ${path} PKCS#7"
-    fi
-
+    # `openssl pkcs7 -print_certs` emits one or more "subject=...\n
+    # issuer=...\n-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE
+    # -----" blocks. Split into per-cert PEMs, then extract each cert's
+    # CN via `openssl x509 -noout -subject -nameopt multiline`. The
+    # multiline nameopt emits one attribute per line with a stable
+    # `<name> = <value>` shape, so a CN that legitimately contains
+    # commas (e.g. `Cisco Systems, Inc.`) is preserved verbatim — the
+    # earlier awk-on-oneline path stripped everything after the first
+    # comma and turned that CN into "Cisco Systems", failing valid
+    # Cisco signatures. See CR spec-002:PRRT_kwDORuAK-s6ahACT.
+    #
+    # Chain-vs-signer note: this checks that AT LEAST ONE cert in the
+    # PKCS#7 chain carries the required publisher CN. `osslsigncode
+    # verify -CAfile` is the primary chain-of-trust check — with a
+    # correctly-pinned CA bundle, any chain that verifies is by
+    # definition Cisco-issued. The CN check here is defense-in-depth
+    # against an accidental non-Cisco cert bundled into the PKCS#7
+    # container; a full SignerInfo → certificate binding would be
+    # stronger and is tracked as a follow-up spec.
     local found=0
+    local seen_cns=""
+    local cert_pem
+    cert_pem="$(mktemp -t cisco-sig.XXXXXX.pem)"
+    # shellcheck disable=SC2064
+    trap "rm -f '${pkcs7_pem}' '${certs_pem}' '${cert_pem}'" RETURN
+
+    # Split certs.pem into individual BEGIN/END CERTIFICATE blocks.
+    # awk keeps the block boundary state without external tools.
+    local cn
     while IFS= read -r cn; do
         [ -z "${cn}" ] && continue
+        seen_cns="${seen_cns}${cn}$'\n'"
         if [ "${cn}" = "${_DEFENSECLAW_CISCO_PUBLISHER_CN}" ]; then
             found=1
-            break
         fi
-    done <<EOF
-${subject_cns}
-EOF
+    done < <(
+        awk -v out="${cert_pem}" '
+            /-----BEGIN CERTIFICATE-----/ { inblock=1; content="" }
+            inblock                       { content = content $0 ORS }
+            /-----END CERTIFICATE-----/ && inblock {
+                # Write the current cert block to `out`, ask openssl
+                # for its CN via -nameopt multiline (one attr per
+                # line), and emit ONLY the commonName value.
+                printf "%s", content > out
+                close(out)
+                cmd = "openssl x509 -in " out " -noout -subject -nameopt multiline 2>/dev/null"
+                while ((cmd | getline line) > 0) {
+                    if (line ~ /commonName/) {
+                        # Line shape:  "    commonName                = Cisco Systems, Inc."
+                        sub(/.*commonName[[:space:]]*=[[:space:]]*/, "", line)
+                        print line
+                        break
+                    }
+                }
+                close(cmd)
+                inblock=0
+            }
+        ' "${certs_pem}"
+    )
 
+    if [ -z "${seen_cns}" ]; then
+        die 4 "assert-cisco-signature: no certificate subjects found in ${path} PKCS#7"
+    fi
     if [ "${found}" -eq 0 ]; then
-        die 4 "assert-cisco-signature: ${path} does not carry a certificate with CN '${_DEFENSECLAW_CISCO_PUBLISHER_CN}' (found: $(printf '%s ' ${subject_cns}))"
+        die 4 "assert-cisco-signature: ${path} does not carry a certificate with CN '${_DEFENSECLAW_CISCO_PUBLISHER_CN}' (found: $(printf '%s ' ${seen_cns}))"
     fi
 }

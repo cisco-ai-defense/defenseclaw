@@ -21,20 +21,25 @@ const unsignedDistributionFlavorSuffix = "-unsigned"
 // resolveDistributionFlavor is the single source of truth for how
 // `--distribution-flavor` interacts with `--unsigned`. Behaviour:
 //
-//   - If the caller passed no --distribution-flavor (i.e. flavor equals
-//     the default) AND --unsigned is set, append the unsigned suffix so
+//   - If the caller passed no --distribution-flavor (explicitFlavor
+//     is false) AND --unsigned is set, append the unsigned suffix so
 //     an unsigned developer build cannot be confused with a release
 //     artefact.
 //
-//   - If the caller passed an explicit --distribution-flavor, trust
-//     them: return it verbatim regardless of --unsigned. Downstream
-//     test harnesses use this to shape flavor strings that already
-//     carry markers of their own.
+//   - If the caller explicitly passed --distribution-flavor (regardless
+//     of value — including the coincidentally-default "managed-enterprise"),
+//     trust them: return it verbatim. Downstream test harnesses use
+//     this to shape flavor strings that already carry markers of
+//     their own; earlier revisions inferred "explicit" from
+//     "value != default" and mis-suffixed
+//     `--distribution-flavor managed-enterprise --unsigned` (CR
+//     spec-002:PRRT_kwDORuAK-s6ahAB9).
 //
 // emit-manifest and emit-provenance both call this — same rule, same
-// bytes, no drift.
-func resolveDistributionFlavor(flavor string, unsigned bool) string {
-	if unsigned && flavor == defaultDistributionFlavor {
+// bytes, no drift. Callers detect explicitFlavor via FlagSet.Visit
+// after Parse (see emit_manifest.go and emit_provenance.go).
+func resolveDistributionFlavor(flavor string, unsigned, explicitFlavor bool) string {
+	if unsigned && !explicitFlavor {
 		return defaultDistributionFlavor + unsignedDistributionFlavorSuffix
 	}
 	return flavor

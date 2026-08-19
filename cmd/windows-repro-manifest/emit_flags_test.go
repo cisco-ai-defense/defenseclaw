@@ -67,6 +67,32 @@ func TestEmitManifestUnsignedFlag(t *testing.T) {
 		t.Fatalf("explicit distribution_flavor=%q, want %q", got, "downstream-test-flavor")
 	}
 
+	// Explicit --distribution-flavor with the same VALUE as the default
+	// ("managed-enterprise") + --unsigned → NO auto-suffix. Guards
+	// against the regression a value-vs-default comparison would
+	// cause: the caller asked for `managed-enterprise` explicitly, so
+	// return `managed-enterprise` even under --unsigned. See CR
+	// spec-002:PRRT_kwDORuAK-s6ahAB9.
+	explicitDefault := filepath.Join(outDir, "explicit-default.json")
+	err = runEmitManifest([]string{
+		"--version", "0.9.0",
+		"--source-commit", "1111222233334444555566667777888899990000",
+		"--payload-dir", payloadDir,
+		"--out", explicitDefault,
+		"--distribution-flavor", "managed-enterprise",
+		"--unsigned",
+	})
+	if err != nil {
+		t.Fatalf("emit-manifest explicit-default+unsigned: %v", err)
+	}
+	doc = readJSONFile(t, explicitDefault)
+	if got := doc["distribution_flavor"]; got != "managed-enterprise" {
+		t.Fatalf("explicit default + unsigned: distribution_flavor=%q, want %q (must NOT be auto-suffixed when the caller explicitly passed the default value)", got, "managed-enterprise")
+	}
+	if got := doc["unsigned"]; got != true {
+		t.Fatalf("explicit default + unsigned: unsigned=%v, want true", got)
+	}
+
 	// No --unsigned → unsigned=false, default flavor unchanged.
 	signed := filepath.Join(outDir, "signed.json")
 	err = runEmitManifest([]string{

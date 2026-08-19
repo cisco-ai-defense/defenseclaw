@@ -74,10 +74,20 @@ if (Test-Path -LiteralPath (Join-Path $scriptDir 'repro-flags.ps1')) {
 }
 
 # ---------------------------------------------------------------------------
-# CLI validation (Mandatory params handle the missing case; validate shape).
+# CLI validation. Every param is optional at the [CmdletBinding] layer
+# so a non-interactive AVC pipeline never blocks on stdin; validate
+# each here with an explicit Invoke-DefenseClawDie -Code 2 so the
+# header's exit-code contract (2 = usage) is preserved.
 # ---------------------------------------------------------------------------
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    # -Version is required by both emit-manifest and emit-provenance;
+    # reaching those without a value would surface as exit 6 (I/O)
+    # instead of the documented exit 2 (usage). See CR
+    # spec-002:PRRT_kwDORuAK-s6ahACO.
+    Invoke-DefenseClawDie -Code 2 -Message "-Version is required (semver, e.g. 0.9.0)"
+}
 if ($SourceCommit -notmatch '^[0-9a-f]{40}$') {
-    Invoke-DefenseClawDie -Code 2 -Message "--source-commit must be a 40-char lowercase git OID (got: '$SourceCommit')"
+    Invoke-DefenseClawDie -Code 2 -Message "-SourceCommit must be a 40-char lowercase git OID (got: '$SourceCommit')"
 }
 if (-not (Test-Path -LiteralPath $PayloadDir -PathType Container)) {
     Invoke-DefenseClawDie -Code 6 -Message "payload-dir not found: $PayloadDir"

@@ -88,10 +88,20 @@ func runEmitProvenance(args []string) error {
 		size = info.Size()
 	}
 
+	// Detect whether --distribution-flavor was passed explicitly. See
+	// emit_manifest.go for the fs.Visit rationale — an explicit
+	// `--distribution-flavor managed-enterprise --unsigned` must stay
+	// `managed-enterprise`, not be re-suffixed.
+	explicitFlavor := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "distribution-flavor" {
+			explicitFlavor = true
+		}
+	})
 	// Shares resolveDistributionFlavor with emit-manifest so a change
 	// to the default or the -unsigned suffix flows through both
 	// emitters in one edit (cmd/windows-repro-manifest/flavor.go).
-	flavor := resolveDistributionFlavor(*distributionFlavor, *unsigned)
+	flavor := resolveDistributionFlavor(*distributionFlavor, *unsigned, explicitFlavor)
 	doc := map[string]any{
 		"distribution_flavor": flavor,
 		"schema_version":      1,

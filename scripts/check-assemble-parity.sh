@@ -123,18 +123,28 @@ fi
 # with two subcommands: emit-manifest, emit-provenance. Anything else
 # (emit-payload-metadata belongs to the bundler side, not assemble)
 # indicates drift.
-extract_emitter_calls() {
-    # Preserve source-order + duplicates: `sort -u` collapsed two files
-    # that invoke the SAME subcommand set in a DIFFERENT order into an
-    # identical hash, which is exactly the drift this lint is supposed
-    # to catch. Emit one line per invocation in the order it appears.
-    # See CR spec-002:PRRT_kwDORuAK-s6af8j4.
-    grep -E "'?emit-[a-z-]+'?" "$1" \
+extract_sh_emitter_calls() {
+    # Bind extraction to the actual emitter invocation form,
+    # `"${EMITTER}" emit-...`, so stage labels (`_stage "stage 3/6
+    # emit-manifest"`) and prose comments do not leak into the parity
+    # set. Preserve source order and duplicates: `sort -u` collapsed
+    # two files that invoke the SAME subcommand set in a DIFFERENT
+    # order into an identical hash, which is exactly the drift this
+    # lint is supposed to catch. See CR spec-002:PRRT_kwDORuAK-s6af8j4
+    # (order preservation) + PRRT_kwDORuAK-s6ahACZ (bind to call site).
+    grep -E '"\$\{EMITTER\}" emit-[a-z-]+' "${SH}" \
+        | grep -oE "emit-[a-z-]+"
+}
+extract_ps_emitter_calls() {
+    # pwsh form: emitter subcommands appear as the first element of
+    # $manifestArgs / $provArgs arrays, formatted `'emit-<name>',`.
+    # Only match those lines to avoid the same stage-label pollution.
+    grep -E "^[[:space:]]+'emit-[a-z-]+'," "${PS}" \
         | grep -oE "emit-[a-z-]+"
 }
 
-sh_emit="$(extract_emitter_calls "${SH}")"
-ps_emit="$(extract_emitter_calls "${PS}")"
+sh_emit="$(extract_sh_emitter_calls)"
+ps_emit="$(extract_ps_emitter_calls)"
 
 if [[ "${sh_emit}" != "${ps_emit}" ]]; then
     echo "check-assemble-parity: emitter subcommand set drift between the two files." >&2
