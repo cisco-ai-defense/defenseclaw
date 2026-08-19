@@ -236,6 +236,24 @@ func TestAggregateCodeGuardSeveritySeparatesVisibleAndEnforceable(t *testing.T) 
 	}
 }
 
+func TestHighestInspectConfidenceIncludesCodeGuardFindings(t *testing.T) {
+	ruleFindings := []RuleFinding{
+		{Severity: "MEDIUM", Confidence: 0.99},
+		{Severity: "HIGH", Confidence: 0.61},
+	}
+	codeGuardFindings := []RuleFinding{
+		{Severity: "HIGH", Confidence: 0.87},
+		{Severity: "LOW", Confidence: 1},
+	}
+
+	if got := highestInspectConfidence(ruleFindings, codeGuardFindings, "HIGH"); got != 0.87 {
+		t.Fatalf("confidence = %.2f, want highest HIGH confidence 0.87", got)
+	}
+	if got := highestInspectConfidence(nil, codeGuardFindings, "HIGH"); got != 0.87 {
+		t.Fatalf("CodeGuard-only confidence = %.2f, want 0.87", got)
+	}
+}
+
 func TestInspectCodeGuardProofCannotBeReplayedFromJSON(t *testing.T) {
 	scan := scanner.NewCodeGuardScanner(t.TempDir()).ScanContentWithProvenance(
 		"app.py",

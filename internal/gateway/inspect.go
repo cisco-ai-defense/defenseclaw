@@ -685,13 +685,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		}
 	} else {
 		severity := HighestSeverity(ruleFindings)
-		confidence := HighestConfidence(ruleFindings, severity)
 		enforceableSeverity := HighestSeverity(enforceableRuleFindings(ruleFindings))
 		severity, enforceableSeverity = aggregateCodeGuardSeverity(
 			cgFindings,
 			severity,
 			enforceableSeverity,
 		)
+		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
 		runtimeAction := guardrailActionAllow
 		if enforceableSeverity != "NONE" {
@@ -748,6 +748,17 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	return verdict
+}
+
+// highestInspectConfidence keeps verdict confidence aligned with the visible
+// finding that established the final severity, regardless of whether that
+// finding came from the rule scanner or CodeGuard.
+func highestInspectConfidence(ruleFindings, codeGuardFindings []RuleFinding, severity string) float64 {
+	confidence := HighestConfidence(ruleFindings, severity)
+	if codeGuardConfidence := HighestConfidence(codeGuardFindings, severity); codeGuardConfidence > confidence {
+		confidence = codeGuardConfidence
+	}
+	return confidence
 }
 
 // unmarshalArgsObject decodes a tool-call args payload that may
