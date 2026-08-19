@@ -232,7 +232,7 @@ type Config struct {
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
 	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
-	Routing               RoutingConfig               `mapstructure:"routing"          yaml:"routing,omitempty"`
+	Routing RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.

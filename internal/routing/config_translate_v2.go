@@ -131,63 +131,63 @@ type SRLoRA struct {
 
 // SRSignalsBlock contains all signal type configurations.
 type SRSignalsBlock struct {
-	Keywords   []SRKeywordSignalV2    `yaml:"keywords,omitempty"`
-	Embedding  []SREmbeddingSignal    `yaml:"embedding,omitempty"`
-	Domain     []SRDomainSignal       `yaml:"domain,omitempty"`
-	Complexity []SRComplexitySignal   `yaml:"complexity,omitempty"`
-	Context    []SRContextSignal      `yaml:"context,omitempty"`
-	Structure  []SRStructureSignal    `yaml:"structure,omitempty"`
-	Jailbreak  []SRJailbreakSignal    `yaml:"jailbreak,omitempty"`
-	PII        []SRPIISignal          `yaml:"pii,omitempty"`
-	Language   []SRLanguageSignal     `yaml:"language,omitempty"`
-	Custom     []SRCustomSignal       `yaml:"custom,omitempty"`
+	Keywords   []SRKeywordSignalV2  `yaml:"keywords,omitempty"`
+	Embedding  []SREmbeddingSignal  `yaml:"embedding,omitempty"`
+	Domain     []SRDomainSignal     `yaml:"domain,omitempty"`
+	Complexity []SRComplexitySignal `yaml:"complexity,omitempty"`
+	Context    []SRContextSignal    `yaml:"context,omitempty"`
+	Structure  []SRStructureSignal  `yaml:"structure,omitempty"`
+	Jailbreak  []SRJailbreakSignal  `yaml:"jailbreak,omitempty"`
+	PII        []SRPIISignal        `yaml:"pii,omitempty"`
+	Language   []SRLanguageSignal   `yaml:"language,omitempty"`
+	Custom     []SRCustomSignal     `yaml:"custom,omitempty"`
 }
 
 // SRKeywordSignalV2 defines a keyword matching signal (v2 expanded format).
 type SRKeywordSignalV2 struct {
-	Name           string   `yaml:"name"`
-	Operator       string   `yaml:"operator,omitempty"`
-	Method         string   `yaml:"method,omitempty"`
-	Keywords       []string `yaml:"keywords,omitempty"`
-	CaseSensitive  bool     `yaml:"case_sensitive,omitempty"`
-	BM25Threshold  float64  `yaml:"bm25_threshold,omitempty"`
-	MinMatches     int      `yaml:"min_matches,omitempty"`
-	Description    string   `yaml:"description,omitempty"`
+	Name          string   `yaml:"name"`
+	Operator      string   `yaml:"operator,omitempty"`
+	Method        string   `yaml:"method,omitempty"`
+	Keywords      []string `yaml:"keywords,omitempty"`
+	CaseSensitive bool     `yaml:"case_sensitive,omitempty"`
+	BM25Threshold float64  `yaml:"bm25_threshold,omitempty"`
+	MinMatches    int      `yaml:"min_matches,omitempty"`
+	Description   string   `yaml:"description,omitempty"`
 }
 
 // SREmbeddingSignal defines a semantic embedding similarity signal.
 type SREmbeddingSignal struct {
-	Name              string               `yaml:"name"`
-	Threshold         float64              `yaml:"threshold,omitempty"`
-	AggregationMethod string               `yaml:"aggregation_method,omitempty"`
+	Name              string                 `yaml:"name"`
+	Threshold         float64                `yaml:"threshold,omitempty"`
+	AggregationMethod string                 `yaml:"aggregation_method,omitempty"`
 	Candidates        []SREmbeddingCandidate `yaml:"candidates,omitempty"`
-	QueryModality     string               `yaml:"query_modality,omitempty"`
-	Model             string               `yaml:"model,omitempty"`
-	Description       string               `yaml:"description,omitempty"`
+	QueryModality     string                 `yaml:"query_modality,omitempty"`
+	Model             string                 `yaml:"model,omitempty"`
+	Description       string                 `yaml:"description,omitempty"`
 }
 
 // SREmbeddingCandidate is a reference text for embedding similarity comparison.
 type SREmbeddingCandidate struct {
-	Text     string  `yaml:"text"`
-	Label    string  `yaml:"label,omitempty"`
-	Weight   float64 `yaml:"weight,omitempty"`
+	Text   string  `yaml:"text"`
+	Label  string  `yaml:"label,omitempty"`
+	Weight float64 `yaml:"weight,omitempty"`
 }
 
 // SRDomainSignal classifies queries by academic/professional domain.
 type SRDomainSignal struct {
-	Name           string                    `yaml:"name"`
-	Description    string                    `yaml:"description,omitempty"`
-	MMLUCategories []string                  `yaml:"mmlu_categories,omitempty"`
-	ModelScores    map[string]float64        `yaml:"model_scores,omitempty"`
+	Name           string             `yaml:"name"`
+	Description    string             `yaml:"description,omitempty"`
+	MMLUCategories []string           `yaml:"mmlu_categories,omitempty"`
+	ModelScores    map[string]float64 `yaml:"model_scores,omitempty"`
 }
 
 // SRComplexitySignal evaluates query complexity.
 type SRComplexitySignal struct {
-	Name        string                   `yaml:"name"`
-	Threshold   float64                  `yaml:"threshold,omitempty"`
-	Description string                   `yaml:"description,omitempty"`
-	Hard        *SRComplexityCandidates  `yaml:"hard,omitempty"`
-	Easy        *SRComplexityCandidates  `yaml:"easy,omitempty"`
+	Name        string                  `yaml:"name"`
+	Threshold   float64                 `yaml:"threshold,omitempty"`
+	Description string                  `yaml:"description,omitempty"`
+	Hard        *SRComplexityCandidates `yaml:"hard,omitempty"`
+	Easy        *SRComplexityCandidates `yaml:"easy,omitempty"`
 }
 
 // SRComplexityCandidates holds example candidates for a complexity level.
@@ -205,8 +205,8 @@ type SRContextSignal struct {
 
 // SRStructureSignal inspects structural features of the input.
 type SRStructureSignal struct {
-	Name        string             `yaml:"name"`
-	Description string             `yaml:"description,omitempty"`
+	Name        string              `yaml:"name"`
+	Description string              `yaml:"description,omitempty"`
 	Feature     *SRStructureFeature `yaml:"feature,omitempty"`
 }
 
@@ -388,8 +388,8 @@ type SRGlobalBlock struct {
 // TranslateFullInput mirrors the expanded DefenseClaw routing config
 // for the v0.3 full format translator. Package-local to avoid circular imports.
 type TranslateFullInput struct {
-	Port      int
-	Strategy  string
+	Port     int
+	Strategy string
 
 	// Provider configuration
 	ProviderDefaults *TranslateProviderDefaults

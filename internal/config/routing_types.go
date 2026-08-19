@@ -26,18 +26,18 @@ package config
 // RoutingConfigV2 is the expanded top-level routing configuration for
 // vLLM Semantic Router v0.3.
 type RoutingConfigV2 struct {
-	Enabled     bool                    `mapstructure:"enabled"      yaml:"enabled"`
-	Version     string                  `mapstructure:"version"      yaml:"version,omitempty"`
-	Container   RoutingContainerConfig  `mapstructure:"container"    yaml:"container,omitempty"`
-	Remote      RoutingRemoteConfig     `mapstructure:"remote"       yaml:"remote,omitempty"`
-	Models      []RoutingModelV2        `mapstructure:"models"       yaml:"models,omitempty"`
-	Signals     RoutingSignalConfigV2   `mapstructure:"signals"      yaml:"signals,omitempty"`
+	Enabled     bool                     `mapstructure:"enabled"      yaml:"enabled"`
+	Version     string                   `mapstructure:"version"      yaml:"version,omitempty"`
+	Container   RoutingContainerConfig   `mapstructure:"container"    yaml:"container,omitempty"`
+	Remote      RoutingRemoteConfig      `mapstructure:"remote"       yaml:"remote,omitempty"`
+	Models      []RoutingModelV2         `mapstructure:"models"       yaml:"models,omitempty"`
+	Signals     RoutingSignalConfigV2    `mapstructure:"signals"      yaml:"signals,omitempty"`
 	Projections RoutingProjectionsConfig `mapstructure:"projections"  yaml:"projections,omitempty"`
-	Decisions   []RoutingDecisionV2     `mapstructure:"decisions"    yaml:"decisions,omitempty"`
-	Global      RoutingGlobalConfig     `mapstructure:"global"       yaml:"global,omitempty"`
-	Recipes     []RoutingRecipe         `mapstructure:"recipes"      yaml:"recipes,omitempty"`
-	Entrypoints []RoutingEntrypoint     `mapstructure:"entrypoints"  yaml:"entrypoints,omitempty"`
-	Context     RoutingContextConfig    `mapstructure:"context"      yaml:"context,omitempty"`
+	Decisions   []RoutingDecisionV2      `mapstructure:"decisions"    yaml:"decisions,omitempty"`
+	Global      RoutingGlobalConfig      `mapstructure:"global"       yaml:"global,omitempty"`
+	Recipes     []RoutingRecipe          `mapstructure:"recipes"      yaml:"recipes,omitempty"`
+	Entrypoints []RoutingEntrypoint      `mapstructure:"entrypoints"  yaml:"entrypoints,omitempty"`
+	Context     RoutingContextConfig     `mapstructure:"context"      yaml:"context,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -59,24 +59,24 @@ type RoutingContainerConfig struct {
 // RoutingModelV2 is the expanded model definition with quality scores,
 // modality, LoRA adapters, pricing, and external model ID mappings.
 type RoutingModelV2 struct {
-	Name              string               `mapstructure:"name"                yaml:"name"`
-	Provider          string               `mapstructure:"provider"            yaml:"provider"`
-	Model             string               `mapstructure:"model"               yaml:"model"`
-	BaseURL           string               `mapstructure:"base_url"            yaml:"base_url,omitempty"`
-	APIKeyEnv         string               `mapstructure:"api_key_env"         yaml:"api_key_env,omitempty"`
-	Weight            int                  `mapstructure:"weight"              yaml:"weight,omitempty"`
-	Capabilities      []string             `mapstructure:"capabilities"        yaml:"capabilities,omitempty"`
-	CostPer1kTokens   float64              `mapstructure:"cost_per_1k_tokens"  yaml:"cost_per_1k_tokens,omitempty"`
-	ReasoningFamily   string               `mapstructure:"reasoning_family"    yaml:"reasoning_family,omitempty"`
-	ParamSize         string               `mapstructure:"param_size"          yaml:"param_size,omitempty"`
-	ContextWindowSize int                  `mapstructure:"context_window_size" yaml:"context_window_size,omitempty"`
-	QualityScore      float64              `mapstructure:"quality_score"       yaml:"quality_score,omitempty"`
-	Modality          []string             `mapstructure:"modality"            yaml:"modality,omitempty"`
-	Tags              []string             `mapstructure:"tags"                yaml:"tags,omitempty"`
-	LoRAs             []RoutingLoRAConfig  `mapstructure:"loras"               yaml:"loras,omitempty"`
-	Pricing           RoutingModelPricing  `mapstructure:"pricing"             yaml:"pricing,omitempty"`
-	BackendRefs       []RoutingBackendRef  `mapstructure:"backend_refs"        yaml:"backend_refs,omitempty"`
-	ExternalModelIDs  map[string]string    `mapstructure:"external_model_ids"  yaml:"external_model_ids,omitempty"`
+	Name              string              `mapstructure:"name"                yaml:"name"`
+	Provider          string              `mapstructure:"provider"            yaml:"provider"`
+	Model             string              `mapstructure:"model"               yaml:"model"`
+	BaseURL           string              `mapstructure:"base_url"            yaml:"base_url,omitempty"`
+	APIKeyEnv         string              `mapstructure:"api_key_env"         yaml:"api_key_env,omitempty"`
+	Weight            int                 `mapstructure:"weight"              yaml:"weight,omitempty"`
+	Capabilities      []string            `mapstructure:"capabilities"        yaml:"capabilities,omitempty"`
+	CostPer1kTokens   float64             `mapstructure:"cost_per_1k_tokens"  yaml:"cost_per_1k_tokens,omitempty"`
+	ReasoningFamily   string              `mapstructure:"reasoning_family"    yaml:"reasoning_family,omitempty"`
+	ParamSize         string              `mapstructure:"param_size"          yaml:"param_size,omitempty"`
+	ContextWindowSize int                 `mapstructure:"context_window_size" yaml:"context_window_size,omitempty"`
+	QualityScore      float64             `mapstructure:"quality_score"       yaml:"quality_score,omitempty"`
+	Modality          []string            `mapstructure:"modality"            yaml:"modality,omitempty"`
+	Tags              []string            `mapstructure:"tags"                yaml:"tags,omitempty"`
+	LoRAs             []RoutingLoRAConfig `mapstructure:"loras"               yaml:"loras,omitempty"`
+	Pricing           RoutingModelPricing `mapstructure:"pricing"             yaml:"pricing,omitempty"`
+	BackendRefs       []RoutingBackendRef `mapstructure:"backend_refs"        yaml:"backend_refs,omitempty"`
+	ExternalModelIDs  map[string]string   `mapstructure:"external_model_ids"  yaml:"external_model_ids,omitempty"`
 }
 
 // RoutingLoRAConfig describes a LoRA adapter attached to a model.
@@ -108,26 +108,26 @@ type RoutingBackendRef struct {
 // RoutingSignalConfigV2 contains all signal type slices for the expanded
 // router configuration.
 type RoutingSignalConfigV2 struct {
-	Keywords     []RoutingKeywordSignalV2   `mapstructure:"keywords"      yaml:"keywords,omitempty"`
-	Embedding    []RoutingEmbeddingSignal   `mapstructure:"embedding"     yaml:"embedding,omitempty"`
-	Domain       []RoutingDomainSignal      `mapstructure:"domain"        yaml:"domain,omitempty"`
-	Complexity   []RoutingComplexitySignal  `mapstructure:"complexity"    yaml:"complexity,omitempty"`
-	Context      []RoutingContextSignal     `mapstructure:"context"       yaml:"context,omitempty"`
-	Structure    []RoutingStructureSignal   `mapstructure:"structure"     yaml:"structure,omitempty"`
-	Modality     []RoutingModalitySignal    `mapstructure:"modality"      yaml:"modality,omitempty"`
-	Language     []RoutingLanguageSignal    `mapstructure:"language"      yaml:"language,omitempty"`
-	PII          []RoutingPIISignal         `mapstructure:"pii"           yaml:"pii,omitempty"`
-	Jailbreak    []RoutingJailbreakSignal   `mapstructure:"jailbreak"     yaml:"jailbreak,omitempty"`
-	FactCheck    []RoutingFactCheckSignal   `mapstructure:"fact_check"    yaml:"fact_check,omitempty"`
+	Keywords     []RoutingKeywordSignalV2    `mapstructure:"keywords"      yaml:"keywords,omitempty"`
+	Embedding    []RoutingEmbeddingSignal    `mapstructure:"embedding"     yaml:"embedding,omitempty"`
+	Domain       []RoutingDomainSignal       `mapstructure:"domain"        yaml:"domain,omitempty"`
+	Complexity   []RoutingComplexitySignal   `mapstructure:"complexity"    yaml:"complexity,omitempty"`
+	Context      []RoutingContextSignal      `mapstructure:"context"       yaml:"context,omitempty"`
+	Structure    []RoutingStructureSignal    `mapstructure:"structure"     yaml:"structure,omitempty"`
+	Modality     []RoutingModalitySignal     `mapstructure:"modality"      yaml:"modality,omitempty"`
+	Language     []RoutingLanguageSignal     `mapstructure:"language"      yaml:"language,omitempty"`
+	PII          []RoutingPIISignal          `mapstructure:"pii"           yaml:"pii,omitempty"`
+	Jailbreak    []RoutingJailbreakSignal    `mapstructure:"jailbreak"     yaml:"jailbreak,omitempty"`
+	FactCheck    []RoutingFactCheckSignal    `mapstructure:"fact_check"    yaml:"fact_check,omitempty"`
 	UserFeedback []RoutingUserFeedbackSignal `mapstructure:"user_feedback" yaml:"user_feedback,omitempty"`
-	Reask        []RoutingReaskSignal       `mapstructure:"reask"         yaml:"reask,omitempty"`
-	Preference   []RoutingPreferenceSignal  `mapstructure:"preference"    yaml:"preference,omitempty"`
+	Reask        []RoutingReaskSignal        `mapstructure:"reask"         yaml:"reask,omitempty"`
+	Preference   []RoutingPreferenceSignal   `mapstructure:"preference"    yaml:"preference,omitempty"`
 	Conversation []RoutingConversationSignal `mapstructure:"conversation"  yaml:"conversation,omitempty"`
-	Event        []RoutingEventSignal       `mapstructure:"event"         yaml:"event,omitempty"`
-	Metadata     []RoutingMetadataSignal    `mapstructure:"metadata"      yaml:"metadata,omitempty"`
-	RoleBinding  []RoutingRoleBindingSignal `mapstructure:"role_binding"  yaml:"role_binding,omitempty"`
-	KB           []RoutingKBSignal          `mapstructure:"kb"            yaml:"kb,omitempty"`
-	Classifier   []RoutingClassifierSignal  `mapstructure:"classifier"    yaml:"classifier,omitempty"`
+	Event        []RoutingEventSignal        `mapstructure:"event"         yaml:"event,omitempty"`
+	Metadata     []RoutingMetadataSignal     `mapstructure:"metadata"      yaml:"metadata,omitempty"`
+	RoleBinding  []RoutingRoleBindingSignal  `mapstructure:"role_binding"  yaml:"role_binding,omitempty"`
+	KB           []RoutingKBSignal           `mapstructure:"kb"            yaml:"kb,omitempty"`
+	Classifier   []RoutingClassifierSignal   `mapstructure:"classifier"    yaml:"classifier,omitempty"`
 }
 
 // RoutingKeywordSignalV2 extends keyword matching with BM25, n-gram, and
@@ -223,13 +223,13 @@ type RoutingPIISignal struct {
 
 // RoutingJailbreakSignal detects jailbreak or prompt injection attempts.
 type RoutingJailbreakSignal struct {
-	Name             string   `mapstructure:"name"              yaml:"name"`
-	Method           string   `mapstructure:"method"            yaml:"method,omitempty"`
-	Threshold        float64  `mapstructure:"threshold"         yaml:"threshold,omitempty"`
-	IncludeHistory   bool     `mapstructure:"include_history"   yaml:"include_history,omitempty"`
-	Description      string   `mapstructure:"description"       yaml:"description,omitempty"`
+	Name              string   `mapstructure:"name"              yaml:"name"`
+	Method            string   `mapstructure:"method"            yaml:"method,omitempty"`
+	Threshold         float64  `mapstructure:"threshold"         yaml:"threshold,omitempty"`
+	IncludeHistory    bool     `mapstructure:"include_history"   yaml:"include_history,omitempty"`
+	Description       string   `mapstructure:"description"       yaml:"description,omitempty"`
 	JailbreakPatterns []string `mapstructure:"jailbreak_patterns" yaml:"jailbreak_patterns,omitempty"`
-	BenignPatterns   []string `mapstructure:"benign_patterns"   yaml:"benign_patterns,omitempty"`
+	BenignPatterns    []string `mapstructure:"benign_patterns"   yaml:"benign_patterns,omitempty"`
 }
 
 // RoutingFactCheckSignal flags requests requiring factual verification.
@@ -355,23 +355,23 @@ type RoutingAlgorithmConfig struct {
 
 // ConfidenceAlgorithmCfg configures confidence-based model selection.
 type ConfidenceAlgorithmCfg struct {
-	ConfidenceMethod  string             `mapstructure:"confidence_method"   yaml:"confidence_method,omitempty"`
-	Threshold         float64            `mapstructure:"threshold"           yaml:"threshold,omitempty"`
-	HybridWeights     map[string]float64 `mapstructure:"hybrid_weights"      yaml:"hybrid_weights,omitempty"`
-	EscalationOrder   []string           `mapstructure:"escalation_order"    yaml:"escalation_order,omitempty"`
-	CostQualityTradeoff float64          `mapstructure:"cost_quality_tradeoff" yaml:"cost_quality_tradeoff,omitempty"`
-	TokenFilter       int                `mapstructure:"token_filter"        yaml:"token_filter,omitempty"`
-	OnError           string             `mapstructure:"on_error"            yaml:"on_error,omitempty"`
+	ConfidenceMethod    string             `mapstructure:"confidence_method"   yaml:"confidence_method,omitempty"`
+	Threshold           float64            `mapstructure:"threshold"           yaml:"threshold,omitempty"`
+	HybridWeights       map[string]float64 `mapstructure:"hybrid_weights"      yaml:"hybrid_weights,omitempty"`
+	EscalationOrder     []string           `mapstructure:"escalation_order"    yaml:"escalation_order,omitempty"`
+	CostQualityTradeoff float64            `mapstructure:"cost_quality_tradeoff" yaml:"cost_quality_tradeoff,omitempty"`
+	TokenFilter         int                `mapstructure:"token_filter"        yaml:"token_filter,omitempty"`
+	OnError             string             `mapstructure:"on_error"            yaml:"on_error,omitempty"`
 }
 
 // AutomixAlgorithmCfg configures automatic model mixing with escalation.
 type AutomixAlgorithmCfg struct {
-	VerificationThreshold float64 `mapstructure:"verification_threshold" yaml:"verification_threshold,omitempty"`
-	MaxEscalations        int     `mapstructure:"max_escalations"        yaml:"max_escalations,omitempty"`
-	CostAwareRouting      bool    `mapstructure:"cost_aware_routing"     yaml:"cost_aware_routing,omitempty"`
-	CostQualityTradeoff   float64 `mapstructure:"cost_quality_tradeoff"  yaml:"cost_quality_tradeoff,omitempty"`
-	DiscountFactor        float64 `mapstructure:"discount_factor"        yaml:"discount_factor,omitempty"`
-	UseLogprobVerification bool   `mapstructure:"use_logprob_verification" yaml:"use_logprob_verification,omitempty"`
+	VerificationThreshold  float64 `mapstructure:"verification_threshold" yaml:"verification_threshold,omitempty"`
+	MaxEscalations         int     `mapstructure:"max_escalations"        yaml:"max_escalations,omitempty"`
+	CostAwareRouting       bool    `mapstructure:"cost_aware_routing"     yaml:"cost_aware_routing,omitempty"`
+	CostQualityTradeoff    float64 `mapstructure:"cost_quality_tradeoff"  yaml:"cost_quality_tradeoff,omitempty"`
+	DiscountFactor         float64 `mapstructure:"discount_factor"        yaml:"discount_factor,omitempty"`
+	UseLogprobVerification bool    `mapstructure:"use_logprob_verification" yaml:"use_logprob_verification,omitempty"`
 }
 
 // HybridAlgorithmCfg blends multiple routing strategies.
@@ -386,31 +386,31 @@ type HybridAlgorithmCfg struct {
 
 // RouterDCAlgorithmCfg configures description-contrastive routing.
 type RouterDCAlgorithmCfg struct {
-	Temperature        float64 `mapstructure:"temperature"           yaml:"temperature,omitempty"`
-	DimensionSize      int     `mapstructure:"dimension_size"        yaml:"dimension_size,omitempty"`
-	MinSimilarity      float64 `mapstructure:"min_similarity"        yaml:"min_similarity,omitempty"`
-	UseQueryContrastive bool   `mapstructure:"use_query_contrastive" yaml:"use_query_contrastive,omitempty"`
-	UseModelContrastive bool   `mapstructure:"use_model_contrastive" yaml:"use_model_contrastive,omitempty"`
-	RequireDescriptions bool   `mapstructure:"require_descriptions"  yaml:"require_descriptions,omitempty"`
-	UseCapabilities     bool   `mapstructure:"use_capabilities"      yaml:"use_capabilities,omitempty"`
+	Temperature         float64 `mapstructure:"temperature"           yaml:"temperature,omitempty"`
+	DimensionSize       int     `mapstructure:"dimension_size"        yaml:"dimension_size,omitempty"`
+	MinSimilarity       float64 `mapstructure:"min_similarity"        yaml:"min_similarity,omitempty"`
+	UseQueryContrastive bool    `mapstructure:"use_query_contrastive" yaml:"use_query_contrastive,omitempty"`
+	UseModelContrastive bool    `mapstructure:"use_model_contrastive" yaml:"use_model_contrastive,omitempty"`
+	RequireDescriptions bool    `mapstructure:"require_descriptions"  yaml:"require_descriptions,omitempty"`
+	UseCapabilities     bool    `mapstructure:"use_capabilities"      yaml:"use_capabilities,omitempty"`
 }
 
 // RemomAlgorithmCfg configures Reasoning-over-Models (ReMoM) multi-model
 // orchestration with breadth-first exploration.
 type RemomAlgorithmCfg struct {
-	BreadthSchedule       []int              `mapstructure:"breadth_schedule"        yaml:"breadth_schedule,omitempty"`
-	ModelDistribution     map[string]float64 `mapstructure:"model_distribution"      yaml:"model_distribution,omitempty"`
-	Temperature           float64            `mapstructure:"temperature"             yaml:"temperature,omitempty"`
-	IncludeReasoning      bool               `mapstructure:"include_reasoning"       yaml:"include_reasoning,omitempty"`
-	CompactionStrategy    string             `mapstructure:"compaction_strategy"     yaml:"compaction_strategy,omitempty"`
-	CompactionTokens      int                `mapstructure:"compaction_tokens"       yaml:"compaction_tokens,omitempty"`
-	SynthesisTemplate     string             `mapstructure:"synthesis_template"      yaml:"synthesis_template,omitempty"`
-	SynthesisModel        string             `mapstructure:"synthesis_model"         yaml:"synthesis_model,omitempty"`
-	MaxConcurrent         int                `mapstructure:"max_concurrent"          yaml:"max_concurrent,omitempty"`
-	MaxCompletionTokens   int                `mapstructure:"max_completion_tokens"   yaml:"max_completion_tokens,omitempty"`
-	RoundTimeoutSeconds   int                `mapstructure:"round_timeout_seconds"   yaml:"round_timeout_seconds,omitempty"`
-	MinSuccessfulResponses int               `mapstructure:"min_successful_responses" yaml:"min_successful_responses,omitempty"`
-	OnError               string             `mapstructure:"on_error"                yaml:"on_error,omitempty"`
+	BreadthSchedule        []int              `mapstructure:"breadth_schedule"        yaml:"breadth_schedule,omitempty"`
+	ModelDistribution      map[string]float64 `mapstructure:"model_distribution"      yaml:"model_distribution,omitempty"`
+	Temperature            float64            `mapstructure:"temperature"             yaml:"temperature,omitempty"`
+	IncludeReasoning       bool               `mapstructure:"include_reasoning"       yaml:"include_reasoning,omitempty"`
+	CompactionStrategy     string             `mapstructure:"compaction_strategy"     yaml:"compaction_strategy,omitempty"`
+	CompactionTokens       int                `mapstructure:"compaction_tokens"       yaml:"compaction_tokens,omitempty"`
+	SynthesisTemplate      string             `mapstructure:"synthesis_template"      yaml:"synthesis_template,omitempty"`
+	SynthesisModel         string             `mapstructure:"synthesis_model"         yaml:"synthesis_model,omitempty"`
+	MaxConcurrent          int                `mapstructure:"max_concurrent"          yaml:"max_concurrent,omitempty"`
+	MaxCompletionTokens    int                `mapstructure:"max_completion_tokens"   yaml:"max_completion_tokens,omitempty"`
+	RoundTimeoutSeconds    int                `mapstructure:"round_timeout_seconds"   yaml:"round_timeout_seconds,omitempty"`
+	MinSuccessfulResponses int                `mapstructure:"min_successful_responses" yaml:"min_successful_responses,omitempty"`
+	OnError                string             `mapstructure:"on_error"                yaml:"on_error,omitempty"`
 }
 
 // FusionAlgorithmCfg configures multi-model fusion with analysis.
@@ -462,10 +462,10 @@ type MultiFactorWeights struct {
 
 // MultiFactorSLO defines service-level objectives for multi-factor routing.
 type MultiFactorSLO struct {
-	MaxTPOTMs   float64 `mapstructure:"max_tpot_ms"    yaml:"max_tpot_ms,omitempty"`
-	MaxTTFTMs   float64 `mapstructure:"max_ttft_ms"    yaml:"max_ttft_ms,omitempty"`
+	MaxTPOTMs    float64 `mapstructure:"max_tpot_ms"    yaml:"max_tpot_ms,omitempty"`
+	MaxTTFTMs    float64 `mapstructure:"max_ttft_ms"    yaml:"max_ttft_ms,omitempty"`
 	MaxCostPer1M float64 `mapstructure:"max_cost_per_1m" yaml:"max_cost_per_1m,omitempty"`
-	MaxInflight int     `mapstructure:"max_inflight"   yaml:"max_inflight,omitempty"`
+	MaxInflight  int     `mapstructure:"max_inflight"   yaml:"max_inflight,omitempty"`
 }
 
 // MultiFactorAlgorithmCfg configures multi-factor routing combining quality,
@@ -497,38 +497,38 @@ type RatingsAlgorithmCfg struct {
 // RoutingDecisionV2 is the expanded decision rule supporting tiered routing,
 // output contracts, plugins, adaptations, and event emission.
 type RoutingDecisionV2 struct {
-	Name           string                  `mapstructure:"name"            yaml:"name"`
-	Description    string                  `mapstructure:"description"     yaml:"description,omitempty"`
-	Priority       int                     `mapstructure:"priority"        yaml:"priority"`
-	Tier           string                  `mapstructure:"tier"            yaml:"tier,omitempty"`
-	OutputContract string                  `mapstructure:"output_contract" yaml:"output_contract,omitempty"`
-	Rules          RoutingRulesV2          `mapstructure:"rules"           yaml:"rules,omitempty"`
-	ModelRefs      []RoutingModelRefV2     `mapstructure:"model_refs"      yaml:"model_refs,omitempty"`
-	Algorithm      RoutingAlgorithmConfig  `mapstructure:"algorithm"       yaml:"algorithm,omitempty"`
-	Plugins        []RoutingPluginConfig   `mapstructure:"plugins"         yaml:"plugins,omitempty"`
-	Adaptations    []RoutingAdaptation     `mapstructure:"adaptations"     yaml:"adaptations,omitempty"`
-	Emits          []string                `mapstructure:"emits"           yaml:"emits,omitempty"`
-	Annotations    map[string]string       `mapstructure:"annotations"     yaml:"annotations,omitempty"`
+	Name           string                 `mapstructure:"name"            yaml:"name"`
+	Description    string                 `mapstructure:"description"     yaml:"description,omitempty"`
+	Priority       int                    `mapstructure:"priority"        yaml:"priority"`
+	Tier           string                 `mapstructure:"tier"            yaml:"tier,omitempty"`
+	OutputContract string                 `mapstructure:"output_contract" yaml:"output_contract,omitempty"`
+	Rules          RoutingRulesV2         `mapstructure:"rules"           yaml:"rules,omitempty"`
+	ModelRefs      []RoutingModelRefV2    `mapstructure:"model_refs"      yaml:"model_refs,omitempty"`
+	Algorithm      RoutingAlgorithmConfig `mapstructure:"algorithm"       yaml:"algorithm,omitempty"`
+	Plugins        []RoutingPluginConfig  `mapstructure:"plugins"         yaml:"plugins,omitempty"`
+	Adaptations    []RoutingAdaptation    `mapstructure:"adaptations"     yaml:"adaptations,omitempty"`
+	Emits          []string               `mapstructure:"emits"           yaml:"emits,omitempty"`
+	Annotations    map[string]string      `mapstructure:"annotations"     yaml:"annotations,omitempty"`
 }
 
 // RoutingRulesV2 supports compound AND/OR/NOT logic with nested children.
 type RoutingRulesV2 struct {
-	Operator   string             `mapstructure:"operator"   yaml:"operator,omitempty"` // AND | OR | NOT
+	Operator   string               `mapstructure:"operator"   yaml:"operator,omitempty"` // AND | OR | NOT
 	Conditions []RoutingConditionV2 `mapstructure:"conditions" yaml:"conditions,omitempty"`
-	Children   []RoutingRulesV2   `mapstructure:"children"   yaml:"children,omitempty"`
+	Children   []RoutingRulesV2     `mapstructure:"children"   yaml:"children,omitempty"`
 }
 
 // RoutingConditionV2 is an expanded condition supporting nested sub-conditions,
 // confidence thresholds, and error handling.
 type RoutingConditionV2 struct {
-	Type          string             `mapstructure:"type"           yaml:"type"`
-	Name          string             `mapstructure:"name"           yaml:"name,omitempty"`
-	Operator      string             `mapstructure:"operator"       yaml:"operator,omitempty"`
+	Type          string               `mapstructure:"type"           yaml:"type"`
+	Name          string               `mapstructure:"name"           yaml:"name,omitempty"`
+	Operator      string               `mapstructure:"operator"       yaml:"operator,omitempty"`
 	Conditions    []RoutingConditionV2 `mapstructure:"conditions"     yaml:"conditions,omitempty"`
-	Label         string             `mapstructure:"label"          yaml:"label,omitempty"`
-	Predicate     string             `mapstructure:"predicate"      yaml:"predicate,omitempty"`
-	OnError       string             `mapstructure:"on_error"       yaml:"on_error,omitempty"`
-	MinConfidence float64            `mapstructure:"min_confidence" yaml:"min_confidence,omitempty"`
+	Label         string               `mapstructure:"label"          yaml:"label,omitempty"`
+	Predicate     string               `mapstructure:"predicate"      yaml:"predicate,omitempty"`
+	OnError       string               `mapstructure:"on_error"       yaml:"on_error,omitempty"`
+	MinConfidence float64              `mapstructure:"min_confidence" yaml:"min_confidence,omitempty"`
 }
 
 // RoutingModelRefV2 references a model with reasoning and LoRA configuration.
@@ -560,11 +560,11 @@ type RoutingPluginConfig struct {
 
 // ResponseCachePlugin configures response caching for routing decisions.
 type ResponseCachePlugin struct {
-	TTLSeconds     int    `mapstructure:"ttl_seconds"     yaml:"ttl_seconds,omitempty"`
-	MaxEntries     int    `mapstructure:"max_entries"     yaml:"max_entries,omitempty"`
-	KeyStrategy    string `mapstructure:"key_strategy"    yaml:"key_strategy,omitempty"`
-	Backend        string `mapstructure:"backend"         yaml:"backend,omitempty"`
-	InvalidateOn   string `mapstructure:"invalidate_on"   yaml:"invalidate_on,omitempty"`
+	TTLSeconds   int    `mapstructure:"ttl_seconds"     yaml:"ttl_seconds,omitempty"`
+	MaxEntries   int    `mapstructure:"max_entries"     yaml:"max_entries,omitempty"`
+	KeyStrategy  string `mapstructure:"key_strategy"    yaml:"key_strategy,omitempty"`
+	Backend      string `mapstructure:"backend"         yaml:"backend,omitempty"`
+	InvalidateOn string `mapstructure:"invalidate_on"   yaml:"invalidate_on,omitempty"`
 }
 
 // ContextCompressionPlugin configures context window compression.
@@ -577,20 +577,20 @@ type ContextCompressionPlugin struct {
 
 // RAGPlugin configures retrieval-augmented generation integration.
 type RAGPlugin struct {
-	Store         string  `mapstructure:"store"          yaml:"store,omitempty"`
-	TopK          int     `mapstructure:"top_k"          yaml:"top_k,omitempty"`
+	Store          string  `mapstructure:"store"          yaml:"store,omitempty"`
+	TopK           int     `mapstructure:"top_k"          yaml:"top_k,omitempty"`
 	ScoreThreshold float64 `mapstructure:"score_threshold" yaml:"score_threshold,omitempty"`
-	IncludeSource bool    `mapstructure:"include_source" yaml:"include_source,omitempty"`
-	ChunkOverlap  int     `mapstructure:"chunk_overlap"  yaml:"chunk_overlap,omitempty"`
+	IncludeSource  bool    `mapstructure:"include_source" yaml:"include_source,omitempty"`
+	ChunkOverlap   int     `mapstructure:"chunk_overlap"  yaml:"chunk_overlap,omitempty"`
 }
 
 // MemoryPlugin configures conversation memory management.
 type MemoryPlugin struct {
-	Backend       string `mapstructure:"backend"        yaml:"backend,omitempty"`
-	MaxTurns      int    `mapstructure:"max_turns"      yaml:"max_turns,omitempty"`
-	SummaryAfter  int    `mapstructure:"summary_after"  yaml:"summary_after,omitempty"`
-	SummaryModel  string `mapstructure:"summary_model"  yaml:"summary_model,omitempty"`
-	PersistStore  string `mapstructure:"persist_store"  yaml:"persist_store,omitempty"`
+	Backend      string `mapstructure:"backend"        yaml:"backend,omitempty"`
+	MaxTurns     int    `mapstructure:"max_turns"      yaml:"max_turns,omitempty"`
+	SummaryAfter int    `mapstructure:"summary_after"  yaml:"summary_after,omitempty"`
+	SummaryModel string `mapstructure:"summary_model"  yaml:"summary_model,omitempty"`
+	PersistStore string `mapstructure:"persist_store"  yaml:"persist_store,omitempty"`
 }
 
 // ToolsPlugin configures tool/function calling integration.
@@ -653,8 +653,8 @@ type RoutingScore struct {
 // RoutingMapping maps signals to model dimensions.
 type RoutingMapping struct {
 	Signal    string            `mapstructure:"signal"    yaml:"signal"`
-	Dimension string           `mapstructure:"dimension" yaml:"dimension,omitempty"`
-	Transform string           `mapstructure:"transform" yaml:"transform,omitempty"`
+	Dimension string            `mapstructure:"dimension" yaml:"dimension,omitempty"`
+	Transform string            `mapstructure:"transform" yaml:"transform,omitempty"`
 	Params    map[string]string `mapstructure:"params"    yaml:"params,omitempty"`
 }
 
@@ -664,9 +664,9 @@ type RoutingMapping struct {
 
 // RoutingRecipe defines a reusable routing configuration template.
 type RoutingRecipe struct {
-	Name        string              `mapstructure:"name"        yaml:"name"`
-	Description string              `mapstructure:"description" yaml:"description,omitempty"`
-	Routing     RoutingRecipeBlock  `mapstructure:"routing"     yaml:"routing,omitempty"`
+	Name        string             `mapstructure:"name"        yaml:"name"`
+	Description string             `mapstructure:"description" yaml:"description,omitempty"`
+	Routing     RoutingRecipeBlock `mapstructure:"routing"     yaml:"routing,omitempty"`
 }
 
 // RoutingRecipeBlock is the routing configuration within a recipe.
@@ -708,10 +708,10 @@ type RoutingGlobalRouter struct {
 
 // RoutingGlobalServices defines external service endpoints used by the router.
 type RoutingGlobalServices struct {
-	EmbeddingEndpoint string `mapstructure:"embedding_endpoint" yaml:"embedding_endpoint,omitempty"`
-	EmbeddingModel    string `mapstructure:"embedding_model"    yaml:"embedding_model,omitempty"`
+	EmbeddingEndpoint  string `mapstructure:"embedding_endpoint" yaml:"embedding_endpoint,omitempty"`
+	EmbeddingModel     string `mapstructure:"embedding_model"    yaml:"embedding_model,omitempty"`
 	ClassifierEndpoint string `mapstructure:"classifier_endpoint" yaml:"classifier_endpoint,omitempty"`
-	GuardrailEndpoint string `mapstructure:"guardrail_endpoint" yaml:"guardrail_endpoint,omitempty"`
+	GuardrailEndpoint  string `mapstructure:"guardrail_endpoint" yaml:"guardrail_endpoint,omitempty"`
 }
 
 // RoutingGlobalStores defines storage backends for routing state.
@@ -736,8 +736,8 @@ type RoutingGlobalIntegrations struct {
 
 // RoutingTelemetryIntegration configures telemetry export for routing decisions.
 type RoutingTelemetryIntegration struct {
-	Enabled    bool   `mapstructure:"enabled"    yaml:"enabled,omitempty"`
-	Endpoint   string `mapstructure:"endpoint"   yaml:"endpoint,omitempty"`
+	Enabled    bool    `mapstructure:"enabled"    yaml:"enabled,omitempty"`
+	Endpoint   string  `mapstructure:"endpoint"   yaml:"endpoint,omitempty"`
 	SampleRate float64 `mapstructure:"sample_rate" yaml:"sample_rate,omitempty"`
 }
 
@@ -756,9 +756,9 @@ type RoutingGuardrailIntegration struct {
 // decisions. Used by Defense Claw to extract session, user, and group info
 // from upstream requests.
 type RoutingContextConfig struct {
-	SessionHeaders    []string `mapstructure:"session_headers"    yaml:"session_headers,omitempty"`
-	UserIDHeaders     []string `mapstructure:"user_id_headers"    yaml:"user_id_headers,omitempty"`
-	UserGroupHeaders  []string `mapstructure:"user_group_headers" yaml:"user_group_headers,omitempty"`
+	SessionHeaders     []string `mapstructure:"session_headers"    yaml:"session_headers,omitempty"`
+	UserIDHeaders      []string `mapstructure:"user_id_headers"    yaml:"user_id_headers,omitempty"`
+	UserGroupHeaders   []string `mapstructure:"user_group_headers" yaml:"user_group_headers,omitempty"`
 	PassthroughHeaders []string `mapstructure:"passthrough_headers" yaml:"passthrough_headers,omitempty"`
-	GuardrailSignals  bool     `mapstructure:"guardrail_signals"  yaml:"guardrail_signals,omitempty"`
+	GuardrailSignals   bool     `mapstructure:"guardrail_signals"  yaml:"guardrail_signals,omitempty"`
 }

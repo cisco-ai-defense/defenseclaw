@@ -602,7 +602,6 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 	return input
 }
 
-
 func (s *Sidecar) webhooksSnapshot() *WebhookDispatcher {
 	if s == nil {
 		return nil

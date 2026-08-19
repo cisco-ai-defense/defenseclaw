@@ -91,16 +91,16 @@ type classifyDecisionResult struct {
 }
 
 type classifyPluginOutputs struct {
-	CachedResponse   *cachedResponsePayload  `json:"cached_response,omitempty"`
-	SystemPrompt     string                  `json:"system_prompt,omitempty"`
-	ReasoningEffort  string                  `json:"reasoning_effort,omitempty"`
-	UseReasoning     bool                    `json:"use_reasoning,omitempty"`
-	LoRAName         string                  `json:"lora_name,omitempty"`
-	HeaderMutations  *headerMutationsPayload `json:"header_mutations,omitempty"`
-	RAGContext       []ragDocument           `json:"rag_context,omitempty"`
+	CachedResponse   *cachedResponsePayload   `json:"cached_response,omitempty"`
+	SystemPrompt     string                   `json:"system_prompt,omitempty"`
+	ReasoningEffort  string                   `json:"reasoning_effort,omitempty"`
+	UseReasoning     bool                     `json:"use_reasoning,omitempty"`
+	LoRAName         string                   `json:"lora_name,omitempty"`
+	HeaderMutations  *headerMutationsPayload  `json:"header_mutations,omitempty"`
+	RAGContext       []ragDocument            `json:"rag_context,omitempty"`
 	CompressedPrompt *compressedPromptPayload `json:"compressed_prompt,omitempty"`
-	ToolsFiltered    []string                `json:"tools_filtered,omitempty"`
-	ToolsBlocked     []string                `json:"tools_blocked,omitempty"`
+	ToolsFiltered    []string                 `json:"tools_filtered,omitempty"`
+	ToolsBlocked     []string                 `json:"tools_blocked,omitempty"`
 }
 
 type cachedResponsePayload struct {
