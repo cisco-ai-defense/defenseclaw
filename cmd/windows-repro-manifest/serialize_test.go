@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -106,7 +107,15 @@ func TestWriteSortedJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o644 {
-		t.Fatalf("file mode = %o, want 0644", got)
+	// POSIX mode assertion is meaningful on Unix only. Windows does not
+	// implement chmod semantics — os.WriteFile there produces a file with
+	// the ambient security descriptor, and info.Mode().Perm() returns
+	// 0666 for readable/writable files regardless of what we asked for.
+	// The byte-stability contract this test cares about is about file
+	// CONTENTS, not filesystem ACLs.
+	if runtime.GOOS != "windows" {
+		if got := info.Mode().Perm(); got != 0o644 {
+			t.Fatalf("file mode = %o, want 0644", got)
+		}
 	}
 }
