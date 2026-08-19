@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -155,5 +156,78 @@ func TestConfigurationRefreshPicksUpGuardianTransition(t *testing.T) {
 
 	if got := h.Snapshot().Configuration.State; got != ConfigStateReady {
 		t.Fatalf("after refresh state = %q, want ready", got)
+	}
+}
+
+// TestConfigurationReaderReplacementIsAppliedAtomically pins the
+// concurrent-reader-swap invariant from CR spec-003:PRRT_kwDORuAK-s6al7aV.
+//
+// The race the CR flagged: SetDaemonConfigLoaded samples the OLD
+// reader outside the write lock, a concurrent SetGuardianStateReader
+// with a NEW ready-returning reader wins the write-lock race, and
+// then the FIRST goroutine acquires the lock and applies its stale
+// StateUnknown sample on top of the fresh StateReady — regressing
+// the deployment to waiting_for_targets.
+//
+// This test drives the sequence deterministically by using a reader
+// whose FIRST call sleeps long enough for the concurrent installer
+// to race ahead, and asserts the final Snapshot() reports the
+// installed reader's return value.
+func TestConfigurationReaderReplacementIsAppliedAtomically(t *testing.T) {
+	h := NewSidecarHealth()
+
+	// Slow reader: the FIRST call returned to the SetDaemonConfigLoaded
+	// sampler blocks on `release` so a competing SetGuardianStateReader
+	// can win the epoch bump. Every OTHER call (including the sample
+	// SetGuardianStateReader itself takes when installing the reader)
+	// returns Unknown immediately, so the install path doesn't deadlock.
+	var slowMu sync.Mutex
+	var armed bool
+	sampled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	slowUnknownReader := func() string {
+		slowMu.Lock()
+		fire := armed
+		armed = false
+		slowMu.Unlock()
+		if fire {
+			sampled <- struct{}{}
+			<-release
+		}
+		return guardianstate.StateUnknown
+	}
+	h.SetGuardianStateReader(slowUnknownReader)
+
+	// Arm the slow-mode: the NEXT invocation of slowUnknownReader
+	// (the one SetDaemonConfigLoaded is about to make) will block.
+	slowMu.Lock()
+	armed = true
+	slowMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.SetDaemonConfigLoaded(true)
+	}()
+
+	// Wait for the goroutine to reach the blocking point inside
+	// its guardian sample. At this moment its snapshotGuardianState
+	// has captured the OLD reader's epoch and is holding StateUnknown.
+	<-sampled
+
+	// Swap in a ready-returning reader. This bumps the epoch. The
+	// competing goroutine's captured epoch is now stale.
+	h.SetGuardianStateReader(func() string { return guardianstate.StateReady })
+
+	// Release the slow reader. The goroutine acquires the write
+	// lock, observes the epoch mismatch, drops the lock, re-samples
+	// against the new (ready) reader, and applies StateReady. Under
+	// the buggy pre-CAS behaviour it would apply the stale Unknown
+	// sample and regress to waiting_for_targets.
+	close(release)
+	<-done
+
+	if got := h.Snapshot().Configuration.State; got != ConfigStateReady {
+		t.Fatalf("after concurrent reader swap state = %q, want ready — a stale sample from the old reader clobbered the newly-installed one", got)
 	}
 }
