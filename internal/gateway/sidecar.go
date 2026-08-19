@@ -602,25 +602,6 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 	return input
 }
 
-func (s *Sidecar) otelSnapshot() *telemetry.Provider {
-	if s == nil {
-		return nil
-	}
-	s.otelMu.RLock()
-	defer s.otelMu.RUnlock()
-	return s.otel
-}
-
-func (s *Sidecar) swapOTel(next *telemetry.Provider) *telemetry.Provider {
-	if s == nil {
-		return nil
-	}
-	s.otelMu.Lock()
-	defer s.otelMu.Unlock()
-	previous := s.otel
-	s.otel = next
-	return previous
-}
 
 func (s *Sidecar) webhooksSnapshot() *WebhookDispatcher {
 	if s == nil {
