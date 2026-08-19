@@ -396,14 +396,14 @@ func (h *SidecarHealth) RefreshConfiguration() {
 // holds h.mu (write lock).
 //
 // Order (spec 003 § Data flow):
-//   1. Daemon not loaded ⇒ waiting_for_config, regardless of guardian.
-//      This lets AC-12 pass: if UCB drops targets.yaml first, the
-//      daemon still says waiting_for_config until config.yaml lands.
-//   2. Daemon loaded, no guardian reader wired ⇒ waiting_for_targets
-//      as the safe default. Never false-positive ready.
-//   3. Daemon loaded, guardian reader returns ready ⇒ ready.
-//   4. Daemon loaded, guardian reader returns waiting_for_targets or
-//      Unknown ⇒ waiting_for_targets.
+//  1. Daemon not loaded ⇒ waiting_for_config, regardless of guardian.
+//     This lets AC-12 pass: if UCB drops targets.yaml first, the
+//     daemon still says waiting_for_config until config.yaml lands.
+//  2. Daemon loaded, no guardian reader wired ⇒ waiting_for_targets
+//     as the safe default. Never false-positive ready.
+//  3. Daemon loaded, guardian reader returns ready ⇒ ready.
+//  4. Daemon loaded, guardian reader returns waiting_for_targets or
+//     Unknown ⇒ waiting_for_targets.
 //
 // Since only advances when the collapsed state actually changes,
 // so a snapshot taken 30 s into a wait returns the SAME Since as
