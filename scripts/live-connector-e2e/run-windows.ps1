@@ -1538,7 +1538,11 @@ function Invoke-DangerousHook(
     if ($null -eq $decision) { throw "$Name did not emit a connector hook_decision" }
     $telemetryMode = if ($Mode -eq 'action') { 'enforce' } else { 'observe' }
     if ([string]$decision.mode -ne $telemetryMode) { throw "$Name mode=$($decision.mode), expected $telemetryMode" }
-    $decisionRuleIDs = @($decision.rule_ids)
+    $decisionRuleIDs = @(
+        @($decision.rule_ids) |
+            ForEach-Object { [string]$_ } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
     if ($Expected -eq 'quiet') {
         if ($decisionRuleIDs.Count -ne 0) {
             throw "$Name quiet decision unexpectedly emitted rules: $($decisionRuleIDs -join ',')"
