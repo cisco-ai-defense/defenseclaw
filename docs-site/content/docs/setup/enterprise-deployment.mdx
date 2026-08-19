@@ -1439,10 +1439,19 @@ services:
 # $env:SystemRoot so an elevated shell that inherited a poisoned SystemRoot
 # cannot redirect this launch to an attacker-controlled powershell.exe
 # before install-enterprise.ps1's own checks run.
+$SystemFolder = [Environment]::GetFolderPath('System')
+if ([string]::IsNullOrWhiteSpace($SystemFolder)) {
+    throw 'GetFolderPath(System) returned empty; refusing an unrooted powershell.exe launch'
+}
 $PowerShell = [IO.Path]::Combine(
-    [Environment]::GetFolderPath('System'),
+    $SystemFolder,
     'WindowsPowerShell\v1.0\powershell.exe'
 )
+# Fail closed on any anomaly: an unrooted path or a missing target would let
+# a same-directory powershell.exe hijack the launch.
+if (-not [IO.Path]::IsPathRooted($PowerShell) -or -not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) {
+    throw "resolved PowerShell is not a rooted existing file: $PowerShell"
+}
 $Installer = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install-enterprise.ps1'
 $Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw'
 
@@ -1569,11 +1578,18 @@ Get-Service DefenseClawGateway, DefenseClawHookGuardian
 # $Manifest so this section can be copied on its own without depending on
 # earlier sections. See the install block above: resolve powershell.exe
 # through the known-folder API so a poisoned $env:SystemRoot cannot redirect
-# the launch.
+# the launch, and fail closed if the lookup returns an empty/relative path.
+$SystemFolder = [Environment]::GetFolderPath('System')
+if ([string]::IsNullOrWhiteSpace($SystemFolder)) {
+    throw 'GetFolderPath(System) returned empty; refusing an unrooted powershell.exe launch'
+}
 $PowerShell = [IO.Path]::Combine(
-    [Environment]::GetFolderPath('System'),
+    $SystemFolder,
     'WindowsPowerShell\v1.0\powershell.exe'
 )
+if (-not [IO.Path]::IsPathRooted($PowerShell) -or -not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) {
+    throw "resolved PowerShell is not a rooted existing file: $PowerShell"
+}
 $Installer = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install-enterprise.ps1'
 $Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
 $Manifest = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml'
