@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -635,6 +636,49 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			result, evalCode := program.EvalBool(context.Background(), projected)
 			if evalCode != semantic.EvalOK || !result.Matched {
 				t.Fatalf("CEL = %#v/%q, want match", result, evalCode)
+			}
+		})
+	}
+}
+
+func TestExplicitFormatCOMDispatchesDeviceWipeFinding(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		tool    string
+		dialect actionfacts.Dialect
+		argv    []string
+	}{
+		{name: "cmd", tool: "cmd", dialect: actionfacts.DialectCMD},
+		{name: "PowerShell", tool: "PowerShell", dialect: actionfacts.DialectPowerShell},
+		{name: "structured argv", tool: "exec", argv: []string{"format.com", "C:"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			connector := "format-com-device-wipe-" + strings.ToLower(test.name)
+			installDefaultProfileConnector(t, connector)
+
+			const command = `format.com C:`
+			input := actionfacts.Input{
+				Tool:        test.tool,
+				DialectHint: test.dialect,
+			}
+			if len(test.argv) > 0 {
+				input.Argv = test.argv
+			} else {
+				input.Command = command
+			}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:              input,
+				LegacyText:         command,
+				Connector:          connector,
+				EnforcementCapable: true,
+			})
+			matched := findingWithID(findings, "CMD-DEVICE-WIPE")
+			if matched == nil || !matched.contributesToEnforcement() ||
+				matched.Evidence != "" {
+				t.Fatalf(
+					"format.com lost semantic device-wipe enforcement: findings=%v facts=%+v",
+					FindingStrings(findings), actionfacts.Analyze(input),
+				)
 			}
 		})
 	}

@@ -225,6 +225,32 @@ func TestWindowsRawStructuredSemanticParity(t *testing.T) {
 			enforcing: true,
 		},
 		{
+			name:       "cmd explicit format.com drive volume",
+			dialect:    DialectCMD,
+			raw:        `format.com C:`,
+			argv:       []string{"format.com", "C:"},
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationWrite, OperationDiskWrite},
+			paths: []windowsParityPath{{
+				Access: PathAccessWrite, Flavor: PathFlavorDevice,
+				Value: "//./C:",
+			}},
+			enforcing: true,
+		},
+		{
+			name:       "PowerShell explicit format.com path drive volume",
+			dialect:    DialectPowerShell,
+			raw:        `format.com C:`,
+			argv:       []string{`C:\Windows\System32\FORMAT.COM`, "C:"},
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationWrite, OperationDiskWrite},
+			paths: []windowsParityPath{{
+				Access: PathAccessWrite, Flavor: PathFlavorDevice,
+				Value: "//./C:",
+			}},
+			enforcing: true,
+		},
+		{
 			name:       "PowerShell format drive volume",
 			dialect:    DialectPowerShell,
 			raw:        `Format-Volume -DriveLetter C`,
@@ -1339,6 +1365,15 @@ type windowsPartialParityCase struct {
 
 func TestWindowsRawStructuredFailClosedParity(t *testing.T) {
 	tests := []windowsPartialParityCase{
+		{
+			name:             "PowerShell bare format is not native authority",
+			dialect:          DialectPowerShell,
+			raw:              `format C:`,
+			argv:             []string{"format", "C:"},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationWrite, OperationDiskWrite},
+			forbidPaths:      true,
+		},
 		{
 			name:    "PowerShell Clear-Disk InputObject",
 			dialect: DialectPowerShell,

@@ -733,6 +733,12 @@ func commandProgramForDialect(executable string, dialect Dialect) string {
 		return program
 	}
 	program := commandProgram(executable)
+	// The Windows system formatter is format.com. Keep its explicit native
+	// executable name aligned with the existing bare format semantic owner.
+	if program == "format.com" && (dialect == DialectCMD ||
+		dialect == DialectPowerShell || dialect == DialectArgv) {
+		return "format"
+	}
 	if dialect != DialectCMD && dialect != DialectPowerShell {
 		return program
 	}
@@ -7717,7 +7723,14 @@ func classifyDestructiveDeviceTool(
 }
 
 func classifyWindowsFormat(out *parseOutput, command *CommandFact) {
-	if !requireCommandDialect(out, command, DialectCMD, DialectArgv) {
+	if command.Dialect == DialectPowerShell {
+		// PowerShell may resolve a bare `format` through its own command table;
+		// only the explicit native formatter executable owns these semantics.
+		if windowsExecutable(command.Executable) != "format.com" {
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+	} else if !requireCommandDialect(out, command, DialectCMD, DialectArgv) {
 		return
 	}
 	if len(command.Argv) == 2 &&
@@ -7740,6 +7753,15 @@ func classifyWindowsFormat(out *parseOutput, command *CommandFact) {
 	device, ok := windowsVolumeDeviceTarget(command.Argv[1])
 	if !ok {
 		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if command.Dialect == DialectArgv {
+		out.appendPath(PathFact{
+			CommandID: command.ID,
+			Access:    PathAccessWrite,
+			Flavor:    PathFlavorDevice,
+			Value:     device,
+		})
 		return
 	}
 	appendCommandPath(out, command, PathAccessWrite, device)

@@ -369,6 +369,9 @@ func syntaxForPath(value string, flavor PathFlavor, cwd string) pathSyntax {
 	case PathFlavorWindows:
 		return pathSyntaxWindows
 	case PathFlavorDevice:
+		if windowsPathFlavor(value) == PathFlavorDevice {
+			return pathSyntaxWindows
+		}
 		if strings.HasPrefix(value, "/") {
 			return pathSyntaxPOSIX
 		}
