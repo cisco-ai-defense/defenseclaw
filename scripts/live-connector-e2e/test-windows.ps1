@@ -1717,7 +1717,7 @@ private-secret-name = "DefenseClaw must remain redacted"
     ).Value
     Assert-True (-not [string]::IsNullOrWhiteSpace($dangerousCommandContract)) 'dangerous-command corpus function is present'
     foreach ($case in @(
-        [pscustomobject]@{ Name = 'remove-item-critical'; Rule = 'CMD-WIN-REMOVE-ITEM-RF'; Tool = 'PowerShell'; Expected = 'block' },
+        [pscustomobject]@{ Name = 'remove-item-critical'; Rule = 'CMD-RM-RF'; Tool = 'PowerShell'; Expected = 'block' },
         [pscustomobject]@{ Name = 'remove-item-scoped'; Rule = 'CMD-WIN-REMOVE-ITEM-RF'; Tool = 'PowerShell'; Expected = 'shadow' },
         [pscustomobject]@{ Name = 'cmd-rmdir'; Rule = 'CMD-WIN-RMDIR-SQ'; Tool = 'cmd'; Expected = 'shadow' },
         [pscustomobject]@{ Name = 'download-execute'; Rule = 'CMD-PIPE-CURL'; Tool = 'PowerShell'; Expected = 'block' },
