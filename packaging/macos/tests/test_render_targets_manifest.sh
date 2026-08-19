@@ -14,7 +14,32 @@
 TEST_SUPPORT="/opt/cisco/secureclient/defenseclaw"
 TEST_RUNTIME="${TEST_SUPPORT}/runtime"
 
+# Stub discover_agent_version so these tests are hermetic. Without a stub
+# the render policy "skip a target row when the connector is not
+# installed" would make row counts depend on whether the dev machine
+# happens to have amp / codex / claudecode / cursor installed under the
+# fake /Users/alice, /Users/bob homes the tests pass in (which they
+# don't — every probe would return empty and every row would be dropped).
+#
+# Bash function names are global — a test that overrides
+# discover_agent_version leaves its override in effect for every case
+# scheduled after it in this file. Each test therefore begins by
+# reinstalling the "everything present" stub via _reset_discover_stub.
+_reset_discover_stub() {
+  discover_agent_version() {
+    case "$1" in
+      amp)        printf '0.100.0' ;;
+      codex)      printf '0.130.0' ;;
+      claudecode) printf '2.5.0'   ;;
+      cursor)     printf '3.14.27' ;;
+      *)          printf ''        ;;
+    esac
+  }
+}
+_reset_discover_stub
+
 t_multi_user_multi_connector_produces_cross_product() {
+  _reset_discover_stub
   local users
   users="alice:501:20:/Users/alice
 bob:502:20:/Users/bob"
@@ -43,6 +68,7 @@ bob:502:20:/Users/bob"
 }
 
 t_unsupported_connector_skipped() {
+  _reset_discover_stub
   # `windsurf` is not in is_supported_connector; it must be dropped
   # even if the caller lists it in the CSV.
   local users="alice:501:20:/Users/alice"
@@ -83,7 +109,52 @@ t_empty_connectors_still_emits_valid_manifest() {
   assert_eq "${count}" "0" "no user lines when CONNECTORS is empty"
 }
 
+t_absent_connector_skipped_partial_box() {
+  # Regression: a box with only cursor installed must NOT get target rows
+  # for codex or claudecode. Otherwise the guardian churns forever trying
+  # to install hooks for a CLI that doesn't exist on the host. See
+  # discover_agent_version + render_targets_manifest empty-version skip.
+  discover_agent_version() {
+    case "$1" in
+      cursor) printf '3.14.27' ;;
+      *)      printf '' ;;
+    esac
+  }
+
+  local users="shawnxu:501:20:/Users/shawnxu"
+  local out
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex,claudecode,cursor" "${users}")"
+
+  assert_contains     "${out}" 'connector: "cursor"'     "cursor row emitted"
+  assert_not_contains "${out}" 'connector: "codex"'      "codex row skipped (not installed)"
+  assert_not_contains "${out}" 'connector: "claudecode"' "claudecode row skipped (not installed)"
+  local count
+  count="$(printf '%s\n' "${out}" | grep -c "^  - user:" || true)"
+  assert_eq "${count}" "1" "one target when only cursor is installed"
+}
+
+t_all_connectors_absent_yields_zero_rows() {
+  # No connectors installed at all — every row skipped. The manifest is
+  # still schema-valid (version + targets:) so the guardian can load it.
+  # install.sh warns loudly on this case (AIFW-31486) but still proceeds
+  # to bootstrap the hook-guardian + hook-enumerator daemons, so the
+  # enumerator's 5-min tick will re-render targets.yaml and the guardian
+  # will wire hooks the moment a supported connector CLI appears.
+  discover_agent_version() { printf ''; }
+
+  local users="shawnxu:501:20:/Users/shawnxu"
+  local out
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex,claudecode,cursor" "${users}")"
+
+  assert_contains "${out}" "version: 1" "empty-agents manifest still has version"
+  assert_contains "${out}" "targets:"   "empty-agents manifest still has targets:"
+  local count
+  count="$(printf '%s\n' "${out}" | grep -c "^  - user:" || true)"
+  assert_eq "${count}" "0" "no target rows when nothing is installed"
+}
+
 t_rendered_yaml_parses() {
+  _reset_discover_stub
   # Best-effort: if PyYAML is available, verify the output actually
   # parses as valid YAML matching the ManifestTarget schema shape.
   if ! command -v /usr/bin/python3 >/dev/null 2>&1; then
@@ -121,6 +192,7 @@ print(json.dumps({"users": users, "connectors": conns, "count": len(targets)}))
 }
 
 t_rows_pin_enabled_and_int_uid_gid() {
+  _reset_discover_stub
   # Every emitted target must set enabled: true (the guardian will skip
   # enabled:false rows, and an omitted field defaults to true — but
   # rendering it explicitly is defensive) and integer uid/gid.
@@ -133,6 +205,7 @@ t_rows_pin_enabled_and_int_uid_gid() {
 }
 
 t_rows_omit_data_dir() {
+  _reset_discover_stub
   # Regression guard for the multi-user-hook-wiring fix. The guardian's
   # per-target Install runs validateUserDataDir which refuses any data_dir
   # outside the target user's home. Emitting SUPPORT_DIR/runtime (which
@@ -188,6 +261,8 @@ run_case "multi-user × multi-connector cross-product"           t_multi_user_mu
 run_case "unsupported connectors dropped"                       t_unsupported_connector_skipped
 run_case "empty user list still emits valid manifest"           t_empty_users_still_emits_valid_manifest
 run_case "empty connector list still emits valid manifest"      t_empty_connectors_still_emits_valid_manifest
+run_case "absent connectors are skipped (partial-box render)"   t_absent_connector_skipped_partial_box
+run_case "all connectors absent yields zero rows"               t_all_connectors_absent_yields_zero_rows
 run_case "rendered targets.yaml parses (schema round-trip)"     t_rendered_yaml_parses
 run_case "rows pin enabled + int uid/gid"                       t_rows_pin_enabled_and_int_uid_gid
 run_case "rows omit data_dir (per-user Install default is used)" t_rows_omit_data_dir

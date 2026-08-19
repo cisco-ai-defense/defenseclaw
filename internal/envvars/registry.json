@@ -1760,6 +1760,20 @@
       "security_note": "MCP scan-target SSRF guard — prevents a scan request from reaching IMDS / loopback / private hosts."
     },
     {
+      "name": "DEFENSECLAW_SCRUB_BIN",
+      "category": "runtime_path",
+      "purpose": "Override the DefenseClaw gateway binary used by the macOS uninstaller for the per-user agent-config scrub step (`defenseclaw-gateway enterprise hooks scrub`). Discovery order without this env var: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to the uninstall.sh script. Bundle-fixture and dev-tree tests set this so they can drive uninstall.sh against a stub binary without needing the managed install tree present.",
+      "default": "unset (auto-discover in order: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to uninstall.sh)",
+      "accepted_values": ["any-absolute-path-to-executable", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "packaging/macos/uninstall.sh", "description": "_scrub_bin() prefers this override before falling back to the managed install path"}
+      ],
+      "since": "0.8.5",
+      "security_note": "Uninstaller-only executable override — uninstall.sh runs under sudo, so the referenced binary is exec'd as root. _scrub_bin() validates every override before use via the shared _scrub_bin_trusted helper: must be an absolute path, must be a regular file (not a symlink or directory), must be executable, must be root-owned, must not be group/other writable. Any check failing prints a WARN and falls through to auto-discovery. Intended for bundle-fixture and dev-tree tests; production installs should never set this. First shipped in the macOS 26.7.3 Cisco Secure Client bundle (DefenseClaw 0.8.5)."
+    },
+    {
       "name": "DEFENSECLAW_BAKED_HOOK_PATH",
       "category": "hook_internal",
       "purpose": "Baked into the installed _hardening.sh helper at hook-generation time. When non-empty, replaces the hardened hook PATH with this colon-separated directory list instead of the default system paths.",
