@@ -30,16 +30,18 @@ import (
 // applyBaselineIPCACL below.
 const windowsSocketParentDirMode = os.FileMode(0o750)
 
-// unsafeSocketOverrideEnv is a TEST-ONLY escape hatch that permits an
-// override socket path outside the trusted ProgramData root. When set
-// to "1", validateWindowsSocketPathOverride skips the trusted-root
-// anchor and falls back to the shape check only. NEVER set on a
-// production install: under the initial-cut deferred-auth posture the
-// DACL is the ONLY access boundary, and the trusted-root anchor is
-// what keeps a user-writable ancestor from letting a local user plant
-// a junction at the target parent. See CR
-// spec-004:PRRT_kwDORuAK-s6aoCwa.
-const unsafeSocketOverrideEnv = "DEFENSECLAW_ALLOW_UNSAFE_IPC_SOCKET_OVERRIDE"
+// allowUnsafeSocketOverrideForTest is an IN-PROCESS test hook that
+// permits an override socket path outside the trusted ProgramData
+// root. When true, validateWindowsSocketPathOverride skips the
+// trusted-root anchor and applies only the shape checks (1-3). Only a
+// test binary in the same Go package can flip this — service binaries
+// (defenseclaw.exe / defenseclaw-gateway.exe) never touch it, so a
+// production process cannot have the anchor disabled by any env,
+// registry, or config surface. See CR spec-004:PRRT_kwDORuAK-s6aoOZv
+// for the rationale — the earlier env-var-based escape hatch was
+// reachable from the service environment and thus disabled the
+// fail-closed boundary in every production Windows binary.
+var allowUnsafeSocketOverrideForTest bool
 
 // bindListenerForOS is the Windows bind block for the spec 004
 // initial-cut deferred-auth IPC surface. Differences from
@@ -132,12 +134,14 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 //     junction) there before the daemon starts and have the DACL
 //     rewritten under their control.
 //
-// CI harnesses that legitimately need to scratch-dir the IPC surface
-// (e.g. an integration test that binds to a temp path outside the
-// trusted root) MUST set the DEFENSECLAW_ALLOW_UNSAFE_IPC_SOCKET_OVERRIDE
-// env var to "1"; check (4) then degrades to a warning and only checks
-// 1-3 apply. This escape hatch is intentionally named and documented
-// as unsafe. See CR spec-004:PRRT_kwDORuAK-s6aoCwa.
+// Tests in this package that legitimately need to scratch-dir the
+// IPC surface can set allowUnsafeSocketOverrideForTest to true for
+// the duration of the test; check (4) then degrades and only checks
+// 1-3 apply. No service binary can flip that flag — there is no
+// exported setter, no env-var reader, and no config surface — so a
+// production Windows install has NO way to disable the trusted-root
+// anchor. See CR spec-004:PRRT_kwDORuAK-s6aoCwa and
+// spec-004:PRRT_kwDORuAK-s6aoOZv.
 func validateWindowsSocketPathOverride(socketPath string) error {
 	if socketPath == "" {
 		return fmt.Errorf("ipc: socket path is empty")
@@ -154,10 +158,12 @@ func validateWindowsSocketPathOverride(socketPath string) error {
 		return fmt.Errorf("ipc: socket path override must live under an 'ipc' directory (got parent %s)", parent)
 	}
 
-	// Anchor: parent must equal the trusted managed-IPC root. Bypass
-	// only via the explicit test-only env, and only after the three
-	// shape checks above already passed.
-	if os.Getenv(unsafeSocketOverrideEnv) == "1" {
+	// Anchor: parent must equal the trusted managed-IPC root. The
+	// in-process test hook (allowUnsafeSocketOverrideForTest) is the
+	// only bypass, and it can only be flipped from a test binary in
+	// this package — no env, registry, or config surface reaches it.
+	// Service binaries thus have no way to disable the anchor.
+	if allowUnsafeSocketOverrideForTest {
 		return nil
 	}
 	programData, err := winpath.TrustedProgramData()
@@ -170,9 +176,8 @@ func validateWindowsSocketPathOverride(socketPath string) error {
 	trustedParent := filepath.Clean(filepath.Join(programData, windowsManagedIPCRelativeDir))
 	if !strings.EqualFold(parent, trustedParent) {
 		return fmt.Errorf(
-			"ipc: socket path override must live under the trusted managed root %q "+
-				"(got parent %q); set %s=1 for CI-only overrides",
-			trustedParent, parent, unsafeSocketOverrideEnv,
+			"ipc: socket path override must live under the trusted managed root %q (got parent %q)",
+			trustedParent, parent,
 		)
 	}
 	return nil
