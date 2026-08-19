@@ -6,13 +6,107 @@
 package audit
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
+
+func TestAuditDBWindowsAllowsOnlyExactPinnedGatewayServiceSID(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-111-222-333-444-555")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignSID, err := windows.StringToSid("S-1-5-80-555-444-333-222-111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const serviceName = "DefenseClawCertGateway_AuditFixture"
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, serviceName)
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\`+serviceName)
+	previous := auditDBWindowsServiceAccountSID
+	auditDBWindowsServiceAccountSID = func(account string) (*windows.SID, error) {
+		if account != `NT SERVICE\`+serviceName {
+			t.Fatalf("service account = %q", account)
+		}
+		return serviceSID, nil
+	}
+	t.Cleanup(func() { auditDBWindowsServiceAccountSID = previous })
+
+	resolved, err := auditDBWindowsPinnedGatewayServiceSID()
+	if err != nil || resolved == nil || !resolved.Equals(serviceSID) {
+		t.Fatalf("pinned gateway SID = %v, %v", resolved, err)
+	}
+	if !auditDBWindowsTrustedPrincipal(serviceSID, resolved) {
+		t.Fatal("exact pinned gateway service SID was not trusted")
+	}
+	if auditDBWindowsTrustedPrincipal(foreignSID, resolved) {
+		t.Fatal("foreign NT SERVICE SID was broadly trusted")
+	}
+
+	dacl, err := auditDBWindowsProtectedDACL(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			t.Fatal(err)
+		}
+		if ace != nil && ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
+			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			if sid.Equals(serviceSID) {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("protected audit DACL omitted exact pinned gateway service SID")
+	}
+}
+
+func TestAuditDBWindowsRejectsIncompleteOrMismatchedGatewayPins(t *testing.T) {
+	const serviceName = "DefenseClawCertGateway_AuditFixture"
+	for _, test := range []struct {
+		name    string
+		account string
+		service string
+	}{
+		{name: "missing account", service: serviceName},
+		{name: "missing service", account: `NT SERVICE\` + serviceName},
+		{name: "foreign account", account: `NT SERVICE\OtherGateway`, service: serviceName},
+		{name: "malformed service", account: `NT SERVICE\Bad/Name`, service: "Bad/Name"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(managed.WindowsServiceAccountEnv, test.account)
+			t.Setenv(connector.WindowsGatewayServiceNameEnv, test.service)
+			if _, err := auditDBWindowsPinnedGatewayServiceSID(); err == nil {
+				t.Fatal("invalid gateway identity pins were accepted")
+			}
+		})
+	}
+
+	t.Run("resolution failure", func(t *testing.T) {
+		t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\`+serviceName)
+		t.Setenv(connector.WindowsGatewayServiceNameEnv, serviceName)
+		previous := auditDBWindowsServiceAccountSID
+		auditDBWindowsServiceAccountSID = func(string) (*windows.SID, error) {
+			return nil, errors.New("fixture SID unavailable")
+		}
+		t.Cleanup(func() { auditDBWindowsServiceAccountSID = previous })
+		if _, err := auditDBWindowsPinnedGatewayServiceSID(); err == nil {
+			t.Fatal("unresolvable exact gateway service SID was accepted")
+		}
+	})
+}
 
 func TestAuditDBWindowsCreatesProtectedPath(t *testing.T) {
 	parent := filepath.Join(t.TempDir(), "protected")

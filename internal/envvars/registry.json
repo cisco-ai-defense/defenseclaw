@@ -941,6 +941,138 @@
       "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
     },
     {
+      "name": "DEFENSECLAW_WINDOWS_ENTERPRISE_INSTALLER",
+      "category": "runtime_path",
+      "purpose": "Select the signed Windows enterprise PowerShell installer used by the native lifecycle CLI when --installer is omitted.",
+      "default": "unset (resolve the trusted installer adjacent to the native binary)",
+      "accepted_values": ["absolute path to a trusted install-enterprise.ps1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_enterprise_service.go", "description": "Resolves and trust-validates the installer delegated to by enterprise windows lifecycle commands"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Privileged code-selection boundary — the resolved installer and adjacent module must pass the native trust checks before elevation."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_SERVICE_NAME",
+      "category": "runtime_path",
+      "purpose": "Select the SCM service role hosted by the signed native defenseclaw binary.",
+      "default": "unset (run as an ordinary CLI process)",
+      "accepted_values": ["installer-owned Windows service name", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows.go", "description": "Opts the native binary into SCM hosting for the named enterprise service"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Installer-owned service switch — production values belong in the protected per-service registry Environment value, not an interactive user environment."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_SERVICE_LOG",
+      "category": "runtime_path",
+      "purpose": "Select the absolute append-only log path used when the native binary is hosted by the Windows SCM.",
+      "default": "unset (retain the inherited service output handles)",
+      "accepted_values": ["absolute administrator-approved log path", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows.go", "description": "Redirects native Windows service stdout and stderr to the configured file"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Service output path — the enterprise installer pins this in protected SCM configuration and hardens its parent directory."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME",
+      "category": "runtime_path",
+      "purpose": "Identify the exact enterprise gateway SCM service used for service-SID ACLs and managed hook peer verification.",
+      "default": "DefenseClawGateway",
+      "accepted_values": ["installer-owned Windows gateway service name"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Binds managed Codex runtime metadata to the gateway service identity"},
+        {"location": "internal/cli/enterprise_hooks_token_windows.go", "description": "Derives the gateway virtual-service SID for protected token ACLs"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Service-identity boundary — changing this value changes which virtual service SID is authorized to read managed runtime secrets."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT",
+      "category": "runtime_path",
+      "purpose": "Identify the exact virtual Windows service account permitted to write the managed runtime tree.",
+      "default": "NT SERVICE\\${DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME}",
+      "accepted_values": ["NT SERVICE\\<installer-owned-service-name>"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/managed.go", "description": "Defines the protected service-account environment contract"},
+        {"location": "internal/managed/trust_windows.go", "description": "Resolves and validates the virtual-service SID"},
+        {"location": "internal/gateway/connector/hook_api_token_windows.go", "description": "Authorizes the service SID on managed hook token files"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Managed-runtime writer identity — only the installer-pinned virtual service account may receive the corresponding write grants."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED",
+      "category": "hook_internal",
+      "purpose": "Carry protected installer evidence that application control restricts every enabled enterprise agent client to approved binaries.",
+      "default": "unset (application-control prerequisite is unverified)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Gates protected Codex requirements reconciliation on approved-agent application-control evidence"},
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins the authenticated attestation in each protected service environment"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Authenticated service evidence — only the signed installer may publish this marker after live WDAC or AppLocker certification."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED",
+      "category": "hook_internal",
+      "purpose": "Retain the protected Codex-specific compatibility alias for the all-agent application-control attestation.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Publishes the compatibility claim alongside the authoritative approved-agent marker"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Compatibility-only service claim — it is not a substitute for DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED or live application-control certification."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED",
+      "category": "hook_internal",
+      "purpose": "Carry protected installer evidence that DefenseClaw is Claude Code's effective first-source-wins managed policy.",
+      "default": "unset (effective policy is unverified)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Includes Claude effective-policy evidence in the aggregate Windows enterprise report"},
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins fresh effective-policy certification in each protected service environment"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Authenticated service evidence — protected local policy bytes alone do not establish which Claude managed-policy source is effective."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED",
+      "category": "hook_internal",
+      "purpose": "Carry protected installer evidence that the approved Codex distribution has a fixed fail-closed trusted Windows hook launcher.",
+      "default": "unset (trusted hook launcher is unverified)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Fails closed before Codex requirements mutation when trusted-launcher evidence is absent"},
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins the authenticated launcher attestation in each protected service environment"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Authenticated service evidence — stock Codex releases that continue after hook-launch failure must leave this unset."
+    },
+    {
       "name": "DEFENSECLAW_IPC_SOCKET",
       "category": "runtime_path",
       "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable; use administrator-owned managed.socket_path instead.",
@@ -2993,16 +3125,134 @@
     {
       "name": "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST",
       "category": "test_fixture",
-      "purpose": "Skip the uid==0 + not-group/world-writable trust check that LoadEnvConfigEndpoint enforces on the AVC-authored env_config.json. Set only in unit tests that need to exercise the JSON parse / URL validation branches with a fixture the test user can write.",
+      "purpose": "Skip the on-disk trust check LoadEnvConfigEndpoint enforces on the AVC-authored env_config.json: root ownership and no group/world write on Unix, administrator ownership across the ancestor chain on Windows. Set only in unit tests that exercise the JSON parse / URL validation branches with a fixture the test user can write.",
       "default": "unset (trust check enforced)",
       "accepted_values": ["1", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/config/env_config.go", "description": "trustEnvConfigFile short-circuits when set — production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"}
+        {"location": "internal/config/env_config.go", "description": "trustEnvConfigFile short-circuits when set — production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"},
+        {"location": "internal/config/env_config_windows.go", "description": "shouldEnforceEnvConfigTrust short-circuits when set, skipping the managed.ValidateTrustedFilePath ancestor walk"}
       ],
       "since": "0.8.11",
-      "security_note": "Bypassing the env_config file trust check lets a group-writable file at the canonical path retarget bearer-authenticated inspection POSTs. Test-only."
+      "security_note": "Bypassing the env_config file trust check lets a file at the canonical path that untrusted principals can write retarget bearer-authenticated inspection POSTs. Test-only."
+    },
+    {
+      "name": "DEFENSECLAW_ATTRIBUTION_ROOT",
+      "category": "test_fixture",
+      "purpose": "Passes a temporary attribution root path from the Windows guardian-attribution Go test harness to its PowerShell child processes so they resolve InstallRoot/StateRoot/ClaudeManagedPolicyPath under the test's t.TempDir() instead of the machine defaults.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "The Windows guardian-attribution tests set the env var when launching PowerShell child processes so managed-path resolution happens under an isolated t.TempDir()"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEMP_RACE_ROOT",
+      "category": "test_fixture",
+      "purpose": "Root directory the Windows temp-race observation harness writes its baseline / observation records under. Set only by the Go test harness before invoking its PowerShell child; consumed by the observation function to emit deterministic evidence for the race check.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "Passed to the PowerShell child driving the Windows temp-race observation test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_LEDGER_ROOT",
+      "category": "test_fixture",
+      "purpose": "State-root anchor for the Windows guardian semantic-ledger test harness. The Go test writes t.TempDir() into this env var so the child PowerShell resolves StateRoot under an isolated directory rather than the machine default.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "Anchors the semantic-ledger StateRoot in the guardian-semantic tests"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_SPARSE_EVIDENCE_ROOT",
+      "category": "test_fixture",
+      "purpose": "Work-root anchor for the Windows sparse-artifact recovery evidence harness. The Go test writes t.TempDir() into this env var so the child PowerShell resolves WorkRoot under an isolated directory.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "Anchors the WorkRoot the sparse-artifact recovery evidence test emits into"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_BOUNDED_DIGEST_ROOT",
+      "category": "test_fixture",
+      "purpose": "Root directory the bounded artifact-digest test harness writes its managed.token fixture under. Consumed by a PowerShell child so the Windows certification path resolves the fixture under the test's t.TempDir() rather than the machine defaults.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "Anchors the fixture the bounded artifact-digest certification test emits"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_CODEX_MANAGED_SUBPROCESS",
+      "category": "test_fixture",
+      "purpose": "Marker the Windows connector-reconcile subprocess test sets in a re-execed child so it takes the Codex-managed code path instead of the parent's test-harness path. Consumed only by tests, never by production callers.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/connector_reconcile_subprocess_windows_test.go", "description": "Marker the re-execed child reads to select the Codex-managed subprocess path under test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_CODEX_MANAGED_DATA",
+      "category": "test_fixture",
+      "purpose": "Passes the isolated Codex managed data root from the Windows connector-reconcile Go test to its re-execed subprocess so the child resolves managed-Codex artifacts under t.TempDir().",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/connector_reconcile_subprocess_windows_test.go", "description": "Handed to the re-execed subprocess to anchor the managed data root during the reconcile test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_CODEX_MANAGED_HOME",
+      "category": "test_fixture",
+      "purpose": "Passes the isolated user-home root from the Windows connector-reconcile Go test to its re-execed subprocess so the child resolves per-user managed-Codex artifacts under t.TempDir() rather than the runner's real profile.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/connector_reconcile_subprocess_windows_test.go", "description": "Handed to the re-execed subprocess to anchor the per-user home during the reconcile test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING",
+      "category": "test_fixture",
+      "purpose": "Marker the Windows enterprise-payload restricted-environment staging test sets in a re-execed helper so the helper knows it is running inside a simulated restricted-user posture and applies the matching payload-staging path. Consumed only by tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_enterprise_payload_test.go", "description": "Marker the re-execed staging helper reads to select the restricted-environment payload-staging path under test"}
+      ],
+      "since": "0.8.11"
     },
     {
       "name": "DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH",

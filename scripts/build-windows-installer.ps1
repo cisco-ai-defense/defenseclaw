@@ -23,8 +23,9 @@ param(
     [string]$OutRoot = $DistRoot,
     [string]$Version = "",
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-windows-installer-build"),
-    [ValidateSet('oss', 'managed-enterprise')][string]$DistributionFlavor = 'oss',
-    [switch]$SkipSigning
+    [ValidateSet('oss')][string]$DistributionFlavor = 'oss',
+    [switch]$SkipSigning,
+    [switch]$SkipCommitCheck
 )
 
 Set-StrictMode -Version Latest
@@ -754,11 +755,11 @@ foreach ($requiredSetupInput in @(
 }
 . $WindowsAuthenticodeHelper
 
-if ($DistributionFlavor -eq 'managed-enterprise') {
-    throw @'
-The public Windows installer builder cannot produce a managed-enterprise artifact. A managed Windows release requires the private CMID provider overlay, its pinned private module version, and authorized dependency credentials; only the macOS bundle pipeline currently implements that overlay contract. Refusing to compile the public cmid-tagged stub.
-'@
-}
+# This builder is intentionally restricted to the ordinary per-user product.
+# A CMID-enabled gateway does not turn its asInvoker/current-user transaction
+# into a machine-wide service installer. Managed-enterprise releases must use
+# scripts/build-windows-enterprise-installer.ps1 and the separate elevated
+# DefenseClawSetup-Enterprise-x64.exe entry point.
 $sourceCommit = Get-GitSourceCommit $repoRoot
 $sourceDateEpoch = Get-GitSourceEpoch $repoRoot $sourceCommit
 
@@ -768,6 +769,35 @@ $state = Resolve-FullPath $StateRoot
 [IO.Directory]::CreateDirectory($dist) | Out-Null
 [IO.Directory]::CreateDirectory($out) | Out-Null
 [IO.Directory]::CreateDirectory($state) | Out-Null
+
+# Managed-enterprise gateway zips are produced by
+# packaging/scripts/build-managed-windows-bundle.sh (on macOS), which drops a
+# gateway-source-commit.txt sidecar in -DistRoot recording the defenseclaw
+# commit the gateway was cross-built from. This script bakes the local git
+# HEAD into manifest.source_commit and the provenance record, so a Windows
+# box on a different commit would silently ship a setup.exe whose gateway
+# metadata points at the wrong sha — no other check catches that. Cross-
+# check when the sidecar is present (OSS builds do not ship one; nothing
+# changes for them). Bypass with -SkipCommitCheck for local dev.
+$commitSidecar = Join-Path $dist 'gateway-source-commit.txt'
+if ((Test-Path -LiteralPath $commitSidecar -PathType Leaf) -and -not $SkipCommitCheck) {
+    $expectedCommit = (Get-Content -LiteralPath $commitSidecar -Raw -Encoding UTF8).Trim().ToLowerInvariant()
+    if ($expectedCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "gateway-source-commit.txt does not contain a 40-char lowercase git OID: $expectedCommit"
+    }
+    if ($sourceCommit -ne $expectedCommit) {
+        throw @"
+build-windows-installer: local defenseclaw HEAD does not match the gateway's source commit.
+
+  gateway built from: $expectedCommit
+  local HEAD:         $sourceCommit
+
+Check the same commit out (git -C $repoRoot checkout $expectedCommit) before
+running the installer, or re-run with -SkipCommitCheck if you accept a
+mismatched source_commit in the manifest / provenance.
+"@
+    }
+}
 
 if (-not $Version) { $Version = Get-ProjectVersion }
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
