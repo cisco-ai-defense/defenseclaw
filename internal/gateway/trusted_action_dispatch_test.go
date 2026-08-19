@@ -1495,14 +1495,18 @@ func TestTrustedActionDynamicExecutableQuietControls(t *testing.T) {
 		})
 	}
 
-	for _, command := range []string{
-		dangerous,
-		"command " + dangerous,
-		"env MODE=check " + dangerous,
-		"exec " + dangerous,
-		"sudo -n " + dangerous,
-		"sudo -h remote " + dangerous,
+	for _, test := range []struct {
+		command     string
+		wantEnforce bool
+	}{
+		{command: dangerous, wantEnforce: true},
+		{command: "command " + dangerous, wantEnforce: true},
+		{command: "env MODE=check " + dangerous},
+		{command: "exec " + dangerous, wantEnforce: true},
+		{command: "sudo -n " + dangerous, wantEnforce: true},
+		{command: "sudo -h remote " + dangerous, wantEnforce: true},
 	} {
+		command := test.command
 		static := actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: static, LegacyText: command, Connector: connector,
@@ -1513,19 +1517,17 @@ func TestTrustedActionDynamicExecutableQuietControls(t *testing.T) {
 			t.Fatalf("static malicious command %q lost detection: %+v", command, findings)
 		}
 		facts := actionfacts.Analyze(static)
-		_, wantEnforce := trustedSemanticOwnerFindingProof(
-			"CMD-RM-RF",
-			static,
-			facts,
-		)
-		if matched.contributesToEnforcement() != wantEnforce {
+		if matched.contributesToEnforcement() != test.wantEnforce {
+			proof, derivedEnforce := trustedSemanticOwnerFindingProof("CMD-RM-RF", static, facts)
 			t.Fatalf(
-				"static command %q enforcement=%t, want %t: %+v facts=%+v",
+				"static command %q enforcement=%t, want %t: %+v facts=%+v derived=%t proof=%+v",
 				command,
 				matched.contributesToEnforcement(),
-				wantEnforce,
+				test.wantEnforce,
 				findings,
 				facts,
+				derivedEnforce,
+				proof,
 			)
 		}
 		if uncertainty := findingWithID(findings, trustedParserUncertaintyRuleID); uncertainty != nil {
@@ -1550,6 +1552,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 		input       actionfacts.Input
 		legacyText  string
 		wantFinding bool
+		wantEnforce bool
 		uncertain   bool
 	}{
 		{
@@ -1919,25 +1922,20 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 					trustedBashFallbackActions(test.input, facts),
 				)
 			}
-			if matched != nil && test.uncertain {
-				if matched.contributesToEnforcement() || matched.Severity != "LOW" {
-					t.Fatalf("parser uncertainty became actionable: %+v", *matched)
-				}
-			} else if matched != nil {
-				_, wantEnforce := trustedSemanticOwnerFindingProof(
-					"CMD-RM-RF",
-					test.input,
+			if matched != nil && matched.contributesToEnforcement() != test.wantEnforce {
+				proof, derivedEnforce := trustedSemanticOwnerFindingProof("CMD-RM-RF", test.input, facts)
+				t.Fatalf(
+					"nested finding enforcement=%t, want %t: %+v facts=%+v derived=%t proof=%+v",
+					matched.contributesToEnforcement(),
+					test.wantEnforce,
+					*matched,
 					facts,
+					derivedEnforce,
+					proof,
 				)
-				if matched.contributesToEnforcement() != wantEnforce {
-					t.Fatalf(
-						"nested finding enforcement=%t, want %t: %+v facts=%+v",
-						matched.contributesToEnforcement(),
-						wantEnforce,
-						*matched,
-						facts,
-					)
-				}
+			}
+			if matched != nil && test.uncertain && matched.Severity != "LOW" {
+				t.Fatalf("parser uncertainty did not remain LOW: %+v", *matched)
 			}
 		})
 	}
@@ -2069,6 +2067,7 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 		command     string
 		ruleID      string
 		wantFinding bool
+		wantEnforce bool
 	}{
 		{
 			name:        "ansi c quoted executable",
@@ -2161,19 +2160,17 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 			}
 			if matched != nil {
 				facts := actionfacts.Analyze(input)
-				_, wantEnforce := trustedSemanticOwnerFindingProof(
-					test.ruleID,
-					input,
-					facts,
-				)
-				if matched.contributesToEnforcement() != wantEnforce {
+				if matched.contributesToEnforcement() != test.wantEnforce {
+					proof, derivedEnforce := trustedSemanticOwnerFindingProof(test.ruleID, input, facts)
 					t.Fatalf(
-						"%s enforcement=%t, want %t: %+v facts=%+v",
+						"%s enforcement=%t, want %t: %+v facts=%+v derived=%t proof=%+v",
 						test.ruleID,
 						matched.contributesToEnforcement(),
-						wantEnforce,
+						test.wantEnforce,
 						*matched,
 						facts,
+						derivedEnforce,
+						proof,
 					)
 				}
 			}

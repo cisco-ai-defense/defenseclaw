@@ -473,9 +473,10 @@ type HookProfile struct {
 
 	// DecodeToolArgs extracts the exact structured tool-argument value from
 	// the original request body when a connector nests it outside the shared
-	// hook vocabulary. A non-nil callback owns the projection completely: a
-	// nil result means the connector envelope was absent or ambiguous and the
-	// gateway must not fall back to treating the opaque payload as arguments.
+	// hook vocabulary. The callback must return a valid JSON object or nil. A
+	// non-nil callback owns the projection completely: a nil result means the
+	// connector envelope was absent or ambiguous, and the gateway normalizes it
+	// to an empty object rather than treating the opaque payload as arguments.
 	DecodeToolArgs func(rawPayload []byte) json.RawMessage
 
 	// Profile-driven dispatch callbacks. All optional — the

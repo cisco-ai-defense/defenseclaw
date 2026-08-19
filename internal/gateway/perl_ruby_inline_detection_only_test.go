@@ -146,19 +146,20 @@ func TestPerlRubyInlineGenericOwnerAlwaysRemainsAuditOnly(t *testing.T) {
 	const connector = "issue-708-perl-ruby-controls"
 	installIssue708ProfileConnector(t, connector, "default")
 	for _, test := range []struct {
-		name             string
-		command          string
-		ruleID           string
-		wantNetwork      bool
-		wantShellExec    bool
-		wantNonAuthority bool
+		name              string
+		command           string
+		ruleID            string
+		wantNetwork       bool
+		wantShellExec     bool
+		wantNonAuthority  bool
+		wantForkBombProof bool
 	}{
 		{name: "Perl read", command: `perl -e 'open(my $fh, "<", "/etc/shadow")'`, ruleID: "CMD-PERL-E"},
 		{name: "Ruby write", command: `ruby -e 'File.write("/etc/profile", "x")'`, ruleID: "CMD-RUBY-E"},
 		{name: "Perl child", command: `perl -e 'system("/bin/rm", "-rf", "/tmp/x")'`, ruleID: "CMD-PERL-E"},
 		{name: "Ruby child", command: `ruby -e 'system("rm -rf /tmp/x")'`, ruleID: "CMD-RUBY-E"},
-		{name: "Perl fork bomb", command: `perl -e 'fork while fork'`, ruleID: "CMD-PERL-E"},
-		{name: "Ruby fork bomb", command: `ruby -e 'loop { fork }'`, ruleID: "CMD-RUBY-E"},
+		{name: "Perl fork bomb", command: `perl -e 'fork while fork'`, ruleID: "CMD-PERL-E", wantForkBombProof: true},
+		{name: "Ruby fork bomb", command: `ruby -e 'loop { fork }'`, ruleID: "CMD-RUBY-E", wantForkBombProof: true},
 		{name: "Perl unknown", command: `perl -e 'Example::Unknown::call("x")'`, ruleID: "CMD-PERL-E"},
 		{name: "Ruby dynamic", command: `ruby -e 'eval("puts 1")'`, ruleID: "CMD-RUBY-E"},
 		{
@@ -210,7 +211,7 @@ func TestPerlRubyInlineGenericOwnerAlwaysRemainsAuditOnly(t *testing.T) {
 			if matched == nil || matched.contributesToEnforcement() || matched.Severity != "LOW" {
 				t.Fatalf("generic %s finding = %+v, want LOW audit-only evidence: %+v", test.ruleID, matched, findings)
 			}
-			if strings.Contains(strings.ToLower(test.name), "fork bomb") {
+			if test.wantForkBombProof {
 				dangerous := findingWithID(findings, "impact.fork_bomb")
 				if dangerous == nil || !dangerous.contributesToEnforcement() {
 					t.Fatalf("specific fork-bomb proof is not enforceable: %+v", findings)

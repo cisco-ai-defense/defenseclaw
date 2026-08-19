@@ -97,7 +97,7 @@ overall_rc=0
 drive_event() {
   local label="$1" payload="$2" expect="$3"
   local before after out code native_event
-  if ! native_event="$(jq -er '(.hook_event_name // .hookEventName) | select(type == "string" and length > 0)' "${payload}")"; then
+  if ! native_event="$(jq -er '[.hook_event_name, .hookEventName] | map(select(type == "string" and length > 0)) | .[0] // empty' "${payload}")"; then
     dc_record_result "${label}:fixture" fail "missing non-empty hook event name in ${payload}"
     overall_rc=1
     return

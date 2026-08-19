@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -421,6 +422,51 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				t.Fatalf("severity = %q, want %q", got[0].Severity, test.wantSeverity)
 			}
 		})
+	}
+}
+
+func TestTrustedActionSensitivePathRuleMatcherTable(t *testing.T) {
+	wantRuleIDs := []string{
+		"PATH-ENV-FILE", "PATH-SSH-DIR", "PATH-SSH-KEY",
+		"PATH-WIN-SSH-KEY", "PATH-ETC-SHADOW", "PATH-ETC-PASSWD",
+		"PATH-AWS-CREDS", "PATH-WIN-AWS-CREDS",
+		"PATH-KUBE", "PATH-WIN-KUBE-CONFIG",
+		"PATH-DOCKER", "PATH-NPMRC", "PATH-PYPIRC",
+		"PATH-GIT-CREDS", "PATH-NETRC", "PATH-WIN-GIT-CREDS",
+		"PATH-WIN-NETRC", "PATH-PROC-ENVIRON",
+		"SECRETS.CLOUD_CREDENTIAL_READ",
+		"SECRETS.BROWSER_SESSION_STORE_READ",
+		"SECRETS.WORKLOAD_IDENTITY_TOKEN_READ",
+	}
+	seen := make(map[string]struct{}, len(wantRuleIDs))
+	gotRuleIDs := make([]string, 0, len(wantRuleIDs))
+	for _, binding := range trustedActionSensitivePathRuleMatchers {
+		if binding.matcher == nil {
+			t.Fatal("sensitive-path matcher table contains a nil matcher")
+		}
+		for _, ruleID := range binding.ruleIDs {
+			ruleID = canonicalTrustedRuleID(ruleID)
+			if _, duplicate := seen[ruleID]; duplicate {
+				t.Fatalf("sensitive-path rule %q has multiple matchers", ruleID)
+			}
+			seen[ruleID] = struct{}{}
+			gotRuleIDs = append(gotRuleIDs, ruleID)
+			matcher, ok := trustedActionSensitivePathMatcherForRule(ruleID)
+			if !ok || matcher == nil || !trustedActionSensitivePathRule(ruleID) {
+				t.Fatalf("sensitive-path rule %q is not discoverable", ruleID)
+			}
+		}
+	}
+	slices.Sort(gotRuleIDs)
+	slices.Sort(wantRuleIDs)
+	if !slices.Equal(gotRuleIDs, wantRuleIDs) {
+		t.Fatalf("sensitive-path rule IDs = %v, want %v", gotRuleIDs, wantRuleIDs)
+	}
+	if trustedActionSensitivePathRule("PATH-NOT-SENSITIVE") {
+		t.Fatal("unknown sensitive-path rule was accepted")
+	}
+	if !trustedActionSensitivePathRule(" path-env-file ") {
+		t.Fatal("canonical sensitive-path rule lookup changed")
 	}
 }
 

@@ -24,6 +24,8 @@ import (
 	"strings"
 )
 
+const antigravityMaxJSONNestingDepth = 64
+
 // antigravityProfileDecode implements HookProfile.Decode for Google's
 // Antigravity (`agy`) CLI / IDE. agy emits Claude-Code-derived hook
 // payloads — fields are nested rather than flat — so the unified
@@ -321,7 +323,7 @@ func antigravityRawJSONObject(raw json.RawMessage) bool {
 
 func antigravityValidateUniqueJSON(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	if err := antigravityConsumeUniqueJSONValue(dec); err != nil {
+	if err := antigravityConsumeUniqueJSONValue(dec, 0); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); err != io.EOF {
@@ -333,7 +335,7 @@ func antigravityValidateUniqueJSON(raw []byte) error {
 	return nil
 }
 
-func antigravityConsumeUniqueJSONValue(dec *json.Decoder) error {
+func antigravityConsumeUniqueJSONValue(dec *json.Decoder, depth int) error {
 	token, err := dec.Token()
 	if err != nil {
 		return err
@@ -341,6 +343,12 @@ func antigravityConsumeUniqueJSONValue(dec *json.Decoder) error {
 	delim, ok := token.(json.Delim)
 	if !ok {
 		return nil
+	}
+	if depth >= antigravityMaxJSONNestingDepth {
+		return fmt.Errorf(
+			"JSON nesting exceeds maximum depth of %d",
+			antigravityMaxJSONNestingDepth,
+		)
 	}
 	switch delim {
 	case '{':
@@ -358,7 +366,7 @@ func antigravityConsumeUniqueJSONValue(dec *json.Decoder) error {
 				return fmt.Errorf("duplicate JSON field %q", key)
 			}
 			seen[key] = struct{}{}
-			if err := antigravityConsumeUniqueJSONValue(dec); err != nil {
+			if err := antigravityConsumeUniqueJSONValue(dec, depth+1); err != nil {
 				return err
 			}
 		}
@@ -371,7 +379,7 @@ func antigravityConsumeUniqueJSONValue(dec *json.Decoder) error {
 		}
 	case '[':
 		for dec.More() {
-			if err := antigravityConsumeUniqueJSONValue(dec); err != nil {
+			if err := antigravityConsumeUniqueJSONValue(dec, depth+1); err != nil {
 				return err
 			}
 		}

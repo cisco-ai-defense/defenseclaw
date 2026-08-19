@@ -64,7 +64,7 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 			})
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			var matched *RuleFinding
 			for index := range findings {
 				if findings[index].RuleID == test.wantRule {
@@ -201,7 +201,7 @@ func TestPromotedArtifactHonorsPOSIXNoExecScriptMode(t *testing.T) {
 			})
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			matched := findingWithID(findings, "tamper.detector_state_write")
 			if !test.wantFinding {
 				if len(findings) != 0 {
@@ -279,7 +279,7 @@ func TestPromotedArtifactRevokesNoExecPreviewAfterConflictingSources(t *testing.
 			}
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			matched := findingWithID(findings, "tamper.detector_state_write")
 			if matched == nil {
 				t.Fatalf("source conflict lost tamper finding: %v facts=%+v", FindingStrings(findings), facts)
@@ -333,7 +333,7 @@ func TestPOSIXNoExecArtifactPipelineRetainsFinding(t *testing.T) {
 			})
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			matched := findingWithID(findings, "tamper.detector_state_write")
 			if matched == nil {
 				t.Fatalf("no-exec pipeline lost tamper finding: %v facts=%+v", FindingStrings(findings), facts)
@@ -421,6 +421,7 @@ func TestPOSIXNoExecScriptRedirectRetainsStateMutationDetection(t *testing.T) {
 		agentHookRequest{ConnectorName: connectorName},
 		facts,
 		true,
+		nil,
 	); len(findings) != 0 {
 		t.Fatalf("safe redirected script produced artifact findings: %v", FindingStrings(findings))
 	}
@@ -508,7 +509,7 @@ func TestPromotedArtifactUsesInvocationWorkingDirectory(t *testing.T) {
 			})
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			got := false
 			for _, finding := range findings {
 				got = got || finding.RuleID == "CMD-RM-RF" && finding.contributesToEnforcement()
@@ -615,7 +616,7 @@ func TestPromotedArtifactOuterControlFlowIsDetectionOnly(t *testing.T) {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: command})
 		findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 			ConnectorName: connectorName,
-		}, facts, true)
+		}, facts, true, nil)
 		var matched *RuleFinding
 		for index := range findings {
 			if findings[index].RuleID == "CMD-RM-RF" {
@@ -659,7 +660,7 @@ func TestPromotedArtifactFactsParticipateInToolChains(t *testing.T) {
 				ConnectorName: connectorName,
 				toolChain:     capture,
 			}
-			_ = promotedArtifactFindings(t.Context(), req, outer, true)
+			_ = promotedArtifactFindings(t.Context(), req, outer, true, nil)
 			projection, _ := projectAgentHookToolChains(
 				req,
 				connector.ToolCallLifecycleContract{},
@@ -705,7 +706,7 @@ func TestPromotedWindowsArtifactFactsParticipateInToolChains(t *testing.T) {
 		ConnectorName: connectorName,
 		toolChain:     capture,
 	}
-	_ = promotedArtifactFindings(t.Context(), req, outer, true)
+	_ = promotedArtifactFindings(t.Context(), req, outer, true, nil)
 	projection, _ := projectAgentHookToolChains(
 		req,
 		connector.ToolCallLifecycleContract{},
@@ -762,6 +763,7 @@ func TestPromotedWindowsArtifactTrailingLineEndingEnforcement(t *testing.T) {
 				agentHookRequest{ConnectorName: connectorName},
 				outer,
 				true,
+				nil,
 			)
 			var matched *RuleFinding
 			for index := range findings {
@@ -827,6 +829,7 @@ func TestPromotedWindowsCMDAndBATFinalBytes(t *testing.T) {
 						agentHookRequest{ConnectorName: connectorName},
 						outer,
 						true,
+						nil,
 					)
 					if test.wantBlock {
 						if len(findings) != 1 || findings[0].RuleID != "CMD-RM-RF" ||
@@ -895,6 +898,7 @@ func TestPromotedArtifactDirectSuffixDoesNotInventInterpreter(t *testing.T) {
 		agentHookRequest{ConnectorName: "artifact-direct-suffix-test"},
 		facts,
 		true,
+		nil,
 	); len(findings) != 0 {
 		t.Fatalf("suffix-only direct path produced findings: %v", FindingStrings(findings))
 	}

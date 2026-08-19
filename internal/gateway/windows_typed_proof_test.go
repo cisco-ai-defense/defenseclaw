@@ -120,6 +120,24 @@ func TestWindowsHighRiskOwnersRequireCompleteCriticalTypedFacts(t *testing.T) {
 			want:   true,
 		},
 		{
+			name: "current user winlogon shell persistence",
+			input: actionfacts.Input{
+				Tool:    "cmd",
+				Command: `reg add "HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /d placeholder.exe`,
+			},
+			ruleID: "CMD-WIN-REG-PERSIST",
+			want:   true,
+		},
+		{
+			name: "current user winlogon userinit persistence",
+			input: actionfacts.Input{
+				Tool:    "cmd",
+				Command: `reg add "HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Userinit /d placeholder.exe`,
+			},
+			ruleID: "CMD-WIN-REG-PERSIST",
+			want:   true,
+		},
+		{
 			name: "service image path persistence",
 			input: actionfacts.Input{
 				Tool:    "cmd",
@@ -127,6 +145,22 @@ func TestWindowsHighRiskOwnersRequireCompleteCriticalTypedFacts(t *testing.T) {
 			},
 			ruleID: "CMD-WIN-REG-PERSIST",
 			want:   true,
+		},
+		{
+			name: "current user service path is not machine persistence",
+			input: actionfacts.Input{
+				Tool:    "cmd",
+				Command: `reg add HKCU\System\CurrentControlSet\Services\Fixture /v ImagePath /d placeholder.exe`,
+			},
+			ruleID: "CMD-WIN-REG-PERSIST",
+		},
+		{
+			name: "numbered control set is not active service persistence",
+			input: actionfacts.Input{
+				Tool:    "cmd",
+				Command: `reg add HKLM\System\ControlSet001\Services\Fixture /v ImagePath /d placeholder.exe`,
+			},
+			ruleID: "CMD-WIN-REG-PERSIST",
 		},
 		{
 			name: "scoped temporary delete",

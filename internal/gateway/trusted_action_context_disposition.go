@@ -143,22 +143,117 @@ const (
 	trustedActionSensitivePathReadEgress
 )
 
-func trustedActionSensitivePathRule(ruleID string) bool {
-	switch canonicalTrustedRuleID(ruleID) {
-	case "PATH-ENV-FILE", "PATH-SSH-DIR", "PATH-SSH-KEY",
-		"PATH-WIN-SSH-KEY", "PATH-ETC-SHADOW", "PATH-ETC-PASSWD",
-		"PATH-AWS-CREDS", "PATH-WIN-AWS-CREDS",
-		"PATH-KUBE", "PATH-WIN-KUBE-CONFIG",
-		"PATH-DOCKER", "PATH-NPMRC", "PATH-PYPIRC",
-		"PATH-GIT-CREDS", "PATH-NETRC", "PATH-WIN-GIT-CREDS",
-		"PATH-WIN-NETRC", "PATH-PROC-ENVIRON",
-		"SECRETS.CLOUD_CREDENTIAL_READ",
-		"SECRETS.BROWSER_SESSION_STORE_READ",
-		"SECRETS.WORKLOAD_IDENTITY_TOKEN_READ":
-		return true
-	default:
-		return false
+type trustedActionSensitivePathMatcher func(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool
+
+type trustedActionSensitivePathRuleMatcher struct {
+	ruleIDs []string
+	matcher trustedActionSensitivePathMatcher
+}
+
+// trustedActionSensitivePathRuleMatchers is the single membership and matcher
+// catalog for trusted sensitive-path findings. Keep aliases grouped when they
+// intentionally share identical path semantics.
+var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMatcher{
+	{
+		ruleIDs: []string{"PATH-ENV-FILE"},
+		matcher: matchesContextualEnvironmentFile,
+	},
+	{
+		ruleIDs: []string{"PATH-SSH-KEY", "PATH-WIN-SSH-KEY"},
+		matcher: trustedActionPathValueMatcher(matchesSSHPrivateKey),
+	},
+	{
+		ruleIDs: []string{"PATH-SSH-DIR"},
+		matcher: trustedActionSSHDirectoryMatcher,
+	},
+	{
+		ruleIDs: []string{"PATH-ETC-SHADOW"},
+		matcher: trustedActionExactPathMatcher("/etc/shadow"),
+	},
+	{
+		ruleIDs: []string{"PATH-ETC-PASSWD"},
+		matcher: trustedActionExactPathMatcher("/etc/passwd"),
+	},
+	{
+		ruleIDs: []string{"PATH-AWS-CREDS", "PATH-WIN-AWS-CREDS"},
+		matcher: trustedActionPathValueMatcher(matchesAWSCredentials),
+	},
+	{
+		ruleIDs: []string{"PATH-KUBE", "PATH-WIN-KUBE-CONFIG"},
+		matcher: trustedActionPathValueMatcher(matchesKubeConfig),
+	},
+	{
+		ruleIDs: []string{"PATH-DOCKER", "PATH-NPMRC", "PATH-PYPIRC"},
+		matcher: trustedActionPathValueMatcher(matchesPackageCredentialFile),
+	},
+	{
+		ruleIDs: []string{
+			"PATH-GIT-CREDS", "PATH-NETRC", "PATH-WIN-GIT-CREDS",
+			"PATH-WIN-NETRC",
+		},
+		matcher: trustedActionPathValueMatcher(matchesGitCredentialFile),
+	},
+	{
+		ruleIDs: []string{"PATH-PROC-ENVIRON"},
+		matcher: trustedActionPathValueMatcher(matchesProcEnviron),
+	},
+	{
+		ruleIDs: []string{"SECRETS.CLOUD_CREDENTIAL_READ"},
+		matcher: matchesContextualCloudCredentialFile,
+	},
+	{
+		ruleIDs: []string{"SECRETS.BROWSER_SESSION_STORE_READ"},
+		matcher: matchesContextualBrowserSessionStore,
+	},
+	{
+		ruleIDs: []string{"SECRETS.WORKLOAD_IDENTITY_TOKEN_READ"},
+		matcher: trustedActionPathValueMatcher(matchesWorkloadIdentityToken),
+	},
+}
+
+func trustedActionPathValueMatcher(
+	matcher func(string) bool,
+) trustedActionSensitivePathMatcher {
+	return func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		return matcher(semanticPathValue(candidate))
 	}
+}
+
+func trustedActionExactPathMatcher(
+	expected string,
+) trustedActionSensitivePathMatcher {
+	return func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		return strings.TrimRight(semanticPathValue(candidate), "/") == expected
+	}
+}
+
+func trustedActionSSHDirectoryMatcher(
+	_ actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := strings.ToLower(strings.Trim(semanticPathValue(candidate), "/"))
+	return value == ".ssh" || strings.HasSuffix(value, "/.ssh") ||
+		strings.Contains(value, "/.ssh/")
+}
+
+func trustedActionSensitivePathMatcherForRule(
+	ruleID string,
+) (trustedActionSensitivePathMatcher, bool) {
+	ruleID = canonicalTrustedRuleID(ruleID)
+	for _, binding := range trustedActionSensitivePathRuleMatchers {
+		if slices.Contains(binding.ruleIDs, ruleID) {
+			return binding.matcher, binding.matcher != nil
+		}
+	}
+	return nil, false
+}
+
+func trustedActionSensitivePathRule(ruleID string) bool {
+	_, ok := trustedActionSensitivePathMatcherForRule(ruleID)
+	return ok
 }
 
 func trustedActionClassifySensitivePathRisk(
@@ -204,39 +299,8 @@ func trustedActionPathMatchesRule(
 	candidate actionfacts.PathFact,
 	ruleID string,
 ) bool {
-	switch canonicalTrustedRuleID(ruleID) {
-	case "PATH-ENV-FILE":
-		return matchesContextualEnvironmentFile(facts, candidate)
-	case "PATH-SSH-KEY", "PATH-WIN-SSH-KEY":
-		return matchesSSHPrivateKey(semanticPathValue(candidate))
-	case "PATH-SSH-DIR":
-		value := strings.ToLower(strings.Trim(semanticPathValue(candidate), "/"))
-		return value == ".ssh" || strings.HasSuffix(value, "/.ssh") ||
-			strings.Contains(value, "/.ssh/")
-	case "PATH-ETC-SHADOW":
-		return strings.TrimRight(semanticPathValue(candidate), "/") == "/etc/shadow"
-	case "PATH-ETC-PASSWD":
-		return strings.TrimRight(semanticPathValue(candidate), "/") == "/etc/passwd"
-	case "PATH-AWS-CREDS", "PATH-WIN-AWS-CREDS":
-		return matchesAWSCredentials(semanticPathValue(candidate))
-	case "PATH-KUBE", "PATH-WIN-KUBE-CONFIG":
-		return matchesKubeConfig(semanticPathValue(candidate))
-	case "PATH-DOCKER", "PATH-NPMRC", "PATH-PYPIRC":
-		return matchesPackageCredentialFile(semanticPathValue(candidate))
-	case "PATH-GIT-CREDS", "PATH-NETRC", "PATH-WIN-GIT-CREDS",
-		"PATH-WIN-NETRC":
-		return matchesGitCredentialFile(semanticPathValue(candidate))
-	case "PATH-PROC-ENVIRON":
-		return matchesProcEnviron(semanticPathValue(candidate))
-	case "SECRETS.CLOUD_CREDENTIAL_READ":
-		return matchesContextualCloudCredentialFile(facts, candidate)
-	case "SECRETS.BROWSER_SESSION_STORE_READ":
-		return matchesContextualBrowserSessionStore(facts, candidate)
-	case "SECRETS.WORKLOAD_IDENTITY_TOKEN_READ":
-		return matchesWorkloadIdentityToken(semanticPathValue(candidate))
-	default:
-		return false
-	}
+	matcher, ok := trustedActionSensitivePathMatcherForRule(ruleID)
+	return ok && matcher(facts, candidate)
 }
 
 func trustedActionContentFindingHasRiskPair(

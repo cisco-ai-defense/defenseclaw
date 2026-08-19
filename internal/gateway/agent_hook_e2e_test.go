@@ -309,8 +309,8 @@ func TestNormalizeAgentHookRequest_AntigravityNestedToolArgsAuthority(t *testing
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := decode(t, tc.raw).ToolArgs; len(got) != 0 {
-				t.Fatalf("ToolArgs=%s want empty fail-closed projection", got)
+			if got := string(decode(t, tc.raw).ToolArgs); got != "{}" {
+				t.Fatalf("ToolArgs=%q want valid empty-object fail-closed projection", got)
 			}
 		})
 	}

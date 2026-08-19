@@ -687,21 +687,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		severity := HighestSeverity(ruleFindings)
 		confidence := HighestConfidence(ruleFindings, severity)
 		enforceableSeverity := HighestSeverity(enforceableRuleFindings(ruleFindings))
-
-		for _, cf := range cgFindings {
-			if cf.Severity == string(scanner.SeverityCritical) {
-				severity = "CRITICAL"
-				if cf.contributesToEnforcement() {
-					enforceableSeverity = "CRITICAL"
-				}
-			}
-			if cf.Severity == string(scanner.SeverityHigh) && severity != "CRITICAL" {
-				severity = "HIGH"
-			}
-			if cf.Severity == string(scanner.SeverityHigh) && cf.contributesToEnforcement() && enforceableSeverity != "CRITICAL" {
-				enforceableSeverity = "HIGH"
-			}
-		}
+		severity, enforceableSeverity = aggregateCodeGuardSeverity(
+			cgFindings,
+			severity,
+			enforceableSeverity,
+		)
 
 		runtimeAction := guardrailActionAllow
 		if enforceableSeverity != "NONE" {
@@ -957,22 +947,11 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	enforcementCapable bool,
 ) *ToolInspectVerdict {
 	cgFindings := codeGuardRuleFindings(scan, trustedBoundary, enforcementCapable)
-	severity := "NONE"
-	enforceableSeverity := "NONE"
-	for _, cf := range cgFindings {
-		if cf.Severity == string(scanner.SeverityCritical) {
-			severity = "CRITICAL"
-			if cf.contributesToEnforcement() {
-				enforceableSeverity = "CRITICAL"
-			}
-		}
-		if cf.Severity == string(scanner.SeverityHigh) && severity != "CRITICAL" {
-			severity = "HIGH"
-		}
-		if cf.Severity == string(scanner.SeverityHigh) && cf.contributesToEnforcement() && enforceableSeverity != "CRITICAL" {
-			enforceableSeverity = "HIGH"
-		}
-	}
+	severity, enforceableSeverity := aggregateCodeGuardSeverity(
+		cgFindings,
+		"NONE",
+		"NONE",
+	)
 	action := guardrailActionAllow
 	if enforceableSeverity != "NONE" {
 		action = guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, enforceableSeverity, true)
@@ -989,6 +968,33 @@ func (a *APIServer) codeGuardOnlyVerdict(
 		Findings:         findingStrs,
 		DetailedFindings: cgFindings,
 	}
+}
+
+// aggregateCodeGuardSeverity folds visible and enforcement-eligible CodeGuard
+// findings independently. A detection-only CRITICAL finding remains visible at
+// CRITICAL without hiding a lower-severity finding that can actually enforce.
+func aggregateCodeGuardSeverity(
+	findings []RuleFinding,
+	severity string,
+	enforceableSeverity string,
+) (string, string) {
+	for _, finding := range findings {
+		switch finding.Severity {
+		case string(scanner.SeverityCritical):
+			severity = "CRITICAL"
+			if finding.contributesToEnforcement() {
+				enforceableSeverity = "CRITICAL"
+			}
+		case string(scanner.SeverityHigh):
+			if severity != "CRITICAL" {
+				severity = "HIGH"
+			}
+			if finding.contributesToEnforcement() && enforceableSeverity != "CRITICAL" {
+				enforceableSeverity = "HIGH"
+			}
+		}
+	}
+	return severity, enforceableSeverity
 }
 
 func codeGuardRuleFindings(

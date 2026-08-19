@@ -130,6 +130,16 @@ func TestParserUncertaintyIsNotPersistedAsFindingOrAlert(t *testing.T) {
 	if persisted != 0 {
 		t.Fatalf("persisted parser-uncertainty findings=%d, want 0", persisted)
 	}
+	var persistedControls int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM scan_findings WHERE rule_id <> ?`,
+		trustedParserUncertaintyRuleID,
+	).Scan(&persistedControls); err != nil {
+		t.Fatal(err)
+	}
+	if persistedControls == 0 {
+		t.Fatal("no control finding persisted; negative parser-uncertainty assertion is not discriminating")
+	}
 	alerts, err := fixture.store.ListAlerts(20)
 	if err != nil {
 		t.Fatal(err)

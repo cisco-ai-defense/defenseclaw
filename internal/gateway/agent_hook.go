@@ -1553,7 +1553,11 @@ func normalizeAgentHookRequestWithRawProfile(connectorName string, payload map[s
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
 	}
 	if profile.DecodeToolArgs != nil && len(rawPayload) != 0 {
-		req.ToolArgs = profile.DecodeToolArgs(rawPayload)
+		toolArgs := profile.DecodeToolArgs(rawPayload)
+		if len(toolArgs) == 0 {
+			toolArgs = json.RawMessage(`{}`)
+		}
+		req.ToolArgs = append(json.RawMessage(nil), toolArgs...)
 	}
 	if decoded.Content != "" {
 		req.Content = decoded.Content

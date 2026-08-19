@@ -758,6 +758,35 @@ func TestSemanticReconImpactOwnerAliasBoundary(t *testing.T) {
 	}
 }
 
+func TestExactMinerWrapperTargetRejectsMinerPreviewArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{name: "nohup launch", argv: []string{"nohup", "xmrig", "--url", "pool.example"}, want: true},
+		{name: "nohup help", argv: []string{"nohup", "xmrig", "--help"}},
+		{name: "setsid launch", argv: []string{"setsid", "--fork", "xmrig", "--url", "pool.example"}, want: true},
+		{name: "setsid help", argv: []string{"setsid", "xmrig", "--help"}},
+		{name: "setsid delimited version", argv: []string{"setsid", "--", "xmrig", "--version"}},
+		{name: "nice launch", argv: []string{"nice", "-n", "5", "xmrig", "--url", "pool.example"}, want: true},
+		{name: "nice help", argv: []string{"nice", "xmrig", "-h"}},
+		{name: "nice adjusted version", argv: []string{"nice", "--adjustment=5", "xmrig", "-v"}},
+		{name: "nice delimited version", argv: []string{"nice", "--", "xmrig", "--version"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := actionfacts.CommandFact{
+				Program: test.argv[0],
+				Argv:    test.argv,
+			}
+			if got := exactMinerWrapperTarget(command); got != test.want {
+				t.Fatalf("exactMinerWrapperTarget(%v) = %t, want %t", test.argv, got, test.want)
+			}
+		})
+	}
+}
+
 func reconImpactCommand(command string) actionfacts.Input {
 	return actionfacts.Input{
 		Tool:       "exec",

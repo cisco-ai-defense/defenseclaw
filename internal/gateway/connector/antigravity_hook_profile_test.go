@@ -19,6 +19,7 @@ package connector
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -137,6 +138,18 @@ func TestAntigravityToolArgsFromRawPayload_StrictEnvelope(t *testing.T) {
 				t.Fatalf("ToolArgs=%s want nil for ambiguous or malformed envelope", got)
 			}
 		})
+	}
+}
+
+func TestAntigravityToolArgsFromRawPayload_RejectsExcessiveNesting(t *testing.T) {
+	nested := strings.Repeat("[", antigravityMaxJSONNestingDepth) +
+		"0" + strings.Repeat("]", antigravityMaxJSONNestingDepth)
+	raw := []byte(`{"toolCall":{"name":"run_command","args":{"nested":` + nested + `}}}`)
+	if !json.Valid(raw) {
+		t.Fatal("deep nesting fixture is not valid JSON")
+	}
+	if got := antigravityToolArgsFromRawPayload(raw); got != nil {
+		t.Fatalf("ToolArgs=%s want nil for payload beyond nesting limit", got)
 	}
 }
 

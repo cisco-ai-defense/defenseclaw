@@ -996,23 +996,20 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 		} else if strings.HasPrefix(argv[index], "-") {
 			return false
 		}
-		return index < len(argv) &&
-			exactMinerName(executableBase(argv[index])) &&
-			!minerPreviewArguments(argv[index+1:])
+		return exactMinerInvocationAt(argv, index)
 	case "setsid":
 		for index := 1; index < len(argv); index++ {
 			switch argv[index] {
 			case "--":
 				index++
-				return index < len(argv) &&
-					exactMinerName(executableBase(argv[index]))
+				return exactMinerInvocationAt(argv, index)
 			case "-c", "--ctty", "-f", "--fork", "-w", "--wait":
 				continue
 			}
 			if strings.HasPrefix(argv[index], "-") {
 				return false
 			}
-			return exactMinerName(executableBase(argv[index]))
+			return exactMinerInvocationAt(argv, index)
 		}
 	case "nice":
 		for index := 1; index < len(argv); index++ {
@@ -1020,8 +1017,7 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 			switch {
 			case argument == "--":
 				index++
-				return index < len(argv) &&
-					exactMinerName(executableBase(argv[index]))
+				return exactMinerInvocationAt(argv, index)
 			case argument == "-n" || argument == "--adjustment":
 				index++
 				if index >= len(argv) {
@@ -1034,11 +1030,17 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 					return false
 				}
 			default:
-				return exactMinerName(executableBase(argument))
+				return exactMinerInvocationAt(argv, index)
 			}
 		}
 	}
 	return false
+}
+
+func exactMinerInvocationAt(argv []string, index int) bool {
+	return index >= 0 && index < len(argv) &&
+		exactMinerName(executableBase(argv[index])) &&
+		!minerPreviewArguments(argv[index+1:])
 }
 
 func minerPreviewArguments(arguments []string) bool {

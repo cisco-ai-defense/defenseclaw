@@ -191,6 +191,51 @@ rules:
 	}
 }
 
+func TestAggregateCodeGuardSeveritySeparatesVisibleAndEnforceable(t *testing.T) {
+	findings := []RuleFinding{
+		{
+			Severity:    string(scanner.SeverityCritical),
+			enforcement: findingEnforcementDetectionOnly,
+		},
+		{
+			Severity:    string(scanner.SeverityHigh),
+			enforcement: findingEnforcementAllowed,
+		},
+		{
+			Severity:    "MEDIUM",
+			enforcement: findingEnforcementAllowed,
+		},
+	}
+	severity, enforceableSeverity := aggregateCodeGuardSeverity(
+		findings,
+		"LOW",
+		"NONE",
+	)
+	if severity != "CRITICAL" || enforceableSeverity != "HIGH" {
+		t.Fatalf(
+			"severity/enforceable = %q/%q, want CRITICAL/HIGH",
+			severity,
+			enforceableSeverity,
+		)
+	}
+
+	severity, enforceableSeverity = aggregateCodeGuardSeverity(
+		[]RuleFinding{{
+			Severity:    string(scanner.SeverityHigh),
+			enforcement: findingEnforcementAllowed,
+		}},
+		"CRITICAL",
+		"CRITICAL",
+	)
+	if severity != "CRITICAL" || enforceableSeverity != "CRITICAL" {
+		t.Fatalf(
+			"existing critical severity was lowered to %q/%q",
+			severity,
+			enforceableSeverity,
+		)
+	}
+}
+
 func TestInspectCodeGuardProofCannotBeReplayedFromJSON(t *testing.T) {
 	scan := scanner.NewCodeGuardScanner(t.TempDir()).ScanContentWithProvenance(
 		"app.py",

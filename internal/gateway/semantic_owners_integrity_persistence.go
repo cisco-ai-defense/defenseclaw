@@ -587,7 +587,8 @@ func matchesActiveRegistryPersistence(
 	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
 	valueName := windowsRegistryValueName(command.Argv[1:])
 	switch {
-	case value == "hklm/software/microsoft/windows nt/currentversion/winlogon":
+	case value == "hklm/software/microsoft/windows nt/currentversion/winlogon" ||
+		value == "hkcu/software/microsoft/windows nt/currentversion/winlogon":
 		return valueName == "shell" || valueName == "userinit"
 	case strings.HasPrefix(value, "hklm/system/currentcontrolset/services/"):
 		return valueName == "imagepath" || valueName == "servicedll"

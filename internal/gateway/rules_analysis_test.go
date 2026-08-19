@@ -119,7 +119,7 @@ func TestCoverage_KnownAttacks(t *testing.T) {
 		name   string
 		tool   string
 		args   string
-		minSev string // minimum expected severity
+		minSev string // minimum expected severity; LOW entries are pinned exactly below
 	}{
 		// --- Credential theft ---
 		{"steal AWS creds", "read_file", `{"path":"~/.aws/credentials"}`, "MEDIUM"},
@@ -183,6 +183,11 @@ func TestCoverage_KnownAttacks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			findings := scanTrustedToolArgs(t, tc.tool, tc.args)
 			highestSev := HighestSeverity(findings)
+			if tc.minSev == "LOW" && highestSev != tc.minSev {
+				t.Errorf("COVERAGE DRIFT: %s\n  tool=%s\n  args=%s\n  expected exactly %s, got %s\n  findings: %v",
+					tc.name, tc.tool, tc.args, tc.minSev, highestSev, findingIDs(findings))
+				return
+			}
 			if severityRank[highestSev] < severityRank[tc.minSev] {
 				t.Errorf("COVERAGE GAP: %s\n  tool=%s\n  args=%s\n  expected >=%s, got %s\n  findings: %v",
 					tc.name, tc.tool, tc.args, tc.minSev, highestSev, findingIDs(findings))

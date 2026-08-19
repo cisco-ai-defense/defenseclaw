@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -71,6 +72,23 @@ func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
 	}
 	if got := normalizeAgentHookMode("warn"); got != "observe" {
 		t.Fatalf("normalizeAgentHookMode(warn) = %q, want observe", got)
+	}
+}
+
+func TestNormalizeAgentHookRequest_AntigravityNilToolArgsProjectionUsesEmptyObject(t *testing.T) {
+	raw := []byte(`{"hookEventName":"PreToolUse","toolCall":{"name":"run_command"}}`)
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	profile := connector.NewAntigravityConnector().HookProfile(connector.SetupOpts{})
+	if profile.DecodeToolArgs == nil {
+		t.Fatal("antigravity DecodeToolArgs callback is nil")
+	}
+
+	req := normalizeAgentHookRequestWithRawProfile("antigravity", payload, raw, profile)
+	if !json.Valid(req.ToolArgs) || string(req.ToolArgs) != `{}` {
+		t.Fatalf("ToolArgs=%q want valid empty JSON object", req.ToolArgs)
 	}
 }
 
