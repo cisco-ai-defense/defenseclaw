@@ -2,15 +2,20 @@
 #
 # build-managed-windows-bundle.sh
 #
-# Cross-build the managed-enterprise Windows gateway zip on macOS (or any
-# host with a Go toolchain), so a Windows tester can consume the zip via the
-# separate scripts/build-windows-enterprise-installer.ps1 builder without
-# needing SSH access to the private cisco-aispg/ai-common repo.
+# Cross-build the managed-enterprise Windows Setup build kit on macOS/Linux
+# and hand it to AVC's signing pipeline. Under the AVC-approved handoff
+# (docs/WINDOWS-AVC-PACKAGING-HANDOFF.md), AVC — not DefenseClaw — signs
+# both the inner payload files and the outer Setup EXE; DefenseClaw only
+# emits an unsigned build kit AVC drops into its pipeline.
 #
-# The output is the goreleaser-shaped defenseclaw_${VERSION}_windows_amd64.zip
-# (plus a small gateway-source-commit.txt sidecar so the Windows box can
-# check out the same defenseclaw commit before driving the installer, so
-# the manifest / provenance source_commit matches).
+# Primary output: ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/,
+# whose contents match the handoff doc byte-for-byte. See
+# docs/specs/002-windows-avc-packaging/design.md for the full flow.
+#
+# Backward-compat: also emits the legacy goreleaser-shaped
+# defenseclaw_${VERSION}_windows_amd64.zip + gateway-source-commit.txt.
+# The zip is vestigial once no consumer remains and can be dropped in a
+# follow-up.
 #
 # What the script does:
 #   1. Clone github.com/cisco-aispg/ai-common at ${REF} (SSH first, HTTPS
@@ -23,22 +28,21 @@
 #      GOOS=windows GOARCH=amd64 -tags cmid.
 #   5. Stamp VERSIONINFO / icon on both PE binaries via
 #      `go run ./internal/tools/windowsresources -target windows_amd64 ...`
-#      (the Go tool is cross-platform; Windows verifies via the Win32
-#      VersionInfo API when the enterprise installer builder consumes the zip).
-#   6. Package the two exe's plus LICENSE / README / CHANGELOG / packaging/**
-#      into ${DIST_DIR}/defenseclaw_${VERSION}_windows_amd64.zip using the
-#      same shape .goreleaser.yaml would produce for windows-amd64.
-#   7. Restore the snapshot in an EXIT trap whether the build succeeded or
+#      (Windows verifies via the Win32 VersionInfo API at install time).
+#   6. Assemble the AVC-facing kit: payload/ (5 unsigned inner files),
+#      source/ (trimmed via `go list -deps`), source/vendor/
+#      (`go mod vendor`), packaging/scripts/lib/ (assemble + trust
+#      helpers), shipped assemble.{sh|ps1} at the kit root, and a
+#      payload-metadata.json + README-AVC.md.
+#   7. Also assemble the legacy goreleaser zip (backward-compat).
+#   8. Restore the snapshot in an EXIT trap whether the build succeeded or
 #      failed, so the OSS working tree stays untouched.
 #
 # What this script deliberately does NOT do:
-#   - It does not run the Windows installer flow. Hand the produced zip and
-#     the companion gateway-source-commit.txt to a Windows box; the tester
-#     runs `.\scripts\build-windows-enterprise-installer.ps1 -DistRoot
-#     <where the zip lives> -Version <version>`.
-#   - It does not sign anything. Authenticode is the Windows box's job.
-#   - It does not touch the pre-staged wheel or upgrade-manifest under
-#     ${DIST_DIR}; only the gateway zip is (re)written.
+#   - It does not sign anything. Both signing rounds (inner + outer)
+#     are AVC's step 1 and step 3 per the handoff doc.
+#   - It does not run under a Windows shell. The AVC-side pipeline is
+#     where the Windows-capable runner is required (for signtool).
 #
 # Args:
 #   --ref <git-ref>       ai-common ref to build against (default: develop)
@@ -310,9 +314,9 @@ echo "==> staging kit payload"
 # defenseclaw-gateway.exe is a byte-identical copy of defenseclaw.exe;
 # they carry distinct identities in the enterprise runtime (the outer
 # Setup extracts each under its own name and hash-checks separately),
-# so both files must be present in the payload. The pair-of-hash-
-# identical-files pattern matches the retired
-# scripts/build-windows-enterprise-installer.ps1 flow.
+# so both files must be present in the payload. This preserves the
+# runtime's expected payload shape (see requiredPayloadFiles in
+# cmd/defenseclaw-enterprise-setup/main.go).
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw.exe"
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw-gateway.exe"
 cp "${HOOK_EXE}"                                         "${KIT_DIR}/payload/defenseclaw-hook.exe"
@@ -582,16 +586,25 @@ ${SOURCE_COMMIT}
 EOF
 
 echo ""
-echo "==> managed Windows gateway prep complete"
+echo "==> managed Windows bundle prep complete"
+echo "    AVC build kit:    ${KIT_DIR}"
 echo "    gateway zip:      ${GATEWAY_ZIP}"
 echo "    source commit:    ${COMMIT_FILE}  (${SOURCE_COMMIT})"
 echo "    pinned cmid:      ${CMID_VERSION}"
-echo ""
-echo "Hand ${GATEWAY_ZIP} and ${COMMIT_FILE} to the Windows tester. On the"
-echo "Windows box, check the same defenseclaw commit out, drop the zip and"
-echo "the pre-staged wheel + upgrade-manifest.json into one -DistRoot, then:"
-echo ""
-echo "  .\\scripts\\build-windows-enterprise-installer.ps1 \`"
-echo "      -DistRoot <that dir> -OutRoot <output dir> \`"
-echo "      -Version ${VERSION}"
+if [[ "${ALLOW_UNSIGNED}" == "true" ]]; then
+  echo "    unsigned Setup:   ${KIT_DIR}/out/DefenseClawSetup-Enterprise-x64.exe"
+  echo ""
+  echo "Local unsigned build ready. Install on a Windows test box with"
+  echo "  DefenseClawSetup-Enterprise-x64.exe /install --allow-unsigned \\"
+  echo "      --certification-codex-home <disposable path>"
+  echo "See cmd/defenseclaw-enterprise-setup/platform_windows.go for the"
+  echo "runtime hash gate that refuses non-disposable scopes."
+else
+  echo ""
+  echo "Hand ${KIT_DIR} (or a tar of it) to AVC per"
+  echo "docs/WINDOWS-AVC-PACKAGING-HANDOFF.md. AVC will:"
+  echo "  1. signtool sign      payload/*.{exe,ps1,psm1}"
+  echo "  2. ./assemble.sh      (or pwsh -File assemble.ps1)"
+  echo "  3. signtool sign      out/DefenseClawSetup-Enterprise-x64.exe"
+fi
 echo ""

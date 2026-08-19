@@ -825,47 +825,47 @@ packaging-windows-managed-gateway-zip:
 packaging-managed-windows-bundle: packaging-windows-managed-gateway-zip
 	@echo 'note: `packaging-managed-windows-bundle` is deprecated; use `packaging-windows-managed-gateway-zip`.'
 
-# packaging-windows-enterprise-installer (Windows only):
-#   Consumes the pre-staged CMID gateway zip produced above and drives the
-#   separate elevated machine-wide builder. It produces the self-contained
-#   DefenseClawSetup-Enterprise-x64.exe and never reuses the ordinary
-#   per-user DefenseClawSetup-x64.exe transaction.
+# packaging-windows-enterprise-installer:
+#   Local self-serve unsigned developer build. Under the AVC-approved
+#   Windows managed_enterprise handoff (spec 002:
+#   docs/specs/002-windows-avc-packaging), a signed Setup EXE is
+#   produced only by AVC's pipeline consuming a build kit; DefenseClaw-
+#   side runs are always unsigned. This target invokes the extended
+#   bundler with --allow-unsigned, which emits the kit AND runs
+#   assemble.sh inline to produce a runnable
+#   DefenseClawSetup-Enterprise-x64.exe under
+#   dist/windows-enterprise-buildkit-<version>-unsigned/out/.
 #
-# Prereqs on the Windows box:
-#   - MSYS2 / Git-for-Windows Bash on PATH. Neither this target's own recipe
-#     nor `packaging-windows-managed-gateway-zip` runs under cmd.exe-backed
-#     make: both rely on POSIX shell features and, in the gateway-zip case,
-#     on a shebang-driven `.sh` invocation. Invoke Make from a Git Bash /
-#     MSYS shell (`make packaging-windows-enterprise-installer`), or drive
-#     `scripts/build-windows-enterprise-installer.ps1` directly from PowerShell.
-#   - pwsh, git, and the Go toolchain required by go.mod.
-#   - $(DIST_DIR) staged with the gateway zip + gateway-source-commit.txt
-#     from the macOS/Linux managed gateway step above.
-#   - Local git HEAD checked out at the same defenseclaw commit the gateway
-#     was built from; a mismatch is always rejected.
-#   - Cisco signing variables for production. Set
-#     WINDOWS_ENTERPRISE_SKIP_SIGNING=1 only for exact disposable
-#     certification scope.
-WINDOWS_ENTERPRISE_INSTALLER_OUT   ?= $(DIST_DIR)/windows-enterprise-installer
-WINDOWS_ENTERPRISE_INSTALLER_STATE ?= $(DIST_DIR)/windows-enterprise-installer-state
-WINDOWS_ENTERPRISE_SKIP_SIGNING    ?=
-# Signing-mode diagnostic. Uses Make's own $(if $(filter ...)) rather than a
-# POSIX shell test so the target does not require MSYS just for the diagnostic
-# (the recipe's `.sh` and `[`-based invocations elsewhere still do — see the
-# prereq block above). Comma-in-argument constructs need a helper variable
-# because commas inside `$(if ...)` split its arguments.
-_WINDOWS_ENTERPRISE_SIGNING_LABEL := $(if $(filter 1 true yes,$(WINDOWS_ENTERPRISE_SKIP_SIGNING)),SKIPPED (WINDOWS_ENTERPRISE_SKIP_SIGNING set),ENFORCED (production Cisco Authenticode variables required))
-
+# Prereqs (macOS/Linux — the retired on-Windows-box flow no longer
+# runs; AVC does the signing round trips):
+#   - bash, git, go, zip on PATH.
+#   - Access to cisco-aispg/ai-common at $WINDOWS_MANAGED_REF for the
+#     private CMID overlay (or --ai-common-dir pointing at an existing
+#     checkout).
+#   - Local git HEAD == the DefenseClaw commit whose bytes you want
+#     stamped into the artefact (the bundler embeds HEAD as
+#     main.commit and refuses drift).
+#
+# For a signed release artefact, use `packaging-windows-avc-buildkit`
+# below to emit the kit and hand it to AVC.
 packaging-windows-enterprise-installer:
-	@# Print the resolved signing mode into the build log so an accidental
-	# `WINDOWS_ENTERPRISE_SKIP_SIGNING=1` (only valid for the exact
-	# disposable-certification scope) shows up during release triage.
-	@echo "packaging-windows-enterprise-installer: signing = $(_WINDOWS_ENTERPRISE_SIGNING_LABEL)"
-	@pwsh -NoProfile -File scripts/build-windows-enterprise-installer.ps1 \
-	    -DistRoot "$(DIST_DIR)" \
-	    -OutRoot "$(WINDOWS_ENTERPRISE_INSTALLER_OUT)" \
-	    -StateRoot "$(WINDOWS_ENTERPRISE_INSTALLER_STATE)" \
-	    -Version "$(VERSION)" $(if $(filter 1 true yes,$(WINDOWS_ENTERPRISE_SKIP_SIGNING)),-SkipSigning,)
+	@packaging/scripts/build-managed-windows-bundle.sh \
+	    --ref "$(WINDOWS_MANAGED_REF)" \
+	    --version "$(VERSION)" \
+	    --dist-dir "$(DIST_DIR)" \
+	    --allow-unsigned
+
+# packaging-windows-avc-buildkit:
+#   Emits the AVC-facing build kit under
+#   $(DIST_DIR)/windows-enterprise-buildkit-<version>/. Hand the kit
+#   to AVC per docs/WINDOWS-AVC-PACKAGING-HANDOFF.md; AVC signs the
+#   inner payload, runs the shipped assemble.sh, and signs the outer
+#   Setup EXE.
+packaging-windows-avc-buildkit:
+	@packaging/scripts/build-managed-windows-bundle.sh \
+	    --ref "$(WINDOWS_MANAGED_REF)" \
+	    --version "$(VERSION)" \
+	    --dist-dir "$(DIST_DIR)"
 
 # Deprecated alias — remove once release runbooks are updated. Use
 # `packaging-windows-enterprise-installer` instead.
