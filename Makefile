@@ -97,7 +97,7 @@ endef
         packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
@@ -1073,7 +1073,7 @@ upgrade-signed-protocol-matrix:
 # Lint targets
 # ---------------------------------------------------------------------------
 
-lint: py-lint go-lint go-mod-no-toolchain repro-flags-parity
+lint: py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity
 	$(VENV_BIN)/python$(EXE) -m py_compile cli/defenseclaw/main.py
 
 # go-mod-no-toolchain refuses a `toolchain` directive in go.mod so the
@@ -1089,6 +1089,14 @@ go-mod-no-toolchain:
 # contract that Workstream A depends on quietly breaks.
 repro-flags-parity:
 	@scripts/check-repro-flags-parity.sh
+
+# assemble-parity refuses drift between the bash and pwsh copies of
+# assemble.* — both files must ship the same stage sequence, expected
+# payload filenames, and emitter subcommand set, or a kit built with
+# --script-host pwsh could silently diverge from --script-host bash.
+# See docs/specs/002-windows-avc-packaging/design.md § Risks.
+assemble-parity:
+	@scripts/check-assemble-parity.sh
 
 py-lint: pycli
 	$(RUFF) check cli/defenseclaw/
