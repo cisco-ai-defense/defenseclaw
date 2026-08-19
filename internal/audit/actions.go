@@ -263,6 +263,7 @@ const (
 	ActionSetupObservability       Action = "setup-observability"
 	ActionSetupLocalObservability  Action = "setup-local-observability"
 	ActionSetupWebhook             Action = "setup-webhook"
+	ActionSetupRouting             Action = "setup-routing"
 	ActionDoctor                   Action = "doctor"
 	ActionUpgrade                  Action = "upgrade"
 	ActionInitGateway              Action = "init-gateway"
@@ -459,6 +460,7 @@ func AllActions() []Action {
 		ActionSetupObservability,
 		ActionSetupLocalObservability,
 		ActionSetupWebhook,
+		ActionSetupRouting,
 		ActionDoctor,
 		ActionUpgrade,
 		ActionInitGateway,

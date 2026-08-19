@@ -162,6 +162,9 @@
     },
     "managed": {
       "$ref": "#/$defs/managedIPC"
+    },
+    "routing": {
+      "$ref": "#/$defs/routing"
     }
   },
   "$defs": {
@@ -2516,6 +2519,87 @@
         "HIGH",
         "CRITICAL"
       ]
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Semantic model router configuration for intelligent LLM request routing via vLLM Semantic Router sidecar.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "version": { "$ref": "#/$defs/boundedString" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "algorithm": { "$ref": "#/$defs/boundedString" },
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": { "$ref": "#/$defs/boundedString" },
+            "timeout_ms": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "embedding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "provider": { "$ref": "#/$defs/boundedString" },
+            "base_url": { "$ref": "#/$defs/boundedString" },
+            "model": { "$ref": "#/$defs/boundedString" }
+          }
+        },
+        "llm_classifier": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "base_url": { "$ref": "#/$defs/boundedString" },
+            "model": { "$ref": "#/$defs/boundedString" }
+          }
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/boundedString" },
+              "provider": { "$ref": "#/$defs/boundedString" },
+              "model": { "$ref": "#/$defs/boundedString" },
+              "base_url": { "$ref": "#/$defs/boundedString" },
+              "api_key_env": { "$ref": "#/$defs/boundedString" },
+              "weight": { "type": "integer" },
+              "capabilities": { "$ref": "#/$defs/stringList" },
+              "cost_per_1k_tokens": { "type": "number" }
+            }
+          }
+        },
+        "signals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keywords": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": { "name": { "$ref": "#/$defs/boundedString" }, "keywords": { "$ref": "#/$defs/stringList" }, "operator": { "$ref": "#/$defs/boundedString" } } } },
+            "embedding": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" }, "threshold": { "type": "number" } } },
+            "domain": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" } } },
+            "complexity": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" } } },
+            "context_length": { "type": "object", "additionalProperties": false, "properties": { "thresholds": { "type": "array", "items": { "type": "integer" } } } }
+          }
+        },
+        "decisions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/boundedString" },
+              "priority": { "type": "integer" },
+              "conditions": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": { "type": { "$ref": "#/$defs/boundedString" }, "name": { "$ref": "#/$defs/boundedString" } } } },
+              "operator": { "$ref": "#/$defs/boundedString" },
+              "model_refs": { "$ref": "#/$defs/stringList" },
+              "algorithm": { "$ref": "#/$defs/boundedString" }
+            }
+          }
+        }
+      }
     }
   }
 }

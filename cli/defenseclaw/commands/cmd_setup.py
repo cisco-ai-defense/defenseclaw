@@ -55,6 +55,7 @@ from defenseclaw.audit_actions import (
     ACTION_SETUP_MCP_SCANNER,
     ACTION_SETUP_NOTIFICATIONS_SET,
     ACTION_SETUP_NOTIFICATIONS_TOGGLE,
+    ACTION_SETUP_ROUTING,
     ACTION_SETUP_SKILL_SCANNER,
     ACTION_SETUP_SPLUNK,
 )
@@ -12449,4 +12450,140 @@ def _show_splunk_credentials(data_dir: str) -> None:
         click.echo("    URL:       http://127.0.0.1:8000")
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
+    click.echo()
+
+
+# ---------------------------------------------------------------------------
+# setup routing
+# ---------------------------------------------------------------------------
+
+
+@setup.command("routing")
+@click.option("--enable", is_flag=True, help="Enable semantic model routing.")
+@click.option("--disable", is_flag=True, help="Disable semantic model routing.")
+@click.option("--status", is_flag=True, help="Show routing status.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts.")
+@pass_ctx
+def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, yes: bool) -> None:
+    """Configure semantic model routing.
+
+    When enabled, DefenseClaw downloads and manages the vLLM Semantic Router
+    as a local subprocess. All routing configuration lives in config.yaml
+    under the 'routing:' section.
+
+    \b
+    Examples:
+      defenseclaw setup routing --enable
+      defenseclaw setup routing --disable
+      defenseclaw setup routing --status
+    """
+    if enable and disable:
+        raise click.UsageError("Cannot use --enable and --disable together.")
+
+    if status or (not enable and not disable):
+        _print_routing_status(app)
+        return
+
+    if enable:
+        import shutil
+        import subprocess as _sp
+
+        app.cfg.routing.enabled = True
+        if not app.cfg.routing.version:
+            app.cfg.routing.version = "0.3.0"
+        if not app.cfg.routing.port:
+            app.cfg.routing.port = 8888
+
+        click.echo()
+        click.echo("  Setting up semantic model routing...")
+        click.echo()
+
+        # 1. Check/install vllm-sr
+        vllm_sr = shutil.which("vllm-sr")
+        if vllm_sr:
+            ver = _sp.run([vllm_sr, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
+            click.echo(f"  ✓ vllm-sr already installed ({ver})")
+        else:
+            click.echo("  Installing vllm-sr...")
+            pip = shutil.which("pip") or "pip"
+            pkg = f"vllm-sr=={app.cfg.routing.version}" if app.cfg.routing.version else "vllm-sr"
+            result = _sp.run([pip, "install", pkg], capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                click.echo(f"  ✗ pip install failed: {result.stderr.strip()}")
+                click.echo("    Install manually: pip install vllm-sr")
+                click.echo("    Then re-run: defenseclaw setup routing --enable")
+                raise click.ClickException("vllm-sr installation failed")
+            vllm_sr = shutil.which("vllm-sr")
+            if vllm_sr:
+                ver = _sp.run([vllm_sr, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
+                click.echo(f"  ✓ vllm-sr installed ({ver})")
+            else:
+                click.echo("  ✗ vllm-sr not found on PATH after install")
+                click.echo("    You may need to add pip's bin directory to PATH")
+                raise click.ClickException("vllm-sr not found on PATH after install")
+
+        # 2. Check Docker
+        docker = shutil.which("docker") or "docker"
+        docker_ok = _sp.run([docker, "info"], capture_output=True, timeout=10).returncode == 0
+        if docker_ok:
+            click.echo("  ✓ Docker is running")
+        else:
+            click.echo("  ⚠ Docker is not running (required for vllm-sr serve)")
+            click.echo("    Start Docker before restarting the gateway.")
+
+        # 3. Save config
+        try:
+            app.cfg.save()
+        except OSError as exc:
+            raise click.ClickException(f"failed to save config: {exc}") from exc
+        click.echo()
+        click.echo("  ✓ Semantic routing enabled")
+        click.echo(f"    Version: {app.cfg.routing.version}")
+        click.echo(f"    Port:    {app.cfg.routing.port}")
+        click.echo(f"    Endpoint: http://127.0.0.1:{app.cfg.routing.port}/v1/chat/completions")
+        click.echo()
+        click.echo("  The router will start automatically with the gateway.")
+        if not yes:
+            click.echo("  Restart the gateway to activate: defenseclaw-gateway restart")
+
+        _log_setup_action(
+            app,
+            ACTION_SETUP_ROUTING,
+            f"enabled=True version={app.cfg.routing.version} port={app.cfg.routing.port}",
+            allow_offline=True,
+        )
+
+    if disable:
+        app.cfg.routing.enabled = False
+        try:
+            app.cfg.save()
+        except OSError as exc:
+            raise click.ClickException(f"failed to save config: {exc}") from exc
+        click.echo()
+        click.echo("  ✓ Semantic routing disabled")
+        click.echo("    All requests will use the default provider.")
+
+        _log_setup_action(
+            app,
+            ACTION_SETUP_ROUTING,
+            "enabled=False",
+            allow_offline=True,
+        )
+
+
+def _print_routing_status(app: AppContext) -> None:
+    click.echo()
+    click.echo("  Semantic Router Status")
+    click.echo("  ══════════════════════")
+    if not app.cfg.routing.enabled:
+        click.echo("    Status:  disabled")
+        click.echo()
+        click.echo("    Enable with: defenseclaw setup routing --enable")
+        return
+    click.echo("    Status:    enabled")
+    version = app.cfg.routing.version or "0.3.0 (default)"
+    click.echo(f"    Version:   {version}")
+    port = app.cfg.routing.port or 8888
+    click.echo(f"    Port:      {port}")
+    click.echo(f"    Algorithm: {app.cfg.routing.algorithm or 'static (default)'}")
     click.echo()
