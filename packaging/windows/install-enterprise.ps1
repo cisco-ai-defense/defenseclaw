@@ -38,6 +38,15 @@ param(
     [switch]$AttestClaudeEffectivePolicy,
     [switch]$AttestCodexTrustedHookLauncher,
     [string]$CodexTrustedHookLauncherBinary,
+    # Spec 003 (docs/specs/003-windows-deferred-config/): opt in to
+    # the UCB-friendly late-config install. When set, -Config and
+    # -Manifest may be omitted; the module's Get-DefenseClawLifecycleSources
+    # + post-copy existence check both accept a missing source, the
+    # canonical drop-point directories are provisioned with ACLs but
+    # no file bodies, and both services are registered stopped so the
+    # gateway daemon's and hook-guardian's fsnotify wait loops can
+    # pick the files up when UCB atomically drops them.
+    [switch]$DeferredConfig,
     [int]$SelfUninstallCallerPID,
     [switch]$Json
 )
@@ -1451,6 +1460,12 @@ try {
         # The exact service/root/CODEX_HOME grammar scopes this relaxation for
         # every certification lifecycle action, including pre-install Status.
         AllowUnsigned = [bool]$AllowUnsigned
+        # Spec 003 Workstream B — see the [switch]$DeferredConfig
+        # param block above for the rationale. Only meaningful for
+        # Install actions in managed-enterprise deployments; the
+        # module's Get-DefenseClawLifecycleSources call ignores it
+        # for other actions.
+        DeferredConfig = [bool]$DeferredConfig
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath
     }

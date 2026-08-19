@@ -8151,7 +8151,13 @@ function Get-DefenseClawLifecycleSources {
         [string]$Manifest,
         [string]$InstallerSource,
         [string]$ModuleSource,
-        [switch]$AllowUnsigned
+        [switch]$AllowUnsigned,
+        # Spec 003 (docs/specs/003-windows-deferred-config/): opt-in
+        # to the UCB-friendly install path. -Config and -Manifest
+        # become optional; the caller's downstream Install-* helpers
+        # provision the drop-point directories with ACLs but write
+        # no file bodies.
+        [switch]$DeferredConfig
     )
     $sources = @{}
     if ($Action -notin @('Install', 'Upgrade', 'Repair')) {
@@ -8162,14 +8168,24 @@ function Get-DefenseClawLifecycleSources {
         throw "$Action requires the installer and adjacent module source paths"
     }
     if ($Action -eq 'Install') {
-        foreach ($required in @(
+        $required = @(
             @('GatewayBinary', $GatewayBinary),
-            @('HookBinary', $HookBinary),
-            @('Config', $Config),
-            @('Manifest', $Manifest)
-        )) {
-            if ([string]::IsNullOrWhiteSpace([string]$required[1])) {
-                throw "Install requires -$($required[0])"
+            @('HookBinary', $HookBinary)
+        )
+        # -DeferredConfig removes -Config / -Manifest from the
+        # required set. Every other Install requirement stays in
+        # place: the payload binaries + adjacent installer/module
+        # sources must still be present so directory provisioning +
+        # service registration can complete.
+        if (-not $DeferredConfig) {
+            $required += @(
+                @('Config', $Config),
+                @('Manifest', $Manifest)
+            )
+        }
+        foreach ($req in $required) {
+            if ([string]::IsNullOrWhiteSpace([string]$req[1])) {
+                throw "Install requires -$($req[0])"
             }
         }
     }
@@ -11013,14 +11029,32 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Source $Sources[$name] `
                 -Destination $destination
         }
-        foreach ($requiredPath in @(
-            $Layout.GatewayPath,
-            $Layout.HookPath,
-            $Layout.ConfigPath,
-            $Layout.ManifestPath,
-            $Layout.InstallerPath,
-            $Layout.ModulePath
-        )) {
+        # Spec 003 (docs/specs/003-windows-deferred-config/): under
+        # --deferred-config, `config` and `manifest` are legitimately
+        # absent from $Sources — the caller opts into a UCB drop
+        # later. The destination directories still exist (with the
+        # ACLs Initialize-DefenseClawManagedRoot applied) but the
+        # file bodies don't. Skip the existence assertion for exactly
+        # those two paths when their source is missing; every other
+        # required artefact (gateway, hook, installer, module) is
+        # still asserted because those bytes shipped in-band with
+        # the installer transaction and their absence would be a
+        # real install failure regardless of deferred mode.
+        $requiredArtifacts = @(
+            @{Path = $Layout.GatewayPath;   SourceKey = $null},
+            @{Path = $Layout.HookPath;      SourceKey = $null},
+            @{Path = $Layout.ConfigPath;    SourceKey = 'config'},
+            @{Path = $Layout.ManifestPath;  SourceKey = 'manifest'},
+            @{Path = $Layout.InstallerPath; SourceKey = $null},
+            @{Path = $Layout.ModulePath;    SourceKey = $null}
+        )
+        foreach ($entry in $requiredArtifacts) {
+            $requiredPath = $entry.Path
+            $skippable = ($null -ne $entry.SourceKey) -and
+                (-not $Sources.ContainsKey($entry.SourceKey))
+            if ($skippable) {
+                continue
+            }
             if (-not (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $requiredPath `
                 -PathType Leaf)) {
@@ -11775,7 +11809,17 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [switch]$AttestCodexTrustedHookLauncher,
         [string]$InstallerSource,
         [string]$ModuleSource,
-        [int]$SelfUninstallCallerPID
+        [int]$SelfUninstallCallerPID,
+        # Spec 003 (docs/specs/003-windows-deferred-config/). Threads
+        # through to Get-DefenseClawLifecycleSources to relax the
+        # -Config/-Manifest Install requirement, then to the copy +
+        # existence-check pair further down so a missing source path
+        # for those two files does not abort. Callers must ONLY set
+        # this in managed_enterprise deployments — the daemon +
+        # guardian bounded fsnotify waits are gated on the same
+        # DEFENSECLAW_DEPLOYMENT_MODE pin the Windows SCM service
+        # already sets.
+        [switch]$DeferredConfig
     )
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
@@ -12001,7 +12045,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -Manifest $Manifest `
         -InstallerSource $InstallerSource `
         -ModuleSource $ModuleSource `
-        -AllowUnsigned:$AllowUnsigned
+        -AllowUnsigned:$AllowUnsigned `
+        -DeferredConfig:$DeferredConfig
 
     # Secure creation is race-safe and validates every existing ancestor
     # before the first lifecycle coordination object is opened. The lock then
@@ -12103,7 +12148,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             ) `
             -RefreshClaudeEffectivePolicyAttestation:$AttestClaudeEffectivePolicy `
             -RefreshCodexTrustedHookLauncherAttestation:$AttestCodexTrustedHookLauncher `
-            -NoStart:$NoStart
+            -NoStart:($NoStart -or $DeferredConfig)
     }
     finally {
         Exit-DefenseClawLifecycleLock -Lock $lifecycleLock

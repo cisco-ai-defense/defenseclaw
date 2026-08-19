@@ -360,6 +360,9 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	if opts.AttestCodexTrustedHookLauncher {
 		arguments = append(arguments, "--attest-codex-trusted-hook-launcher")
 	}
+	if opts.DeferredConfig {
+		arguments = append(arguments, "--deferred-config")
+	}
 	return arguments
 }
 
