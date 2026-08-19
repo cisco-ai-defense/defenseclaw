@@ -33,16 +33,18 @@ func TestActiveAgentFilesAreBoundedTrustedContext(t *testing.T) {
 	}
 	caseInsensitive := []string{"/repo/./AGENTS.md"}
 	facts := Analyze(Input{
-		Tool:                            "shell",
-		Command:                         "printf updated > /repo/AGENTS.md",
-		CWD:                             "/repo",
-		ActiveAgentFiles:                provided,
-		ActiveAgentFilesCaseInsensitive: caseInsensitive,
-		ActiveAgentFilesUncertain:       true,
+		Tool:                                     "shell",
+		Command:                                  "printf updated > /repo/AGENTS.md",
+		CWD:                                      "/repo",
+		ActiveAgentFiles:                         provided,
+		ActiveAgentFilesCaseInsensitive:          caseInsensitive,
+		ActiveAgentFilesCaseInsensitiveUncertain: true,
+		ActiveAgentFilesUncertain:                true,
 	})
 	want := []string{"/repo/AGENTS.md", "C:/Users/fixture/MEMORY.md"}
 	wantCaseInsensitive := []string{"/repo/AGENTS.md"}
 	if !facts.Authoritative() || !facts.ActiveAgentFilesUncertain ||
+		!facts.ActiveAgentFilesCaseInsensitiveUncertain ||
 		!slices.Equal(facts.ActiveAgentFiles, want) ||
 		!slices.Equal(
 			facts.ActiveAgentFilesCaseInsensitive,
@@ -62,7 +64,8 @@ func TestActiveAgentFilesAreBoundedTrustedContext(t *testing.T) {
 	}
 
 	projected := facts.EnforcementProjection()
-	if !projected.ActiveAgentFilesUncertain {
+	if !projected.ActiveAgentFilesUncertain ||
+		!projected.ActiveAgentFilesCaseInsensitiveUncertain {
 		t.Fatal("enforcement projection lost active-file uncertainty")
 	}
 	facts.ActiveAgentFiles[0] = "/mutated/AGENTS.md"
@@ -145,11 +148,16 @@ func TestActiveAgentFilesRejectUnboundedOrInexactContext(t *testing.T) {
 			ActiveAgentFiles:                []string{`C:\repo\AGENTS.md`},
 			ActiveAgentFilesCaseInsensitive: []string{`C:\repo\AGENTS.md`},
 		},
+		"case uncertainty requires broad uncertainty": {
+			Argv:                                     []string{"true"},
+			ActiveAgentFilesCaseInsensitiveUncertain: true,
+		},
 	} {
 		facts := Analyze(input)
 		if facts.Parse.Status != StatusInvalid ||
 			len(facts.ActiveAgentFiles) != 0 ||
-			len(facts.ActiveAgentFilesCaseInsensitive) != 0 {
+			len(facts.ActiveAgentFilesCaseInsensitive) != 0 ||
+			facts.ActiveAgentFilesCaseInsensitiveUncertain {
 			t.Fatalf("%s = %#v", name, facts)
 		}
 	}

@@ -44,6 +44,11 @@ type Input struct {
 	// in ActiveAgentFiles. It is carried only in process so later policy checks
 	// can honor native case-insensitive filename lookup without filesystem I/O.
 	ActiveAgentFilesCaseInsensitive []string `json:"-"`
+	// ActiveAgentFilesCaseInsensitiveUncertain is private trusted connector
+	// state proving that at least one active POSIX file omitted by bounded cache
+	// loss had case-insensitive filename lookup. It may be true only when
+	// ActiveAgentFilesUncertain is true and is never derived from action input.
+	ActiveAgentFilesCaseInsensitiveUncertain bool `json:"-"`
 	// ActiveAgentFilesUncertain is trusted connector state indicating that the
 	// exact list above may be incomplete because its bounded authority cache
 	// evicted or overflowed an entry. Parsers never derive it from action input.
@@ -55,17 +60,18 @@ type Input struct {
 // controlled parse failures are represented by Parse and never returned as
 // errors.
 type Facts struct {
-	Tool                            string
-	CWD                             string
-	ActiveHome                      string
-	ActiveAgentFiles                []string
-	ActiveAgentFilesCaseInsensitive []string `json:"-"`
-	ActiveAgentFilesUncertain       bool
-	Parse                           ParseResult
-	Commands                        []CommandFact
-	Paths                           []PathFact
-	Network                         []NetworkFact
-	DataFlows                       []DataFlowFact
+	Tool                                     string
+	CWD                                      string
+	ActiveHome                               string
+	ActiveAgentFiles                         []string
+	ActiveAgentFilesCaseInsensitive          []string `json:"-"`
+	ActiveAgentFilesCaseInsensitiveUncertain bool     `json:"-"`
+	ActiveAgentFilesUncertain                bool
+	Parse                                    ParseResult
+	Commands                                 []CommandFact
+	Paths                                    []PathFact
+	Network                                  []NetworkFact
+	DataFlows                                []DataFlowFact
 }
 
 // Authoritative reports whether the entire action can be evaluated by migrated

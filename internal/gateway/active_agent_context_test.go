@@ -275,6 +275,97 @@ func TestActiveAgentContextReseedClearsStaleCaseProof(t *testing.T) {
 	}
 }
 
+func TestActiveAgentContextOverflowCarriesOnlyProvenLostCaseSemantics(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		lostCaseInsensitive bool
+	}{
+		{name: "case-sensitive lost file"},
+		{name: "case-insensitive lost file", lostCaseInsensitive: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cache := activeAgentContextCache{}
+			key := activeAgentContextKey{
+				connector: "claudecode",
+				sessionID: "overflow-session",
+			}
+			for index := 0; index < maxActiveAgentContextFiles; index++ {
+				cache.seedLoadedFile(
+					key,
+					fmt.Sprintf("/repo/retained-%02d/AGENTS.md", index),
+					index == 0,
+					time.Unix(int64(index+1), 0),
+				)
+			}
+			cache.seedLoadedFile(
+				key,
+				"/repo/lost/AGENTS.md",
+				test.lostCaseInsensitive,
+				time.Unix(maxActiveAgentContextFiles+1, 0),
+			)
+
+			snapshot := cache.snapshot("claudecode", "overflow-session")
+			if len(snapshot.files) != maxActiveAgentContextFiles ||
+				!snapshot.uncertain ||
+				snapshot.caseInsensitiveUncertain != test.lostCaseInsensitive ||
+				len(snapshot.caseInsensitiveFiles) != 1 {
+				t.Fatalf("overflow snapshot = %#v", snapshot)
+			}
+
+			cache.begin("claudecode", "overflow-session")
+			reset := cache.snapshot("claudecode", "overflow-session")
+			if len(reset.files) != 0 || len(reset.caseInsensitiveFiles) != 0 ||
+				reset.uncertain || reset.caseInsensitiveUncertain {
+				t.Fatalf("lifecycle reset retained overflow authority: %#v", reset)
+			}
+		})
+	}
+}
+
+func TestActiveAgentContextEvictionCarriesOnlyProvenLostCaseSemantics(t *testing.T) {
+	cache := activeAgentContextCache{}
+	for index := 0; index < maxActiveAgentContextSessions; index++ {
+		cache.seedLoadedFile(
+			activeAgentContextKey{
+				connector: "claudecode",
+				sessionID: fmt.Sprintf("session-%03d", index),
+			},
+			fmt.Sprintf("/repo/session-%03d/AGENTS.md", index),
+			index == 1,
+			time.Unix(int64(index+1), 0),
+		)
+	}
+	cache.seedLoadedFile(
+		activeAgentContextKey{connector: "claudecode", sessionID: "session-new-1"},
+		"/repo/new-1/AGENTS.md",
+		false,
+		time.Unix(maxActiveAgentContextSessions+1, 0),
+	)
+	firstEvicted := cache.snapshot("claudecode", "session-000")
+	if !firstEvicted.uncertain || firstEvicted.caseInsensitiveUncertain {
+		t.Fatalf("case-sensitive eviction = %#v", firstEvicted)
+	}
+
+	cache.seedLoadedFile(
+		activeAgentContextKey{connector: "claudecode", sessionID: "session-new-2"},
+		"/repo/new-2/AGENTS.md",
+		false,
+		time.Unix(maxActiveAgentContextSessions+2, 0),
+	)
+	caseInsensitiveEvicted := cache.snapshot("claudecode", "session-001")
+	if !caseInsensitiveEvicted.uncertain ||
+		!caseInsensitiveEvicted.caseInsensitiveUncertain {
+		t.Fatalf("case-insensitive eviction = %#v", caseInsensitiveEvicted)
+	}
+
+	cache.begin("claudecode", "session-001")
+	reset := cache.snapshot("claudecode", "session-001")
+	if len(reset.files) != 0 || reset.uncertain ||
+		reset.caseInsensitiveUncertain {
+		t.Fatalf("lifecycle reset inherited global uncertainty: %#v", reset)
+	}
+}
+
 func TestActiveAgentContextDoesNotTreatHardLinkAsCaseInsensitiveVolume(t *testing.T) {
 	if filepath.Separator != '/' {
 		t.Skip("POSIX case semantics are covered on POSIX hosts")
@@ -602,7 +693,7 @@ func TestActiveAgentContextIsBoundedAndRetainsIdleSessions(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutations(t *testing.T) {
+func TestClaudeCodeActiveAgentContextCapacityLossUsesProvenCaseSemantics(t *testing.T) {
 	installDefaultProfileConnector(t, "claudecode")
 	root := t.TempDir()
 	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
@@ -640,6 +731,43 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		t.Fatalf("uncertain exact mutation was not enforceable: %+v", mutating.findings)
 	}
 
+	aliasPath := filepath.Join(filepath.Dir(agentFile), "agents.md")
+	aliasInfo, aliasErr := os.Lstat(aliasPath)
+	agentInfo, agentErr := os.Lstat(agentFile)
+	wantCaseInsensitiveUncertain := filepath.Separator == '/' &&
+		aliasErr == nil && agentErr == nil && os.SameFile(agentInfo, aliasInfo)
+	if mutating.facts.ActiveAgentFilesCaseInsensitiveUncertain !=
+		wantCaseInsensitiveUncertain {
+		t.Fatalf(
+			"evicted case uncertainty = %t, want %t",
+			mutating.facts.ActiveAgentFilesCaseInsensitiveUncertain,
+			wantCaseInsensitiveUncertain,
+		)
+	}
+	foldedMutation := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PreToolUse",
+		"session-000",
+		nil,
+		"Write",
+		map[string]interface{}{
+			"file_path": aliasPath,
+			"content":   "updated",
+		},
+	)
+	foldedFinding := findingWithID(foldedMutation.findings, "COG-AGENTS-MD")
+	wantFoldedEnforcement := filepath.Separator != '/' ||
+		wantCaseInsensitiveUncertain
+	if (foldedFinding != nil && foldedFinding.contributesToEnforcement()) !=
+		wantFoldedEnforcement {
+		t.Fatalf(
+			"uncertain folded finding = %+v, want enforcement=%t",
+			foldedFinding,
+			wantFoldedEnforcement,
+		)
+	}
+
 	read := evaluateClaudeCodeToolFacts(
 		t,
 		api,
@@ -668,6 +796,7 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		mutation,
 	)
 	if knownEmpty.facts.ActiveAgentFilesUncertain ||
+		knownEmpty.facts.ActiveAgentFilesCaseInsensitiveUncertain ||
 		len(knownEmpty.facts.ActiveAgentFiles) != 0 {
 		t.Fatalf("authenticated session reset did not establish known-empty context: %+v", knownEmpty.facts)
 	}
@@ -690,6 +819,7 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		mutation,
 	)
 	if reloaded.facts.ActiveAgentFilesUncertain ||
+		reloaded.facts.ActiveAgentFilesCaseInsensitiveUncertain ||
 		!slices.Equal(
 			reloaded.facts.ActiveAgentFiles,
 			[]string{filepath.ToSlash(agentFile)},
@@ -714,6 +844,7 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		mutation,
 	)
 	if changedDirectory.facts.ActiveAgentFilesUncertain ||
+		changedDirectory.facts.ActiveAgentFilesCaseInsensitiveUncertain ||
 		len(changedDirectory.facts.ActiveAgentFiles) != 0 {
 		t.Fatalf("CwdChanged did not establish known-empty context: %+v", changedDirectory.facts)
 	}

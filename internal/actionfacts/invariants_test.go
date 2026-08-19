@@ -36,6 +36,10 @@ func assertFactsInvariants(t testing.TB, facts Facts) {
 			facts.ActiveAgentFilesCaseInsensitive,
 		)
 	}
+	if facts.ActiveAgentFilesCaseInsensitiveUncertain &&
+		!facts.ActiveAgentFilesUncertain {
+		t.Fatal("case-insensitive cache uncertainty without active-file uncertainty")
+	}
 	commandIDs := make(map[int64]struct{}, len(facts.Commands))
 	for _, command := range facts.Commands {
 		if command.ID <= 0 {

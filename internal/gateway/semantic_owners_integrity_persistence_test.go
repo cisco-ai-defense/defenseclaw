@@ -324,6 +324,34 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 		}
 	})
 
+	t.Run("uncertain context folds only with lost case proof", func(t *testing.T) {
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                                     "shell",
+			Command:                                  "printf updated > /repo/agents.md",
+			CWD:                                      "/repo",
+			ActiveAgentFilesCaseInsensitiveUncertain: true,
+			ActiveAgentFilesUncertain:                true,
+		}), "COG-AGENTS-MD")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("lost case proof did not enforce folded candidate: %+v", finding)
+		}
+	})
+
+	t.Run("uncertain context checks retained exact entries first", func(t *testing.T) {
+		const activePath = "/repo/AGENTS.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                            "shell",
+			Command:                         "printf updated > /repo/agents.md",
+			CWD:                             "/repo",
+			ActiveAgentFiles:                []string{activePath},
+			ActiveAgentFilesCaseInsensitive: []string{activePath},
+			ActiveAgentFilesUncertain:       true,
+		}), "COG-AGENTS-MD")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("retained exact case proof was ignored: %+v", finding)
+		}
+	})
+
 	t.Run("cached basename proof does not fold parent", func(t *testing.T) {
 		const activePath = "/Repo/AGENTS.md"
 		const command = "printf updated > /repo/agents.md"

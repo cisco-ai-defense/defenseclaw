@@ -61,26 +61,29 @@ type activeAgentContextKey struct {
 }
 
 type activeAgentContextSession struct {
-	files                []string
-	caseInsensitiveFiles []string
-	uncertain            bool
-	updatedAt            time.Time
+	files                    []string
+	caseInsensitiveFiles     []string
+	caseInsensitiveUncertain bool
+	uncertain                bool
+	updatedAt                time.Time
 }
 
 type activeAgentContextSnapshot struct {
-	files                []string
-	caseInsensitiveFiles []string
-	uncertain            bool
+	files                    []string
+	caseInsensitiveFiles     []string
+	caseInsensitiveUncertain bool
+	uncertain                bool
 }
 
 // activeAgentContextCache is an APIServer-owned, process-local authority
 // cache. Its zero value is ready for use so tests and small server fixtures
 // that construct APIServer directly retain the production behavior.
 type activeAgentContextCache struct {
-	mu        sync.Mutex
-	sessions  map[activeAgentContextKey]activeAgentContextSession
-	uncertain bool
-	now       func() time.Time
+	mu                       sync.Mutex
+	sessions                 map[activeAgentContextKey]activeAgentContextSession
+	uncertain                bool
+	caseInsensitiveUncertain bool
+	now                      func() time.Time
 }
 
 func (cache *activeAgentContextCache) currentTime() time.Time {
@@ -230,11 +233,16 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 		}
 	}
 	if found {
+		evicted := cache.sessions[oldestKey]
 		delete(cache.sessions, oldestKey)
 		// The evicted session may still be active because only authenticated
 		// lifecycle events can prove otherwise. Keep that loss of exact context
 		// explicit so a later tool request cannot turn it into a safe negative.
 		cache.uncertain = true
+		if evicted.caseInsensitiveUncertain ||
+			len(evicted.caseInsensitiveFiles) != 0 {
+			cache.caseInsensitiveUncertain = true
+		}
 	}
 }
 
@@ -277,8 +285,9 @@ func (cache *activeAgentContextCache) seedLoadedFile(
 	if !exists {
 		cache.makeRoomLocked()
 		session = activeAgentContextSession{
-			uncertain: cache.uncertain,
-			updatedAt: now,
+			caseInsensitiveUncertain: cache.caseInsensitiveUncertain,
+			uncertain:                cache.uncertain,
+			updatedAt:                now,
 		}
 	}
 	for _, existing := range session.files {
@@ -291,6 +300,9 @@ func (cache *activeAgentContextCache) seedLoadedFile(
 	}
 	if len(session.files) >= maxActiveAgentContextFiles {
 		session.uncertain = true
+		if caseInsensitive {
+			session.caseInsensitiveUncertain = true
+		}
 		session.updatedAt = now
 		cache.sessions[key] = session
 		return
@@ -359,7 +371,10 @@ func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) 
 	defer cache.mu.Unlock()
 	session, ok := cache.sessions[key]
 	if !ok {
-		return activeAgentContextSnapshot{uncertain: cache.uncertain}
+		return activeAgentContextSnapshot{
+			caseInsensitiveUncertain: cache.caseInsensitiveUncertain,
+			uncertain:                cache.uncertain,
+		}
 	}
 	session.updatedAt = now
 	cache.sessions[key] = session
@@ -369,7 +384,8 @@ func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) 
 			[]string(nil),
 			session.caseInsensitiveFiles...,
 		),
-		uncertain: session.uncertain,
+		caseInsensitiveUncertain: session.caseInsensitiveUncertain,
+		uncertain:                session.uncertain,
 	}
 }
 

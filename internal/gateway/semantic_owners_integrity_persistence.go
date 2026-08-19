@@ -157,16 +157,6 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 		) {
 			return false
 		}
-		if facts.ActiveAgentFilesUncertain {
-			// A bounded authenticated cache lost part of this session's exact
-			// context. Fail closed only after ActionFacts proves a mutation of an
-			// exact instruction-file path; filename mentions and reads stay safe.
-			return activeAgentInstructionBaseMatches(
-				candidatePath,
-				candidate.Flavor,
-				fileName,
-			)
-		}
 		for _, activePath := range facts.ActiveAgentFiles {
 			canonicalActivePath, active := activeAgentInstructionPath(
 				activePath,
@@ -184,6 +174,26 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 			) {
 				return true
 			}
+		}
+		if facts.ActiveAgentFilesUncertain {
+			// Check retained exact entries above before falling back to lost
+			// context. Exact POSIX basenames always fail closed. A folded POSIX
+			// basename does so only when authenticated load-time state proved that
+			// at least one omitted active file used case-insensitive lookup.
+			if activeAgentInstructionBaseMatches(
+				candidatePath,
+				candidate.Flavor,
+				fileName,
+			) {
+				return true
+			}
+			return candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+				facts.ActiveAgentFilesCaseInsensitiveUncertain &&
+				activeAgentInstructionCandidateBaseMatches(
+					path.Base(candidatePath),
+					candidate.Flavor,
+					fileName,
+				)
 		}
 		return false
 	}
@@ -272,10 +282,10 @@ func activeAgentInstructionBaseMatches(
 	flavor actionfacts.PathFlavor,
 	fileName string,
 ) bool {
-	// POSIX matching is deliberately exact here. This is the fail-closed
-	// basename gate used when bounded active-file context is uncertain and when
-	// validating the canonical active path itself; no cached filesystem proof is
-	// available to authorize a folded candidate in the uncertain branch.
+	// POSIX matching is deliberately exact here. This is the baseline
+	// fail-closed basename gate when bounded active-file context is uncertain and
+	// when validating the canonical active path itself. The caller handles the
+	// separate proof-gated folded-candidate case.
 	base := path.Base(value)
 	if flavor == actionfacts.PathFlavorWindows {
 		return strings.EqualFold(base, fileName)
