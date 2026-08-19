@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -100,6 +101,29 @@ func TestEvaluateClaudeCodeHook_NonClaudeConnectorStaysDisabled(t *testing.T) {
 
 	if resp.RawAction != "allow" {
 		t.Errorf("RawAction = %q, want allow (claudecode hooks should be inert under a different connector)", resp.RawAction)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_DisabledConnectorRetainsAuthenticatedLifecycle(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "openclaw"
+	api := &APIServer{scannerCfg: cfg}
+	agentFile := writeActiveAgentTestFile(t, t.TempDir(), "AGENTS.md")
+
+	resp := api.evaluateClaudeCodeHook(
+		withAuthenticatedHookConnector(context.Background(), "claudecode"),
+		claudeCodeHookRequest{
+			HookEventName: "InstructionsLoaded",
+			SessionID:     "disabled-session",
+			FilePath:      agentFile,
+		},
+	)
+	if resp.RawAction != "allow" {
+		t.Fatalf("RawAction = %q, want allow", resp.RawAction)
+	}
+	if got := api.activeAgentContext.snapshot("claudecode", "disabled-session"); !slices.Equal(got.files, []string{agentFile}) || got.uncertain {
+		t.Fatalf("disabled connector lost authenticated lifecycle state: %#v", got)
 	}
 }
 

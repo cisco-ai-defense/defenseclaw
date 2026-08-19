@@ -104,6 +104,157 @@ func TestActiveAgentContextCachesNativePOSIXCaseSemanticsAtLoad(t *testing.T) {
 	}
 }
 
+func TestActiveAgentContextAcceptsNativeCaseAliasesAtLoad(t *testing.T) {
+	for _, test := range []struct {
+		canonical string
+		alias     string
+	}{
+		{canonical: "AGENTS.md", alias: "agents.md"},
+		{canonical: "MEMORY.md", alias: "memory.md"},
+	} {
+		t.Run(test.canonical, func(t *testing.T) {
+			root := t.TempDir()
+			canonicalPath := writeActiveAgentTestFile(t, root, test.canonical)
+			aliasPath := filepath.Join(filepath.Dir(canonicalPath), test.alias)
+			canonicalInfo, canonicalErr := os.Lstat(canonicalPath)
+			aliasInfo, aliasErr := os.Lstat(aliasPath)
+			if canonicalErr != nil {
+				t.Fatal(canonicalErr)
+			}
+			if aliasErr != nil {
+				if !os.IsNotExist(aliasErr) {
+					t.Fatal(aliasErr)
+				}
+				t.Skip("native filesystem is case-sensitive")
+			}
+			if !os.SameFile(canonicalInfo, aliasInfo) {
+				t.Skip("native filesystem is case-sensitive")
+			}
+
+			canonical, caseInsensitive, valid := exactActiveAgentFile(aliasPath)
+			if !valid || canonical != canonicalPath {
+				t.Fatalf(
+					"case alias = (%q, %t, %t), want (%q, _, true)",
+					canonical,
+					caseInsensitive,
+					valid,
+					canonicalPath,
+				)
+			}
+			if filepath.Separator == '/' && !caseInsensitive {
+				t.Fatal("POSIX case alias did not retain native case proof")
+			}
+			if filepath.Separator != '/' && caseInsensitive {
+				t.Fatal("Windows case alias unexpectedly produced POSIX case metadata")
+			}
+
+			cache := activeAgentContextCache{}
+			cache.seed("claudecode", "case-alias-session", aliasPath)
+			snapshot := cache.snapshot("claudecode", "case-alias-session")
+			if !slices.Equal(snapshot.files, []string{canonicalPath}) {
+				t.Fatalf("case alias cached as %#v, want %q", snapshot.files, canonicalPath)
+			}
+		})
+	}
+}
+
+func TestActiveAgentContextRejectsUnrelatedLowercaseFileOnCaseSensitivePOSIX(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("POSIX case-sensitive behavior is covered on POSIX hosts")
+	}
+	root := t.TempDir()
+	canonicalPath := writeActiveAgentTestFile(t, root, "AGENTS.md")
+	aliasPath := filepath.Join(root, "agents.md")
+	if aliasInfo, err := os.Lstat(aliasPath); err == nil {
+		canonicalInfo, canonicalErr := os.Lstat(canonicalPath)
+		if canonicalErr != nil {
+			t.Fatal(canonicalErr)
+		}
+		if os.SameFile(canonicalInfo, aliasInfo) {
+			t.Skip("native filesystem is case-insensitive")
+		}
+		t.Fatal("unexpected pre-existing lowercase entry")
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(aliasPath, []byte("unrelated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if canonical, caseInsensitive, valid := exactActiveAgentFile(canonicalPath); !valid || canonical != canonicalPath || caseInsensitive {
+		t.Fatalf(
+			"exact file beside unrelated lowercase entry = (%q, %t, %t)",
+			canonical,
+			caseInsensitive,
+			valid,
+		)
+	}
+
+	if canonical, caseInsensitive, valid := exactActiveAgentFile(aliasPath); valid {
+		t.Fatalf(
+			"unrelated lowercase file = (%q, %t, %t), want invalid",
+			canonical,
+			caseInsensitive,
+			valid,
+		)
+	}
+	cache := activeAgentContextCache{}
+	cache.seed("claudecode", "case-sensitive-session", aliasPath)
+	if got := cache.snapshot("claudecode", "case-sensitive-session"); len(got.files) != 0 || len(got.caseInsensitiveFiles) != 0 {
+		t.Fatalf("unrelated lowercase file gained authority: %#v", got)
+	}
+}
+
+func TestClaudeCodeLowercaseInstructionsLoadedUsesCanonicalActiveFile(t *testing.T) {
+	root := t.TempDir()
+	canonicalPath := writeActiveAgentTestFile(t, root, "AGENTS.md")
+	aliasPath := filepath.Join(filepath.Dir(canonicalPath), "agents.md")
+	canonicalInfo, canonicalErr := os.Lstat(canonicalPath)
+	aliasInfo, aliasErr := os.Lstat(aliasPath)
+	if canonicalErr != nil {
+		t.Fatal(canonicalErr)
+	}
+	if aliasErr != nil {
+		if !os.IsNotExist(aliasErr) {
+			t.Fatal(aliasErr)
+		}
+		t.Skip("native filesystem is case-sensitive")
+	}
+	if !os.SameFile(canonicalInfo, aliasInfo) {
+		t.Skip("native filesystem is case-sensitive")
+	}
+
+	installDefaultProfileConnector(t, "claudecode")
+	api := activeClaudeCodeTestAPI()
+	api.evaluateClaudeCodeHook(
+		authenticatedClaudeCodeTestContext(),
+		claudeCodeHookRequest{
+			HookEventName: "InstructionsLoaded",
+			SessionID:     "lowercase-load-session",
+			FilePath:      aliasPath,
+		},
+	)
+	snapshot := api.activeAgentContext.snapshot(
+		"claudecode",
+		"lowercase-load-session",
+	)
+	if !slices.Equal(snapshot.files, []string{canonicalPath}) {
+		t.Fatalf("lowercase load cached %#v, want %q", snapshot.files, canonicalPath)
+	}
+
+	mutation := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PreToolUse",
+		"lowercase-load-session",
+		nil,
+		"Write",
+		map[string]interface{}{"file_path": aliasPath},
+	)
+	if finding := findingWithID(mutation.findings, "COG-AGENTS-MD"); finding == nil || !finding.contributesToEnforcement() {
+		t.Fatalf("lowercase active-file mutation finding = %+v", finding)
+	}
+}
+
 func TestActiveAgentContextReseedClearsStaleCaseProof(t *testing.T) {
 	cache := activeAgentContextCache{}
 	key := activeAgentContextKey{connector: "claudecode", sessionID: "session"}

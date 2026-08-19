@@ -96,20 +96,47 @@ func exactActiveAgentFile(filePath string) (string, bool, bool) {
 		filepath.Clean(filePath) != filePath {
 		return "", false, false
 	}
-	switch filepath.Base(filePath) {
-	case "AGENTS.md", "MEMORY.md":
-	default:
+	canonicalName, ok := canonicalActiveAgentFileName(filepath.Base(filePath))
+	if !ok {
 		return "", false, false
 	}
 	info, err := os.Lstat(filePath)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return "", false, false
 	}
-	resolved, err := filepath.EvalSymlinks(filePath)
-	if err != nil || resolved != filePath {
+	canonicalPath := filepath.Join(filepath.Dir(filePath), canonicalName)
+	canonicalInfo, err := os.Lstat(canonicalPath)
+	if err != nil || !canonicalInfo.Mode().IsRegular() ||
+		canonicalInfo.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(info, canonicalInfo) {
 		return "", false, false
 	}
-	return filePath, nativePOSIXFilenameCaseInsensitive(filePath, info), true
+	resolved, err := filepath.EvalSymlinks(canonicalPath)
+	if err != nil || resolved != canonicalPath {
+		return "", false, false
+	}
+	caseInsensitive := nativePOSIXFilenameCaseInsensitive(
+		canonicalPath,
+		canonicalInfo,
+	)
+	if filepath.Separator == '/' && filepath.Base(filePath) != canonicalName &&
+		!caseInsensitive {
+		// On POSIX, a non-canonical spelling is authoritative only when native
+		// lookup proves that one directory entry serves both spellings. This
+		// rejects a distinct lowercase file and a casing hard-link alias on a
+		// case-sensitive filesystem.
+		return "", false, false
+	}
+	return canonicalPath, caseInsensitive, true
+}
+
+func canonicalActiveAgentFileName(value string) (string, bool) {
+	for _, canonical := range []string{"AGENTS.md", "MEMORY.md"} {
+		if activeAgentASCIIEqualFold(value, canonical) {
+			return canonical, true
+		}
+	}
+	return "", false
 }
 
 // nativePOSIXFilenameCaseInsensitive runs only while an authenticated

@@ -272,6 +272,10 @@ func activeAgentInstructionBaseMatches(
 	flavor actionfacts.PathFlavor,
 	fileName string,
 ) bool {
+	// POSIX matching is deliberately exact here. This is the fail-closed
+	// basename gate used when bounded active-file context is uncertain and when
+	// validating the canonical active path itself; no cached filesystem proof is
+	// available to authorize a folded candidate in the uncertain branch.
 	base := path.Base(value)
 	if flavor == actionfacts.PathFlavorWindows {
 		return strings.EqualFold(base, fileName)
@@ -284,6 +288,9 @@ func activeAgentInstructionCandidateBaseMatches(
 	flavor actionfacts.PathFlavor,
 	fileName string,
 ) bool {
+	// Candidate discovery may recognize an ASCII case variant, but that alone
+	// never grants authority. POSIX enforcement still requires the exact parent
+	// and authenticated load-time case proof in activeAgentInstructionPathsMatch.
 	if flavor == actionfacts.PathFlavorWindows {
 		return strings.EqualFold(base, fileName)
 	}

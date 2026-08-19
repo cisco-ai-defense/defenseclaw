@@ -313,6 +313,17 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 		}
 	})
 
+	t.Run("uncertain context does not fold candidate casing", func(t *testing.T) {
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                      "shell",
+			Command:                   "printf updated > /repo/agents.md",
+			CWD:                       "/repo",
+			ActiveAgentFilesUncertain: true,
+		}), "COG-AGENTS-MD"); finding != nil && finding.contributesToEnforcement() {
+			t.Fatalf("uncertain context enforced a folded-case candidate: %+v", *finding)
+		}
+	})
+
 	t.Run("cached basename proof does not fold parent", func(t *testing.T) {
 		const activePath = "/Repo/AGENTS.md"
 		const command = "printf updated > /repo/agents.md"
