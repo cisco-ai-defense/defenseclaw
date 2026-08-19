@@ -31,6 +31,13 @@ func runEmitManifest(args []string) error {
 	distributionFlavor := fs.String("distribution-flavor", "managed-enterprise", "distribution flavor tag")
 	payloadDir := fs.String("payload-dir", "", "directory whose regular-file children are hashed")
 	out := fs.String("out", "", "output path for manifest.json")
+	// --unsigned stamps `"unsigned": true` into the manifest and appends
+	// "-unsigned" to distribution_flavor unless the caller explicitly
+	// passes --distribution-flavor. Used by the spec 002 assemble path
+	// when running under --allow-unsigned for the local developer loop;
+	// the runtime hash gate at stageEnterprisePayload keys off the
+	// same field to refuse non-disposable-scope installs.
+	unsigned := fs.Bool("unsigned", false, "mark this manifest as an unsigned developer build")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -62,11 +69,19 @@ func runEmitManifest(args []string) error {
 			"size":   f.size,
 		})
 	}
+	flavor := *distributionFlavor
+	if *unsigned && flavor == "managed-enterprise" {
+		// Only auto-suffix the default flavor. A caller that passes an
+		// explicit --distribution-flavor is trusted to have shaped the
+		// string already (e.g. downstream test harnesses).
+		flavor = "managed-enterprise-unsigned"
+	}
 	doc := map[string]any{
-		"distribution_flavor": *distributionFlavor,
+		"distribution_flavor": flavor,
 		"files":               entries,
 		"schema_version":      *schemaVersion,
 		"source_commit":       *sourceCommit,
+		"unsigned":            *unsigned,
 		"version":             *version,
 	}
 	return writeSortedJSON(*out, doc)
