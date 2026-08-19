@@ -2054,12 +2054,13 @@ func trustedBashFallbackActions(
 				return false
 			}
 			nestedInput := actionfacts.Input{
-				Tool:                      "bash",
-				Command:                   body,
-				CWD:                       input.CWD,
-				ActiveHome:                input.ActiveHome,
-				ActiveAgentFiles:          append([]string(nil), input.ActiveAgentFiles...),
-				ActiveAgentFilesUncertain: input.ActiveAgentFilesUncertain,
+				Tool:                            "bash",
+				Command:                         body,
+				CWD:                             input.CWD,
+				ActiveHome:                      input.ActiveHome,
+				ActiveAgentFiles:                append([]string(nil), input.ActiveAgentFiles...),
+				ActiveAgentFilesCaseInsensitive: append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+				ActiveAgentFilesUncertain:       input.ActiveAgentFilesUncertain,
 			}
 			nestedFacts := actionfacts.Analyze(nestedInput)
 			if len(nestedFacts.Commands) == 0 {
@@ -2135,12 +2136,13 @@ func trustedStaticShellWrapperFallbackActions(
 			}
 			seen[script.Value] = struct{}{}
 			nestedInput := actionfacts.Input{
-				Tool:                      program,
-				Command:                   script.Value,
-				CWD:                       input.CWD,
-				ActiveHome:                input.ActiveHome,
-				ActiveAgentFiles:          append([]string(nil), input.ActiveAgentFiles...),
-				ActiveAgentFilesUncertain: input.ActiveAgentFilesUncertain,
+				Tool:                            program,
+				Command:                         script.Value,
+				CWD:                             input.CWD,
+				ActiveHome:                      input.ActiveHome,
+				ActiveAgentFiles:                append([]string(nil), input.ActiveAgentFiles...),
+				ActiveAgentFilesCaseInsensitive: append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+				ActiveAgentFilesUncertain:       input.ActiveAgentFilesUncertain,
 			}
 			nestedFacts := actionfacts.Analyze(nestedInput)
 			actions = append(
@@ -2622,12 +2624,13 @@ func trustedEmbeddedExecutionActions(
 			return
 		}
 		nestedInput := actionfacts.Input{
-			Tool:                      "bash",
-			Command:                   text,
-			CWD:                       input.CWD,
-			ActiveHome:                input.ActiveHome,
-			ActiveAgentFiles:          append([]string(nil), input.ActiveAgentFiles...),
-			ActiveAgentFilesUncertain: input.ActiveAgentFilesUncertain,
+			Tool:                            "bash",
+			Command:                         text,
+			CWD:                             input.CWD,
+			ActiveHome:                      input.ActiveHome,
+			ActiveAgentFiles:                append([]string(nil), input.ActiveAgentFiles...),
+			ActiveAgentFilesCaseInsensitive: append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+			ActiveAgentFilesUncertain:       input.ActiveAgentFilesUncertain,
 		}
 		nestedFacts := actionfacts.Analyze(nestedInput)
 		if len(nestedFacts.Commands) == 0 {
@@ -2655,12 +2658,13 @@ func trustedEmbeddedExecutionActions(
 			return
 		}
 		nestedInput := actionfacts.Input{
-			Tool:                      "shell",
-			Argv:                      append([]string(nil), argv...),
-			CWD:                       input.CWD,
-			ActiveHome:                input.ActiveHome,
-			ActiveAgentFiles:          append([]string(nil), input.ActiveAgentFiles...),
-			ActiveAgentFilesUncertain: input.ActiveAgentFilesUncertain,
+			Tool:                            "shell",
+			Argv:                            append([]string(nil), argv...),
+			CWD:                             input.CWD,
+			ActiveHome:                      input.ActiveHome,
+			ActiveAgentFiles:                append([]string(nil), input.ActiveAgentFiles...),
+			ActiveAgentFilesCaseInsensitive: append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+			ActiveAgentFilesUncertain:       input.ActiveAgentFilesUncertain,
 		}
 		actions = append(actions, trustedNestedAction{
 			input: trustedTerminalNestedInput(nestedInput),
@@ -2936,6 +2940,10 @@ func trustedNestedExecutionActions(
 		exploreInput.ActiveAgentFiles = append(
 			[]string(nil),
 			queued.action.input.ActiveAgentFiles...,
+		)
+		exploreInput.ActiveAgentFilesCaseInsensitive = append(
+			[]string(nil),
+			queued.action.input.ActiveAgentFilesCaseInsensitive...,
 		)
 		exploreInput.Tool = queued.action.facts.Tool
 		if strings.TrimSpace(exploreInput.Tool) == "" {

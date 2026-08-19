@@ -23,6 +23,19 @@ func assertFactsInvariants(t testing.TB, facts Facts) {
 	if issue != "" || !slices.Equal(normalizedAgentFiles, facts.ActiveAgentFiles) {
 		t.Fatalf("invalid active agent file context: %q", facts.ActiveAgentFiles)
 	}
+	normalizedCaseInsensitive, issue := normalizeCaseInsensitiveActiveAgentFiles(
+		facts.ActiveAgentFilesCaseInsensitive,
+		facts.ActiveAgentFiles,
+	)
+	if issue != "" || !slices.Equal(
+		normalizedCaseInsensitive,
+		facts.ActiveAgentFilesCaseInsensitive,
+	) {
+		t.Fatalf(
+			"invalid active agent case metadata: %q",
+			facts.ActiveAgentFilesCaseInsensitive,
+		)
+	}
 	commandIDs := make(map[int64]struct{}, len(facts.Commands))
 	for _, command := range facts.Commands {
 		if command.ID <= 0 {

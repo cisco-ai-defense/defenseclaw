@@ -48,11 +48,17 @@ func analyze(input Input) Facts {
 	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(
 		input.ActiveAgentFiles,
 	)
+	activeAgentFilesCaseInsensitive, activeAgentFilesCaseInsensitiveIssue :=
+		normalizeCaseInsensitiveActiveAgentFiles(
+			input.ActiveAgentFilesCaseInsensitive,
+			activeAgentFiles,
+		)
 	for _, issue := range []IssueCode{
 		validateToolName(input.Tool),
 		validateScalar(input.CWD, maxScalarBytes),
 		validateActiveHome(input.ActiveHome),
 		activeAgentFilesIssue,
+		activeAgentFilesCaseInsensitiveIssue,
 	} {
 		if issue == "" {
 			continue
@@ -70,6 +76,7 @@ func analyze(input Input) Facts {
 			"",
 		)
 		facts.ActiveAgentFiles = nil
+		facts.ActiveAgentFilesCaseInsensitive = nil
 		facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
 		return facts
 	}
@@ -190,6 +197,9 @@ func analyze(input Input) Facts {
 		activeHome,
 	)
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
+	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
+		activeAgentFilesCaseInsensitive,
+	)
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
 	return facts
 }

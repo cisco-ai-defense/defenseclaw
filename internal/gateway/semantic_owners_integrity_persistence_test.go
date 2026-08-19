@@ -18,12 +18,7 @@ package gateway
 
 import (
 	"encoding/json"
-	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
 	"slices"
-	"strconv"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -232,42 +227,49 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 	}
 }
 
-func TestActiveAgentInstructionMutationFollowsPOSIXFilesystemIdentity(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX filesystem identity is covered on Unix hosts")
-	}
-
-	directory := t.TempDir()
-	activePath := filepath.Join(directory, "AGENTS.md")
-	candidatePath := filepath.Join(directory, "agents.md")
-	if err := os.WriteFile(activePath, []byte("active"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(candidatePath); errors.Is(err, os.ErrNotExist) {
-		if err := os.Link(activePath, candidatePath); err != nil {
-			t.Skipf("same-file aliases are unavailable: %v", err)
-		}
-	} else if err != nil {
-		t.Fatal(err)
-	}
-
-	facts := analyzeIntegrityCommand(
-		t,
-		"printf updated > "+strconv.Quote(candidatePath),
-		actionfacts.DialectPOSIX,
-		directory,
-		"",
-	)
-	facts.ActiveAgentFiles = []string{activePath}
+func TestActiveAgentInstructionMutationUsesCachedPOSIXCaseSemantics(t *testing.T) {
+	const activePath = "/repo/AGENTS.md"
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool:                            "shell",
+		Command:                         "printf updated > /repo/agents.md",
+		CWD:                             "/repo",
+		ActiveAgentFiles:                []string{activePath},
+		ActiveAgentFilesCaseInsensitive: []string{activePath},
+	})
+	requireAuthoritativeIntegrityFacts(t, facts)
 	owner := semanticIntegrityPersistenceOwners["COG-AGENTS-MD"]
 	if !owner.prerequisite(facts) {
-		t.Fatalf("same-file casing alias did not match the active instruction file: %+v", facts)
+		t.Fatalf("cached basename casing alias did not match: %+v", facts)
 	}
 	if projected := facts.EnforcementProjection(); !owner.prerequisite(projected) {
 		t.Fatalf(
 			"eligible active mutation did not survive enforcement projection: %+v",
 			projected,
 		)
+	}
+
+	facts.ActiveAgentFilesCaseInsensitive = nil
+	if owner.prerequisite(facts) || !owner.suppressFallback(facts) {
+		t.Fatalf("unmarked POSIX case variant did not remain a safe negative: %+v", facts)
+	}
+
+	parentVariant := actionfacts.Analyze(actionfacts.Input{
+		Tool:                            "shell",
+		Command:                         "printf updated > /repo/agents.md",
+		CWD:                             "/repo",
+		ActiveAgentFiles:                []string{"/Repo/AGENTS.md"},
+		ActiveAgentFilesCaseInsensitive: []string{"/Repo/AGENTS.md"},
+	})
+	if owner.prerequisite(parentVariant) || !owner.suppressFallback(parentVariant) {
+		t.Fatalf("cached basename proof folded an unproven parent: %+v", parentVariant)
+	}
+	if activeAgentInstructionPathsMatch(
+		activePath,
+		"/repo/AGENTſ.md",
+		actionfacts.PathFlavorPOSIX,
+		true,
+	) {
+		t.Fatal("ASCII load proof accepted a Unicode simple-fold alias")
 	}
 }
 
@@ -284,59 +286,56 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 		})
 	}
 
-	t.Run("POSIX same-file casing alias enforces", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("POSIX filesystem identity is covered on Unix hosts")
-		}
-		directory := t.TempDir()
-		activePath := filepath.Join(directory, "AGENTS.md")
-		candidatePath := filepath.Join(directory, "agents.md")
-		if err := os.WriteFile(activePath, []byte("active"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := os.Stat(candidatePath); errors.Is(err, os.ErrNotExist) {
-			if err := os.Link(activePath, candidatePath); err != nil {
-				t.Skipf("same-file aliases are unavailable: %v", err)
-			}
-		} else if err != nil {
-			t.Fatal(err)
-		}
-
-		command := "printf updated > " + strconv.Quote(candidatePath)
+	t.Run("cached POSIX filename casing alias enforces", func(t *testing.T) {
+		const activePath = "/repo/AGENTS.md"
+		const command = "printf updated > /repo/agents.md"
 		finding := findingWithID(dispatch(actionfacts.Input{
-			Tool:             "shell",
-			Command:          command,
-			CWD:              directory,
-			ActiveAgentFiles: []string{activePath},
+			Tool:                            "shell",
+			Command:                         command,
+			CWD:                             "/repo",
+			ActiveAgentFiles:                []string{activePath},
+			ActiveAgentFilesCaseInsensitive: []string{activePath},
 		}), "COG-AGENTS-MD")
 		if finding == nil || !finding.contributesToEnforcement() {
-			t.Fatalf("same-file alias finding = %+v, want enforcement", finding)
+			t.Fatalf("cached case alias finding = %+v, want enforcement", finding)
+		}
+	})
+
+	t.Run("unmarked POSIX casing alias stays safe", func(t *testing.T) {
+		const command = "printf updated > /repo/agents.md"
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          command,
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD"); finding != nil {
+			t.Fatalf("unmarked POSIX case alias produced finding: %+v", *finding)
+		}
+	})
+
+	t.Run("cached basename proof does not fold parent", func(t *testing.T) {
+		const activePath = "/Repo/AGENTS.md"
+		const command = "printf updated > /repo/agents.md"
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                            "shell",
+			Command:                         command,
+			CWD:                             "/repo",
+			ActiveAgentFiles:                []string{activePath},
+			ActiveAgentFilesCaseInsensitive: []string{activePath},
+		}), "COG-AGENTS-MD"); finding != nil {
+			t.Fatalf("unproven parent casing produced finding: %+v", *finding)
 		}
 	})
 
 	t.Run("unrelated lowercase POSIX path stays safe", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("POSIX path identity is covered on Unix hosts")
-		}
-		directory := t.TempDir()
-		activePath := filepath.Join(directory, "MEMORY.md")
-		candidatePath := filepath.Join(directory, "unrelated", "memory.md")
-		if err := os.MkdirAll(filepath.Dir(candidatePath), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(activePath, []byte("active"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(candidatePath, []byte("unrelated"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		command := "printf updated > " + strconv.Quote(candidatePath)
+		const activePath = "/repo/MEMORY.md"
+		const command = "printf updated > /repo/unrelated/memory.md"
 		if finding := findingWithID(dispatch(actionfacts.Input{
-			Tool:             "shell",
-			Command:          command,
-			CWD:              directory,
-			ActiveAgentFiles: []string{activePath},
+			Tool:                            "shell",
+			Command:                         command,
+			CWD:                             "/repo",
+			ActiveAgentFiles:                []string{activePath},
+			ActiveAgentFilesCaseInsensitive: []string{activePath},
 		}), "COG-MEMORY"); finding != nil {
 			t.Fatalf("unrelated lowercase path produced finding: %+v", *finding)
 		}

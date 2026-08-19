@@ -31,21 +31,33 @@ func TestActiveAgentFilesAreBoundedTrustedContext(t *testing.T) {
 		"/repo/AGENTS.md",
 		`C:\Users\fixture\MEMORY.md`,
 	}
+	caseInsensitive := []string{"/repo/./AGENTS.md"}
 	facts := Analyze(Input{
-		Tool:                      "shell",
-		Command:                   "printf updated > /repo/AGENTS.md",
-		CWD:                       "/repo",
-		ActiveAgentFiles:          provided,
-		ActiveAgentFilesUncertain: true,
+		Tool:                            "shell",
+		Command:                         "printf updated > /repo/AGENTS.md",
+		CWD:                             "/repo",
+		ActiveAgentFiles:                provided,
+		ActiveAgentFilesCaseInsensitive: caseInsensitive,
+		ActiveAgentFilesUncertain:       true,
 	})
 	want := []string{"/repo/AGENTS.md", "C:/Users/fixture/MEMORY.md"}
+	wantCaseInsensitive := []string{"/repo/AGENTS.md"}
 	if !facts.Authoritative() || !facts.ActiveAgentFilesUncertain ||
-		!slices.Equal(facts.ActiveAgentFiles, want) {
+		!slices.Equal(facts.ActiveAgentFiles, want) ||
+		!slices.Equal(
+			facts.ActiveAgentFilesCaseInsensitive,
+			wantCaseInsensitive,
+		) {
 		t.Fatalf("active files = %#v, want %#v; facts=%#v", facts.ActiveAgentFiles, want, facts)
 	}
 
 	provided[0] = "/attacker/MEMORY.md"
-	if !slices.Equal(facts.ActiveAgentFiles, want) {
+	caseInsensitive[0] = "/attacker/AGENTS.md"
+	if !slices.Equal(facts.ActiveAgentFiles, want) ||
+		!slices.Equal(
+			facts.ActiveAgentFilesCaseInsensitive,
+			wantCaseInsensitive,
+		) {
 		t.Fatalf("facts retained caller-owned slice: %#v", facts.ActiveAgentFiles)
 	}
 
@@ -54,8 +66,20 @@ func TestActiveAgentFilesAreBoundedTrustedContext(t *testing.T) {
 		t.Fatal("enforcement projection lost active-file uncertainty")
 	}
 	facts.ActiveAgentFiles[0] = "/mutated/AGENTS.md"
-	if !slices.Equal(projected.ActiveAgentFiles, want) {
+	facts.ActiveAgentFilesCaseInsensitive[0] = "/mutated/AGENTS.md"
+	if !slices.Equal(projected.ActiveAgentFiles, want) ||
+		!slices.Equal(
+			projected.ActiveAgentFilesCaseInsensitive,
+			wantCaseInsensitive,
+		) {
 		t.Fatalf("projection retained source-owned slice: %#v", projected.ActiveAgentFiles)
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "ActiveAgentFilesCaseInsensitive") {
+		t.Fatalf("private filesystem metadata was serialized: %s", encoded)
 	}
 
 	untrustedArgs := Analyze(Input{
@@ -108,5 +132,25 @@ func TestActiveAgentFilesRejectUnboundedOrInexactContext(t *testing.T) {
 	if limited.Parse.Status != StatusLimitExceeded ||
 		len(limited.ActiveAgentFiles) != 0 {
 		t.Fatalf("unbounded context = %#v", limited)
+	}
+
+	for name, input := range map[string]Input{
+		"metadata path is not active": {
+			Argv:                            []string{"true"},
+			ActiveAgentFiles:                []string{"/repo/AGENTS.md"},
+			ActiveAgentFilesCaseInsensitive: []string{"/other/AGENTS.md"},
+		},
+		"Windows metadata is invalid": {
+			Argv:                            []string{"true"},
+			ActiveAgentFiles:                []string{`C:\repo\AGENTS.md`},
+			ActiveAgentFilesCaseInsensitive: []string{`C:\repo\AGENTS.md`},
+		},
+	} {
+		facts := Analyze(input)
+		if facts.Parse.Status != StatusInvalid ||
+			len(facts.ActiveAgentFiles) != 0 ||
+			len(facts.ActiveAgentFilesCaseInsensitive) != 0 {
+			t.Fatalf("%s = %#v", name, facts)
+		}
 	}
 }

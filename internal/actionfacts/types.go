@@ -39,6 +39,11 @@ type Input struct {
 	// filesystem paths. ActionFacts validates, canonicalizes, bounds, and copies
 	// the list; it never discovers active files from argv, CWD, or process state.
 	ActiveAgentFiles []string
+	// ActiveAgentFilesCaseInsensitive is private, trusted connector metadata
+	// captured when an active POSIX file is loaded. Each entry must also occur
+	// in ActiveAgentFiles. It is carried only in process so later policy checks
+	// can honor native case-insensitive filename lookup without filesystem I/O.
+	ActiveAgentFilesCaseInsensitive []string `json:"-"`
 	// ActiveAgentFilesUncertain is trusted connector state indicating that the
 	// exact list above may be incomplete because its bounded authority cache
 	// evicted or overflowed an entry. Parsers never derive it from action input.
@@ -50,16 +55,17 @@ type Input struct {
 // controlled parse failures are represented by Parse and never returned as
 // errors.
 type Facts struct {
-	Tool                      string
-	CWD                       string
-	ActiveHome                string
-	ActiveAgentFiles          []string
-	ActiveAgentFilesUncertain bool
-	Parse                     ParseResult
-	Commands                  []CommandFact
-	Paths                     []PathFact
-	Network                   []NetworkFact
-	DataFlows                 []DataFlowFact
+	Tool                            string
+	CWD                             string
+	ActiveHome                      string
+	ActiveAgentFiles                []string
+	ActiveAgentFilesCaseInsensitive []string `json:"-"`
+	ActiveAgentFilesUncertain       bool
+	Parse                           ParseResult
+	Commands                        []CommandFact
+	Paths                           []PathFact
+	Network                         []NetworkFact
+	DataFlows                       []DataFlowFact
 }
 
 // Authoritative reports whether the entire action can be evaluated by migrated

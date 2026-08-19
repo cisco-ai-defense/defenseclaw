@@ -57,6 +57,98 @@ func activeClaudeCodeTestAPI() *APIServer {
 	return &APIServer{scannerCfg: cfg}
 }
 
+func TestActiveAgentContextCachesNativePOSIXCaseSemanticsAtLoad(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("POSIX case semantics are covered on POSIX hosts")
+	}
+	root := t.TempDir()
+	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
+	canonical, caseInsensitive, valid := exactActiveAgentFile(agentFile)
+	if !valid || canonical != agentFile {
+		t.Fatalf("exact active file = %q, valid=%t; want %q", canonical, valid, agentFile)
+	}
+	aliasInfo, aliasErr := os.Lstat(filepath.Join(root, "agents.md"))
+	activeInfo, activeErr := os.Lstat(agentFile)
+	wantCaseInsensitive := aliasErr == nil && activeErr == nil &&
+		os.SameFile(activeInfo, aliasInfo)
+	if caseInsensitive != wantCaseInsensitive {
+		t.Fatalf(
+			"cached case-insensitive identity = %t, native alias=%t",
+			caseInsensitive,
+			wantCaseInsensitive,
+		)
+	}
+
+	cache := activeAgentContextCache{}
+	cache.seed("claudecode", "session", agentFile)
+	snapshot := cache.snapshot("claudecode", "session")
+	wantMetadata := []string(nil)
+	if wantCaseInsensitive {
+		wantMetadata = []string{agentFile}
+	}
+	if !slices.Equal(snapshot.caseInsensitiveFiles, wantMetadata) {
+		t.Fatalf(
+			"cached case metadata = %#v, want %#v",
+			snapshot.caseInsensitiveFiles,
+			wantMetadata,
+		)
+	}
+	if err := os.Remove(agentFile); err != nil {
+		t.Fatal(err)
+	}
+	if afterRemoval := cache.snapshot("claudecode", "session"); !slices.Equal(
+		afterRemoval.caseInsensitiveFiles,
+		wantMetadata,
+	) {
+		t.Fatalf("snapshot re-read filesystem after load: %#v", afterRemoval)
+	}
+}
+
+func TestActiveAgentContextReseedClearsStaleCaseProof(t *testing.T) {
+	cache := activeAgentContextCache{}
+	key := activeAgentContextKey{connector: "claudecode", sessionID: "session"}
+	const activePath = "/repo/AGENTS.md"
+	cache.seedLoadedFile(key, activePath, true, time.Unix(1, 0))
+	if got := cache.snapshot("claudecode", "session"); !slices.Equal(
+		got.caseInsensitiveFiles,
+		[]string{activePath},
+	) {
+		t.Fatalf("initial case proof = %#v, want %q", got, activePath)
+	}
+
+	cache.seedLoadedFile(key, activePath, false, time.Unix(2, 0))
+	if got := cache.snapshot("claudecode", "session"); len(
+		got.caseInsensitiveFiles,
+	) != 0 {
+		t.Fatalf("reseed retained stale case proof: %#v", got)
+	}
+}
+
+func TestActiveAgentContextDoesNotTreatHardLinkAsCaseInsensitiveVolume(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("POSIX case semantics are covered on POSIX hosts")
+	}
+	root := t.TempDir()
+	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
+	alias := filepath.Join(root, "agents.md")
+	if _, err := os.Lstat(alias); err == nil {
+		t.Skip("native case-insensitive volume cannot create a casing hard link")
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Link(agentFile, alias); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	_, caseInsensitive, valid := exactActiveAgentFile(agentFile)
+	if !valid || caseInsensitive {
+		t.Fatalf(
+			"hard-link identity marked volume case-insensitive: valid=%t caseInsensitive=%t",
+			valid,
+			caseInsensitive,
+		)
+	}
+}
+
 func evaluateClaudeCodeToolFacts(
 	t *testing.T,
 	api *APIServer,
@@ -102,6 +194,7 @@ func TestClaudeCodeActiveAgentFilesRequireAuthenticatedExactLoadAndSameSession(t
 	}
 
 	api.evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), load)
+	loadedContext := api.activeAgentContext.snapshot("claudecode", "session-a")
 	now = now.Add(24 * time.Hour)
 	mutation := map[string]interface{}{
 		"file_path": agentFile,
@@ -112,6 +205,16 @@ func TestClaudeCodeActiveAgentFilesRequireAuthenticatedExactLoadAndSameSession(t
 			sameSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-a", nil, "Write", mutation)
 			if !slices.Equal(sameSession.facts.ActiveAgentFiles, []string{filepath.ToSlash(agentFile)}) {
 				t.Fatalf("same-session active files = %#v, want %q", sameSession.facts.ActiveAgentFiles, filepath.ToSlash(agentFile))
+			}
+			if !slices.Equal(
+				sameSession.facts.ActiveAgentFilesCaseInsensitive,
+				loadedContext.caseInsensitiveFiles,
+			) {
+				t.Fatalf(
+					"same-session case metadata = %#v, want %#v",
+					sameSession.facts.ActiveAgentFilesCaseInsensitive,
+					loadedContext.caseInsensitiveFiles,
+				)
 			}
 			if sameSession.facts.ActiveAgentFilesUncertain {
 				t.Fatal("idle exact session became uncertain without a lifecycle reset")
@@ -436,7 +539,10 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		mutation,
 	)
 	if reloaded.facts.ActiveAgentFilesUncertain ||
-		!slices.Equal(reloaded.facts.ActiveAgentFiles, []string{agentFile}) {
+		!slices.Equal(
+			reloaded.facts.ActiveAgentFiles,
+			[]string{filepath.ToSlash(agentFile)},
+		) {
 		t.Fatalf("reloaded reset session did not regain exact context: %+v", reloaded.facts)
 	}
 	if finding := findingWithID(reloaded.findings, "COG-AGENTS-MD"); finding == nil || !finding.contributesToEnforcement() {

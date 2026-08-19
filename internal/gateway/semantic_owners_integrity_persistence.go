@@ -17,7 +17,6 @@
 package gateway
 
 import (
-	"os"
 	"path"
 	"strings"
 
@@ -26,11 +25,11 @@ import (
 
 const (
 	semanticHistoryTamperExpression = `f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))`
-	// The owner binds this mutation shape to the exact active instruction file
-	// using the host filesystem's identity semantics. Owner eligibility accepts
-	// only executing mutations (or static redirects that remain executing in the
-	// enforcement projection), so an unrelated sibling mutation cannot lend it
-	// authority.
+	// The owner binds this mutation shape to the exact active instruction file,
+	// using trusted case-sensitivity metadata captured when the file was loaded.
+	// Owner eligibility accepts only executing mutations (or static redirects
+	// that remain executing in the enforcement projection), so an unrelated
+	// sibling mutation cannot lend it authority.
 	semanticActiveAgentInstructionMutationExpression = `f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))`
 )
 
@@ -151,7 +150,11 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 			exactSemanticPathValue(candidate),
 			candidate.Flavor,
 		)
-		if !ok || !strings.EqualFold(path.Base(candidatePath), fileName) {
+		if !ok || !activeAgentInstructionCandidateBaseMatches(
+			path.Base(candidatePath),
+			candidate.Flavor,
+			fileName,
+		) {
 			return false
 		}
 		if facts.ActiveAgentFilesUncertain {
@@ -177,6 +180,7 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 				canonicalActivePath,
 				candidatePath,
 				candidate.Flavor,
+				activeAgentFileCaseInsensitive(facts, activePath),
 			) {
 				return true
 			}
@@ -216,8 +220,8 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 
 // exactSemanticPathValue intentionally does not use semanticPathValue: that
 // helper folds case for broad pattern matching. Active instruction-file
-// authority must preserve the proven spelling and filesystem flavor until
-// identity is checked with the host filesystem's semantics.
+// authority must preserve the proven spelling and filesystem flavor until it
+// is checked against authenticated, load-time identity metadata.
 func exactSemanticPathValue(candidate actionfacts.PathFact) string {
 	if candidate.Resolved != "" {
 		return candidate.Resolved
@@ -275,23 +279,47 @@ func activeAgentInstructionBaseMatches(
 	return flavor == actionfacts.PathFlavorPOSIX && base == fileName
 }
 
+func activeAgentInstructionCandidateBaseMatches(
+	base string,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	if flavor == actionfacts.PathFlavorWindows {
+		return strings.EqualFold(base, fileName)
+	}
+	return flavor == actionfacts.PathFlavorPOSIX &&
+		activeAgentASCIIEqualFold(base, fileName)
+}
+
 func activeAgentInstructionPathsMatch(
 	activePath string,
 	candidatePath string,
 	flavor actionfacts.PathFlavor,
+	caseInsensitive bool,
 ) bool {
 	if activePath == candidatePath {
 		return true
 	}
-	if flavor != actionfacts.PathFlavorPOSIX {
+	if flavor != actionfacts.PathFlavorPOSIX || !caseInsensitive {
 		return false
 	}
-	activeInfo, err := os.Stat(activePath)
-	if err != nil {
-		return false
+	return path.Dir(activePath) == path.Dir(candidatePath) &&
+		activeAgentASCIIEqualFold(
+			path.Base(activePath),
+			path.Base(candidatePath),
+		)
+}
+
+func activeAgentFileCaseInsensitive(
+	facts actionfacts.Facts,
+	activePath string,
+) bool {
+	for _, candidate := range facts.ActiveAgentFilesCaseInsensitive {
+		if candidate == activePath {
+			return true
+		}
 	}
-	candidateInfo, err := os.Stat(candidatePath)
-	return err == nil && os.SameFile(activeInfo, candidateInfo)
+	return false
 }
 
 func isASCIIPathLetter(value byte) bool {

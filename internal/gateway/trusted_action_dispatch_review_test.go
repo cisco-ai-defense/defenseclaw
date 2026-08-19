@@ -26,14 +26,16 @@ import (
 
 func TestTrustedNestedExecutionActionsCloneActiveAgentFiles(t *testing.T) {
 	activeAgentFiles := []string{"/repo/AGENTS.md"}
+	caseInsensitiveFiles := []string{"/repo/AGENTS.md"}
 	want := append([]string(nil), activeAgentFiles...)
 	input := actionfacts.Input{
-		Tool:                      "shell",
-		Command:                   `eval 'printf updated > /repo/AGENTS.md'`,
-		CWD:                       "/repo",
-		ActiveHome:                "/home/alice",
-		ActiveAgentFiles:          activeAgentFiles,
-		ActiveAgentFilesUncertain: true,
+		Tool:                            "shell",
+		Command:                         `eval 'printf updated > /repo/AGENTS.md'`,
+		CWD:                             "/repo",
+		ActiveHome:                      "/home/alice",
+		ActiveAgentFiles:                activeAgentFiles,
+		ActiveAgentFilesCaseInsensitive: caseInsensitiveFiles,
+		ActiveAgentFilesUncertain:       true,
 	}
 	actions := trustedNestedExecutionActions(input, actionfacts.Analyze(input))
 	if len(actions) == 0 {
@@ -60,6 +62,18 @@ func TestTrustedNestedExecutionActionsCloneActiveAgentFiles(t *testing.T) {
 				want,
 			)
 		}
+		if !slices.Equal(
+			actions[index].input.ActiveAgentFilesCaseInsensitive,
+			want,
+		) || !slices.Equal(
+			actions[index].facts.ActiveAgentFilesCaseInsensitive,
+			want,
+		) {
+			t.Fatalf(
+				"nested action lost active-file case metadata: %+v",
+				actions[index],
+			)
+		}
 		if !actions[index].input.ActiveAgentFilesUncertain ||
 			!actions[index].facts.ActiveAgentFilesUncertain {
 			t.Fatalf("nested action lost active-file uncertainty: %+v", actions[index])
@@ -70,12 +84,20 @@ func TestTrustedNestedExecutionActionsCloneActiveAgentFiles(t *testing.T) {
 	}
 
 	activeAgentFiles[0] = "/mutated/source"
+	caseInsensitiveFiles[0] = "/mutated/case-source"
 	for index := range actions {
 		if actions[index].rawFallback {
 			continue
 		}
 		if !slices.Equal(actions[index].input.ActiveAgentFiles, want) ||
-			!slices.Equal(actions[index].facts.ActiveAgentFiles, want) {
+			!slices.Equal(actions[index].facts.ActiveAgentFiles, want) ||
+			!slices.Equal(
+				actions[index].input.ActiveAgentFilesCaseInsensitive,
+				want,
+			) || !slices.Equal(
+			actions[index].facts.ActiveAgentFilesCaseInsensitive,
+			want,
+		) {
 			t.Fatalf("nested action retained caller-owned active-file storage: %+v", actions[index])
 		}
 		actions[index].input.ActiveAgentFiles[0] = "/mutated/projection"
@@ -86,8 +108,24 @@ func TestTrustedNestedExecutionActionsCloneActiveAgentFiles(t *testing.T) {
 		if !slices.Equal(actions[index].input.ActiveAgentFiles, []string{"/mutated/projection"}) {
 			t.Fatalf("nested input retained projected-facts storage: %+v", actions[index])
 		}
+		actions[index].input.ActiveAgentFilesCaseInsensitive[0] = "/mutated/case-projection"
+		if !slices.Equal(
+			actions[index].facts.ActiveAgentFilesCaseInsensitive,
+			want,
+		) {
+			t.Fatalf("nested facts retained projected case metadata: %+v", actions[index])
+		}
+		actions[index].facts.ActiveAgentFilesCaseInsensitive[0] = "/mutated/case-facts"
+		if !slices.Equal(
+			actions[index].input.ActiveAgentFilesCaseInsensitive,
+			[]string{"/mutated/case-projection"},
+		) {
+			t.Fatalf("nested input retained facts case metadata: %+v", actions[index])
+		}
 		actions[index].input.ActiveAgentFiles[0] = want[0]
 		actions[index].facts.ActiveAgentFiles[0] = want[0]
+		actions[index].input.ActiveAgentFilesCaseInsensitive[0] = want[0]
+		actions[index].facts.ActiveAgentFilesCaseInsensitive[0] = want[0]
 	}
 }
 

@@ -153,12 +153,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:                      toolName,
-				Args:                      toolArgs,
-				CWD:                       req.CWD,
-				ActiveHome:                trustedSameHostHome(),
-				ActiveAgentFiles:          activeAgentContext.files,
-				ActiveAgentFilesUncertain: activeAgentContext.uncertain,
+				Tool:                            toolName,
+				Args:                            toolArgs,
+				CWD:                             req.CWD,
+				ActiveHome:                      trustedSameHostHome(),
+				ActiveAgentFiles:                activeAgentContext.files,
+				ActiveAgentFilesCaseInsensitive: activeAgentContext.caseInsensitiveFiles,
+				ActiveAgentFilesUncertain:       activeAgentContext.uncertain,
 			},
 			LegacyText:         string(toolArgs),
 			Connector:          "claudecode",

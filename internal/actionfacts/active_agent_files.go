@@ -53,6 +53,31 @@ func normalizeActiveAgentFiles(values []string) ([]string, IssueCode) {
 	return out, ""
 }
 
+func normalizeCaseInsensitiveActiveAgentFiles(
+	values []string,
+	activeFiles []string,
+) ([]string, IssueCode) {
+	normalized, issue := normalizeActiveAgentFiles(values)
+	if issue != "" {
+		return nil, issue
+	}
+	for _, value := range normalized {
+		if !strings.HasPrefix(value, "/") || !containsExactPath(activeFiles, value) {
+			return nil, IssueInvalidSyntax
+		}
+	}
+	return normalized, ""
+}
+
+func containsExactPath(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeActiveAgentFile(value string) (normalized string, windows bool, ok bool) {
 	if value == "" || strings.TrimSpace(value) != value ||
 		hasUnresolvedPathSyntax(value) {

@@ -28,11 +28,12 @@ package actionfacts
 // is in a preview mode.
 func (f Facts) EnforcementProjection() Facts {
 	projected := Facts{
-		Tool:                      f.Tool,
-		CWD:                       f.CWD,
-		ActiveHome:                f.ActiveHome,
-		ActiveAgentFiles:          cloneSlice(f.ActiveAgentFiles),
-		ActiveAgentFilesUncertain: f.ActiveAgentFilesUncertain,
+		Tool:                            f.Tool,
+		CWD:                             f.CWD,
+		ActiveHome:                      f.ActiveHome,
+		ActiveAgentFiles:                cloneSlice(f.ActiveAgentFiles),
+		ActiveAgentFilesCaseInsensitive: cloneSlice(f.ActiveAgentFilesCaseInsensitive),
+		ActiveAgentFilesUncertain:       f.ActiveAgentFilesUncertain,
 		Parse: ParseResult{
 			Status:  f.Parse.Status,
 			Dialect: f.Parse.Dialect,

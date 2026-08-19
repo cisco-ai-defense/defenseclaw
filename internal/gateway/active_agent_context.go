@@ -18,8 +18,10 @@ package gateway
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -59,14 +61,16 @@ type activeAgentContextKey struct {
 }
 
 type activeAgentContextSession struct {
-	files     []string
-	uncertain bool
-	updatedAt time.Time
+	files                []string
+	caseInsensitiveFiles []string
+	uncertain            bool
+	updatedAt            time.Time
 }
 
 type activeAgentContextSnapshot struct {
-	files     []string
-	uncertain bool
+	files                []string
+	caseInsensitiveFiles []string
+	uncertain            bool
 }
 
 // activeAgentContextCache is an APIServer-owned, process-local authority
@@ -86,26 +90,92 @@ func (cache *activeAgentContextCache) currentTime() time.Time {
 	return time.Now()
 }
 
-func exactActiveAgentFile(filePath string) (string, bool) {
+func exactActiveAgentFile(filePath string) (string, bool, bool) {
 	if filePath == "" || len(filePath) > maxActiveAgentContextPathSize ||
 		strings.TrimSpace(filePath) != filePath || !filepath.IsAbs(filePath) ||
 		filepath.Clean(filePath) != filePath {
-		return "", false
+		return "", false, false
 	}
 	switch filepath.Base(filePath) {
 	case "AGENTS.md", "MEMORY.md":
 	default:
-		return "", false
+		return "", false, false
 	}
 	info, err := os.Lstat(filePath)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return "", false
+		return "", false, false
 	}
 	resolved, err := filepath.EvalSymlinks(filePath)
 	if err != nil || resolved != filePath {
-		return "", false
+		return "", false, false
 	}
-	return filePath, true
+	return filePath, nativePOSIXFilenameCaseInsensitive(filePath, info), true
+}
+
+// nativePOSIXFilenameCaseInsensitive runs only while an authenticated
+// InstructionsLoaded event is being recorded. The later synchronous tool
+// policy path consumes the cached result and never touches the filesystem.
+func nativePOSIXFilenameCaseInsensitive(filePath string, info os.FileInfo) bool {
+	if filepath.Separator != '/' {
+		return false
+	}
+	base := filepath.Base(filePath)
+	aliasPath := filepath.Join(filepath.Dir(filePath), strings.ToLower(base))
+	if aliasPath == filePath {
+		return false
+	}
+	aliasInfo, err := os.Lstat(aliasPath)
+	if err != nil || !aliasInfo.Mode().IsRegular() ||
+		aliasInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, aliasInfo) {
+		return false
+	}
+	directory, err := os.Open(filepath.Dir(filePath))
+	if err != nil {
+		return false
+	}
+	defer directory.Close()
+
+	matches := 0
+	for {
+		entries, readErr := directory.ReadDir(64)
+		for _, entry := range entries {
+			if activeAgentASCIIEqualFold(entry.Name(), base) {
+				matches++
+				if matches > 1 {
+					return false
+				}
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return false
+		}
+	}
+	// A case-sensitive directory can contain a differently cased hard link.
+	// Accept folding only when one directory entry serves both spellings.
+	return matches == 1
+}
+
+func activeAgentASCIIEqualFold(left, right string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		leftByte := left[index]
+		rightByte := right[index]
+		if leftByte >= 'A' && leftByte <= 'Z' {
+			leftByte += 'a' - 'A'
+		}
+		if rightByte >= 'A' && rightByte <= 'Z' {
+			rightByte += 'a' - 'A'
+		}
+		if leftByte != rightByte {
+			return false
+		}
+	}
+	return true
 }
 
 func validActiveAgentContextKey(connectorName, sessionID string) (activeAgentContextKey, bool) {
@@ -153,11 +223,24 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	if !ok {
 		return
 	}
-	canonicalPath, valid := exactActiveAgentFile(filePath)
+	canonicalPath, caseInsensitive, valid := exactActiveAgentFile(filePath)
 	if !valid {
 		return
 	}
-	now := cache.currentTime()
+	cache.seedLoadedFile(
+		key,
+		canonicalPath,
+		caseInsensitive,
+		cache.currentTime(),
+	)
+}
+
+func (cache *activeAgentContextCache) seedLoadedFile(
+	key activeAgentContextKey,
+	canonicalPath string,
+	caseInsensitive bool,
+	now time.Time,
+) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.sessions == nil {
@@ -173,6 +256,7 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	}
 	for _, existing := range session.files {
 		if existing == canonicalPath {
+			session.setCaseInsensitive(canonicalPath, caseInsensitive)
 			session.updatedAt = now
 			cache.sessions[key] = session
 			return
@@ -185,8 +269,28 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 		return
 	}
 	session.files = append(session.files, canonicalPath)
+	session.setCaseInsensitive(canonicalPath, caseInsensitive)
 	session.updatedAt = now
 	cache.sessions[key] = session
+}
+
+func (session *activeAgentContextSession) setCaseInsensitive(
+	filePath string,
+	enabled bool,
+) {
+	index := slices.Index(session.caseInsensitiveFiles, filePath)
+	if enabled && index < 0 {
+		session.caseInsensitiveFiles = append(
+			session.caseInsensitiveFiles,
+			filePath,
+		)
+	} else if !enabled && index >= 0 {
+		session.caseInsensitiveFiles = slices.Delete(
+			session.caseInsensitiveFiles,
+			index,
+			index+1,
+		)
+	}
 }
 
 func (cache *activeAgentContextCache) begin(connectorName, sessionID string) {
@@ -233,7 +337,11 @@ func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) 
 	session.updatedAt = now
 	cache.sessions[key] = session
 	return activeAgentContextSnapshot{
-		files:     append([]string(nil), session.files...),
+		files: append([]string(nil), session.files...),
+		caseInsensitiveFiles: append(
+			[]string(nil),
+			session.caseInsensitiveFiles...,
+		),
 		uncertain: session.uncertain,
 	}
 }
