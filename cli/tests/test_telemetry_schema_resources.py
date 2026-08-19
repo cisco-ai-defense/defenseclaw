@@ -194,7 +194,7 @@ from defenseclaw.observability.v8_compatibility import load_packaged_v7_compatib
 raw = v7_exporter_selection_bytes()
 selection = load_packaged_v7_compatibility_selection()
 audit_selector = next(selector for selector in selection.exporter_selectors('audit_sink', 'logs') if selector.actions)
-assert len(audit_selector.actions) == 189
+assert len(audit_selector.actions) == 190
 assert 'setup-redaction-policy' in audit_selector.actions
 print(json.dumps({{
     'v7-exporter-selection': hashlib.sha256(raw).hexdigest(),
