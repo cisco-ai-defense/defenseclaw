@@ -904,11 +904,14 @@
       "surface_in_doctor": false,
       "consumers": [
         {"location": "internal/config/config.go", "description": "Pins deployment mode before parsing or trusting config.yaml"},
+        {"location": "internal/cli/config_v8_wait.go", "description": "Spec 003 daemon wait loop gates on managed_enterprise before config.yaml has loaded"},
+        {"location": "internal/cli/enterprise_hooks.go", "description": "Spec 003 hook-guardian late-manifest wait gates on managed_enterprise for --deferred-config installs"},
         {"location": "packaging/systemd/defenseclaw-gateway.service", "description": "Managed Linux service pin"},
-        {"location": "packaging/launchd/com.cisco.secureclient.defenseclaw.plist", "description": "Managed macOS service pin"}
+        {"location": "packaging/launchd/com.cisco.secureclient.defenseclaw.plist", "description": "Managed macOS service pin"},
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Windows SCM service env pin (both DefenseClawGateway + DefenseClawHookGuardian); already the source of the managed_enterprise value the spec 003 wait loops key off"}
       ],
       "since": "0.8.0",
-      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks."
+      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases."
     },
     {
       "name": "DEFENSECLAW_PLIST_SRC",

@@ -65,7 +65,18 @@ type windowsEnterpriseLifecycleOptions struct {
 	noStart                        bool
 	purge                          bool
 	allowUnsigned                  bool
-	jsonOutput                     bool
+	// deferredConfig requests the UCB-friendly install path (spec 003
+	// / Workstream B). When true: --config and --manifest are
+	// optional at install time; the installer provisions the
+	// canonical drop-point directories with ACLs but writes no file
+	// bodies; both services register but are NOT started so the
+	// bounded fsnotify wait loops in the gateway daemon
+	// (internal/cli/config_v8_wait.go) and hook-guardian
+	// (internal/cli/enterprise_hooks.go) pick the files up once UCB
+	// atomically drops them. See
+	// docs/specs/003-windows-deferred-config/.
+	deferredConfig bool
+	jsonOutput     bool
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -194,6 +205,11 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
 	flags.BoolVar(&opts.purge, "purge", false, "remove managed state as well as services and binaries")
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
+	// Spec 003 Workstream B: UCB-friendly late-config install.
+	// Requires managed-enterprise deployment mode; enforced by the
+	// installer, not here (this flag is a passthrough).
+	flags.BoolVar(&opts.deferredConfig, "deferred-config", false,
+		"provision drop points and register services stopped; config.yaml and targets.yaml may arrive later via UCB")
 	flags.BoolVar(&opts.jsonOutput, "json", false, "emit machine-readable JSON")
 	return cmd
 }
@@ -503,6 +519,9 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	if opts.allowUnsigned {
 		args = append(args, "-AllowUnsigned")
 	}
+	if opts.deferredConfig {
+		args = append(args, "-DeferredConfig")
+	}
 	if opts.jsonOutput {
 		args = append(args, "-Json")
 	}
@@ -574,6 +593,18 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 				"--core-hardening-certification cannot be combined with production application-control, Claude-policy, or trusted-launcher attestations",
 			)
 		}
+	}
+	// Spec 003 --deferred-config is meaningful only for the initial
+	// Install action. On upgrade/repair the config.yaml + targets.yaml
+	// artefacts are already on disk; deferring them would leave the
+	// deployment offline and mask a real re-signing failure. Reject
+	// the combination up front so the CLI-side matches the PowerShell
+	// installer's Install-only relaxation in Get-DefenseClawLifecycleSources.
+	// See CR spec-003:PRRT_kwDORuAK-s6alkr4.
+	if opts.deferredConfig && action != "install" {
+		return fmt.Errorf(
+			"--deferred-config is valid only with install (got: %s)", action,
+		)
 	}
 	return nil
 }

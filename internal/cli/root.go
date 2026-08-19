@@ -103,9 +103,29 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	activeObservabilityV8Startup = nil
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
 	var err error
-	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
+	cfgPath := config.ConfigPath()
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		// Spec 003 B2: in managed_enterprise, tolerate a missing
+		// config.yaml at startup by fsnotify-waiting for UCB to drop
+		// it. Non-managed-enterprise deployments (OSS / SaaS / DP /
+		// CP) retain the existing fail-fast; the pin-based gate
+		// makes sure a wait loop never starts outside its intended
+		// scope. See docs/specs/003-windows-deferred-config/.
+		retry, waitErr := enterConfigWaitLoopIfManaged(cmd.Context(), cfgPath, err, cmd.ErrOrStderr())
+		if waitErr != nil {
+			return waitErr
+		}
+		if !retry {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
+		if err != nil {
+			// The wait declared config.yaml present; a second
+			// failure now is a real parse/permission problem, not
+			// another missing-file case worth waiting through.
+			return fmt.Errorf("failed to load config after wait: %w", err)
+		}
 	}
 	version.SetBinaryVersion(appVersion)
 	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {

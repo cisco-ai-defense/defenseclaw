@@ -38,9 +38,25 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// enterpriseHookTargetsWaitTimeout is the bounded window the hook-guardian
+// will fsnotify-wait for a missing targets.yaml before returning a
+// distinguishable error. See spec 003 (docs/specs/003-windows-deferred-config/)
+// requirements.md REQ-14 + REQ-29. Kept as a package-level `var` (not a
+// const) so the timeout-path CI test can shorten it via a build-tag override
+// file; there is no envvar-configurable path — an operator cannot silently
+// extend the cap to weeks and mask a broken UCB pipeline as still-installing.
+var enterpriseHookTargetsWaitTimeout = 24 * time.Hour
+
+// enterpriseHookTargetsWaitPoll is the interval at which the wait loop
+// re-checks the manifest even if no fsnotify event fired. Defensive against
+// missed events (Windows fsnotify can drop events under load) and against
+// non-inotify filesystems (network shares) that never fire events at all.
+var enterpriseHookTargetsWaitPoll = 30 * time.Second
 
 var (
 	enterpriseHookConnector     string
@@ -1296,9 +1312,32 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		return changed, nil
 	}
 
+	// Spec 003 B3: in managed_enterprise mode, tolerate a missing
+	// targets.yaml at startup by fsnotify-waiting for UCB to drop it.
+	// Non-managed-enterprise deployments retain the existing hard-exit
+	// behaviour (an operator explicitly asked for a manifest that
+	// isn't there; loudly refusing is the right thing).
 	if _, err := reconcile("startup"); err != nil {
-		return err
+		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+			return err
+		}
+		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
+			return waitErr
+		}
+		// Manifest is present now — re-run the startup reconcile so
+		// the watch loop enters its main select with a valid row set,
+		// hashes, and watched dirs. Any other error from THIS retry
+		// (parse failure, missing file races back to gone, etc.) is
+		// fatal — we've done our one bounded wait; further retries
+		// belong to the SCM restart cycle.
+		if _, err := reconcile("startup_after_wait"); err != nil {
+			return err
+		}
 	}
+	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
+	// the guardian-side "ready" state so the sidecar's health surface
+	// (spec 003 REQ-19) can collapse to overall `ready`.
+	writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -1471,6 +1510,166 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
+}
+
+// isMissingManifestErr classifies an error from
+// runEnterpriseHookReconcileOnce (which ultimately calls
+// enterprisehooks.LoadManifest) as the specific "targets.yaml is not on
+// disk yet" case, distinct from parse errors, permission errors, or
+// symlink refusals. Only file-not-found is safe to interpret as
+// "waiting for UCB to drop the manifest" — everything else is a real
+// failure that should surface loudly.
+//
+// LoadManifest wraps the underlying os.Lstat / os.Open error with
+// %w, so errors.Is against os.ErrNotExist reaches the sentinel.
+func isMissingManifestErr(err error) bool {
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// writeGuardianStateOrLog writes the guardian's out-of-band state file
+// via the guardianstate package and logs a warning on failure. Never
+// returns an error: a state-file write failure is a health-surface
+// degradation (the sidecar will fall through to its safe default), not
+// a reason to fail the guardian's core reconcile path.
+func writeGuardianStateOrLog(w io.Writer, state string) {
+	if enterpriseHookManifest == "" {
+		return
+	}
+	statePath := guardianstate.PathForStateRoot(filepath.Dir(filepath.Clean(enterpriseHookManifest)))
+	if err := guardianstate.WriteState(statePath, state); err != nil {
+		fmt.Fprintf(w, "[hook-guardian] warn: could not write %s state file %s: %v\n", state, statePath, err)
+	}
+}
+
+// waitForEnterpriseHookManifestManaged is the spec 003 B3 bounded wait
+// loop. Called only from managed_enterprise + missing-manifest at
+// startup. Uses the caller's already-created fsnotify.Watcher so we
+// share the same file-descriptor budget the normal watch loop uses;
+// on entry the watcher is empty (the reconcile that just failed never
+// added dirs). On successful return the watcher is again empty — the
+// caller re-runs `reconcile("startup_after_wait")` which re-adds
+// dirs based on the freshly-loaded row set.
+//
+// Behaviour:
+//
+//   - Writes guardianstate `.state=waiting_for_targets` so the sidecar
+//     collapsing rule reports overall `waiting_for_targets` (spec 003
+//     REQ-15).
+//   - Adds an fsnotify watch on the manifest's parent directory.
+//   - Loop: wait for a WRITE/CREATE event on the manifest path OR the
+//     poll ticker fires; on either, re-attempt LoadManifest. Success
+//     ⇒ return nil (caller resumes normal boot). Missing ⇒ keep
+//     waiting.
+//   - Hard cap at enterpriseHookTargetsWaitTimeout — return a
+//     distinguishable error so the SCM restart cycle picks the
+//     guardian back up cleanly (spec 003 AC-06 analogue on the
+//     guardian side, though the primary AC-06 is for the daemon).
+//
+// A non-missing error from a retried LoadManifest (parse failure,
+// symlink) is treated as fatal: we did our one bounded wait, an
+// operator now dropped a bad file, further recovery belongs to a
+// human triage rather than an unbounded wait loop.
+func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw *fsnotify.Watcher) error {
+	manifestPath := filepath.Clean(enterpriseHookManifest)
+	parentDir := filepath.Dir(manifestPath)
+
+	fmt.Fprintf(w, "[hook-guardian] managed-enterprise: targets.yaml missing at %s, waiting on fsnotify (parent=%s)\n", manifestPath, parentDir)
+	writeGuardianStateOrLog(w, guardianstate.StateWaitingForTargets)
+
+	if err := fsw.Add(parentDir); err != nil {
+		return fmt.Errorf("enterprise hooks watch: add wait dir %s: %w", parentDir, err)
+	}
+	// Best-effort cleanup: remove the watch when we return so the
+	// caller's fresh startup_after_wait reconcile gets a clean
+	// watched-set to sync against. A Remove error is not fatal —
+	// syncEnterpriseHookWatchDirs will fix any drift on the next
+	// reconcile.
+	defer func() { _ = fsw.Remove(parentDir) }()
+
+	// Poll at a fixed interval so a missed fsnotify event (Windows
+	// can drop events under load, and network shares may not emit
+	// them at all) does not extend the wait beyond one poll interval.
+	poll := time.NewTicker(enterpriseHookTargetsWaitPoll)
+	defer poll.Stop()
+
+	// Hard cap so a broken UCB pipeline does not leave the guardian
+	// silently waiting forever. Distinguishable exit — see spec 003
+	// AC-06's daemon-side counterpart.
+	deadline, cancel := context.WithTimeout(ctx, enterpriseHookTargetsWaitTimeout)
+	defer cancel()
+
+	// probeShouldReturn classifies a probeManifestPresent result:
+	// nil ⇒ manifest loaded, return success. A missing-file error ⇒
+	// keep waiting (this is the whole point of the wait loop). Any
+	// OTHER error (parse failure, trust-plumbing rejection, symlink
+	// refusal, oversized manifest) ⇒ return that error immediately;
+	// the wait loop's contract is "wait for a MISSING file", not
+	// "silently absorb 24 hours of broken UCB drops". See CR
+	// spec-003:PRRT_kwDORuAK-s6alkry.
+	probeShouldReturn := func(err error, reason string) (bool, error) {
+		if err == nil {
+			fmt.Fprintf(w, "[hook-guardian] targets.yaml %s; resuming\n", reason)
+			return true, nil
+		}
+		if isMissingManifestErr(err) {
+			return false, nil
+		}
+		return true, fmt.Errorf("enterprise hooks watch: targets.yaml probe returned non-missing error: %w", err)
+	}
+
+	// Try LoadManifest once up front — the manifest may have landed
+	// between the failing startup reconcile and this fsnotify.Add
+	// call. Without this probe we'd sit for enterpriseHookTargetsWaitPoll
+	// waiting for an event that already happened.
+	if done, err := probeShouldReturn(probeManifestPresent(manifestPath), "present on entry to wait loop"); done {
+		return err
+	}
+
+	for {
+		select {
+		case <-deadline.Done():
+			// Distinguish timeout from ctx.Done: the operator's ctx
+			// is fine, only our bounded wait ran out.
+			if errors.Is(deadline.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("enterprise hooks watch: targets.yaml wait timeout after %s at %s — exiting for SCM restart", enterpriseHookTargetsWaitTimeout, manifestPath)
+			}
+			return deadline.Err()
+		case event := <-fsw.Events:
+			// Only react to writes/creates for the target file; ignore
+			// noise for siblings (a stray temp file, chmod on the
+			// dir itself).
+			if filepath.Clean(event.Name) != manifestPath {
+				continue
+			}
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+				continue
+			}
+			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), fmt.Sprintf("appeared (%s)", event.Op)); done {
+				return err
+			}
+		case fswErr := <-fsw.Errors:
+			// fsnotify.Errors is documented to deliver only
+			// recoverable errors (queue overflow, watcher-internal
+			// signals). Log and keep waiting; the ticker will retry.
+			if fswErr != nil {
+				fmt.Fprintf(w, "[hook-guardian] fsnotify wait error: %v\n", fswErr)
+			}
+		case <-poll.C:
+			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), "present on poll"); done {
+				return err
+			}
+		}
+	}
+}
+
+// probeManifestPresent returns nil if enterprisehooks.LoadManifest can
+// open + parse the manifest at path, or the underlying error otherwise.
+// Missing-file returns an error that satisfies isMissingManifestErr;
+// any other error (parse, symlink, oversized) also returns and is
+// escalated by the caller as a fatal condition.
+func probeManifestPresent(path string) error {
+	_, err := enterprisehooks.LoadManifest(path)
+	return err
 }
 
 func enterpriseHookWatchNextRepairRetryDelay(previous time.Duration) time.Duration {

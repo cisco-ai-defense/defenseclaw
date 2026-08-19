@@ -65,7 +65,14 @@ type enterpriseSetupOptions struct {
 	AttestAgentApplicationControl  bool
 	AttestClaudeEffectivePolicy    bool
 	AttestCodexTrustedHookLauncher bool
-	LifecycleTimeout               time.Duration
+	// DeferredConfig turns on the UCB-friendly late-config install
+	// path from spec 003 (docs/specs/003-windows-deferred-config/):
+	// --config and --manifest become optional at install time; the
+	// installer provisions the canonical drop-point directories with
+	// ACLs but writes no file bodies; the daemon + guardian fsnotify-
+	// wait for UCB to atomically drop them later.
+	DeferredConfig   bool
+	LifecycleTimeout time.Duration
 }
 
 type enterprisePayloadManifest struct {
@@ -139,6 +146,7 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	flags.BoolVar(&opts.AttestAgentApplicationControl, "attest-agent-application-control", false, "attest live WDAC or AppLocker enforcement")
 	flags.BoolVar(&opts.AttestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "attest Claude managed-policy precedence")
 	flags.BoolVar(&opts.AttestCodexTrustedHookLauncher, "attest-codex-trusted-hook-launcher", false, "attest the supplied fail-closed Codex launcher")
+	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "spec 003 UCB-friendly install: --config and --manifest optional; services registered stopped")
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
 	flags.IntVar(&timeoutSeconds, "timeout-seconds", timeoutSeconds, "bounded lifecycle timeout")
 	if err := flags.Parse(normalized); err != nil {
@@ -155,9 +163,21 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	if !validActions[opts.Action] {
 		return opts, false, errors.New("--action must be install, upgrade, repair, reconcile, status, verify, or uninstall")
 	}
-	if opts.Action == "install" &&
+	if opts.Action == "install" && !opts.DeferredConfig &&
 		(strings.TrimSpace(opts.Config) == "" || strings.TrimSpace(opts.Manifest) == "") {
-		return opts, false, errors.New("install requires both --config and --manifest")
+		// --deferred-config bypasses the config/manifest requirement:
+		// the installer will provision the drop-point directories
+		// with ACLs but write no file bodies; UCB atomically writes
+		// the bodies later, and the daemon + guardian fsnotify-wait
+		// pick them up. Spec 003 REQ-02 / REQ-03.
+		return opts, false, errors.New("install requires both --config and --manifest (or --deferred-config for the UCB-friendly late-arrival path)")
+	}
+	if opts.DeferredConfig && opts.Action != "install" {
+		// Spec 003 --deferred-config is meaningful only at initial
+		// install. Upgrade/repair use the config/manifest already on
+		// disk; deferring them would leave the deployment offline.
+		// CR spec-003:PRRT_kwDORuAK-s6alkr4.
+		return opts, false, errors.New("--deferred-config is valid only with install")
 	}
 	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
 	if opts.NoStart && !mutation {
