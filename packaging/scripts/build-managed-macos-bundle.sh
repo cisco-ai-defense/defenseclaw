@@ -110,12 +110,13 @@ require_bin() {
 
 require_bin git
 require_bin go
-require_bin lipo   # macOS-only; the make target refuses to lipo elsewhere
-
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "build-managed-macos-bundle: this target is macOS-only (need lipo)" >&2
-  exit 1
-fi
+# `lipo` is intentionally not required here anymore. The Apple-Silicon-only
+# gate at the top of the script now enforces the platform, and the macOS
+# make target no longer stitches a universal binary — the arm64-only pin
+# from main-side PR #722 makes `lipo` a leftover dependency. The `uname
+# -s == Darwin` and `macos_hardware_machine == arm64` checks earlier in
+# the script already reject non-macOS and Rosetta-emulated hosts fail-
+# closed, superseding the previous separate Darwin block that lived here.
 
 # ---- ai-common checkout -------------------------------------------------
 
