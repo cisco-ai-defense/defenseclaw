@@ -153,17 +153,24 @@ jobs:
       - name: Emit JSON artefacts
         run: |
           set -euo pipefail
+          workdir=$(mktemp -d)
+          # Build the emitter FIRST, for the CI host platform, with a
+          # completely clean env — see emit-linux for the full rationale.
+          (
+            unset GOFLAGS GOOS GOARCH GOTOOLCHAIN CGO_ENABLED || true
+            go build -trimpath -buildvcs=false \
+              -o "$workdir/windows-repro-manifest" \
+              ./cmd/windows-repro-manifest
+          )
+          # Now source repro-flags so the emit-* invocations below run
+          # under the same env preflight the outer build will.
           unset GOFLAGS CGO_ENABLED GOOS GOARCH || true
           source packaging/scripts/lib/repro-flags.sh
-          workdir=$(mktemp -d)
           zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
             | tar -x -C "$workdir"
           export SOURCE_DATE_EPOCH=1700000000
           export DEFENSECLAW_BUILDID=defenseclaw-enterprise-setup-repro-fixture
           defenseclaw_repro_preflight
-          go build -mod=vendor -trimpath -buildvcs=false \
-            -o "$workdir/windows-repro-manifest" \
-            ./cmd/windows-repro-manifest
           mkdir -p "$workdir/out"
           "$workdir/windows-repro-manifest" emit-manifest \
             --version 0.0.0-repro-fixture \
