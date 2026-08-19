@@ -1154,10 +1154,18 @@ try {
         $junctionExecuted = $true
     }
     catch {
+        # A runner that cannot create a junction (missing SeCreateSymbolic-
+        # LinkPrivilege, filesystem that does not support reparse points)
+        # should not fail the whole smoke. Record the capability gap on the
+        # report field so the reason is visible and treat this branch as a
+        # skip. Any other error still fails the smoke.
         if ($_.Exception.Message -match 'privilege|not supported|cannot find|reparse') {
+            $junctionCapabilityUnavailable = $true
+            $junctionCapabilityReason = $_.Exception.Message
+        }
+        else {
             throw
         }
-        throw
     }
 }
 finally {

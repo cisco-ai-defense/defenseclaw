@@ -62,7 +62,9 @@ VERSION=""
 DIST_DIR="dist"
 
 usage() {
-  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
+  # The header comment block ends at line 54. A wider range would leak the
+  # shell code that follows into --help output.
+  sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -116,6 +118,10 @@ require_bin() {
 
 require_bin git
 require_bin go
+# Fail-fast on a missing `zip` before we clone the private repo, overlay
+# the tree, run `go get`, or cross-build. Otherwise the operator would
+# only discover the missing binary after minutes of work.
+require_bin zip
 
 # ---- ai-common checkout ------------------------------------------------
 
@@ -272,7 +278,7 @@ echo "==> writing ${GATEWAY_ZIP}"
 # Use zip -X to strip extra timestamps; SOURCE_DATE_EPOCH lets zip pick a
 # deterministic mtime if the version is recent enough. cd + zip from the
 # stage dir so entries land at the archive root, matching goreleaser.
-require_bin zip
+# zip presence is fail-fast-checked next to git/go at the top of the file.
 SOURCE_COMMIT_EPOCH="$(git -C "${REPO_ROOT}" show -s --format=%ct HEAD)"
 export SOURCE_DATE_EPOCH="${SOURCE_COMMIT_EPOCH}"
 ( cd "${STAGE_DIR}" && zip -X -r -q "${GATEWAY_ZIP}" . )

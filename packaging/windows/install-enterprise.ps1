@@ -1466,15 +1466,12 @@ catch {
 finally {
     if ($null -ne $bootstrapEnvironment) {
         $cleanupFailures = [Collections.Generic.List[string]]::new()
-        try {
-            Remove-DefenseClawBootstrapEnvironment `
-                -Context $bootstrapEnvironment
-        }
-        catch {
-            $cleanupFailures.Add(
-                "protected bootstrap cleanup failed: $($_.Exception.Message)"
-            )
-        }
+        # Restore TEMP/TMP and cache env vars BEFORE the tree they still
+        # point into gets removed. Otherwise any temp file created during
+        # the enumeration window of Remove-DefenseClawBootstrapEnvironment
+        # can trip Directory.Delete or its final leftover-check. The
+        # failure path inside New-DefenseClawBootstrapEnvironment already
+        # uses this safer order.
         try {
             Restore-DefenseClawBootstrapEnvironment `
                 -Context $bootstrapEnvironment
@@ -1482,6 +1479,15 @@ finally {
         catch {
             $cleanupFailures.Add(
                 "bootstrap environment restore failed: $($_.Exception.Message)"
+            )
+        }
+        try {
+            Remove-DefenseClawBootstrapEnvironment `
+                -Context $bootstrapEnvironment
+        }
+        catch {
+            $cleanupFailures.Add(
+                "protected bootstrap cleanup failed: $($_.Exception.Message)"
             )
         }
         if ($cleanupFailures.Count -gt 0) {

@@ -84,8 +84,8 @@ jobs:
               [ref]$tokens,
               [ref]$errors
             ) | Out-Null
-            foreach ($error in @($errors)) {
-              $failures.Add("${path}: ${error}")
+            foreach ($parseError in @($errors)) {
+              $failures.Add("${path}: ${parseError}")
             }
           }
           if ($failures.Count) { throw ($failures -join "`n") }

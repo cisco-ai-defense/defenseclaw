@@ -780,6 +780,11 @@ $state = Resolve-FullPath $StateRoot
 # check when the sidecar is present (OSS builds do not ship one; nothing
 # changes for them). Bypass with -SkipCommitCheck for local dev.
 $commitSidecar = Join-Path $dist 'gateway-source-commit.txt'
+if ($SkipCommitCheck -and (Test-Path -LiteralPath $commitSidecar -PathType Leaf)) {
+    # Make the bypass visible in the build log so a mismatched source_commit
+    # in the shipped manifest/provenance is not silent.
+    Write-Warning "-SkipCommitCheck bypassing gateway-source-commit.txt guard; manifest.source_commit may not match the gateway zip's build commit."
+}
 if ((Test-Path -LiteralPath $commitSidecar -PathType Leaf) -and -not $SkipCommitCheck) {
     $expectedCommit = (Get-Content -LiteralPath $commitSidecar -Raw -Encoding UTF8).Trim().ToLowerInvariant()
     if ($expectedCommit -notmatch '^[0-9a-f]{40}$') {

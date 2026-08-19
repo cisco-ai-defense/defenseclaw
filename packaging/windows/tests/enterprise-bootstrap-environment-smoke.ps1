@@ -340,6 +340,8 @@ $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
     [Microsoft.Win32.RegistryHive]::LocalMachine,
     [Microsoft.Win32.RegistryView]::Registry64
 )
+$currentVersion = $null
+$shellFolders = $null
 try {
     $currentVersion = $registry.OpenSubKey(
         'SOFTWARE\Microsoft\Windows\CurrentVersion',
@@ -352,26 +354,27 @@ try {
     if ($null -eq $currentVersion -or $null -eq $shellFolders) {
         throw 'machine known-folder registration is unavailable to the smoke'
     }
-    try {
-        $expectedProgramFiles = [IO.Path]::GetFullPath(
-            [string]$currentVersion.GetValue(
-                'ProgramFilesDir',
-                $null,
-                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
-            )
-        ).TrimEnd('\')
-        $expectedProgramData = [IO.Path]::GetFullPath(
-            [string]$shellFolders.GetValue(
-                'Common AppData',
-                $null,
-                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
-            )
-        ).TrimEnd('\')
-    } finally {
-        $currentVersion.Dispose()
-        $shellFolders.Dispose()
-    }
+    $expectedProgramFiles = [IO.Path]::GetFullPath(
+        [string]$currentVersion.GetValue(
+            'ProgramFilesDir',
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+    ).TrimEnd('\')
+    $expectedProgramData = [IO.Path]::GetFullPath(
+        [string]$shellFolders.GetValue(
+            'Common AppData',
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+    ).TrimEnd('\')
 } finally {
+    # Guard each Dispose independently. If OpenSubKey succeeded for one key
+    # but the other returned $null (or threw), the inner try/finally could
+    # leak the opened one. Moving the opens into this outer try and
+    # nil-checking each dispose keeps both handles paired to this scope.
+    if ($null -ne $currentVersion) { $currentVersion.Dispose() }
+    if ($null -ne $shellFolders) { $shellFolders.Dispose() }
     $registry.Dispose()
 }
 foreach ($name in @(

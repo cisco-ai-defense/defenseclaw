@@ -31,7 +31,14 @@ import (
 const (
 	enterpriseSetupStagePrefix = "DefenseClaw-Enterprise-Setup-"
 	enterpriseSetupStageSDDL   = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
-	maximumLifecycleOutput     = 2 << 20
+	// enterpriseSetupScratchDirName is a dedicated subdirectory under
+	// stageRoot pointed at by TEMP/TMP/LOCALAPPDATA/APPDATA/USERPROFILE/HOME
+	// so PowerShell and the lifecycle can create scratch files WITHOUT
+	// polluting the strict payload-file allowlist cleanupEnterpriseSetupStage
+	// enforces on stageRoot itself. Removed recursively before the outer
+	// stage cleanup runs.
+	enterpriseSetupScratchDirName = "scratch"
+	maximumLifecycleOutput        = 2 << 20
 )
 
 func executeEnterpriseSetup(
@@ -177,6 +184,15 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 	if err != nil {
 		return "", nil, err
 	}
+	// Create a dedicated scratch subdirectory that TEMP/TMP/LOCALAPPDATA/
+	// APPDATA/USERPROFILE/HOME all point at, so PowerShell and the
+	// lifecycle can write scratch files without breaking the strict
+	// payload-file allowlist that cleanupEnterpriseSetupStage enforces
+	// on stageRoot itself.
+	scratchDir := filepath.Join(stageRoot, enterpriseSetupScratchDirName)
+	if err := os.Mkdir(scratchDir, 0o700); err != nil {
+		return "", nil, errors.Join(fmt.Errorf("create enterprise Setup scratch directory: %w", err), cleanupEnterpriseSetupStage(stageRoot, programData))
+	}
 	cleanup := func() error { return cleanupEnterpriseSetupStage(stageRoot, programData) }
 	for _, name := range requiredPayloadFiles {
 		path := filepath.Join(stageRoot, name)
@@ -269,6 +285,14 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	if err := managed.ValidateTrustedRuntimeDir(cleanStage, "enterprise Setup staging cleanup"); err != nil {
 		return fmt.Errorf("refusing enterprise Setup cleanup after trust drift: %w", err)
 	}
+	// Delete the scratch subdirectory (recursively) first. PowerShell and
+	// the child lifecycle may have created arbitrary temp files under it
+	// via TEMP/TMP/LOCALAPPDATA/etc.; the strict allowlist below refuses
+	// anything except payload files at the top of stageRoot.
+	scratchDir := filepath.Join(cleanStage, enterpriseSetupScratchDirName)
+	if err := os.RemoveAll(scratchDir); err != nil {
+		return fmt.Errorf("remove enterprise Setup scratch directory: %w", err)
+	}
 	entries, err := os.ReadDir(cleanStage)
 	if err != nil {
 		return err
@@ -349,15 +373,19 @@ func trustedEnterpriseSetupEnvironment(stageRoot string) ([]string, error) {
 		return nil, fmt.Errorf("resolve trusted Windows machine roots: %w", err)
 	}
 	system32 := filepath.Join(windowsDirectory, "System32")
+	// Point the child's scratch env vars at a dedicated subdirectory so
+	// PowerShell/CLR scratch writes don't collide with the strict payload
+	// allowlist enforced on stageRoot itself.
+	scratchDir := filepath.Join(stageRoot, enterpriseSetupScratchDirName)
 	allowed := map[string]string{
 		"SystemRoot": windowsDirectory, "windir": windowsDirectory,
 		"SystemDrive": filepath.VolumeName(windowsDirectory), "ComSpec": filepath.Join(system32, "cmd.exe"),
 		"ProgramFiles": roots.ProgramFiles, "ProgramW6432": roots.ProgramFiles,
 		"ProgramFiles(x86)": roots.ProgramFilesX86, "ProgramData": roots.ProgramData,
-		"ALLUSERSPROFILE": roots.ProgramData, "TEMP": stageRoot, "TMP": stageRoot,
-		"LOCALAPPDATA": stageRoot, "APPDATA": stageRoot, "USERPROFILE": stageRoot,
-		"HOME": stageRoot, "HOMEDRIVE": filepath.VolumeName(stageRoot),
-		"HOMEPATH": strings.TrimPrefix(stageRoot, filepath.VolumeName(stageRoot)),
+		"ALLUSERSPROFILE": roots.ProgramData, "TEMP": scratchDir, "TMP": scratchDir,
+		"LOCALAPPDATA": scratchDir, "APPDATA": scratchDir, "USERPROFILE": scratchDir,
+		"HOME": scratchDir, "HOMEDRIVE": filepath.VolumeName(scratchDir),
+		"HOMEPATH": strings.TrimPrefix(scratchDir, filepath.VolumeName(scratchDir)),
 		"PATH": strings.Join([]string{
 			system32, windowsDirectory, filepath.Join(system32, "Wbem"),
 			filepath.Join(system32, "WindowsPowerShell", "v1.0"),

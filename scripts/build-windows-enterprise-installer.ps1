@@ -131,20 +131,23 @@ function Copy-ZipEntry {
         [Parameter(Mandatory)][string]$EntryName,
         [Parameter(Mandatory)][string]$Destination
     )
-    $matches = @($Archive.Entries | Where-Object {
+    # $matches and $input are PowerShell automatic variables (written by
+    # `-match` and by the pipeline enumerator). Assigning them would produce
+    # surprising behavior in any future edit, so use distinct names.
+    $entryMatches = @($Archive.Entries | Where-Object {
         $_.FullName.Replace('\', '/') -ceq $EntryName
     })
-    if ($matches.Count -ne 1 -or $matches[0].Length -le 0) {
+    if ($entryMatches.Count -ne 1 -or $entryMatches[0].Length -le 0) {
         throw "managed gateway archive must contain exactly one non-empty $EntryName"
     }
-    $input = $matches[0].Open()
+    $entryStream = $entryMatches[0].Open()
     $output = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try {
-        $input.CopyTo($output)
+        $entryStream.CopyTo($output)
         $output.Flush($true)
     } finally {
         $output.Dispose()
-        $input.Dispose()
+        $entryStream.Dispose()
     }
 }
 

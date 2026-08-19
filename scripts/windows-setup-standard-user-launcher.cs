@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
@@ -125,7 +126,18 @@ namespace DefenseClaw
                 }
                 catch (TargetInvocationException exception)
                 {
-                    if (exception.InnerException != null) throw exception.InnerException;
+                    // Kill(bool) raises InvalidOperationException when the
+                    // process has already exited. Treat that as success on
+                    // this branch so the reflection path behaves like the
+                    // ordinary Process.Kill() fallback below.
+                    if (exception.InnerException is InvalidOperationException) return;
+                    // Rethrow WITHOUT the reflection wrapper, but preserve
+                    // the inner stack trace so triage sees where the kill
+                    // actually failed.
+                    if (exception.InnerException != null)
+                    {
+                        ExceptionDispatchInfo.Capture(exception.InnerException).Throw();
+                    }
                     throw;
                 }
             }
@@ -134,15 +146,26 @@ namespace DefenseClaw
                 string taskkill = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.System),
                     "taskkill.exe");
-                using (Process killer = Process.Start(new ProcessStartInfo
+                // Process.Start can throw Win32Exception when taskkill.exe is
+                // absent or blocked. Swallow it here so the ordinary Kill()
+                // fallback below still runs — otherwise a missing taskkill
+                // removes the last chance to terminate the child.
+                try
                 {
-                    FileName = taskkill,
-                    Arguments = "/PID " + process.Id.ToString(CultureInfo.InvariantCulture) + " /T /F",
-                    CreateNoWindow = true,
-                    UseShellExecute = false
-                }))
+                    using (Process killer = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = taskkill,
+                        Arguments = "/PID " + process.Id.ToString(CultureInfo.InvariantCulture) + " /T /F",
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    }))
+                    {
+                        if (killer != null) killer.WaitForExit(30000);
+                    }
+                }
+                catch (Win32Exception)
                 {
-                    if (killer != null) killer.WaitForExit(30000);
+                    // taskkill.exe missing/blocked; fall through to Kill().
                 }
                 if (process.HasExited) return;
             }

@@ -56,7 +56,9 @@ AI_COMMON_DIR=""
 KEEP="false"
 
 usage() {
-  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+  # The header comment block ends at line 35. A wider range would leak the
+  # shell code that follows into --help output.
+  sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -148,7 +150,12 @@ else
     exit 1
   fi
   echo "==> using existing ai-common checkout at ${AI_COMMON_DIR}"
-  ( cd "${AI_COMMON_DIR}" && git fetch --quiet origin "${REF}" && git checkout --quiet "${REF}" )
+  # Check out the fetched ref via FETCH_HEAD, not a possibly-stale local
+  # branch. `git checkout develop` selects the local tracking branch which
+  # can lag behind origin, so the build would then pin `cmid` to a stale
+  # commit that no longer matches --ref. Detached matches the sibling
+  # build-managed-windows-bundle.sh's behavior.
+  ( cd "${AI_COMMON_DIR}" && git fetch --quiet origin "${REF}" && git checkout --quiet --detach FETCH_HEAD )
 fi
 
 cleanup() {

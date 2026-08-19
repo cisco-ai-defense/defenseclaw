@@ -210,9 +210,26 @@ try {
         )
     }
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    # Sequential ReadToEnd on stdout+stderr can deadlock: if the child writes
+    # more than the pipe buffer to stderr (a PowerShell error record with
+    # its stack trace easily exceeds it) while the parent is blocked on
+    # stdout, the child blocks on its stderr write and neither side makes
+    # progress. Read stderr asynchronously so both drains run concurrently.
+    $stderrReadTask = $nestedProcess.StandardError.ReadToEndAsync()
     $capturedOutput = $nestedProcess.StandardOutput.ReadToEnd()
-    $capturedError = $nestedProcess.StandardError.ReadToEnd()
-    $nestedProcess.WaitForExit()
+    # Bound the wait so a hung child fails the smoke rather than the CI job.
+    $detachedHelperWaitBudgetMs = 5 * 60 * 1000
+    if (-not $nestedProcess.WaitForExit($detachedHelperWaitBudgetMs)) {
+        try { $nestedProcess.Kill($true) } catch { }
+        throw (
+            'captured detached-helper smoke child did not exit within ' +
+            "$($detachedHelperWaitBudgetMs / 1000)s"
+        )
+    }
+    if (-not $stderrReadTask.Wait($detachedHelperWaitBudgetMs)) {
+        throw 'captured detached-helper smoke child stderr drain did not complete'
+    }
+    $capturedError = $stderrReadTask.Result
     $stopwatch.Stop()
     if ($nestedProcess.ExitCode -ne 0) {
         throw (

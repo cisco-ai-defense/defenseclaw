@@ -239,6 +239,25 @@ def _no_op_command_tree() -> click.Command:
     return command
 
 
+_COMMAND_PATH_TERMINATOR_MARKERS: tuple[str, ...] = (
+    "<", ">", "[", "]", "{", "}", "|", "/", "*", "...", "…",
+)
+
+
+def _is_command_path_terminator(token: str) -> bool:
+    """Return True when this token marks the end of a literal command path.
+
+    The native-path allowlist walk and the Click subcommand walk both need to
+    stop at options, placeholders, and choice notation. Keeping the predicate
+    in one place prevents them from silently drifting apart — if one loop
+    grew a new terminator marker but the other did not, the two walks would
+    disagree on how far the command path extends.
+    """
+    if token.startswith("-"):
+        return True
+    return any(marker in token for marker in _COMMAND_PATH_TERMINATOR_MARKERS)
+
+
 def _validate_inline_path(command: click.Command, documented: DocumentedCommand) -> str | None:
     """Return an error when an inline reference names an unknown command path.
 
@@ -257,9 +276,7 @@ def _validate_inline_path(command: click.Command, documented: DocumentedCommand)
 
     path: list[str] = []
     for token in tokens[1:]:
-        if token.startswith("-") or any(
-            marker in token for marker in ("<", ">", "[", "]", "{", "}", "|", "/", "*", "...", "…")
-        ):
+        if _is_command_path_terminator(token):
             break
         path.append(token)
     if tuple(path) in _NATIVE_GO_COMMAND_PATHS:
@@ -269,9 +286,7 @@ def _validate_inline_path(command: click.Command, documented: DocumentedCommand)
     for token in tokens[1:]:
         if not isinstance(node, click.Group):
             break
-        if token.startswith("-") or any(
-            marker in token for marker in ("<", ">", "[", "]", "{", "}", "|", "/", "*", "...", "…")
-        ):
+        if _is_command_path_terminator(token):
             break
         child = node.commands.get(token)
         if child is None:

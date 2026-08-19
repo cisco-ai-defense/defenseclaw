@@ -176,8 +176,14 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 		(strings.TrimSpace(opts.CodexTrustedHookLauncherBinary) != "") {
 		return opts, false, errors.New("--attest-codex-trusted-hook-launcher and --codex-trusted-hook-launcher-binary must be supplied together")
 	}
-	if timeoutSeconds < 60 || time.Duration(timeoutSeconds)*time.Second > maximumLifecycleTimeout {
-		return opts, false, fmt.Errorf("--timeout-seconds must be between 60 and %d", int(maximumLifecycleTimeout/time.Second))
+	// Bound the raw integer BEFORE multiplying by time.Second. A very large
+	// timeoutSeconds value would otherwise overflow int64 during the
+	// multiplication, wrap to a small or negative time.Duration, and slip
+	// past the upper-bound check — leaving LifecycleTimeout at a non-positive
+	// value that expires context.WithTimeout at once.
+	maxTimeoutSeconds := int64(maximumLifecycleTimeout / time.Second)
+	if timeoutSeconds < 60 || int64(timeoutSeconds) > maxTimeoutSeconds {
+		return opts, false, fmt.Errorf("--timeout-seconds must be between 60 and %d", maxTimeoutSeconds)
 	}
 	opts.LifecycleTimeout = time.Duration(timeoutSeconds) * time.Second
 	return opts, false, nil

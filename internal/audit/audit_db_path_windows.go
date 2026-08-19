@@ -293,7 +293,7 @@ func auditDBWindowsWriteLikeAccess(mask windows.ACCESS_MASK, protectChildren boo
 
 func auditDBWindowsTrustedPrincipal(
 	sid *windows.SID,
-	gatewayServiceSID ...*windows.SID,
+	gatewayServiceSID *windows.SID,
 ) bool {
 	if sid == nil {
 		return false
@@ -301,10 +301,8 @@ func auditDBWindowsTrustedPrincipal(
 	if sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid) {
 		return true
 	}
-	for _, allowed := range gatewayServiceSID {
-		if allowed != nil && sid.Equals(allowed) {
-			return true
-		}
+	if gatewayServiceSID != nil && sid.Equals(gatewayServiceSID) {
+		return true
 	}
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err == nil && currentUser != nil && currentUser.User.Sid != nil && sid.Equals(currentUser.User.Sid) {

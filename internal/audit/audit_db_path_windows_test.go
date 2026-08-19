@@ -106,6 +106,23 @@ func TestAuditDBWindowsRejectsIncompleteOrMismatchedGatewayPins(t *testing.T) {
 			t.Fatal("unresolvable exact gateway service SID was accepted")
 		}
 	})
+
+	// Cover the both-unset branch: an ordinary (non-enterprise-managed)
+	// Windows deployment leaves both env vars unset and expects
+	// auditDBWindowsPinnedGatewayServiceSID to return (nil, nil) —
+	// the "no pin" case. A regression here would convert every such
+	// host into a hard audit failure.
+	t.Run("both unset returns no pin", func(t *testing.T) {
+		t.Setenv(managed.WindowsServiceAccountEnv, "")
+		t.Setenv(connector.WindowsGatewayServiceNameEnv, "")
+		sid, err := auditDBWindowsPinnedGatewayServiceSID()
+		if err != nil {
+			t.Fatalf("both-unset returned error: %v", err)
+		}
+		if sid != nil {
+			t.Fatalf("both-unset returned SID %v, want nil", sid)
+		}
+	})
 }
 
 func TestAuditDBWindowsCreatesProtectedPath(t *testing.T) {

@@ -128,6 +128,18 @@ foreach ($signedOverride in @(
         expected = 'requires exact production roots'
     },
     [pscustomobject]@{
+        # Exercise the custom StateRoot rejection path. Without this case
+        # $customStateRoot was assigned but never read, and signed mode was
+        # never actually tested against a non-production StateRoot — yet
+        # signed_custom_roots_rejected in the report reads $true regardless.
+        name = 'custom state root'
+        install = $installRoot
+        state = $customStateRoot
+        gateway = $gatewayService
+        guardian = $guardianService
+        expected = 'requires exact production roots'
+    },
+    [pscustomobject]@{
         name = 'custom service names'
         install = $installRoot
         state = $stateRoot
@@ -246,10 +258,15 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $certificationCodexHome) {
-        Remove-Item -LiteralPath $certificationCodexHome -Force
+        # These are directories created with New-Item -ItemType Directory.
+        # Without -Recurse, Remove-Item -Force refuses non-empty directories,
+        # and a lifecycle write into the certification CODEX_HOME would fail
+        # cleanup inside this $ErrorActionPreference='Stop' finally — masking
+        # the actual test failure with a cleanup error.
+        Remove-Item -LiteralPath $certificationCodexHome -Force -Recurse
     }
     if (Test-Path -LiteralPath $wrongCertificationCodexHome) {
-        Remove-Item -LiteralPath $wrongCertificationCodexHome -Force
+        Remove-Item -LiteralPath $wrongCertificationCodexHome -Force -Recurse
     }
 }
 
@@ -654,10 +671,11 @@ namespace DefenseClaw.Windows.Tests
     }
     finally {
         if (Test-Path -LiteralPath $modeMetadataPath) {
-            Remove-Item -LiteralPath $modeMetadataPath -Force
+            # See rationale on the certificationCodexHome cleanup above.
+            Remove-Item -LiteralPath $modeMetadataPath -Force -Recurse
         }
         if ($modeHomeCreated -and (Test-Path -LiteralPath $modeHome)) {
-            Remove-Item -LiteralPath $modeHome -Force
+            Remove-Item -LiteralPath $modeHome -Force -Recurse
         }
     }
     $environmentArguments = @{
@@ -676,10 +694,26 @@ namespace DefenseClaw.Windows.Tests
     }).Count -ne 0) {
         throw 'default production service environment unexpectedly contains CODEX_HOME'
     }
+    # Prove that an operator-supplied certification CODEX_HOME in ambient
+    # process env does NOT leak into the service environment values. Without
+    # this the previous assertion compared two identical outputs of the
+    # deterministic Get-DefenseClawServiceEnvironmentValues splat and always
+    # passed, hiding a regression where the function grew a CODEX_HOME
+    # pass-through.
     $certificationHome = 'C:\certification\.codex-defenseclaw-cert-0123456789'
-    $certificationEnvironment = @(
-        Get-DefenseClawServiceEnvironmentValues @environmentArguments
-    )
+    $priorCodexHome = $env:CODEX_HOME
+    try {
+        $env:CODEX_HOME = $certificationHome
+        $certificationEnvironment = @(
+            Get-DefenseClawServiceEnvironmentValues @environmentArguments
+        )
+    } finally {
+        if ($null -eq $priorCodexHome) {
+            [Environment]::SetEnvironmentVariable('CODEX_HOME', $null, 'Process')
+        } else {
+            $env:CODEX_HOME = $priorCodexHome
+        }
+    }
     $certificationEntries = @($certificationEnvironment | Where-Object {
         ([string]$_).StartsWith('CODEX_HOME=', [StringComparison]::OrdinalIgnoreCase)
     })
