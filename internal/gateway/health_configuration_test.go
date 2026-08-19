@@ -210,10 +210,22 @@ func TestConfigurationReaderReplacementIsAppliedAtomically(t *testing.T) {
 		h.SetDaemonConfigLoaded(true)
 	}()
 
+	// Every channel wait below is bounded. A regression that moves
+	// the guardian reader call back INSIDE h.mu would deadlock
+	// SetGuardianStateReader against the blocked goroutine, and
+	// unbounded receives would then hang until the go-test binary
+	// timeout with a confusing "test timed out" report. CR
+	// spec-003:PRRT_kwDORuAK-s6amXYh.
+	const waitCap = 5 * time.Second
+
 	// Wait for the goroutine to reach the blocking point inside
 	// its guardian sample. At this moment its snapshotGuardianState
 	// has captured the OLD reader's epoch and is holding StateUnknown.
-	<-sampled
+	select {
+	case <-sampled:
+	case <-time.After(waitCap):
+		t.Fatalf("timed out waiting for goroutine's slow reader to sample the old epoch")
+	}
 
 	// Swap in a ready-returning reader. This bumps the epoch. The
 	// competing goroutine's captured epoch is now stale.
@@ -225,7 +237,11 @@ func TestConfigurationReaderReplacementIsAppliedAtomically(t *testing.T) {
 	// the buggy pre-CAS behaviour it would apply the stale Unknown
 	// sample and regress to waiting_for_targets.
 	close(release)
-	<-done
+	select {
+	case <-done:
+	case <-time.After(waitCap):
+		t.Fatalf("timed out waiting for SetDaemonConfigLoaded goroutine to complete after reader-swap")
+	}
 
 	if got := h.Snapshot().Configuration.State; got != ConfigStateReady {
 		t.Fatalf("after concurrent reader swap state = %q, want ready — a stale sample from the old reader clobbered the newly-installed one", got)

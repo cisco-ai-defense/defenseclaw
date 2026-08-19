@@ -340,7 +340,7 @@ func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details 
 // call this method (OSS / SaaS / DP / CP) keep the nil pointer and
 // the snapshot omits the block entirely.
 func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
-	// updateConfigurationUnderLock handles:
+	// updateConfiguration handles:
 	//   - I/O-outside-lock discipline (CR spec-003:PRRT_kwDORuAK-s6alksL)
 	//   - notify-only-on-transition (CR spec-003:PRRT_kwDORuAK-s6alksD)
 	//   - epoch CAS retry (CR spec-003:PRRT_kwDORuAK-s6al7aV)
@@ -349,8 +349,8 @@ func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
 	// per successful attempt. Its own I/O footprint is zero: just
 	// scalar assignments + the *ConfigurationHealth allocation on
 	// first call. Everything expensive (the guardian reader) lives
-	// in updateConfigurationUnderLock's outside-lock sampler.
-	h.updateConfigurationUnderLock(func() {
+	// in updateConfiguration's outside-lock sampler.
+	h.updateConfiguration(func() {
 		if h.configuration == nil {
 			h.configuration = &ConfigurationHealth{
 				State: ConfigStateWaitingForConfig,
@@ -374,8 +374,8 @@ func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
 // RefreshConfiguration tick.
 func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
 	// Fetch the state via the NEW reader before acquiring the write
-	// lock. This is the special case updateConfigurationUnderLock
-	// cannot serve directly: we need to use `fn` (which we haven't
+	// lock. This is the special case updateConfiguration cannot
+	// serve directly: we need to use `fn` (which we haven't
 	// installed yet) to sample. Handle it inline with the same
 	// discipline — outside-lock I/O + short in-lock critical section
 	// + notify-only-on-change — but skip the epoch retry because
@@ -408,7 +408,7 @@ func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
 // nothing on the daemon side has changed. If no reader is wired the
 // call is a no-op.
 func (h *SidecarHealth) RefreshConfiguration() {
-	// updateConfigurationUnderLock handles the whole discipline:
+	// updateConfiguration handles the whole discipline:
 	// outside-lock guardian I/O (CR PRRT_kwDORuAK-s6alksL),
 	// notify-only-on-change (CR PRRT_kwDORuAK-s6alksD), and the
 	// epoch CAS retry that catches a concurrent SetGuardianStateReader
@@ -417,7 +417,7 @@ func (h *SidecarHealth) RefreshConfiguration() {
 	// mutate is nil for RefreshConfiguration — the periodic tick
 	// carries no state change of its own; it only asks the collapsing
 	// rule to re-fold whatever fresh guardian state a poll surfaces.
-	h.updateConfigurationUnderLock(nil)
+	h.updateConfiguration(nil)
 }
 
 // snapshotGuardianState reads the guardian state via the wired
@@ -451,37 +451,66 @@ func snapshotGuardianStateFrom(reader func() string) string {
 	return reader()
 }
 
-// updateConfigurationUnderLock is the shared write-lock protocol
-// every mutator (SetDaemonConfigLoaded, SetGuardianStateReader,
-// RefreshConfiguration) uses to fold a fresh guardian sample into
-// the collapsed configuration state.
+// updateConfiguration is the shared write-lock protocol used by
+// SetDaemonConfigLoaded and RefreshConfiguration to fold a fresh
+// guardian sample into the collapsed configuration state.
+// SetGuardianStateReader has its own inline variant because it must
+// use the CALLER-supplied reader (which it hasn't installed yet) to
+// sample, rather than the currently-installed one.
 //
 // The compare-and-apply retry catches the race the CR flagged
 // (spec-003:PRRT_kwDORuAK-s6al7aV):
 //
-//   Goroutine A:                        Goroutine B:
-//     samples reader (epoch E1) → SA
-//                                          SetGuardianStateReader
-//                                          bumps epoch → E2, applies SB
-//     acquires lock
-//     observes epoch != E1
-//     drops lock, resamples (epoch E2) → SA'
-//     acquires lock
-//     observes epoch == E2, applies SA'
+//	Goroutine A:                        Goroutine B:
+//	  samples reader (epoch E1) → SA
+//	                                       SetGuardianStateReader
+//	                                       bumps epoch → E2, applies SB
+//	  acquires lock
+//	  observes epoch != E1
+//	  drops lock, resamples (epoch E2) → SA'
+//	  acquires lock
+//	  observes epoch == E2, applies SA'
 //
 // Without the retry, A would apply SA under the lock, silently
 // clobbering B's fresh SB with a sample taken against the OLD reader.
 //
 // mutate is invoked under the write lock exactly once per successful
-// attempt; it must be short (no I/O). The prev parameter carries the
-// configuration state at entry so mutate/recompute can return a
-// consistent "changed" flag for notifySubscribers.
+// attempt; it must be short (no I/O). Passing mutate==nil means "no
+// caller-supplied state change — just re-fold whatever fresh guardian
+// state a poll surfaces"; that's the RefreshConfiguration case, and
+// this function bails out cheaply for non-managed-enterprise
+// deployments (see the read-locked fast-path below).
 //
 // Bounded retries prevent a livelock under pathological
 // SetGuardianStateReader churn; if the cap is hit we still apply the
 // last sample and the NEXT RefreshConfiguration tick corrects any
 // drift within one poll interval.
-func (h *SidecarHealth) updateConfigurationUnderLock(mutate func()) {
+//
+// The name is deliberately NOT `updateConfigurationUnderLock` — the
+// `Locked` suffix elsewhere in this file (e.g.
+// recomputeConfigurationLocked) marks "caller already holds h.mu",
+// and this function is the opposite: it acquires h.mu itself. sync
+// mutexes aren't reentrant, so a maintainer following the file's
+// convention would deadlock on a call from an already-lock-holding
+// site. See CR spec-003:PRRT_kwDORuAK-s6amXY8.
+func (h *SidecarHealth) updateConfiguration(mutate func()) {
+	// Fast path: if there's no configuration tracking active AND the
+	// caller has no state change to apply, skip the guardian file
+	// read entirely. Non-managed-enterprise deployments never wire a
+	// state reader either, but the periodic RefreshConfiguration
+	// ticker still runs — without this bail-out, every tick would
+	// pointlessly open + read the guardian .state file (or return
+	// StateUnknown from a nil reader) and then discard the result.
+	// See CR spec-003:PRRT_kwDORuAK-s6amXYx.
+	if mutate == nil {
+		h.mu.RLock()
+		inactive := h.configuration == nil
+		h.mu.RUnlock()
+		if inactive {
+			return
+		}
+	}
+
 	const guardianSampleMaxAttempts = 4
 	var changed bool
 	for i := 0; i < guardianSampleMaxAttempts; i++ {
