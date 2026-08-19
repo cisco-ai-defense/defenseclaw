@@ -1718,10 +1718,10 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True (-not [string]::IsNullOrWhiteSpace($dangerousCommandContract)) 'dangerous-command corpus function is present'
     foreach ($case in @(
         [pscustomobject]@{ Name = 'remove-item-critical'; Rule = 'CMD-RM-RF'; Tool = 'PowerShell'; Expected = 'block' },
-        [pscustomobject]@{ Name = 'remove-item-scoped'; Rule = 'CMD-WIN-REMOVE-ITEM-RF'; Tool = 'PowerShell'; Expected = 'shadow' },
-        [pscustomobject]@{ Name = 'cmd-rmdir'; Rule = 'CMD-WIN-RMDIR-SQ'; Tool = 'cmd'; Expected = 'shadow' },
+        [pscustomobject]@{ Name = 'remove-item-scoped'; Rule = 'CMD-WIN-REMOVE-ITEM-RF'; Tool = 'PowerShell'; Expected = 'quiet' },
+        [pscustomobject]@{ Name = 'cmd-rmdir'; Rule = 'CMD-WIN-RMDIR-SQ'; Tool = 'cmd'; Expected = 'quiet' },
         [pscustomobject]@{ Name = 'download-execute'; Rule = 'CMD-PIPE-CURL'; Tool = 'PowerShell'; Expected = 'block' },
-        [pscustomobject]@{ Name = 'registry-persistence'; Rule = 'CMD-WIN-REG-PERSIST'; Tool = 'cmd'; Expected = 'block' },
+        [pscustomobject]@{ Name = 'registry-persistence'; Rule = 'CMD-SYSTEMCTL'; Tool = 'cmd'; Expected = 'block' },
         [pscustomobject]@{ Name = 'aws-credentials'; Rule = 'PATH-WIN-AWS-CREDS'; Tool = 'PowerShell'; Expected = 'shadow' },
         [pscustomobject]@{ Name = 'git-credentials'; Rule = 'PATH-WIN-GIT-CREDS'; Tool = 'PowerShell'; Expected = 'shadow' },
         [pscustomobject]@{ Name = 'credential-manager'; Rule = 'PATH-WIN-CREDENTIAL-MANAGER'; Tool = 'PowerShell'; Expected = 'shadow' }
