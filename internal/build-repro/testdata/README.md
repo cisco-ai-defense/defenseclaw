@@ -45,7 +45,8 @@ The regeneration script:
 3. Compresses with `zstd --no-progress --long=27 -19` for a stable
    compression path.
 4. Prints the resulting SHA-256; commit-update requires bumping the
-   `EXPECTED_SHA256` constant in the CI workflow.
+   `FIXTURE_EXPECTED_SHA256` constant in
+   `.github/workflows/windows-deterministic-build.yml`.
 
 If a future refresh legitimately changes the fixture (e.g., you add
 a sixth expected filename to Workstream A), regenerate and update

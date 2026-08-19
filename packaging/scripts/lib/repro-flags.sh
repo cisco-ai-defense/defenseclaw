@@ -59,25 +59,52 @@ REPRO_REQUIRED_ENVS=(
 # Bash exports arrays as an opaque "NAME=(...)"-style scalar most tools
 # can't parse anyway.
 
+# Required-exact-value map: env name -> exact value the reproducibility
+# contract expects. A caller can source this file and then unset or
+# rewrite any of these before running preflight; each fixed-value check
+# below compares against the literal required value so mutations are
+# caught, not silently accepted.
+_repro_expected_value() {
+    case "$1" in
+        GOFLAGS)      printf '%s' "-trimpath -buildvcs=false -mod=vendor" ;;
+        GOTOOLCHAIN)  printf '%s' "go1.26.4" ;;
+        CGO_ENABLED)  printf '%s' "0" ;;
+        GOOS)         printf '%s' "windows" ;;
+        GOARCH)       printf '%s' "amd64" ;;
+        *)            return 1 ;;
+    esac
+}
+
 # defenseclaw_repro_preflight refuses to run if any required env is
-# missing, empty, or (for SOURCE_DATE_EPOCH) not a positive integer.
-# Prints ONE diagnostic per missing env so a caller who omitted three
-# of them fixes them in one round.
+# missing, empty, has an unexpected fixed value, or (for
+# SOURCE_DATE_EPOCH) is not a positive integer. Prints ONE diagnostic
+# per issue so a caller who broke three envs fixes them in one round.
 defenseclaw_repro_preflight() {
     local missing=()
     local name
     for name in "${REPRO_REQUIRED_ENVS[@]}"; do
         if [[ -z "${!name:-}" ]]; then
             missing+=("${name} is unset or empty")
+            continue
+        fi
+        # SOURCE_DATE_EPOCH and DEFENSECLAW_BUILDID are per-build values
+        # supplied by the caller; every other required env is a fixed
+        # literal defined by _repro_expected_value above.
+        if [[ "${name}" == "SOURCE_DATE_EPOCH" || "${name}" == "DEFENSECLAW_BUILDID" ]]; then
+            continue
+        fi
+        local expected
+        if ! expected="$(_repro_expected_value "${name}")"; then
+            continue
+        fi
+        if [[ "${!name}" != "${expected}" ]]; then
+            missing+=("${name} must be '${expected}' (got: '${!name}')")
         fi
     done
-    if [[ "${SOURCE_DATE_EPOCH:-}" != "" ]]; then
+    if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
         if ! [[ "${SOURCE_DATE_EPOCH}" =~ ^[1-9][0-9]*$ ]]; then
             missing+=("SOURCE_DATE_EPOCH must be a positive integer (got: '${SOURCE_DATE_EPOCH}')")
         fi
-    fi
-    if [[ "${GOTOOLCHAIN}" != "go1.26.4" ]]; then
-        missing+=("GOTOOLCHAIN must be 'go1.26.4' (got: '${GOTOOLCHAIN}')")
     fi
     if [[ ${#missing[@]} -gt 0 ]]; then
         printf 'repro-flags preflight: %s\n' "${missing[@]}" >&2
@@ -89,7 +116,20 @@ defenseclaw_repro_preflight() {
 # defenseclaw_repro_build invokes `go build` with the exact flag list
 # the AVC reproducibility contract requires. Callers pass output path
 # and package path only; every other flag is fixed here.
+#
+# NOTE: `go build` itself has no `-buildid` flag; the build ID is a
+# link-time argument passed via `-ldflags`. Passing `-buildid=...`
+# directly to `go build` fails with "flag provided but not defined:
+# -buildid". Always route the DEFENSECLAW_BUILDID pin through
+# -ldflags.
 defenseclaw_repro_build() {
+    # Guard the arg-count check BEFORE reading $1/$2 so a caller
+    # running with `set -u` sees the diagnostic below, not an
+    # unbound-variable exit.
+    if [[ $# -lt 2 ]]; then
+        echo "defenseclaw_repro_build: <output-path> <package-path> required" >&2
+        return 1
+    fi
     local out="$1"
     local pkg="$2"
     if [[ -z "${out}" || -z "${pkg}" ]]; then
@@ -101,7 +141,7 @@ defenseclaw_repro_build() {
         -mod=vendor \
         -trimpath \
         -buildvcs=false \
-        -buildid="${DEFENSECLAW_BUILDID}" \
+        -ldflags="-buildid=${DEFENSECLAW_BUILDID}" \
         -o "${out}" \
         "${pkg}"
 }

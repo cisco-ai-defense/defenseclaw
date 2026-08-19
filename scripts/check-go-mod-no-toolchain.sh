@@ -26,8 +26,13 @@ fi
 
 # Match a real `toolchain` directive, not a comment mentioning "toolchain".
 # The Go module file grammar has `toolchain` as a top-level line-start
-# directive (never indented, one per file).
-if grep -qE '^toolchain[[:space:]]+go' "${go_mod}"; then
+# directive (never indented, one per file). Match ANY value: the two
+# forms `toolchain go1.26.4` (an explicit version) and `toolchain default`
+# (delegates to the caller's GOTOOLCHAIN env, still forcing a repo-wide
+# policy) are both banned — either would ferry the AVC reproducibility
+# pin into OSS builds. `[[:space:]]+\S+` matches both without requiring
+# a literal `go` prefix.
+if grep -qE '^toolchain[[:space:]]+[^[:space:]]' "${go_mod}"; then
   cat >&2 <<'EOF'
 check-go-mod-no-toolchain: go.mod must not contain a `toolchain` directive.
 

@@ -70,7 +70,11 @@ else
     # switch to skip xattrs; combined with COPYFILE_DISABLE this excludes
     # every AppleDouble `._*` entry a macOS host would otherwise inject.
     # Set mtimes to 0 in advance so BSD tar reads the frozen timestamp.
-    find "${work}/payload" -exec touch -t 197001010000.00 {} +
+    # TZ=UTC pins the interpretation of `-t YYYYMMDDhhmm.ss` — without it,
+    # a non-UTC host reads the argument in local time and the resulting
+    # tar entry's mtime differs from a GNU-tar --mtime='@0' entry,
+    # breaking cross-host fixture SHA-256 stability.
+    TZ=UTC find "${work}/payload" -exec touch -t 197001010000.00 {} +
     tar \
         --uid 0 --gid 0 --numeric-owner \
         --no-xattrs \
@@ -90,6 +94,6 @@ sha=$(shasum -a 256 "${FIXTURE_TAR_ZST}" | awk '{print $1}')
 echo "fixture: ${FIXTURE_TAR_ZST}"
 echo "sha256:  ${sha}"
 echo ""
-echo "Update the EXPECTED_SHA256 constant in"
+echo "Update the FIXTURE_EXPECTED_SHA256 constant in"
 echo "  .github/workflows/windows-deterministic-build.yml"
 echo "to this value in the same PR that regenerates the fixture."

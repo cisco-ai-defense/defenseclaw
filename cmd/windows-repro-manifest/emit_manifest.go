@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // runEmitManifest emits manifest.json for a directory of signed payload
@@ -93,25 +94,35 @@ func hashPayloadDir(dir string) ([]payloadFile, error) {
 	}
 	out := make([]payloadFile, 0, len(entries))
 	for _, e := range entries {
+		name := e.Name()
+		// The manifest's `name` field is embedded verbatim into
+		// manifest.json. encoding/json would replace invalid UTF-8 bytes
+		// with U+FFFD on marshal, which silently mutates the recorded
+		// name and breaks the byte-identity between the file on disk and
+		// the string a verifier will compare against. Reject up front so
+		// the failure is loud and located, not smeared over the artefact.
+		if !utf8.ValidString(name) {
+			return nil, fmt.Errorf("refusing payload entry with non-UTF-8 name: %q", name)
+		}
 		info, err := e.Info()
 		if err != nil {
-			return nil, fmt.Errorf("stat %s: %w", e.Name(), err)
+			return nil, fmt.Errorf("stat %s: %w", name, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("refusing symlink in payload dir: %s", e.Name())
+			return nil, fmt.Errorf("refusing symlink in payload dir: %s", name)
 		}
 		if info.IsDir() {
-			return nil, fmt.Errorf("refusing subdirectory in payload dir: %s", e.Name())
+			return nil, fmt.Errorf("refusing subdirectory in payload dir: %s", name)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("refusing non-regular file in payload dir: %s", e.Name())
+			return nil, fmt.Errorf("refusing non-regular file in payload dir: %s", name)
 		}
-		digest, err := sha256File(filepath.Join(dir, e.Name()))
+		digest, err := sha256File(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, payloadFile{
-			name:   e.Name(),
+			name:   name,
 			sha256: digest,
 			size:   info.Size(),
 		})

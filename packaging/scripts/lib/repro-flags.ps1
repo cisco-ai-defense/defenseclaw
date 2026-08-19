@@ -45,26 +45,49 @@ $script:DefenseClawReproRequiredEnvs = @(
     'DEFENSECLAW_BUILDID'
 )
 
+# Required-exact-value map: mirror of _repro_expected_value in the bash
+# library. A caller can rewrite any of these after sourcing this file
+# and before invoking preflight; each fixed-value check below compares
+# against the literal required value so mutations are caught, not
+# silently accepted.
+$script:DefenseClawReproExpectedValues = @{
+    GOFLAGS     = '-trimpath -buildvcs=false -mod=vendor'
+    GOTOOLCHAIN = 'go1.26.4'
+    CGO_ENABLED = '0'
+    GOOS        = 'windows'
+    GOARCH      = 'amd64'
+}
+
 function Invoke-DefenseClawReproPreflight {
     <#
     .SYNOPSIS
     Asserts every required reproducibility env is set to a well-formed value.
-    Emits one diagnostic per missing/malformed env and returns non-zero.
+    Emits one diagnostic per missing/malformed/mismatched env and returns
+    non-zero.
     #>
     $missing = New-Object System.Collections.Generic.List[string]
     foreach ($name in $script:DefenseClawReproRequiredEnvs) {
         $val = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ([string]::IsNullOrEmpty($val)) {
             $missing.Add("$name is unset or empty")
+            continue
+        }
+        # SOURCE_DATE_EPOCH and DEFENSECLAW_BUILDID are per-build inputs
+        # supplied by the caller; every other required env is a fixed
+        # literal defined by DefenseClawReproExpectedValues above.
+        if ($name -eq 'SOURCE_DATE_EPOCH' -or $name -eq 'DEFENSECLAW_BUILDID') {
+            continue
+        }
+        if ($script:DefenseClawReproExpectedValues.ContainsKey($name)) {
+            $expected = $script:DefenseClawReproExpectedValues[$name]
+            if ($val -cne $expected) {
+                $missing.Add("$name must be '$expected' (got: '$val')")
+            }
         }
     }
     $sde = [Environment]::GetEnvironmentVariable('SOURCE_DATE_EPOCH', 'Process')
     if (-not [string]::IsNullOrEmpty($sde) -and $sde -notmatch '^[1-9][0-9]*$') {
         $missing.Add("SOURCE_DATE_EPOCH must be a positive integer (got: '$sde')")
-    }
-    $tc = [Environment]::GetEnvironmentVariable('GOTOOLCHAIN', 'Process')
-    if ($tc -ne 'go1.26.4') {
-        $missing.Add("GOTOOLCHAIN must be 'go1.26.4' (got: '$tc')")
     }
     if ($missing.Count -gt 0) {
         foreach ($line in $missing) {
@@ -80,6 +103,11 @@ function Invoke-DefenseClawReproBuild {
     Invokes `go build` with the exact flag list the AVC reproducibility
     contract requires. Callers pass output path and package path only;
     every other flag is fixed here.
+
+    NOTE: `go build` itself has no `-buildid` flag; the build ID is a
+    link-time argument passed via `-ldflags`. Passing `-buildid=...`
+    directly to `go build` fails with "flag provided but not defined:
+    -buildid". Always route DEFENSECLAW_BUILDID through -ldflags.
     #>
     param(
         [Parameter(Mandatory)][string]$Output,
@@ -91,7 +119,7 @@ function Invoke-DefenseClawReproBuild {
         -mod=vendor `
         -trimpath `
         -buildvcs=false `
-        "-buildid=$buildid" `
+        "-ldflags=-buildid=$buildid" `
         -o $Output `
         $Package
     if ($LASTEXITCODE -ne 0) {

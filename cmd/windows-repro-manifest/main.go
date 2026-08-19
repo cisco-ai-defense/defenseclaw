@@ -22,6 +22,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 )
@@ -60,22 +62,33 @@ func main() {
 		return
 	case "emit-manifest":
 		if err := runEmitManifest(args); err != nil {
-			fmt.Fprintf(os.Stderr, "windows-repro-manifest emit-manifest: %s\n", err)
-			os.Exit(1)
+			exitSubcommand("emit-manifest", err)
 		}
 	case "emit-payload-metadata":
 		if err := runEmitPayloadMetadata(args); err != nil {
-			fmt.Fprintf(os.Stderr, "windows-repro-manifest emit-payload-metadata: %s\n", err)
-			os.Exit(1)
+			exitSubcommand("emit-payload-metadata", err)
 		}
 	case "emit-provenance":
 		if err := runEmitProvenance(args); err != nil {
-			fmt.Fprintf(os.Stderr, "windows-repro-manifest emit-provenance: %s\n", err)
-			os.Exit(1)
+			exitSubcommand("emit-provenance", err)
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", sub)
 		fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
 	}
+}
+
+// exitSubcommand terminates the process with the conventional exit
+// codes for a subcommand error:
+//   - flag.ErrHelp (raised by fs.Parse when the user passes -h) is a
+//     successful help print, not a real error; exit 0 without a diagnostic
+//     to keep `subcommand -h` scriptable.
+//   - anything else is a real error; write the diagnostic and exit 1.
+func exitSubcommand(sub string, err error) {
+	if errors.Is(err, flag.ErrHelp) {
+		os.Exit(0)
+	}
+	fmt.Fprintf(os.Stderr, "windows-repro-manifest %s: %s\n", sub, err)
+	os.Exit(1)
 }

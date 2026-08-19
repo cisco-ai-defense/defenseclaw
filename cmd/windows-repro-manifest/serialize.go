@@ -33,7 +33,16 @@ func writeSortedJSON(path string, v any) error {
 	// Write with 0o644; these files are build artefacts consumed by AVC's
 	// pipeline and do not carry secrets. Callers that need stricter mode
 	// bits can chmod after the fact.
-	return os.WriteFile(path, buf, 0o644)
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		return err
+	}
+	// os.WriteFile respects the process umask on Unix; a caller running
+	// under umask 0077 would land 0600 despite the 0644 argument, which
+	// breaks reproducibility across CI hosts that pick different umasks.
+	// Explicitly chmod to force the mode we advertise. Windows ignores
+	// chmod's group/other bits — the runtime.GOOS != "windows" guard in
+	// the round-trip test reflects that, not a defect here.
+	return os.Chmod(path, 0o644)
 }
 
 // marshalSortedJSON is the pure-in-memory sibling of writeSortedJSON,

@@ -27,6 +27,9 @@ on:
       - scripts/check-repro-flags-parity.sh
       - scripts/generate-repro-fixture.sh
       - .github/workflows/windows-deterministic-build.yml
+      # setup-go@v5 reads go.mod; check-go-mod-no-toolchain.sh polices it.
+      # Either can change repository-wide reproducibility semantics.
+      - go.mod
   push:
     branches:
       - windows-enterprise-integration
@@ -35,6 +38,11 @@ on:
       - cmd/windows-repro-manifest/**
       - packaging/scripts/lib/repro-flags.*
       - internal/build-repro/testdata/**
+      - scripts/check-go-mod-no-toolchain.sh
+      - scripts/check-repro-flags-parity.sh
+      - scripts/generate-repro-fixture.sh
+      - .github/workflows/windows-deterministic-build.yml
+      - go.mod
 
 permissions:
   contents: read
@@ -46,16 +54,39 @@ env:
   # Expected fixture SHA-256. Regenerate via
   # scripts/generate-repro-fixture.sh; update this constant in the same
   # PR that regenerates.
-  FIXTURE_EXPECTED_SHA256: 7a3f39331ec428350cd5c60db23512ea29a8b3ab95ab4f28ac16ffdc33d120f7
+  FIXTURE_EXPECTED_SHA256: 9ba86aa776ef0c711d4e4d2514a01d81ae42a7ea0c0d05df5706602e6072f898
 
 jobs:
+  # Fast lint job that runs both reproducibility lints on every PR to
+  # this workflow's paths. Fails fast — cheaper than blocking on the
+  # 10-minute cross-platform emit fan-out to catch a one-line drift.
+  repro-lints:
+    name: reproducibility lints
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Run check-go-mod-no-toolchain.sh
+        run: scripts/check-go-mod-no-toolchain.sh
+      - name: Run check-repro-flags-parity.sh
+        run: scripts/check-repro-flags-parity.sh
+
   emit-linux:
     name: emit JSON artefacts (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: repro-lints
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Don't leave ${{ github.token }} on disk in .git/config —
+          # this workflow needs no authenticated git operations, and a
+          # persisted token widens the blast radius of any later step
+          # that runs untrusted source-controlled code.
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Verify fixture SHA-256
@@ -125,7 +156,7 @@ jobs:
           (cd "$workdir/out" && sha256sum manifest.json payload-metadata.json provenance.json) \
             > "$workdir/out/sha256sums.txt"
           cp -R "$workdir/out" artifacts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: repro-artefacts-linux
           path: artifacts/
@@ -135,9 +166,16 @@ jobs:
     name: emit JSON artefacts (macos-latest)
     runs-on: macos-latest
     timeout-minutes: 10
+    needs: repro-lints
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Don't leave ${{ github.token }} on disk in .git/config —
+          # this workflow needs no authenticated git operations, and a
+          # persisted token widens the blast radius of any later step
+          # that runs untrusted source-controlled code.
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Verify fixture SHA-256
@@ -192,7 +230,7 @@ jobs:
           (cd "$workdir/out" && shasum -a 256 manifest.json payload-metadata.json provenance.json) \
             > "$workdir/out/sha256sums.txt"
           cp -R "$workdir/out" artifacts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: repro-artefacts-macos
           path: artifacts/
@@ -204,11 +242,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: repro-artefacts-linux
           path: linux/
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: repro-artefacts-macos
           path: macos/
