@@ -67,8 +67,15 @@ func TestEnterConfigWaitLoopIfManagedGatesOnDeployMode(t *testing.T) {
 				t.Fatalf("stage cfg: %v", err)
 			}
 
+			// Bounded ctx so a regression in the entry-time probe
+			// fails the test at 2s rather than at the `go test`
+			// binary's 10-minute wall-clock timeout — the failure
+			// diagnostic in the latter case points at an unrelated
+			// panic. CR spec-003:PRRT_kwDORuAK-s6alkrh.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
 			retry, err := enterConfigWaitLoopIfManaged(
-				context.Background(),
+				ctx,
 				cfgPath,
 				fmt.Errorf("open %s: %w", cfgPath, os.ErrNotExist),
 				io.Discard,
@@ -121,8 +128,13 @@ func TestWaitForConfigV8ManagedReturnsWhenFilePresentOnEntry(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("deployment_mode: managed_enterprise\n"), 0o644); err != nil {
 		t.Fatalf("stage cfg: %v", err)
 	}
+	// Bounded ctx so an entry-probe regression fails the test at 2s
+	// rather than at `go test`'s wall-clock timeout. CR
+	// spec-003:PRRT_kwDORuAK-s6alkrh.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	var buf strings.Builder
-	if err := waitForConfigV8Managed(context.Background(), cfgPath, &buf); err != nil {
+	if err := waitForConfigV8Managed(ctx, cfgPath, &buf); err != nil {
 		t.Fatalf("wait returned error even though file was already present: %v", err)
 	}
 	if !strings.Contains(buf.String(), "present on entry to wait loop") {

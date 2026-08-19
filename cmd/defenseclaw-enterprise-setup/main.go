@@ -172,6 +172,13 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 		// pick them up. Spec 003 REQ-02 / REQ-03.
 		return opts, false, errors.New("install requires both --config and --manifest (or --deferred-config for the UCB-friendly late-arrival path)")
 	}
+	if opts.DeferredConfig && opts.Action != "install" {
+		// Spec 003 --deferred-config is meaningful only at initial
+		// install. Upgrade/repair use the config/manifest already on
+		// disk; deferring them would leave the deployment offline.
+		// CR spec-003:PRRT_kwDORuAK-s6alkr4.
+		return opts, false, errors.New("--deferred-config is valid only with install")
+	}
 	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
 	if opts.NoStart && !mutation {
 		return opts, false, errors.New("--no-start is valid only with install, upgrade, or repair")

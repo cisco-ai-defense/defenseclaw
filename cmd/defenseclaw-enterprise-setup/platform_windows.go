@@ -360,7 +360,11 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	if opts.AttestCodexTrustedHookLauncher {
 		arguments = append(arguments, "--attest-codex-trusted-hook-launcher")
 	}
-	if opts.DeferredConfig {
+	// Spec 003 --deferred-config forwards only for the initial
+	// install action. Upgrade/repair use the config/manifest already
+	// on disk and cannot legitimately defer them. See CR
+	// spec-003:PRRT_kwDORuAK-s6alkr4.
+	if opts.DeferredConfig && opts.Action == "install" {
 		arguments = append(arguments, "--deferred-config")
 	}
 	return arguments

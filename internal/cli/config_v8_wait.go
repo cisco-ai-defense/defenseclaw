@@ -14,7 +14,6 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -174,20 +173,12 @@ func enterConfigWaitLoopIfManaged(ctx context.Context, cfgPath string, initialEr
 // readConfigV8Source's %w, so errors.Is against os.ErrNotExist reaches
 // the sentinel.
 //
-// Other errors (parse failure via config.V8SemanticError, oversize,
-// permission denied) are NOT treated as wait-triggers: they represent
-// real UCB / operator faults that must surface loudly rather than be
-// masked by a 24-hour wait.
+// Other errors (parse failure, oversize, permission denied) are NOT
+// treated as wait-triggers: they represent real UCB / operator faults
+// that must surface loudly rather than be masked by a 24-hour wait.
 func isMissingConfigErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	return errors.Is(err, os.ErrNotExist)
 }
-
-// unused reference so the config.V8SemanticError import doesn't get
-// pruned — the type is documented in isMissingConfigErr's comment as
-// the error kind we DELIBERATELY do not wait through, so keeping a
-// visible symbol reference here makes the negative-space contract
-// grep-able.
-var _ = (*config.V8SemanticError)(nil)

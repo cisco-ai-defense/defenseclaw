@@ -594,6 +594,18 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			)
 		}
 	}
+	// Spec 003 --deferred-config is meaningful only for the initial
+	// Install action. On upgrade/repair the config.yaml + targets.yaml
+	// artefacts are already on disk; deferring them would leave the
+	// deployment offline and mask a real re-signing failure. Reject
+	// the combination up front so the CLI-side matches the PowerShell
+	// installer's Install-only relaxation in Get-DefenseClawLifecycleSources.
+	// See CR spec-003:PRRT_kwDORuAK-s6alkr4.
+	if opts.deferredConfig && action != "install" {
+		return fmt.Errorf(
+			"--deferred-config is valid only with install (got: %s)", action,
+		)
+	}
 	return nil
 }
 

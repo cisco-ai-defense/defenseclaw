@@ -11858,6 +11858,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         $Action -notin @('Install', 'Upgrade', 'Repair')) {
         throw '-CoreHardeningCertification is valid only with Install, Upgrade, or Repair'
     }
+    # Spec 003 -DeferredConfig is meaningful only for the initial
+    # Install. Upgrade/Repair operate against config.yaml + targets.yaml
+    # that are already on disk; deferring them would leave the
+    # deployment offline. CR spec-003:PRRT_kwDORuAK-s6alkr4.
+    if ($DeferredConfig -and $Action -ne 'Install') {
+        throw '-DeferredConfig is valid only with Install'
+    }
     if (-not [string]::IsNullOrWhiteSpace($resolvedCertificationCodexHome) -and
         -not $AllowUnsigned) {
         throw '-CertificationCodexHome requires -AllowUnsigned for every lifecycle action'

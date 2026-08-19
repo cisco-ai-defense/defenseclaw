@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -330,6 +331,12 @@ func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details 
 // call this method (OSS / SaaS / DP / CP) keep the nil pointer and
 // the snapshot omits the block entirely.
 func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
+	// Read guardian state OUTSIDE the write lock. Under production
+	// wiring the reader opens a file on disk; holding h.mu across
+	// that I/O would stall every concurrent Snapshot() reader (CR
+	// spec-003:PRRT_kwDORuAK-s6alksL).
+	guardianState := h.snapshotGuardianState()
+
 	h.mu.Lock()
 	if h.configuration == nil {
 		h.configuration = &ConfigurationHealth{
@@ -337,15 +344,18 @@ func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
 			Since: time.Now(),
 		}
 	}
-	if h.daemonConfigLoaded == loaded && h.configuration.State != ConfigStateWaitingForConfig {
-		// No-op: already in the right state.
-		h.mu.Unlock()
-		return
-	}
+	prev := h.configuration.State
 	h.daemonConfigLoaded = loaded
-	h.recomputeConfigurationLocked()
+	h.recomputeConfigurationLocked(guardianState)
+	changed := h.configuration.State != prev
 	h.mu.Unlock()
-	h.notifySubscribers()
+	// Notify only on a real transition. Prior revisions notified on
+	// every call, which woke IPC GetHealth stream consumers on every
+	// fsnotify event the daemon's wait loop received (CR
+	// spec-003:PRRT_kwDORuAK-s6alksD).
+	if changed {
+		h.notifySubscribers()
+	}
 }
 
 // SetGuardianStateReader wires the sidecar's cross-process probe for
@@ -360,13 +370,24 @@ func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
 // guardian state file says without waiting for the next
 // RefreshConfiguration tick.
 func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
+	// Fetch the state via the NEW reader before acquiring the write
+	// lock — same rationale as SetDaemonConfigLoaded. If fn is nil
+	// (test path clearing the reader), snapshotGuardianStateFrom
+	// short-circuits to StateUnknown without any I/O.
+	guardianState := snapshotGuardianStateFrom(fn)
+
 	h.mu.Lock()
 	h.guardianStateReader = fn
+	var changed bool
 	if h.configuration != nil {
-		h.recomputeConfigurationLocked()
+		prev := h.configuration.State
+		h.recomputeConfigurationLocked(guardianState)
+		changed = h.configuration.State != prev
 	}
 	h.mu.Unlock()
-	h.notifySubscribers()
+	if changed {
+		h.notifySubscribers()
+	}
 }
 
 // RefreshConfiguration re-reads the guardian state (via the wired
@@ -376,6 +397,14 @@ func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
 // nothing on the daemon side has changed. If no reader is wired the
 // call is a no-op.
 func (h *SidecarHealth) RefreshConfiguration() {
+	// Read the guardian state OUTSIDE the write lock (CR
+	// spec-003:PRRT_kwDORuAK-s6alksL). The read may block on file I/O
+	// under production wiring; keeping it out of the critical section
+	// means concurrent Snapshot() callers on the health endpoint are
+	// never blocked by a slow guardian rename or a transient sharing
+	// violation on Windows.
+	guardianState := h.snapshotGuardianState()
+
 	h.mu.Lock()
 	if h.configuration == nil {
 		// Deployment never entered managed-enterprise deferred-config
@@ -384,7 +413,7 @@ func (h *SidecarHealth) RefreshConfiguration() {
 		return
 	}
 	prev := h.configuration.State
-	h.recomputeConfigurationLocked()
+	h.recomputeConfigurationLocked(guardianState)
 	changed := h.configuration.State != prev
 	h.mu.Unlock()
 	if changed {
@@ -392,41 +421,73 @@ func (h *SidecarHealth) RefreshConfiguration() {
 	}
 }
 
+// snapshotGuardianState reads the guardian state via the wired
+// reader WITHOUT holding h.mu. Snapshots the reader function under
+// the read lock (a pointer copy, no I/O) and then invokes it
+// outside — same lock discipline as observabilityV8Source is called
+// with in Snapshot(). Returns guardianstate.StateUnknown when no
+// reader is wired so the collapsing rule's safe-default branch runs.
+func (h *SidecarHealth) snapshotGuardianState() string {
+	h.mu.RLock()
+	reader := h.guardianStateReader
+	h.mu.RUnlock()
+	return snapshotGuardianStateFrom(reader)
+}
+
+// snapshotGuardianStateFrom invokes a specific reader function outside
+// any lock. Broken out so SetGuardianStateReader can use the freshly-
+// installed callback in the same call — using snapshotGuardianState
+// there would race against the caller's own SetGuardianStateReader
+// write.
+func snapshotGuardianStateFrom(reader func() string) string {
+	if reader == nil {
+		return guardianstate.StateUnknown
+	}
+	return reader()
+}
+
 // recomputeConfigurationLocked applies the collapsing rule; caller
-// holds h.mu (write lock).
+// holds h.mu (write lock) and passes the already-read guardian state
+// so the recompute never performs I/O under the lock (CR
+// spec-003:PRRT_kwDORuAK-s6alksL).
 //
 // Order (spec 003 § Data flow):
 //  1. Daemon not loaded ⇒ waiting_for_config, regardless of guardian.
 //     This lets AC-12 pass: if UCB drops targets.yaml first, the
 //     daemon still says waiting_for_config until config.yaml lands.
-//  2. Daemon loaded, no guardian reader wired ⇒ waiting_for_targets
-//     as the safe default. Never false-positive ready.
-//  3. Daemon loaded, guardian reader returns ready ⇒ ready.
-//  4. Daemon loaded, guardian reader returns waiting_for_targets or
-//     Unknown ⇒ waiting_for_targets.
+//  2. Daemon loaded, guardian state = StateReady ⇒ ready.
+//  3. Daemon loaded, guardian state = StateWaitingForTargets or
+//     StateUnknown (missing / unreadable / malformed file, OR no
+//     reader wired) ⇒ waiting_for_targets. This is the safe default:
+//     the sidecar never false-positive-publishes ready.
 //
 // Since only advances when the collapsed state actually changes,
-// so a snapshot taken 30 s into a wait returns the SAME Since as
+// so a snapshot taken 30s into a wait returns the SAME Since as
 // one taken at the wait's start (spec 003 AC-08).
-func (h *SidecarHealth) recomputeConfigurationLocked() {
+//
+// The switch below compares against `guardianstate` package
+// constants (CR spec-003:PRRT_kwDORuAK-s6alksT) so a rename or
+// reshaping of the state vocabulary is caught by the compiler,
+// not by a silent fall-through to the default branch.
+func (h *SidecarHealth) recomputeConfigurationLocked(guardianState string) {
 	if h.configuration == nil {
 		return
 	}
 	var next ConfigurationState
 	if !h.daemonConfigLoaded {
 		next = ConfigStateWaitingForConfig
-	} else if h.guardianStateReader == nil {
-		next = ConfigStateWaitingForTargets
 	} else {
-		switch h.guardianStateReader() {
-		case "ready":
+		switch guardianState {
+		case guardianstate.StateReady:
 			next = ConfigStateReady
-		case "waiting_for_targets":
+		case guardianstate.StateWaitingForTargets:
 			next = ConfigStateWaitingForTargets
 		default:
-			// Unknown ⇒ safe default. Guardian may be starting up,
-			// crashed mid-boot, or file may be transiently unreadable
-			// during a rename; report waiting_for_targets rather than
+			// StateUnknown or any future addition (empty string,
+			// unrecognised body) — safe default. Guardian may be
+			// starting up, crashed mid-boot, no reader wired yet,
+			// or the state file may be transiently unreadable during
+			// a rename; report waiting_for_targets rather than
 			// stale ready.
 			next = ConfigStateWaitingForTargets
 		}

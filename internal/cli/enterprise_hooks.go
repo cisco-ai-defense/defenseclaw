@@ -1598,13 +1598,31 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 	deadline, cancel := context.WithTimeout(ctx, enterpriseHookTargetsWaitTimeout)
 	defer cancel()
 
+	// probeShouldReturn classifies a probeManifestPresent result:
+	// nil ⇒ manifest loaded, return success. A missing-file error ⇒
+	// keep waiting (this is the whole point of the wait loop). Any
+	// OTHER error (parse failure, trust-plumbing rejection, symlink
+	// refusal, oversized manifest) ⇒ return that error immediately;
+	// the wait loop's contract is "wait for a MISSING file", not
+	// "silently absorb 24 hours of broken UCB drops". See CR
+	// spec-003:PRRT_kwDORuAK-s6alkry.
+	probeShouldReturn := func(err error, reason string) (bool, error) {
+		if err == nil {
+			fmt.Fprintf(w, "[hook-guardian] targets.yaml %s; resuming\n", reason)
+			return true, nil
+		}
+		if isMissingManifestErr(err) {
+			return false, nil
+		}
+		return true, fmt.Errorf("enterprise hooks watch: targets.yaml probe returned non-missing error: %w", err)
+	}
+
 	// Try LoadManifest once up front — the manifest may have landed
 	// between the failing startup reconcile and this fsnotify.Add
 	// call. Without this probe we'd sit for enterpriseHookTargetsWaitPoll
 	// waiting for an event that already happened.
-	if err := probeManifestPresent(manifestPath); err == nil {
-		fmt.Fprintf(w, "[hook-guardian] targets.yaml present on entry to wait loop; resuming\n")
-		return nil
+	if done, err := probeShouldReturn(probeManifestPresent(manifestPath), "present on entry to wait loop"); done {
+		return err
 	}
 
 	for {
@@ -1626,9 +1644,8 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
-			if err := probeManifestPresent(manifestPath); err == nil {
-				fmt.Fprintf(w, "[hook-guardian] targets.yaml appeared (%s); resuming\n", event.Op)
-				return nil
+			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), fmt.Sprintf("appeared (%s)", event.Op)); done {
+				return err
 			}
 		case fswErr := <-fsw.Errors:
 			// fsnotify.Errors is documented to deliver only
@@ -1638,9 +1655,8 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 				fmt.Fprintf(w, "[hook-guardian] fsnotify wait error: %v\n", fswErr)
 			}
 		case <-poll.C:
-			if err := probeManifestPresent(manifestPath); err == nil {
-				fmt.Fprintf(w, "[hook-guardian] targets.yaml present on poll; resuming\n")
-				return nil
+			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), "present on poll"); done {
+				return err
 			}
 		}
 	}
