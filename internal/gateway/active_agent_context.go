@@ -226,7 +226,7 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 		a.activeAgentContext.reset(connectorName, req.SessionID)
 	case "InstructionsLoaded":
 		a.activeAgentContext.seed(connectorName, req.SessionID, req.FilePath)
-	case "PreToolUse":
+	case "PreToolUse", "PermissionRequest":
 		return a.activeAgentContext.snapshot(connectorName, req.SessionID)
 	}
 	return nil

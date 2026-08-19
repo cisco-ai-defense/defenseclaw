@@ -60,6 +60,7 @@ func activeClaudeCodeTestAPI() *APIServer {
 func evaluateClaudeCodeToolFacts(
 	t *testing.T,
 	api *APIServer,
+	hookEventName string,
 	sessionID string,
 	payload map[string]interface{},
 ) toolChainHookCapture {
@@ -67,7 +68,7 @@ func evaluateClaudeCodeToolFacts(
 	capture := toolChainHookCapture{}
 	ctx := withToolChainHookCapture(authenticatedClaudeCodeTestContext(), &capture)
 	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
-		HookEventName: "PreToolUse",
+		HookEventName: hookEventName,
 		SessionID:     sessionID,
 		CWD:           t.TempDir(),
 		ToolName:      "Bash",
@@ -98,13 +99,17 @@ func TestClaudeCodeActiveAgentFilesRequireAuthenticatedExactLoadAndSameSession(t
 	}
 
 	api.evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), load)
-	sameSession := evaluateClaudeCodeToolFacts(t, api, "session-a", nil)
-	if !slices.Equal(sameSession.facts.ActiveAgentFiles, []string{filepath.ToSlash(agentFile)}) {
-		t.Fatalf("same-session active files = %#v, want %q", sameSession.facts.ActiveAgentFiles, filepath.ToSlash(agentFile))
-	}
-	differentSession := evaluateClaudeCodeToolFacts(t, api, "session-b", nil)
-	if len(differentSession.facts.ActiveAgentFiles) != 0 {
-		t.Fatalf("different session inherited authority: %#v", differentSession.facts.ActiveAgentFiles)
+	for _, hookEventName := range []string{"PreToolUse", "PermissionRequest"} {
+		t.Run(hookEventName, func(t *testing.T) {
+			sameSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-a", nil)
+			if !slices.Equal(sameSession.facts.ActiveAgentFiles, []string{filepath.ToSlash(agentFile)}) {
+				t.Fatalf("same-session active files = %#v, want %q", sameSession.facts.ActiveAgentFiles, filepath.ToSlash(agentFile))
+			}
+			differentSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-b", nil)
+			if len(differentSession.facts.ActiveAgentFiles) != 0 {
+				t.Fatalf("different session inherited authority: %#v", differentSession.facts.ActiveAgentFiles)
+			}
+		})
 	}
 }
 
@@ -193,7 +198,7 @@ func TestClaudeCodeActiveAgentFilesIgnoreReadMentionAndGenericPayload(t *testing
 			"active_agent_files": []interface{}{agentFile},
 		},
 	})
-	capture := evaluateClaudeCodeToolFacts(t, api, "read-session", map[string]interface{}{
+	capture := evaluateClaudeCodeToolFacts(t, api, "PreToolUse", "read-session", map[string]interface{}{
 		"active_agent_files": []interface{}{agentFile},
 		"content":            "the active file is " + agentFile,
 	})

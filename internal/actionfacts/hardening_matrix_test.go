@@ -107,6 +107,116 @@ func TestStructuredPowerShellPathMutatorRolesAndControls(t *testing.T) {
 	}
 }
 
+func TestStructuredPowerShellPathMutatorBooleanSwitches(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		argv      []string
+		operation OperationKind
+		access    PathAccess
+		path      string
+	}{
+		{
+			name: "no newline true",
+			argv: []string{
+				"Set-Content", "-LiteralPath", `C:\target.txt`,
+				"-Value", "fixture", "-NoNewline:$true",
+			},
+			operation: OperationWrite,
+			access:    PathAccessWrite,
+			path:      `C:\target.txt`,
+		},
+		{
+			name: "append false remains overwrite",
+			argv: []string{
+				"Out-File", "-FilePath", `C:\target.txt`,
+				"-InputObject", "fixture", "-Append:$false",
+			},
+			operation: OperationWrite,
+			access:    PathAccessWrite,
+			path:      `C:\target.txt`,
+		},
+		{
+			name: "append true retains append semantics",
+			argv: []string{
+				"Out-File", "-FilePath", `C:\target.txt`,
+				"-InputObject", "fixture", "-Append:$true",
+			},
+			operation: OperationAppend,
+			access:    PathAccessAppend,
+			path:      `C:\target.txt`,
+		},
+		{
+			name: "pass thru true",
+			argv: []string{
+				"Copy-Item", "-LiteralPath", `C:\source.txt`,
+				"-Destination", `C:\target.txt`, "-PassThru:$true",
+			},
+			operation: OperationCopy,
+			access:    PathAccessWrite,
+			path:      `C:\target.txt`,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{
+				Argv: test.argv, DialectHint: DialectPowerShell,
+			})
+			if !facts.Authoritative() || len(facts.Commands) != 1 ||
+				!commandHasOperation(facts.Commands[0], test.operation) ||
+				!factsHavePath(facts, test.access, test.path) {
+				t.Fatalf("facts = %#v", facts)
+			}
+			if test.name == "append false remains overwrite" &&
+				(commandHasOperation(facts.Commands[0], OperationAppend) ||
+					factsHavePath(facts, PathAccessAppend, test.path)) {
+				t.Fatalf("false append switch acted enabled: %#v", facts)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		argv []string
+	}{
+		{
+			name: "no newline invalid",
+			argv: []string{
+				"Set-Content", "-LiteralPath", `C:\target.txt`,
+				"-Value", "fixture", "-NoNewline:maybe",
+			},
+		},
+		{
+			name: "append empty",
+			argv: []string{
+				"Out-File", "-FilePath", `C:\target.txt`,
+				"-InputObject", "fixture", "-Append:",
+			},
+		},
+		{
+			name: "pass thru invalid",
+			argv: []string{
+				"Copy-Item", "-LiteralPath", `C:\source.txt`,
+				"-Destination", `C:\target.txt`, "-PassThru:2",
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{
+				Argv:        test.argv,
+				DialectHint: DialectPowerShell,
+			})
+			if facts.Authoritative() ||
+				!containsIssue(facts.Parse.Issues, IssueUnknownOperandGrammar) {
+				t.Fatalf("malformed switch became authoritative: %#v", facts)
+			}
+		})
+	}
+}
+
 func TestPowerShellPathMutatorRawStructuredParity(t *testing.T) {
 	t.Parallel()
 	raw := Analyze(Input{

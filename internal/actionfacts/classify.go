@@ -1553,11 +1553,18 @@ func classifyStructuredPowerShellNewItem(
 }
 
 func structuredPowerShellBooleanLiteral(value string) bool {
+	_, ok := structuredPowerShellBooleanValue(value)
+	return ok
+}
+
+func structuredPowerShellBooleanValue(value string) (bool, bool) {
 	switch strings.ToLower(value) {
-	case "$true", "true", "1", "$false", "false", "0":
-		return true
+	case "$true", "true", "1":
+		return true, true
+	case "$false", "false", "0":
+		return false, true
 	default:
-		return false
+		return false, false
 	}
 }
 
@@ -1817,6 +1824,7 @@ func classifyStructuredPowerShellPathMutator(
 	controls := newStructuredPowerShellControlState()
 	seen := make(map[string]struct{})
 	var positional, sources, destinations []string
+	appendEnabled := false
 	valid := true
 	for index := 1; index < len(command.Argv); index++ {
 		arg := command.Argv[index]
@@ -1880,10 +1888,17 @@ func classifyStructuredPowerShellPathMutator(
 			}
 		case "-force", "-recurse", "-passthru", "-container",
 			"-nonewline", "-append", "-noclobber", "-debug", "-verbose":
-			if joined && (key != "-force" && key != "-recurse" ||
-				!structuredPowerShellBooleanLiteral(joinedValue)) {
-				valid = false
-				continue
+			if joined {
+				enabled, ok := structuredPowerShellBooleanValue(joinedValue)
+				if !ok {
+					valid = false
+					continue
+				}
+				if key == "-append" {
+					appendEnabled = enabled
+				}
+			} else if key == "-append" {
+				appendEnabled = true
 			}
 			if _, duplicate := seen[key]; duplicate {
 				valid = false
@@ -1919,7 +1934,7 @@ func classifyStructuredPowerShellPathMutator(
 		}
 		access := PathAccessWrite
 		operation := OperationWrite
-		if program == "add-content" {
+		if program == "add-content" || program == "out-file" && appendEnabled {
 			access = PathAccessAppend
 			operation = OperationAppend
 		}
