@@ -307,8 +307,12 @@ class CliSmokeTests(unittest.TestCase):
                     "set PYTEST_GATEWAY_BIN to skip building",
                 )
             built = repository_root / gateway_name
+            # The gateway binary is produced from the `./cmd/defenseclaw`
+            # package (renamed to `defenseclaw-gateway` in the Makefile
+            # recipe). The cmd tree has no `defenseclaw-gateway`
+            # subdirectory; use the same source package the Makefile does.
             build = subprocess.run(
-                [go_bin, "build", "-o", str(built), "./cmd/defenseclaw-gateway"],
+                [go_bin, "build", "-o", str(built), "./cmd/defenseclaw"],
                 cwd=repository_root,
                 capture_output=True,
                 text=True,
