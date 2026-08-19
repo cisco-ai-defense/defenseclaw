@@ -122,21 +122,23 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 // Everything else is pass-through. RawBody carries the original JSON so
 // the OpenAI provider can forward unknown fields verbatim.
 type ChatRequest struct {
-	Model        string          `json:"model"`
-	Messages     []ChatMessage   `json:"messages"`
-	MaxTokens    *int            `json:"max_tokens,omitempty"`
-	Temperature  *float64        `json:"temperature,omitempty"`
-	TopP         *float64        `json:"top_p,omitempty"`
-	Stream       bool            `json:"stream,omitempty"`
-	Stop         json.RawMessage `json:"stop,omitempty"`
-	Tools        json.RawMessage `json:"tools,omitempty"`
-	ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
-	Fallbacks    []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
-	ExtraParams  map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
-	RawBody      json.RawMessage `json:"-"`
-	TargetURL    string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
-	TargetPath   string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
-	TargetAPIKey string          `json:"-"` // from Authorization header, forwarded to upstream
+	Model            string          `json:"model"`
+	Messages         []ChatMessage   `json:"messages"`
+	MaxTokens        *int            `json:"max_tokens,omitempty"`
+	Temperature      *float64        `json:"temperature,omitempty"`
+	TopP             *float64        `json:"top_p,omitempty"`
+	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
+	Stream           bool            `json:"stream,omitempty"`
+	Stop             json.RawMessage `json:"stop,omitempty"`
+	Tools            json.RawMessage `json:"tools,omitempty"`
+	ToolChoice       json.RawMessage `json:"tool_choice,omitempty"`
+	Fallbacks        []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
+	ExtraParams      map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
+	RawBody          json.RawMessage `json:"-"`
+	TargetURL        string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
+	TargetPath       string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
+	TargetAPIKey     string          `json:"-"` // from Authorization header, forwarded to upstream
 }
 
 // ChatChoice is a single choice in an OpenAI chat completion response.
