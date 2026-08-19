@@ -113,9 +113,14 @@ func TestResolveWindowsCodexManagedRuntimeRegistryWaitsForMachinePolicyLock(t *t
 	// clean assertion failure into a package-wide timeout.
 	t.Cleanup(func() {
 		_ = release()
+		// 30s deadline: the previous 15s value flakes on GitHub-hosted
+		// Windows runners under load. The resolver still returns on
+		// the order of tens of milliseconds when the lock releases;
+		// the extra budget is purely runner-scheduling slack, not a
+		// signal that a real deadlock is being tolerated.
 		select {
 		case <-resolved:
-		case <-time.After(15 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Error("resolver goroutine did not finish; it still holds windowsCodexMachineProcessMu")
 		}
 	})

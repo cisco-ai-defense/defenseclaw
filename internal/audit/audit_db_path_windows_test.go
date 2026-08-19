@@ -333,7 +333,7 @@ func TestAuditDBWindowsTrustRejectsWorldOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if auditDBWindowsTrustedPrincipal(everyone) {
+	if auditDBWindowsTrustedPrincipal(everyone, nil) {
 		t.Fatal("Everyone SID must never be a trusted audit DB owner")
 	}
 }

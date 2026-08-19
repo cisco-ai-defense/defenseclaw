@@ -3269,6 +3269,21 @@
         }
       ],
       "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_BUILDID",
+      "category": "runtime_path",
+      "purpose": "Reproducible-build id for the Windows managed-enterprise AVC assembly step. Set by assemble.sh / assemble.ps1 to `defenseclaw-enterprise-setup-<source_commit>` before `go build`, then passed as `-buildid`. Ensures the outer DefenseClawSetup-Enterprise-x64.exe is byte-identical across runners.",
+      "default": "unset",
+      "accepted_values": ["defenseclaw-enterprise-setup-<40-char-lowercase-sha>", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "packaging/scripts/lib/repro-flags.sh", "description": "Sourced by assemble.sh; passes to go build -buildid"},
+        {"location": "packaging/scripts/lib/repro-flags.ps1", "description": "Sourced by assemble.ps1; passes to go build -buildid"},
+        {"location": ".github/workflows/windows-deterministic-build.yml", "description": "Set in the reproducibility CI fan-out for the emitter build"}
+      ],
+      "since": "0.9.0"
     }
   ]
 }

@@ -348,11 +348,33 @@ func TestWindowsPrivateDACLNormalAndImpersonatedPolicies(t *testing.T) {
 			wantImpersonatedSafe: true,
 		},
 		{
-			name: "administrators allow",
+			// Administrators with an unbounded read-like mask fails
+			// impersonated-safe. See the code in protect_windows.go:
+			// under impersonation the Administrators ACE mask must be
+			// exactly READ_CONTROL (0x00020000), matching the Creator
+			// Owner Rights rule. GENERIC_READ (0x80000000) is broader —
+			// it maps to FILE_READ_DATA|FILE_READ_ATTRIBUTES|
+			// FILE_READ_EA|STANDARD_RIGHTS_READ|SYNCHRONIZE — so this
+			// row is expected to fail impersonated safety and trigger
+			// a repair.
+			name: "administrators generic read",
 			entries: []windows.EXPLICIT_ACCESS{
 				windowsAccessEntry(subjectSID, windows.GENERIC_ALL),
 				windowsAccessEntry(system, windows.GENERIC_ALL),
 				windowsAccessEntry(administrators, windows.GENERIC_READ),
+			},
+			wantNormalSafe:       false,
+			wantImpersonatedSafe: false,
+		},
+		{
+			// Administrators bounded to exactly READ_CONTROL is the
+			// only impersonated-safe Administrators shape — same rule
+			// as Creator Owner Rights.
+			name: "administrators exact read control",
+			entries: []windows.EXPLICIT_ACCESS{
+				windowsAccessEntry(subjectSID, windows.GENERIC_ALL),
+				windowsAccessEntry(system, windows.GENERIC_ALL),
+				windowsAccessEntry(administrators, windows.READ_CONTROL),
 			},
 			wantNormalSafe:       false,
 			wantImpersonatedSafe: true,
