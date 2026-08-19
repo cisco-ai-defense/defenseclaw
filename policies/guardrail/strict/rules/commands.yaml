@@ -124,7 +124,8 @@ rules:
       c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
-      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] &&
       p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
     pattern: '(?i)\b(?:mkfs(?:\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\b'
     title: "Filesystem format command"
@@ -134,11 +135,15 @@ rules:
   - id: CMD-DEVICE-WIPE
     expression: >-
       f.commands.exists(c, c.argv_complete &&
-      c.program in ['wipefs', 'sgdisk', 'shred', 'blkdiscard', 'tee', 'cryptsetup', 'hdparm', 'nvme', 'parted', 'diskutil', 'format', 'format-volume', 'clear-disk'] &&
+      c.program != 'dd' &&
+      !(c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs']) &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
-      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] &&
       p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
+    # dd and filesystem formatters retain their dedicated stable rule IDs;
+    # every other proven device write or append is owned here.
     # Semantic-only: raw mentions of common verbs such as `tee` and `format`
     # are not evidence of a destructive device write.
     pattern: 'a^'
@@ -151,7 +156,8 @@ rules:
       f.commands.exists(c, c.argv_complete && c.program == 'dd' &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
-      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] &&
       p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
     pattern: '(?i)\bdd\s+if='
     title: "dd disk write"

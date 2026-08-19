@@ -292,6 +292,12 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "dd redirected device append keeps its dedicated owner",
+			ruleID: "CMD-DD-IF",
+			input:  reconImpactCommand("dd if=/tmp/inert.bin >> /dev/sda"),
+			want:   true,
+		},
+		{
 			name:   "dd device read",
 			ruleID: "CMD-DD-IF",
 			input:  reconImpactCommand("dd if=/dev/sda of=/tmp/backup.img"),
@@ -301,6 +307,17 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			ruleID: "CMD-MKFS",
 			input:  reconImpactCommand("mkfs.ext4 /dev/sda"),
 			want:   true,
+		},
+		{
+			name:   "filesystem formatter redirected device append keeps its dedicated owner",
+			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("mkfs.ext4 /tmp/disk.img >> /dev/sda"),
+			want:   true,
+		},
+		{
+			name:   "filesystem format keeps its dedicated owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("mkfs.ext4 /dev/sda"),
 		},
 		{
 			name:   "filesystem format preview",
@@ -428,9 +445,21 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "device append has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("tee -a /dev/sda"),
+			want:   true,
+		},
+		{
 			name:   "device redirect is not a formatter",
 			ruleID: "CMD-MKFS",
 			input:  reconImpactCommand("printf x > /dev/sda"),
+		},
+		{
+			name:   "device redirect has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("printf x > /dev/sda"),
+			want:   true,
 		},
 		{
 			name:   "ordinary shred target",

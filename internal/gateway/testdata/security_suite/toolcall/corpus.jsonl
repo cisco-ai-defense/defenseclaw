@@ -95,9 +95,15 @@
 {"id":"setid-executable","rule_id":"CMD-CHMOD-WORLD","command":"chmod 4755 /usr/local/bin/helper","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"ordinary-workspace-permissions","rule_id":"CMD-CHMOD-WORLD","command":"chmod 0755 /tmp/build-output","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"raw-disk-overwrite","rule_id":"CMD-DD-IF","command":"dd if=/tmp/inert.bin of=/dev/sda bs=4M","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"raw-disk-redirect-append","rule_id":"CMD-DD-IF","command":"dd if=/tmp/inert.bin >> /dev/sda","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"raw-disk-backup","rule_id":"CMD-DD-IF","command":"dd if=/dev/sda of=/tmp/backup.img","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"filesystem-format","rule_id":"CMD-MKFS","command":"mkfs.ext4 /dev/sda","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"filesystem-format-redirect-append","rule_id":"CMD-MKFS","command":"mkfs.ext4 /tmp/disk.img >> /dev/sda","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"raw-device-tee","rule_id":"CMD-DEVICE-WIPE","command":"tee /dev/sda","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"raw-device-tee-append","rule_id":"CMD-DEVICE-WIPE","command":"tee -a /dev/sda","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"raw-device-redirect","rule_id":"CMD-DEVICE-WIPE","command":"printf x > /dev/sda","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"ordinary-file-tee","rule_id":"CMD-DEVICE-WIPE","command":"tee /tmp/fixture.img","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"ordinary-file-tee-append","rule_id":"CMD-DEVICE-WIPE","command":"tee -a /tmp/fixture.log","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"network-range-sweep","rule_id":"recon.network_sweep","command":"nmap 192.0.2.0/24","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"network-single-host","rule_id":"recon.network_sweep","command":"nmap 192.0.2.1/32","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"privileged-container-root-bind","rule_id":"privilege.container_host_escape","command":"docker run --privileged -v /:/host ubuntu:24.04","is_attack":true,"expect_route":"semantic","no_other_finding":true}
