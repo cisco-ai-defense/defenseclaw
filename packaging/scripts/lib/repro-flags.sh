@@ -45,7 +45,7 @@ export GOARCH="amd64"
 # Names of the six required per-build envs; used by both preflight
 # and the parity lint (scripts/check-repro-flags-parity.sh) so
 # adding/removing an env here is caught in one place.
-DEFENSECLAW_REPRO_REQUIRED_ENVS=(
+REPRO_REQUIRED_ENVS=(
     GOFLAGS
     GOTOOLCHAIN
     CGO_ENABLED
@@ -54,7 +54,10 @@ DEFENSECLAW_REPRO_REQUIRED_ENVS=(
     SOURCE_DATE_EPOCH
     DEFENSECLAW_BUILDID
 )
-export DEFENSECLAW_REPRO_REQUIRED_ENVS
+# Intentionally not exported: this array is a script-local metadata
+# constant, not an environment variable a child process should see.
+# Bash exports arrays as an opaque "NAME=(...)"-style scalar most tools
+# can't parse anyway.
 
 # defenseclaw_repro_preflight refuses to run if any required env is
 # missing, empty, or (for SOURCE_DATE_EPOCH) not a positive integer.
@@ -63,7 +66,7 @@ export DEFENSECLAW_REPRO_REQUIRED_ENVS
 defenseclaw_repro_preflight() {
     local missing=()
     local name
-    for name in "${DEFENSECLAW_REPRO_REQUIRED_ENVS[@]}"; do
+    for name in "${REPRO_REQUIRED_ENVS[@]}"; do
         if [[ -z "${!name:-}" ]]; then
             missing+=("${name} is unset or empty")
         fi

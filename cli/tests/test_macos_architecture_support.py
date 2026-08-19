@@ -26,7 +26,7 @@ MACOS_HARDWARE_ENTRYPOINTS = (
     "scripts/defenseclaw-rescue.sh",
     "packaging/macos/install.sh",
     "scripts/build-macos-app-release.sh",
-    "scripts/build-managed-bundle.sh",
+    "packaging/scripts/build-managed-macos-bundle.sh",
     "scripts/test-fresh-install-release.sh",
     "scripts/test-upgrade-release.sh",
     "scripts/test-upgrade-macos-intel-refusal.sh",
@@ -141,7 +141,7 @@ def test_release_build_and_package_contract_is_arm64_only() -> None:
     assert "build_arch amd64" not in builder
     assert "lipo -create" not in builder
 
-    managed_builder = _text("scripts/build-managed-bundle.sh")
+    managed_builder = _text("packaging/scripts/build-managed-macos-bundle.sh")
     assert 'BUNDLE_GOARCH="${BUNDLE_GOARCH:-arm64}"' in managed_builder
     assert '[[ "$(macos_hardware_machine "$(uname -m)")" == "arm64" ]]' in managed_builder
     assert "require_bin lipo" not in managed_builder
@@ -165,7 +165,7 @@ def test_managed_bundle_wrapper_drives_arm64_target_without_lipo(tmp_path: Path)
     fake_bin = tmp_path / "bin"
     fake_sysctl = tmp_path / "sysctl"
     make_log = tmp_path / "make.log"
-    managed_builder = tmp_path / "scripts/build-managed-bundle.sh"
+    managed_builder = tmp_path / "packaging/scripts/build-managed-macos-bundle.sh"
     (ai_common / ".git").mkdir(parents=True)
     (ai_common / "cmid").mkdir()
     (ai_common / "cmid/go.mod").write_text("module example.invalid/cmid\n", encoding="utf-8")
@@ -197,10 +197,10 @@ def test_managed_bundle_wrapper_drives_arm64_target_without_lipo(tmp_path: Path)
         fake_bin / "make",
         f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {make_log!s}\n",
     )
-    managed_builder.parent.mkdir()
+    managed_builder.parent.mkdir(parents=True)
     _write_executable(
         managed_builder,
-        _text("scripts/build-managed-bundle.sh").replace(
+        _text("packaging/scripts/build-managed-macos-bundle.sh").replace(
             'readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"',
             f'readonly MACOS_SYSCTL_BIN="{fake_sysctl!s}"',
             1,

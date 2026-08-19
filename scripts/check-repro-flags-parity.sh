@@ -71,8 +71,11 @@ fi
 
 # The required-env array/list must contain the same names.
 extract_sh_required() {
-    # Names appear inside the DEFENSECLAW_REPRO_REQUIRED_ENVS=(...) block.
-    awk '/^DEFENSECLAW_REPRO_REQUIRED_ENVS=\(/,/^\)/' "${SH}" \
+    # Names appear inside the REPRO_REQUIRED_ENVS=(...) block. The
+    # array name deliberately lacks a DEFENSECLAW_ prefix so it stays
+    # out of the codebase env-var-coverage regex — see
+    # cli/tests/test_envvars_codebase_coverage.py.
+    awk '/^REPRO_REQUIRED_ENVS=\(/,/^\)/' "${SH}" \
         | grep -E '^[[:space:]]+[A-Z_]+$' \
         | awk '{print $1}' \
         | sort
@@ -90,7 +93,7 @@ sh_required="$(extract_sh_required)"
 ps_required="$(extract_ps_required)"
 
 if [[ "${sh_required}" != "${ps_required}" ]]; then
-    echo "check-repro-flags-parity: DEFENSECLAW_REPRO_REQUIRED_ENVS drift between the two files." >&2
+    echo "check-repro-flags-parity: REPRO_REQUIRED_ENVS drift between the two files." >&2
     echo "" >&2
     echo "bash required list:" >&2
     echo "${sh_required}" | sed 's/^/  /' >&2
