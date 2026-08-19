@@ -210,25 +210,40 @@ try {
         )
     }
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-    # Sequential ReadToEnd on stdout+stderr can deadlock: if the child writes
-    # more than the pipe buffer to stderr (a PowerShell error record with
-    # its stack trace easily exceeds it) while the parent is blocked on
-    # stdout, the child blocks on its stderr write and neither side makes
-    # progress. Read stderr asynchronously so both drains run concurrently.
+    # Drain BOTH pipes asynchronously. A single sync ReadToEnd on either
+    # stream can block the parent before the bounded WaitForExit below
+    # runs (a PowerShell error record with its stack trace easily exceeds
+    # the pipe buffer, and stdout can burst similarly). Concurrent async
+    # reads let the child make progress on both streams while the parent
+    # only waits on the ordered task pair below.
+    $stdoutReadTask = $nestedProcess.StandardOutput.ReadToEndAsync()
     $stderrReadTask = $nestedProcess.StandardError.ReadToEndAsync()
-    $capturedOutput = $nestedProcess.StandardOutput.ReadToEnd()
-    # Bound the wait so a hung child fails the smoke rather than the CI job.
     $detachedHelperWaitBudgetMs = 5 * 60 * 1000
     if (-not $nestedProcess.WaitForExit($detachedHelperWaitBudgetMs)) {
-        try { $nestedProcess.Kill($true) } catch { }
+        # Process.Kill([bool]) is a .NET Core 2.1+ overload and is NOT
+        # available under Windows PowerShell 5.1 (.NET Framework 4.x).
+        # Fall back to taskkill.exe /T /F, which the runtime always ships
+        # on Windows. Best-effort; the throw below still reports the hang.
+        try {
+            $taskkillPath = [IO.Path]::Combine(
+                [Environment]::GetFolderPath('System'),
+                'taskkill.exe'
+            )
+            $killArgs = @('/PID', $nestedProcess.Id, '/T', '/F')
+            & $taskkillPath @killArgs | Out-Null
+        } catch { }
         throw (
             'captured detached-helper smoke child did not exit within ' +
             "$($detachedHelperWaitBudgetMs / 1000)s"
         )
     }
+    if (-not $stdoutReadTask.Wait($detachedHelperWaitBudgetMs)) {
+        throw 'captured detached-helper smoke child stdout drain did not complete'
+    }
     if (-not $stderrReadTask.Wait($detachedHelperWaitBudgetMs)) {
         throw 'captured detached-helper smoke child stderr drain did not complete'
     }
+    $capturedOutput = $stdoutReadTask.Result
     $capturedError = $stderrReadTask.Result
     $stopwatch.Stop()
     if ($nestedProcess.ExitCode -ne 0) {
