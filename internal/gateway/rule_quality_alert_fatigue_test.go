@@ -155,6 +155,12 @@ func TestAlertFatigueActionModePreservesWeakExplicitCredentials(t *testing.T) {
 		if verdict.Action != "allow" {
 			t.Errorf("Action verdict for unproved credential egress = %s, want allow", verdict.Action)
 		}
+		if verdict.RawAction != "allow" {
+			t.Errorf("Raw action for unproved credential egress = %s, want allow", verdict.RawAction)
+		}
+		if verdict.WouldBlock {
+			t.Error("unproved credential egress must not set would_block")
+		}
 		if verdict.Severity != "LOW" {
 			t.Errorf("Visible severity for unproved credential egress = %s, want LOW", verdict.Severity)
 		}

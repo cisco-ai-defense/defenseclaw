@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"os"
 	"path"
 	"strings"
 
@@ -142,11 +143,7 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 			exactSemanticPathValue(candidate),
 			candidate.Flavor,
 		)
-		if !ok || !activeAgentInstructionBaseMatches(
-			candidatePath,
-			candidate.Flavor,
-			fileName,
-		) {
+		if !ok || !strings.EqualFold(path.Base(candidatePath), fileName) {
 			return false
 		}
 		for _, activePath := range facts.ActiveAgentFiles {
@@ -154,7 +151,15 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 				activePath,
 				candidate.Flavor,
 			)
-			if active && canonicalActivePath == candidatePath {
+			if active && activeAgentInstructionBaseMatches(
+				canonicalActivePath,
+				candidate.Flavor,
+				fileName,
+			) && activeAgentInstructionPathsMatch(
+				canonicalActivePath,
+				candidatePath,
+				candidate.Flavor,
+			) {
 				return true
 			}
 		}
@@ -192,9 +197,9 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 }
 
 // exactSemanticPathValue intentionally does not use semanticPathValue: that
-// helper folds case for broad pattern matching, while POSIX path identity is
-// case-sensitive. Active instruction-file authority must preserve the
-// filesystem flavor proven by ActionFacts.
+// helper folds case for broad pattern matching. Active instruction-file
+// authority must preserve the proven spelling and filesystem flavor until
+// identity is checked with the host filesystem's semantics.
 func exactSemanticPathValue(candidate actionfacts.PathFact) string {
 	if candidate.Resolved != "" {
 		return candidate.Resolved
@@ -250,6 +255,25 @@ func activeAgentInstructionBaseMatches(
 		return strings.EqualFold(base, fileName)
 	}
 	return flavor == actionfacts.PathFlavorPOSIX && base == fileName
+}
+
+func activeAgentInstructionPathsMatch(
+	activePath string,
+	candidatePath string,
+	flavor actionfacts.PathFlavor,
+) bool {
+	if activePath == candidatePath {
+		return true
+	}
+	if flavor != actionfacts.PathFlavorPOSIX {
+		return false
+	}
+	activeInfo, err := os.Stat(activePath)
+	if err != nil {
+		return false
+	}
+	candidateInfo, err := os.Stat(candidatePath)
+	return err == nil && os.SameFile(activeInfo, candidateInfo)
 }
 
 func isASCIIPathLetter(value byte) bool {

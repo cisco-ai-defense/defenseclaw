@@ -50,6 +50,9 @@ Authoritative ActionFacts own the semantic decision; unsupported or ambiguous
 input keeps the legacy fallback. Each migrated owner emits one canonical
 finding rather than independent regex and CEL findings.
 
+Semantic-only rules use the intentionally never-matching RE2 sentinel `a^`
+when a raw command mention cannot safely serve as fallback evidence.
+
 All trusted-action findings cross a final same-rule proof gate before they can
 affect a block decision. Complete, code-owned semantic, CodeGuard, exact
 fallback proof may authorize enforcement. Raw regex matches, parser-shadow

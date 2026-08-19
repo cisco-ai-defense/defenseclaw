@@ -341,7 +341,8 @@ func TestHandleAgentHook_AntigravityUsesCompleteRawBodyForAuthority(t *testing.T
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Action != "allow" || response.RawAction != "allow" {
+	if response.Action != "allow" || response.RawAction != "allow" ||
+		response.WouldBlock || response.Severity != "NONE" {
 		t.Fatalf("trailing JSON acquired tool authority: %+v", response)
 	}
 }

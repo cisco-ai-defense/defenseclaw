@@ -18,7 +18,12 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -104,14 +109,14 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			want:        true,
 		},
 		{
-			name:        "POSIX path identity is case sensitive",
+			name:        "unresolved POSIX case variant is not trusted",
 			ruleID:      "COG-AGENTS-MD",
 			command:     "printf updated > /repo/AGENTS.md",
 			activeFiles: []string{"/Repo/AGENTS.md"},
 			wantSafe:    true,
 		},
 		{
-			name:        "POSIX instruction basename is case sensitive",
+			name:        "untrusted lowercase active basename stays inactive",
 			ruleID:      "COG-AGENTS-MD",
 			command:     "printf updated > /repo/agents.md",
 			activeFiles: []string{"/repo/agents.md"},
@@ -193,6 +198,39 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestActiveAgentInstructionMutationFollowsPOSIXFilesystemIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX filesystem identity is covered on Unix hosts")
+	}
+
+	directory := t.TempDir()
+	activePath := filepath.Join(directory, "AGENTS.md")
+	candidatePath := filepath.Join(directory, "agents.md")
+	if err := os.WriteFile(activePath, []byte("active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(candidatePath); errors.Is(err, os.ErrNotExist) {
+		if err := os.Link(activePath, candidatePath); err != nil {
+			t.Skipf("same-file aliases are unavailable: %v", err)
+		}
+	} else if err != nil {
+		t.Fatal(err)
+	}
+
+	facts := analyzeIntegrityCommand(
+		t,
+		"printf updated > "+strconv.Quote(candidatePath),
+		actionfacts.DialectPOSIX,
+		directory,
+		"",
+	)
+	facts.ActiveAgentFiles = []string{activePath}
+	owner := semanticIntegrityPersistenceOwners["COG-AGENTS-MD"]
+	if !owner.prerequisite(facts) {
+		t.Fatalf("same-file casing alias did not match the active instruction file: %+v", facts)
 	}
 }
 

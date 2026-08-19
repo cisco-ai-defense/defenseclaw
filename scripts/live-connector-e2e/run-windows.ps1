@@ -1598,7 +1598,8 @@ function Invoke-DangerousHook(
         if ($result.ExitCode -ne 0) { throw "$Name shadow hook exited $($result.ExitCode), expected 0" }
     }
     if (Test-Path -LiteralPath $Sentinel) { throw "$Name command input executed and created $Sentinel" }
-    Write-Result "dangerous-command:$Name`:$Mode" pass "exit=$($result.ExitCode) action=$($decision.action) raw=$($decision.raw_action) expected=$Expected would_block=$($decision.would_block) enforced=$($decision.enforced) rule=$RuleID sentinel=absent"
+    $ruleEvidence = if ($Expected -eq 'quiet') { 'none' } else { $RuleID }
+    Write-Result "dangerous-command:$Name`:$Mode" pass "exit=$($result.ExitCode) action=$($decision.action) raw=$($decision.raw_action) expected=$Expected would_block=$($decision.would_block) enforced=$($decision.enforced) rule=$ruleEvidence sentinel=absent"
 }
 
 function Invoke-DangerousCommandCorpus([ValidateSet('observe', 'action')][string]$Mode) {
