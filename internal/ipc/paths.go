@@ -53,7 +53,17 @@ const (
 //
 //  1. cfg.Managed.SocketPath (verbatim)
 //  2. $DEFENSECLAW_IPC_SOCKET (dev / test rigs only)
-//  3. managed_enterprise → filepath.Join(filepath.Dir(cfg.DataDir), "ipc", SocketFileName)
+//  3. managed_enterprise → resolveManagedIPCSocketPath(cfg):
+//        - linux/darwin: filepath.Join(filepath.Dir(cfg.DataDir),
+//          "ipc", SocketFileName)
+//        - windows:      filepath.Join(<TrustedProgramData>, "Cisco",
+//          "Cisco Secure Client", "DefenseClaw", "ipc",
+//          SocketFileName). See spec 004 REQ-02. Returns "" when
+//          TrustedProgramData resolution fails; the caller's
+//          ResolveSocketPath empty-check turns that into a
+//          distinguishable "ipc: resolve socket path: empty"
+//          server-start error rather than a fall-through to a
+//          per-user path.
 //  4. otherwise → filepath.Join(cfg.DataDir, "ipc", SocketFileName)
 //
 // The env override is intentionally ignored in managed_enterprise so
@@ -61,7 +71,9 @@ const (
 // the enterprise-owned socket path. Operators who need to move the
 // socket in production must set cfg.Managed.SocketPath explicitly.
 //
-// Never returns an error: rule 4 always produces a value.
+// Never returns an error: rule 4 always produces a value (rule 3 may
+// return "" on Windows when the TrustedProgramData registry lookup
+// fails — the server refuses to start in that case).
 func ResolveSocketPath(cfg *config.Config) string {
 	if cfg == nil {
 		return ""
@@ -75,7 +87,7 @@ func ResolveSocketPath(cfg *config.Config) string {
 		}
 	}
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		return filepath.Join(filepath.Dir(cfg.DataDir), "ipc", SocketFileName)
+		return resolveManagedIPCSocketPath(cfg)
 	}
 	return filepath.Join(cfg.DataDir, "ipc", SocketFileName)
 }

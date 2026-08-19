@@ -10,7 +10,11 @@
 
 package config
 
-import "github.com/defenseclaw/defenseclaw/internal/managed"
+import (
+	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
 
 // ManagedIPCConfig controls the local UDS gRPC server that external
 // consumers (Cisco Secure Client GUI) use to observe DefenseClaw
@@ -119,4 +123,42 @@ func DefaultSecureClientPolicy() ManagedIPCConfig {
 		AllowedSigningIDs: []string{SecureClientSigningID},
 		AllowedBundleIDs:  []string{SecureClientBundleID},
 	}
+}
+
+// Peer-auth Kind literals. Duplicated here (rather than imported
+// from internal/ipc/peerauth_unix.go) to avoid an import cycle: the
+// ipc package imports internal/config, so a config → ipc edge would
+// break the build. The values MUST stay in sync — the value lookup
+// helpers (peerauth_unix.go / peerauth_windows.go) are the runtime
+// sources; this file's role is to surface the effective KIND to
+// callers that need to compose diagnostic output BEFORE the ipc
+// server is constructed (e.g. spec 004's startup log line).
+const (
+	peerAuthKindUnixPeer                = "UnixPeer"
+	peerAuthKindUnixPeerUnauthenticated = "UnixPeerUnauthenticated"
+)
+
+// EffectivePeerAuthKind reports which peer-auth kind the IPC accept
+// path will report for peers on the current runtime, given a config.
+// Returns "" when ManagedIPCEnabled() is false — no IPC server, no
+// peer-auth surface.
+//
+// - macOS + Linux managed_enterprise: `"UnixPeer"` (codesign +
+//   LOCAL_PEERCRED path in peerauth_unix.go / peerauth_darwin.go).
+// - Windows managed_enterprise: `"UnixPeerUnauthenticated"` — the
+//   initial-cut deferred-auth posture (spec 004 REQ-06 / REQ-11).
+//   The socket-file DACL is the access boundary; full peer-auth is
+//   a follow-up spec per parity-plan §4.4.
+//
+// The GA release-gate at internal/ipc/authposture_gagate.go refuses
+// a release-candidate build in which this helper can still return
+// "UnixPeerUnauthenticated" (spec 004 REQ-18 + REQ-19).
+func (c *Config) EffectivePeerAuthKind() string {
+	if !c.ManagedIPCEnabled() {
+		return ""
+	}
+	if runtime.GOOS == "windows" {
+		return peerAuthKindUnixPeerUnauthenticated
+	}
+	return peerAuthKindUnixPeer
 }
