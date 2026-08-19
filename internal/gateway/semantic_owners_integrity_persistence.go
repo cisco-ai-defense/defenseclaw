@@ -146,6 +146,16 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 		if !ok || !strings.EqualFold(path.Base(candidatePath), fileName) {
 			return false
 		}
+		if facts.ActiveAgentFilesUncertain {
+			// A bounded authenticated cache lost part of this session's exact
+			// context. Fail closed only after ActionFacts proves a mutation of an
+			// exact instruction-file path; filename mentions and reads stay safe.
+			return activeAgentInstructionBaseMatches(
+				candidatePath,
+				candidate.Flavor,
+				fileName,
+			)
+		}
 		for _, activePath := range facts.ActiveAgentFiles {
 			canonicalActivePath, active := activeAgentInstructionPath(
 				activePath,

@@ -70,6 +70,7 @@ func analyze(input Input) Facts {
 			"",
 		)
 		facts.ActiveAgentFiles = nil
+		facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
 		return facts
 	}
 
@@ -189,6 +190,7 @@ func analyze(input Input) Facts {
 		activeHome,
 	)
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
+	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
 	return facts
 }
 

@@ -32,13 +32,15 @@ func TestActiveAgentFilesAreBoundedTrustedContext(t *testing.T) {
 		`C:\Users\fixture\MEMORY.md`,
 	}
 	facts := Analyze(Input{
-		Tool:             "shell",
-		Command:          "printf updated > /repo/AGENTS.md",
-		CWD:              "/repo",
-		ActiveAgentFiles: provided,
+		Tool:                      "shell",
+		Command:                   "printf updated > /repo/AGENTS.md",
+		CWD:                       "/repo",
+		ActiveAgentFiles:          provided,
+		ActiveAgentFilesUncertain: true,
 	})
 	want := []string{"/repo/AGENTS.md", "C:/Users/fixture/MEMORY.md"}
-	if !facts.Authoritative() || !slices.Equal(facts.ActiveAgentFiles, want) {
+	if !facts.Authoritative() || !facts.ActiveAgentFilesUncertain ||
+		!slices.Equal(facts.ActiveAgentFiles, want) {
 		t.Fatalf("active files = %#v, want %#v; facts=%#v", facts.ActiveAgentFiles, want, facts)
 	}
 
@@ -48,6 +50,9 @@ func TestActiveAgentFilesAreBoundedTrustedContext(t *testing.T) {
 	}
 
 	projected := facts.EnforcementProjection()
+	if !projected.ActiveAgentFilesUncertain {
+		t.Fatal("enforcement projection lost active-file uncertainty")
+	}
 	facts.ActiveAgentFiles[0] = "/mutated/AGENTS.md"
 	if !slices.Equal(projected.ActiveAgentFiles, want) {
 		t.Fatalf("projection retained source-owned slice: %#v", projected.ActiveAgentFiles)

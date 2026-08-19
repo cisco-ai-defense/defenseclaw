@@ -93,13 +93,14 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
-		name        string
-		ruleID      string
-		command     string
-		dialect     actionfacts.Dialect
-		activeFiles []string
-		want        bool
-		wantSafe    bool
+		name             string
+		ruleID           string
+		command          string
+		dialect          actionfacts.Dialect
+		activeFiles      []string
+		contextUncertain bool
+		want             bool
+		wantSafe         bool
 	}{
 		{
 			name:        "active AGENTS mutation",
@@ -166,6 +167,35 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			wantSafe: true,
 		},
 		{
+			name:             "uncertain context fails closed for exact mutation",
+			ruleID:           "COG-MEMORY",
+			command:          "printf updated > /repo/MEMORY.md",
+			contextUncertain: true,
+			want:             true,
+		},
+		{
+			name:             "uncertain context preserves POSIX basename case",
+			ruleID:           "COG-AGENTS-MD",
+			command:          "printf updated > /repo/agents.md",
+			contextUncertain: true,
+			wantSafe:         true,
+		},
+		{
+			name:             "uncertain context preserves Windows case folding",
+			ruleID:           "COG-AGENTS-MD",
+			command:          `Set-Content -LiteralPath 'C:\Repo\agents.md' -Value updated`,
+			dialect:          actionfacts.DialectPowerShell,
+			contextUncertain: true,
+			want:             true,
+		},
+		{
+			name:             "uncertain context does not turn reads into mutations",
+			ruleID:           "COG-AGENTS-MD",
+			command:          "cat /repo/AGENTS.md",
+			contextUncertain: true,
+			wantSafe:         true,
+		},
+		{
 			name:        "filename mention",
 			ruleID:      "COG-AGENTS-MD",
 			command:     "rg -n AGENTS.md internal/gateway",
@@ -177,12 +207,13 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			facts := actionfacts.Analyze(actionfacts.Input{
-				Tool:             "shell",
-				Command:          test.command,
-				DialectHint:      test.dialect,
-				CWD:              "/repo",
-				ActiveHome:       "/home/alice",
-				ActiveAgentFiles: test.activeFiles,
+				Tool:                      "shell",
+				Command:                   test.command,
+				DialectHint:               test.dialect,
+				CWD:                       "/repo",
+				ActiveHome:                "/home/alice",
+				ActiveAgentFiles:          test.activeFiles,
+				ActiveAgentFilesUncertain: test.contextUncertain,
 			})
 			requireAuthoritativeIntegrityFacts(t, facts)
 			owner, ok := semanticIntegrityPersistenceOwners[test.ruleID]

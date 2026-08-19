@@ -63,8 +63,12 @@ func evaluateClaudeCodeToolFacts(
 	hookEventName string,
 	sessionID string,
 	payload map[string]interface{},
+	command string,
 ) toolChainHookCapture {
 	t.Helper()
+	if command == "" {
+		command = "printf updated > /tmp/AGENTS.md"
+	}
 	capture := toolChainHookCapture{}
 	ctx := withToolChainHookCapture(authenticatedClaudeCodeTestContext(), &capture)
 	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
@@ -73,7 +77,7 @@ func evaluateClaudeCodeToolFacts(
 		CWD:           t.TempDir(),
 		ToolName:      "Bash",
 		ToolInput: map[string]interface{}{
-			"command": "printf updated > /tmp/AGENTS.md",
+			"command": command,
 		},
 		Payload: payload,
 	})
@@ -84,9 +88,12 @@ func evaluateClaudeCodeToolFacts(
 }
 
 func TestClaudeCodeActiveAgentFilesRequireAuthenticatedExactLoadAndSameSession(t *testing.T) {
+	installDefaultProfileConnector(t, "claudecode")
 	root := t.TempDir()
 	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
 	api := activeClaudeCodeTestAPI()
+	now := time.Unix(1_700_000_000, 0)
+	api.activeAgentContext.now = func() time.Time { return now }
 
 	load := claudeCodeHookRequest{
 		HookEventName: "InstructionsLoaded",
@@ -94,20 +101,31 @@ func TestClaudeCodeActiveAgentFilesRequireAuthenticatedExactLoadAndSameSession(t
 		FilePath:      agentFile,
 	}
 	api.evaluateClaudeCodeHook(context.Background(), load)
-	if got := api.activeAgentContext.snapshot("claudecode", "session-a"); len(got) != 0 {
+	if got := api.activeAgentContext.snapshot("claudecode", "session-a"); len(got.files) != 0 || got.uncertain {
 		t.Fatalf("unauthenticated load gained authority: %#v", got)
 	}
 
 	api.evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), load)
+	now = now.Add(24 * time.Hour)
+	mutation := fmt.Sprintf("printf updated > %q", agentFile)
 	for _, hookEventName := range []string{"PreToolUse", "PermissionRequest"} {
 		t.Run(hookEventName, func(t *testing.T) {
-			sameSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-a", nil)
+			sameSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-a", nil, mutation)
 			if !slices.Equal(sameSession.facts.ActiveAgentFiles, []string{filepath.ToSlash(agentFile)}) {
 				t.Fatalf("same-session active files = %#v, want %q", sameSession.facts.ActiveAgentFiles, filepath.ToSlash(agentFile))
 			}
-			differentSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-b", nil)
+			if sameSession.facts.ActiveAgentFilesUncertain {
+				t.Fatal("idle exact session became uncertain without a lifecycle reset")
+			}
+			if finding := findingWithID(sameSession.findings, "COG-AGENTS-MD"); finding == nil || !finding.contributesToEnforcement() {
+				t.Fatalf("idle active-file mutation was not enforceable: %+v", sameSession.findings)
+			}
+			differentSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-b", nil, mutation)
 			if len(differentSession.facts.ActiveAgentFiles) != 0 {
 				t.Fatalf("different session inherited authority: %#v", differentSession.facts.ActiveAgentFiles)
+			}
+			if finding := findingWithID(differentSession.findings, "COG-AGENTS-MD"); finding != nil {
+				t.Fatalf("known-absent context used a filename heuristic: %+v", differentSession.findings)
 			}
 		})
 	}
@@ -136,7 +154,7 @@ func TestClaudeCodeActiveAgentFilesAuthenticationComesFromHookTokenBoundary(t *t
 	if unauthorizedResult.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status = %d, want %d", unauthorizedResult.Code, http.StatusUnauthorized)
 	}
-	if got := api.activeAgentContext.snapshot("claudecode", load.SessionID); len(got) != 0 {
+	if got := api.activeAgentContext.snapshot("claudecode", load.SessionID); len(got.files) != 0 {
 		t.Fatalf("unauthorized request gained authority: %#v", got)
 	}
 
@@ -148,7 +166,7 @@ func TestClaudeCodeActiveAgentFilesAuthenticationComesFromHookTokenBoundary(t *t
 	if masterAuthorizedResult.Code != http.StatusNoContent {
 		t.Fatalf("master-token status = %d, want %d", masterAuthorizedResult.Code, http.StatusNoContent)
 	}
-	if got := api.activeAgentContext.snapshot("claudecode", load.SessionID); len(got) != 0 {
+	if got := api.activeAgentContext.snapshot("claudecode", load.SessionID); len(got.files) != 0 {
 		t.Fatalf("master gateway token gained connector hook authority: %#v", got)
 	}
 
@@ -160,7 +178,7 @@ func TestClaudeCodeActiveAgentFilesAuthenticationComesFromHookTokenBoundary(t *t
 	if authorizedResult.Code != http.StatusNoContent {
 		t.Fatalf("authenticated status = %d, want %d", authorizedResult.Code, http.StatusNoContent)
 	}
-	if got := api.activeAgentContext.snapshot("claudecode", load.SessionID); !slices.Equal(got, []string{agentFile}) {
+	if got := api.activeAgentContext.snapshot("claudecode", load.SessionID); !slices.Equal(got.files, []string{agentFile}) || got.uncertain {
 		t.Fatalf("authenticated hook context = %#v, want %q", got, agentFile)
 	}
 
@@ -201,7 +219,7 @@ func TestClaudeCodeActiveAgentFilesIgnoreReadMentionAndGenericPayload(t *testing
 	capture := evaluateClaudeCodeToolFacts(t, api, "PreToolUse", "read-session", map[string]interface{}{
 		"active_agent_files": []interface{}{agentFile},
 		"content":            "the active file is " + agentFile,
-	})
+	}, "")
 	if len(capture.facts.ActiveAgentFiles) != 0 {
 		t.Fatalf("read, mention, or generic payload gained authority: %#v", capture.facts.ActiveAgentFiles)
 	}
@@ -224,7 +242,7 @@ func TestClaudeCodeActiveAgentFilesLifecycleClears(t *testing.T) {
 				HookEventName: event,
 				SessionID:     "lifecycle-session",
 			})
-			if got := api.activeAgentContext.snapshot("claudecode", "lifecycle-session"); len(got) != 0 {
+			if got := api.activeAgentContext.snapshot("claudecode", "lifecycle-session"); len(got.files) != 0 {
 				t.Fatalf("%s retained authority: %#v", event, got)
 			}
 		})
@@ -239,11 +257,11 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		cache := activeAgentContextCache{}
 		cache.seed("claudecode", "session", valid)
 		cache.seed("claudecode", "session", "AGENTS.md")
-		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got, []string{valid}) {
+		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got.files, []string{valid}) {
 			t.Fatalf("relative load changed exact authority: %#v", got)
 		}
 		cache.seed("claudecode", "session", valid)
-		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got, []string{valid}) {
+		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got.files, []string{valid}) {
 			t.Fatalf("repeated exact load changed authority: %#v", got)
 		}
 	})
@@ -253,7 +271,7 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		inexact := writeActiveAgentTestFile(t, root, "CLAUDE.md")
 		cache.seed("claudecode", "session", valid)
 		cache.seed("claudecode", "session", inexact)
-		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got, []string{valid}) {
+		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got.files, []string{valid}) {
 			t.Fatalf("out-of-scope instruction load changed authority: %#v", got)
 		}
 	})
@@ -268,7 +286,7 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 		cache.seed("claudecode", "session", link)
-		if got := cache.snapshot("claudecode", "session"); len(got) != 0 {
+		if got := cache.snapshot("claudecode", "session"); len(got.files) != 0 {
 			t.Fatalf("symlink gained authority: %#v", got)
 		}
 	})
@@ -282,7 +300,7 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 		cache.seed("claudecode", "session", filepath.Join(linkDir, filepath.Base(memory)))
-		if got := cache.snapshot("claudecode", "session"); len(got) != 0 {
+		if got := cache.snapshot("claudecode", "session"); len(got.files) != 0 {
 			t.Fatalf("path through symlink gained authority: %#v", got)
 		}
 	})
@@ -297,24 +315,25 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 			}
 			cache.seed("claudecode", "session", path)
 		}
-		if got := cache.snapshot("claudecode", "session"); len(got) != maxActiveAgentContextFiles || got[0] != first {
+		if got := cache.snapshot("claudecode", "session"); len(got.files) != maxActiveAgentContextFiles || got.files[0] != first || !got.uncertain {
 			t.Fatalf("overflow changed bounded exact entries: %#v", got)
 		}
 	})
 }
 
-func TestActiveAgentContextIsBoundedAndExpires(t *testing.T) {
+func TestActiveAgentContextIsBoundedAndRetainsIdleSessions(t *testing.T) {
 	root := t.TempDir()
 	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
 	now := time.Unix(1_700_000_000, 0)
 	cache := activeAgentContextCache{now: func() time.Time { return now }}
 
-	cache.seed("claudecode", "expiring", agentFile)
-	now = now.Add(activeAgentContextTTL)
-	if got := cache.snapshot("claudecode", "expiring"); len(got) != 0 {
-		t.Fatalf("expired session retained authority: %#v", got)
+	cache.seed("claudecode", "idle", agentFile)
+	now = now.Add(24 * time.Hour)
+	if got := cache.snapshot("claudecode", "idle"); !slices.Equal(got.files, []string{agentFile}) || got.uncertain {
+		t.Fatalf("idle session lost authority without a lifecycle reset: %#v", got)
 	}
 
+	cache = activeAgentContextCache{now: func() time.Time { return now }}
 	for index := 0; index <= maxActiveAgentContextSessions; index++ {
 		now = now.Add(time.Millisecond)
 		cache.seed("claudecode", fmt.Sprintf("session-%03d", index), agentFile)
@@ -325,8 +344,117 @@ func TestActiveAgentContextIsBoundedAndExpires(t *testing.T) {
 	if count != maxActiveAgentContextSessions {
 		t.Fatalf("session cache size = %d, want %d", count, maxActiveAgentContextSessions)
 	}
-	if got := cache.snapshot("claudecode", "session-000"); len(got) != 0 {
-		t.Fatalf("oldest bounded session retained authority: %#v", got)
+	if got := cache.snapshot("claudecode", "session-000"); len(got.files) != 0 || !got.uncertain {
+		t.Fatalf("evicted session loss was not explicit: %#v", got)
+	}
+}
+
+func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutations(t *testing.T) {
+	installDefaultProfileConnector(t, "claudecode")
+	root := t.TempDir()
+	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
+	api := activeClaudeCodeTestAPI()
+	fixedTime := time.Unix(1_700_000_000, 0)
+	api.activeAgentContext.now = func() time.Time { return fixedTime }
+
+	for index := 0; index < maxActiveAgentContextSessions; index++ {
+		api.activeAgentContext.seed(
+			"claudecode",
+			fmt.Sprintf("session-%03d", index),
+			agentFile,
+		)
+	}
+	api.activeAgentContext.seed("claudecode", "session-new", agentFile)
+
+	mutation := fmt.Sprintf("printf updated > %q", agentFile)
+	mutating := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PreToolUse",
+		"session-000",
+		nil,
+		mutation,
+	)
+	if len(mutating.facts.ActiveAgentFiles) != 0 ||
+		!mutating.facts.ActiveAgentFilesUncertain {
+		t.Fatalf("evicted session did not preserve explicit uncertainty: %+v", mutating.facts)
+	}
+	if finding := findingWithID(mutating.findings, "COG-AGENTS-MD"); finding == nil || !finding.contributesToEnforcement() {
+		t.Fatalf("uncertain exact mutation was not enforceable: %+v", mutating.findings)
+	}
+
+	read := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PreToolUse",
+		"session-000",
+		nil,
+		fmt.Sprintf("cat %q", agentFile),
+	)
+	if finding := findingWithID(read.findings, "COG-AGENTS-MD"); finding != nil {
+		t.Fatalf("uncertain context turned an exact read into a mutation: %+v", read.findings)
+	}
+
+	ctx := authenticatedClaudeCodeTestContext()
+	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "SessionStart",
+		SessionID:     "session-000",
+	})
+	knownEmpty := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PreToolUse",
+		"session-000",
+		nil,
+		mutation,
+	)
+	if knownEmpty.facts.ActiveAgentFilesUncertain ||
+		len(knownEmpty.facts.ActiveAgentFiles) != 0 {
+		t.Fatalf("authenticated session reset did not establish known-empty context: %+v", knownEmpty.facts)
+	}
+	if finding := findingWithID(knownEmpty.findings, "COG-AGENTS-MD"); finding != nil {
+		t.Fatalf("known-empty reset context inherited unrelated saturation: %+v", knownEmpty.findings)
+	}
+
+	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "InstructionsLoaded",
+		SessionID:     "session-000",
+		FilePath:      agentFile,
+	})
+	reloaded := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PermissionRequest",
+		"session-000",
+		nil,
+		mutation,
+	)
+	if reloaded.facts.ActiveAgentFilesUncertain ||
+		!slices.Equal(reloaded.facts.ActiveAgentFiles, []string{agentFile}) {
+		t.Fatalf("reloaded reset session did not regain exact context: %+v", reloaded.facts)
+	}
+	if finding := findingWithID(reloaded.findings, "COG-AGENTS-MD"); finding == nil || !finding.contributesToEnforcement() {
+		t.Fatalf("reloaded active-file mutation was not enforceable: %+v", reloaded.findings)
+	}
+
+	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "CwdChanged",
+		SessionID:     "session-000",
+	})
+	changedDirectory := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PreToolUse",
+		"session-000",
+		nil,
+		mutation,
+	)
+	if changedDirectory.facts.ActiveAgentFilesUncertain ||
+		len(changedDirectory.facts.ActiveAgentFiles) != 0 {
+		t.Fatalf("CwdChanged did not establish known-empty context: %+v", changedDirectory.facts)
+	}
+	if finding := findingWithID(changedDirectory.findings, "COG-AGENTS-MD"); finding != nil {
+		t.Fatalf("CwdChanged inherited stale instruction authority: %+v", changedDirectory.findings)
 	}
 }
 
@@ -357,9 +485,10 @@ func TestActiveAgentContextTimestampTieEvictionIsDeterministic(t *testing.T) {
 		}]
 		count := len(cache.sessions)
 		cache.mu.Unlock()
+		evicted := cache.snapshot("claudecode", "session-000")
 
 		if oldestRetained || !nextRetained || !newRetained ||
-			count != maxActiveAgentContextSessions {
+			count != maxActiveAgentContextSessions || !evicted.uncertain {
 			t.Fatalf(
 				"run %d eviction: oldest=%t next=%t new=%t count=%d",
 				run,
@@ -385,7 +514,7 @@ func TestActiveAgentContextInvalidNewSessionCannotEvictExactSession(t *testing.T
 	}
 	cache.seed("claudecode", "invalid-new-session", invalidFile)
 
-	if got := cache.snapshot("claudecode", "session-000"); !slices.Equal(got, []string{agentFile}) {
+	if got := cache.snapshot("claudecode", "session-000"); !slices.Equal(got.files, []string{agentFile}) || got.uncertain {
 		t.Fatalf("invalid new session evicted oldest exact session: %#v", got)
 	}
 	cache.mu.Lock()

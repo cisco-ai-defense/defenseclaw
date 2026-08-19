@@ -28,11 +28,12 @@ func TestTrustedNestedExecutionActionsCloneActiveAgentFiles(t *testing.T) {
 	activeAgentFiles := []string{"/repo/AGENTS.md"}
 	want := append([]string(nil), activeAgentFiles...)
 	input := actionfacts.Input{
-		Tool:             "shell",
-		Command:          `eval 'printf updated > /repo/AGENTS.md'`,
-		CWD:              "/repo",
-		ActiveHome:       "/home/alice",
-		ActiveAgentFiles: activeAgentFiles,
+		Tool:                      "shell",
+		Command:                   `eval 'printf updated > /repo/AGENTS.md'`,
+		CWD:                       "/repo",
+		ActiveHome:                "/home/alice",
+		ActiveAgentFiles:          activeAgentFiles,
+		ActiveAgentFilesUncertain: true,
 	}
 	actions := trustedNestedExecutionActions(input, actionfacts.Analyze(input))
 	if len(actions) == 0 {
@@ -58,6 +59,10 @@ func TestTrustedNestedExecutionActionsCloneActiveAgentFiles(t *testing.T) {
 				actions[index].facts.ActiveAgentFiles,
 				want,
 			)
+		}
+		if !actions[index].input.ActiveAgentFilesUncertain ||
+			!actions[index].facts.ActiveAgentFilesUncertain {
+			t.Fatalf("nested action lost active-file uncertainty: %+v", actions[index])
 		}
 	}
 	if nonRaw == 0 {

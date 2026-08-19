@@ -30,7 +30,6 @@ const (
 	maxActiveAgentContextSessions = 256
 	maxActiveAgentContextPathSize = 4 << 10
 	maxActiveAgentSessionIDSize   = 512
-	activeAgentContextTTL         = 30 * time.Minute
 )
 
 type authenticatedHookConnectorContextKey struct{}
@@ -61,16 +60,23 @@ type activeAgentContextKey struct {
 
 type activeAgentContextSession struct {
 	files     []string
+	uncertain bool
 	updatedAt time.Time
+}
+
+type activeAgentContextSnapshot struct {
+	files     []string
+	uncertain bool
 }
 
 // activeAgentContextCache is an APIServer-owned, process-local authority
 // cache. Its zero value is ready for use so tests and small server fixtures
 // that construct APIServer directly retain the production behavior.
 type activeAgentContextCache struct {
-	mu       sync.Mutex
-	sessions map[activeAgentContextKey]activeAgentContextSession
-	now      func() time.Time
+	mu        sync.Mutex
+	sessions  map[activeAgentContextKey]activeAgentContextSession
+	uncertain bool
+	now       func() time.Time
 }
 
 func (cache *activeAgentContextCache) currentTime() time.Time {
@@ -111,14 +117,6 @@ func validActiveAgentContextKey(connectorName, sessionID string) (activeAgentCon
 	return activeAgentContextKey{connector: connectorName, sessionID: sessionID}, true
 }
 
-func (cache *activeAgentContextCache) pruneLocked(now time.Time) {
-	for key, session := range cache.sessions {
-		if now.Sub(session.updatedAt) >= activeAgentContextTTL {
-			delete(cache.sessions, key)
-		}
-	}
-}
-
 func (cache *activeAgentContextCache) makeRoomLocked() {
 	if len(cache.sessions) < maxActiveAgentContextSessions {
 		return
@@ -136,6 +134,10 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 	}
 	if found {
 		delete(cache.sessions, oldestKey)
+		// The evicted session may still be active because only authenticated
+		// lifecycle events can prove otherwise. Keep that loss of exact context
+		// explicit so a later tool request cannot turn it into a safe negative.
+		cache.uncertain = true
 	}
 }
 
@@ -161,11 +163,13 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	if cache.sessions == nil {
 		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
 	}
-	cache.pruneLocked(now)
 	session, exists := cache.sessions[key]
 	if !exists {
 		cache.makeRoomLocked()
-		session = activeAgentContextSession{updatedAt: now}
+		session = activeAgentContextSession{
+			uncertain: cache.uncertain,
+			updatedAt: now,
+		}
 	}
 	for _, existing := range session.files {
 		if existing == canonicalPath {
@@ -175,6 +179,9 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 		}
 	}
 	if len(session.files) >= maxActiveAgentContextFiles {
+		session.uncertain = true
+		session.updatedAt = now
+		cache.sessions[key] = session
 		return
 	}
 	session.files = append(session.files, canonicalPath)
@@ -182,7 +189,26 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	cache.sessions[key] = session
 }
 
-func (cache *activeAgentContextCache) reset(connectorName, sessionID string) {
+func (cache *activeAgentContextCache) begin(connectorName, sessionID string) {
+	key, ok := validActiveAgentContextKey(connectorName, sessionID)
+	if !ok {
+		return
+	}
+	now := cache.currentTime()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.sessions == nil {
+		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
+	}
+	if _, exists := cache.sessions[key]; !exists {
+		cache.makeRoomLocked()
+	}
+	// SessionStart and CwdChanged are authenticated lifecycle proof that no
+	// previously loaded instruction file remains active for this session.
+	cache.sessions[key] = activeAgentContextSession{updatedAt: now}
+}
+
+func (cache *activeAgentContextCache) end(connectorName, sessionID string) {
 	key, ok := validActiveAgentContextKey(connectorName, sessionID)
 	if !ok {
 		return
@@ -192,42 +218,44 @@ func (cache *activeAgentContextCache) reset(connectorName, sessionID string) {
 	cache.mu.Unlock()
 }
 
-func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) []string {
+func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) activeAgentContextSnapshot {
 	key, ok := validActiveAgentContextKey(connectorName, sessionID)
 	if !ok {
-		return nil
+		return activeAgentContextSnapshot{}
 	}
 	now := cache.currentTime()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	cache.pruneLocked(now)
 	session, ok := cache.sessions[key]
-	if !ok || len(session.files) == 0 {
-		return nil
+	if !ok {
+		return activeAgentContextSnapshot{uncertain: cache.uncertain}
 	}
 	session.updatedAt = now
 	cache.sessions[key] = session
-	return append([]string(nil), session.files...)
+	return activeAgentContextSnapshot{
+		files:     append([]string(nil), session.files...),
+		uncertain: session.uncertain,
+	}
 }
 
 // applyClaudeCodeActiveAgentContext consumes only authenticated, typed Claude
 // Code lifecycle fields. It never reads req.Payload or ToolInput, preventing a
 // generic payload, command mention, or tool argument from manufacturing trusted
 // instruction-file context.
-func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req claudeCodeHookRequest) []string {
+func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req claudeCodeHookRequest) activeAgentContextSnapshot {
 	const connectorName = "claudecode"
 	if a == nil || authenticatedHookConnector(ctx) != connectorName {
-		return nil
+		return activeAgentContextSnapshot{}
 	}
 	switch req.HookEventName {
 	case "SessionStart", "CwdChanged":
-		a.activeAgentContext.reset(connectorName, req.SessionID)
+		a.activeAgentContext.begin(connectorName, req.SessionID)
 	case "SessionEnd":
-		a.activeAgentContext.reset(connectorName, req.SessionID)
+		a.activeAgentContext.end(connectorName, req.SessionID)
 	case "InstructionsLoaded":
 		a.activeAgentContext.seed(connectorName, req.SessionID, req.FilePath)
 	case "PreToolUse", "PermissionRequest":
 		return a.activeAgentContext.snapshot(connectorName, req.SessionID)
 	}
-	return nil
+	return activeAgentContextSnapshot{}
 }
