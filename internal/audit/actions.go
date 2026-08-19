@@ -460,6 +460,7 @@ func AllActions() []Action {
 		ActionSetupObservability,
 		ActionSetupLocalObservability,
 		ActionSetupWebhook,
+		ActionSetupRouting,
 		ActionDoctor,
 		ActionUpgrade,
 		ActionInitGateway,
