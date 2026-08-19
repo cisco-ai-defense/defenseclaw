@@ -27,11 +27,21 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// configurationPollInterval is how often the sidecar re-reads the
+// guardian's out-of-band state file. Spec 003 tolerates a lag up to
+// one interval between a guardian-side transition and the health
+// surface reflecting it; 5s is short enough for a Secure Client UI to
+// update in near-real-time without burning IO on non-managed
+// deployments (the poller is only started under managed_enterprise).
+const configurationPollInterval = 5 * time.Second
 
 var (
 	sidecarToken string
@@ -100,6 +110,27 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell)
 	if err != nil {
 		return fmt.Errorf("sidecar: init: %w", err)
+	}
+
+	// Spec 003 (docs/specs/003-windows-deferred-config/) health-surface
+	// wiring. Only under managed_enterprise: mark the daemon-side of
+	// the collapsing rule loaded (we reached this point AFTER
+	// loadGatewayConfigV8 succeeded — either directly or via the wait
+	// loop in rootPersistentPreRunE), wire the sidecar's guardian
+	// state reader against the well-known .state file path, and start
+	// a periodic RefreshConfiguration ticker so a guardian-side
+	// transition surfaces without a daemon-side event.
+	//
+	// Non-managed-enterprise deployments (OSS / SaaS / DP / CP) never
+	// call SetDaemonConfigLoaded, so their health snapshot omits the
+	// top-level "configuration" block entirely — byte-for-byte
+	// backward compatible with today.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		sc.Health().SetDaemonConfigLoaded(true)
+		statePath := guardianstate.PathForDataDir(cfg.DataDir)
+		sc.Health().SetGuardianStateReader(func() string {
+			return guardianstate.ReadState(statePath)
+		})
 	}
 
 	// Local UDS gRPC server for external consumers. Only constructed
@@ -179,6 +210,27 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 			return
 		}
 	}()
+
+	// Spec 003 periodic guardian-state poller. Only under
+	// managed_enterprise (SetDaemonConfigLoaded was called only in
+	// that branch above; RefreshConfiguration is a cheap no-op when
+	// SidecarHealth's configuration pointer is still nil, so this
+	// goroutine is safe to always start but we gate it anyway to
+	// keep the goroutine off entirely under non-managed deployments).
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		go func() {
+			tick := time.NewTicker(configurationPollInterval)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					sc.Health().RefreshConfiguration()
+				}
+			}
+		}()
+	}
 
 	if diag {
 		// Heartbeat ticker + return diagnostics are only emitted when

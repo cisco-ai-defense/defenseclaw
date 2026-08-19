@@ -55,6 +55,14 @@ const (
 // root directory. Constant so tests and callers don't guess.
 const FileName = ".state"
 
+// StateDirName is the subdirectory under the daemon's data dir
+// (cfg.DataDir on both platforms) that the hook-guardian owns. The
+// guardian's targets.yaml AND its .state file both live here. Windows
+// installer maps this to `<StateRoot>\hook-guardian\` via the psm1
+// module's directory-prep block; Linux/macOS keep the same subdir
+// name for consistency across the two `.state` reader-writer paths.
+const StateDirName = "hook-guardian"
+
 // PathForStateRoot returns the full state file path for a given
 // hook-guardian state root. The state root is
 // `<StateRoot>\hook-guardian\` on Windows (matches the runtime layout
@@ -62,6 +70,16 @@ const FileName = ".state"
 // not the state file itself.
 func PathForStateRoot(stateRoot string) string {
 	return filepath.Join(stateRoot, FileName)
+}
+
+// PathForDataDir returns the state file path derived from the
+// daemon's data dir. Callers on the READ side (the sidecar) don't
+// know the manifest path directly — they resolve it from cfg.DataDir
+// plus the fixed hook-guardian subdirectory convention. The writer
+// side (the guardian) uses PathForStateRoot with
+// filepath.Dir(manifestPath).
+func PathForDataDir(dataDir string) string {
+	return filepath.Join(dataDir, StateDirName, FileName)
 }
 
 // ReadState reads the state file at the given path. Returns
