@@ -96,3 +96,47 @@ jobs:
       - name: Validate the managed bundle shell boundary
         shell: bash
         run: bash -n packaging/scripts/build-managed-windows-bundle.sh
+
+      - name: Assert GA release-gate refuses the unauthenticated IPC posture
+        shell: bash
+        env:
+          # Force a Windows cross-compile so internal/ipc's Windows
+          # peer-auth stub is in the compile set — the whole point of
+          # the gate is to refuse a release-candidate Windows build
+          # that still carries the initial-cut deferred-auth code
+          # path. See docs/specs/004-windows-ui-ipc/ REQ-18 + REQ-19.
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          set -u
+          # A release-candidate build compiles with -tags ga. The gate
+          # at internal/ipc/authposture_gagate.go references a symbol
+          # (authpostureGAApproved) that ONLY the follow-up
+          # peer-auth spec defines; until that lands, the build MUST
+          # fail with a specific "undefined:" error. This job asserts:
+          #   - go build -tags ga fails (non-zero exit), AND
+          #   - stderr contains "undefined: authpostureGAApproved".
+          # A regression that lets a release-candidate build through
+          # (either because someone deleted the gate file or renamed
+          # the symbol) fails on BOTH: no error, or a DIFFERENT error
+          # signature.
+          if output=$(go build -tags ga ./internal/ipc/... 2>&1); then
+            echo "::error::spec 004 GA release-gate did not refuse -tags ga build"
+            echo "$output"
+            exit 1
+          fi
+          if ! grep -q 'undefined: authpostureGAApproved' <<<"$output"; then
+            echo "::error::spec 004 GA release-gate refused the build, but with the wrong error signature"
+            echo "expected substring: 'undefined: authpostureGAApproved'"
+            echo "actual output:"
+            echo "$output"
+            exit 1
+          fi
+          echo "spec 004 GA release-gate is intact — refuses -tags ga with the expected error"
+
+      - name: Windows AF_UNIX + spec 003 configuration state — Go tests
+        run: >-
+          go test -count=1
+          ./internal/ipc/...
+          ./internal/config/...
