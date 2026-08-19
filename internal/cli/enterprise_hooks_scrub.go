@@ -869,19 +869,42 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 	}
 
 	// newStayInHooksEvent returns a predicate that stays inside a
-	// specific event's subtree — accepts `[hooks.<event>]`,
-	// `[[hooks.<event>]]`, and any dotted / array-of-tables sub-tables
-	// (`[hooks.<event>.hooks]`, `[[hooks.<event>.hooks]]`, etc.), but
-	// STOPS at a sibling event's header (`[[hooks.<other>]]`). Without
-	// this per-event scoping, sectionReferencesDC would span across
-	// EVERY consecutive `hooks.*` table and, on a DC marker found
-	// anywhere in the run, remove the whole run — including an
-	// adjacent user-owned event block that never referenced DC. The
-	// mixed-nested regression test pins the fix.
+	// specific event's nested subtree — accepts only headers whose
+	// event path continues below `<event>`, i.e. `[hooks.<event>.<sub>…]`
+	// or `[[hooks.<event>.<sub>…]]`. It STOPS at:
+	//
+	//   * a sibling event's header (`[[hooks.<other>]]`), and
+	//   * a REPEATED root `[[hooks.<event>]]` (i.e. a second array-of-
+	//     tables element of the same event), because pelletier emits
+	//     each list element as its own `[[hooks.<event>]]` header —
+	//     one is user-owned, the next may be DC-owned, and merging
+	//     them would let one element's DC marker scrub away the
+	//     other user-owned element on `defenseclaw uninstall --purge`.
+	//
+	// The initial root header itself is consumed by the caller (the
+	// entry-point above passes `start = i+1`), so the predicate only
+	// sees headers ENCOUNTERED DURING the scan; anything that isn't a
+	// nested continuation of `hooks.<event>` ends the scan.
 	newStayInHooksEvent := func(event string) func(string) bool {
 		return func(hdr string) bool {
-			m := tomlHooksEventRE.FindStringSubmatch(hdr)
-			return m != nil && m[1] == event
+			m := tomlHooksEventRE.FindStringSubmatchIndex(hdr)
+			if m == nil {
+				return false
+			}
+			if hdr[m[2]:m[3]] != event {
+				return false
+			}
+			// Byte immediately after the captured event name
+			// distinguishes shapes:
+			//   `[hooks.<event>]`         → next byte is `]`   (root repeat — reject)
+			//   `[[hooks.<event>]]`       → next byte is `]`   (root repeat — reject)
+			//   `[hooks.<event>.<sub>]`   → next byte is `.`   (nested — accept)
+			//   `[[hooks.<event>.<sub>]]` → next byte is `.`   (nested — accept)
+			eventEnd := m[3]
+			if eventEnd >= len(hdr) {
+				return false
+			}
+			return hdr[eventEnd] == '.'
 		}
 	}
 

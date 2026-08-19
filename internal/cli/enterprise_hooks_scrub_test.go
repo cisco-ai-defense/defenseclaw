@@ -384,6 +384,67 @@ trust_level = "trusted"
 	}
 }
 
+// TestScrubCodex_RepeatedRootEventKeepsUserElement is the regression
+// pin for CodeRabbit ID 3802850705: pelletier emits each element of
+// a `hooks.<event>` array-of-tables as its own top-level
+// `[[hooks.<event>]]` header. When the first element is user-owned
+// and a later element of the SAME event is DC-owned, the per-event
+// scan must stop at the second root header — otherwise the DC marker
+// downstream flags the whole run and scrubbing wipes the user's
+// element too. This asserts the per-event predicate only crosses
+// NESTED sub-tables (`[[hooks.<event>.hooks]]`) and treats a repeated
+// root as an event boundary.
+func TestScrubCodex_RepeatedRootEventKeepsUserElement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	writeFile(t, path, `model = "gpt-5"
+
+[[hooks.PreToolUse]]
+
+  [[hooks.PreToolUse.hooks]]
+  command = "/Users/u/bin/my-own-hook.sh"
+  type = "command"
+
+[[hooks.PreToolUse]]
+
+  [[hooks.PreToolUse.hooks]]
+  command = "/Users/u/.defenseclaw/hooks/codex-hook.sh"
+  type = "command"
+
+[projects."/Users/u/dev"]
+trust_level = "trusted"
+`)
+	if _, err := scrubCodexFile(path, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCodexFile: %v", err)
+	}
+	out := readFile(t, path)
+	// User-owned array element MUST survive: the second (DC-owned)
+	// element's marker must not scrub the first one.
+	if !strings.Contains(out, "/Users/u/bin/my-own-hook.sh") {
+		t.Errorf("user-owned PreToolUse element stripped by repeated-root scan:\n%s", out)
+	}
+	// The DC-owned element and its marker MUST be gone.
+	for _, forbidden := range []string{
+		"codex-hook.sh",
+		".defenseclaw/hooks/",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("DC-owned PreToolUse element still present after scrub: %q\n---output---\n%s", forbidden, out)
+		}
+	}
+	// Non-hooks state untouched.
+	for _, want := range []string{`model = "gpt-5"`, `[projects."/Users/u/dev"]`, `trust_level = "trusted"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("user state dropped: %s\n---output---\n%s", want, out)
+		}
+	}
+	// Post-scrub output remains valid TOML.
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Errorf("post-scrub TOML no longer parses: %v\n---output---\n%s", err, out)
+	}
+}
+
 // TestScrubCodex_PreservesUserHooksArrayOfTables asserts the
 // complement of the above: a user's own `[[hooks.PreToolUse.hooks]]`
 // block (pointing at a script the user wrote themselves, not at any

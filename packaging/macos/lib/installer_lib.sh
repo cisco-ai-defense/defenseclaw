@@ -480,6 +480,15 @@ _read_json_field() {
         # Top-level key must be a JSON string. Anything else means the
         # object body is malformed.
         if (c != "\"") exit 2
+        # RFC 8259 requires a comma between adjacent object members.
+        # after_member is 1 iff we just consumed a key-value pair and
+        # have NOT since seen a comma; a bare quoted key here would be
+        # the next member with the separator missing, e.g.
+        # {"a":"1" "b":"2"} — malformed. Rejecting at rc 2 keeps the
+        # _probe_json_version discovery-error path (malformed-json)
+        # engaged instead of silently accepting a hand-corrupted or
+        # truncated document.
+        if (after_member) exit 2
         saw_comma = 0
         # Read the top-level key.
         key_is_target = 0

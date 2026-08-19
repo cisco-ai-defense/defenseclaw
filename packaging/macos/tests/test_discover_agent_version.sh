@@ -340,6 +340,52 @@ t_read_json_field_rc_2_on_leading_or_double_comma() {
   assert_eq "${rc}" "2" "double comma inside object is malformed"
 }
 
+# Regression pin for CodeRabbit ID 3802850710: two adjacent members
+# without a comma between them (`{"a":"1" "b":"2"}`) is malformed per
+# RFC 8259 — the parser previously accepted this because it never
+# required a separator before the next quoted key. rc 2 keeps
+# _probe_json_version's malformed-json path engaged instead of
+# silently returning a truncated document's earlier value.
+t_read_json_field_rc_2_on_missing_comma_between_members() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+
+  # Missing comma between the target field and the next member.
+  printf '{"version":"1.2.3" "other":true}' > "${cfg}"
+  local out rc
+  out="$(_read_json_field "${cfg}" version)"
+  rc=$?
+  assert_eq "${out}" "" "missing-comma object must not emit the earlier member's value"
+  assert_eq "${rc}"  "2" "missing comma between top-level members is malformed — rc 2"
+
+  # Symmetric: missing comma where the earlier member is a non-target scalar
+  # (target still appears later). Parser must reject BEFORE consuming target.
+  printf '{"other":42 "version":"9.9.9"}' > "${cfg}"
+  out="$(_read_json_field "${cfg}" version)"
+  rc=$?
+  assert_eq "${out}" "" "missing-comma object with target as later member is malformed"
+  assert_eq "${rc}"  "2" "missing comma is malformed even when target appears after — rc 2"
+}
+
+# End-to-end guard: _probe_json_version must record the missing-comma
+# document as malformed-json so install.sh's zero-target branch
+# surfaces the corrupt metadata file to the operator.
+t_probe_json_version_records_missing_comma() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  local log; log="${dir}/errors.log"
+  : > "${log}"
+
+  printf '{"version":"1.2.3" "other":true}' > "${cfg}"
+  local out
+  out="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
+         DC_INSTALLER_TARGET_USER="alice" \
+         _probe_json_version "${cfg}" codex)"
+  assert_eq "${out}" "" "missing-comma package.json yields empty version through the probe"
+  assert_contains "$(cat "${log}")" "malformed-json" "missing comma recorded as malformed-json"
+  assert_contains "$(cat "${log}")" "${cfg}" "missing comma records failing path"
+}
+
 # End-to-end guard: _probe_json_version must record both bad inputs as
 # malformed-json in DC_DISCOVERY_ERRORS_LOG (so install.sh's zero-
 # target branch can surface a corrupt metadata file instead of
@@ -496,8 +542,10 @@ run_case "_read_json_field rc 0 for missing file"          t_read_json_field_rc_
 run_case "_read_json_field rc 2 on garbage non-target scalar" t_read_json_field_rc_2_on_garbage_non_target_scalar
 run_case "_read_json_field rc 2 on trailing comma"           t_read_json_field_rc_2_on_trailing_comma
 run_case "_read_json_field rc 2 on leading/double comma"     t_read_json_field_rc_2_on_leading_or_double_comma
+run_case "_read_json_field rc 2 on missing comma between members" t_read_json_field_rc_2_on_missing_comma_between_members
 run_case "_read_json_field rc 0 on mixed valid scalars"      t_read_json_field_rc_0_on_mixed_valid_scalars
 run_case "_probe_json_version records garbage/trailing-comma" t_probe_json_version_records_garbage_and_trailing_comma
+run_case "_probe_json_version records missing comma"          t_probe_json_version_records_missing_comma
 run_case "_probe_json_version records malformed when log set"    t_probe_json_version_records_malformed_when_log_set
 run_case "_probe_json_version no log without env var set"        t_probe_json_version_no_log_when_env_unset
 run_case "_probe_json_version passthrough on well-formed"        t_probe_json_version_passthrough_on_wellformed
