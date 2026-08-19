@@ -15,8 +15,6 @@ import (
 
 const inspectMetricsV8Producer = "gateway.inspect.metrics"
 
-const trustedParserUncertaintyMetricScanner = "action-parser-uncertainty"
-
 // recordInspectMetricsV8 is the generated-family owner for inspect and
 // guardrail evaluation metrics emitted by the HTTP inspection surfaces. The
 // local-observability projection keeps the established Prometheus names and
@@ -194,15 +192,13 @@ func recordParserUncertaintyMetricV8ForRuntime(
 		time.Now().UTC(),
 		meta,
 		producer,
-		observability.EventName(observability.TelemetryInstrumentDefenseClawGuardrailEvaluations),
+		observability.EventName(observability.TelemetryInstrumentDefenseClawGuardrailParserUncertainty),
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
-			return builder.BuildMetricDefenseClawGuardrailEvaluations(
-				observability.MetricDefenseClawGuardrailEvaluationsInput{
-					Envelope:                            envelope,
-					Value:                               count,
-					DefenseClawGuardrailEffectiveAction: observability.Present(guardrailActionAllow),
-					DefenseClawConnectorSource:          observability.Present(connectorName),
-					DefenseClawMetricGuardrailScanner:   observability.Present(trustedParserUncertaintyMetricScanner),
+			return builder.BuildMetricDefenseClawGuardrailParserUncertainty(
+				observability.MetricDefenseClawGuardrailParserUncertaintyInput{
+					Envelope:                   envelope,
+					Value:                      count,
+					DefenseClawConnectorSource: observability.Present(connectorName),
 				},
 			)
 		},

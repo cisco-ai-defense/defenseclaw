@@ -282,8 +282,12 @@ func TestNormalizeAgentHookRequest_AntigravityNestedToolArgsAuthority(t *testing
 	t.Run("exact nested args reach trusted request", func(t *testing.T) {
 		raw := `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args": { "CommandLine": "rm -rf /", "Cwd": "/tmp/work" }}}`
 		want := `{ "CommandLine": "rm -rf /", "Cwd": "/tmp/work" }`
-		if got := string(decode(t, raw).ToolArgs); got != want {
+		req := decode(t, raw)
+		if got := string(req.ToolArgs); got != want {
 			t.Fatalf("ToolArgs=%q want exact nested object %q", got, want)
+		}
+		if req.ToolArgsProjectionUncertain {
+			t.Fatal("exact nested args were marked uncertain")
 		}
 	})
 
@@ -313,6 +317,50 @@ func TestNormalizeAgentHookRequest_AntigravityNestedToolArgsAuthority(t *testing
 				t.Fatalf("ToolArgs=%q want valid empty-object fail-closed projection", got)
 			}
 		})
+	}
+}
+
+func TestHandleAgentHook_AntigravityUsesCompleteRawBodyForAuthority(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "antigravity"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	handler := http.HandlerFunc(api.handleAgentHook("antigravity"))
+
+	first := `{"hookEventName":"PreToolUse","conversationId":"session-antigravity","toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /","Cwd":"/tmp/work"}}}`
+	body := first + strings.Repeat(" ", 8192) + `{}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/antigravity/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 fail-open response: %s", w.Code, w.Body.String())
+	}
+	var response agentHookResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Action != "allow" || response.RawAction != "allow" {
+		t.Fatalf("trailing JSON acquired tool authority: %+v", response)
+	}
+}
+
+func TestHandleAgentHookRejectsOversizedBody(t *testing.T) {
+	api := &APIServer{health: NewSidecarHealth()}
+	handler := http.HandlerFunc(api.handleAgentHook("antigravity"))
+	body := strings.Repeat(" ", int(apiRequestBodyMaxBytes+1)) + `{}`
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/antigravity/hook",
+		strings.NewReader(body),
+	)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want 413: %s", w.Code, w.Body.String())
 	}
 }
 

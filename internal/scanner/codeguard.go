@@ -19,6 +19,7 @@ package scanner
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,7 +45,22 @@ type CodeGuardContentScan struct {
 
 // Findings returns an independent copy of the visible scan findings.
 func (r CodeGuardContentScan) Findings() []Finding {
-	return append([]Finding(nil), r.findings...)
+	findings := make([]Finding, len(r.findings))
+	for index := range r.findings {
+		findings[index] = r.findings[index]
+		findings[index].Tags = append([]string(nil), r.findings[index].Tags...)
+		findings[index].DataAxis = append([]string(nil), r.findings[index].DataAxis...)
+		findings[index].DecisionPath = append(json.RawMessage(nil), r.findings[index].DecisionPath...)
+		if r.findings[index].LineNumber != nil {
+			line := *r.findings[index].LineNumber
+			findings[index].LineNumber = &line
+		}
+		if r.findings[index].TurnID != nil {
+			turn := *r.findings[index].TurnID
+			findings[index].TurnID = &turn
+		}
+	}
+	return findings
 }
 
 // Complete reports whether the in-process scanner evaluated the whole input.

@@ -23,28 +23,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-// trustedRepositoryPolicyProof is trusted, server-owned policy context. Rule
-// IDs in this proof were explicitly forbidden by repository policy; they must
-// never be populated from tool arguments or model-produced text.
-//
-// A slice keeps the boundary immutable by convention and makes the value easy
-// to copy with the action request. The number of repository rules is bounded
-// by the rule-pack loader, so a linear lookup is preferable to accepting a
-// caller-owned mutable map here.
-type trustedRepositoryPolicyProof struct {
-	ForbiddenRuleIDs []string
-}
-
-func (p trustedRepositoryPolicyProof) forbids(ruleID string) bool {
-	ruleID = canonicalTrustedRuleID(ruleID)
-	for _, candidate := range p.ForbiddenRuleIDs {
-		if canonicalTrustedRuleID(candidate) == ruleID {
-			return true
-		}
-	}
-	return false
-}
-
 // applyTrustedActionContextDisposition is the trusted-action-only disposition
 // boundary for content literals and selected advisory rules. It deliberately
 // is not called by prompt, tool-result, or completion scanners: those scan
@@ -52,26 +30,34 @@ func (p trustedRepositoryPolicyProof) forbids(ruleID string) bool {
 //
 // The function returns an owned findings slice and never promotes a finding
 // that an earlier boundary already marked detection-only. Its only authority
-// input is ActionFacts plus explicit server-owned repository-policy proof.
+// input is ActionFacts derived from the current action.
 func applyTrustedActionContextDisposition(
 	generation *compiledRulePackCategories,
 	facts actionfacts.Facts,
 	findings []RuleFinding,
-	repositoryPolicy trustedRepositoryPolicyProof,
 ) []RuleFinding {
 	adjusted := append([]RuleFinding(nil), findings...)
+	// Detection sees the complete action, while authorization considers only
+	// commands and redirects statically proven to execute. A harmless preview
+	// sibling must not erase proof for an independent executing mutation.
+	enforcementFacts := facts.EnforcementProjection()
 	for index := range adjusted {
 		finding := adjusted[index]
 
 		if trustedActionSensitivePathRule(finding.RuleID) {
-			switch trustedActionClassifySensitivePathRisk(facts, finding.RuleID) {
+			switch trustedActionClassifySensitivePathRisk(enforcementFacts, finding.RuleID) {
+			case trustedActionSensitivePathUncertain:
+				// Preserve the finding's original severity so parser coverage
+				// uncertainty remains visible, but never let incomplete facts
+				// authorize enforcement.
+				finding.enforcement = findingEnforcementDetectionOnly
 			case trustedActionSensitivePathMutation,
 				trustedActionSensitivePathReadEgress:
 				// A typed mutation or read-to-external-network flow remains a
 				// security finding. Do not promote a finding that another
 				// boundary already made detection-only.
 				finding = finding.withTrustedActionProof(
-					trustedActionContextFindingProof(finding.RuleID, facts),
+					trustedActionContextFindingProof(finding.RuleID, enforcementFacts),
 				)
 			case trustedActionSensitivePathRead:
 				finding = trustedActionAdvisoryFinding(finding)
@@ -87,11 +73,10 @@ func applyTrustedActionContextDisposition(
 		if trustedActionShippedGitAdvisoryRule(
 			generation,
 			finding.RuleID,
-		) && !repositoryPolicy.forbids(finding.RuleID) {
+		) {
 			// Shipped git remote changes and hook-bypass switches are useful
 			// advisory evidence, but repositories legitimately use both. A
-			// custom rule or explicit repository-policy proof retains its
-			// original enforcement disposition.
+			// custom rule retains its original enforcement disposition.
 			finding = trustedActionAdvisoryFinding(finding)
 			adjusted[index] = finding
 			continue
@@ -104,7 +89,7 @@ func applyTrustedActionContextDisposition(
 		if !trustedReadOnlyArgumentDataFinding(category, finding) {
 			continue
 		}
-		if !trustedActionContentFindingHasRiskPair(facts, rule) {
+		if !trustedActionContentFindingHasRiskPair(enforcementFacts, rule) {
 			// Literal secret/PII material in an action remains visible for
 			// local audit, but cannot alert or block without command-local
 			// proof of external egress or an active sensitive-path write.
@@ -112,7 +97,7 @@ func applyTrustedActionContextDisposition(
 			continue
 		}
 		adjusted[index] = finding.withTrustedActionProof(
-			trustedActionContextFindingProof(finding.RuleID, facts),
+			trustedActionContextFindingProof(finding.RuleID, enforcementFacts),
 		)
 	}
 	return adjusted
@@ -122,6 +107,10 @@ func trustedActionContextFindingProof(
 	ruleID string,
 	facts actionfacts.Facts,
 ) findingProof {
+	// Callers invoke this only after the typed risk classifier has completed
+	// and matched the same rule against this execution-only projection. The
+	// remaining two booleans are therefore boundary postconditions, while the
+	// Facts methods retain authority and eligibility as independent checks.
 	return newActionFactsSemanticFindingProof(
 		ruleID,
 		actionFactsSemanticProofInput{
@@ -138,6 +127,7 @@ type trustedActionSensitivePathRisk uint8
 
 const (
 	trustedActionSensitivePathReference trustedActionSensitivePathRisk = iota
+	trustedActionSensitivePathUncertain
 	trustedActionSensitivePathRead
 	trustedActionSensitivePathMutation
 	trustedActionSensitivePathReadEgress
@@ -263,7 +253,7 @@ func trustedActionClassifySensitivePathRisk(
 	// Partial outer shell expressions may expose useful shadow facts, but they
 	// never authorize a path alert or block.
 	if !facts.Authoritative() || !facts.EnforcementEligible() {
-		return trustedActionSensitivePathReference
+		return trustedActionSensitivePathUncertain
 	}
 
 	risk := trustedActionSensitivePathReference

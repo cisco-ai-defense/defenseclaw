@@ -135,6 +135,18 @@ func TestClaudeCodeActiveAgentFilesAuthenticationComesFromHookTokenBoundary(t *t
 		t.Fatalf("unauthorized request gained authority: %#v", got)
 	}
 
+	masterAuthorized := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+	masterAuthorized.RemoteAddr = "127.0.0.1:45678"
+	masterAuthorized.Header.Set("Authorization", "Bearer master-token")
+	masterAuthorizedResult := httptest.NewRecorder()
+	handler.ServeHTTP(masterAuthorizedResult, masterAuthorized)
+	if masterAuthorizedResult.Code != http.StatusNoContent {
+		t.Fatalf("master-token status = %d, want %d", masterAuthorizedResult.Code, http.StatusNoContent)
+	}
+	if got := api.activeAgentContext.snapshot("claudecode", load.SessionID); len(got) != 0 {
+		t.Fatalf("master gateway token gained connector hook authority: %#v", got)
+	}
+
 	authorized := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
 	authorized.RemoteAddr = "127.0.0.1:45678"
 	authorized.Header.Set("Authorization", "Bearer claude-hook-token")
@@ -145,6 +157,22 @@ func TestClaudeCodeActiveAgentFilesAuthenticationComesFromHookTokenBoundary(t *t
 	}
 	if got := api.activeAgentContext.snapshot("claudecode", load.SessionID); !slices.Equal(got, []string{agentFile}) {
 		t.Fatalf("authenticated hook context = %#v, want %q", got, agentFile)
+	}
+
+	registry := NewAgentRegistry("agent-ci", "CI Agent")
+	var promoted AgentIdentity
+	promotedHandler := CorrelationMiddleware(registry)(api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		promoted = AgentIdentityFromContext(r.Context())
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	promotedRequest := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+	promotedRequest.RemoteAddr = "127.0.0.1:45678"
+	promotedRequest.Header.Set("Authorization", "Bearer claude-hook-token")
+	promotedRequest.Header.Set(SessionIDHeader, "scoped-hook-session")
+	promotedResult := httptest.NewRecorder()
+	promotedHandler.ServeHTTP(promotedResult, promotedRequest)
+	if promotedResult.Code != http.StatusNoContent || promoted.AgentInstanceID == "" {
+		t.Fatalf("scoped hook session was not promoted: status=%d identity=%+v", promotedResult.Code, promoted)
 	}
 }
 
@@ -198,30 +226,30 @@ func TestClaudeCodeActiveAgentFilesLifecycleClears(t *testing.T) {
 	}
 }
 
-func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowFailClosed(t *testing.T) {
+func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries(t *testing.T) {
 	root := t.TempDir()
 	valid := writeActiveAgentTestFile(t, root, "AGENTS.md")
 
-	t.Run("relative invalidates session", func(t *testing.T) {
+	t.Run("relative path cannot erase exact entry", func(t *testing.T) {
 		cache := activeAgentContextCache{}
 		cache.seed("claudecode", "session", valid)
 		cache.seed("claudecode", "session", "AGENTS.md")
-		if got := cache.snapshot("claudecode", "session"); len(got) != 0 {
-			t.Fatalf("relative load retained authority: %#v", got)
+		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got, []string{valid}) {
+			t.Fatalf("relative load changed exact authority: %#v", got)
 		}
 		cache.seed("claudecode", "session", valid)
-		if got := cache.snapshot("claudecode", "session"); len(got) != 0 {
-			t.Fatalf("poisoned session regained authority: %#v", got)
+		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got, []string{valid}) {
+			t.Fatalf("repeated exact load changed authority: %#v", got)
 		}
 	})
 
-	t.Run("inexact file invalidates session", func(t *testing.T) {
+	t.Run("out of scope file cannot erase exact entry", func(t *testing.T) {
 		cache := activeAgentContextCache{}
 		inexact := writeActiveAgentTestFile(t, root, "CLAUDE.md")
 		cache.seed("claudecode", "session", valid)
 		cache.seed("claudecode", "session", inexact)
-		if got := cache.snapshot("claudecode", "session"); len(got) != 0 {
-			t.Fatalf("inexact instruction file retained authority: %#v", got)
+		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got, []string{valid}) {
+			t.Fatalf("out-of-scope instruction load changed authority: %#v", got)
 		}
 	})
 
@@ -254,14 +282,18 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowFailClosed(t *testin
 		}
 	})
 
-	t.Run("overflow invalidates session", func(t *testing.T) {
+	t.Run("overflow retains bounded exact prefix", func(t *testing.T) {
 		cache := activeAgentContextCache{}
+		var first string
 		for index := 0; index <= maxActiveAgentContextFiles; index++ {
 			path := writeActiveAgentTestFile(t, filepath.Join(root, fmt.Sprintf("file-%02d", index)), "AGENTS.md")
+			if index == 0 {
+				first = path
+			}
 			cache.seed("claudecode", "session", path)
 		}
-		if got := cache.snapshot("claudecode", "session"); len(got) != 0 {
-			t.Fatalf("overflow retained partial authority: %#v", got)
+		if got := cache.snapshot("claudecode", "session"); len(got) != maxActiveAgentContextFiles || got[0] != first {
+			t.Fatalf("overflow changed bounded exact entries: %#v", got)
 		}
 	})
 }
@@ -332,5 +364,33 @@ func TestActiveAgentContextTimestampTieEvictionIsDeterministic(t *testing.T) {
 				count,
 			)
 		}
+	}
+}
+
+func TestActiveAgentContextInvalidNewSessionCannotEvictExactSession(t *testing.T) {
+	root := t.TempDir()
+	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
+	invalidFile := writeActiveAgentTestFile(t, root, "CLAUDE.md")
+	now := time.Unix(1_700_000_000, 0)
+	cache := activeAgentContextCache{now: func() time.Time { return now }}
+
+	for index := 0; index < maxActiveAgentContextSessions; index++ {
+		cache.seed("claudecode", fmt.Sprintf("session-%03d", index), agentFile)
+		now = now.Add(time.Millisecond)
+	}
+	cache.seed("claudecode", "invalid-new-session", invalidFile)
+
+	if got := cache.snapshot("claudecode", "session-000"); !slices.Equal(got, []string{agentFile}) {
+		t.Fatalf("invalid new session evicted oldest exact session: %#v", got)
+	}
+	cache.mu.Lock()
+	_, invalidInserted := cache.sessions[activeAgentContextKey{
+		connector: "claudecode",
+		sessionID: "invalid-new-session",
+	}]
+	count := len(cache.sessions)
+	cache.mu.Unlock()
+	if invalidInserted || count != maxActiveAgentContextSessions {
+		t.Fatalf("invalid session inserted=%t count=%d", invalidInserted, count)
 	}
 }

@@ -3190,7 +3190,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
 			if a.hookAPITokenMatches(hookScope, token) {
-				r = r.WithContext(withAuthenticatedHookConnector(r.Context(), hookScope))
+				r = r.WithContext(withAuthenticatedHookConnector(
+					PromoteSessionIfAuthenticated(r.Context()),
+					hookScope,
+				))
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -3227,9 +3230,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// to a fully minted entry so authenticated traffic still
 		// gets a stable agent_instance_id on its emissions.
 		ctx = PromoteSessionIfAuthenticated(r.Context())
-		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok {
-			ctx = withAuthenticatedHookConnector(ctx, hookScope)
-		}
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})

@@ -328,9 +328,21 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			input:  reconImpactCommand("cryptsetup luksErase /dev/sda1"),
 		},
 		{
+			name:   "device cryptsetup erase has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("cryptsetup luksErase /dev/sda1"),
+			want:   true,
+		},
+		{
 			name:   "device nvme sanitize is not a formatter",
 			ruleID: "CMD-MKFS",
 			input:  reconImpactCommand("nvme sanitize /dev/nvme0n1"),
+		},
+		{
+			name:   "device nvme sanitize has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("nvme sanitize /dev/nvme0n1"),
+			want:   true,
 		},
 		{
 			name:   "device parted label is not a formatter",
@@ -338,9 +350,21 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			input:  reconImpactCommand("parted /dev/sda mklabel gpt"),
 		},
 		{
+			name:   "device parted label has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("parted /dev/sda mklabel gpt"),
+			want:   true,
+		},
+		{
 			name:   "macos bare disk erase is not a formatter executable",
 			ruleID: "CMD-MKFS",
 			input:  reconImpactCommand("diskutil eraseDisk APFS Empty disk2"),
+		},
+		{
+			name:   "macos bare disk erase has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("diskutil eraseDisk APFS Empty disk2"),
+			want:   true,
 		},
 		{
 			name:   "windows oem disk clear is not a formatter executable",
@@ -350,6 +374,46 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 				Command:     "Clear-Disk -Number 1 -RemoveOEM",
 				DialectHint: actionfacts.DialectPowerShell,
 			},
+		},
+		{
+			name:   "windows oem disk clear has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input: actionfacts.Input{
+				Tool:        "powershell",
+				Command:     "Clear-Disk -Number 1 -RemoveOEM",
+				DialectHint: actionfacts.DialectPowerShell,
+			},
+			want: true,
+		},
+		{
+			name:   "windows disk number is canonicalized",
+			ruleID: "CMD-DEVICE-WIPE",
+			input: actionfacts.Input{
+				Tool:        "powershell",
+				Command:     "Clear-Disk -Number 00 -RemoveData",
+				DialectHint: actionfacts.DialectPowerShell,
+			},
+			want: true,
+		},
+		{
+			name:   "cmd drive format has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input: actionfacts.Input{
+				Tool:        "cmd",
+				Command:     "format C:",
+				DialectHint: actionfacts.DialectCMD,
+			},
+			want: true,
+		},
+		{
+			name:   "PowerShell drive format has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input: actionfacts.Input{
+				Tool:        "powershell",
+				Command:     "Format-Volume -DriveLetter C",
+				DialectHint: actionfacts.DialectPowerShell,
+			},
+			want: true,
 		},
 		{
 			name:   "device tee is not a formatter",
@@ -766,11 +830,14 @@ func TestExactMinerWrapperTargetRejectsMinerPreviewArguments(t *testing.T) {
 	}{
 		{name: "nohup launch", argv: []string{"nohup", "xmrig", "--url", "pool.example"}, want: true},
 		{name: "nohup help", argv: []string{"nohup", "xmrig", "--help"}},
+		{name: "nohup mixed help token launches", argv: []string{"nohup", "xmrig", "--url", "pool.example", "--help"}, want: true},
 		{name: "setsid launch", argv: []string{"setsid", "--fork", "xmrig", "--url", "pool.example"}, want: true},
 		{name: "setsid help", argv: []string{"setsid", "xmrig", "--help"}},
+		{name: "setsid help-looking value launches", argv: []string{"setsid", "xmrig", "--user", "--help"}, want: true},
 		{name: "setsid delimited version", argv: []string{"setsid", "--", "xmrig", "--version"}},
 		{name: "nice launch", argv: []string{"nice", "-n", "5", "xmrig", "--url", "pool.example"}, want: true},
 		{name: "nice help", argv: []string{"nice", "xmrig", "-h"}},
+		{name: "nice mixed version token launches", argv: []string{"nice", "xmrig", "--url", "pool.example", "--version"}, want: true},
 		{name: "nice adjusted version", argv: []string{"nice", "--adjustment=5", "xmrig", "-v"}},
 		{name: "nice delimited version", argv: []string{"nice", "--", "xmrig", "--version"}},
 	}

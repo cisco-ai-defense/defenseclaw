@@ -75,6 +75,13 @@ boundary.
   longer evaluated as an executable command or sensitive-path request; typed
   command/path enforcement remains on `PreToolUse`, and physically verified
   standalone source reads reuse the Codex low-noise source boundary.
+- **Trusted-action enforcement now requires exact, same-rule proof**: raw,
+  partial, parser-shadow, and unpinned evidence remains detection-only;
+  ordinary sensitive reads are advisory unless paired with mutation or
+  external egress, and Claude Code instruction-file mutation protection
+  requires an authenticated exact load in the same session. Parser uncertainty
+  is counted separately by `defenseclaw.guardrail.parser_uncertainty`, so it
+  does not inflate guardrail evaluation or block-rate metrics.
 - **Amp is now a first-class connector on macOS, Linux, and native Windows**:
   setup installs an owner-only authenticated system policy plugin for Amp's five
   documented callbacks; action mode gates `tool.call` before execution and can

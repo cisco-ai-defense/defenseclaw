@@ -150,7 +150,7 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 		{
 			name:        "inactive same basename",
 			ruleID:      "COG-AGENTS-MD",
-			command:     "printf updated > /repo/examples/AGENTS.md",
+			command:     "printf updated > /repo/other/AGENTS.md",
 			activeFiles: []string{"/repo/AGENTS.md"},
 			wantSafe:    true,
 		},
@@ -180,7 +180,10 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 				ActiveAgentFiles: test.activeFiles,
 			})
 			requireAuthoritativeIntegrityFacts(t, facts)
-			owner := semanticIntegrityPersistenceOwners[test.ruleID]
+			owner, ok := semanticIntegrityPersistenceOwners[test.ruleID]
+			if !ok {
+				t.Fatalf("owner %q is missing", test.ruleID)
+			}
 			if got := owner.prerequisite(facts); got != test.want {
 				t.Fatalf("prerequisite=%t, want %t; facts=%+v", got, test.want, facts)
 			}
@@ -190,6 +193,31 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestActiveAgentInstructionMutationUnresolvedCandidateIsNotSafe(t *testing.T) {
+	t.Parallel()
+
+	facts := actionfacts.Facts{
+		Parse: actionfacts.ParseResult{Status: actionfacts.StatusComplete},
+		Commands: []actionfacts.CommandFact{{
+			ID:           1,
+			Kind:         actionfacts.CommandKindProcess,
+			Effect:       actionfacts.EffectExecute,
+			Program:      "printf",
+			Executable:   "printf",
+			Argv:         []string{"printf", "updated", "AGENTS.md"},
+			ArgvComplete: true,
+			Operations:   []actionfacts.OperationKind{actionfacts.OperationWrite},
+		}},
+	}
+	owner := semanticIntegrityPersistenceOwners["COG-AGENTS-MD"]
+	if owner.prerequisite(facts) {
+		t.Fatal("unresolved instruction-file candidate satisfied the semantic owner")
+	}
+	if owner.suppressFallback(facts) {
+		t.Fatal("unresolved instruction-file candidate suppressed detection fallback")
 	}
 }
 
@@ -258,6 +286,7 @@ func TestIntegrityPersistenceCommandPrerequisites(t *testing.T) {
 		{"crontab list", "crontab -l", "", "CMD-CRONTAB", false},
 		{"crontab removal", "crontab -r", "", "CMD-CRONTAB", false},
 		{"systemctl enable", "systemctl enable --now demo.service", "", "CMD-SYSTEMCTL", true},
+		{"systemctl detached job mode", "systemctl --job-mode fail enable demo.service", "", "CMD-SYSTEMCTL", true},
 		{"systemctl status", "systemctl status demo.service", "", "CMD-SYSTEMCTL", false},
 		{"systemctl dry run", "systemctl --dry-run enable demo.service", "", "CMD-SYSTEMCTL", false},
 		{"launchctl bootstrap", "launchctl bootstrap gui/501 /Library/LaunchAgents/demo.plist", "", "CMD-SYSTEMCTL", true},
@@ -321,6 +350,12 @@ func TestIntegrityPersistenceCommandPrerequisites(t *testing.T) {
 				)
 			}
 		})
+	}
+
+	if verb, ok := integrityFirstPositional([]string{
+		"systemctl", "--future-mode", "enable", "demo.service",
+	}); ok || verb != "" {
+		t.Fatalf("unknown detached option produced verb %q", verb)
 	}
 
 	if gitNoVerify([]string{"commit", "-m", "-n"}) {

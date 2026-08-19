@@ -126,7 +126,7 @@ func TestParserUncertaintyV8IsCounterOnlyNotAlert(t *testing.T) {
 		_, requests := capture.snapshot()
 		if hookModelV8MetricPointCount(
 			requests,
-			observability.TelemetryInstrumentDefenseClawGuardrailEvaluations,
+			observability.TelemetryInstrumentDefenseClawGuardrailParserUncertainty,
 		) == 1 {
 			break
 		}
@@ -134,12 +134,16 @@ func TestParserUncertaintyV8IsCounterOnlyNotAlert(t *testing.T) {
 	}
 	_, requests := capture.snapshot()
 	assertHookV8MetricPoint(t, hookModelV8MetricPoints(
-		requests, observability.TelemetryInstrumentDefenseClawGuardrailEvaluations,
+		requests, observability.TelemetryInstrumentDefenseClawGuardrailParserUncertainty,
 	), map[string]string{
-		"defenseclaw.connector.source":           "codex",
-		"defenseclaw.guardrail.effective_action": "allow",
-		"defenseclaw.metric.guardrail.scanner":   trustedParserUncertaintyMetricScanner,
+		"defenseclaw.connector.source": "codex",
 	}, 3)
+	if got := hookModelV8MetricPointCount(
+		requests,
+		observability.TelemetryInstrumentDefenseClawGuardrailEvaluations,
+	); got != 0 {
+		t.Fatalf("parser uncertainty emitted guardrail evaluation metric points=%d", got)
+	}
 	if got := hookModelV8MetricPointCount(
 		requests,
 		observability.TelemetryInstrumentDefenseClawAlertCount,

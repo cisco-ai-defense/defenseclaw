@@ -1623,6 +1623,8 @@ func windowsClassifyPowerShell(
 		windowsClassifyGit(command, args, builder)
 	case "openssl", "openssl.exe":
 		classifyOpenSSLDecode(builder.out, command)
+	case "format":
+		classifyWindowsFormat(builder.out, command)
 	case "codex", "codex.exe", "claude", "claude.exe",
 		"gemini", "gemini.exe", "opencode", "opencode.exe":
 		classifyAgentRuntime(builder.out, command, command.Program)
@@ -1822,6 +1824,8 @@ func windowsClassifyCMD(
 		windowsClassifyGit(command, args, builder)
 	case "openssl", "openssl.exe":
 		classifyOpenSSLDecode(builder.out, command)
+	case "format":
+		classifyWindowsFormat(builder.out, command)
 	case "codex", "codex.exe", "claude", "claude.exe",
 		"gemini", "gemini.exe", "opencode", "opencode.exe":
 		classifyAgentRuntime(builder.out, command, command.Program)
@@ -1849,6 +1853,7 @@ func windowsClassifyClearDisk(
 ) {
 	valid := true
 	targetSeen := false
+	targetNumber := ""
 	removeData := false
 	removeOEM := false
 	for i := 0; i < len(args); i++ {
@@ -1864,12 +1869,14 @@ func windowsClassifyClearDisk(
 				valid = false
 				continue
 			}
-			if _, err := strconv.ParseUint(value.value, 10, 32); err != nil {
+			number, err := strconv.ParseUint(value.value, 10, 32)
+			if err != nil {
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 				valid = false
 				continue
 			}
 			targetSeen = true
+			targetNumber = strconv.FormatUint(number, 10)
 		case "-inputobject":
 			value, _ := windowsPowerShellParameterValue(args, &i, builder)
 			if value.wildcard {
@@ -1903,6 +1910,11 @@ func windowsClassifyClearDisk(
 		return
 	}
 	windowsAddOperation(command, OperationDiskWrite)
+	builder.addPath(
+		command.ID,
+		PathAccessWrite,
+		`\\.\PhysicalDrive`+targetNumber,
+	)
 }
 
 func windowsClassifyStopProcess(
@@ -3416,6 +3428,9 @@ func windowsAddPowerShellPaths(
 	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg.quote == QuoteNone && windowsKnownRecursiveForceSwitchValue(arg.value) {
+			continue
+		}
 		if arg.expands {
 			builder.out.markPartial(IssueDynamicWord)
 			continue
@@ -3453,6 +3468,19 @@ func windowsAddPowerShellPaths(
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 	}
 	return filesystemFound, environmentFound
+}
+
+func windowsKnownRecursiveForceSwitchValue(value string) bool {
+	name, switchValue, joined := strings.Cut(strings.ToLower(value), ":")
+	if !joined || name != "-force" && name != "-recurse" {
+		return false
+	}
+	switch switchValue {
+	case "$true", "true", "1", "$false", "false", "0":
+		return true
+	default:
+		return false
+	}
 }
 
 // windowsAddPowerShellNewItemPath owns New-Item's separate -Path and -Name

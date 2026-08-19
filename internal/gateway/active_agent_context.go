@@ -61,7 +61,6 @@ type activeAgentContextKey struct {
 
 type activeAgentContextSession struct {
 	files     []string
-	invalid   bool
 	updatedAt time.Time
 }
 
@@ -152,6 +151,10 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	if !ok {
 		return
 	}
+	canonicalPath, valid := exactActiveAgentFile(filePath)
+	if !valid {
+		return
+	}
 	now := cache.currentTime()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -164,14 +167,6 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 		cache.makeRoomLocked()
 		session = activeAgentContextSession{updatedAt: now}
 	}
-	if session.invalid {
-		return
-	}
-	canonicalPath, valid := exactActiveAgentFile(filePath)
-	if !valid {
-		cache.sessions[key] = activeAgentContextSession{invalid: true, updatedAt: now}
-		return
-	}
 	for _, existing := range session.files {
 		if existing == canonicalPath {
 			session.updatedAt = now
@@ -180,7 +175,6 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 		}
 	}
 	if len(session.files) >= maxActiveAgentContextFiles {
-		cache.sessions[key] = activeAgentContextSession{invalid: true, updatedAt: now}
 		return
 	}
 	session.files = append(session.files, canonicalPath)
@@ -208,7 +202,7 @@ func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) 
 	defer cache.mu.Unlock()
 	cache.pruneLocked(now)
 	session, ok := cache.sessions[key]
-	if !ok || session.invalid || len(session.files) == 0 {
+	if !ok || len(session.files) == 0 {
 		return nil
 	}
 	session.updatedAt = now

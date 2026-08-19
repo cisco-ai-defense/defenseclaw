@@ -19,6 +19,7 @@ package connector
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -326,7 +327,7 @@ func antigravityValidateUniqueJSON(raw []byte) error {
 	if err := antigravityConsumeUniqueJSONValue(dec, 0); err != nil {
 		return err
 	}
-	if _, err := dec.Token(); err != io.EOF {
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return fmt.Errorf("multiple JSON values")
 		}

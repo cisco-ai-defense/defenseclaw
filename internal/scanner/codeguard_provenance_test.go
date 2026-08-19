@@ -70,3 +70,31 @@ rules:
 		t.Fatal("JSON round trip manufactured CodeGuard builtin provenance")
 	}
 }
+
+func TestCodeGuardFindingsReturnsDeepCopies(t *testing.T) {
+	scan := CodeGuardContentScan{findings: []Finding{{
+		ID:           "CG-EXEC-001",
+		Tags:         []string{"execution"},
+		DataAxis:     []string{"egress_external"},
+		DecisionPath: json.RawMessage(`{"source":"fixture"}`),
+		LineNumber:   intPointer(7),
+		TurnID:       intPointer(9),
+	}}}
+
+	first := scan.Findings()
+	first[0].Tags[0] = "mutated"
+	first[0].DataAxis[0] = "mutated"
+	first[0].DecisionPath[0] = '['
+	*first[0].LineNumber = 70
+	*first[0].TurnID = 90
+
+	second := scan.Findings()
+	if second[0].Tags[0] != "execution" ||
+		second[0].DataAxis[0] != "egress_external" ||
+		string(second[0].DecisionPath) != `{"source":"fixture"}` ||
+		*second[0].LineNumber != 7 || *second[0].TurnID != 9 {
+		t.Fatalf("private scan state was mutated through Findings: %+v", second[0])
+	}
+}
+
+func intPointer(value int) *int { return &value }

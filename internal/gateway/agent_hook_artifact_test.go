@@ -93,6 +93,26 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 			}
 		})
 	}
+
+	t.Run("parser uncertainty telemetry", func(t *testing.T) {
+		path := filepath.Join(dir, "parser-uncertainty.sh")
+		body := []byte("#!/bin/sh\n\"$RUNNER\" -c 'rm -rf /'\n")
+		if err := os.WriteFile(path, body, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		facts := actionfacts.Analyze(actionfacts.Input{
+			Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir,
+		})
+		var telemetry trustedActionTelemetry
+		promotedArtifactFindings(t.Context(), agentHookRequest{
+			ConnectorName: connectorName,
+		}, facts, true, func(observation trustedActionTelemetry) {
+			telemetry.merge(observation)
+		})
+		if telemetry.ParserUncertaintyCount == 0 {
+			t.Fatalf("artifact parser uncertainty telemetry = %+v", telemetry)
+		}
+	})
 }
 
 func TestPromotedArtifactHonorsPOSIXNoExecScriptMode(t *testing.T) {

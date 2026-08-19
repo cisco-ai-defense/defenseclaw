@@ -155,6 +155,9 @@ func TestAlertFatigueActionModePreservesWeakExplicitCredentials(t *testing.T) {
 		if verdict.Action != "allow" {
 			t.Errorf("Action verdict for unproved credential egress = %s, want allow", verdict.Action)
 		}
+		if verdict.Severity != "LOW" {
+			t.Errorf("Visible severity for unproved credential egress = %s, want LOW", verdict.Severity)
+		}
 		if !containsString(verdict.Findings, "SEC-CONNSTR:Connection string with credentials") {
 			t.Errorf("Action verdict missing SEC-CONNSTR: %v", verdict.Findings)
 		}

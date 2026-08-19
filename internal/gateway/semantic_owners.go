@@ -654,7 +654,9 @@ func readAndEgressPrerequisite(
 
 func externalFileUploadPrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if !curlProgram(command.Program) ||
+		if command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete ||
+			!curlProgram(command.Program) ||
 			!hasOperation(command, actionfacts.OperationUpload) ||
 			!hasReadPath(facts, command.ID, true) ||
 			!hasExternalUpload(facts, command.ID) ||

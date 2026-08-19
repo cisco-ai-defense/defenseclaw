@@ -102,6 +102,14 @@ telemetry. Batch, failure, denial, and mixed outputs remain untrusted content;
 they are still advisory because they cannot be attributed to one executable
 request safely.
 
+Protection for active `AGENTS.md` and `MEMORY.md` files is similarly
+context-bound. DefenseClaw accepts an active file only from an authenticated
+`InstructionsLoaded` event that names the exact absolute, regular,
+non-symlinked file. A later `PreToolUse` mutation is enforcement-eligible only
+in that same Claude Code session and for that exact path. A file mention, a
+`Read` call, a generic payload field, or an event from another session cannot
+claim this authority.
+
 <Callout type="info">
 Claude Code is one of the few connectors that supports native PreToolUse ask. HITL approvals surface inside the agent UI itself, so the operator never has to leave Claude Code to decide.
 </Callout>

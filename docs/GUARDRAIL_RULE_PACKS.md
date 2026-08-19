@@ -50,6 +50,12 @@ Authoritative ActionFacts own the semantic decision; unsupported or ambiguous
 input keeps the legacy fallback. Each migrated owner emits one canonical
 finding rather than independent regex and CEL findings.
 
+All trusted-action findings cross a final same-rule proof gate before they can
+affect a block decision. Complete, code-owned semantic, CodeGuard, exact
+fallback proof may authorize enforcement. Raw regex matches, parser-shadow
+evidence, partial or invalid facts, and proof for another rule remain
+detection-only and auditable.
+
 Durable ordered-chain enforcement is limited to authenticated connector hooks
 with canonical connector/session correlation. The audit store persists only
 bounded masks and fingerprints, never raw commands, arguments, paths, URLs, or

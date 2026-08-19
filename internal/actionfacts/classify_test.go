@@ -4762,6 +4762,17 @@ func TestCommandSpecificNoEffectPrecedence(t *testing.T) {
 			t.Fatalf("output = %#v", out)
 		}
 	})
+
+	t.Run("systemctl detached job mode", func(t *testing.T) {
+		out := classifyTestArgv([]string{
+			"systemctl", "--job-mode", "fail", "enable", "fixture.service",
+		})
+		if out.status != StatusComplete ||
+			out.commands[0].Effect != EffectExecute ||
+			!commandHasOperation(out.commands[0], OperationSchedule) {
+			t.Fatalf("output = %#v", out)
+		}
+	})
 }
 
 func TestCredentialHelpRespectsOptionOwnership(t *testing.T) {

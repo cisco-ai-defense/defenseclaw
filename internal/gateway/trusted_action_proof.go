@@ -29,8 +29,6 @@ const (
 	findingProofActionFactsSemantic
 	findingProofExactCodeGuard
 	findingProofExactFallback
-	findingProofRepositoryPolicy
-	findingProofJudge
 	findingProofParserShadow
 )
 
@@ -39,10 +37,9 @@ const (
 // pins and completeness are checked by the constructors and collapsed to the
 // authority bit before the record is attached to a finding.
 type findingProof struct {
-	kind            findingProofKind
-	ruleID          string
-	authoritative   bool
-	promoteAdvisory bool
+	kind          findingProofKind
+	ruleID        string
+	authoritative bool
 }
 
 // actionFactsSemanticProofInput describes the independent conditions which
@@ -67,7 +64,6 @@ func newActionFactsSemanticFindingProof(
 			input.ProjectionComplete &&
 			input.EvaluationComplete &&
 			input.Matched,
-		false,
 	)
 }
 
@@ -83,7 +79,6 @@ func newExactCodeGuardFindingProof(
 		findingProofExactCodeGuard,
 		ruleID,
 		trustedBoundary && scanComplete && exactUnsafeMatch,
-		false,
 	)
 }
 
@@ -101,75 +96,26 @@ func newExactFallbackFindingProof(
 		findingProofExactFallback,
 		ruleID,
 		factsAuthoritative && enforcementEligible && structureComplete && exactMatch,
-		false,
-	)
-}
-
-// newRepositoryPolicyFindingProof is the only constructor which may promote
-// a shipped advisory. The active repository policy must be authoritative,
-// match the current repository scope, and explicitly forbid this exact rule.
-// The allowlist is intentionally limited to the two advisory Git behaviors.
-func newRepositoryPolicyFindingProof(
-	ruleID string,
-	policyAuthoritative bool,
-	repositoryScopeMatched bool,
-	explicitlyForbidden bool,
-) findingProof {
-	authoritative := trustedRepositoryAdvisoryRule(ruleID) &&
-		policyAuthoritative && repositoryScopeMatched && explicitlyForbidden
-	return newFindingProof(
-		findingProofRepositoryPolicy,
-		ruleID,
-		authoritative,
-		authoritative,
-	)
-}
-
-func trustedRepositoryAdvisoryRule(ruleID string) bool {
-	switch ruleID {
-	case "integrity.git_hooks_bypass", "source.git_remote_tamper":
-		return true
-	default:
-		return false
-	}
-}
-
-// newJudgeFindingProof is reserved for an authenticated, complete judge lane
-// which returned an explicit deny. Incomplete, advisory, or unauthenticated
-// judge results remain visible but non-authoritative.
-func newJudgeFindingProof(
-	ruleID string,
-	authenticated bool,
-	evaluationComplete bool,
-	explicitDeny bool,
-) findingProof {
-	return newFindingProof(
-		findingProofJudge,
-		ruleID,
-		authenticated && evaluationComplete && explicitDeny,
-		false,
 	)
 }
 
 func newParserShadowFindingProof(ruleID string) findingProof {
-	return newFindingProof(findingProofParserShadow, ruleID, false, false)
+	return newFindingProof(findingProofParserShadow, ruleID, false)
 }
 
 func newFindingProof(
 	kind findingProofKind,
 	ruleID string,
 	authoritative bool,
-	promoteAdvisory bool,
 ) findingProof {
-	if ruleID == "" || strings.TrimSpace(ruleID) != ruleID {
+	normalizedRuleID := strings.TrimSpace(ruleID)
+	if normalizedRuleID == "" || normalizedRuleID != ruleID {
 		authoritative = false
-		promoteAdvisory = false
 	}
 	return findingProof{
-		kind:            kind,
-		ruleID:          ruleID,
-		authoritative:   authoritative,
-		promoteAdvisory: promoteAdvisory,
+		kind:          kind,
+		ruleID:        normalizedRuleID,
+		authoritative: authoritative,
 	}
 }
 
@@ -185,27 +131,17 @@ func (p findingProof) authorizes(ruleID string) bool {
 	switch p.kind {
 	case findingProofActionFactsSemantic,
 		findingProofExactCodeGuard,
-		findingProofExactFallback,
-		findingProofRepositoryPolicy,
-		findingProofJudge:
+		findingProofExactFallback:
 		return true
 	default:
 		return false
 	}
 }
 
-func (p findingProof) authorizesAdvisoryPromotion(ruleID string) bool {
-	return p.kind == findingProofRepositoryPolicy &&
-		p.promoteAdvisory &&
-		trustedRepositoryAdvisoryRule(ruleID) &&
-		p.authorizes(ruleID)
-}
-
 // applyTrustedActionProofBoundary is the final pure action-boundary gate. It
 // returns an independent slice and never removes a finding. Unsupported raw
 // regex, parser-shadow, PARTIAL, INVALID, and unpinned results remain visible
-// as detection-only findings. Existing detection/audit findings remain so;
-// only an exact active repository policy may promote a shipped Git advisory.
+// as detection-only findings. Existing detection/audit findings remain so.
 func applyTrustedActionProofBoundary(
 	findings []RuleFinding,
 	enforcementCapable bool,
@@ -221,9 +157,6 @@ func applyTrustedActionProofBoundary(
 			continue
 		}
 		if finding.enforcement == findingEnforcementDetectionOnly {
-			if finding.proof.authorizesAdvisoryPromotion(finding.RuleID) {
-				finding.enforcement = findingEnforcementAllowed
-			}
 			continue
 		}
 		if finding.proof.authorizes(finding.RuleID) {

@@ -645,10 +645,11 @@ function Wait-GatewayEvidenceAfter(
     [string]$Name,
     [int]$Since,
     [bool]$RequireBlock,
-    [int]$TimeoutMilliseconds = 5000,
-    [string]$SessionID = '',
-    [string]$HookEvent = '',
-    [string]$ToolInvocationID = ''
+	[int]$TimeoutMilliseconds = 5000,
+	[string]$SessionID = '',
+	[string]$HookEvent = '',
+	[string]$ToolInvocationID = '',
+	[string]$ExpectedRequestID = ''
 ) {
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     $connectorEvent = $false
@@ -662,10 +663,17 @@ function Wait-GatewayEvidenceAfter(
         if ($hasHookIdentity) {
             $decision = Get-LatestHookDecision `
                 -Path $Path -Name $Name -Since $Since `
-                -SessionID $SessionID -HookEvent $HookEvent `
-                -ToolInvocationID $ToolInvocationID
-            if ($null -ne $decision) {
-                $requestID = [string]$decision.request_id
+				-SessionID $SessionID -HookEvent $HookEvent `
+				-ToolInvocationID $ToolInvocationID
+			if ($null -ne $decision) {
+				$candidateRequestID = [string]$decision.request_id
+				if (-not [string]::IsNullOrWhiteSpace($ExpectedRequestID) -and
+					$candidateRequestID -cne $ExpectedRequestID) {
+					$decision = $null
+					$connectorEvent = $false
+					continue
+				}
+				$requestID = $candidateRequestID
                 $connectorEvent = Test-ConnectorEvent `
                     -Path $Path -Name $Name -Since $Since `
                     -SessionID $SessionID -HookEvent $HookEvent -RequestID $requestID `
@@ -1553,10 +1561,18 @@ function Invoke-DangerousHook(
 
     $requestID = [string]$decision.request_id
     if ([string]::IsNullOrWhiteSpace($requestID)) { throw "$Name hook_decision has no request identity" }
-    $hasBlockVerdict = Test-BlockVerdict `
-        -Path $script:GatewayJsonl -Since $before -Name $Connector `
-        -RequestID $requestID -SessionID $sessionID `
-        -ToolInvocationID $toolInvocationID
+    if ($Expected -eq 'block') {
+		$evidence = Wait-GatewayEvidenceAfter `
+			-Path $script:GatewayJsonl -Name $Connector -Since $before `
+			-RequireBlock $true -SessionID $sessionID -HookEvent $nativeHookEvent `
+			-ToolInvocationID $toolInvocationID -ExpectedRequestID $requestID
+        $hasBlockVerdict = [bool]$evidence.BlockVerdict
+    } else {
+        $hasBlockVerdict = Test-BlockVerdict `
+            -Path $script:GatewayJsonl -Since $before -Name $Connector `
+            -RequestID $requestID -SessionID $sessionID `
+            -ToolInvocationID $toolInvocationID
+    }
     if ($Expected -eq 'block') {
         if (-not $hasBlockVerdict) { throw "$Name has no underlying gateway block verdict" }
         if ([string]$decision.raw_action -ne 'block') { throw "$Name raw_action=$($decision.raw_action), expected block" }

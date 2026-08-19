@@ -1080,6 +1080,7 @@ func classifyStructuredPowerShellClearDisk(
 	}
 	controls := newStructuredPowerShellControlState()
 	targetSeen := false
+	targetNumber := ""
 	removeDataSeen := false
 	removeOEMSeen := false
 	passThruSeen := false
@@ -1099,11 +1100,13 @@ func classifyStructuredPowerShellClearDisk(
 				valid = false
 				continue
 			}
-			if _, err := strconv.ParseUint(value, 10, 32); err != nil {
+			number, err := strconv.ParseUint(value, 10, 32)
+			if err != nil {
 				valid = false
 				continue
 			}
 			targetSeen = true
+			targetNumber = strconv.FormatUint(number, 10)
 		case "-inputobject":
 			_, ok := structuredPowerShellRequiredValue(command.Argv, &i)
 			// InputObject may carry a live PowerShell object or pipeline
@@ -1144,6 +1147,12 @@ func classifyStructuredPowerShellClearDisk(
 		return
 	}
 	addOperation(command, OperationDiskWrite)
+	appendCommandPath(
+		out,
+		command,
+		PathAccessWrite,
+		`\\.\PhysicalDrive`+targetNumber,
+	)
 }
 
 func classifyStructuredPowerShellStopProcess(
@@ -1538,8 +1547,12 @@ func classifyStructuredPowerShellNewItem(
 }
 
 func structuredPowerShellBooleanLiteral(value string) bool {
-	return strings.EqualFold(value, "$true") ||
-		strings.EqualFold(value, "$false")
+	switch strings.ToLower(value) {
+	case "$true", "true", "1", "$false", "false", "0":
+		return true
+	default:
+		return false
+	}
 }
 
 func canonicalPowerShellNewItemParameter(key string) string {
@@ -1861,7 +1874,8 @@ func classifyStructuredPowerShellPathMutator(
 			}
 		case "-force", "-recurse", "-passthru", "-container",
 			"-nonewline", "-append", "-noclobber", "-debug", "-verbose":
-			if joined {
+			if joined && (key != "-force" && key != "-recurse" ||
+				!structuredPowerShellBooleanLiteral(joinedValue)) {
 				valid = false
 				continue
 			}
@@ -7723,7 +7737,12 @@ func classifyWindowsFormat(out *parseOutput, command *CommandFact) {
 	}
 	addOperation(command, OperationWrite)
 	addOperation(command, OperationDiskWrite)
-	appendCommandPath(out, command, PathAccessWrite, command.Argv[1])
+	device, ok := windowsVolumeDeviceTarget(command.Argv[1])
+	if !ok {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	appendCommandPath(out, command, PathAccessWrite, device)
 }
 
 func classifyStructuredPowerShellFormatVolume(
@@ -7735,6 +7754,7 @@ func classifyStructuredPowerShellFormatVolume(
 	}
 	controls := newStructuredPowerShellControlState()
 	selector := ""
+	selectorKind := ""
 	complete := true
 	for index := 1; index < len(command.Argv); index++ {
 		if controls.consume(command, command.Argv[index]) {
@@ -7752,6 +7772,12 @@ func classifyStructuredPowerShellFormatVolume(
 				complete = false
 			}
 			selector = command.Argv[index]
+			selectorKind = argument
+			if argument == "-partition" || argument == "-inputobject" {
+				// These parameters carry PowerShell objects, not an exact device
+				// identity that can safely authorize a destructive action.
+				complete = false
+			}
 		case "-filesystem", "-newfilesystemlabel", "-allocationsize":
 			if index+1 >= len(command.Argv) {
 				complete = false
@@ -7771,9 +7797,31 @@ func classifyStructuredPowerShellFormatVolume(
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
+	device, ok := windowsVolumeDeviceTarget(selector)
+	if !ok || (selectorKind != "-driveletter" && selectorKind != "-path") {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
 	addOperation(command, OperationWrite)
 	addOperation(command, OperationDiskWrite)
-	appendCommandPath(out, command, PathAccessWrite, selector)
+	appendCommandPath(out, command, PathAccessWrite, device)
+}
+
+func windowsVolumeDeviceTarget(value string) (string, bool) {
+	if len(value) == 1 && isASCIILetter(value[0]) {
+		return "//./" + strings.ToUpper(value) + ":", true
+	}
+	if windowsDriveRoot(value) {
+		return "//./" + strings.ToUpper(value), true
+	}
+	if len(value) == 3 && isASCIILetter(value[0]) && value[1] == ':' &&
+		(value[2] == '\\' || value[2] == '/') {
+		return "//./" + strings.ToUpper(value[:2]), true
+	}
+	if windowsPathFlavor(value) == PathFlavorDevice {
+		return value, true
+	}
+	return "", false
 }
 
 func windowsDriveRoot(value string) bool {
@@ -10570,7 +10618,7 @@ func classifySchedule(out *parseOutput, command *CommandFact, program string) {
 	case "systemctl":
 		valueOptions := exactOptionSet(
 			"-H", "--host", "-M", "--machine", "-n", "--lines", "-o", "--output",
-			"-p", "--property", "--root", "--runtime-scope", "--state",
+			"-p", "--property", "--job-mode", "--root", "--runtime-scope", "--state",
 			"-t", "--type",
 		)
 		parsed := parseOwnedPOSIXOptions(

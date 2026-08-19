@@ -19,9 +19,10 @@ rules:
       f.paths.exists(p, p.command_id == c.id &&
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] &&
+      (p.normalized == 'MEMORY.md' || p.normalized.endsWith('/MEMORY.md'))))
     pattern: '(?i)MEMORY\.md'
-    title: "Active MEMORY.md mutation"
+    title: "MEMORY.md mutation or reference"
     severity: HIGH
     confidence: 0.85
     tags: [cognitive-tampering]
@@ -43,9 +44,10 @@ rules:
       f.paths.exists(p, p.command_id == c.id &&
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] &&
+      (p.normalized == 'AGENTS.md' || p.normalized.endsWith('/AGENTS.md'))))
     pattern: '(?i)AGENTS\.md'
-    title: "Active AGENTS.md mutation"
+    title: "AGENTS.md mutation or reference"
     severity: HIGH
     confidence: 0.80
     tags: [cognitive-tampering]

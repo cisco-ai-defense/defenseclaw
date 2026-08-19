@@ -90,6 +90,16 @@ func TestNormalizeAgentHookRequest_AntigravityNilToolArgsProjectionUsesEmptyObje
 	if !json.Valid(req.ToolArgs) || string(req.ToolArgs) != `{}` {
 		t.Fatalf("ToolArgs=%q want valid empty JSON object", req.ToolArgs)
 	}
+	if !req.ToolArgsProjectionUncertain {
+		t.Fatal("missing raw tool args did not retain parser uncertainty")
+	}
+	withoutRaw := normalizeAgentHookRequestWithProfile("antigravity", payload, profile)
+	if !json.Valid(withoutRaw.ToolArgs) || string(withoutRaw.ToolArgs) != `{}` {
+		t.Fatalf("no-raw ToolArgs=%q want valid empty JSON object", withoutRaw.ToolArgs)
+	}
+	if !withoutRaw.ToolArgsProjectionUncertain {
+		t.Fatal("no-raw authoritative projection did not retain parser uncertainty")
+	}
 }
 
 // TestNormalizeAgentHookRequest_HermesExtraEnvelope is the regression

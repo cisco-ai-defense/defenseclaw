@@ -64,6 +64,27 @@ rules:
 			wantEnforceable: true,
 		},
 		{
+			name:            "string encoded complete builtin authorizes",
+			args:            json.RawMessage(`"{\"path\":\"/tmp/app.py\",\"content\":\"os.system(cmd)\"}"`),
+			wantAction:      guardrailActionAlert,
+			wantRuleID:      "CG-EXEC-001",
+			wantEnforceable: true,
+		},
+		{
+			name:            "irrelevant duplicate metadata preserves exact proof",
+			args:            json.RawMessage(`{"path":"/tmp/app.py","content":"os.system(cmd)","unused":1,"unused":2}`),
+			wantAction:      guardrailActionAlert,
+			wantRuleID:      "CG-EXEC-001",
+			wantEnforceable: true,
+		},
+		{
+			name:            "identical duplicate proof fields preserve exact proof",
+			args:            json.RawMessage(`{"path":"/tmp/app.py","path":"/tmp/app.py","content":"os.system(cmd)","content":"os.system(cmd)"}`),
+			wantAction:      guardrailActionAlert,
+			wantRuleID:      "CG-EXEC-001",
+			wantEnforceable: true,
+		},
+		{
 			name:       "custom regex is detection only",
 			args:       json.RawMessage(`{"path":"/tmp/app.py","content":"CUSTOM_ONLY_MATCH"}`),
 			wantAction: guardrailActionAllow,
@@ -233,6 +254,47 @@ func TestAggregateCodeGuardSeveritySeparatesVisibleAndEnforceable(t *testing.T) 
 			severity,
 			enforceableSeverity,
 		)
+	}
+
+	severity, enforceableSeverity = aggregateCodeGuardSeverity(
+		[]RuleFinding{
+			{
+				Severity:    string(scanner.SeverityMedium),
+				enforcement: findingEnforcementAllowed,
+			},
+			{
+				Severity:    string(scanner.SeverityLow),
+				enforcement: findingEnforcementDetectionOnly,
+			},
+		},
+		"NONE",
+		"NONE",
+	)
+	if severity != "MEDIUM" || enforceableSeverity != "MEDIUM" {
+		t.Fatalf(
+			"medium/low severity aggregation = %q/%q, want MEDIUM/MEDIUM",
+			severity,
+			enforceableSeverity,
+		)
+	}
+}
+
+func TestCodeGuardRuleFindingsRetainsUntitledCustomRuleAsDetectionOnly(t *testing.T) {
+	findings := codeGuardRuleFindings(codeGuardArgsScan{
+		findings: []scanner.Finding{{
+			RuleID:   "CG-CUSTOM-UNTITLED",
+			Severity: scanner.SeverityHigh,
+		}},
+		complete: true,
+	}, true, true)
+	if len(findings) != 1 {
+		t.Fatalf("untitled custom findings = %+v, want one visible finding", findings)
+	}
+	if findings[0].Title != "CG-CUSTOM-UNTITLED" {
+		t.Fatalf("untitled custom finding title = %q", findings[0].Title)
+	}
+	if findings[0].contributesToEnforcement() {
+		t.Fatalf("untitled custom finding authorized enforcement: %+v", findings[0])
 	}
 }
 

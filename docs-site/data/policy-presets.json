@@ -418,8 +418,9 @@
                 },
                 {
                   "id": "COG-MEMORY",
+                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] && (p.normalized == 'MEMORY.md' || p.normalized.endsWith('/MEMORY.md'))))",
                   "pattern": "(?i)MEMORY\\.md",
-                  "title": "MEMORY.md access",
+                  "title": "MEMORY.md mutation or reference",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
@@ -448,8 +449,9 @@
                 },
                 {
                   "id": "COG-AGENTS-MD",
+                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] && (p.normalized == 'AGENTS.md' || p.normalized.endsWith('/AGENTS.md'))))",
                   "pattern": "(?i)AGENTS\\.md",
-                  "title": "AGENTS.md access",
+                  "title": "AGENTS.md mutation or reference",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -644,9 +646,20 @@
                 },
                 {
                   "id": "CMD-MKFS",
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program != 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
-                  "pattern": "(?i)\\bmkfs\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+                  "pattern": "(?i)\\b(?:mkfs(?:\\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\\b",
                   "title": "Filesystem format command",
+                  "severity": "CRITICAL",
+                  "confidence": 0.9,
+                  "tags": [
+                    "destructive"
+                  ]
+                },
+                {
+                  "id": "CMD-DEVICE-WIPE",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['wipefs', 'sgdisk', 'shred', 'blkdiscard', 'tee', 'cryptsetup', 'hdparm', 'nvme', 'parted', 'diskutil', 'format', 'format-volume', 'clear-disk'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+                  "pattern": "a^",
+                  "title": "Destructive write to a disk device",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
                   "tags": [
@@ -2824,8 +2837,9 @@
                 },
                 {
                   "id": "COG-MEMORY",
+                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] && (p.normalized == 'MEMORY.md' || p.normalized.endsWith('/MEMORY.md'))))",
                   "pattern": "(?i)MEMORY\\.md",
-                  "title": "MEMORY.md access",
+                  "title": "MEMORY.md mutation or reference",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
@@ -2854,8 +2868,9 @@
                 },
                 {
                   "id": "COG-AGENTS-MD",
+                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] && (p.normalized == 'AGENTS.md' || p.normalized.endsWith('/AGENTS.md'))))",
                   "pattern": "(?i)AGENTS\\.md",
-                  "title": "AGENTS.md access",
+                  "title": "AGENTS.md mutation or reference",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -3050,9 +3065,20 @@
                 },
                 {
                   "id": "CMD-MKFS",
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program != 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
-                  "pattern": "(?i)\\bmkfs\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+                  "pattern": "(?i)\\b(?:mkfs(?:\\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\\b",
                   "title": "Filesystem format command",
+                  "severity": "CRITICAL",
+                  "confidence": 0.9,
+                  "tags": [
+                    "destructive"
+                  ]
+                },
+                {
+                  "id": "CMD-DEVICE-WIPE",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['wipefs', 'sgdisk', 'shred', 'blkdiscard', 'tee', 'cryptsetup', 'hdparm', 'nvme', 'parted', 'diskutil', 'format', 'format-volume', 'clear-disk'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+                  "pattern": "a^",
+                  "title": "Destructive write to a disk device",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
                   "tags": [
@@ -5126,8 +5152,9 @@
                 },
                 {
                   "id": "COG-MEMORY",
+                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] && (p.normalized == 'MEMORY.md' || p.normalized.endsWith('/MEMORY.md'))))",
                   "pattern": "(?i)MEMORY\\.md",
-                  "title": "MEMORY.md access",
+                  "title": "MEMORY.md mutation or reference",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
@@ -5156,8 +5183,9 @@
                 },
                 {
                   "id": "COG-AGENTS-MD",
+                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] && (p.normalized == 'AGENTS.md' || p.normalized.endsWith('/AGENTS.md'))))",
                   "pattern": "(?i)AGENTS\\.md",
-                  "title": "AGENTS.md access",
+                  "title": "AGENTS.md mutation or reference",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -5352,9 +5380,20 @@
                 },
                 {
                   "id": "CMD-MKFS",
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program != 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
-                  "pattern": "(?i)\\bmkfs\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+                  "pattern": "(?i)\\b(?:mkfs(?:\\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\\b",
                   "title": "Filesystem format command",
+                  "severity": "CRITICAL",
+                  "confidence": 0.9,
+                  "tags": [
+                    "destructive"
+                  ]
+                },
+                {
+                  "id": "CMD-DEVICE-WIPE",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['wipefs', 'sgdisk', 'shred', 'blkdiscard', 'tee', 'cryptsetup', 'hdparm', 'nvme', 'parted', 'diskutil', 'format', 'format-volume', 'clear-disk'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+                  "pattern": "a^",
+                  "title": "Destructive write to a disk device",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
                   "tags": [

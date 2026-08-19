@@ -169,7 +169,11 @@ func TestWindowsRawStructuredSemanticParity(t *testing.T) {
 			argv:       []string{"Clear-Disk", "-Number", "0", "-RemoveData"},
 			effect:     EffectExecute,
 			operations: []OperationKind{OperationDiskWrite},
-			enforcing:  true,
+			paths: []windowsParityPath{{
+				Access: PathAccessWrite, Flavor: PathFlavorDevice,
+				Value: "//./PhysicalDrive0",
+			}},
+			enforcing: true,
 		},
 		{
 			name:    "PowerShell clear disk preview",
@@ -180,6 +184,10 @@ func TestWindowsRawStructuredSemanticParity(t *testing.T) {
 			},
 			effect:     EffectPreview,
 			operations: []OperationKind{OperationDiskWrite},
+			paths: []windowsParityPath{{
+				Access: PathAccessWrite, Flavor: PathFlavorDevice,
+				Value: "//./PhysicalDrive0",
+			}},
 		},
 		{
 			name:       "PowerShell force stop",
@@ -189,6 +197,45 @@ func TestWindowsRawStructuredSemanticParity(t *testing.T) {
 			effect:     EffectExecute,
 			operations: []OperationKind{OperationProcessKill},
 			enforcing:  true,
+		},
+		{
+			name:       "PowerShell clear disk canonical number",
+			dialect:    DialectPowerShell,
+			raw:        `Clear-Disk -Number 00 -RemoveData`,
+			argv:       []string{"Clear-Disk", "-Number", "00", "-RemoveData"},
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationDiskWrite},
+			paths: []windowsParityPath{{
+				Access: PathAccessWrite, Flavor: PathFlavorDevice,
+				Value: "//./PhysicalDrive0",
+			}},
+			enforcing: true,
+		},
+		{
+			name:       "cmd format drive volume",
+			dialect:    DialectCMD,
+			raw:        `format C:`,
+			argv:       []string{"format", "C:"},
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationWrite, OperationDiskWrite},
+			paths: []windowsParityPath{{
+				Access: PathAccessWrite, Flavor: PathFlavorDevice,
+				Value: "//./C:",
+			}},
+			enforcing: true,
+		},
+		{
+			name:       "PowerShell format drive volume",
+			dialect:    DialectPowerShell,
+			raw:        `Format-Volume -DriveLetter C`,
+			argv:       []string{"Format-Volume", "-DriveLetter", "C"},
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationWrite, OperationDiskWrite},
+			paths: []windowsParityPath{{
+				Access: PathAccessWrite, Flavor: PathFlavorDevice,
+				Value: "//./C:",
+			}},
+			enforcing: true,
 		},
 		{
 			name:    "PowerShell local group mutation",

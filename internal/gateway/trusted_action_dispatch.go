@@ -50,9 +50,6 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
-	// repositoryPolicy is trusted server-owned context. Tool arguments and
-	// model text can never populate it.
-	repositoryPolicy trustedRepositoryPolicyProof
 	// DowngradeReadOnlyDataArgs is advisory-only. Bare executable names and
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
@@ -857,19 +854,20 @@ func filterExactFallbackFindings(
 	facts actionfacts.Facts,
 	enforcementCapable bool,
 ) []RuleFinding {
+	enforcementFacts := facts.EnforcementProjection()
 	suppressAuthorizedKeysPathFallback := false
 	suppressPowerShellDownloadAlias := false
 	for _, finding := range findings {
 		switch finding.RuleID {
 		case "persistence.ssh_authorized_keys_command":
 			contract := exactFallbackContracts[finding.RuleID]
-			if contract.proves != nil && contract.proves(input, facts) {
+			if contract.proves != nil && contract.proves(input, enforcementFacts) {
 				suppressAuthorizedKeysPathFallback = true
 			}
 		case "CMD-PIPE-CURL":
 			contract := exactFallbackContracts[finding.RuleID]
-			if contract.proves != nil && contract.proves(input, facts) &&
-				powerShellDownloadExecPrerequisite(facts) {
+			if contract.proves != nil && contract.proves(input, enforcementFacts) &&
+				powerShellDownloadExecPrerequisite(enforcementFacts) {
 				suppressPowerShellDownloadAlias = true
 			}
 		}
@@ -895,18 +893,30 @@ func filterExactFallbackFindings(
 			filtered = append(filtered, finding)
 			continue
 		}
-		proven := contract.proves != nil && contract.proves(input, facts)
-		if !proven {
+		matched := contract.proves != nil && contract.proves(input, facts)
+		if !matched {
+			matched = trustedNestedExactFallbackMatch(
+				contract,
+				input,
+				facts,
+			)
+		}
+		if !preserveUnstructured && !matched {
+			continue
+		}
+		proofBoundary := facts.Authoritative() &&
+			enforcementFacts.EnforcementEligible() &&
+			enforcementFacts.Parse.Status == actionfacts.StatusComplete
+		proven := proofBoundary && contract.proves != nil &&
+			contract.proves(input, enforcementFacts)
+		if proofBoundary && !proven {
 			proven = trustedNestedExactFallbackProof(
 				contract,
 				input,
 				facts,
 			)
 		}
-		if !preserveUnstructured && !proven {
-			continue
-		}
-		if contract.detectionOnly || !enforcementCapable {
+		if contract.detectionOnly || !enforcementCapable || !proven {
 			finding.enforcement = findingEnforcementDetectionOnly
 		} else {
 			finding.enforcement = findingEnforcementAllowed
@@ -915,8 +925,8 @@ func filterExactFallbackFindings(
 			newExactFallbackFindingProof(
 				finding.RuleID,
 				facts.Authoritative(),
-				facts.EnforcementEligible(),
-				facts.Parse.Status == actionfacts.StatusComplete,
+				enforcementFacts.EnforcementEligible(),
+				enforcementFacts.Parse.Status == actionfacts.StatusComplete,
 				proven,
 			),
 		)
@@ -925,7 +935,7 @@ func filterExactFallbackFindings(
 	return filtered
 }
 
-func trustedNestedExactFallbackProof(
+func trustedNestedExactFallbackMatch(
 	contract exactFallbackContract,
 	input actionfacts.Input,
 	facts actionfacts.Facts,
@@ -934,10 +944,40 @@ func trustedNestedExactFallbackProof(
 		return false
 	}
 	for _, nested := range trustedNestedExecutionActions(input, facts) {
-		if nested.rawFallback {
+		if !nested.rawFallback && contract.proves(nested.input, nested.facts) {
+			return true
+		}
+	}
+	return false
+}
+
+func trustedNestedExactFallbackProof(
+	contract exactFallbackContract,
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) bool {
+	return trustedNestedExactFallbackProofFromActions(
+		contract,
+		trustedNestedExecutionActions(input, facts),
+	)
+}
+
+func trustedNestedExactFallbackProofFromActions(
+	contract exactFallbackContract,
+	nestedActions []trustedNestedAction,
+) bool {
+	if contract.proves == nil {
+		return false
+	}
+	for _, nested := range nestedActions {
+		if nested.rawFallback || !nested.facts.Authoritative() {
 			continue
 		}
-		if contract.proves(nested.input, nested.facts) {
+		nestedEnforcementFacts := nested.facts.EnforcementProjection()
+		if !nestedEnforcementFacts.EnforcementEligible() {
+			continue
+		}
+		if contract.proves(nested.input, nestedEnforcementFacts) {
 			return true
 		}
 	}
@@ -1024,22 +1064,7 @@ func finalizeTrustedActionFindings(
 		generation,
 		facts,
 		findings,
-		request.repositoryPolicy,
 	)
-	for index := range findings {
-		if !request.repositoryPolicy.forbids(findings[index].RuleID) ||
-			!trustedActionShippedGitAdvisoryRule(generation, findings[index].RuleID) {
-			continue
-		}
-		findings[index] = findings[index].withTrustedActionProof(
-			newRepositoryPolicyFindingProof(
-				findings[index].RuleID,
-				true,
-				true,
-				true,
-			),
-		)
-	}
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
@@ -3525,21 +3550,28 @@ func trustedSemanticOwnerFindingProofFromActions(
 	facts actionfacts.Facts,
 	nestedActions []trustedNestedAction,
 ) (findingProof, bool) {
-	if !facts.Authoritative() || !facts.EnforcementEligible() {
+	if !facts.Authoritative() {
+		return findingProof{}, false
+	}
+	enforcementFacts := facts.EnforcementProjection()
+	if !enforcementFacts.EnforcementEligible() {
 		return findingProof{}, false
 	}
 	owner, ok := trustedSemanticOwnerClaimingRule(ruleID)
 	if !ok || owner.prerequisite == nil {
 		return findingProof{}, false
 	}
-	matched := owner.prerequisite(facts)
+	matched := owner.prerequisite(enforcementFacts)
 	if !matched {
 		for _, nested := range nestedActions {
-			if nested.rawFallback || !nested.facts.Authoritative() ||
-				!nested.facts.EnforcementEligible() {
+			if nested.rawFallback || !nested.facts.Authoritative() {
 				continue
 			}
-			if owner.prerequisite(nested.facts) {
+			nestedEnforcementFacts := nested.facts.EnforcementProjection()
+			if !nestedEnforcementFacts.EnforcementEligible() {
+				continue
+			}
+			if owner.prerequisite(nestedEnforcementFacts) {
 				matched = true
 				break
 			}
@@ -3551,8 +3583,8 @@ func trustedSemanticOwnerFindingProofFromActions(
 	return newActionFactsSemanticFindingProof(
 		ruleID,
 		actionFactsSemanticProofInput{
-			FactsAuthoritative:  true,
-			EnforcementEligible: true,
+			FactsAuthoritative:  facts.Authoritative(),
+			EnforcementEligible: enforcementFacts.EnforcementEligible(),
 			ProjectionComplete:  true,
 			EvaluationComplete:  true,
 			Matched:             true,
@@ -3615,26 +3647,33 @@ func trustedNetworkFindingProofFromActions(
 	facts actionfacts.Facts,
 	nestedActions []trustedNestedAction,
 ) (findingProof, bool) {
-	if !facts.Authoritative() || !facts.EnforcementEligible() {
+	if !facts.Authoritative() {
+		return findingProof{}, false
+	}
+	enforcementFacts := facts.EnforcementProjection()
+	if !enforcementFacts.EnforcementEligible() {
 		return findingProof{}, false
 	}
 	matched := trustedNetworkRuleMatchesExecutingFact(
 		generation,
 		ruleID,
 		toolName,
-		facts,
+		enforcementFacts,
 	)
 	if !matched {
 		for _, nested := range nestedActions {
-			if nested.rawFallback || !nested.facts.Authoritative() ||
-				!nested.facts.EnforcementEligible() {
+			if nested.rawFallback || !nested.facts.Authoritative() {
+				continue
+			}
+			nestedEnforcementFacts := nested.facts.EnforcementProjection()
+			if !nestedEnforcementFacts.EnforcementEligible() {
 				continue
 			}
 			if trustedNetworkRuleMatchesExecutingFact(
 				generation,
 				ruleID,
 				toolName,
-				nested.facts,
+				nestedEnforcementFacts,
 			) {
 				matched = true
 				break
@@ -3647,8 +3686,8 @@ func trustedNetworkFindingProofFromActions(
 	return newActionFactsSemanticFindingProof(
 		ruleID,
 		actionFactsSemanticProofInput{
-			FactsAuthoritative:  true,
-			EnforcementEligible: true,
+			FactsAuthoritative:  facts.Authoritative(),
+			EnforcementEligible: enforcementFacts.EnforcementEligible(),
 			ProjectionComplete:  true,
 			EvaluationComplete:  true,
 			Matched:             true,

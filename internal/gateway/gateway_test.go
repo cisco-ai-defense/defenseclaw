@@ -4018,6 +4018,9 @@ func TestInspectToolSecretInArgs(t *testing.T) {
 	if verdict.Severity != "LOW" {
 		t.Errorf("severity = %q, want LOW audit telemetry", verdict.Severity)
 	}
+	if !containsString(verdict.Findings, "SEC-ANTHROPIC:Anthropic API key") {
+		t.Errorf("secret finding was dropped from advisory telemetry: %v", verdict.Findings)
+	}
 	if verdict.Mode != "observe" {
 		t.Errorf("mode = %q, want observe", verdict.Mode)
 	}

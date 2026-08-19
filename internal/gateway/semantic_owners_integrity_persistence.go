@@ -164,6 +164,28 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 		isCandidate,
 		isActive,
 		func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+			resolved := candidate.Resolved
+			if resolved == "" {
+				resolved = candidate.Normalized
+			}
+			flavor := candidate.Flavor
+			if flavor != actionfacts.PathFlavorPOSIX &&
+				flavor != actionfacts.PathFlavorWindows {
+				normalized := strings.ReplaceAll(resolved, `\`, "/")
+				switch {
+				case strings.HasPrefix(normalized, "//") ||
+					len(normalized) >= 3 && normalized[1] == ':' && normalized[2] == '/':
+					flavor = actionfacts.PathFlavorWindows
+				case strings.HasPrefix(normalized, "/"):
+					flavor = actionfacts.PathFlavorPOSIX
+				default:
+					return false
+				}
+			}
+			if _, ok := activeAgentInstructionPath(resolved, flavor); !ok {
+				return false
+			}
+			candidate.Flavor = flavor
 			return !isActive(facts, candidate)
 		},
 	)
@@ -556,9 +578,19 @@ func integrityFirstPositional(argv []string) (string, bool) {
 			return lower, true
 		}
 		key, _, joined := strings.Cut(lower, "=")
-		if systemctlValueOption(key) && !joined {
-			index++
+		if systemctlValueOption(key) {
+			if !joined {
+				if index+1 >= len(argv) {
+					return "", false
+				}
+				index++
+			}
+			continue
 		}
+		if systemctlFlagOption(key) && !joined {
+			continue
+		}
+		return "", false
 	}
 	return "", false
 }
@@ -566,8 +598,21 @@ func integrityFirstPositional(argv []string) (string, bool) {
 func systemctlValueOption(option string) bool {
 	switch option {
 	case "-h", "--host", "-m", "--machine", "-n", "--lines",
-		"-o", "--output", "-p", "--property", "--root",
+		"-o", "--output", "-p", "--property", "--job-mode", "--root",
 		"--runtime-scope", "--state", "-t", "--type":
+		return true
+	default:
+		return false
+	}
+}
+
+func systemctlFlagOption(option string) bool {
+	switch option {
+	case "-a", "--all", "--failed", "--force", "--global",
+		"--no-ask-password", "--no-block", "--no-legend", "--no-pager",
+		"--no-reload", "--now", "-q", "--quiet", "--recursive",
+		"--runtime", "--system", "--user", "--dry-run", "--help",
+		"--version":
 		return true
 	default:
 		return false
@@ -582,6 +627,9 @@ func matchesActiveRegistryPersistence(
 		return true
 	}
 	if candidate.Flavor != actionfacts.PathFlavorRegistry {
+		return false
+	}
+	if len(command.Argv) == 0 {
 		return false
 	}
 	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
@@ -601,7 +649,7 @@ func matchesActiveRunKey(candidate actionfacts.PathFact) bool {
 	if candidate.Flavor != actionfacts.PathFlavorRegistry {
 		return false
 	}
-	value := strings.Trim(semanticPathValue(candidate), "/")
+	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
 	return value == "hkcu/software/microsoft/windows/currentversion/run" ||
 		value == "hkcu/software/microsoft/windows/currentversion/runonce" ||
 		value == "hklm/software/microsoft/windows/currentversion/run" ||

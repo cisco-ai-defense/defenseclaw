@@ -274,7 +274,7 @@ func powerShellSwitchValueEnabled(value string, joined bool) bool {
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "$true", "true":
+	case "$true", "true", "1":
 		return true
 	default:
 		return false
@@ -974,7 +974,7 @@ func cryptominingFallbackProof(
 		if !reconImpactExecutingOwned(command) {
 			continue
 		}
-		if exactMinerName(executableBase(command.Program)) &&
+		if len(command.Argv) > 0 && exactMinerName(executableBase(command.Program)) &&
 			!minerPreviewArguments(command.Argv[1:]) ||
 			exactMinerWrapperTarget(command) {
 			return true
@@ -1044,13 +1044,18 @@ func exactMinerInvocationAt(argv []string, index int) bool {
 }
 
 func minerPreviewArguments(arguments []string) bool {
-	for _, argument := range arguments {
-		switch strings.ToLower(argument) {
-		case "-h", "--help", "-v", "--version":
-			return true
-		}
+	if len(arguments) == 2 && arguments[0] == "--" {
+		arguments = arguments[1:]
 	}
-	return false
+	if len(arguments) != 1 {
+		return false
+	}
+	switch strings.ToLower(arguments[0]) {
+	case "-h", "--help", "-v", "--version":
+		return true
+	default:
+		return false
+	}
 }
 
 func containerRunDisposition(

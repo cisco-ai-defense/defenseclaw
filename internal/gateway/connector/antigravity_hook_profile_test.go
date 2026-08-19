@@ -132,6 +132,18 @@ func TestAntigravityToolArgsFromRawPayload_StrictEnvelope(t *testing.T) {
 			name: "opaque payload string has no authority",
 			raw:  `{"toolCall":{"name":"run_command"},"payload":"{\"args\":{\"CommandLine\":\"rm -rf /\"}}"}`,
 		},
+		{
+			name: "blank tool name",
+			raw:  `{"toolCall":{"name":"   ","args":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "trailing JSON value",
+			raw:  `{"toolCall":{"name":"run_command","args":{"CommandLine":"echo safe"}}}{"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "malformed JSON body",
+			raw:  `{"toolCall":{"name":"run_command","args":{`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := antigravityToolArgsFromRawPayload([]byte(tc.raw)); got != nil {
@@ -142,6 +154,13 @@ func TestAntigravityToolArgsFromRawPayload_StrictEnvelope(t *testing.T) {
 }
 
 func TestAntigravityToolArgsFromRawPayload_RejectsExcessiveNesting(t *testing.T) {
+	acceptedNested := strings.Repeat("[", antigravityMaxJSONNestingDepth-3) +
+		"0" + strings.Repeat("]", antigravityMaxJSONNestingDepth-3)
+	acceptedRaw := []byte(`{"toolCall":{"name":"run_command","args":{"nested":` + acceptedNested + `}}}`)
+	if got := antigravityToolArgsFromRawPayload(acceptedRaw); got == nil {
+		t.Fatal("payload within nesting limit was rejected")
+	}
+
 	nested := strings.Repeat("[", antigravityMaxJSONNestingDepth) +
 		"0" + strings.Repeat("]", antigravityMaxJSONNestingDepth)
 	raw := []byte(`{"toolCall":{"name":"run_command","args":{"nested":` + nested + `}}}`)

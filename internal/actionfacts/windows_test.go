@@ -2111,6 +2111,10 @@ func TestPowerShellOwnedDiskAndProcessGrammar(t *testing.T) {
 			wantOp: OperationDiskWrite,
 		},
 		{
+			name: "format volume unresolved partition", source: `Format-Volume -Partition $partition`,
+			wantStatus: StatusPartial,
+		},
+		{
 			name: "stop wildcard", source: `Stop-Process -Name * -Force`,
 			wantStatus: StatusComplete, wantEffect: EffectExecute,
 			wantOp: OperationProcessKill, wantEnforce: true,
@@ -4043,6 +4047,68 @@ func TestPowerShellWhatIfRetainsDetectionIntent(t *testing.T) {
 			value:     `C:\victim`,
 		}) {
 		t.Fatalf("Out-File width abbreviation became preview: %#v", width)
+	}
+}
+
+func TestPowerShellRecursiveForceJoinedBooleanValues(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		source string
+		argv   []string
+	}{
+		{
+			source: `Remove-Item C:\victim -Recurse:$true -Force:true`,
+			argv:   []string{"Remove-Item", `C:\victim`, "-Recurse:$true", "-Force:true"},
+		},
+		{
+			source: `Remove-Item C:\victim -Recurse:1 -Force:1`,
+			argv:   []string{"Remove-Item", `C:\victim`, "-Recurse:1", "-Force:1"},
+		},
+		{
+			source: `Remove-Item C:\victim -Recurse:0 -Force:1`,
+			argv:   []string{"Remove-Item", `C:\victim`, "-Recurse:0", "-Force:1"},
+		},
+	} {
+		out := parsePowerShell(test.source, 1, 0)
+		classifyOutput(&out)
+		if out.status != StatusComplete || len(out.commands) != 1 ||
+			out.commands[0].Effect != EffectExecute ||
+			!commandHasOperation(out.commands[0], OperationDelete) ||
+			!containsPath(out.paths, pathExpectation{
+				commandID: 1,
+				access:    PathAccessDelete,
+				value:     `C:\victim`,
+			}) {
+			t.Fatalf("joined boolean switches were not authoritative: %#v", out)
+		}
+
+		facts := Analyze(Input{
+			Tool:        "powershell",
+			Argv:        test.argv,
+			DialectHint: DialectPowerShell,
+		})
+		if !facts.Authoritative() || len(facts.Commands) != 1 ||
+			facts.Commands[0].Effect != EffectExecute ||
+			!commandHasOperation(facts.Commands[0], OperationDelete) ||
+			len(facts.Paths) != 1 || facts.Paths[0].Access != PathAccessDelete ||
+			facts.Paths[0].Normalized != `C:/victim` {
+			t.Fatalf("structured joined boolean switches were not authoritative: %#v", facts)
+		}
+	}
+
+	out := parsePowerShell(`Remove-Item C:\victim -Recurse:maybe -Force:1`, 1, 0)
+	classifyOutput(&out)
+	if out.status != StatusPartial {
+		t.Fatalf("unknown joined switch value was authoritative: %#v", out)
+	}
+	unknown := Analyze(Input{
+		Tool:        "powershell",
+		Argv:        []string{"Remove-Item", `C:\victim`, "-Recurse:maybe", "-Force:1"},
+		DialectHint: DialectPowerShell,
+	})
+	if unknown.Authoritative() {
+		t.Fatalf("unknown structured joined switch value was authoritative: %#v", unknown)
 	}
 }
 

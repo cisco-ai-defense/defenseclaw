@@ -22,7 +22,7 @@ runtime accept and how a match becomes detection or enforcement evidence.
 
 <Flow
   direction="TB"
-  caption="Only authoritative facts enter CEL. Full facts detect the security intent; an execute-only projection determines whether that evidence can support synchronous enforcement."
+  caption="Only authoritative facts enter CEL. Full facts detect the security intent; an execute-only projection and final same-rule proof gate determine whether that evidence can support synchronous enforcement."
 >
   <Node id="boundary" kind="connector">Server-established trusted action boundary</Node>
   <Node id="analyze" kind="gateway">Parse and normalize tool arguments</Node>
@@ -30,6 +30,7 @@ runtime accept and how a match becomes detection or enforcement evidence.
   <Node id="full" kind="policy">Evaluate owner on full facts</Node>
   <Node id="execute" kind="policy">Evaluate execute-only projection</Node>
   <Node id="fallback" kind="policy">Owner-local regex fallback</Node>
+  <Node id="proof" kind="decision">Final same-rule proof gate</Node>
   <Node id="detect" kind="decision">Detection-only finding</Node>
   <Node id="enforce" kind="decision">Enforcement-eligible finding</Node>
   <Node id="none" kind="decision">No owner finding</Node>
@@ -41,10 +42,12 @@ runtime accept and how a match becomes detection or enforcement evidence.
   <Edge from="full" to="none" label="false" />
   <Edge from="full" to="fallback" label="error or budget" variant="dashed" />
   <Edge from="full" to="execute" label="true" />
-  <Edge from="execute" to="enforce" label="true + eligible surface" />
-  <Edge from="execute" to="detect" label="false or ineligible surface" />
-  <Edge from="fallback" to="detect" label="pattern matched" />
+  <Edge from="execute" to="proof" label="true" />
+  <Edge from="execute" to="detect" label="false" />
+  <Edge from="fallback" to="proof" label="pattern matched" />
   <Edge from="fallback" to="none" label="no match" />
+  <Edge from="proof" to="enforce" label="complete exact proof + eligible surface" />
+  <Edge from="proof" to="detect" label="raw, partial, unpinned, or ineligible" />
   <Edge from="detect" to="action" />
   <Edge from="enforce" to="action" />
 </Flow>
@@ -115,12 +118,20 @@ fallback without stopping unrelated rules.
 | Result | Owner behavior |
 | --- | --- |
 | Compile or admission failure | Reject the candidate generation; do not publish it. |
-| Projection is unsupported, partial, ambiguous, invalid, or uncertain | Run this owner's required regex fallback. |
+| Projection is unsupported, partial, ambiguous, invalid, or uncertain | Run this owner's required regex fallback; a raw pattern match remains detection-only. |
 | CEL evaluates `false` | Produce no owner finding and suppress only this owner's claimed fallback IDs on the structured route. |
 | CEL matches full facts but not the execute-only projection | Create detection-only evidence; preview behavior cannot synchronously block. |
-| CEL matches both projections on an enforcement-eligible, synchronous surface | Create an enforcement-eligible finding from the YAML metadata. |
+| CEL matches both projections on an enforcement-eligible, synchronous surface | Create an enforcement candidate from the YAML metadata; the final same-rule proof gate must still authorize it. |
 | CEL matches but the connector surface is not block-capable or enforcement-eligible | Create detection-only evidence. |
-| CEL errors, times out, or exceeds runtime cost | Run this owner's regex fallback; unrelated rules continue. |
+| CEL errors, times out, or exceeds runtime cost | Run this owner's regex fallback; unrelated rules continue and raw matches remain detection-only. |
+
+Every trusted-action candidate then crosses a final, code-owned proof gate. It
+can contribute to enforcement only when its proof is complete and pinned to
+the same rule ID: authoritative ActionFacts semantic evidence, an exact
+CodeGuard result, or a bounded exact fallback result. Raw regex matches,
+parser-shadow evidence, partial or invalid projections, and unpinned results
+remain visible as detection-only findings. The gate never removes a finding;
+it only prevents incomplete evidence from authorizing a block.
 
 Custom rules own their own rule ID. DefenseClaw may define internal alias,
 prerequisite, and safe-negative contracts for bundled owners, but those maps

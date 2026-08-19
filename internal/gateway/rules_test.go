@@ -219,6 +219,7 @@ func TestCommandRules_TruePositives(t *testing.T) {
 		{"rm -rf /", `rm -rf /`, "CMD-RM-RF"},
 		{"rm -rf / with flags", `rm -rf --no-preserve-root /`, "CMD-RM-RF"},
 		{"mkfs", `mkfs.ext4 /dev/sda1`, "CMD-MKFS"},
+		{"mkswap fallback", `mkswap /dev/sda2`, "CMD-MKFS"},
 		{"dd if", `dd if=/dev/zero of=/dev/sda`, "CMD-DD-IF"},
 		{"chmod world writable", `chmod 777 /etc/important`, "CMD-CHMOD-WORLD"},
 		{"write to /etc", `> /etc/crontab`, "CMD-ETC-WRITE"},

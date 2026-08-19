@@ -856,9 +856,9 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(req *ToolInspectRequest) co
 	}
 }
 
-// decodeCodeGuardArgsObject preserves every field occurrence so duplicate or
-// trailing members can never be mistaken for a complete trusted envelope. A
-// best-effort map is still returned for detection-only scanning.
+// decodeCodeGuardArgsObject preserves every field occurrence so proof-relevant
+// aliases can be checked for ambiguity. Duplicate unrelated metadata is not a
+// reason to discard otherwise exact path/content proof.
 func decodeCodeGuardArgsObject(raw json.RawMessage) (map[string][]json.RawMessage, bool) {
 	if len(raw) == 0 {
 		return nil, false
@@ -888,9 +888,6 @@ func decodeCodeGuardArgsObject(raw json.RawMessage) (map[string][]json.RawMessag
 			return nil, false
 		}
 		fields[name] = append(fields[name], append(json.RawMessage(nil), value...))
-		if len(fields[name]) != 1 {
-			complete = false
-		}
 	}
 	closing, err := decoder.Token()
 	if err != nil || closing != json.Delim('}') {
@@ -923,6 +920,7 @@ func exactCodeGuardStringField(
 ) (string, bool) {
 	present := 0
 	value := ""
+	exact := ""
 	complete := true
 	for _, name := range names {
 		if candidate, ok := bestEffort[name].(string); ok && candidate != "" {
@@ -942,9 +940,14 @@ func exactCodeGuardStringField(
 				complete = false
 				continue
 			}
+			if exact == "" {
+				exact = candidate
+			} else if candidate != exact {
+				complete = false
+			}
 		}
 	}
-	return value, complete && present == 1 && value != ""
+	return value, complete && present > 0 && value != "" && value == exact
 }
 
 // codeGuardOnlyVerdict builds a verdict from CodeGuard findings alone, for an
@@ -990,19 +993,13 @@ func aggregateCodeGuardSeverity(
 	enforceableSeverity string,
 ) (string, string) {
 	for _, finding := range findings {
-		switch finding.Severity {
-		case string(scanner.SeverityCritical):
-			severity = "CRITICAL"
-			if finding.contributesToEnforcement() {
-				enforceableSeverity = "CRITICAL"
-			}
-		case string(scanner.SeverityHigh):
-			if severity != "CRITICAL" {
-				severity = "HIGH"
-			}
-			if finding.contributesToEnforcement() && enforceableSeverity != "CRITICAL" {
-				enforceableSeverity = "HIGH"
-			}
+		findingSeverity := strings.ToUpper(strings.TrimSpace(finding.Severity))
+		if severityRank[findingSeverity] > severityRank[severity] {
+			severity = findingSeverity
+		}
+		if finding.contributesToEnforcement() &&
+			severityRank[findingSeverity] > severityRank[enforceableSeverity] {
+			enforceableSeverity = findingSeverity
 		}
 	}
 	return severity, enforceableSeverity
@@ -1019,18 +1016,24 @@ func codeGuardRuleFindings(
 	result := make([]RuleFinding, 0, len(scan.findings))
 	for _, finding := range scan.findings {
 		ruleID := firstNonEmpty(finding.RuleID, finding.ID)
-		if ruleID == "" || strings.TrimSpace(finding.Title) == "" {
+		if ruleID == "" {
 			continue
 		}
+		title := strings.TrimSpace(finding.Title)
+		builtinMatch := finding.CodeGuardBuiltinMatch(ruleID)
+		if title == "" {
+			title = ruleID
+			builtinMatch = false
+		}
 		converted := RuleFinding{
-			RuleID: ruleID, Title: finding.Title, Severity: string(finding.Severity),
+			RuleID: ruleID, Title: title, Severity: string(finding.Severity),
 			Confidence: finding.Confidence, Tags: append([]string(nil), finding.Tags...),
 			ToolCapabilityClass: finding.ToolCapabilityClass,
 		}.withTrustedActionProof(newExactCodeGuardFindingProof(
 			ruleID,
 			trustedBoundary,
 			scan.complete,
-			finding.CodeGuardBuiltinMatch(ruleID),
+			builtinMatch,
 		))
 		result = append(result, converted)
 	}

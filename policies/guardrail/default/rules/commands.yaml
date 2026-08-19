@@ -136,7 +136,7 @@ rules:
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
       p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
-    pattern: '(?i)\bmkfs\b'
+    pattern: '(?i)\b(?:mkfs(?:\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\b'
     title: "Filesystem format command"
     severity: CRITICAL
     confidence: 0.90

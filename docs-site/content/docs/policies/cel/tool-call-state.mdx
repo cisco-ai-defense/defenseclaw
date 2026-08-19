@@ -62,7 +62,9 @@ Structured action routing uses the [CEL engine's exclusive semantic-owner
 contract](/docs/policies/cel/engine#runtime-results). Authoritative facts use
 CEL; unsupported or ambiguous projection and evaluation errors use that
 owner's compatible regex fallback. The two routes do not produce duplicate
-owner findings, and unrelated rules continue normally.
+owner findings, and unrelated rules continue normally. Either route can
+authorize enforcement only after the CEL engine's final same-rule proof gate;
+raw, partial, or unpinned fallback evidence remains detection-only.
 
 The state-transition route is a closed, versioned extension point, and its list
 is currently empty for every connector. It can be populated only when an

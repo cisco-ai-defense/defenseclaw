@@ -457,10 +457,11 @@ func TestExactFallbackPreservesMalformedInputWithoutCommandFacts(t *testing.T) {
 		facts,
 		true,
 	)
+	findings = applyTrustedActionProofBoundary(findings, true)
 	if len(findings) != 1 ||
 		findings[0].RuleID != "CMD-PIPE-CURL" ||
-		!findings[0].contributesToEnforcement() {
-		t.Fatalf("malformed exact fallback was dropped: %+v", findings)
+		findings[0].contributesToEnforcement() {
+		t.Fatalf("malformed exact fallback was not visible detection-only: %+v", findings)
 	}
 }
 
@@ -2435,6 +2436,7 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShapeAndStayAdvisory(t
 		home     string
 		want     bool
 		fallback bool
+		severity string
 	}{
 		{
 			name:    "posix cloud live path",
@@ -2560,6 +2562,7 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShapeAndStayAdvisory(t
 			cwd:      "/repo",
 			want:     true,
 			fallback: true,
+			severity: "CRITICAL",
 		},
 	}
 	for _, test := range tests {
@@ -2598,9 +2601,11 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShapeAndStayAdvisory(t
 						*matched,
 					)
 				}
-				wantSeverity := "MEDIUM"
-				if test.fallback {
+				wantSeverity := test.severity
+				if wantSeverity == "" && test.fallback {
 					wantSeverity = "LOW"
+				} else if wantSeverity == "" {
+					wantSeverity = "MEDIUM"
 				}
 				if matched.Severity != wantSeverity {
 					t.Fatalf(
