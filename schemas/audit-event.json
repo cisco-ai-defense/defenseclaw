@@ -163,6 +163,7 @@
             "setup-observability",
             "setup-local-observability",
             "setup-webhook",
+            "setup-routing",
             "doctor",
             "upgrade",
             "init-gateway",
