@@ -46,7 +46,7 @@ env:
   # Expected fixture SHA-256. Regenerate via
   # scripts/generate-repro-fixture.sh; update this constant in the same
   # PR that regenerates.
-  FIXTURE_EXPECTED_SHA256: c48d2eea2439370c4d70fd2996ecd77b7b79f341f5a89467469f5980e4736728
+  FIXTURE_EXPECTED_SHA256: 7a3f39331ec428350cd5c60db23512ea29a8b3ab95ab4f28ac16ffdc33d120f7
 
 jobs:
   emit-linux:
@@ -73,35 +73,33 @@ jobs:
       - name: Emit JSON artefacts
         run: |
           set -euo pipefail
-          # Unset the ambient env we want repro-flags.sh to control so
-          # the preflight would catch any drift caused by CI-injected
-          # values. This mirrors AVC's expected pipeline shape.
+          workdir=$(mktemp -d)
+          # Build the emitter FIRST, for the CI host platform, with a
+          # completely clean env. This is NOT the outer Setup EXE — it
+          # is a helper that runs on THIS runner to produce the JSON
+          # artefacts. It must NOT inherit GOOS=windows / GOARCH=amd64
+          # / -mod=vendor from repro-flags.sh (that pin is for the
+          # outer build in Workstream A's build kit; the repo has no
+          # vendor/ dir today).
+          (
+            unset GOFLAGS GOOS GOARCH GOTOOLCHAIN CGO_ENABLED || true
+            go build -trimpath -buildvcs=false \
+              -o "$workdir/windows-repro-manifest" \
+              ./cmd/windows-repro-manifest
+          )
+          # Now source repro-flags so the emit-* invocations below run
+          # under the same env preflight the outer build will, and
+          # unset any ambient GOFLAGS the CI host may have injected.
           unset GOFLAGS CGO_ENABLED GOOS GOARCH || true
           source packaging/scripts/lib/repro-flags.sh
-          # Extract fixture into a workdir; verify contents.
-          workdir=$(mktemp -d)
+          # Extract the fixture.
           zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
             | tar -x -C "$workdir"
-          # Deterministic per-build envs — used by the preflight
-          # assertion below to catch drift injected by the CI host.
+          # Deterministic per-build envs — the preflight below asserts
+          # these are set so drift injected by the CI host is caught.
           export SOURCE_DATE_EPOCH=1700000000
           export DEFENSECLAW_BUILDID=defenseclaw-enterprise-setup-repro-fixture
           defenseclaw_repro_preflight
-          # Build the emitter tool. This is NOT the outer Setup EXE —
-          # it is a helper that runs on the CI host to emit JSON. It
-          # doesn't need `-mod=vendor` (the repo isn't vendored today;
-          # Workstream A adds the vendored tree inside the build kit).
-          # The reproducibility contract enforces `-mod=vendor` for the
-          # OUTER build, wired through defenseclaw_repro_build. Here we
-          # use plain `go build` so the emitter compiles against the
-          # module cache like the rest of the repo.
-          unset GOFLAGS
-          go build -trimpath -buildvcs=false \
-            -o "$workdir/windows-repro-manifest" \
-            ./cmd/windows-repro-manifest
-          # Re-source repro-flags so the emitter's `emit-*` invocations
-          # below run under the same env preflight the outer build will.
-          source packaging/scripts/lib/repro-flags.sh
           # Emit all three artefacts against the fixture.
           mkdir -p "$workdir/out"
           "$workdir/windows-repro-manifest" emit-manifest \

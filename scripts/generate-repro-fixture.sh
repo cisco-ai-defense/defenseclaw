@@ -48,24 +48,35 @@ printf 'install-enterprise-fixture-v1\n'            > "${work}/payload/install-e
 
 # BSD tar (macOS default) and GNU tar accept a slightly different flag
 # set for reproducibility. Detect and branch.
+#
+# COPYFILE_DISABLE=1 tells macOS tar (which links to libarchive) NOT to
+# include AppleDouble `._*` companion files carrying extended attributes.
+# Without this, a tarball generated on macOS extracts to a mixed set of
+# `foo` + `._foo` entries on Linux, which breaks the byte-stability
+# contract and confuses gnu tar with 'implausibly old time stamp'
+# warnings.
+export COPYFILE_DISABLE=1
 if tar --version 2>&1 | grep -qi 'gnu'; then
     tar \
         --sort=name \
         --owner=0 --group=0 --numeric-owner \
         --mtime='@0' \
-        -C "${work}/payload" \
+        --no-xattrs \
+        -C "${work}" \
         -cf "${work}/fixture.tar" \
-        .
+        payload
 else
-    # BSD tar: --uid=0 --gid=0 --numeric-owner --sort=name, no --mtime.
+    # BSD tar: --uid=0 --gid=0 --numeric-owner. `--no-xattrs` is BSD tar's
+    # switch to skip xattrs; combined with COPYFILE_DISABLE this excludes
+    # every AppleDouble `._*` entry a macOS host would otherwise inject.
     # Set mtimes to 0 in advance so BSD tar reads the frozen timestamp.
     find "${work}/payload" -exec touch -t 197001010000.00 {} +
     tar \
         --uid 0 --gid 0 --numeric-owner \
-        -s '#^#./#' \
-        -C "${work}/payload" \
+        --no-xattrs \
+        -C "${work}" \
         -cf "${work}/fixture.tar" \
-        .
+        payload
 fi
 
 # Use a fixed compression level. --long=27 makes zstd emit a stable
