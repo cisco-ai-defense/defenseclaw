@@ -320,13 +320,20 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - name: Prepare payload from fixture
+      - name: Prepare payload from fixture + vendor tree
         run: |
           set -euo pipefail
           workdir="$(pwd)/.assemble-work"
           mkdir -p "$workdir"
           zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
             | tar -x -C "$workdir"
+          # go build -mod=vendor (from repro-flags.sh) requires a vendor/
+          # tree. The outer Setup EXE has no external deps (stdlib only
+          # per spec 001 deps_test), so `go mod vendor` produces the
+          # minimum vendor/ needed for -mod=vendor to succeed. Matches
+          # the assemble-linux "Prepare payload from fixture + vendor
+          # tree" step — CR spec-002:PRRT_kwDORuAK-s6af8iG.
+          go mod vendor
       - name: Run assemble.sh --allow-unsigned
         env:
           SOURCE_DATE_EPOCH: '1700000000'

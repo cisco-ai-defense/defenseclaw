@@ -57,9 +57,11 @@ extract_sh_stages() {
         | sed -E 's/^[[:space:]]*_stage "(stage [0-9]+\/6[^"]*)".*/\1/'
 }
 extract_ps_stages() {
-    # pwsh form: DefenseClaw-Stage "stage N/6  <name>"
-    grep -E 'DefenseClaw-Stage "stage [0-9]+/6' "${PS}" \
-        | sed -E 's/^[[:space:]]*DefenseClaw-Stage "(stage [0-9]+\/6[^"]*)".*/\1/'
+    # pwsh form: Write-DefenseClawStage "stage N/6  <name>" (renamed
+    # from the earlier non-approved-verb DefenseClaw-Stage per CR
+    # spec-002:PRRT_kwDORuAK-s6af8i2).
+    grep -E 'Write-DefenseClawStage "stage [0-9]+/6' "${PS}" \
+        | sed -E 's/^[[:space:]]*Write-DefenseClawStage "(stage [0-9]+\/6[^"]*)".*/\1/'
 }
 
 sh_stages="$(extract_sh_stages)"
@@ -122,9 +124,13 @@ fi
 # (emit-payload-metadata belongs to the bundler side, not assemble)
 # indicates drift.
 extract_emitter_calls() {
+    # Preserve source-order + duplicates: `sort -u` collapsed two files
+    # that invoke the SAME subcommand set in a DIFFERENT order into an
+    # identical hash, which is exactly the drift this lint is supposed
+    # to catch. Emit one line per invocation in the order it appears.
+    # See CR spec-002:PRRT_kwDORuAK-s6af8j4.
     grep -E "'?emit-[a-z-]+'?" "$1" \
-        | grep -oE "emit-[a-z-]+" \
-        | sort -u
+        | grep -oE "emit-[a-z-]+"
 }
 
 sh_emit="$(extract_emitter_calls "${SH}")"

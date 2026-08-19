@@ -5,7 +5,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"strings"
 )
 
 // runEmitProvenance emits provenance.json for a built outer Setup EXE.
@@ -35,7 +37,7 @@ func runEmitProvenance(args []string) error {
 	sourceCommit := fs.String("source-commit", "", "40-char lowercase git commit sha")
 	setupExe := fs.String("setup-exe", "", "path to the built DefenseClawSetup-Enterprise-x64.exe (required unless --setup-sha256-placeholder)")
 	out := fs.String("out", "", "output path for provenance.json")
-	distributionFlavor := fs.String("distribution-flavor", "managed-enterprise", "distribution flavor tag")
+	distributionFlavor := fs.String("distribution-flavor", defaultDistributionFlavor, "distribution flavor tag")
 	unsigned := fs.Bool("unsigned", false, "mark this provenance as belonging to an unsigned developer build")
 	placeholder := fs.Bool("setup-sha256-placeholder", false, "emit setup_sha256=\"\" and setup_size=0; AVC or finalize.* fills them in after step-3 signing")
 	if err := fs.Parse(args); err != nil {
@@ -52,6 +54,13 @@ func runEmitProvenance(args []string) error {
 	}
 	if err := requireFlags(required); err != nil {
 		return err
+	}
+	// If a caller passes both --setup-sha256-placeholder AND --setup-exe,
+	// the setup-exe path is silently ignored — we emit setup_sha256=""
+	// regardless. That is a caller-side mistake that should be loud:
+	// fail with a diagnostic instead of accepting the conflicting args.
+	if *placeholder && strings.TrimSpace(*setupExe) != "" {
+		return fmt.Errorf("--setup-sha256-placeholder is exclusive with --setup-exe; drop one")
 	}
 	if err := validateSourceCommit(*sourceCommit); err != nil {
 		return err
@@ -79,10 +88,10 @@ func runEmitProvenance(args []string) error {
 		size = info.Size()
 	}
 
-	flavor := *distributionFlavor
-	if *unsigned && flavor == "managed-enterprise" {
-		flavor = "managed-enterprise-unsigned"
-	}
+	// Shares resolveDistributionFlavor with emit-manifest so a change
+	// to the default or the -unsigned suffix flows through both
+	// emitters in one edit (cmd/windows-repro-manifest/flavor.go).
+	flavor := resolveDistributionFlavor(*distributionFlavor, *unsigned)
 	doc := map[string]any{
 		"distribution_flavor": flavor,
 		"schema_version":      1,

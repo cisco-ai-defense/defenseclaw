@@ -3284,6 +3284,19 @@
         {"location": ".github/workflows/windows-deterministic-build.yml", "description": "Set in the reproducibility CI fan-out for the emitter build"}
       ],
       "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_CISCO_CA_BUNDLE",
+      "category": "runtime_path",
+      "purpose": "Optional path to an alternate CA bundle for the POSIX Cisco Authenticode signature check in packaging/scripts/lib/assert-cisco-signature.sh. When set, osslsigncode verify uses this bundle via `-CAfile`; when unset, the system trust store is used. Used by the Workstream A round-trip CI test with a disposable CA that signs a `Cisco Systems, Inc.` common name so the assemble.sh flow can be exercised on Linux runners without a real production certificate.",
+      "default": "unset",
+      "accepted_values": ["<path to PEM bundle>", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "packaging/scripts/lib/assert-cisco-signature.sh", "description": "Passed to osslsigncode verify -CAfile when set (POSIX signature check)"}
+      ],
+      "since": "0.9.0"
     }
   ]
 }

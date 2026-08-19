@@ -28,7 +28,7 @@ func runEmitManifest(args []string) error {
 	schemaVersion := fs.Int("schema-version", 1, "manifest schema version")
 	version := fs.String("version", "", "release version, e.g. 0.9.0")
 	sourceCommit := fs.String("source-commit", "", "40-char lowercase git commit sha")
-	distributionFlavor := fs.String("distribution-flavor", "managed-enterprise", "distribution flavor tag")
+	distributionFlavor := fs.String("distribution-flavor", defaultDistributionFlavor, "distribution flavor tag")
 	payloadDir := fs.String("payload-dir", "", "directory whose regular-file children are hashed")
 	out := fs.String("out", "", "output path for manifest.json")
 	// --unsigned stamps `"unsigned": true` into the manifest and appends
@@ -69,13 +69,9 @@ func runEmitManifest(args []string) error {
 			"size":   f.size,
 		})
 	}
-	flavor := *distributionFlavor
-	if *unsigned && flavor == "managed-enterprise" {
-		// Only auto-suffix the default flavor. A caller that passes an
-		// explicit --distribution-flavor is trusted to have shaped the
-		// string already (e.g. downstream test harnesses).
-		flavor = "managed-enterprise-unsigned"
-	}
+	// Single source of truth for the flavor-and-unsigned rule shared
+	// with emit-provenance; see cmd/windows-repro-manifest/flavor.go.
+	flavor := resolveDistributionFlavor(*distributionFlavor, *unsigned)
 	doc := map[string]any{
 		"distribution_flavor": flavor,
 		"files":               entries,

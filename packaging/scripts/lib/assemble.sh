@@ -78,12 +78,15 @@ Options:
                                  (default: ./out)
   --source-commit <sha>          40-char lowercase git OID (required)
   --version <semver>             Release version (required)
-  --cmid-pseudo-version <v>      v0.0.0-YYYYMMDDhhmmss-<12hex> (required)
   --allow-unsigned               Skip Cisco-signature assertion; emit
                                  manifest.json with "unsigned": true
   -h, --help                     Show this usage and exit 0
 
 Exit codes: 0=ok 2=usage 3=preflight 4=signature 5=build 6=io.
+
+Note: the bundler-side `payload-metadata.json` (see
+packaging/scripts/build-managed-windows-bundle.sh) is the audit
+trail for cmid_pseudo_version; assemble does not re-emit it.
 EOF
 }
 
@@ -92,7 +95,6 @@ SOURCE_DIR="./source"
 OUT_DIR="./out"
 SOURCE_COMMIT=""
 VERSION=""
-CMID_PSEUDO_VERSION=""
 ALLOW_UNSIGNED=0
 
 while [ $# -gt 0 ]; do
@@ -102,7 +104,12 @@ while [ $# -gt 0 ]; do
         --out-dir)              OUT_DIR="${2:?}"; shift 2 ;;
         --source-commit)        SOURCE_COMMIT="${2:?}"; shift 2 ;;
         --version)              VERSION="${2:?}"; shift 2 ;;
-        --cmid-pseudo-version)  CMID_PSEUDO_VERSION="${2:?}"; shift 2 ;;
+        # Accept and ignore for backward-compat with older bundler
+        # callers that pass this arg. The bundler-side
+        # `payload-metadata.json` is the audit trail; assemble does
+        # not need to re-emit or thread cmid through — see CR
+        # spec-002:PRRT_kwDORuAK-s6af8i8.
+        --cmid-pseudo-version)  shift 2 ;;
         --allow-unsigned)       ALLOW_UNSIGNED=1; shift ;;
         -h|--help)              usage; exit 0 ;;
         *)                      usage; die 2 "unknown flag: $1" ;;
@@ -111,7 +118,6 @@ done
 
 [ -n "${SOURCE_COMMIT}" ]        || die 2 "--source-commit required"
 [ -n "${VERSION}" ]              || die 2 "--version required"
-[ -n "${CMID_PSEUDO_VERSION}" ]  || die 2 "--cmid-pseudo-version required"
 
 if ! [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
     die 2 "--source-commit must be a 40-char lowercase git OID (got: '${SOURCE_COMMIT}')"
@@ -120,6 +126,17 @@ fi
 [ -d "${PAYLOAD_DIR}" ]  || die 6 "payload-dir not found: ${PAYLOAD_DIR}"
 [ -d "${SOURCE_DIR}" ]   || die 6 "source-dir not found: ${SOURCE_DIR}"
 mkdir -p "${OUT_DIR}"
+
+# Resolve every user-supplied directory to an absolute path up front.
+# Later stages `cd "${SOURCE_DIR}"` inside subshells to invoke `go build`
+# under the shipped kit's module root; if we left OUT_DIR / PAYLOAD_DIR
+# relative, those subshells' relative paths would resolve against the
+# source tree instead of the caller's CWD and land the outer EXE inside
+# ./source/ instead of ./out/ (CodeRabbit spec-002 finding — "both
+# assemblers build artifacts into the wrong directory").
+PAYLOAD_DIR="$(cd "${PAYLOAD_DIR}" && pwd)"
+SOURCE_DIR="$(cd "${SOURCE_DIR}" && pwd)"
+OUT_DIR="$(cd "${OUT_DIR}" && pwd)"
 
 # ---------------------------------------------------------------------------
 # Stage (a): source repro-flags.sh so subsequent go invocations use the
@@ -143,7 +160,7 @@ _stage "stage 0/6  build native windows-repro-manifest"
     unset GOFLAGS GOOS GOARCH GOTOOLCHAIN CGO_ENABLED || true
     cd "${SOURCE_DIR}"
     go build -trimpath -buildvcs=false \
-        -o "${OLDPWD}/${EMITTER}" \
+        -o "${EMITTER}" \
         ./cmd/windows-repro-manifest
 ) || die 5 "windows-repro-manifest native build failed"
 
@@ -213,16 +230,19 @@ EMBED_DIR="${SOURCE_DIR}/cmd/defenseclaw-enterprise-setup/payload"
 mkdir -p "${EMBED_DIR}"
 
 _stage "stage 3/6  emit-manifest"
-UNSIGNED_FLAG=""
+# Use an array so an empty --allow-unsigned expansion doesn't inject
+# an empty positional arg (`""`) into the emitter's argv, and so a
+# future --unsigned=<value>-style flag can't be word-split by mistake.
+UNSIGNED_FLAG=()
 if [ "${ALLOW_UNSIGNED}" -eq 1 ]; then
-    UNSIGNED_FLAG="--unsigned"
+    UNSIGNED_FLAG=(--unsigned)
 fi
 "${EMITTER}" emit-manifest \
     --version "${VERSION}" \
     --source-commit "${SOURCE_COMMIT}" \
     --payload-dir "${PAYLOAD_DIR}" \
     --out "${EMBED_DIR}/manifest.json" \
-    ${UNSIGNED_FLAG} \
+    "${UNSIGNED_FLAG[@]}" \
     || die 6 "emit-manifest failed"
 
 # ---------------------------------------------------------------------------
@@ -242,7 +262,7 @@ _stage "stage 5/6  go-build DefenseClawSetup-Enterprise-x64.exe"
 (
     cd "${SOURCE_DIR}"
     defenseclaw_repro_build \
-        "${OLDPWD}/${OUT_DIR}/DefenseClawSetup-Enterprise-x64.exe" \
+        "${OUT_DIR}/DefenseClawSetup-Enterprise-x64.exe" \
         ./cmd/defenseclaw-enterprise-setup
 ) || die 5 "outer Setup EXE go build failed"
 
@@ -257,10 +277,9 @@ _stage "stage 6/6  emit-provenance"
 "${EMITTER}" emit-provenance \
     --version "${VERSION}" \
     --source-commit "${SOURCE_COMMIT}" \
-    --setup-exe "${OUT_DIR}/DefenseClawSetup-Enterprise-x64.exe" \
     --out "${OUT_DIR}/DefenseClawSetup-Enterprise-x64.exe.provenance.json" \
     --setup-sha256-placeholder \
-    ${UNSIGNED_FLAG} \
+    "${UNSIGNED_FLAG[@]}" \
     || die 6 "emit-provenance failed"
 
 rm -f "${EMITTER}"

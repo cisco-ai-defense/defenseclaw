@@ -74,9 +74,8 @@ jobs:
           @(
             'packaging/scripts/lib/assemble.ps1',
             'packaging/scripts/lib/assert-cisco-signature.ps1',
-            'packaging/scripts/lib/binary-identity.ps1',
-            'packaging/scripts/lib/file-hash.ps1',
             'packaging/scripts/lib/finalize.ps1',
+            'packaging/scripts/lib/repro-flags.ps1',
             'packaging/windows/install-enterprise.ps1',
             'packaging/windows/DefenseClawEnterprise.psm1'
           ) | ForEach-Object {

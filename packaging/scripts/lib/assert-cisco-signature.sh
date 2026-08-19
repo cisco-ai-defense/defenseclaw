@@ -1,12 +1,17 @@
+#!/usr/bin/env bash
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 #
-# assert-cisco-signature.sh — POSIX port of Assert-CiscoSignature.
+# assert-cisco-signature.sh — bash port of Assert-CiscoSignature.
 #
-# Source (dot-include) this file — it defines `defenseclaw_assert_cisco_signature`
-# and no side effects. Used by packaging/scripts/lib/assemble.sh during the
-# AVC-driven Windows managed-enterprise Setup assembly step when the runner
-# is Linux (see docs/specs/002-windows-avc-packaging/tasks.md task 2).
+# Source (dot-include) this file from bash — it defines
+# `defenseclaw_assert_cisco_signature` and no side effects. Uses bash
+# arrays and here-docs, so it requires bash 4+; it is not POSIX sh
+# (an earlier version claimed POSIX portability, which was wrong).
+#
+# Used by packaging/scripts/lib/assemble.sh during the AVC-driven
+# Windows managed-enterprise Setup assembly step when the runner is
+# Linux (see docs/specs/002-windows-avc-packaging/tasks.md task 2).
 #
 # Contract:
 #   - The file at $1 MUST carry a valid Authenticode signature
@@ -76,29 +81,68 @@ defenseclaw_assert_cisco_signature() {
 ${verify_output}"
     fi
 
-    # Extract the leaf signer cert to a temp file and read its Subject
-    # CN via openssl. -in <(...) via process substitution would be
-    # simpler, but process substitution is bash-only and this file
-    # also has to work under dash/ash for a broader CI base image
-    # future-proofing; use mktemp instead.
-    local cert_pem
-    cert_pem="$(mktemp -t cisco-sig.XXXXXX.pem)"
-    trap 'rm -f "${cert_pem}"' RETURN
+    # osslsigncode extract-signature -pem emits a PEM-encoded PKCS#7
+    # container (SignedData), NOT a bare X.509 certificate. `openssl
+    # x509 -in <pkcs7>` fails on every valid signature. Use `openssl
+    # pkcs7 -inform PEM -print_certs -in <pkcs7>` to get all certs in
+    # the chain, then select the signer explicitly. The signer is the
+    # cert whose Subject matches the SignerInfo's serial/issuer, but
+    # for the CN check we only need to find the leaf that carries the
+    # required CN — so we walk every printed cert and require at
+    # least one match.
+    local pkcs7_pem
+    pkcs7_pem="$(mktemp -t cisco-sig.XXXXXX.p7)"
+    local certs_pem
+    certs_pem="$(mktemp -t cisco-sig.XXXXXX.certs)"
+    # shellcheck disable=SC2064
+    trap "rm -f '${pkcs7_pem}' '${certs_pem}'" RETURN
 
     if ! osslsigncode extract-signature -pem \
             -in "${path}" \
-            -out "${cert_pem}" >/dev/null 2>&1; then
-        die 4 "assert-cisco-signature: could not extract signer cert from ${path}"
+            -out "${pkcs7_pem}" >/dev/null 2>&1; then
+        die 4 "assert-cisco-signature: could not extract PKCS#7 from ${path}"
     fi
 
-    local subject_cn
-    subject_cn=$(openssl x509 -in "${cert_pem}" -noout -subject -nameopt multiline \
-        | awk '/commonName/ { sub(/.*commonName[[:space:]]*=[[:space:]]*/, ""); print; exit }')
-
-    if [ -z "${subject_cn}" ]; then
-        die 4 "assert-cisco-signature: could not read signer CN from ${path}"
+    if ! openssl pkcs7 -inform PEM -print_certs \
+            -in "${pkcs7_pem}" -out "${certs_pem}" 2>/dev/null; then
+        die 4 "assert-cisco-signature: could not decode PKCS#7 from ${path}"
     fi
-    if [ "${subject_cn}" != "${_DEFENSECLAW_CISCO_PUBLISHER_CN}" ]; then
-        die 4 "assert-cisco-signature: ${path} signer CN mismatch (expected '${_DEFENSECLAW_CISCO_PUBLISHER_CN}', got '${subject_cn}')"
+
+    # `openssl pkcs7 -print_certs` emits repeated "subject=...\nissuer=
+    # ...\n-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
+    # blocks. Extract every subject line's CN and require the required
+    # publisher CN to appear at least once. This is robust against the
+    # chain order osslsigncode picks and matches the pwsh helper's
+    # X509Certificate2.GetNameInfo(SimpleName) semantics — publisher
+    # match is what matters, not chain position.
+    local subject_cns
+    subject_cns=$(awk -F'CN[[:space:]]*=[[:space:]]*' '
+        /^subject=/ && NF>1 {
+            cn = $2
+            # CN may be followed by a comma-separated attribute; strip
+            # everything from the first comma or slash onward.
+            sub(/,.*$/, "", cn)
+            sub(/\/.*$/, "", cn)
+            print cn
+        }
+    ' "${certs_pem}")
+
+    if [ -z "${subject_cns}" ]; then
+        die 4 "assert-cisco-signature: no certificate subjects found in ${path} PKCS#7"
+    fi
+
+    local found=0
+    while IFS= read -r cn; do
+        [ -z "${cn}" ] && continue
+        if [ "${cn}" = "${_DEFENSECLAW_CISCO_PUBLISHER_CN}" ]; then
+            found=1
+            break
+        fi
+    done <<EOF
+${subject_cns}
+EOF
+
+    if [ "${found}" -eq 0 ]; then
+        die 4 "assert-cisco-signature: ${path} does not carry a certificate with CN '${_DEFENSECLAW_CISCO_PUBLISHER_CN}' (found: $(printf '%s ' ${subject_cns}))"
     fi
 }

@@ -311,12 +311,28 @@ mkdir -p "${KIT_DIR}/payload" "${KIT_DIR}/source" "${KIT_DIR}/packaging/scripts/
 # ---- kit/payload: the five files AVC signs (or leaves unsigned in
 #                   --allow-unsigned mode) ------------------------------
 echo "==> staging kit payload"
+# Single-source the expected filename list: EXPECTED_PAYLOAD_NAMES is
+# what we tell emit-payload-metadata (--expected-filenames arg) and
+# it is the same set of names we stage under payload/. Keeping the
+# list in one variable prevents drift between the staged payload and
+# the audit trail in payload-metadata.json (CR spec-002:PRRT_kwDORuAK-s6af8iw).
+# The runtime's requiredPayloadFiles in cmd/defenseclaw-enterprise-setup/main.go
+# and the assemble.{sh,ps1} EXPECTED_PAYLOAD arrays must all agree —
+# scripts/check-assemble-parity.sh enforces the two assembler ends.
+EXPECTED_PAYLOAD_NAMES=(
+    DefenseClawEnterprise.psm1
+    defenseclaw-gateway.exe
+    defenseclaw-hook.exe
+    defenseclaw.exe
+    install-enterprise.ps1
+)
 # defenseclaw-gateway.exe is a byte-identical copy of defenseclaw.exe;
 # they carry distinct identities in the enterprise runtime (the outer
 # Setup extracts each under its own name and hash-checks separately),
-# so both files must be present in the payload. This preserves the
-# runtime's expected payload shape (see requiredPayloadFiles in
-# cmd/defenseclaw-enterprise-setup/main.go).
+# so both files must be present in the payload. The kit-staging block
+# below is the one place either name is copied out — anything else
+# that references the pair reaches into ${KIT_DIR}/payload/, not
+# GATEWAY_EXE/HOOK_EXE.
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw.exe"
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw-gateway.exe"
 cp "${HOOK_EXE}"                                         "${KIT_DIR}/payload/defenseclaw-hook.exe"
@@ -324,6 +340,16 @@ cp "${REPO_ROOT}/packaging/windows/DefenseClawEnterprise.psm1" \
                                                          "${KIT_DIR}/payload/DefenseClawEnterprise.psm1"
 cp "${REPO_ROOT}/packaging/windows/install-enterprise.ps1" \
                                                          "${KIT_DIR}/payload/install-enterprise.ps1"
+
+# Sanity-check: every EXPECTED_PAYLOAD_NAMES entry now exists at the
+# staged path. Catches a typo in the copy block above before it
+# becomes an AVC-side failure.
+for _name in "${EXPECTED_PAYLOAD_NAMES[@]}"; do
+    if [[ ! -f "${KIT_DIR}/payload/${_name}" ]]; then
+        echo "build-managed-windows-bundle: staged payload missing ${_name} (bundler bug)" >&2
+        exit 1
+    fi
+done
 
 # ---- kit/source: the trimmed Go source tree AVC's `go build` needs
 #                  (spec 002 REQ-04 + REQ-05 + REQ-06). We trim via
@@ -383,25 +409,37 @@ mkdir -p "${KIT_DIR}/source/cmd/defenseclaw-enterprise-setup/payload"
 touch    "${KIT_DIR}/source/cmd/defenseclaw-enterprise-setup/payload/.keep"
 
 # ---- kit/source/vendor + go.mod/go.sum ---------------------------------
+#
+# `go mod vendor` writes to a `vendor/` dir under GOMOD's directory.
+# We deliberately keep OSS working trees untouched (see the header
+# comment "the OSS working tree stays untouched"). Before touching
+# vendor:
+#   - If ${REPO_ROOT}/vendor already exists, REFUSE to run so a
+#     `go mod vendor` (which overwrites) followed by our `mv` (which
+#     removes) does not destroy a pre-existing vendor tree the caller
+#     may have staged for a different purpose.
+#   - Otherwise, run go mod vendor at REPO_ROOT, mv it into the kit,
+#     and rely on restore_overlay's EXIT trap to leave a clean tree.
+# See CR spec-002:PRRT_kwDORuAK-s6af8io.
+if [[ -d "${REPO_ROOT}/vendor" ]]; then
+  echo "build-managed-windows-bundle: refusing to run — ${REPO_ROOT}/vendor already exists." >&2
+  echo "  The bundler needs to run 'go mod vendor' and then move the result" >&2
+  echo "  into the AVC kit. Moving an already-populated vendor tree would" >&2
+  echo "  destroy work you may not have committed. Delete or move" >&2
+  echo "  ${REPO_ROOT}/vendor first, then rerun." >&2
+  exit 1
+fi
+
 echo "==> writing kit/source/vendor via go mod vendor"
-# `go mod vendor` writes to a `vendor/` dir under CWD, so we point it
-# at the kit's source tree via GOFLAGS or a temporary run in a clean
-# CWD. The simplest path: run `go mod vendor` in a copy of the module
-# root, then move its output into the kit. But that doubles the disk
-# hit. Instead, run `go mod vendor` at REPO_ROOT (which is where the
-# overlay lives + where go.mod resolves), then move ONLY the resulting
-# vendor/ + go.mod + go.sum into the kit. This is safe because
-# restore_overlay's EXIT trap already snapshots go.mod/go.sum for
-# rollback.
 ( cd "${REPO_ROOT}" && go mod vendor -e ) || {
   echo "build-managed-windows-bundle: go mod vendor failed" >&2
   exit 1
 }
 # Move (not copy) the vendor tree — a 150+ MB copy inside dist/ isn't
 # reversible without another mv, so bundle it once. The snapshot in
-# OVERLAY_SNAPSHOT_DIR still has the pre-overlay go.mod/go.sum for
-# EXIT restore; the vendor dir is a build artefact we don't care to
-# restore.
+# OVERLAY_SNAPSHOT_DIR has the pre-overlay go.mod/go.sum for EXIT
+# restore; because the refuse-if-exists guard above ran, moving vendor
+# out never destroys OSS-side work.
 rm -rf "${KIT_DIR}/source/vendor"
 mv "${REPO_ROOT}/vendor" "${KIT_DIR}/source/vendor"
 cp "${REPO_ROOT}/go.mod" "${KIT_DIR}/source/go.mod"
@@ -418,8 +456,6 @@ cp "${LIB_SRC}/repro-flags.sh"                "${LIB_DST}/repro-flags.sh"
 cp "${LIB_SRC}/repro-flags.ps1"               "${LIB_DST}/repro-flags.ps1"
 cp "${LIB_SRC}/assert-cisco-signature.sh"     "${LIB_DST}/assert-cisco-signature.sh"
 cp "${LIB_SRC}/assert-cisco-signature.ps1"    "${LIB_DST}/assert-cisco-signature.ps1"
-cp "${LIB_SRC}/file-hash.ps1"                 "${LIB_DST}/file-hash.ps1"
-cp "${LIB_SRC}/binary-identity.ps1"           "${LIB_DST}/binary-identity.ps1"
 cp "${LIB_SRC}/finalize.sh"                   "${LIB_DST}/finalize.sh"
 cp "${LIB_SRC}/finalize.ps1"                  "${LIB_DST}/finalize.ps1"
 
@@ -456,7 +492,7 @@ trap 'restore_overlay; rm -rf "${STAGE_DIR}" "${EMITTER_TMP}"' EXIT
   --version "${VERSION}" \
   --source-commit "${SOURCE_COMMIT}" \
   --cmid-pseudo-version "${CMID_VERSION}" \
-  --expected-filenames "DefenseClawEnterprise.psm1,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw.exe,install-enterprise.ps1" \
+  --expected-filenames "$(IFS=,; echo "${EXPECTED_PAYLOAD_NAMES[*]}")" \
   --out "${KIT_DIR}/payload-metadata.json"
 
 # ---- kit/README-AVC.md (~40-line runbook) -----------------------------

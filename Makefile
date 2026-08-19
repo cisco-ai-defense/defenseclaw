@@ -94,7 +94,7 @@ endef
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
@@ -856,21 +856,23 @@ packaging-windows-enterprise-installer:
 	    --allow-unsigned
 
 # packaging-windows-avc-buildkit:
-#   Emits the AVC-facing build kit under
-#   $(DIST_DIR)/windows-enterprise-buildkit-<version>/. Hand the kit
-#   to AVC per docs/WINDOWS-AVC-PACKAGING-HANDOFF.md; AVC signs the
-#   inner payload, runs the shipped assemble.sh, and signs the outer
-#   Setup EXE.
-packaging-windows-avc-buildkit:
-	@packaging/scripts/build-managed-windows-bundle.sh \
-	    --ref "$(WINDOWS_MANAGED_REF)" \
-	    --version "$(VERSION)" \
-	    --dist-dir "$(DIST_DIR)"
+#   Alias for `packaging-windows-managed-gateway-zip` — both invoke the
+#   same bundler, which emits BOTH the legacy gateway zip AND the
+#   AVC-facing build kit at
+#   $(DIST_DIR)/windows-enterprise-buildkit-<version>/ on the same run.
+#   The alias exists so release runbooks that grep for the intent
+#   ("build the AVC kit") find a matching target. Hand the kit to AVC
+#   per docs/WINDOWS-AVC-PACKAGING-HANDOFF.md; AVC signs the inner
+#   payload, runs the shipped assemble.sh, and signs the outer Setup
+#   EXE. See CR spec-002:PRRT_kwDORuAK-s6af8ii.
+packaging-windows-avc-buildkit: packaging-windows-managed-gateway-zip
 
-# Deprecated alias — remove once release runbooks are updated. Use
-# `packaging-windows-enterprise-installer` instead.
-packaging-windows-managed-bundle: packaging-windows-enterprise-installer
-	@echo 'note: `packaging-windows-managed-bundle` is deprecated; use `packaging-windows-enterprise-installer`.'
+# Deprecated alias — remove once release runbooks are updated to use
+# `packaging-windows-avc-buildkit` (the AVC-facing kit target) or
+# `packaging-windows-enterprise-installer` (the local unsigned dev
+# build). See CR spec-002:PRRT_kwDORuAK-s6af8ie.
+packaging-windows-managed-bundle: packaging-windows-avc-buildkit
+	@echo 'note: `packaging-windows-managed-bundle` is deprecated; use `packaging-windows-avc-buildkit` (for the AVC kit) or `packaging-windows-enterprise-installer` (for a local unsigned dev build).'
 
 # Native SwiftUI companion-app checks and release packaging. The release target
 # builds a runtime-bearing drag-to-Applications DMG plus an app-only self-update

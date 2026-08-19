@@ -26,16 +26,26 @@ param(
     [string]$PayloadDir = './payload',
     [string]$SourceDir  = './source',
     [string]$OutDir     = './out',
-    [Parameter(Mandatory)][string]$SourceCommit,
-    [Parameter(Mandatory)][string]$Version,
-    [Parameter(Mandatory)][string]$CmidPseudoVersion,
+    # Mandatory attributes trigger a stdin prompt when a value is
+    # missing, which hangs a non-interactive AVC pipeline. Accept
+    # every param as optional and validate below via Invoke-DefenseClawDie
+    # so the exit code matches the header's contract (exit 2 for CLI
+    # arg errors). See CR spec-002:PRRT_kwDORuAK-s6af8i2.
+    [string]$SourceCommit = '',
+    [string]$Version = '',
+    # Accepted for backward-compat with older bundler callers; the
+    # bundler-side payload-metadata.json is the audit trail — assemble
+    # does not thread cmid through. See CR spec-002:PRRT_kwDORuAK-s6af8i8.
+    [string]$CmidPseudoVersion = '',
     [switch]$AllowUnsigned
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function DefenseClaw-Die {
+# Approved-verb function names (Get-Verb list); the earlier
+# Invoke-DefenseClawDie / Write-DefenseClawStage variants tripped PSUseApprovedVerbs.
+function Invoke-DefenseClawDie {
     param(
         [Parameter(Mandatory)][int]$Code,
         [Parameter(Mandatory)][string]$Message
@@ -44,7 +54,7 @@ function DefenseClaw-Die {
     exit $Code
 }
 
-function DefenseClaw-Stage {
+function Write-DefenseClawStage {
     param([Parameter(Mandatory)][string]$Message)
     Microsoft.PowerShell.Utility\Write-Host "==> $Message"
 }
@@ -60,27 +70,38 @@ if (Test-Path -LiteralPath (Join-Path $scriptDir 'repro-flags.ps1')) {
 } elseif (Test-Path -LiteralPath (Join-Path $scriptDir 'packaging/scripts/lib/repro-flags.ps1')) {
     $libDir = Join-Path $scriptDir 'packaging/scripts/lib'
 } else {
-    DefenseClaw-Die -Code 6 -Message "could not locate packaging/scripts/lib/ next to assemble.ps1"
+    Invoke-DefenseClawDie -Code 6 -Message "could not locate packaging/scripts/lib/ next to assemble.ps1"
 }
 
 # ---------------------------------------------------------------------------
 # CLI validation (Mandatory params handle the missing case; validate shape).
 # ---------------------------------------------------------------------------
 if ($SourceCommit -notmatch '^[0-9a-f]{40}$') {
-    DefenseClaw-Die -Code 2 -Message "--source-commit must be a 40-char lowercase git OID (got: '$SourceCommit')"
+    Invoke-DefenseClawDie -Code 2 -Message "--source-commit must be a 40-char lowercase git OID (got: '$SourceCommit')"
 }
 if (-not (Test-Path -LiteralPath $PayloadDir -PathType Container)) {
-    DefenseClaw-Die -Code 6 -Message "payload-dir not found: $PayloadDir"
+    Invoke-DefenseClawDie -Code 6 -Message "payload-dir not found: $PayloadDir"
 }
 if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
-    DefenseClaw-Die -Code 6 -Message "source-dir not found: $SourceDir"
+    Invoke-DefenseClawDie -Code 6 -Message "source-dir not found: $SourceDir"
 }
 [void](New-Item -ItemType Directory -Force -Path $OutDir)
 
-DefenseClaw-Stage "assemble.ps1 — DefenseClaw enterprise Setup kit assembler"
-DefenseClaw-Stage "payload=$PayloadDir source=$SourceDir out=$OutDir"
+# Resolve every user-supplied directory to an absolute path up front.
+# Later stages Push-Location $SourceDir inside try/finally blocks to
+# invoke `go build` under the shipped kit's module root; if we left
+# OutDir / PayloadDir relative, those blocks' relative paths would
+# resolve against the source tree instead of the caller's CWD and land
+# the outer EXE inside ./source/ instead of ./out/. Matches assemble.sh
+# `PAYLOAD_DIR="$(cd "${PAYLOAD_DIR}" && pwd)"` pattern.
+$PayloadDir = (Resolve-Path -LiteralPath $PayloadDir).ProviderPath
+$SourceDir  = (Resolve-Path -LiteralPath $SourceDir).ProviderPath
+$OutDir     = (Resolve-Path -LiteralPath $OutDir).ProviderPath
+
+Write-DefenseClawStage "assemble.ps1 — DefenseClaw enterprise Setup kit assembler"
+Write-DefenseClawStage "payload=$PayloadDir source=$SourceDir out=$OutDir"
 $commitPrefix = $SourceCommit.Substring(0, 12)
-DefenseClaw-Stage "version=$Version source-commit=${commitPrefix}... allow-unsigned=$AllowUnsigned"
+Write-DefenseClawStage "version=$Version source-commit=${commitPrefix}... allow-unsigned=$AllowUnsigned"
 
 # ---------------------------------------------------------------------------
 # Stage 0: build cmd/windows-repro-manifest for the CI host (native arch).
@@ -89,7 +110,7 @@ DefenseClaw-Stage "version=$Version source-commit=${commitPrefix}... allow-unsig
 # ---------------------------------------------------------------------------
 $emitter = Join-Path $OutDir '.windows-repro-manifest'
 if ($IsWindows) { $emitter += '.exe' }
-DefenseClaw-Stage "stage 0/6  build native windows-repro-manifest"
+Write-DefenseClawStage "stage 0/6  build native windows-repro-manifest"
 
 $savedEnv = @{}
 foreach ($k in @('GOFLAGS','GOOS','GOARCH','GOTOOLCHAIN','CGO_ENABLED')) {
@@ -101,7 +122,7 @@ try {
     try {
         & go build -trimpath -buildvcs=false -o $emitter ./cmd/windows-repro-manifest
         if ($LASTEXITCODE -ne 0) {
-            DefenseClaw-Die -Code 5 -Message "windows-repro-manifest native build failed (exit=$LASTEXITCODE)"
+            Invoke-DefenseClawDie -Code 5 -Message "windows-repro-manifest native build failed (exit=$LASTEXITCODE)"
         }
     } finally {
         Pop-Location
@@ -122,22 +143,22 @@ foreach ($k in @('GOFLAGS','GOOS','GOARCH','CGO_ENABLED')) {
 . (Join-Path $libDir 'repro-flags.ps1')
 
 if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('SOURCE_DATE_EPOCH', 'Process'))) {
-    DefenseClaw-Die -Code 3 -Message "SOURCE_DATE_EPOCH must be exported by the caller (see README-AVC.md)"
+    Invoke-DefenseClawDie -Code 3 -Message "SOURCE_DATE_EPOCH must be exported by the caller (see README-AVC.md)"
 }
 $env:DEFENSECLAW_BUILDID = "defenseclaw-enterprise-setup-$SourceCommit"
 
-DefenseClaw-Stage "stage 1/6  preflight"
+Write-DefenseClawStage "stage 1/6  preflight"
 try {
     Invoke-DefenseClawReproPreflight
 } catch {
-    DefenseClaw-Die -Code 3 -Message "repro-flags preflight failed: $($_.Exception.Message)"
+    Invoke-DefenseClawDie -Code 3 -Message "repro-flags preflight failed: $($_.Exception.Message)"
 }
 
 # ---------------------------------------------------------------------------
 # Stage (c): Cisco-signature assertion for every payload file, unless
 # -AllowUnsigned.
 # ---------------------------------------------------------------------------
-DefenseClaw-Stage "stage 2/6  verify-signatures"
+Write-DefenseClawStage "stage 2/6  verify-signatures"
 $expectedPayload = @(
     'DefenseClawEnterprise.psm1',
     'defenseclaw-gateway.exe',
@@ -148,12 +169,12 @@ $expectedPayload = @(
 foreach ($name in $expectedPayload) {
     $p = Join-Path $PayloadDir $name
     if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
-        DefenseClaw-Die -Code 6 -Message "payload-dir missing required file: $name"
+        Invoke-DefenseClawDie -Code 6 -Message "payload-dir missing required file: $name"
     }
 }
 $extras = Get-ChildItem -LiteralPath $PayloadDir | Where-Object { $_.Name -notin $expectedPayload }
 if ($extras) {
-    DefenseClaw-Die -Code 6 -Message "payload-dir contains unexpected entries: $(($extras.Name) -join ', ')"
+    Invoke-DefenseClawDie -Code 6 -Message "payload-dir contains unexpected entries: $(($extras.Name) -join ', ')"
 }
 
 if (-not $AllowUnsigned) {
@@ -162,7 +183,7 @@ if (-not $AllowUnsigned) {
         try {
             Assert-CiscoSignature -Path (Join-Path $PayloadDir $name)
         } catch {
-            DefenseClaw-Die -Code 4 -Message $_.Exception.Message
+            Invoke-DefenseClawDie -Code 4 -Message $_.Exception.Message
         }
     }
 }
@@ -173,7 +194,7 @@ if (-not $AllowUnsigned) {
 $embedDir = Join-Path (Join-Path (Join-Path $SourceDir 'cmd') 'defenseclaw-enterprise-setup') 'payload'
 [void](New-Item -ItemType Directory -Force -Path $embedDir)
 
-DefenseClaw-Stage "stage 3/6  emit-manifest"
+Write-DefenseClawStage "stage 3/6  emit-manifest"
 $manifestArgs = @(
     'emit-manifest',
     '--version',       $Version,
@@ -184,13 +205,13 @@ $manifestArgs = @(
 if ($AllowUnsigned) { $manifestArgs += '--unsigned' }
 & $emitter @manifestArgs
 if ($LASTEXITCODE -ne 0) {
-    DefenseClaw-Die -Code 6 -Message "emit-manifest failed (exit=$LASTEXITCODE)"
+    Invoke-DefenseClawDie -Code 6 -Message "emit-manifest failed (exit=$LASTEXITCODE)"
 }
 
 # ---------------------------------------------------------------------------
 # Stage (e): copy the signed payload into the embed dir.
 # ---------------------------------------------------------------------------
-DefenseClaw-Stage "stage 4/6  stage-payload"
+Write-DefenseClawStage "stage 4/6  stage-payload"
 foreach ($name in $expectedPayload) {
     Copy-Item -LiteralPath (Join-Path $PayloadDir $name) -Destination (Join-Path $embedDir $name) -Force
 }
@@ -198,13 +219,13 @@ foreach ($name in $expectedPayload) {
 # ---------------------------------------------------------------------------
 # Stage (f): outer Setup EXE cross-build.
 # ---------------------------------------------------------------------------
-DefenseClaw-Stage "stage 5/6  go-build DefenseClawSetup-Enterprise-x64.exe"
+Write-DefenseClawStage "stage 5/6  go-build DefenseClawSetup-Enterprise-x64.exe"
 $outerExe = Join-Path $OutDir 'DefenseClawSetup-Enterprise-x64.exe'
 Push-Location $SourceDir
 try {
     Invoke-DefenseClawReproBuild -Output $outerExe -Package './cmd/defenseclaw-enterprise-setup'
 } catch {
-    DefenseClaw-Die -Code 5 -Message "outer Setup EXE go build failed: $($_.Exception.Message)"
+    Invoke-DefenseClawDie -Code 5 -Message "outer Setup EXE go build failed: $($_.Exception.Message)"
 } finally {
     Pop-Location
 }
@@ -214,23 +235,22 @@ try {
 # after step-3 signtool sign. We do NOT write the .sha256 sidecar for
 # the same reason (design.md § Decisions).
 # ---------------------------------------------------------------------------
-DefenseClaw-Stage "stage 6/6  emit-provenance"
+Write-DefenseClawStage "stage 6/6  emit-provenance"
 $provArgs = @(
     'emit-provenance',
     '--version',       $Version,
     '--source-commit', $SourceCommit,
-    '--setup-exe',     $outerExe,
     '--out',           (Join-Path $OutDir 'DefenseClawSetup-Enterprise-x64.exe.provenance.json'),
     '--setup-sha256-placeholder'
 )
 if ($AllowUnsigned) { $provArgs += '--unsigned' }
 & $emitter @provArgs
 if ($LASTEXITCODE -ne 0) {
-    DefenseClaw-Die -Code 6 -Message "emit-provenance failed (exit=$LASTEXITCODE)"
+    Invoke-DefenseClawDie -Code 6 -Message "emit-provenance failed (exit=$LASTEXITCODE)"
 }
 
 Remove-Item -LiteralPath $emitter -Force -ErrorAction SilentlyContinue
 
-DefenseClaw-Stage "done  out/DefenseClawSetup-Enterprise-x64.exe + provenance.json ready"
-DefenseClaw-Stage "next  AVC signs the outer EXE, then invokes finalize.ps1 (or"
-DefenseClaw-Stage "      populates .sha256 + provenance.setup_sha256 in-pipeline)"
+Write-DefenseClawStage "done  out/DefenseClawSetup-Enterprise-x64.exe + provenance.json ready"
+Write-DefenseClawStage "next  AVC signs the outer EXE, then invokes finalize.ps1 (or"
+Write-DefenseClawStage "      populates .sha256 + provenance.setup_sha256 in-pipeline)"
