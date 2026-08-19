@@ -94,12 +94,7 @@ func (cache *activeAgentContextCache) currentTime() time.Time {
 }
 
 func exactActiveAgentFile(filePath string) (string, bool, bool) {
-	if filePath == "" || len(filePath) > maxActiveAgentContextPathSize ||
-		strings.TrimSpace(filePath) != filePath || !filepath.IsAbs(filePath) ||
-		filepath.Clean(filePath) != filePath {
-		return "", false, false
-	}
-	canonicalName, ok := canonicalActiveAgentFileName(filepath.Base(filePath))
+	canonicalName, ok := syntacticActiveAgentFile(filePath)
 	if !ok {
 		return "", false, false
 	}
@@ -131,6 +126,23 @@ func exactActiveAgentFile(filePath string) (string, bool, bool) {
 		return "", false, false
 	}
 	return canonicalPath, caseInsensitive, true
+}
+
+func syntacticActiveAgentFile(filePath string) (string, bool) {
+	if filePath == "" || len(filePath) > maxActiveAgentContextPathSize ||
+		strings.TrimSpace(filePath) != filePath || !filepath.IsAbs(filePath) ||
+		filepath.Clean(filePath) != filePath {
+		return "", false
+	}
+	return canonicalActiveAgentFileName(filepath.Base(filePath))
+}
+
+func syntacticActiveAgentFileCandidate(filePath string) bool {
+	canonicalName, ok := syntacticActiveAgentFile(filePath)
+	// This classifies only exact-identity failures. A native POSIX case alias
+	// already succeeded above; an unproved folded spelling remains noise.
+	return ok && (filepath.Separator != '/' ||
+		filepath.Base(filePath) == canonicalName)
 }
 
 func canonicalActiveAgentFileName(value string) (string, bool) {
@@ -235,13 +247,15 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 	if found {
 		evicted := cache.sessions[oldestKey]
 		delete(cache.sessions, oldestKey)
-		// The evicted session may still be active because only authenticated
-		// lifecycle events can prove otherwise. Keep that loss of exact context
-		// explicit so a later tool request cannot turn it into a safe negative.
-		cache.uncertain = true
-		if evicted.caseInsensitiveUncertain ||
-			len(evicted.caseInsensitiveFiles) != 0 {
-			cache.caseInsensitiveUncertain = true
+		if evicted.uncertain || len(evicted.files) != 0 {
+			// A session with active or already-incomplete authority may still be
+			// live. Preserve that loss globally, while an authenticated
+			// known-empty session can be discarded without poisoning later lookups.
+			cache.uncertain = true
+			if evicted.caseInsensitiveUncertain ||
+				len(evicted.caseInsensitiveFiles) != 0 {
+				cache.caseInsensitiveUncertain = true
+			}
 		}
 	}
 }
@@ -260,6 +274,9 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	}
 	canonicalPath, caseInsensitive, valid := exactActiveAgentFile(filePath)
 	if !valid {
+		if syntacticActiveAgentFileCandidate(filePath) {
+			cache.markUncertain(key, cache.currentTime())
+		}
 		return
 	}
 	cache.seedLoadedFile(
@@ -268,6 +285,31 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 		caseInsensitive,
 		cache.currentTime(),
 	)
+}
+
+func (cache *activeAgentContextCache) markUncertain(
+	key activeAgentContextKey,
+	now time.Time,
+) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.sessions == nil {
+		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
+	}
+	session, exists := cache.sessions[key]
+	if !exists {
+		cache.makeRoomLocked()
+		session = activeAgentContextSession{
+			caseInsensitiveUncertain: cache.caseInsensitiveUncertain,
+			uncertain:                cache.uncertain,
+		}
+	}
+	// The authenticated event identifies an instruction-file candidate, but
+	// native identity could not be proved. Retain any exact entries while
+	// making that authority loss explicit; case folding remains proof-gated.
+	session.uncertain = true
+	session.updatedAt = now
+	cache.sessions[key] = session
 }
 
 func (cache *activeAgentContextCache) seedLoadedFile(

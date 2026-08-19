@@ -137,11 +137,15 @@ func promotedArtifactFindings(
 		}
 		analysisBody := promotedArtifactAnalysisBody(body)
 		input := actionfacts.Input{
-			Tool:        "shell",
-			Command:     string(analysisBody),
-			CWD:         facts.CWD,
-			ActiveHome:  trustedSameHostHome(),
-			DialectHint: dialect,
+			Tool:                                     "shell",
+			Command:                                  string(analysisBody),
+			CWD:                                      facts.CWD,
+			ActiveHome:                               trustedSameHostHome(),
+			ActiveAgentFiles:                         append([]string(nil), facts.ActiveAgentFiles...),
+			ActiveAgentFilesCaseInsensitive:          append([]string(nil), facts.ActiveAgentFilesCaseInsensitive...),
+			ActiveAgentFilesCaseInsensitiveUncertain: facts.ActiveAgentFilesCaseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                facts.ActiveAgentFilesUncertain,
+			DialectHint:                              dialect,
 		}
 		artifactFacts := actionfacts.Analyze(input)
 		outerCandidateEnforceable := preExecutionBoundary &&

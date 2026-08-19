@@ -51,7 +51,9 @@ type Input struct {
 	ActiveAgentFilesCaseInsensitiveUncertain bool `json:"-"`
 	// ActiveAgentFilesUncertain is trusted connector state indicating that the
 	// exact list above may be incomplete because its bounded authority cache
-	// evicted or overflowed an entry. Parsers never derive it from action input.
+	// evicted or overflowed an entry, or because an authenticated load named a
+	// recognized instruction path whose native identity could not be proved.
+	// Parsers never derive it from action input.
 	ActiveAgentFilesUncertain bool
 	DialectHint               Dialect
 }

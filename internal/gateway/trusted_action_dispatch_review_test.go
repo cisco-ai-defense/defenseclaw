@@ -132,6 +132,64 @@ func TestTrustedNestedExecutionActionsCloneActiveAgentFiles(t *testing.T) {
 	}
 }
 
+func TestTrustedRawShellFallbackActionClonesActiveAgentContext(t *testing.T) {
+	const (
+		connector = "trusted-raw-active-agent-context-test"
+		command   = "cat =(printf updated > /repo/AGENTS.md)"
+		active    = "/repo/AGENTS.md"
+	)
+	installDefaultProfileConnector(t, connector)
+	activeFiles := []string{active}
+	caseInsensitiveFiles := []string{active}
+	input := actionfacts.Input{
+		Tool:                                     "zsh",
+		Command:                                  command,
+		CWD:                                      "/repo",
+		ActiveHome:                               "/home/alice",
+		ActiveAgentFiles:                         activeFiles,
+		ActiveAgentFilesCaseInsensitive:          caseInsensitiveFiles,
+		ActiveAgentFilesCaseInsensitiveUncertain: true,
+		ActiveAgentFilesUncertain:                true,
+	}
+	actions := trustedRawShellFallbackAction(input, command)
+	if len(actions) != 1 || !actions[0].rawFallback {
+		t.Fatalf("raw fallback actions = %+v", actions)
+	}
+	nested := &actions[0].input
+	if !slices.Equal(nested.ActiveAgentFiles, []string{active}) ||
+		!slices.Equal(
+			nested.ActiveAgentFilesCaseInsensitive,
+			[]string{active},
+		) || !nested.ActiveAgentFilesUncertain ||
+		!nested.ActiveAgentFilesCaseInsensitiveUncertain {
+		t.Fatalf("raw fallback lost active-file context: %+v", *nested)
+	}
+
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:              input,
+		LegacyText:         command,
+		Connector:          connector,
+		EnforcementCapable: true,
+	})
+	matched := findingWithID(findings, "COG-AGENTS-MD")
+	if matched == nil || matched.contributesToEnforcement() ||
+		!hasTag(matched.Tags, trustedParserUncertaintyTag) {
+		t.Fatalf("raw active-file mutation finding = %+v", matched)
+	}
+
+	activeFiles[0] = "/mutated/source"
+	caseInsensitiveFiles[0] = "/mutated/case-source"
+	if !slices.Equal(nested.ActiveAgentFiles, []string{active}) ||
+		!slices.Equal(nested.ActiveAgentFilesCaseInsensitive, []string{active}) {
+		t.Fatalf("raw fallback retained caller-owned context: %+v", *nested)
+	}
+	nested.ActiveAgentFiles[0] = "/mutated/projection"
+	if !slices.Equal(nested.ActiveAgentFilesCaseInsensitive, []string{active}) ||
+		activeFiles[0] != "/mutated/source" {
+		t.Fatalf("raw fallback context slices share storage: %+v", *nested)
+	}
+}
+
 func TestTrustedInlineCommandOwnerRequiresAuthoritativeFacts(t *testing.T) {
 	for _, test := range []struct {
 		name    string

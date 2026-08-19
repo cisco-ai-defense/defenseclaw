@@ -199,8 +199,9 @@ func TestActiveAgentContextRejectsUnrelatedLowercaseFileOnCaseSensitivePOSIX(t *
 	}
 	cache := activeAgentContextCache{}
 	cache.seed("claudecode", "case-sensitive-session", aliasPath)
-	if got := cache.snapshot("claudecode", "case-sensitive-session"); len(got.files) != 0 || len(got.caseInsensitiveFiles) != 0 {
-		t.Fatalf("unrelated lowercase file gained authority: %#v", got)
+	if got := cache.snapshot("claudecode", "case-sensitive-session"); len(got.files) != 0 || len(got.caseInsensitiveFiles) != 0 ||
+		got.uncertain || got.caseInsensitiveUncertain {
+		t.Fatalf("unrelated lowercase file context = %#v", got)
 	}
 }
 
@@ -322,44 +323,57 @@ func TestActiveAgentContextOverflowCarriesOnlyProvenLostCaseSemantics(t *testing
 	}
 }
 
-func TestActiveAgentContextEvictionCarriesOnlyProvenLostCaseSemantics(t *testing.T) {
-	cache := activeAgentContextCache{}
-	for index := 0; index < maxActiveAgentContextSessions; index++ {
-		cache.seedLoadedFile(
-			activeAgentContextKey{
-				connector: "claudecode",
-				sessionID: fmt.Sprintf("session-%03d", index),
-			},
-			fmt.Sprintf("/repo/session-%03d/AGENTS.md", index),
-			index == 1,
-			time.Unix(int64(index+1), 0),
-		)
-	}
-	cache.seedLoadedFile(
-		activeAgentContextKey{connector: "claudecode", sessionID: "session-new-1"},
-		"/repo/new-1/AGENTS.md",
-		false,
-		time.Unix(maxActiveAgentContextSessions+1, 0),
+func TestActiveAgentContextEvictionCarriesOnlyActualAuthority(t *testing.T) {
+	nextTime := int64(0)
+	cache := activeAgentContextCache{now: func() time.Time {
+		nextTime++
+		return time.Unix(nextTime, 0)
+	}}
+	const (
+		emptySession           = "session-empty"
+		caseSensitiveSession   = "session-case-sensitive"
+		caseInsensitiveSession = "session-case-insensitive"
 	)
-	firstEvicted := cache.snapshot("claudecode", "session-000")
-	if !firstEvicted.uncertain || firstEvicted.caseInsensitiveUncertain {
-		t.Fatalf("case-sensitive eviction = %#v", firstEvicted)
+	cache.begin("claudecode", emptySession)
+	cache.seedLoadedFile(
+		activeAgentContextKey{connector: "claudecode", sessionID: caseSensitiveSession},
+		"/repo/case-sensitive/AGENTS.md",
+		false,
+		cache.currentTime(),
+	)
+	cache.seedLoadedFile(
+		activeAgentContextKey{connector: "claudecode", sessionID: caseInsensitiveSession},
+		"/repo/case-insensitive/AGENTS.md",
+		true,
+		cache.currentTime(),
+	)
+	for index := 3; index < maxActiveAgentContextSessions; index++ {
+		cache.begin("claudecode", fmt.Sprintf("session-filler-%03d", index))
 	}
 
-	cache.seedLoadedFile(
-		activeAgentContextKey{connector: "claudecode", sessionID: "session-new-2"},
-		"/repo/new-2/AGENTS.md",
-		false,
-		time.Unix(maxActiveAgentContextSessions+2, 0),
-	)
-	caseInsensitiveEvicted := cache.snapshot("claudecode", "session-001")
+	cache.begin("claudecode", "session-new-1")
+	emptyEvicted := cache.snapshot("claudecode", emptySession)
+	if len(emptyEvicted.files) != 0 || emptyEvicted.uncertain ||
+		emptyEvicted.caseInsensitiveUncertain {
+		t.Fatalf("known-empty eviction poisoned global context: %#v", emptyEvicted)
+	}
+
+	cache.begin("claudecode", "session-new-2")
+	caseSensitiveEvicted := cache.snapshot("claudecode", caseSensitiveSession)
+	if !caseSensitiveEvicted.uncertain ||
+		caseSensitiveEvicted.caseInsensitiveUncertain {
+		t.Fatalf("case-sensitive eviction = %#v", caseSensitiveEvicted)
+	}
+
+	cache.begin("claudecode", "session-new-3")
+	caseInsensitiveEvicted := cache.snapshot("claudecode", caseInsensitiveSession)
 	if !caseInsensitiveEvicted.uncertain ||
 		!caseInsensitiveEvicted.caseInsensitiveUncertain {
 		t.Fatalf("case-insensitive eviction = %#v", caseInsensitiveEvicted)
 	}
 
-	cache.begin("claudecode", "session-001")
-	reset := cache.snapshot("claudecode", "session-001")
+	cache.begin("claudecode", caseInsensitiveSession)
+	reset := cache.snapshot("claudecode", caseInsensitiveSession)
 	if len(reset.files) != 0 || reset.uncertain ||
 		reset.caseInsensitiveUncertain {
 		t.Fatalf("lifecycle reset inherited global uncertainty: %#v", reset)
@@ -594,14 +608,60 @@ func TestClaudeCodeActiveAgentFilesLifecycleClears(t *testing.T) {
 }
 
 func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries(t *testing.T) {
+	installDefaultProfileConnector(t, "claudecode")
 	root := t.TempDir()
 	valid := writeActiveAgentTestFile(t, root, "AGENTS.md")
+	assertIdentityFailureFailsClosed := func(
+		t *testing.T,
+		filePath string,
+		ruleID string,
+		retainExact bool,
+	) {
+		t.Helper()
+		const sessionID = "identity-failure-session"
+		api := activeClaudeCodeTestAPI()
+		ctx := authenticatedClaudeCodeTestContext()
+		var wantFiles []string
+		if retainExact {
+			api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "InstructionsLoaded",
+				SessionID:     sessionID,
+				FilePath:      valid,
+			})
+			wantFiles = []string{valid}
+		}
+		api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "InstructionsLoaded",
+			SessionID:     sessionID,
+			FilePath:      filePath,
+		})
+		if got := api.activeAgentContext.snapshot("claudecode", sessionID); !slices.Equal(got.files, wantFiles) || !got.uncertain ||
+			got.caseInsensitiveUncertain {
+			t.Fatalf("unprovable load context = %#v", got)
+		}
+		mutation := evaluateClaudeCodeToolFacts(
+			t,
+			api,
+			"PreToolUse",
+			sessionID,
+			nil,
+			"Write",
+			map[string]interface{}{
+				"file_path": filePath,
+				"content":   "updated",
+			},
+		)
+		finding := findingWithID(mutation.findings, ruleID)
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("unprovable active-file mutation finding = %+v", finding)
+		}
+	}
 
 	t.Run("relative path cannot erase exact entry", func(t *testing.T) {
 		cache := activeAgentContextCache{}
 		cache.seed("claudecode", "session", valid)
 		cache.seed("claudecode", "session", "AGENTS.md")
-		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got.files, []string{valid}) {
+		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got.files, []string{valid}) || got.uncertain {
 			t.Fatalf("relative load changed exact authority: %#v", got)
 		}
 		cache.seed("claudecode", "session", valid)
@@ -615,13 +675,12 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		inexact := writeActiveAgentTestFile(t, root, "CLAUDE.md")
 		cache.seed("claudecode", "session", valid)
 		cache.seed("claudecode", "session", inexact)
-		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got.files, []string{valid}) {
+		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got.files, []string{valid}) || got.uncertain {
 			t.Fatalf("out-of-scope instruction load changed authority: %#v", got)
 		}
 	})
 
-	t.Run("symlinks invalidate session", func(t *testing.T) {
-		cache := activeAgentContextCache{}
+	t.Run("direct symlink marks fresh session uncertain", func(t *testing.T) {
 		link := filepath.Join(root, "link", "MEMORY.md")
 		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 			t.Fatal(err)
@@ -629,24 +688,22 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		if err := os.Symlink(valid, link); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		cache.seed("claudecode", "session", link)
-		if got := cache.snapshot("claudecode", "session"); len(got.files) != 0 {
-			t.Fatalf("symlink gained authority: %#v", got)
-		}
+		assertIdentityFailureFailsClosed(t, link, "COG-MEMORY", false)
 	})
 
-	t.Run("parent symlinks invalidate session", func(t *testing.T) {
-		cache := activeAgentContextCache{}
+	t.Run("parent symlink preserves exact entry and marks uncertainty", func(t *testing.T) {
 		realDir := filepath.Join(root, "real-parent")
 		memory := writeActiveAgentTestFile(t, realDir, "MEMORY.md")
 		linkDir := filepath.Join(root, "linked-parent")
 		if err := os.Symlink(realDir, linkDir); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		cache.seed("claudecode", "session", filepath.Join(linkDir, filepath.Base(memory)))
-		if got := cache.snapshot("claudecode", "session"); len(got.files) != 0 {
-			t.Fatalf("path through symlink gained authority: %#v", got)
-		}
+		assertIdentityFailureFailsClosed(
+			t,
+			filepath.Join(linkDir, filepath.Base(memory)),
+			"COG-MEMORY",
+			true,
+		)
 	})
 
 	t.Run("overflow retains bounded exact prefix", func(t *testing.T) {

@@ -3051,10 +3051,14 @@ func trustedRawShellFallbackAction(
 ) []trustedNestedAction {
 	return []trustedNestedAction{{
 		input: trustedTerminalNestedInput(actionfacts.Input{
-			Tool:       "bash",
-			Command:    trustedExecutableShellProjection(command),
-			CWD:        input.CWD,
-			ActiveHome: input.ActiveHome,
+			Tool:                                     "bash",
+			Command:                                  trustedExecutableShellProjection(command),
+			CWD:                                      input.CWD,
+			ActiveHome:                               input.ActiveHome,
+			ActiveAgentFiles:                         append([]string(nil), input.ActiveAgentFiles...),
+			ActiveAgentFilesCaseInsensitive:          append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+			ActiveAgentFilesCaseInsensitiveUncertain: input.ActiveAgentFilesCaseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                input.ActiveAgentFilesUncertain,
 		}),
 		rawFallback: true,
 	}}

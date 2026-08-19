@@ -115,6 +115,74 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 	})
 }
 
+func TestPromotedArtifactPreservesActiveAgentInstructionContext(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-active-agent-context-test"
+	installDefaultProfileConnector(t, connectorName)
+	dir := t.TempDir()
+
+	for _, test := range []struct {
+		name     string
+		fileName string
+		ruleID   string
+		lost     bool
+	}{
+		{
+			name:     "cached case-insensitive AGENTS.md",
+			fileName: "AGENTS.md",
+			ruleID:   "COG-AGENTS-MD",
+		},
+		{
+			name:     "lost case-insensitive MEMORY.md",
+			fileName: "MEMORY.md",
+			ruleID:   "COG-MEMORY",
+			lost:     true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			activePath := filepath.Join(dir, test.fileName)
+			mutatedPath := filepath.Join(dir, strings.ToLower(test.fileName))
+			scriptPath := filepath.Join(dir, test.fileName+"-mutator.sh")
+			body := fmt.Sprintf("#!/bin/sh\nprintf updated > %q\n", mutatedPath)
+			if err := os.WriteFile(scriptPath, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			input := actionfacts.Input{
+				Tool:    "shell",
+				Command: fmt.Sprintf("bash %q", scriptPath),
+				CWD:     dir,
+			}
+			if test.lost {
+				input.ActiveAgentFilesCaseInsensitiveUncertain = true
+				input.ActiveAgentFilesUncertain = true
+			} else {
+				input.ActiveAgentFiles = []string{activePath}
+				input.ActiveAgentFilesCaseInsensitive = []string{activePath}
+			}
+			outer := actionfacts.Analyze(input)
+
+			for _, preExecution := range []bool{true, false} {
+				t.Run(fmt.Sprintf("pre-execution=%t", preExecution), func(t *testing.T) {
+					findings := promotedArtifactFindings(
+						t.Context(),
+						agentHookRequest{ConnectorName: connectorName},
+						outer,
+						preExecution,
+						nil,
+					)
+					matched := findingWithID(findings, test.ruleID)
+					if matched == nil {
+						t.Fatalf("executed script lost %s: %v outer=%+v", test.ruleID, FindingStrings(findings), outer)
+					}
+					if got := matched.contributesToEnforcement(); got != preExecution {
+						t.Fatalf("enforceable=%t want %t: %+v", got, preExecution, *matched)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestPromotedArtifactHonorsPOSIXNoExecScriptMode(t *testing.T) {
 	requireNativePOSIXArtifactHost(t)
 	const connectorName = "artifact-noexec-script-test"

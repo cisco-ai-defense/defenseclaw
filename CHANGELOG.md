@@ -79,9 +79,11 @@ boundary.
   partial, parser-shadow, and unpinned evidence remains detection-only;
   ordinary sensitive reads are advisory unless paired with mutation or
   external egress, and Claude Code instruction-file mutation protection
-  requires an authenticated exact load in the same session. Parser uncertainty
-  is counted separately by `defenseclaw.guardrail.parser_uncertainty`, so it
-  does not inflate guardrail evaluation or block-rate metrics.
+  requires authenticated same-session load context; exact identities are
+  retained, while recognized instruction paths with unprovable native identity
+  fail closed only for proven canonical mutations. Parser uncertainty is
+  counted separately by `defenseclaw.guardrail.parser_uncertainty`, so it does
+  not inflate guardrail evaluation or block-rate metrics.
 - **Amp is now a first-class connector on macOS, Linux, and native Windows**:
   setup installs an owner-only authenticated system policy plugin for Amp's five
   documented callbacks; action mode gates `tool.call` before execution and can
