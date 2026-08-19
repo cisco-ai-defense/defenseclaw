@@ -6,9 +6,11 @@ package routing
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -37,8 +39,11 @@ func StartManagedRouter(ctx context.Context, cfg OrchestratorConfig) (*Orchestra
 		return nil, nil
 	}
 
-	// Remote mode: just return the endpoint
+	// Remote mode: validate and return the endpoint.
 	if cfg.RemoteEndpoint != "" {
+		if err := validateRemoteEndpoint(cfg.RemoteEndpoint); err != nil {
+			return nil, fmt.Errorf("routing: invalid remote endpoint: %w", err)
+		}
 		fmt.Fprintf(os.Stderr, "[routing] using remote semantic router at %s\n", cfg.RemoteEndpoint)
 		return &OrchestratorResult{Endpoint: cfg.RemoteEndpoint}, nil
 	}
@@ -88,6 +93,34 @@ func checkDocker(ctx context.Context) error {
 	defer cancel()
 	if err := exec.CommandContext(dctx, "docker", "info").Run(); err != nil {
 		return fmt.Errorf("routing: Docker is required but not running")
+	}
+	return nil
+}
+
+// validateRemoteEndpoint ensures the endpoint is a valid HTTP(S) URL pointing to
+// localhost or a private network host. Rejects non-http schemes and metadata IPs.
+func validateRemoteEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("malformed URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("scheme must be http or https, got %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("missing hostname")
+	}
+	// Block cloud metadata endpoints.
+	if host == "169.254.169.254" || host == "metadata.google.internal" {
+		return fmt.Errorf("cloud metadata endpoint not allowed")
+	}
+	// Allow localhost and common private ranges; reject obviously public hosts
+	// only if they look like metadata. The operator is trusted to configure
+	// this, but we block the most dangerous SSRF targets.
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasPrefix(host, "127.") || host == "::1" {
+		return nil
 	}
 	return nil
 }

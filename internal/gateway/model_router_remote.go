@@ -131,7 +131,7 @@ type compressedPromptPayload struct {
 }
 
 func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput) *ModelRouterDecision {
-	if c == nil || c.endpoint == "" {
+	if c == nil || c.endpoint == "" || input == nil {
 		return nil
 	}
 
