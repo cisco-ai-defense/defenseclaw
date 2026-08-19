@@ -3003,7 +3003,28 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         sources = registries.get("sources") or []
         if not sources:
             d.pop("registries", None)
+    _serialize_routing(d)
     return d
+
+
+def _serialize_routing(d: dict[str, Any]) -> None:
+    """Compact the ``routing:`` block, omitting fields at their zero value.
+
+    Mirrors Go's ``yaml:",omitempty"`` so configs that never opt in stay
+    byte-identical after a load/save round-trip.
+    """
+    routing = d.get("routing")
+    if not isinstance(routing, dict):
+        return
+    if not routing.get("enabled") and not routing.get("version") and not routing.get("port") and not routing.get("algorithm"):
+        d.pop("routing", None)
+        return
+    if not routing.get("version"):
+        routing.pop("version", None)
+    if not routing.get("port"):
+        routing.pop("port", None)
+    if not routing.get("algorithm"):
+        routing.pop("algorithm", None)
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
@@ -4890,9 +4911,9 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
     if not isinstance(raw, dict):
         return RoutingConfig()
     return RoutingConfig(
-        enabled=bool(raw.get("enabled", False)),
+        enabled=_coerce_bool(raw.get("enabled", False)),
         version=str(raw.get("version", "") or ""),
-        port=int(raw.get("port", 0) or 0),
+        port=_as_int(raw.get("port", 0), 0),
         algorithm=str(raw.get("algorithm", "") or ""),
     )
 

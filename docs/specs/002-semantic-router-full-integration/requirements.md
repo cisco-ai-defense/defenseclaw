@@ -25,7 +25,7 @@ over code changes.
 
 ### Phase 1: Config Expansion
 
-- REQ-01: The system shall support configuring all 17 SR signal types (keywords,
+- REQ-01: The system shall support configuring all 20 SR signal types (keywords,
   embeddings, domain, complexity, context, structure, modality, language, pii,
   jailbreak, fact_check, user_feedbacks, reasks, preferences, conversation, events,
   metadata, role_bindings, kb, classifiers) in `~/.defenseclaw/config.yaml`.

@@ -2721,6 +2721,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				w.Header().Set("X-Semantic-Router-Reason", decision.Reason)
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(decision.CachedResponse)
+				// TODO: cached responses should pass through the inspection/telemetry
+				// pipeline before returning, so that post-call guardrails and audit
+				// logging still apply to cache hits.
 				return
 			}
 			if decision.TargetURL != "" {

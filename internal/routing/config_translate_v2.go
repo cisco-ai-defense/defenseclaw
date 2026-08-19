@@ -830,7 +830,6 @@ func translateProviders(input TranslateFullInput) SRProvidersBlock {
 				Weight:       br.Weight,
 				Type:         br.Type,
 				APIKeyEnv:    br.APIKeyEnv,
-				APIKey:       br.APIKey,
 				ExtraHeaders: br.ExtraHeaders,
 			})
 		}

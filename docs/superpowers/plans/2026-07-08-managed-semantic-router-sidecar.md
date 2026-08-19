@@ -2,7 +2,7 @@
 
 **Goal:** Enable DefenseClaw to manage the vLLM Semantic Router as a single Docker container, using its classify/intent API for routing decisions while preserving Bifrost in the forwarding path for multi-provider format translation.
 
-**Architecture:** DefenseClaw starts a single router container from the `ghcr.io/vllm-project/semantic-router/vllm-sr:latest` image. At boot, it translates its `routing:` config block into the SR's v0.3 canonical format, starts the container with the router binary directly (no Envoy, no storage backends), and registers a `RemoteRouterClient` that calls `POST /api/v1/classify/intent` for every request. The response contains `recommended_model` — DefenseClaw then forwards via Bifrost to the appropriate upstream.
+**Architecture:** DefenseClaw starts a single router container from the `ghcr.io/vllm-project/semantic-router/vllm-sr:v0.3.0` image. At boot, it translates its `routing:` config block into the SR's v0.3 canonical format, starts the container with the router binary directly (no Envoy, no storage backends), and registers a `RemoteRouterClient` that calls `POST /api/v1/classify/intent` for every request. The response contains `recommended_model` — DefenseClaw then forwards via Bifrost to the appropriate upstream.
 
 **Tech Stack:** Go (DefenseClaw gateway), Docker (single container), vLLM Semantic Router v0.3 (router binary only), HTTP JSON for routing decisions, existing Bifrost SDK for upstream forwarding.
 
@@ -49,7 +49,7 @@
 
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  Docker container: defenseclaw-semantic-router                            │
-│  Image: ghcr.io/vllm-project/semantic-router/vllm-sr:latest              │
+│  Image: ghcr.io/vllm-project/semantic-router/vllm-sr:v0.3.0              │
 │  Entrypoint: /usr/local/bin/router (direct binary, no shell wrapper)     │
 │  Port: 8888 (API server)                                                 │
 │                                                                          │
@@ -388,7 +388,7 @@ docker run -d \
   -v <config-dir>:/app/config \
   -p 8888:8888 \
   --entrypoint /usr/local/bin/router \
-  ghcr.io/vllm-project/semantic-router/vllm-sr:latest \
+  ghcr.io/vllm-project/semantic-router/vllm-sr:v0.3.0 \
   -config=/app/config/config.yaml \
   -port=50051 \
   -enable-api=true \

@@ -55,6 +55,7 @@ from defenseclaw.audit_actions import (
     ACTION_SETUP_MCP_SCANNER,
     ACTION_SETUP_NOTIFICATIONS_SET,
     ACTION_SETUP_NOTIFICATIONS_TOGGLE,
+    ACTION_SETUP_ROUTING,
     ACTION_SETUP_SKILL_SCANNER,
     ACTION_SETUP_SPLUNK,
 )
@@ -12498,28 +12499,32 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         click.echo()
 
         # 1. Check/install vllm-sr
-        if shutil.which("vllm-sr"):
-            ver = _sp.run(["vllm-sr", "--version"], capture_output=True, text=True).stdout.strip()
+        vllm_sr = shutil.which("vllm-sr")
+        if vllm_sr:
+            ver = _sp.run([vllm_sr, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
             click.echo(f"  ✓ vllm-sr already installed ({ver})")
         else:
             click.echo("  Installing vllm-sr...")
+            pip = shutil.which("pip") or "pip"
             pkg = f"vllm-sr=={app.cfg.routing.version}" if app.cfg.routing.version else "vllm-sr"
-            result = _sp.run(["pip", "install", pkg], capture_output=True, text=True)
+            result = _sp.run([pip, "install", pkg], capture_output=True, text=True, timeout=120)
             if result.returncode != 0:
                 click.echo(f"  ✗ pip install failed: {result.stderr.strip()}")
                 click.echo("    Install manually: pip install vllm-sr")
                 click.echo("    Then re-run: defenseclaw setup routing --enable")
-                return
-            if shutil.which("vllm-sr"):
-                ver = _sp.run(["vllm-sr", "--version"], capture_output=True, text=True).stdout.strip()
+                raise click.ClickException("vllm-sr installation failed")
+            vllm_sr = shutil.which("vllm-sr")
+            if vllm_sr:
+                ver = _sp.run([vllm_sr, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
                 click.echo(f"  ✓ vllm-sr installed ({ver})")
             else:
                 click.echo("  ✗ vllm-sr not found on PATH after install")
                 click.echo("    You may need to add pip's bin directory to PATH")
-                return
+                raise click.ClickException("vllm-sr not found on PATH after install")
 
         # 2. Check Docker
-        docker_ok = _sp.run(["docker", "info"], capture_output=True).returncode == 0
+        docker = shutil.which("docker") or "docker"
+        docker_ok = _sp.run([docker, "info"], capture_output=True, timeout=10).returncode == 0
         if docker_ok:
             click.echo("  ✓ Docker is running")
         else:
@@ -12527,7 +12532,10 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
             click.echo("    Start Docker before restarting the gateway.")
 
         # 3. Save config
-        app.cfg.save()
+        try:
+            app.cfg.save()
+        except OSError as exc:
+            raise click.ClickException(f"failed to save config: {exc}") from exc
         click.echo()
         click.echo("  ✓ Semantic routing enabled")
         click.echo(f"    Version: {app.cfg.routing.version}")
@@ -12538,12 +12546,29 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         if not yes:
             click.echo("  Restart the gateway to activate: defenseclaw-gateway restart")
 
+        _log_setup_action(
+            app,
+            ACTION_SETUP_ROUTING,
+            f"enabled=True version={app.cfg.routing.version} port={app.cfg.routing.port}",
+            allow_offline=True,
+        )
+
     if disable:
         app.cfg.routing.enabled = False
-        app.cfg.save()
+        try:
+            app.cfg.save()
+        except OSError as exc:
+            raise click.ClickException(f"failed to save config: {exc}") from exc
         click.echo()
         click.echo("  ✓ Semantic routing disabled")
         click.echo("    All requests will use the default provider.")
+
+        _log_setup_action(
+            app,
+            ACTION_SETUP_ROUTING,
+            "enabled=False",
+            allow_offline=True,
+        )
 
 
 def _print_routing_status(app: AppContext) -> None:

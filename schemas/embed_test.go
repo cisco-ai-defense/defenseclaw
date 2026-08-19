@@ -563,6 +563,84 @@ func TestDefenseClawConfigV8SchemaCompilesAndValidates(t *testing.T) {
 	}
 }
 
+func TestDefenseClawConfigV8RoutingSchemaValidation(t *testing.T) {
+	t.Parallel()
+
+	schema := compileConfigV8Schema(t)
+
+	t.Run("valid routing block", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled":   true,
+				"version":   "0.3.0",
+				"port":      8888,
+				"algorithm": "hybrid",
+				"models": []any{
+					map[string]any{
+						"name":               "reasoning",
+						"provider":           "anthropic",
+						"model":              "claude-sonnet-4-6",
+						"api_key_env":        "ANTHROPIC_API_KEY",
+						"capabilities":       []any{"reasoning", "analysis"},
+						"cost_per_1k_tokens": 0.003,
+					},
+				},
+				"signals": map[string]any{
+					"keywords": []any{
+						map[string]any{
+							"name":     "complex_task",
+							"keywords": []any{"analyze", "compare"},
+							"operator": "OR",
+						},
+					},
+				},
+				"decisions": []any{
+					map[string]any{
+						"name":       "reasoning_route",
+						"priority":   100,
+						"operator":   "AND",
+						"conditions": []any{map[string]any{"type": "keyword", "name": "complex_task"}},
+						"model_refs": []any{"reasoning"},
+					},
+				},
+			},
+		}
+		if err := schema.Validate(doc); err != nil {
+			t.Fatalf("valid routing config rejected: %v", err)
+		}
+	})
+
+	t.Run("invalid port zero", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled": true,
+				"port":    0,
+			},
+		}
+		if err := schema.Validate(doc); err == nil {
+			t.Fatal("routing config with port 0 should be rejected")
+		}
+	})
+
+	t.Run("unknown property in routing", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled":          true,
+				"unknown_property": "bad",
+			},
+		}
+		if err := schema.Validate(doc); err == nil {
+			t.Fatal("routing config with unknown property should be rejected")
+		}
+	})
+}
+
 func TestDefenseClawConfigV8CurrentNonObservabilitySectionsValidate(t *testing.T) {
 	t.Parallel()
 

@@ -340,6 +340,7 @@ type RoutingClassifierSignal struct {
 // configuration. Only one of the embedded configs should be non-nil.
 type RoutingAlgorithmConfig struct {
 	Type         string                    `mapstructure:"type"          yaml:"type"`
+	OnError      string                    `mapstructure:"on_error"      yaml:"on_error,omitempty"`
 	Confidence   *ConfidenceAlgorithmCfg   `mapstructure:"confidence"    yaml:"confidence,omitempty"`
 	Automix      *AutomixAlgorithmCfg      `mapstructure:"automix"       yaml:"automix,omitempty"`
 	Hybrid       *HybridAlgorithmCfg       `mapstructure:"hybrid"        yaml:"hybrid,omitempty"`

@@ -13,7 +13,7 @@ richer configuration, context passing, and response handling.
 
 ### System Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  ~/.defenseclaw/config.yaml                                                  │
 │                                                                              │
@@ -142,8 +142,8 @@ richer configuration, context passing, and response handling.
 
 | Component | File(s) | Change |
 |-----------|---------|--------|
-| Config types | `internal/config/config.go` | Expand `RoutingConfig` to full v0.3 schema (~40 new types) |
-| Config translator | `internal/routing/config_translate.go` | Emit full v0.3 YAML (signals, algorithms, plugins, global, recipes) |
+| Config types | `internal/config/routing_types.go` | Expand `RoutingConfig` to full v0.3 schema (~40 new types) |
+| Config translator | `internal/routing/config_translate_v2.go` | Emit full v0.3 YAML (signals, algorithms, plugins, global, recipes) |
 | Config validator | `internal/routing/config_validate.go` | NEW: validate cross-references, model names, signal names |
 | Router interface | `internal/gateway/model_router.go` | Expand `ModelRouterInput` and `ModelRouterDecision` |
 | Remote client | `internal/gateway/model_router_remote.go` | Expand request/response types, pass rich context |
@@ -168,7 +168,7 @@ richer configuration, context passing, and response handling.
 
 ### Data Flow: Classify Request
 
-```
+```text
 GuardrailProxy.handleRequest()
     │
     ├─ Pre-call guardrails complete
@@ -226,7 +226,7 @@ Parse classifyResponse:
 
 ### Data Flow: Hot Config Reload
 
-```
+```text
 Config file watcher detects change
     │
     ▼
@@ -374,7 +374,7 @@ Log "routing config reloaded" event
 
 ## Data Model
 
-### Config Types (internal/config/config.go)
+### Config Types (internal/config/routing_types.go)
 
 New/expanded types (abbreviated — full definitions in implementation):
 
@@ -404,7 +404,7 @@ type RoutingModelBackend struct {
     ContextWindowSize int
     QualityScore      float64
     Capabilities      []string
-    Modality          string
+    Modality          []string
     Tags              []string
     LoRAs             []RoutingLoRA
     Pricing           RoutingModelPricing

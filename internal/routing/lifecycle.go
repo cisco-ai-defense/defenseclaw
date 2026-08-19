@@ -16,7 +16,7 @@ import (
 const (
 	defaultSRPort    = 8888 // Envoy listener port (unused in our integration)
 	defaultSRAPIPort = 8080 // Router API server port (classify/intent, health)
-	srRouterImage    = "ghcr.io/vllm-project/semantic-router/vllm-sr:latest"
+	srRouterImage    = "ghcr.io/vllm-project/semantic-router/vllm-sr:v0.3.0"
 	srContainerName  = "defenseclaw-semantic-router"
 )
 
