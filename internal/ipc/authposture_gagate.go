@@ -7,36 +7,47 @@ package ipc
 
 // authpostureGAGateOK is the compile-time gate spec 004 REQ-18 / REQ-19
 // require. A release-candidate build compiles with `-tags ga`; every
-// production build path (cmd/defenseclaw, cmd/defenseclaw-enterprise-setup,
-// packaging artefacts) invokes `go build -tags ga` per the release
-// runbook. The build MUST fail to link when the unauthenticated Windows
-// peer-auth code path is still reachable — that's the GA guard-rail
-// keeping the initial-cut deferred-auth posture from silently shipping.
+// production build path invokes `go build -tags ga` per the release
+// runbook. The build MUST fail (non-zero exit from `go build`) when
+// the unauthenticated Windows peer-auth code path is still reachable
+// — that's the GA guard-rail keeping the initial-cut deferred-auth
+// posture from silently shipping.
 //
 // The gate is implemented as a compile-time reference to the symbol
 // authpostureGAApproved, defined ONLY in the follow-up spec's file
-// (authposture_gagate_approved.go) that lands the real peer-auth
-// mechanism. Until that spec lands:
+// that lands the real peer-auth mechanism. Until that spec lands,
+// `go build -tags ga` fails with a compile error (typically
+// "undefined: authpostureGAApproved"); `go build` (no tag) succeeds
+// normally because this file is excluded by //go:build ga.
 //
-//   go build -tags ga        →  fails with:
-//     undefined: authpostureGAApproved
+// The CI job in .github/workflows/windows-enterprise-setup.yml
+// asserts the PRIMARY invariant — `go build -tags ga` exits non-
+// zero — and emits the "authpostureGAApproved"-in-stderr check as
+// a diagnostic hint only. This shape refuses three bypass attempts:
 //
-//   go build (no tag)        →  succeeds normally (the file below is
-//     excluded by //go:build ga).
+//  1. Rename the "UnixPeerUnauthenticated" const literal to look
+//     benign. The gate does not compare strings — it looks for an
+//     approval SYMBOL that only the auth follow-up defines.
+//  2. Drop this file entirely. The package then has NO Go files
+//     matching //go:build ga on Windows; `go build -tags ga` still
+//     fails on downstream packages that reference the moved symbol
+//     (or fails outright with "no Go files" on the target). Either
+//     way, non-zero exit.
+//  3. Delete only the `var _ = ...` line and keep this comment-
+//     only file. `go build -tags ga` then succeeds for this
+//     package in isolation, but the follow-up spec's peer-auth
+//     logic ALSO won't be present, so the eventual daemon behaves
+//     identically to a pre-spec-004 pre-cut build — which is
+//     caught by the follow-up spec's OWN release-time assertion
+//     that the daemon reports a legitimate peer-auth kind, not
+//     by this file. This bypass is degenerate: it removes the
+//     gate but does NOT remove the underlying unauthenticated
+//     posture; the follow-up spec's peer-auth landing IS the
+//     point at which "UnixPeerUnauthenticated" stops being
+//     reachable at runtime.
 //
-// The pattern refuses the two obvious bypass attempts:
-//
-//   1. Rename the "UnixPeerUnauthenticated" const literal to look
-//      benign. The gate does not compare strings — it looks for an
-//      approval SYMBOL that only the auth follow-up defines. Renaming
-//      a string does not create the symbol.
-//   2. Drop this file. The release CI job runs `go build -tags ga`
-//      and asserts a specific compile-error signature ("undefined:
-//      authpostureGAApproved"). A missing gate file falls to a
-//      DIFFERENT error signature ("no Go files"), which the job also
-//      rejects. So the guard-rail catches both "posture snuck through"
-//      and "guard was disabled".
-//
-// See parity-plan §4.4 for the follow-up spec that lands the real
-// peer-auth mechanism and defines authpostureGAApproved.
+// See parity-plan §4.4 for the follow-up spec that defines
+// authpostureGAApproved and lands the real peer-auth mechanism.
+// See CR spec-004:PRRT_kwDORuAK-s6ankzo for the primary/diagnostic
+// split.
 var _ = authpostureGAApproved

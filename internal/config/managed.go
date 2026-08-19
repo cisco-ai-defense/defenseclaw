@@ -143,12 +143,12 @@ const (
 // Returns "" when ManagedIPCEnabled() is false — no IPC server, no
 // peer-auth surface.
 //
-// - macOS + Linux managed_enterprise: `"UnixPeer"` (codesign +
-//   LOCAL_PEERCRED path in peerauth_unix.go / peerauth_darwin.go).
-// - Windows managed_enterprise: `"UnixPeerUnauthenticated"` — the
-//   initial-cut deferred-auth posture (spec 004 REQ-06 / REQ-11).
-//   The socket-file DACL is the access boundary; full peer-auth is
-//   a follow-up spec per parity-plan §4.4.
+//   - macOS + Linux managed_enterprise: `"UnixPeer"` (codesign +
+//     LOCAL_PEERCRED path in peerauth_unix.go / peerauth_darwin.go).
+//   - Windows managed_enterprise: `"UnixPeerUnauthenticated"` — the
+//     initial-cut deferred-auth posture (spec 004 REQ-06 / REQ-11).
+//     The socket-file DACL is the access boundary; full peer-auth is
+//     a follow-up spec per parity-plan §4.4.
 //
 // The GA release-gate at internal/ipc/authposture_gagate.go refuses
 // a release-candidate build in which this helper can still return

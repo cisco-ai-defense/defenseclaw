@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -58,7 +59,7 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	// root and the chown succeeds. We rely on os.Chown returning
 	// EPERM for the unprivileged case and only treat other errors
 	// as fatal.
-	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
+	if runtime.GOOS == "darwin" && managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
 		if err := os.Chown(dir, 0, int(s.staffGID)); err != nil && !os.IsPermission(err) {
 			return nil, fmt.Errorf("ipc: chown %s to root:staff: %w", dir, err)
 		}
@@ -82,7 +83,7 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	// Chown the socket itself to root:staff in managed_enterprise so
 	// the group-based fs filter is real. Same permission-error
 	// tolerance as the dir chown above.
-	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
+	if runtime.GOOS == "darwin" && managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
 		if err := os.Chown(s.socketPath, 0, int(s.staffGID)); err != nil && !os.IsPermission(err) {
 			_ = inner.Close()
 			return nil, fmt.Errorf("ipc: chown %s to root:staff: %w", s.socketPath, err)

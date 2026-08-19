@@ -54,16 +54,16 @@ const (
 //  1. cfg.Managed.SocketPath (verbatim)
 //  2. $DEFENSECLAW_IPC_SOCKET (dev / test rigs only)
 //  3. managed_enterprise → resolveManagedIPCSocketPath(cfg):
-//        - linux/darwin: filepath.Join(filepath.Dir(cfg.DataDir),
-//          "ipc", SocketFileName)
-//        - windows:      filepath.Join(<TrustedProgramData>, "Cisco",
-//          "Cisco Secure Client", "DefenseClaw", "ipc",
-//          SocketFileName). See spec 004 REQ-02. Returns "" when
-//          TrustedProgramData resolution fails; the caller's
-//          ResolveSocketPath empty-check turns that into a
-//          distinguishable "ipc: resolve socket path: empty"
-//          server-start error rather than a fall-through to a
-//          per-user path.
+//     - linux/darwin: filepath.Join(filepath.Dir(cfg.DataDir),
+//     "ipc", SocketFileName)
+//     - windows:      filepath.Join(<TrustedProgramData>, "Cisco",
+//     "Cisco Secure Client", "DefenseClaw", "ipc",
+//     SocketFileName). See spec 004 REQ-02. Returns "" when
+//     TrustedProgramData resolution fails; the caller's
+//     ResolveSocketPath empty-check turns that into a
+//     distinguishable "ipc: resolve socket path: empty"
+//     server-start error rather than a fall-through to a
+//     per-user path.
 //  4. otherwise → filepath.Join(cfg.DataDir, "ipc", SocketFileName)
 //
 // The env override is intentionally ignored in managed_enterprise so

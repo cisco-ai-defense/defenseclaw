@@ -3,7 +3,10 @@
 
 package config
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // TestEffectivePeerAuthKindGating pins the spec 004 REQ-11 table:
 //
@@ -15,11 +18,11 @@ import "testing"
 //     refuses a release-candidate build in which this branch
 //     remains reachable.)
 //
-// The test uses table-driven inputs against a stubbed
-// runtime.GOOS via a small helper; we can't `t.Setenv` GOOS, but
-// EffectivePeerAuthKind currently reads runtime.GOOS at call time
-// so we assert the branch by CI OS. Test is skipped on unsupported
-// OSes.
+// Non-managed cases below produce "" on every OS. See
+// TestEffectivePeerAuthKindManagedEnterprise for the per-OS
+// managed-mode assertion — it computes the expected value directly
+// from runtime.GOOS so a regression that returns the wrong Kind on
+// the current CI OS fails immediately (CR spec-004:PRRT_kwDORuAK-s6ankzW).
 func TestEffectivePeerAuthKindGating(t *testing.T) {
 	tests := []struct {
 		name string
@@ -51,23 +54,22 @@ func TestEffectivePeerAuthKindGating(t *testing.T) {
 	}
 }
 
-// TestEffectivePeerAuthKindManagedEnterprise asserts the
-// managed_enterprise branch reports one of the two supported
-// Kinds. Because runtime.GOOS is fixed at test time we can only
-// assert the value matches the current host — spec 004 REQ-06 +
-// REQ-11 are proved together via the value's identity to
-// KindUnixPeer (linux/darwin) or KindUnixPeerUnauthenticated
-// (Windows).
+// TestEffectivePeerAuthKindManagedEnterprise asserts the exact
+// per-OS mapping — computing the expected value from runtime.GOOS
+// so a regression that returns the wrong Kind on the CI OS fails
+// immediately. The Windows runner must see
+// `UnixPeerUnauthenticated`; linux/darwin runners must see
+// `UnixPeer`. See CR spec-004:PRRT_kwDORuAK-s6ankzW — accepting
+// either kind on every OS left REQ-11's Windows-specific posture
+// invariant unverified.
 func TestEffectivePeerAuthKindManagedEnterprise(t *testing.T) {
 	cfg := &Config{DeploymentMode: string(DeploymentModeManagedEnterprise)}
-	got := cfg.EffectivePeerAuthKind()
-	// Cross-platform: the value MUST be non-empty (managed_enterprise
-	// always has an IPC surface post-spec 004) AND match one of the
-	// two supported Kinds.
-	if got == "" {
-		t.Fatalf("managed_enterprise EffectivePeerAuthKind() = empty; expected UnixPeer or UnixPeerUnauthenticated")
+	want := peerAuthKindUnixPeer
+	if runtime.GOOS == "windows" {
+		want = peerAuthKindUnixPeerUnauthenticated
 	}
-	if got != peerAuthKindUnixPeer && got != peerAuthKindUnixPeerUnauthenticated {
-		t.Fatalf("managed_enterprise EffectivePeerAuthKind() = %q; expected UnixPeer or UnixPeerUnauthenticated", got)
+	if got := cfg.EffectivePeerAuthKind(); got != want {
+		t.Fatalf("managed_enterprise on %s: EffectivePeerAuthKind() = %q, want %q",
+			runtime.GOOS, got, want)
 	}
 }

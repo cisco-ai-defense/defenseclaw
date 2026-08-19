@@ -45,11 +45,25 @@ const windowsSocketParentDirMode = os.FileMode(0o750)
 // codesign validator in peerauth_windows.go returns the inner
 // listener verbatim under the initial-cut posture).
 func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
+	// Refuse an operator override that points the socket at a
+	// pre-existing path outside our dedicated dir. Applying
+	// applyBaselineIPCACL to a shared directory would REPLACE the
+	// caller's original DACL — including any ACEs Cisco Secure
+	// Client or an unrelated installer relies on. See CR
+	// spec-004:PRRT_kwDORuAK-s6ankzx.
+	if err := validateWindowsSocketPathOverride(s.socketPath); err != nil {
+		return nil, err
+	}
+
 	dir := filepath.Dir(s.socketPath)
 	if err := os.MkdirAll(dir, windowsSocketParentDirMode); err != nil {
 		return nil, fmt.Errorf("ipc: mkdir %s: %w", dir, err)
 	}
-	if err := applyBaselineIPCACL(dir); err != nil {
+	// Directory gets the traverse+list-only Authenticated Users ACE.
+	// FILE_ADD_FILE is deliberately refused so an auth-user cannot
+	// pre-create a decoy at the socket path while the daemon is
+	// stopped (CR spec-004:PRRT_kwDORuAK-s6ankzk).
+	if err := applyBaselineIPCACL(dir, aclObjectDirectory); err != nil {
 		return nil, err
 	}
 
@@ -68,9 +82,47 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 		// supported" from a permission failure.
 		return nil, fmt.Errorf("ipc: listen unix %s: %w", s.socketPath, err)
 	}
-	if err := applyBaselineIPCACL(s.socketPath); err != nil {
+	// Socket file gets the read+write Authenticated Users ACE —
+	// enough for connect() + gRPC handshake, no WRITE_DAC.
+	if err := applyBaselineIPCACL(s.socketPath, aclObjectSocketFile); err != nil {
 		_ = inner.Close()
 		return nil, err
 	}
 	return inner, nil
+}
+
+// validateWindowsSocketPathOverride refuses an operator override
+// (cfg.Managed.SocketPath) that would cause applyBaselineIPCACL to
+// rewrite the DACL of a shared or user-visible directory. Enforces:
+//
+//  1. Absolute path, no relative traversal.
+//  2. Basename equals SocketFileName (defenseclaw_ipc.sock) — refuses
+//     an override that points at a shared directory's existing file.
+//  3. Parent directory basename is "ipc" — refuses an override that
+//     would target ancestor policy at a directory shared with
+//     unrelated files.
+//
+// Together these prevent an operator or an env-var-injected override
+// from re-flagging an arbitrary path as the IPC socket, since
+// applyBaselineIPCACL rewrites (with SE_DACL_PROTECTED) the DACL of
+// the parent directory it targets. The dedicated default path
+// (`<TrustedProgramData>\Cisco\...\DefenseClaw\ipc\defenseclaw_ipc.sock`)
+// trivially satisfies all three checks; a scratch-dir override for
+// CI still passes as long as it follows the shape.
+func validateWindowsSocketPathOverride(socketPath string) error {
+	if socketPath == "" {
+		return fmt.Errorf("ipc: socket path is empty")
+	}
+	if !filepath.IsAbs(socketPath) {
+		return fmt.Errorf("ipc: socket path override must be absolute: %s", socketPath)
+	}
+	clean := filepath.Clean(socketPath)
+	if filepath.Base(clean) != SocketFileName {
+		return fmt.Errorf("ipc: socket path override must end in %q (got %s)", SocketFileName, clean)
+	}
+	parent := filepath.Dir(clean)
+	if filepath.Base(parent) != "ipc" {
+		return fmt.Errorf("ipc: socket path override must live under an 'ipc' directory (got parent %s)", parent)
+	}
+	return nil
 }

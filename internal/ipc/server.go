@@ -48,9 +48,9 @@ type ServerOptions struct {
 // posture — do not rename without coordinating with the release
 // monitoring path referenced in spec 004 REQ-09.
 const (
-	codesignStateDisabled         = "disabled"
-	codesignStateEnabled          = "enabled"
-	codesignStateDeferredWindows  = "deferred_windows"
+	codesignStateDisabled        = "disabled"
+	codesignStateEnabled         = "enabled"
+	codesignStateDeferredWindows = "deferred_windows"
 )
 
 // codesignStateLabel picks the codesign_peer_auth log-field value
@@ -137,13 +137,19 @@ func NewServer(opts ServerOptions) (*Server, error) {
 	}
 
 	// Best-effort staff GID lookup for macOS managed_enterprise
-	// socket ownership. On non-macOS or when the group is missing
-	// we leave the gid at 0 and skip the chown; the rest of the
-	// server continues normally.
+	// socket ownership. Gated on GOOS=="darwin" because Debian /
+	// Ubuntu ship an UNRELATED `staff` group at gid 50 with different
+	// membership — resolving it on Linux would silently widen the
+	// IPC surface to every Linux staff-group member. bindListenerForOS
+	// in server_unix.go has a defense-in-depth GOOS check before
+	// using staffGID, but skipping the lookup entirely on non-darwin
+	// is the cleanest posture. See CR spec-004:PRRT_kwDORuAK-s6ankzw.
 	var staffGID uint32
-	if g, err := user.LookupGroup("staff"); err == nil {
-		if gid, convErr := strconv.ParseUint(g.Gid, 10, 32); convErr == nil {
-			staffGID = uint32(gid)
+	if runtime.GOOS == "darwin" {
+		if g, err := user.LookupGroup("staff"); err == nil {
+			if gid, convErr := strconv.ParseUint(g.Gid, 10, 32); convErr == nil {
+				staffGID = uint32(gid)
+			}
 		}
 	}
 
@@ -249,9 +255,17 @@ func (s *Server) Run(ctx context.Context) error {
 	// Spec 004 REQ-08: emit the deferred-auth warning line ONCE at
 	// startup, BEFORE the "listening on ..." line, so any log
 	// aggregator has a clear ordering signal for the beta posture.
-	// The warning fires only on Windows managed_enterprise — the
-	// codesignStateLabel branch above reads `deferred_windows`
-	// exactly when that condition holds.
+	// The warning fires on EVERY Windows build (managed or
+	// unmanaged) because codesignStateLabel returns
+	// `deferred_windows` unconditionally on GOOS=="windows" — the
+	// Windows accept-time codesign validator is a no-op regardless
+	// of deploy mode, so calling it anything else would be a lie.
+	// On non-managed Windows builds the IPC server itself never
+	// starts (ManagedIPCEnabled() gates the sidecar bootstrap in
+	// internal/cli/sidecar.go), so we never actually reach this
+	// branch on non-managed hosts — but the label + warning are
+	// wired identically for defense-in-depth. See CR
+	// spec-004:PRRT_kwDORuAK-s6ankzz.
 	if codesignState == codesignStateDeferredWindows {
 		s.opts.Logf("windows: peer-auth is deferred; UDS is DACL-permissive to Authenticated Users")
 	}

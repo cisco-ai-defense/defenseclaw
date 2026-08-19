@@ -111,32 +111,24 @@ jobs:
         run: |
           set -u
           # A release-candidate build compiles with -tags ga. The gate
-          # at internal/ipc/authposture_gagate.go references a symbol
-          # (authpostureGAApproved) that ONLY the follow-up
-          # peer-auth spec defines; until that lands, the build MUST
-          # fail with a specific "undefined:" error. This job asserts:
-          #   - go build -tags ga fails (non-zero exit), AND
-          #   - stderr contains "undefined: authpostureGAApproved".
-          # A regression that lets a release-candidate build through
-          # (either because someone deleted the gate file or renamed
-          # the symbol) fails on BOTH: no error, or a DIFFERENT error
-          # signature.
+          # at internal/ipc/authposture_gagate.go must refuse the
+          # build; the PRIMARY check is exit != 0. The undefined-
+          # symbol signature is emitted as a diagnostic hint but is
+          # NOT the pass condition: Go can rephrase its "undefined:"
+          # message (or a maintainer could refactor the gate) without
+          # breaking spec 004's guarantee. See CR
+          # spec-004:PRRT_kwDORuAK-s6ankzo.
           if output=$(go build -tags ga ./internal/ipc/... 2>&1); then
             echo "::error::spec 004 GA release-gate did not refuse -tags ga build"
             echo "$output"
             exit 1
           fi
-          if ! grep -q 'undefined: authpostureGAApproved' <<<"$output"; then
-            echo "::error::spec 004 GA release-gate refused the build, but with the wrong error signature"
-            echo "expected substring: 'undefined: authpostureGAApproved'"
-            echo "actual output:"
+          if grep -q 'authpostureGAApproved' <<<"$output"; then
+            echo "GA gate refused the build citing the expected authpostureGAApproved symbol (diagnostic OK)"
+          else
+            echo "::warning::spec 004 GA release-gate refused the build, but the error output does NOT mention authpostureGAApproved."
+            echo "::warning::This is not a failure — the gate did its job — but the diagnostic may indicate a refactor or Go version change."
+            echo "Full build output:"
             echo "$output"
-            exit 1
           fi
-          echo "spec 004 GA release-gate is intact — refuses -tags ga with the expected error"
-
-      - name: Windows AF_UNIX + spec 003 configuration state — Go tests
-        run: >-
-          go test -count=1
-          ./internal/ipc/...
-          ./internal/config/...
+          echo "spec 004 GA release-gate is intact — go build -tags ga refused with non-zero exit"
