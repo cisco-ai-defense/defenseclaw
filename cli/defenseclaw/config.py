@@ -3016,7 +3016,8 @@ def _serialize_routing(d: dict[str, Any]) -> None:
     routing = d.get("routing")
     if not isinstance(routing, dict):
         return
-    if not routing.get("enabled") and not routing.get("version") and not routing.get("port") and not routing.get("algorithm"):
+    has_value = routing.get("enabled") or routing.get("version") or routing.get("port") or routing.get("algorithm")
+    if not has_value:
         d.pop("routing", None)
         return
     if not routing.get("version"):
