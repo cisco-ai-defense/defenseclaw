@@ -1,0 +1,152 @@
+---
+title: Managed enterprise
+description: Run DefenseClaw as protected Windows services with administrator-owned policy, guardian auto-heal, and non-admin tamper resistance.
+keywords:
+  - DefenseClaw Windows enterprise
+  - managed_enterprise Windows
+  - DefenseClaw Windows service
+  - DefenseClaw hook guardian
+  - Windows tamper resistance
+---
+
+Windows managed enterprise provides the same security properties as the Linux
+and macOS service deployments through Windows-native controls: Service Control
+Manager (SCM) services, NTFS DACLs, a restricted gateway identity, and a
+LocalSystem hook guardian.
+
+<Callout title="Enterprise is opt-in; auto-heal is not">
+Installing an enterprise-capable release changes nothing by itself. Unless the
+effective configuration sets `deployment_mode: managed_enterprise` **and** an
+administrator runs `enterprise windows install`, DefenseClaw creates no machine
+service, moves no state into `ProgramData`, and keeps the current per-user
+startup, connector setup, application-protection repair, and hook auto-heal.
+</Callout>
+
+For the complete config, target manifest, staging, attestation, and validation
+procedure, use [Enterprise hardening and deployment](/docs/setup/enterprise-deployment#windows-system-service-layout).
+
+## Security parity and Windows boundaries
+
+| Property | Managed Windows behavior |
+| --- | --- |
+| Administrator-owned runtime | `DefenseClawGateway` runs as the restricted `NT SERVICE\DefenseClawGateway` virtual account. |
+| Privileged repair | `DefenseClawHookGuardian` runs as LocalSystem and repairs only administrator allow-listed users and connectors. |
+| Protected control plane | Binaries, managed config, target manifest, service definitions, runtime credentials, and the authorization ledger are protected by administrator/System ownership and DACLs. |
+| Mode pin | The SCM environment pins `managed_enterprise`; user config or environment changes cannot downgrade the installed services. |
+| Hook recovery | An event-driven watcher repairs drift, with a periodic reconcile as the missed-event backstop. Normal mode keeps its existing per-user repair loop. |
+| Readiness | Partial target coverage, stale authorization, service drift, or failed verification returns unhealthy and non-zero instead of claiming protection. |
+
+The gateway cannot write arbitrary interactive-user profiles. The guardian
+uses the exact active, non-elevated token for each SID in `targets.yaml`, then
+returns to LocalSystem before publishing protected authorization state.
+
+### What a standard user cannot disable
+
+A standard user, including an AI agent running as that user, cannot stop,
+pause, reconfigure, delete, or replace either SCM service; modify protected
+binaries or policy; change the service mode pin; read service-side scoped
+credentials; or forge guardian authorization.
+
+The user still owns parts of the native agent profile. Deleting or editing a
+user-owned hook can therefore create a short bypass window before repair; the
+guardian makes that change non-persistent, not impossible. Use WDAC, AppLocker,
+MDM, EDR, or filesystem policy when the hook itself must be immutable. A fully
+elevated administrator or LocalSystem remains a trusted authority and is
+outside this threat boundary.
+
+See the [cross-platform threat model](/docs/setup/enterprise-deployment#threat-model),
+the [exact non-admin guarantee](/docs/setup/enterprise-deployment#why-a-standard-ai-agent-cannot-permanently-remove-defenseclaw),
+and the repository's [Windows threat model](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md).
+
+## Qualified connectors
+
+Managed enterprise on native Windows is qualified only for `codex` and
+`claudecode` targets. Other connectors remain outside the Windows enterprise
+certification boundary.
+
+- **Codex:** version 0.133.0 or newer is required, but version alone is not
+  sufficient. Production enforcement also requires approved-client application
+  control and a separately verified, fail-closed fixed hook launcher.
+- **Claude Code:** version 2.1.152 or newer is required. Production acceptance
+  also requires proof from the real approved client that DefenseClaw's managed
+  policy remains effective against hostile user and project settings.
+
+Follow the connector-specific acceptance rules for
+[Codex](/docs/setup/enterprise-deployment#native-windows-codex-managed-hooks)
+and [Claude Code](/docs/setup/enterprise-deployment#native-windows-claude-code-managed-hooks).
+
+## CLI lifecycle
+
+The signed enterprise CLI exposes the same administrator lifecycle as the
+packaged Windows transaction:
+
+| Command | Purpose |
+| --- | --- |
+| `defenseclaw enterprise windows install` | Install and activate the protected gateway and guardian services. |
+| `defenseclaw enterprise windows repair` | Reapply binary, DACL, service, environment, recovery, policy, and readiness invariants. |
+| `defenseclaw enterprise windows upgrade` | Transactionally activate a staged release; run this from the **new staged CLI** when replacing the installed CLI. |
+| `defenseclaw enterprise windows reconcile` | Restart only the guardian and wait for fresh target reconciliation. |
+| `defenseclaw enterprise windows status` | Report observed SCM state separately from application readiness; this read-only command is available without elevation. |
+| `defenseclaw enterprise windows verify` | Verify protected files, DACLs, service policy, the mode pin, targets, and readiness. |
+| `defenseclaw enterprise windows uninstall` | Remove services and owned integration state while preserving diagnostics by default; add `--purge` only for approved decommissioning. |
+
+Install, repair, upgrade, reconcile, verify, and uninstall are administrator
+operations. The CLI does not self-elevate. For an interactive deployment, open
+one terminal with **Run as administrator**, approve that Windows UAC prompt,
+and run the lifecycle from the same elevated session; each command does not
+need a new prompt. A standard user without administrator credentials cannot
+cross or bypass that boundary.
+Trusted endpoint management running as LocalSystem does not need interactive
+UAC consent. The operator shell may be PowerShell 7, but the signed CLI
+intentionally launches the fixed in-box Windows PowerShell executable
+internally as part of its trusted transaction. That is not a general
+PowerShell 5 support promise. The disposable-host certification harness itself
+requires 64-bit PowerShell 7.
+
+Every lifecycle command accepts `--json`. Install, repair, and upgrade require
+the complete approved gateway, hook, config, and manifest input set. Do not
+copy a partial command from this overview; use the exact
+[install](/docs/setup/enterprise-deployment#install-the-windows-services) and
+[repair/upgrade/uninstall](/docs/setup/enterprise-deployment#windows-repair-upgrade-and-removal)
+examples.
+
+### Guardian verification
+
+After installation or any target change, reconcile through the Windows
+lifecycle and use the generic enterprise-hook commands only for read-only
+target diagnostics:
+
+```powershell
+$Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
+$Manifest = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml'
+
+& $Gateway enterprise windows reconcile --json
+& $Gateway enterprise hooks status --manifest $Manifest --json
+& $Gateway enterprise hooks verify --manifest $Manifest --json
+```
+
+Do not run `enterprise hooks install`, `reconcile`, `watch`, or generic
+user-footprint `uninstall` directly from an elevated user shell on Windows.
+Those mutations belong to the LocalSystem guardian so it can impersonate the
+exact target SID safely. See [Reconcile and verify Windows targets](/docs/setup/enterprise-deployment#reconcile-and-verify-windows-targets).
+
+## Upgrade, automatic rollback, and removal
+
+Upgrade is transactional. A validation or staging failure leaves the previous
+verified deployment running; a failed activation automatically rolls back
+instead of publishing mixed versions as healthy. There is no public
+`enterprise windows rollback` command. After an upgrade, require lifecycle
+`status` and `verify`, guardian `status` and `verify`, and an allow/block
+connector check.
+
+Default uninstall removes the services, installed binaries, and only
+DefenseClaw-owned Codex and Claude integration leaves. It retains runtime,
+logs, guardian evidence, and deployment diagnostics for recovery. `--purge`
+removes managed DefenseClaw state, but neither form recursively deletes the
+shared `C:\ProgramData\OpenAI\Codex` or `C:\Program Files\ClaudeCode` parent.
+Restart open Codex and Claude Code sessions after decommissioning so they do
+not retain cached hook commands.
+
+Use [Verify Windows service hardening](/docs/setup/enterprise-deployment#verify-windows-service-hardening)
+for rollout acceptance and the canonical [production checklist](/docs/setup/enterprise-deployment#production-checklist)
+before declaring an endpoint protected.

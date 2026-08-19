@@ -94,7 +94,7 @@ endef
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        packaging-macos-test packaging-macos-bundle packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
@@ -794,6 +794,50 @@ packaging-macos-bundle:
 	    "$(BUNDLE_TAGS)" \
 	    "$(CMID_OVERLAY)" \
 	    "$(CMID_VERSION)"
+
+# The managed-enterprise Windows build is split so a macOS release box (which
+# has SSH access to cisco-aispg/ai-common) prepares the -tags cmid gateway
+# zip, and a Windows tester (which typically does not) only runs the OSS
+# installer flow against that zip.
+#
+# packaging-managed-windows-bundle (macOS / Linux / Windows-with-bash):
+#   Clones ai-common at $(WINDOWS_MANAGED_REF), applies the cloudreg overlay,
+#   pins the ai-common/cmid pseudo-version, cross-builds defenseclaw.exe +
+#   defenseclaw-hook.exe with -tags cmid, stamps VERSIONINFO / icon on both,
+#   and packages them into $(DIST_DIR)/defenseclaw_$(VERSION)_windows_amd64.zip
+#   alongside a gateway-source-commit.txt sidecar. Restores the OSS working
+#   tree on exit.
+WINDOWS_MANAGED_REF ?= develop
+packaging-managed-windows-bundle:
+	@packaging/scripts/build-managed-windows-bundle.sh \
+	    --ref "$(WINDOWS_MANAGED_REF)" \
+	    --version "$(VERSION)" \
+	    --dist-dir "$(DIST_DIR)"
+
+# packaging-windows-managed-bundle (Windows only):
+#   Consumes the pre-staged CMID gateway zip produced above and drives the
+#   separate elevated machine-wide builder. It produces the self-contained
+#   DefenseClawSetup-Enterprise-x64.exe and never reuses the ordinary
+#   per-user DefenseClawSetup-x64.exe transaction.
+#
+# Prereqs on the Windows box:
+#   - pwsh, git, and the Go toolchain required by go.mod.
+#   - $(DIST_DIR) staged with the gateway zip + gateway-source-commit.txt
+#     from the macOS/Linux managed gateway step above.
+#   - Local git HEAD checked out at the same defenseclaw commit the gateway
+#     was built from; a mismatch is always rejected.
+#   - Cisco signing variables for production. Set
+#     WINDOWS_ENTERPRISE_SKIP_SIGNING=1 only for exact disposable
+#     certification scope.
+WINDOWS_ENTERPRISE_INSTALLER_OUT   ?= $(DIST_DIR)/windows-enterprise-installer
+WINDOWS_ENTERPRISE_INSTALLER_STATE ?= $(DIST_DIR)/windows-enterprise-installer-state
+WINDOWS_ENTERPRISE_SKIP_SIGNING    ?=
+packaging-windows-managed-bundle:
+	@pwsh -NoProfile -File scripts/build-windows-enterprise-installer.ps1 \
+	    -DistRoot "$(DIST_DIR)" \
+	    -OutRoot "$(WINDOWS_ENTERPRISE_INSTALLER_OUT)" \
+	    -StateRoot "$(WINDOWS_ENTERPRISE_INSTALLER_STATE)" \
+	    -Version "$(VERSION)" $(if $(filter 1 true yes,$(WINDOWS_ENTERPRISE_SKIP_SIGNING)),-SkipSigning,)
 
 # Native SwiftUI companion-app checks and release packaging. The release target
 # builds a runtime-bearing drag-to-Applications DMG plus an app-only self-update

@@ -1,4 +1,4 @@
 {
   "title": "Native Windows",
-  "pages": ["index", "install-lifecycle", "connectors-enforcement", "capabilities-commands", "telemetry-security", "paths-troubleshooting"]
+  "pages": ["index", "install-lifecycle", "managed-enterprise", "connectors-enforcement", "capabilities-commands", "telemetry-security", "paths-troubleshooting"]
 }

@@ -196,7 +196,8 @@ default-groups = ["dev"]
 override-dependencies = [
     "rich>=14.2,<15",
     # CVE-2026-39892 fixed in 46.0.7; GHSA-537c-gmf6-5ccf fixed in 48.0.1;
-    # CVE-2026-69248/69249 fixed in 49.0.0; CVE-2026-69247 fixed in 50.0.0.
+    # CVE-2026-69248/69249 / PYSEC-2026-3553-3554 fixed in 49.0.0;
+    # CVE-2026-69247 / PYSEC-2026-3552 fixed in 50.0.0.
     "cryptography>=50.0.0,<51",
     # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0.
     "litellm>=1.84.0,<1.92.0",
@@ -218,7 +219,8 @@ override-dependencies = [
     # aiohttp 3.13.4 fixes a batch of HTTP-parser CVEs (CVE-2026-22815,
     # CVE-2026-34513..34520, CVE-2026-34525); 3.14.0 additionally fixes
     # CVE-2026-34993 and CVE-2026-47265; 3.14.1 fixes CVE-2026-54273..54280;
-    # 3.14.3 fixes CVE-2026-59881 and CVE-2026-69243/69244.
+    # 3.14.2 fixes PYSEC-2026-3546 and PYSEC-2026-3547; 3.14.3 fixes
+    # CVE-2026-59881, CVE-2026-69243/69244, and PYSEC-2026-3545.
     # LiteLLM's transitive pin floats aiohttp downward without this override.
     "aiohttp>=3.14.3,<4",
     # pyjwt 2.13.0 fixes PYSEC-2026-175, PYSEC-2026-177, PYSEC-2026-178 and
