@@ -263,6 +263,113 @@ func TestActiveAgentInstructionMutationFollowsPOSIXFilesystemIdentity(t *testing
 	if !owner.prerequisite(facts) {
 		t.Fatalf("same-file casing alias did not match the active instruction file: %+v", facts)
 	}
+	if projected := facts.EnforcementProjection(); !owner.prerequisite(projected) {
+		t.Fatalf(
+			"eligible active mutation did not survive enforcement projection: %+v",
+			projected,
+		)
+	}
+}
+
+func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) {
+	const connector = "active-instruction-filesystem-identity-dispatch"
+	installDefaultProfileConnector(t, connector)
+
+	dispatch := func(input actionfacts.Input) []RuleFinding {
+		return dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:              input,
+			LegacyText:         input.Command,
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+	}
+
+	t.Run("POSIX same-file casing alias enforces", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("POSIX filesystem identity is covered on Unix hosts")
+		}
+		directory := t.TempDir()
+		activePath := filepath.Join(directory, "AGENTS.md")
+		candidatePath := filepath.Join(directory, "agents.md")
+		if err := os.WriteFile(activePath, []byte("active"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(candidatePath); errors.Is(err, os.ErrNotExist) {
+			if err := os.Link(activePath, candidatePath); err != nil {
+				t.Skipf("same-file aliases are unavailable: %v", err)
+			}
+		} else if err != nil {
+			t.Fatal(err)
+		}
+
+		command := "printf updated > " + strconv.Quote(candidatePath)
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          command,
+			CWD:              directory,
+			ActiveAgentFiles: []string{activePath},
+		}), "COG-AGENTS-MD")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("same-file alias finding = %+v, want enforcement", finding)
+		}
+	})
+
+	t.Run("unrelated lowercase POSIX path stays safe", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("POSIX path identity is covered on Unix hosts")
+		}
+		directory := t.TempDir()
+		activePath := filepath.Join(directory, "MEMORY.md")
+		candidatePath := filepath.Join(directory, "unrelated", "memory.md")
+		if err := os.MkdirAll(filepath.Dir(candidatePath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(activePath, []byte("active"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(candidatePath, []byte("unrelated"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		command := "printf updated > " + strconv.Quote(candidatePath)
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          command,
+			CWD:              directory,
+			ActiveAgentFiles: []string{activePath},
+		}), "COG-MEMORY"); finding != nil {
+			t.Fatalf("unrelated lowercase path produced finding: %+v", *finding)
+		}
+	})
+
+	t.Run("Windows case folding enforces", func(t *testing.T) {
+		const command = `Set-Content -LiteralPath 'C:\Repo\agents.md' -Value updated`
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "PowerShell",
+			Command:          command,
+			CWD:              `C:\Repo`,
+			ActiveAgentFiles: []string{`c:\repo\AGENTS.MD`},
+		}), "COG-AGENTS-MD")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("Windows case-folded finding = %+v, want enforcement", finding)
+		}
+	})
+
+	t.Run("preview active mutation cannot borrow unrelated execution", func(t *testing.T) {
+		const command = `Set-Content -LiteralPath 'C:\Repo\AGENTS.md' -Value preview -WhatIf; Set-Content -LiteralPath 'C:\Repo\notes.txt' -Value updated`
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "PowerShell",
+			Command:          command,
+			CWD:              `C:\Repo`,
+			ActiveAgentFiles: []string{`C:\Repo\AGENTS.md`},
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf(
+				"preview mutation finding = %+v, want detection-only",
+				finding,
+			)
+		}
+	})
 }
 
 func TestActiveAgentInstructionMutationUnresolvedCandidateIsNotSafe(t *testing.T) {
@@ -290,15 +397,51 @@ func TestActiveAgentInstructionMutationUnresolvedCandidateIsNotSafe(t *testing.T
 	}
 }
 
-func TestSemanticHistoryTamperExpressionCompiles(t *testing.T) {
+func TestSemanticIntegrityPersistenceExpressionsCompile(t *testing.T) {
 	t.Parallel()
 
 	compiler, err := semantic.NewCompiler()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, code := compiler.Compile(semanticHistoryTamperExpression); code != semantic.CompileOK {
-		t.Fatalf("compile code = %q", code)
+	for name, expression := range map[string]string{
+		"history tamper":                    semanticHistoryTamperExpression,
+		"active agent instruction mutation": semanticActiveAgentInstructionMutationExpression,
+	} {
+		if _, code := compiler.Compile(expression); code != semantic.CompileOK {
+			t.Fatalf("%s compile code = %q", name, code)
+		}
+	}
+}
+
+func TestGeneratedActiveInstructionRulesUseFilesystemNeutralExpression(t *testing.T) {
+	t.Parallel()
+
+	generation := snapshotRulePackGeneration("")
+	if generation == nil {
+		t.Fatal("default rule generation is unavailable")
+	}
+	want := map[string]bool{
+		"COG-AGENTS-MD": false,
+		"COG-MEMORY":    false,
+	}
+	for _, candidate := range generation.semanticRules {
+		if _, ok := want[candidate.rule.ID]; !ok {
+			continue
+		}
+		if candidate.rule.Expression != semanticActiveAgentInstructionMutationExpression {
+			t.Fatalf(
+				"%s expression = %q, want filesystem-neutral owner gate",
+				candidate.rule.ID,
+				candidate.rule.Expression,
+			)
+		}
+		want[candidate.rule.ID] = true
+	}
+	for ruleID, found := range want {
+		if !found {
+			t.Fatalf("default semantic rule %q is missing", ruleID)
+		}
 	}
 }
 

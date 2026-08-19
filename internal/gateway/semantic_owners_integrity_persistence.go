@@ -24,7 +24,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-const semanticHistoryTamperExpression = `f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))`
+const (
+	semanticHistoryTamperExpression = `f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))`
+	// The owner binds this mutation shape to the exact active instruction file
+	// using the host filesystem's identity semantics. Owner eligibility accepts
+	// only executing mutations (or static redirects that remain executing in the
+	// enforcement projection), so an unrelated sibling mutation cannot lend it
+	// authority.
+	semanticActiveAgentInstructionMutationExpression = `f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))`
+)
 
 var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"CMD-CRONTAB": {

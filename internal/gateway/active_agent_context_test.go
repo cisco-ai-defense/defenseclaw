@@ -63,23 +63,19 @@ func evaluateClaudeCodeToolFacts(
 	hookEventName string,
 	sessionID string,
 	payload map[string]interface{},
-	command string,
+	toolName string,
+	toolInput map[string]interface{},
 ) toolChainHookCapture {
 	t.Helper()
-	if command == "" {
-		command = "printf updated > /tmp/AGENTS.md"
-	}
 	capture := toolChainHookCapture{}
 	ctx := withToolChainHookCapture(authenticatedClaudeCodeTestContext(), &capture)
 	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
 		HookEventName: hookEventName,
 		SessionID:     sessionID,
 		CWD:           t.TempDir(),
-		ToolName:      "Bash",
-		ToolInput: map[string]interface{}{
-			"command": command,
-		},
-		Payload: payload,
+		ToolName:      toolName,
+		ToolInput:     toolInput,
+		Payload:       payload,
 	})
 	if !capture.recorded {
 		t.Fatal("trusted action facts were not captured")
@@ -107,10 +103,13 @@ func TestClaudeCodeActiveAgentFilesRequireAuthenticatedExactLoadAndSameSession(t
 
 	api.evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), load)
 	now = now.Add(24 * time.Hour)
-	mutation := fmt.Sprintf("printf updated > %q", agentFile)
+	mutation := map[string]interface{}{
+		"file_path": agentFile,
+		"content":   "updated",
+	}
 	for _, hookEventName := range []string{"PreToolUse", "PermissionRequest"} {
 		t.Run(hookEventName, func(t *testing.T) {
-			sameSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-a", nil, mutation)
+			sameSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-a", nil, "Write", mutation)
 			if !slices.Equal(sameSession.facts.ActiveAgentFiles, []string{filepath.ToSlash(agentFile)}) {
 				t.Fatalf("same-session active files = %#v, want %q", sameSession.facts.ActiveAgentFiles, filepath.ToSlash(agentFile))
 			}
@@ -120,7 +119,7 @@ func TestClaudeCodeActiveAgentFilesRequireAuthenticatedExactLoadAndSameSession(t
 			if finding := findingWithID(sameSession.findings, "COG-AGENTS-MD"); finding == nil || !finding.contributesToEnforcement() {
 				t.Fatalf("idle active-file mutation was not enforceable: %+v", sameSession.findings)
 			}
-			differentSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-b", nil, mutation)
+			differentSession := evaluateClaudeCodeToolFacts(t, api, hookEventName, "session-b", nil, "Write", mutation)
 			if len(differentSession.facts.ActiveAgentFiles) != 0 {
 				t.Fatalf("different session inherited authority: %#v", differentSession.facts.ActiveAgentFiles)
 			}
@@ -219,7 +218,7 @@ func TestClaudeCodeActiveAgentFilesIgnoreReadMentionAndGenericPayload(t *testing
 	capture := evaluateClaudeCodeToolFacts(t, api, "PreToolUse", "read-session", map[string]interface{}{
 		"active_agent_files": []interface{}{agentFile},
 		"content":            "the active file is " + agentFile,
-	}, "")
+	}, "Read", map[string]interface{}{"file_path": agentFile})
 	if len(capture.facts.ActiveAgentFiles) != 0 {
 		t.Fatalf("read, mention, or generic payload gained authority: %#v", capture.facts.ActiveAgentFiles)
 	}
@@ -366,13 +365,17 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 	}
 	api.activeAgentContext.seed("claudecode", "session-new", agentFile)
 
-	mutation := fmt.Sprintf("printf updated > %q", agentFile)
+	mutation := map[string]interface{}{
+		"file_path": agentFile,
+		"content":   "updated",
+	}
 	mutating := evaluateClaudeCodeToolFacts(
 		t,
 		api,
 		"PreToolUse",
 		"session-000",
 		nil,
+		"Write",
 		mutation,
 	)
 	if len(mutating.facts.ActiveAgentFiles) != 0 ||
@@ -389,7 +392,8 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		"PreToolUse",
 		"session-000",
 		nil,
-		fmt.Sprintf("cat %q", agentFile),
+		"Read",
+		map[string]interface{}{"file_path": agentFile},
 	)
 	if finding := findingWithID(read.findings, "COG-AGENTS-MD"); finding != nil {
 		t.Fatalf("uncertain context turned an exact read into a mutation: %+v", read.findings)
@@ -406,6 +410,7 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		"PreToolUse",
 		"session-000",
 		nil,
+		"Write",
 		mutation,
 	)
 	if knownEmpty.facts.ActiveAgentFilesUncertain ||
@@ -427,6 +432,7 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		"PermissionRequest",
 		"session-000",
 		nil,
+		"Write",
 		mutation,
 	)
 	if reloaded.facts.ActiveAgentFilesUncertain ||
@@ -447,6 +453,7 @@ func TestClaudeCodeActiveAgentContextCapacityLossFailsClosedOnlyForExactMutation
 		"PreToolUse",
 		"session-000",
 		nil,
+		"Write",
 		mutation,
 	)
 	if changedDirectory.facts.ActiveAgentFilesUncertain ||
