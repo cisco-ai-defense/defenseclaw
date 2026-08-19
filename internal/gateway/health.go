@@ -82,6 +82,40 @@ type SubsystemHealth struct {
 	Details   map[string]interface{} `json:"details,omitempty"`
 }
 
+// ConfigurationState is the overall daemon+guardian readiness state
+// spec 003 (docs/specs/003-windows-deferred-config/) exposes on the
+// health snapshot. This is distinct from the per-subsystem
+// SubsystemState above: SubsystemState reports each component's own
+// health, ConfigurationState reports the CROSS-subsystem "is the
+// managed-enterprise Windows deployment ready to accept traffic yet"
+// question that Cisco Secure Client (Workstream C) and downstream
+// dashboards read.
+type ConfigurationState string
+
+const (
+	// ConfigStateWaitingForConfig — the gateway daemon has not yet
+	// loaded a valid config.yaml. This is the initial state on a
+	// deferred-config install (`defenseclaw enterprise windows
+	// install --deferred-config`) before UCB drops the config file.
+	ConfigStateWaitingForConfig ConfigurationState = "waiting_for_config"
+	// ConfigStateWaitingForTargets — the daemon has loaded config,
+	// but the hook-guardian has not yet loaded targets.yaml.
+	ConfigStateWaitingForTargets ConfigurationState = "waiting_for_targets"
+	// ConfigStateReady — both daemon config and guardian targets are
+	// loaded, hook enforcement is engaged.
+	ConfigStateReady ConfigurationState = "ready"
+)
+
+// ConfigurationHealth is the value published under
+// HealthSnapshot.Configuration. Since tracks the moment the current
+// State value was entered — a bounded-wait indicator downstream
+// consumers can page on without needing to inspect service uptime.
+// See spec 003 REQ-19, REQ-20, REQ-21.
+type ConfigurationHealth struct {
+	State ConfigurationState `json:"state"`
+	Since time.Time          `json:"since"`
+}
+
 // ConnectorHealth reports a connector's identity, mode, and live counters.
 type ConnectorHealth struct {
 	Name               string                       `json:"name"`
@@ -110,6 +144,13 @@ type HealthSnapshot struct {
 	AIDiscovery           SubsystemHealth  `json:"ai_discovery"`
 	ApplicationProtection SubsystemHealth  `json:"application_protection"`
 	Sandbox               *SubsystemHealth `json:"sandbox,omitempty"`
+	// Configuration is the overall daemon+guardian readiness state,
+	// distinct from the per-subsystem Config/Gateway fields above.
+	// Populated only in managed_enterprise deployments (spec 003);
+	// omitted from the payload for OSS / SaaS / DP / CP hosts so
+	// downstream consumers don't have to reason about the field for
+	// deployments where it never has meaning.
+	Configuration *ConfigurationHealth `json:"configuration,omitempty"`
 	// Managed reports the local UDS gRPC server (internal/ipc) that
 	// serves the DefenseClaw ↔ AVC contract. Present only when the
 	// server has been started (managed_enterprise or managed.enabled).
@@ -142,6 +183,26 @@ type SidecarHealth struct {
 	observabilityV8EventHistoryGeneration uint64
 	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
 	managed                               *SubsystemHealth
+
+	// configuration is the collapsed daemon+guardian state (spec 003).
+	// Nil until SetDaemonConfigLoaded is called at least once — a
+	// nil pointer omits the top-level "configuration" block from the
+	// snapshot, which is the correct behaviour for every deployment
+	// mode other than managed_enterprise. The pointer becomes
+	// non-nil after the first call and stays non-nil for the life of
+	// the process (a managed_enterprise daemon never "un-enters"
+	// deferred-config mode).
+	configuration *ConfigurationHealth
+	// daemonConfigLoaded is the daemon-side half of the collapsing
+	// rule (spec 003 § Data flow). SetDaemonConfigLoaded flips this
+	// true when v8 config parses; it never goes false again.
+	daemonConfigLoaded bool
+	// guardianStateReader is best-effort probe wired by the daemon
+	// after it knows the state root path. Returns one of
+	// guardianstate.State{WaitingForTargets,Ready,Unknown}. Nil until
+	// wired; nil ⇒ collapsing rule falls to the safe default
+	// (waiting_for_targets when daemon is loaded).
+	guardianStateReader func() string
 
 	// subscribers receive a non-blocking notification after every Set*
 	// call, so long-lived consumers (like the IPC GetHealth stream)
@@ -253,6 +314,130 @@ func (h *SidecarHealth) SetConfig(state SubsystemState, lastErr string, details 
 	}
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+// SetDaemonConfigLoaded is the daemon-side half of the spec 003
+// deferred-config collapsing rule. Call once with `false` right after
+// the sidecar is constructed if the daemon is entering a
+// waiting-for-config loop, then again with `true` once v8 config
+// parses. Idempotent: repeated calls with the same value are no-ops,
+// so a wait loop that "wakes on every fsnotify event" doesn't spam
+// state transitions.
+//
+// The first call transitions the internal `configuration` field from
+// nil to a pointer, which is what makes the top-level "configuration"
+// block appear in the health snapshot JSON. Deployments that never
+// call this method (OSS / SaaS / DP / CP) keep the nil pointer and
+// the snapshot omits the block entirely.
+func (h *SidecarHealth) SetDaemonConfigLoaded(loaded bool) {
+	h.mu.Lock()
+	if h.configuration == nil {
+		h.configuration = &ConfigurationHealth{
+			State: ConfigStateWaitingForConfig,
+			Since: time.Now(),
+		}
+	}
+	if h.daemonConfigLoaded == loaded && h.configuration.State != ConfigStateWaitingForConfig {
+		// No-op: already in the right state.
+		h.mu.Unlock()
+		return
+	}
+	h.daemonConfigLoaded = loaded
+	h.recomputeConfigurationLocked()
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// SetGuardianStateReader wires the sidecar's cross-process probe for
+// the hook-guardian's state file. The callback returns one of
+// guardianstate.State{WaitingForTargets, Ready, Unknown}; the sidecar
+// applies the safe-default collapsing rule when the probe returns
+// StateUnknown (missing file, unreadable, malformed) so a
+// guardian-side crash never falsely publishes "ready".
+//
+// Nil clears the reader (used by tests). Passing a reader triggers an
+// immediate recompute so the snapshot picks up whatever the current
+// guardian state file says without waiting for the next
+// RefreshConfiguration tick.
+func (h *SidecarHealth) SetGuardianStateReader(fn func() string) {
+	h.mu.Lock()
+	h.guardianStateReader = fn
+	if h.configuration != nil {
+		h.recomputeConfigurationLocked()
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// RefreshConfiguration re-reads the guardian state (via the wired
+// reader, if any) and re-applies the collapsing rule. Meant to be
+// called on a periodic ticker by the daemon so a guardian-side
+// transition (waiting_for_targets → ready) is observed even when
+// nothing on the daemon side has changed. If no reader is wired the
+// call is a no-op.
+func (h *SidecarHealth) RefreshConfiguration() {
+	h.mu.Lock()
+	if h.configuration == nil {
+		// Deployment never entered managed-enterprise deferred-config
+		// mode; nothing to refresh.
+		h.mu.Unlock()
+		return
+	}
+	prev := h.configuration.State
+	h.recomputeConfigurationLocked()
+	changed := h.configuration.State != prev
+	h.mu.Unlock()
+	if changed {
+		h.notifySubscribers()
+	}
+}
+
+// recomputeConfigurationLocked applies the collapsing rule; caller
+// holds h.mu (write lock).
+//
+// Order (spec 003 § Data flow):
+//   1. Daemon not loaded ⇒ waiting_for_config, regardless of guardian.
+//      This lets AC-12 pass: if UCB drops targets.yaml first, the
+//      daemon still says waiting_for_config until config.yaml lands.
+//   2. Daemon loaded, no guardian reader wired ⇒ waiting_for_targets
+//      as the safe default. Never false-positive ready.
+//   3. Daemon loaded, guardian reader returns ready ⇒ ready.
+//   4. Daemon loaded, guardian reader returns waiting_for_targets or
+//      Unknown ⇒ waiting_for_targets.
+//
+// Since only advances when the collapsed state actually changes,
+// so a snapshot taken 30 s into a wait returns the SAME Since as
+// one taken at the wait's start (spec 003 AC-08).
+func (h *SidecarHealth) recomputeConfigurationLocked() {
+	if h.configuration == nil {
+		return
+	}
+	var next ConfigurationState
+	if !h.daemonConfigLoaded {
+		next = ConfigStateWaitingForConfig
+	} else if h.guardianStateReader == nil {
+		next = ConfigStateWaitingForTargets
+	} else {
+		switch h.guardianStateReader() {
+		case "ready":
+			next = ConfigStateReady
+		case "waiting_for_targets":
+			next = ConfigStateWaitingForTargets
+		default:
+			// Unknown ⇒ safe default. Guardian may be starting up,
+			// crashed mid-boot, or file may be transiently unreadable
+			// during a rename; report waiting_for_targets rather than
+			// stale ready.
+			next = ConfigStateWaitingForTargets
+		}
+	}
+	if h.configuration.State == next {
+		return
+	}
+	h.configuration = &ConfigurationHealth{
+		State: next,
+		Since: time.Now(),
+	}
 }
 
 func (h *SidecarHealth) SetGateway(state SubsystemState, lastErr string, details map[string]interface{}) {
@@ -782,6 +967,15 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		ApplicationProtection: h.applicationProtection,
 		Sandbox:               h.sandbox,
 		Managed:               h.managed,
+	}
+	// Deep-copy the configuration pointer under the read lock so a
+	// caller mutating the returned snapshot cannot race with a Set*
+	// on the sidecar. Non-managed-enterprise deployments leave
+	// h.configuration nil and this field stays omitted from the
+	// snapshot JSON per its omitempty tag.
+	if h.configuration != nil {
+		cfg := *h.configuration
+		snap.Configuration = &cfg
 	}
 	source := h.observabilityV8Source
 	failures := make(map[string]observabilityV8FailureObservation, len(h.observabilityV8Failures))
