@@ -1,0 +1,227 @@
+name: Windows deterministic-build (Workstream E)
+# Reproducibility gate for the Windows managed-enterprise AVC packaging
+# handoff. See docs/specs/001-windows-deterministic-build/design.md.
+#
+# WHAT THIS GATE PROVES
+#   - windows-repro-manifest emits byte-identical manifest.json,
+#     payload-metadata.json, and provenance.json on both Linux and
+#     macOS runners.
+#   - The fixture tarball at internal/build-repro/testdata/ is
+#     byte-stable and matches its pinned SHA-256.
+#
+# WHAT THIS GATE DOES NOT (YET) PROVE
+#   The full assemble.sh path — including the outer `go build` step —
+#   ships in Workstream A. When A lands, this workflow will be extended
+#   to run assemble.sh and compare the resulting Setup EXE SHA-256s
+#   across runners. Until then, the JSON-emitter cross-platform check
+#   catches ~all the shell-host variance the reproducibility contract
+#   is meant to remove (sorted keys, LF endings, no HTML escaping).
+
+on:
+  pull_request:
+    paths:
+      - cmd/windows-repro-manifest/**
+      - packaging/scripts/lib/repro-flags.*
+      - internal/build-repro/testdata/**
+      - scripts/check-go-mod-no-toolchain.sh
+      - scripts/check-repro-flags-parity.sh
+      - scripts/generate-repro-fixture.sh
+      - .github/workflows/windows-deterministic-build.yml
+  push:
+    branches:
+      - windows-enterprise-integration
+      - main
+    paths:
+      - cmd/windows-repro-manifest/**
+      - packaging/scripts/lib/repro-flags.*
+      - internal/build-repro/testdata/**
+
+permissions:
+  contents: read
+
+env:
+  # Pin the toolchain out-of-band per the OSS-scope decision in
+  # docs/specs/001-windows-deterministic-build/design.md § Tradeoffs.
+  GOTOOLCHAIN: go1.26.4
+  # Expected fixture SHA-256. Regenerate via
+  # scripts/generate-repro-fixture.sh; update this constant in the same
+  # PR that regenerates.
+  FIXTURE_EXPECTED_SHA256: c48d2eea2439370c4d70fd2996ecd77b7b79f341f5a89467469f5980e4736728
+
+jobs:
+  emit-linux:
+    name: emit JSON artefacts (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify fixture SHA-256
+        run: |
+          set -euo pipefail
+          got=$(sha256sum internal/build-repro/testdata/signed-payload-fixture.tar.zst | awk '{print $1}')
+          if [ "$got" != "$FIXTURE_EXPECTED_SHA256" ]; then
+            echo "fixture SHA-256 drifted:"
+            echo "  got:      $got"
+            echo "  expected: $FIXTURE_EXPECTED_SHA256"
+            echo "Regenerate with scripts/generate-repro-fixture.sh and update"
+            echo "FIXTURE_EXPECTED_SHA256 in this workflow."
+            exit 1
+          fi
+      - name: Emit JSON artefacts
+        run: |
+          set -euo pipefail
+          # Unset the ambient env we want repro-flags.sh to control so
+          # the preflight would catch any drift caused by CI-injected
+          # values. This mirrors AVC's expected pipeline shape.
+          unset GOFLAGS CGO_ENABLED GOOS GOARCH || true
+          source packaging/scripts/lib/repro-flags.sh
+          # Extract fixture into a workdir; verify contents.
+          workdir=$(mktemp -d)
+          zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
+            | tar -x -C "$workdir"
+          # Deterministic per-build envs.
+          export SOURCE_DATE_EPOCH=1700000000
+          export DEFENSECLAW_BUILDID=defenseclaw-enterprise-setup-repro-fixture
+          defenseclaw_repro_preflight
+          # Build the emitter with the same flags the outer go build will use.
+          go build -mod=vendor -trimpath -buildvcs=false \
+            -o "$workdir/windows-repro-manifest" \
+            ./cmd/windows-repro-manifest
+          # Emit all three artefacts against the fixture.
+          mkdir -p "$workdir/out"
+          "$workdir/windows-repro-manifest" emit-manifest \
+            --version 0.0.0-repro-fixture \
+            --source-commit 1111222233334444555566667777888899990000 \
+            --payload-dir "$workdir/payload" \
+            --out "$workdir/out/manifest.json"
+          "$workdir/windows-repro-manifest" emit-payload-metadata \
+            --version 0.0.0-repro-fixture \
+            --source-commit 1111222233334444555566667777888899990000 \
+            --cmid-pseudo-version v0.0.0-19700101000000-000000000000 \
+            --expected-filenames "DefenseClawEnterprise.psm1,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw.exe,install-enterprise.ps1" \
+            --out "$workdir/out/payload-metadata.json"
+          # Use a fixed-byte "outer setup exe" stand-in so provenance is
+          # comparable; the real outer go build lands in Workstream A.
+          printf 'defenseclaw-outer-setup-fixture-v1\n' > "$workdir/out/setup.exe"
+          "$workdir/windows-repro-manifest" emit-provenance \
+            --version 0.0.0-repro-fixture \
+            --source-commit 1111222233334444555566667777888899990000 \
+            --setup-exe "$workdir/out/setup.exe" \
+            --out "$workdir/out/provenance.json"
+          # Record SHA-256s for the compare job.
+          (cd "$workdir/out" && sha256sum manifest.json payload-metadata.json provenance.json) \
+            > "$workdir/out/sha256sums.txt"
+          cp -R "$workdir/out" artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repro-artefacts-linux
+          path: artifacts/
+          retention-days: 7
+
+  emit-macos:
+    name: emit JSON artefacts (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify fixture SHA-256
+        run: |
+          set -euo pipefail
+          got=$(shasum -a 256 internal/build-repro/testdata/signed-payload-fixture.tar.zst | awk '{print $1}')
+          if [ "$got" != "$FIXTURE_EXPECTED_SHA256" ]; then
+            echo "fixture SHA-256 drifted:"
+            echo "  got:      $got"
+            echo "  expected: $FIXTURE_EXPECTED_SHA256"
+            exit 1
+          fi
+      - name: Emit JSON artefacts
+        run: |
+          set -euo pipefail
+          unset GOFLAGS CGO_ENABLED GOOS GOARCH || true
+          source packaging/scripts/lib/repro-flags.sh
+          workdir=$(mktemp -d)
+          zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
+            | tar -x -C "$workdir"
+          export SOURCE_DATE_EPOCH=1700000000
+          export DEFENSECLAW_BUILDID=defenseclaw-enterprise-setup-repro-fixture
+          defenseclaw_repro_preflight
+          go build -mod=vendor -trimpath -buildvcs=false \
+            -o "$workdir/windows-repro-manifest" \
+            ./cmd/windows-repro-manifest
+          mkdir -p "$workdir/out"
+          "$workdir/windows-repro-manifest" emit-manifest \
+            --version 0.0.0-repro-fixture \
+            --source-commit 1111222233334444555566667777888899990000 \
+            --payload-dir "$workdir/payload" \
+            --out "$workdir/out/manifest.json"
+          "$workdir/windows-repro-manifest" emit-payload-metadata \
+            --version 0.0.0-repro-fixture \
+            --source-commit 1111222233334444555566667777888899990000 \
+            --cmid-pseudo-version v0.0.0-19700101000000-000000000000 \
+            --expected-filenames "DefenseClawEnterprise.psm1,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw.exe,install-enterprise.ps1" \
+            --out "$workdir/out/payload-metadata.json"
+          printf 'defenseclaw-outer-setup-fixture-v1\n' > "$workdir/out/setup.exe"
+          "$workdir/windows-repro-manifest" emit-provenance \
+            --version 0.0.0-repro-fixture \
+            --source-commit 1111222233334444555566667777888899990000 \
+            --setup-exe "$workdir/out/setup.exe" \
+            --out "$workdir/out/provenance.json"
+          (cd "$workdir/out" && shasum -a 256 manifest.json payload-metadata.json provenance.json) \
+            > "$workdir/out/sha256sums.txt"
+          cp -R "$workdir/out" artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repro-artefacts-macos
+          path: artifacts/
+          retention-days: 7
+
+  compare:
+    name: compare cross-platform SHA-256s
+    needs: [emit-linux, emit-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: repro-artefacts-linux
+          path: linux/
+      - uses: actions/download-artifact@v4
+        with:
+          name: repro-artefacts-macos
+          path: macos/
+      - name: Assert byte-identical
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in manifest.json payload-metadata.json provenance.json; do
+            if ! diff -q "linux/$f" "macos/$f" >/dev/null 2>&1; then
+              echo "::error::$f differs between linux and macos runners"
+              echo "--- linux/$f ---"
+              cat "linux/$f"
+              echo "--- macos/$f ---"
+              cat "macos/$f"
+              echo "--- diff ---"
+              diff -u "linux/$f" "macos/$f" || true
+              echo "--- linux xxd (first 512B) ---"
+              xxd -l 512 "linux/$f" || true
+              echo "--- macos xxd (first 512B) ---"
+              xxd -l 512 "macos/$f" || true
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "All three JSON artefacts are byte-identical across ubuntu-latest and macos-latest."
+          echo ""
+          echo "Recorded SHA-256s (should match line-for-line):"
+          echo "--- linux ---"
+          cat linux/sha256sums.txt
+          echo "--- macos ---"
+          cat macos/sha256sums.txt
