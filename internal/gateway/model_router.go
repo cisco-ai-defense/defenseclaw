@@ -38,6 +38,16 @@ type ModelRouterInput struct {
 	JailbreakScore float64
 	PIIDetected    bool
 	Severity       string
+
+	// Rich context fields for semantic routing.
+	Tools          []interface{}
+	SessionID      string
+	ConversationID string
+	UserID         string
+	UserGroups     []string
+	Headers        map[string]string
+	Metadata       map[string]interface{}
+	RequestModel   string
 }
 
 // ModelRouterDecision is the routing outcome. The proxy uses these fields
@@ -60,6 +70,41 @@ type ModelRouterDecision struct {
 
 	// Reason is a human-readable explanation for observability.
 	Reason string
+
+	// Plugin-enriched fields from the semantic router.
+	SystemPrompt       string
+	ReasoningEffort    string
+	UseReasoning       bool
+	LoRAName           string
+	HeaderMutations    *HeaderMutations
+	RAGDocuments       []RAGDocument
+	CompressedMessages []ChatMessage
+	DecisionName       string
+	Algorithm          string
+	MatchedSignals     map[string]interface{}
+	Warnings           []string
+}
+
+// HeaderMutations describes HTTP header changes the router wants applied
+// to the upstream request.
+type HeaderMutations struct {
+	Add    []HeaderEntry `json:"add,omitempty"`
+	Update []HeaderEntry `json:"update,omitempty"`
+	Delete []string      `json:"delete,omitempty"`
+}
+
+// HeaderEntry is a single header name/value pair.
+type HeaderEntry struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// RAGDocument represents a retrieved document returned by the router's
+// RAG plugin for injection into the prompt context.
+type RAGDocument struct {
+	Content    string  `json:"content"`
+	Source     string  `json:"source,omitempty"`
+	Similarity float64 `json:"similarity,omitempty"`
 }
 
 // SetModelRouter installs an embedded model router into the proxy.

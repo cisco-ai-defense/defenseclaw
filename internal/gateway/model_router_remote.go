@@ -45,9 +45,17 @@ func NewRemoteRouterClient(endpoint string, timeoutMs int) *RemoteRouterClient {
 
 // classifyRequest is the JSON body sent to POST /api/v1/classify/intent.
 type classifyRequest struct {
-	Messages []classifyMessage `json:"messages"`
-	Text     string            `json:"text,omitempty"`
-	Options  *classifyOptions  `json:"options,omitempty"`
+	Messages   []classifyMessage      `json:"messages"`
+	Text       string                 `json:"text,omitempty"`
+	Model      string                 `json:"model,omitempty"`
+	Tools      []interface{}          `json:"tools,omitempty"`
+	Stream     bool                   `json:"stream,omitempty"`
+	SessionID  string                 `json:"session_id,omitempty"`
+	UserID     string                 `json:"user_id,omitempty"`
+	UserGroups []string               `json:"user_groups,omitempty"`
+	Headers    map[string]string      `json:"headers,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Options    *classifyOptions       `json:"options,omitempty"`
 }
 
 type classifyMessage struct {
@@ -66,6 +74,10 @@ type classifyResponse struct {
 	Classification   classifyClassification `json:"classification"`
 	MatchedSignals   map[string]interface{} `json:"matched_signals"`
 	DecisionResult   classifyDecisionResult `json:"decision_result"`
+	// Plugin outputs
+	PluginOutputs    *classifyPluginOutputs `json:"plugin_outputs,omitempty"`
+	Warnings         []string               `json:"warnings,omitempty"`
+	SessionTelemetry map[string]interface{} `json:"session_telemetry,omitempty"`
 }
 
 type classifyClassification struct {
@@ -78,6 +90,46 @@ type classifyDecisionResult struct {
 	Confidence   float64 `json:"confidence"`
 }
 
+type classifyPluginOutputs struct {
+	CachedResponse   *cachedResponsePayload  `json:"cached_response,omitempty"`
+	SystemPrompt     string                  `json:"system_prompt,omitempty"`
+	ReasoningEffort  string                  `json:"reasoning_effort,omitempty"`
+	UseReasoning     bool                    `json:"use_reasoning,omitempty"`
+	LoRAName         string                  `json:"lora_name,omitempty"`
+	HeaderMutations  *headerMutationsPayload `json:"header_mutations,omitempty"`
+	RAGContext       []ragDocument           `json:"rag_context,omitempty"`
+	CompressedPrompt *compressedPromptPayload `json:"compressed_prompt,omitempty"`
+	ToolsFiltered    []string                `json:"tools_filtered,omitempty"`
+	ToolsBlocked     []string                `json:"tools_blocked,omitempty"`
+}
+
+type cachedResponsePayload struct {
+	Body    json.RawMessage   `json:"body"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Status  int               `json:"status,omitempty"`
+}
+
+type headerMutationsPayload struct {
+	Add    []headerEntry `json:"add,omitempty"`
+	Update []headerEntry `json:"update,omitempty"`
+	Delete []string      `json:"delete,omitempty"`
+}
+
+type headerEntry struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type ragDocument struct {
+	Content    string  `json:"content"`
+	Source     string  `json:"source,omitempty"`
+	Similarity float64 `json:"similarity,omitempty"`
+}
+
+type compressedPromptPayload struct {
+	Messages []classifyMessage `json:"messages"`
+}
+
 func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput) *ModelRouterDecision {
 	if c == nil || c.endpoint == "" {
 		return nil
@@ -88,9 +140,23 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 		msgs[i] = classifyMessage{Role: m.Role, Content: m.Content}
 	}
 
+	// Build request with rich context from ModelRouterInput.
 	reqBody := classifyRequest{
-		Messages: msgs,
-		Options:  &classifyOptions{ReturnProbabilities: true},
+		Messages:   msgs,
+		Model:      input.RequestModel,
+		Tools:      input.Tools,
+		Stream:     input.Stream,
+		SessionID:  input.SessionID,
+		UserID:     input.UserID,
+		UserGroups: input.UserGroups,
+		Headers:    input.Headers,
+		Metadata:   input.Metadata,
+		Options:    &classifyOptions{ReturnProbabilities: true},
+	}
+
+	// Fall back to input.Model if RequestModel is empty.
+	if reqBody.Model == "" {
+		reqBody.Model = input.Model
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -137,10 +203,66 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 
 	fmt.Fprintf(os.Stderr, "[routing] route: %s\n", reason)
 
-	return &ModelRouterDecision{
-		Model:  classResp.RecommendedModel,
-		Reason: reason,
+	decision := &ModelRouterDecision{
+		Model:          classResp.RecommendedModel,
+		Reason:         reason,
+		DecisionName:   classResp.DecisionResult.DecisionName,
+		Algorithm:      classResp.RoutingDecision,
+		MatchedSignals: classResp.MatchedSignals,
+		Warnings:       classResp.Warnings,
 	}
+
+	// Enrich decision with plugin outputs if present.
+	if po := classResp.PluginOutputs; po != nil {
+		decision.SystemPrompt = po.SystemPrompt
+		decision.ReasoningEffort = po.ReasoningEffort
+		decision.UseReasoning = po.UseReasoning
+		decision.LoRAName = po.LoRAName
+
+		// Convert cached response.
+		if po.CachedResponse != nil && po.CachedResponse.Body != nil {
+			decision.CacheHit = true
+			decision.CachedResponse = []byte(po.CachedResponse.Body)
+		}
+
+		// Convert header mutations.
+		if po.HeaderMutations != nil {
+			hm := &HeaderMutations{
+				Delete: po.HeaderMutations.Delete,
+			}
+			for _, e := range po.HeaderMutations.Add {
+				hm.Add = append(hm.Add, HeaderEntry{Name: e.Name, Value: e.Value})
+			}
+			for _, e := range po.HeaderMutations.Update {
+				hm.Update = append(hm.Update, HeaderEntry{Name: e.Name, Value: e.Value})
+			}
+			decision.HeaderMutations = hm
+		}
+
+		// Convert RAG context documents.
+		if len(po.RAGContext) > 0 {
+			docs := make([]RAGDocument, len(po.RAGContext))
+			for i, d := range po.RAGContext {
+				docs[i] = RAGDocument{
+					Content:    d.Content,
+					Source:     d.Source,
+					Similarity: d.Similarity,
+				}
+			}
+			decision.RAGDocuments = docs
+		}
+
+		// Convert compressed prompt messages.
+		if po.CompressedPrompt != nil && len(po.CompressedPrompt.Messages) > 0 {
+			compressed := make([]ChatMessage, len(po.CompressedPrompt.Messages))
+			for i, m := range po.CompressedPrompt.Messages {
+				compressed[i] = ChatMessage{Role: m.Role, Content: m.Content}
+			}
+			decision.CompressedMessages = compressed
+		}
+	}
+
+	return decision
 }
 
 // Healthy checks if the SR service is reachable.
