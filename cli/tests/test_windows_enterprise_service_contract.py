@@ -95,7 +95,13 @@ def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
     assert '"Cisco Secure Client"' in env_config
     assert "const DefaultEnvConfigPath" not in env_config
     assert r"C:\ProgramData\Cisco" not in env_config
-    assert 'os.Getenv("DEFENSECLAW_ENV_CONFIG_SKIP_TRUST") != "1"' in env_config
+    # The trust-check env var was refactored into a shouldEnforceEnvConfigTrust()
+    # gate that composes with envConfigTrustWaived() (slice-1 CR feedback), so
+    # the raw os.Getenv comparison is no longer inline in env_config_windows.go.
+    # Bind to the gate helper and to the env var name so the test still
+    # verifies the effective contract rather than a specific implementation.
+    assert "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST" in env_config
+    assert "shouldEnforceEnvConfigTrust()" in env_config
 
 
 def windows_powershell_engines() -> list[str]:
@@ -2267,9 +2273,13 @@ def test_certification_purges_through_installed_cli_without_retirement_leaks() -
     assert "[int]$WaitSeconds = 6" in helper_capture_smoke
     assert "$startInfo.RedirectStandardOutput = $true" in helper_capture_smoke
     assert "$startInfo.RedirectStandardError = $true" in helper_capture_smoke
-    assert "$nestedProcess.StandardOutput.ReadToEnd()" in helper_capture_smoke
-    assert "$nestedProcess.StandardError.ReadToEnd()" in helper_capture_smoke
-    assert "$nestedProcess.WaitForExit()" in helper_capture_smoke
+    # Both pipes are now drained via ReadToEndAsync so the parent cannot
+    # deadlock on a large stderr burst that exceeds the pipe buffer, and
+    # WaitForExit uses a bounded budget so a hung child fails the smoke
+    # rather than the CI job (slice-3 CR feedback + follow-up).
+    assert "$nestedProcess.StandardOutput.ReadToEndAsync()" in helper_capture_smoke
+    assert "$nestedProcess.StandardError.ReadToEndAsync()" in helper_capture_smoke
+    assert "$nestedProcess.WaitForExit($detachedHelperWaitBudgetMs)" in helper_capture_smoke
     assert "DEFENSECLAW_DETACHED_HELPER_READY_V1" in helper_capture_smoke
     assert helper_capture_smoke.index("$nestedProcess.StandardOutput.ReadLine()") < helper_capture_smoke.index(
         "$stopwatch = [Diagnostics.Stopwatch]::StartNew()"

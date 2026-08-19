@@ -78,7 +78,12 @@ and [Claude Code](/docs/setup/enterprise-deployment#native-windows-claude-code-m
 ## CLI lifecycle
 
 The signed enterprise CLI exposes the same administrator lifecycle as the
-packaged Windows transaction:
+packaged Windows transaction. The shared signed Go command surface is available
+under either executable name — `defenseclaw.exe` (the elevated administrator
+CLI) or `defenseclaw-gateway.exe` (the same command set invoked through the
+gateway binary). Both accept the `enterprise windows ...` command family
+identically. The Python `defenseclaw` CLI does NOT expose this family; it is
+signed-Go-only.
 
 | Command | Purpose |
 | --- | --- |

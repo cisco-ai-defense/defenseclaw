@@ -47,7 +47,7 @@ the release actually qualifies.
 | Gateway token rotation | **Supported** | Global transactional rotation, all active connectors refreshed, readiness/auth verified, exact prior state restored on failure. |
 | Native automatic upgrade | **Unavailable for published releases through 0.8.10** | Every published manifest has an empty Windows tested-source list. A future target could authorize only sources named by its authenticated manifest. No manual downgrade/rollback command. |
 | Fresh/repair/uninstall packaged lifecycle | **Supported** | Release-authenticated per-user Setup in a non-elevated interactive user session. Current Setup is not Authenticode-signed. |
-| Managed-enterprise service lifecycle | **Supported separately** | The signed enterprise CLI manages the protected SCM gateway and LocalSystem guardian; see [Managed enterprise](/docs/get-started/windows/managed-enterprise). The per-user Setup never enables it. |
+| Managed-enterprise service lifecycle | **Supported** | The signed enterprise CLI manages the protected SCM gateway and LocalSystem guardian on a separate distribution path; see [Managed enterprise](/docs/get-started/windows/managed-enterprise). The per-user Setup never enables it. |
 | Offline install/servicing | **Limited** | Self-contained Setup after authenticated staging; remote registries/providers/destinations are not offline features. |
 | Local observability and Local Splunk | **Limited** | Optional Hyper-V Docker Desktop/Linux-container path on x64 Pro/Enterprise/Education only. |
 | OpenShell sandbox | **Unsupported** | Linux-only lifecycle. |
@@ -131,7 +131,7 @@ optional and retain their own prerequisites.
 | `provenance` | `show` | **Supported**. |
 | `scan` | `code` | **Supported** CodeGuard/ClawShield source scan. |
 | `enterprise windows` | `install`, `repair`, `upgrade`, `reconcile`, `status`, `verify`, `uninstall` | **Supported** only by the separate managed-enterprise package and protected lifecycle; see [Managed enterprise](/docs/get-started/windows/managed-enterprise#cli-lifecycle). |
-| `enterprise hooks` | `install`, `reconcile`, `uninstall`, `watch`, `status`, `verify` | Direct Windows mutation is guardian-only. Elevated operators may run read-only `status` and `verify`; use `enterprise windows reconcile` for service-mediated repair. |
+| `enterprise hooks` | `install`, `reconcile`, `uninstall`, `watch`, `status`, `verify` | **Limited**. Direct Windows mutation is guardian-only; elevated operators may run read-only `status` and `verify`. Use `enterprise windows reconcile` for service-mediated repair. |
 | `sandbox` | `exec`, `policy`, `restart`, `shell`, `start`, `status`, `stop` | **Unsupported** on native Windows. |
 | `completion` | `powershell`; also generates `bash`, `fish`, `zsh` scripts | **Supported** for PowerShell. Other shell generators emit text but those shells are outside native Windows certification. |
 

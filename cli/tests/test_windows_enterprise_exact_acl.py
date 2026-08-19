@@ -57,6 +57,43 @@ def _powershell_engines() -> list[str]:
     return engines
 
 
+def _powershell_engines_or_fail() -> list[str]:
+    """Return the parametrize input; on Windows, refuse an empty list.
+
+    An empty parametrize input silently emits zero test cases, so a Windows
+    CI runner that could not locate any PowerShell engine would still report
+    the whole suite as green. Fail-loud with a single parametrized case that
+    pytest can report as an assertion failure instead.
+    """
+    engines = _powershell_engines()
+    if engines:
+        return engines
+    if os.name == "nt":
+        return ["<no-powershell-engine-found>"]
+    return []
+
+
+def _extract_function_body(source: str, function_name: str, terminator: str) -> str:
+    """Return the slice of source between two anchors, or raise AssertionError.
+
+    The DefenseClawEnterprise module has several similarly-shaped foreach
+    loops. Using ``source.index("foreach ...")`` on the raw text picks the
+    first match and scans to end-of-file, mixing in code from unrelated
+    loops. Callers use this helper to bind an assertion to a specific
+    function so a missing anchor produces a readable failure instead of a
+    silent scope drift.
+    """
+    start = source.find(function_name)
+    if start < 0:
+        raise AssertionError(f"anchor not found: {function_name!r}")
+    end = source.find(terminator, start + len(function_name))
+    if end < 0:
+        raise AssertionError(
+            f"terminator {terminator!r} not found after {function_name!r}",
+        )
+    return source[start:end]
+
+
 def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     source = MODULE.read_text(encoding="utf-8")
     setter = source[
@@ -117,9 +154,18 @@ def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None
     assert "SetAccessRuleProtection" not in grant
     assert "SetOwner" not in grant
 
-    applied = source[
-        source.index("foreach ($ancestor in @($Layout.StateRootAncestors)) {") :
-    ]
+    # Bind the ancestor-loop assertion to the enclosing Set-DefenseClawManagedAcls
+    # function so the four similar `foreach ($ancestor in
+    # @($Layout.StateRootAncestors))` blocks elsewhere in the module can't
+    # cause source.index to select the wrong loop and scan the rest of the
+    # file. `_extract_function_body` raises AssertionError if either anchor
+    # goes missing so a rename shows up as a readable failure.
+    applied = _extract_function_body(
+        source,
+        "function Set-DefenseClawManagedAcls",
+        "function Set-DefenseClawManagedCoreAcls",
+    )
+    assert "foreach ($ancestor in @($Layout.StateRootAncestors)) {" in applied
     assert "Grant-DefenseClawStateAncestorTraverse" in applied
 
     # The ancestor trust invariant still has to hold.
@@ -141,8 +187,18 @@ def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell smoke")
-@pytest.mark.parametrize("engine", _powershell_engines())
+@pytest.mark.parametrize("engine", _powershell_engines_or_fail())
 def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
+    # Guard against a Windows runner that ships without any PowerShell
+    # engine. `_powershell_engines()` returned []; the parametrize decorator
+    # would otherwise emit zero test cases and let the exact-DACL contract
+    # go unverified on the ONLY platform where it can be verified. The
+    # sentinel value is placed there by _powershell_engines_or_fail().
+    if engine == "<no-powershell-engine-found>":
+        pytest.fail(
+            "No powershell.exe or pwsh.exe was found on this Windows runner; "
+            "the exact-DACL smoke cannot run and must not silently pass.",
+        )
     completed = subprocess.run(
         [
             engine,

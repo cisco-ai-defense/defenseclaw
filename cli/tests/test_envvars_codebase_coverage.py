@@ -156,6 +156,10 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # are test protocol data, not supported process configuration.
     "internal/cli/windows_enterprise_service_test.go",
     "cli/tests/test_windows_enterprise_service_contract.py",
+    # Asserts that DEFENSECLAW_WINDOWS_CODEX_TRUSTED_SHELL_ENFORCED, a
+    # removed legacy service-environment claim, stays out of production
+    # code. Test-protocol mention only, not a supported env var.
+    "cmd/defenseclaw/service_windows_test.go",
     # Docs-site policy-creator quick-start: an illustrative apply.ts
     # snippet mentions DEFENSECLAW_LOG as an example client-side toggle;
     # it is sample documentation, not a var DefenseClaw reads.
@@ -189,9 +193,15 @@ _NON_ENVVAR_TOKENS = frozenset(
         "HEADER_DEFENSECLAW_CLIENT",
         # Public constant names exported by the JS correlation module.
         "DEFENSECLAW_CORRELATION_HEADER_NAMES",
-        # Removed legacy service-environment claim asserted absent by Windows
-        # regression tests. It must not re-enter the supported registry.
-        "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_SHELL_ENFORCED",
+        # NOTE: DEFENSECLAW_WINDOWS_CODEX_TRUSTED_SHELL_ENFORCED was previously
+        # listed here to silence Windows regression-test mentions, but a global
+        # token exclusion defeats the "must not re-enter the supported
+        # registry" invariant — production code could reintroduce the name and
+        # this coverage test would stay silent. The two Windows enterprise
+        # test files that assert its absence are already allow-listed above
+        # (internal/cli/windows_enterprise_service_test.go and
+        # cli/tests/test_windows_enterprise_service_contract.py), so no
+        # token-level exclusion is required.
     }
 )
 

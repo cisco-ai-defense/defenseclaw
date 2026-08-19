@@ -16,6 +16,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -159,6 +160,13 @@ class CliSmokeTests(unittest.TestCase):
                         "--json-summary",
                     ],
                 )
+                # Check init succeeded FIRST. If it failed, the read below
+                # would raise FileNotFoundError inside the context manager and
+                # swallow the actual init.output — hiding the diagnostic and
+                # preventing the exit-code assertions below from ever running.
+                self.assertEqual(
+                    initialized.exit_code, 0, initialized.output,
+                )
                 initialized_receipt = json.loads(
                     (home / "agent_selection.json").read_text()
                 )
@@ -272,11 +280,45 @@ class CliSmokeTests(unittest.TestCase):
     def test_offline_trusted_path_add_list_init_subprocess_preserves_config(self):
         cli_root = Path(__file__).resolve().parents[1]
         repository_root = Path(__file__).resolve().parents[2]
-        gateway = repository_root / (
+        gateway_name = (
             "defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway"
         )
-        if not gateway.is_file():
-            self.skipTest("real gateway binary is unavailable")
+        # Prefer an operator-supplied binary path (CI can stage one via
+        # PYTEST_GATEWAY_BIN). Fall back to the repository-root
+        # location. If neither exists but `go` is available, build the
+        # gateway on demand so this smoke actually runs under CI Python
+        # test jobs instead of silently skipping. When Go is also
+        # unavailable, skip with a clear reason.
+        fixture_env = os.environ.get("PYTEST_GATEWAY_BIN", "").strip()
+        gateway: Path | None = None
+        if fixture_env:
+            candidate = Path(fixture_env)
+            if candidate.is_file():
+                gateway = candidate
+        if gateway is None:
+            candidate = repository_root / gateway_name
+            if candidate.is_file():
+                gateway = candidate
+        if gateway is None:
+            go_bin = shutil.which("go")
+            if go_bin is None:
+                self.skipTest(
+                    "real gateway binary unavailable and `go` not on PATH; "
+                    "set PYTEST_GATEWAY_BIN to skip building",
+                )
+            built = repository_root / gateway_name
+            build = subprocess.run(
+                [go_bin, "build", "-o", str(built), "./cmd/defenseclaw-gateway"],
+                cwd=repository_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if build.returncode != 0 or not built.is_file():
+                self.skipTest(
+                    "gateway build failed: " + (build.stderr or build.stdout).strip(),
+                )
+            gateway = built
 
         runner = CliRunner()
         with runner.isolated_filesystem():

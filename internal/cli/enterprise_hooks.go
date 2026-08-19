@@ -59,10 +59,10 @@ var (
 	enterpriseHookWatchDebounce time.Duration
 	enterpriseHookWatchSettle   time.Duration
 
-	enterpriseHooksRuntimeGOOS                = func() string { return runtime.GOOS }
-	enterpriseHooksPlatformPreflight          = enterpriseHooksNativePlatformPreflight
-	enterpriseHooksMutationIdentityPreflight  = enterpriseHooksNativeMutationIdentityPreflight
-	enterpriseHooksRootPersistentPreRun       = enterpriseHooksNativePersistentPreRun
+	enterpriseHooksRuntimeGOOS               = func() string { return runtime.GOOS }
+	enterpriseHooksPlatformPreflight         = enterpriseHooksNativePlatformPreflight
+	enterpriseHooksMutationIdentityPreflight = enterpriseHooksNativeMutationIdentityPreflight
+	enterpriseHooksRootPersistentPreRun      = enterpriseHooksNativePersistentPreRun
 	// Default the "full" enterprise hooks pre-run to the no-audit variant. The
 	// hook-guardian's `enterprise hooks watch` runs as a long-lived daemon
 	// beside the main gateway; the main gateway already owns audit.db in RW
