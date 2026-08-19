@@ -99,8 +99,8 @@ func TestClaudeCodeActiveAgentFilesRequireAuthenticatedExactLoadAndSameSession(t
 
 	api.evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), load)
 	sameSession := evaluateClaudeCodeToolFacts(t, api, "session-a", nil)
-	if !slices.Equal(sameSession.facts.ActiveAgentFiles, []string{agentFile}) {
-		t.Fatalf("same-session active files = %#v, want %q", sameSession.facts.ActiveAgentFiles, agentFile)
+	if !slices.Equal(sameSession.facts.ActiveAgentFiles, []string{filepath.ToSlash(agentFile)}) {
+		t.Fatalf("same-session active files = %#v, want %q", sameSession.facts.ActiveAgentFiles, filepath.ToSlash(agentFile))
 	}
 	differentSession := evaluateClaudeCodeToolFacts(t, api, "session-b", nil)
 	if len(differentSession.facts.ActiveAgentFiles) != 0 {

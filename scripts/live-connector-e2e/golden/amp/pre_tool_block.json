@@ -11,6 +11,6 @@
   "tool_call_id": "dc-e2e-amp-tool-block",
   "tool_name": "shell",
   "tool_input": {
-    "command": "cat /etc/shadow"
+    "command": "rm -rf /"
   }
 }

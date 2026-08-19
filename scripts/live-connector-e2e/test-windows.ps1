@@ -469,10 +469,14 @@ private-secret-name = "DefenseClaw must remain redacted"
         $dangerousPayloadRoot = Join-Path $StateRoot 'dangerous-payload-identity'
         [IO.Directory]::CreateDirectory($dangerousPayloadRoot) | Out-Null
         $observePayload = [IO.File]::ReadAllText((
-            New-DangerousCommandPayload 'fixture' 'synthetic command' $dangerousPayloadRoot observe
+            New-DangerousCommandPayload `
+                -Name 'fixture' -Command 'synthetic command' -ToolName 'shell' `
+                -Root $dangerousPayloadRoot -Mode observe
         )) | ConvertFrom-Json
         $actionPayload = [IO.File]::ReadAllText((
-            New-DangerousCommandPayload 'fixture' 'synthetic command' $dangerousPayloadRoot action
+            New-DangerousCommandPayload `
+                -Name 'fixture' -Command 'synthetic command' -ToolName 'shell' `
+                -Root $dangerousPayloadRoot -Mode action
         )) | ConvertFrom-Json
         foreach ($identityField in @(
             'turn_id',
@@ -1707,11 +1711,23 @@ private-secret-name = "DefenseClaw must remain redacted"
         $packagedHomeGuard -match 'packaged Amp home must be a strict child') `
         'packaged Codex and Claude homes are disjoint while Amp is safely nested in the contained, non-reparse profile'
     Assert-True ($harnessText -match 'timeout-handling' -and $harnessText -match 'telemetry pass') 'contract records timeout and telemetry evidence'
-    foreach ($rule in @(
-        'CMD-WIN-REMOVE-ITEM-RF', 'CMD-WIN-RMDIR-SQ', 'CMD-PIPE-CURL', 'CMD-WIN-REG-PERSIST',
-        'PATH-WIN-AWS-CREDS', 'PATH-WIN-GIT-CREDS', 'PATH-WIN-CREDENTIAL-MANAGER'
+    $dangerousCommandContract = [regex]::Match(
+        $harnessText,
+        '(?s)function Invoke-DangerousCommandCorpus\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True (-not [string]::IsNullOrWhiteSpace($dangerousCommandContract)) 'dangerous-command corpus function is present'
+    foreach ($case in @(
+        [pscustomobject]@{ Name = 'remove-item-critical'; Rule = 'CMD-WIN-REMOVE-ITEM-RF'; Tool = 'PowerShell'; Expected = 'block' },
+        [pscustomobject]@{ Name = 'remove-item-scoped'; Rule = 'CMD-WIN-REMOVE-ITEM-RF'; Tool = 'PowerShell'; Expected = 'shadow' },
+        [pscustomobject]@{ Name = 'cmd-rmdir'; Rule = 'CMD-WIN-RMDIR-SQ'; Tool = 'cmd'; Expected = 'shadow' },
+        [pscustomobject]@{ Name = 'download-execute'; Rule = 'CMD-PIPE-CURL'; Tool = 'PowerShell'; Expected = 'block' },
+        [pscustomobject]@{ Name = 'registry-persistence'; Rule = 'CMD-WIN-REG-PERSIST'; Tool = 'cmd'; Expected = 'block' },
+        [pscustomobject]@{ Name = 'aws-credentials'; Rule = 'PATH-WIN-AWS-CREDS'; Tool = 'PowerShell'; Expected = 'shadow' },
+        [pscustomobject]@{ Name = 'git-credentials'; Rule = 'PATH-WIN-GIT-CREDS'; Tool = 'PowerShell'; Expected = 'shadow' },
+        [pscustomobject]@{ Name = 'credential-manager'; Rule = 'PATH-WIN-CREDENTIAL-MANAGER'; Tool = 'PowerShell'; Expected = 'shadow' }
     )) {
-        Assert-True ($harnessText.Contains($rule)) "required Windows dangerous-command corpus contains $rule"
+        $mapping = "Name = '$($case.Name)'; Rule = '$($case.Rule)'; Tool = '$($case.Tool)'; Expected = '$($case.Expected)'"
+        Assert-True ($dangerousCommandContract.Contains($mapping)) "dangerous-command corpus has the wrong mapping for $($case.Name)"
     }
     Assert-True ($harnessText -match "Invoke-DangerousCommandCorpus observe" -and $harnessText -match "Invoke-DangerousCommandCorpus action") 'connector contract executes dangerous-command corpus in observe and action modes'
     Assert-True ($harnessText -match 'raw_action' -and $harnessText -match 'would_block' -and $harnessText -match 'enforced') 'dangerous-command contract asserts raw and enforced decisions'

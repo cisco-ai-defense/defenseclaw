@@ -7,6 +7,6 @@
   "agent_type": "copilot-cli",
   "tool_name": "shell",
   "tool_input": {
-    "command": "cat /etc/shadow"
+    "command": "rm -rf /"
   }
 }

@@ -7,6 +7,6 @@
   "agent_type": "cursor-cli",
   "tool_name": "run_terminal_cmd",
   "tool_input": {
-    "command": "cat /etc/shadow"
+    "command": "rm -rf /"
   }
 }
