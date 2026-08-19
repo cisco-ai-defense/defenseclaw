@@ -28,11 +28,17 @@ package ipc
 //  1. Rename the "UnixPeerUnauthenticated" const literal to look
 //     benign. The gate does not compare strings — it looks for an
 //     approval SYMBOL that only the auth follow-up defines.
-//  2. Drop this file entirely. The package then has NO Go files
-//     matching //go:build ga on Windows; `go build -tags ga` still
-//     fails on downstream packages that reference the moved symbol
-//     (or fails outright with "no Go files" on the target). Either
-//     way, non-zero exit.
+//  2. Drop this file entirely. This does NOT keep the gate on:
+//     the `ga` tag is ADDITIVE, so every other .go file in
+//     internal/ipc (none of them //go:build-ga-constrained) still
+//     compiles under `go build -tags ga`, and the build passes.
+//     This is the same degenerate bypass as item 3 below — it
+//     removes the gate WITHOUT removing the underlying
+//     unauthenticated posture. See CR
+//     spec-004:PRRT_kwDORuAK-s6aoCwI. The follow-up spec's OWN
+//     release-time assertion on the reported peer-auth kind is
+//     the control that catches this case; this file's role is
+//     item 1's rename-refusal only.
 //  3. Delete only the `var _ = ...` line and keep this comment-
 //     only file. `go build -tags ga` then succeeds for this
 //     package in isolation, but the follow-up spec's peer-auth
