@@ -23,6 +23,31 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+func TestWindowsRegistryValueNameUsesProgramGrammar(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, program, want string
+		args                []string
+	}{
+		{"reg separated", "reg.exe", "shell", []string{"/v", "Shell"}},
+		{"reg joined", "reg", "userinit", []string{"/v:Userinit"}},
+		{"set property", "set-itemproperty", "shell", []string{"-Name", "Shell"}},
+		{"new property joined", "new-itemproperty", "userinit", []string{"-Name:Userinit"}},
+		{"missing", "set-itemproperty", "", []string{"-Value", "payload.exe"}},
+		{"dynamic", "set-itemproperty", "", []string{"-Name", "$valueName"}},
+		{"duplicate", "set-itemproperty", "", []string{"-Name", "Shell", "-Name", "Userinit"}},
+		{"malformed", "set-itemproperty", "", []string{"-Name", "-Value", "payload.exe"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := windowsRegistryValueNameForProgram(test.program, test.args); got != test.want {
+				t.Fatalf("value name = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestWindowsCommandRulesMaliciousCorpus(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

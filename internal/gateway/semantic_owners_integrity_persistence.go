@@ -720,7 +720,10 @@ func matchesActiveRegistryPersistence(
 		return false
 	}
 	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
-	valueName := windowsRegistryValueName(command.Argv[1:])
+	valueName := windowsRegistryValueNameForProgram(
+		command.Program,
+		command.Argv[1:],
+	)
 	switch {
 	case value == "hklm/software/microsoft/windows nt/currentversion/winlogon" ||
 		value == "hkcu/software/microsoft/windows nt/currentversion/winlogon":
