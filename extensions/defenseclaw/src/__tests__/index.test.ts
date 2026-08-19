@@ -65,6 +65,31 @@ vi.mock("../scanners/mcp-scanner.js", () => ({
 
 type EventHandler = (...args: unknown[]) => Promise<unknown> | unknown;
 
+type ToolVerdict = {
+  action: "allow" | "alert" | "confirm" | "block";
+  severity: "NONE" | "INFO" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  reason: string;
+  mode: "action" | "observe";
+  raw_action?: "allow" | "alert" | "confirm" | "block";
+  approval_timeout_ms?: number;
+};
+
+const validToolVerdict = (
+  overrides: Partial<ToolVerdict> = {},
+): ToolVerdict => ({
+  action: "allow",
+  severity: "NONE",
+  reason: "",
+  mode: "action",
+  ...overrides,
+});
+
+const verdictResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+
 function createMockContext() {
   const listeners: Record<string, EventHandler> = {};
   const commands: Record<string, { handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> }> = {};
@@ -116,6 +141,7 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN;
     delete (globalThis as Record<string, unknown>).__defenseclawAwsHttp1ShimEvaluated;
     delete (globalThis as Record<string, unknown>).__defenseclawAwsHttp1GuardrailPatch;
     mockEnforcer.syncFromDaemon.mockResolvedValue(undefined);
@@ -146,29 +172,92 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     });
   });
 
-  describe("before_tool_call approvals", () => {
-    it("returns native OpenClaw approval request when sidecar returns confirm", async () => {
-      const fetchMock = vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            action: "confirm",
-            raw_action: "confirm",
-            severity: "HIGH",
-            reason: "matched: CMD-ENV-DUMP:Environment variable dump",
-            mode: "action",
-            approval_timeout_ms: 30000,
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
+  describe("before_tool_call verdict handling", () => {
+    const genericEvent = {
+      toolName: "exec",
+      params: { command: "printenv" },
+    };
+    const genericContext = {
+      sessionKey: "agent:main:main",
+      runId: "run-1",
+      toolName: "exec",
+    };
+
+    async function runGeneric(verdict: unknown) {
+      globalThis.fetch = vi.fn().mockResolvedValue(verdictResponse(verdict));
+      return listeners.before_tool_call(genericEvent, genericContext);
+    }
+
+    async function runMessage(verdict: unknown) {
+      globalThis.fetch = vi.fn().mockResolvedValue(verdictResponse(verdict));
+      return listeners.before_tool_call(
+        {
+          toolName: "message",
+          params: { to: "security@example.test", content: "status update" },
+        },
+        genericContext,
+      );
+    }
+
+    it.each([
+      ["allow", validToolVerdict({ action: "allow" })],
+      [
+        "informational",
+        validToolVerdict({
+          action: "allow",
+          severity: "INFO",
+          reason: "informational finding",
+        }),
+      ],
+      [
+        "alert",
+        validToolVerdict({
+          action: "alert",
+          severity: "LOW",
+          reason: "review recommended",
+        }),
+      ],
+      [
+        "observe",
+        validToolVerdict({
+          action: "allow",
+          raw_action: "block",
+          severity: "HIGH",
+          reason: "observed match",
+          mode: "observe",
+        }),
+      ],
+    ])("allows valid %s verdict", async (_name, verdict) => {
+      await expect(runGeneric(verdict)).resolves.toBeUndefined();
+      await expect(runMessage(verdict)).resolves.toBeUndefined();
+    });
+
+    it("returns native OpenClaw approval requests for valid confirm verdicts", async () => {
+      const verdict = validToolVerdict({
+        action: "confirm",
+        raw_action: "confirm",
+        severity: "HIGH",
+        reason: "matched: CMD-ENV-DUMP:Environment variable dump",
+        approval_timeout_ms: 30000,
+      });
+      const fetchMock = vi.fn().mockImplementation(async () =>
+        verdictResponse(verdict),
       );
       globalThis.fetch = fetchMock;
 
-      const result = await listeners.before_tool_call(
-        { toolName: "exec", params: { command: "printenv" } },
-        { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+      const genericResult = await listeners.before_tool_call(
+        genericEvent,
+        genericContext,
+      );
+      const messageResult = await listeners.before_tool_call(
+        {
+          toolName: "message",
+          params: { to: "security@example.test", content: "status update" },
+        },
+        genericContext,
       );
 
-      expect(result).toMatchObject({
+      expect(genericResult).toMatchObject({
         requireApproval: {
           title: "DefenseClaw approval required",
           severity: "warning",
@@ -176,8 +265,21 @@ describe("DefenseClaw OpenClaw Plugin", () => {
           timeoutBehavior: "deny",
         },
       });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+      expect(messageResult).toMatchObject({
+        requireApproval: {
+          title: "DefenseClaw approval required",
+          description: expect.stringContaining("outbound message"),
+          severity: "warning",
+          timeoutBehavior: "deny",
+        },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const [requestUrl, requestInit] = fetchMock.mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      expect(requestUrl).toMatch(/\/api\/v1\/inspect\/tool$/);
+      const body = JSON.parse(requestInit.body as string);
       expect(body).toMatchObject({
         tool: "exec",
         session_id: "agent:main:main",
@@ -185,26 +287,348 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       });
     });
 
-    it("does not request approval in observe mode", async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            action: "allow",
-            raw_action: "confirm",
-            severity: "HIGH",
-            reason: "matched: CMD-ENV-DUMP:Environment variable dump",
-            mode: "observe",
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
+    it("keeps large sidecar bodies on the interceptor's URL/init path", async () => {
+      const verdict = validToolVerdict();
+      const fetchMock = vi.fn().mockResolvedValue(verdictResponse(verdict));
+      globalThis.fetch = fetchMock;
+      const command = "x".repeat(70 * 1024);
+
+      await expect(
+        listeners.before_tool_call(
+          { toolName: "exec", params: { command } },
+          genericContext,
         ),
+      ).resolves.toBeUndefined();
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [requestUrl, requestInit] = fetchMock.mock.calls[0] as [
+        string,
+        RequestInit,
+      ];
+      expect(requestUrl).toBeTypeOf("string");
+      expect(requestInit.body).toBeTypeOf("string");
+      expect(new TextEncoder().encode(requestInit.body as string).byteLength)
+        .toBeGreaterThan(64 * 1024);
+      expect(JSON.parse(requestInit.body as string)).toMatchObject({
+        tool: "exec",
+        args: { command },
+      });
+    });
+
+    it("blocks generic and outbound message calls for a valid action-mode block", async () => {
+      const verdict = validToolVerdict({
+        action: "block",
+        raw_action: "block",
+        severity: "CRITICAL",
+        reason: "matched guardrail policy",
+      });
+
+      await expect(runGeneric(verdict)).resolves.toEqual({
+        block: true,
+        blockReason: "DefenseClaw: matched guardrail policy",
+      });
+      await expect(runMessage(verdict)).resolves.toEqual({
+        block: true,
+        blockReason:
+          "DefenseClaw: outbound blocked — matched guardrail policy",
+      });
+    });
+
+    it("accepts the gateway's fail-closed unsupported-confirmation verdict", async () => {
+      const verdict = validToolVerdict({
+        action: "block",
+        raw_action: "confirm",
+        severity: "HIGH",
+        reason: "human approval unsupported; failing closed",
+      });
+
+      await expect(runGeneric(verdict)).resolves.toEqual({
+        block: true,
+        blockReason:
+          "DefenseClaw: human approval unsupported; failing closed",
+      });
+      await expect(runMessage(verdict)).resolves.toEqual({
+        block: true,
+        blockReason:
+          "DefenseClaw: outbound blocked — human approval unsupported; failing closed",
+      });
+    });
+
+    it("treats a zero approval timeout as an omitted optional timeout", async () => {
+      const result = await runGeneric(
+        validToolVerdict({
+          action: "confirm",
+          severity: "HIGH",
+          reason: "approval required",
+          approval_timeout_ms: 0,
+        }),
       );
+
+      expect(result).toMatchObject({
+        requireApproval: {
+          timeoutBehavior: "deny",
+        },
+      });
+      expect(
+        (result as { requireApproval: { timeoutMs?: number } }).requireApproval
+          .timeoutMs,
+      ).toBeUndefined();
+    });
+
+    const invalidVerdicts: Array<[string, unknown]> = [
+      ["null", null],
+      ["array", []],
+      ["empty object", {}],
+      ["string", "allow"],
+      ["number", 1],
+      ["boolean", true],
+      ["missing action", { severity: "NONE", reason: "", mode: "action" }],
+      ["missing mode", { action: "allow", severity: "NONE", reason: "" }],
+      ["missing severity", { action: "allow", reason: "", mode: "action" }],
+      ["missing reason", { action: "allow", severity: "NONE", mode: "action" }],
+      ["unknown action", { ...validToolVerdict(), action: "pass" }],
+      ["unknown mode", { ...validToolVerdict(), mode: "enforce" }],
+      ["unknown severity", { ...validToolVerdict(), severity: "WARNING" }],
+      ["non-string action", { ...validToolVerdict(), action: true }],
+      ["non-string mode", { ...validToolVerdict(), mode: 1 }],
+      ["non-string severity", { ...validToolVerdict(), severity: null }],
+      ["non-string reason", { ...validToolVerdict(), reason: ["secret"] }],
+      ["non-string raw action", { ...validToolVerdict(), raw_action: 1 }],
+      ["unknown raw action", { ...validToolVerdict(), raw_action: "pass" }],
+      [
+        "contradictory action-mode raw action",
+        { ...validToolVerdict(), raw_action: "block" },
+      ],
+      [
+        "observe-mode effective block without raw action",
+        validToolVerdict({ action: "block", mode: "observe" }),
+      ],
+      [
+        "observe-mode effective block with raw action",
+        validToolVerdict({
+          action: "block",
+          raw_action: "block",
+          mode: "observe",
+        }),
+      ],
+      [
+        "observe-mode effective confirm without raw action",
+        validToolVerdict({ action: "confirm", mode: "observe" }),
+      ],
+      [
+        "observe-mode effective confirm with raw action",
+        validToolVerdict({
+          action: "confirm",
+          raw_action: "confirm",
+          mode: "observe",
+        }),
+      ],
+      [
+        "observe-mode effective alert",
+        validToolVerdict({
+          action: "alert",
+          raw_action: "alert",
+          mode: "observe",
+        }),
+      ],
+      [
+        "non-number approval timeout",
+        { ...validToolVerdict(), approval_timeout_ms: "30000" },
+      ],
+      [
+        "negative approval timeout",
+        { ...validToolVerdict(), approval_timeout_ms: -1 },
+      ],
+      [
+        "fractional approval timeout",
+        { ...validToolVerdict(), approval_timeout_ms: 1.5 },
+      ],
+      [
+        "unsafe approval timeout",
+        {
+          ...validToolVerdict(),
+          approval_timeout_ms: Number.MAX_SAFE_INTEGER + 1,
+        },
+      ],
+    ];
+
+    it.each(invalidVerdicts)(
+      "fails closed on an invalid %s verdict in generic and message paths",
+      async (_name, verdict) => {
+        await expect(runGeneric(verdict)).resolves.toMatchObject({
+          block: true,
+          blockReason: expect.stringContaining(
+            "sidecar returned invalid verdict",
+          ),
+        });
+        await expect(runMessage(verdict)).resolves.toMatchObject({
+          block: true,
+          blockReason: expect.stringContaining(
+            "sidecar returned invalid verdict",
+          ),
+        });
+      },
+    );
+
+    it("fails closed on a non-finite JSON approval timeout", async () => {
+      const responseBody =
+        '{"action":"allow","severity":"NONE","reason":"","mode":"action","approval_timeout_ms":1e10000}';
+      globalThis.fetch = vi
+        .fn()
+        .mockImplementation(async () => new Response(responseBody));
+
+      await expect(
+        listeners.before_tool_call(genericEvent, genericContext),
+      ).resolves.toMatchObject({ block: true });
+      await expect(
+        listeners.before_tool_call(
+          {
+            toolName: "message",
+            params: {
+              to: "security@example.test",
+              content: "status update",
+            },
+          },
+          genericContext,
+        ),
+      ).resolves.toMatchObject({ block: true });
+    });
+
+    it("does not expose response, argument, or credential data in diagnostics", async () => {
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      globalThis.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          verdictResponse({
+            ...validToolVerdict(),
+            reason: ["sensitive-response-value"],
+          }),
+        )
+        .mockRejectedValueOnce(
+          new Error("synthetic-credential-value"),
+        );
+
+      try {
+        const invalidResponseResult = await listeners.before_tool_call(
+          {
+            toolName: "exec",
+            params: { command: "sensitive-tool-argument" },
+          },
+          genericContext,
+        );
+        const transportResult = await listeners.before_tool_call(
+          {
+            toolName: "exec",
+            params: { command: "sensitive-tool-argument" },
+          },
+          genericContext,
+        );
+        const visible = JSON.stringify({
+          invalidResponseResult,
+          transportResult,
+          logs: logSpy.mock.calls,
+          warnings: warnSpy.mock.calls,
+          errors: errorSpy.mock.calls,
+        });
+        expect(visible).not.toContain("sensitive-response-value");
+        expect(visible).not.toContain("sensitive-tool-argument");
+        expect(visible).not.toContain("synthetic-credential-value");
+      } finally {
+        logSpy.mockRestore();
+        warnSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it("keeps invalid and malformed HTTP responses fail-closed under the availability override", async () => {
+      process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
+      globalThis.fetch = vi
+        .fn()
+        .mockResolvedValueOnce(verdictResponse({ action: "allow" }))
+        .mockResolvedValueOnce(new Response("not-json", { status: 200 }))
+        .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await expect(
+          listeners.before_tool_call(genericEvent, genericContext),
+        ).resolves.toMatchObject({ block: true });
+      }
+    });
+
+    it("applies fail-open only to an unavailable transport", async () => {
+      process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
+      globalThis.fetch = vi
+        .fn()
+        .mockRejectedValue(new Error("sensitive-transport-value"));
+
+      await expect(
+        listeners.before_tool_call(genericEvent, genericContext),
+      ).resolves.toBeUndefined();
+    });
+
+    it("does not expose transport exception text when failing closed", async () => {
+      globalThis.fetch = vi
+        .fn()
+        .mockRejectedValue(new Error("sensitive-transport-value"));
 
       const result = await listeners.before_tool_call(
-        { toolName: "exec", params: { command: "printenv" } },
-        { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+        genericEvent,
+        genericContext,
+      );
+      expect(JSON.stringify(result)).not.toContain("sensitive-transport-value");
+    });
+
+    it("keeps local request failures closed under the availability override", async () => {
+      process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
+      const fetchMock = vi.fn();
+      globalThis.fetch = fetchMock;
+      mockDaemonClient.buildOutboundHeaders.mockRejectedValueOnce(
+        new Error("header preparation failed"),
       );
 
-      expect(result).toBeUndefined();
+      await expect(
+        listeners.before_tool_call(genericEvent, genericContext),
+      ).resolves.toMatchObject({ block: true });
+
+      mockDaemonClient.buildOutboundHeaders.mockResolvedValue({});
+      await expect(
+        listeners.before_tool_call(
+          { toolName: "exec", params: { count: 1n } },
+          genericContext,
+        ),
+      ).resolves.toMatchObject({ block: true });
+
+      mockDaemonClient.buildOutboundHeaders.mockResolvedValueOnce({
+        "x-invalid-local-header": "value\nsmuggled",
+      });
+      await expect(
+        listeners.before_tool_call(genericEvent, genericContext),
+      ).resolves.toMatchObject({ block: true });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("fails closed repeatedly when transport is unavailable by default", async () => {
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline"));
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await expect(
+          listeners.before_tool_call(genericEvent, genericContext),
+        ).resolves.toMatchObject({ block: true });
+      }
+    });
+
+    it("fails closed on an invalid verdict from a legacy host without tool context", async () => {
+      globalThis.fetch = vi
+        .fn()
+        .mockResolvedValue(verdictResponse({ action: "allow" }));
+
+      await expect(listeners.before_tool_call(genericEvent)).resolves.toEqual({
+        block: true,
+        blockReason:
+          "DefenseClaw: defenseclaw failing closed: sidecar returned invalid verdict",
+      });
     });
   });
 
