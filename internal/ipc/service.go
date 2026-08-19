@@ -177,11 +177,42 @@ func (s *service) WatchNotifications(req *pb.WatchNotificationsRequest, stream g
 // SidecarHealth. version is a static, safe string ("v1.2.3" or
 // "dev") — we tolerate an empty version by omitting the field
 // rather than sending a placeholder that AVC might try to display.
+//
+// ConfigurationState (spec 004 REQ-12 + REQ-13) is folded from
+// spec 003's HealthSnapshot.Configuration.State. Non-managed
+// deployments never populate the Configuration pointer, so
+// ConfigurationState reads UNSPECIFIED (proto3 default) — the
+// Secure Client UI treats that as "no configuration tracking here"
+// and MUST NOT render it as an error.
 func (s *service) currentHealth() *pb.HealthSnapshot {
 	snap := s.health.Snapshot()
 	return &pb.HealthSnapshot{
 		SchemaVersion:      schemaVersion,
 		Availability:       mapHealth(snap),
 		DefenseClawVersion: strings.TrimSpace(s.version),
+		ConfigurationState: mapConfigurationState(snap.Configuration),
+	}
+}
+
+// mapConfigurationState folds the sidecar's internal ConfigurationState
+// (from spec 003) into the proto enum (spec 004). Nil pointer — the
+// case for every non-managed-enterprise deployment — collapses to
+// UNSPECIFIED. Any unknown state literal (a future
+// spec 003 extension that spec 004 hasn't caught up to) also
+// collapses to UNSPECIFIED so a stale spec 004 build never
+// misreports the state as READY.
+func mapConfigurationState(cfg *gateway.ConfigurationHealth) pb.ConfigurationState {
+	if cfg == nil {
+		return pb.ConfigurationState_CONFIGURATION_STATE_UNSPECIFIED
+	}
+	switch cfg.State {
+	case gateway.ConfigStateWaitingForConfig:
+		return pb.ConfigurationState_CONFIGURATION_STATE_WAITING_FOR_CONFIG
+	case gateway.ConfigStateWaitingForTargets:
+		return pb.ConfigurationState_CONFIGURATION_STATE_WAITING_FOR_TARGETS
+	case gateway.ConfigStateReady:
+		return pb.ConfigurationState_CONFIGURATION_STATE_READY
+	default:
+		return pb.ConfigurationState_CONFIGURATION_STATE_UNSPECIFIED
 	}
 }

@@ -96,3 +96,39 @@ jobs:
       - name: Validate the managed bundle shell boundary
         shell: bash
         run: bash -n packaging/scripts/build-managed-windows-bundle.sh
+
+      - name: Assert GA release-gate refuses the unauthenticated IPC posture
+        shell: bash
+        env:
+          # Force a Windows cross-compile so internal/ipc's Windows
+          # peer-auth stub is in the compile set — the whole point of
+          # the gate is to refuse a release-candidate Windows build
+          # that still carries the initial-cut deferred-auth code
+          # path. See docs/specs/004-windows-ui-ipc/ REQ-18 + REQ-19.
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          set -u
+          # A release-candidate build compiles with -tags ga. The gate
+          # at internal/ipc/authposture_gagate.go must refuse the
+          # build; the PRIMARY check is exit != 0. The undefined-
+          # symbol signature is emitted as a diagnostic hint but is
+          # NOT the pass condition: Go can rephrase its "undefined:"
+          # message (or a maintainer could refactor the gate) without
+          # breaking spec 004's guarantee. See CR
+          # spec-004:PRRT_kwDORuAK-s6ankzo.
+          if output=$(go build -tags ga ./internal/ipc/... 2>&1); then
+            echo "::error::spec 004 GA release-gate did not refuse -tags ga build"
+            echo "$output"
+            exit 1
+          fi
+          if grep -q 'authpostureGAApproved' <<<"$output"; then
+            echo "GA gate refused the build citing the expected authpostureGAApproved symbol (diagnostic OK)"
+          else
+            echo "::warning::spec 004 GA release-gate refused the build, but the error output does NOT mention authpostureGAApproved."
+            echo "::warning::This is not a failure — the gate did its job — but the diagnostic may indicate a refactor or Go version change."
+            echo "Full build output:"
+            echo "$output"
+          fi
+          echo "spec 004 GA release-gate is intact — go build -tags ga refused with non-zero exit"
