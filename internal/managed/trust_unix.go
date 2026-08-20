@@ -18,6 +18,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -81,8 +82,15 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 }
 
 // ValidateTrustedServiceRuntimeDir is the cross-platform service-runtime
-// entry point. Unix resolves the packaged defenseclaw account by uid, so the
-// Windows account name parameter is intentionally ignored here.
+// entry point. On unix the packaged defenseclaw account is resolved by
+// username (via user.Lookup) inside trustedRuntimeOwner; the
+// Windows-format `NT SERVICE\...` account name in the third argument
+// cannot be reused for a unix user lookup, so it is intentionally
+// dropped here. To point unix trust at a non-default username, set the
+// DEFENSECLAW_UNIX_SERVICE_ACCOUNT env — trustedRuntimeOwner reads it
+// on every check. When neither the env is set nor the "defenseclaw"
+// user exists, the ancestor walk fails with a clear "owner uid N is
+// not trusted" error instead of silently allowing any owner.
 func ValidateTrustedServiceRuntimeDir(path, label, _ string) error {
 	return ValidateTrustedRuntimeDir(path, label)
 }
@@ -204,7 +212,19 @@ func trustedRuntimeOwner(uid uint32) bool {
 	if uid == 0 {
 		return true
 	}
-	serviceUser, err := user.Lookup("defenseclaw")
+	// The unix trust model accepts root (uid 0) or the packaged
+	// defenseclaw service account. The service account username is
+	// "defenseclaw" by convention (installer contract). Setting
+	// DEFENSECLAW_UNIX_SERVICE_ACCOUNT lets custom packaging point trust
+	// at a different username without patching the source — the finder
+	// audit flagged this as previously silently unavailable because the
+	// serviceAccount parameter on ValidateTrustedServiceRuntimeDir is a
+	// Windows-format `NT SERVICE\...` value and cannot be reused here.
+	username := "defenseclaw"
+	if custom := strings.TrimSpace(os.Getenv(UnixServiceAccountEnv)); custom != "" {
+		username = custom
+	}
+	serviceUser, err := user.Lookup(username)
 	if err != nil {
 		return false
 	}

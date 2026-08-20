@@ -58,7 +58,7 @@ func TestPublishServiceRuntimeFileLeavesNoTemporaryFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ai-discovery.json")
 	for _, payload := range []string{"{}", "{\"a\":1}"} {
-		if err := publishServiceRuntimeFile(path, []byte(payload)); err != nil {
+		if err := publishServiceRuntimeFile(path, []byte(payload), false); err != nil {
 			t.Fatalf("publish %q: %v", payload, err)
 		}
 		data, err := os.ReadFile(path)

@@ -955,6 +955,21 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 //     reason. The interval loop keeps ticking; the state flips back
 //     to Running on the next successful cycle.
 //
+// T5.1 wiring status: the enumerator CLI and the sidecar live in
+// separate processes, so SetEnumerator cannot be called across that
+// boundary directly. The follow-up work is to (1) have the enumerator
+// CLI atomically publish `.enumerator-state` alongside every cycle
+// (mirroring spec 003's guardianstate JSON), and (2) plumb a
+// SetEnumeratorStateReader callback on SidecarHealth that the daemon
+// wires to a file-watching poller which translates the on-disk record
+// into SetEnumerator invocations. Both halves belong in a coordinated
+// follow-up PR because they touch the enumerator CLI, the daemon
+// bootstrap, and a new state-file schema; wiring only half would leak
+// stale health without corresponding writes. Until then, callers that
+// run the enumerator via the CLI (production) see the Snapshot's
+// Enumerator field stay nil, and only in-process test callers exercise
+// SetEnumerator directly.
+//
 // Nil-safe: the enumerator subcommand may run standalone
 // (`--once` from an installer shell-out) with no SidecarHealth
 // wired; in that case the caller passes a nil *SidecarHealth
@@ -982,13 +997,22 @@ func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, deta
 	h.notifySubscribers()
 }
 
-// cloneSubsystemDetails is a shallow-deep hybrid: the top-level map
-// is copied; each value is copied by re-boxing (values are
-// primitives + occasional nested map[string]interface{}). Recurses
-// one level for nested maps — enough for the shapes SetEnumerator
-// callers pass today (cycle_count, elapsed_ms, error_reason,
-// last_success). Callers that need deeper nesting can extend the
-// recursion; the current contract keeps details flat.
+// cloneSubsystemDetails deep-copies the top-level map, every nested
+// map[string]interface{}, and the common slice / typed-map values that
+// health-detail callers actually emit today (spec 005 D1 introduced
+// []string / []int for cycle-counter and per-target flavor fields
+// alongside the flat primitives + nested map[string]interface{} shapes
+// the prior generation carried). A shallow copy of these types would
+// let a Snapshot() consumer mutate the internal slice header and
+// race against a subsequent Set* call — the T5.4 finding was that
+// spec-005's CR round 1 fix stopped short of handling those.
+//
+// Types not covered here fall through to a value-copy of the interface
+// header; the invariant callers must respect is: any type passed as a
+// Details value must be either a primitive, a map or slice this
+// function knows how to clone, or a fully-immutable struct that a
+// consumer cannot mutate through the returned interface. Bump this
+// switch when a new mutable value type gets emitted through SetHealth.
 //
 // Returns nil for a nil input so the stored SubsystemHealth.Details
 // carries the same zero-value semantics — a Snapshot consumer sees
@@ -1000,13 +1024,62 @@ func cloneSubsystemDetails(in map[string]interface{}) map[string]interface{} {
 	}
 	out := make(map[string]interface{}, len(in))
 	for k, v := range in {
-		if nested, ok := v.(map[string]interface{}); ok {
-			out[k] = cloneSubsystemDetails(nested)
-			continue
-		}
-		out[k] = v
+		out[k] = cloneSubsystemDetailValue(v)
 	}
 	return out
+}
+
+// cloneSubsystemDetailValue clones the mutable value types health
+// details may carry. Kept outside the outer map loop so recursive
+// callers (nested maps, nested slices of maps) share the same coverage.
+func cloneSubsystemDetailValue(v interface{}) interface{} {
+	switch typed := v.(type) {
+	case nil:
+		return nil
+	case map[string]interface{}:
+		return cloneSubsystemDetails(typed)
+	case map[string]string:
+		if typed == nil {
+			return map[string]string(nil)
+		}
+		copyOf := make(map[string]string, len(typed))
+		for k, val := range typed {
+			copyOf[k] = val
+		}
+		return copyOf
+	case []interface{}:
+		if typed == nil {
+			return []interface{}(nil)
+		}
+		copyOf := make([]interface{}, len(typed))
+		for i, elem := range typed {
+			copyOf[i] = cloneSubsystemDetailValue(elem)
+		}
+		return copyOf
+	case []string:
+		if typed == nil {
+			return []string(nil)
+		}
+		copyOf := make([]string, len(typed))
+		copy(copyOf, typed)
+		return copyOf
+	case []int:
+		if typed == nil {
+			return []int(nil)
+		}
+		copyOf := make([]int, len(typed))
+		copy(copyOf, typed)
+		return copyOf
+	case []int64:
+		if typed == nil {
+			return []int64(nil)
+		}
+		copyOf := make([]int64, len(typed))
+		copy(copyOf, typed)
+		return copyOf
+	default:
+		return v
+	}
 }
 
 // cloneSubsystemHealth deep-copies a *SubsystemHealth pointer so

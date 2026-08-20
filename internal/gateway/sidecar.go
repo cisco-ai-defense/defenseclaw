@@ -1960,6 +1960,20 @@ func (s *Sidecar) ensureActiveHookRegistration(ctx context.Context, connectorNam
 func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 	cfg := s.currentConfig()
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		// Re-check cloudreg.Registered() on every hot-reload (T5.3).
+		// Factory registration is set once at init() time and does not
+		// change during runtime, but a config reload that switches
+		// deployment_mode from opensource to managed_enterprise on an
+		// OSS build should surface a distinct "no factory registered"
+		// state via /health instead of falling into the generic
+		// "provider unavailable" path that ensureCMIDProvider would
+		// otherwise take.
+		if !cloudreg.Registered() {
+			s.setInspectionAvailability(cloudreg.ErrNoProviderRegistered)
+			EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
+				"managed_enterprise + managed-cloud support absent: "+cloudreg.ErrNoProviderRegistered.Error())
+			return nil
+		}
 		return s.newManagedInspector(ctx, "remote inspection disabled")
 	}
 	// Opensource path — unchanged from before the picker was added.
@@ -2007,10 +2021,27 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 // provider cannot Refresh (unsupported OS, no provider registered,
 // agent unavailable after the retry ladder). The error is surfaced so
 // the caller can take the fail-closed path.
+//
+// T5.2 note: every call — cached or fresh — updates
+// setInspectionAvailability with the latest Refresh outcome, so
+// /health cannot lag reality. Previously setInspectionAvailability
+// only fired on the first successful build; a cached provider whose
+// upstream auth later dropped kept reporting inspection_available=true
+// while every inspect call failed.
 func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
 	s.cmidProviderMu.Lock()
 	defer s.cmidProviderMu.Unlock()
 	if s.cmidProviderInst != nil {
+		if err := s.cmidProviderInst.Refresh(ctx); err != nil {
+			// Cached provider is now unusable. Report loss of
+			// availability and drop the cache so the next call
+			// re-runs the full construction ladder (which may
+			// succeed if the failure was transient).
+			s.setInspectionAvailability(err)
+			s.cmidProviderInst = nil
+			return nil, err
+		}
+		s.setInspectionAvailability(nil)
 		return s.cmidProviderInst, nil
 	}
 	prov, err := s.buildCMIDProvider(ctx)
@@ -3769,7 +3800,14 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return false, "parse hook guardian authorization: trailing content"
 	}
-	if authorization.Version != 1 {
+	// Accept version==0 (pre-spec-005 files that omit the `version`
+	// key entirely — JSON decode leaves the int zero) alongside the
+	// current version==1 envelope. This keeps macOS hosts covered
+	// during a non-lockstep upgrade where the gateway rolls to
+	// spec-005+ before the guardian process on the same host has
+	// re-published its authorization file (T5.6). Anything above 1 is
+	// an unknown-future format and stays rejected.
+	if authorization.Version < 0 || authorization.Version > 1 {
 		return false, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
 	}
 	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
@@ -3834,7 +3872,16 @@ func managedGuardianTargetKey(target managedGuardianAuthorizationTarget, connect
 	if home == "" {
 		return ""
 	}
-	return connectorName + "\x00home\x00" + filepath.Clean(home)
+	cleaned := filepath.Clean(home)
+	// Windows paths are case-insensitive at the OS level; different-case
+	// spellings of the same user home (e.g. `C:\Users\Alice` vs
+	// `c:\users\alice`) refer to the same directory and MUST hash to the
+	// same guardian target so dedup + freshness tracking stay coherent.
+	// On unix the case matters, so preserve the original.
+	if runtime.GOOS == "windows" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	return connectorName + "\x00home\x00" + cleaned
 }
 
 func connectorNames(conns []connector.Connector) []string {

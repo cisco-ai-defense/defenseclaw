@@ -16,3 +16,9 @@ package managed
 // layout it walks is Secure Client for Windows, and other platforms'
 // providers resolve their own library.
 func DiscoverCMIDLibrary() string { return "" }
+
+// rejectCMIDLibraryReparse is a no-op off Windows: the version-directory
+// walk is only reachable from Windows in production. The stub keeps the
+// cross-platform `cmid_library.go` and its cross-platform unit tests
+// compiling on macOS / Linux.
+func rejectCMIDLibraryReparse(string) error { return nil }

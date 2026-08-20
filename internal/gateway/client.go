@@ -619,6 +619,16 @@ func (c *Client) tryAuthRepair(connectErr error) {
 //
 // hooks/.token is skipped when the hooks directory is missing (e.g.
 // connector not yet set up); that's not an error.
+//
+// T5.8 symmetry note: both writes below go through
+// managed.WriteServiceRuntimeFile with the same PinnedDeploymentMode +
+// (implicit) WindowsServiceAccountEnv lookup, so a transient unset of
+// either env produces the same failure at both call sites — surfaced
+// as the clear "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT is not set" error
+// from T3.5 rather than a divergent pair of "untrusted-owner" vs
+// "not-owned-by-caller" wrapper errors. When one call fails the other
+// is skipped, so the file pair cannot end up with a mixed old/new
+// token from a partial rotation.
 func persistRefreshedToken(dataDir, newToken string) error {
 	if err := updateEnvFileToken(filepath.Join(dataDir, ".env"), newToken); err != nil {
 		return fmt.Errorf("update .env: %w", err)

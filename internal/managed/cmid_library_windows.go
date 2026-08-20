@@ -44,3 +44,19 @@ func cmidArchDirectory() string {
 	}
 	return "x64"
 }
+
+// rejectCMIDLibraryReparse rejects any Windows reparse point (junction,
+// symbolic link, mount point) at path. The version-directory walk in
+// discoverCMIDLibraryIn calls this on each candidate directory and on
+// the final library file so an attacker who can plant a junction under
+// Program Files\Cisco cannot redirect the CMID lookup off the trusted
+// Secure Client tree.
+//
+// Note: this checks the single element at `path`, not its ancestor
+// chain. `TrustedProgramFiles()` (used by DiscoverCMIDLibrary above)
+// already anchors the walk at a known-trusted Windows root, so
+// per-element rejection is sufficient to prevent redirection into an
+// attacker-controlled subtree.
+func rejectCMIDLibraryReparse(path string) error {
+	return rejectWindowsReparsePoint(path, "cmid library")
+}

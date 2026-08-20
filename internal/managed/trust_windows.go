@@ -27,6 +27,22 @@ func ValidateTrustedConfigPath(path string) error {
 	return ValidateTrustedFilePath(path, "managed config")
 }
 
+// ValidateTrustedFilePath is the Windows counterpart of the unix
+// trust_unix.go implementation and is INTENTIONALLY NOT byte-for-byte
+// equivalent. The leaf (clean, ancestor=false) is checked with the full
+// strict write mask — same as unix — but ancestor directories are
+// checked with the narrower WindowsAncestorReplaceAccess mask (see its
+// docstring). That relaxation is load-bearing on Windows: stock OS
+// defaults grant BUILTIN\Users add-file and write-EA/attributes on
+// roots like `C:\ProgramData`, none of which lets a standard user
+// replace an existing protected leaf. Applying the leaf mask to
+// ancestors would reject every legitimate Windows install.
+//
+// Callers that need a strictly-strict ancestor check (no relaxation)
+// must build their own walk with ancestor=false at every element; no
+// caller currently does. When adding one, do NOT quietly extend this
+// function — introduce a distinct entry point so the semantic split
+// stays visible at the call site.
 func ValidateTrustedFilePath(path, label string) error {
 	if label == "" {
 		label = "managed file"
@@ -184,7 +200,11 @@ func validateTrustedWindowsPathElementWithWriter(
 		return fmt.Errorf("%s: inspect Windows owner: %w", path, err)
 	}
 	if !windowsTrustedPathOwner(owner, allowedWriter) {
-		return fmt.Errorf("%s: owner %s is not trusted for %s; expected Administrators, LocalSystem, or TrustedInstaller", path, sidString(owner), label)
+		expected := "Administrators, LocalSystem, or TrustedInstaller"
+		if allowedWriter != nil {
+			expected = fmt.Sprintf("%s, or the pinned service SID %s", expected, sidString(allowedWriter))
+		}
+		return fmt.Errorf("%s: owner %s is not trusted for %s; expected %s", path, sidString(owner), label, expected)
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
@@ -282,7 +302,19 @@ func rejectWindowsReparsePoint(path, label string) error {
 func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 	account = strings.TrimSpace(account)
 	if account == "" {
-		return nil, nil
+		// Empty account previously fell through to (nil, nil) so callers
+		// with an unset DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT ended up on
+		// the strict-admin trust path — safe in isolation, but on a
+		// managed-enterprise host the runtime tree is intentionally
+		// Administrators-owned with a service-SID writer ACE, so the
+		// strict path then fails validation with a confusing "untrusted
+		// ACE" error rather than surfacing the missing env. Every
+		// caller of WindowsServiceAccountSID / this internal helper now
+		// guards for an empty account explicitly (audit and hook-token
+		// callers already did); the internal ValidateTrustedService*
+		// entry points did not, so return a targeted error here to
+		// point operators at the true root cause.
+		return nil, fmt.Errorf("%s is not set", WindowsServiceAccountEnv)
 	}
 	const prefix = `NT SERVICE\`
 	if len(account) <= len(prefix) || !strings.EqualFold(account[:len(prefix)], prefix) {

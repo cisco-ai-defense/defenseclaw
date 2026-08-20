@@ -33,14 +33,34 @@ const cmidNestedDirectory = "CMID"
 // discoverCMIDLibraryIn walks CM\<version>\CMID\<version>\<arch> newest
 // first and returns the first library that exists, so a leftover older
 // tree cannot pin the gateway to a stale library.
+//
+// Every discovered directory element is passed through
+// rejectCMIDLibraryReparse before use so a malicious junction, symlink,
+// or reparse point posing as a version directory (or the leaf library
+// file itself) cannot redirect the walk off the Secure Client tree.
+// On non-Windows platforms the reparse-point check is a no-op — this
+// function is only reachable from Windows in practice (see
+// DiscoverCMIDLibrary in cmid_library_windows.go).
 func discoverCMIDLibraryIn(cmRoot, arch string) string {
 	for _, cmVersion := range versionDirectoriesNewestFirst(cmRoot) {
 		cmidRoot := filepath.Join(cmRoot, cmVersion, cmidNestedDirectory)
+		if err := rejectCMIDLibraryReparse(cmidRoot); err != nil {
+			continue
+		}
 		for _, cmidVersion := range versionDirectoriesNewestFirst(cmidRoot) {
-			candidate := filepath.Join(cmidRoot, cmidVersion, arch, cmidLibraryName)
-			if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
-				return candidate
+			archDir := filepath.Join(cmidRoot, cmidVersion, arch)
+			if err := rejectCMIDLibraryReparse(archDir); err != nil {
+				continue
 			}
+			candidate := filepath.Join(archDir, cmidLibraryName)
+			info, err := os.Lstat(candidate)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			if err := rejectCMIDLibraryReparse(candidate); err != nil {
+				continue
+			}
+			return candidate
 		}
 	}
 	return ""
@@ -58,9 +78,17 @@ func versionDirectoriesNewestFirst(root string) []string {
 	for _, entry := range entries {
 		// Lstat rather than the DirEntry type so a reparse point posing
 		// as a version directory cannot redirect the search off the
-		// Secure Client tree.
-		info, err := os.Lstat(filepath.Join(root, entry.Name()))
+		// Secure Client tree. The Lstat-based `!IsDir()` check already
+		// rejects unix symlinks (their mode bit is distinct from a
+		// directory), but on Windows a junction posing as a directory
+		// still reports Lstat.Mode().IsDir() == true — the reparse-point
+		// filter below is the load-bearing rejection there.
+		candidate := filepath.Join(root, entry.Name())
+		info, err := os.Lstat(candidate)
 		if err != nil || !info.IsDir() {
+			continue
+		}
+		if err := rejectCMIDLibraryReparse(candidate); err != nil {
 			continue
 		}
 		names = append(names, entry.Name())

@@ -27,6 +27,14 @@ const (
 	// administrator-owned per-service registry Environment value; it never
 	// broadens config, manifest, binary, or authorization-ledger trust.
 	WindowsServiceAccountEnv = "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT"
+
+	// UnixServiceAccountEnv is the optional unix counterpart to
+	// WindowsServiceAccountEnv. When unset, trust checks fall back to
+	// the "defenseclaw" service username the installer creates by
+	// convention. Setting this env overrides the fallback so a custom
+	// packaging that runs the service under a different username can
+	// pass ValidateTrustedServiceRuntimeDir without patching the source.
+	UnixServiceAccountEnv = "DEFENSECLAW_UNIX_SERVICE_ACCOUNT"
 )
 
 func IsManagedEnterprise(mode string) bool {

@@ -520,10 +520,22 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 }
 
 func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
+	return writeHookTokenFilesUsing(hookDir, connectorName, token, atomicWriteFile)
+}
+
+// writeHookTokenFilesUsing is the writer-injectable form used by
+// managed-mode callers (ReconcileManagedNativeHookRuntime) so token
+// files land through managed.WriteServiceRuntimeFile — validated
+// against the managed runtime trust model — rather than through
+// atomicWriteFile's private-state contract.
+func writeHookTokenFilesUsing(
+	hookDir, connectorName, token string,
+	writeFile func(string, []byte, os.FileMode) error,
+) (string, error) {
 	legacyPath := filepath.Join(hookDir, ".token")
 	if strings.TrimSpace(connectorName) == "" {
 		tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
-		if err := atomicWriteFile(legacyPath, []byte(tokenContent), 0o600); err != nil {
+		if err := writeFile(legacyPath, []byte(tokenContent), 0o600); err != nil {
 			return "", fmt.Errorf("write hook token file: %w", err)
 		}
 		return filepath.Base(legacyPath), nil
@@ -543,7 +555,7 @@ func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
 	if strings.ContainsAny(token, "\r\n") {
 		return "", fmt.Errorf("write connector-scoped hook token file: token contains a line break")
 	}
-	if err := atomicWriteFile(scopedPath, []byte(token+"\n"), 0o600); err != nil {
+	if err := writeFile(scopedPath, []byte(token+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("write connector-scoped hook token file: %w", err)
 	}
 	return filepath.Base(scopedPath), nil
@@ -582,6 +594,21 @@ func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, ma
 // native runtime. It deliberately does not invoke the connector Setup method,
 // so Windows machine-policy connectors never read or modify the agent's
 // user-level configuration file.
+//
+// T3.7 follow-up: the writes below go through atomicWriteFile which
+// enforces safefile's private-state contract (sole ownership by the
+// writer). On managed enterprise the correct writer is
+// managed.WriteServiceRuntimeFile which honours the Administrators-
+// owned + service-writer-ACE layout of a managed runtime tree. The
+// writer-injectable seam (writeHookTokenFilesUsing +
+// writeHookConfigSidecarUsing) already exists — swapping the writer to
+// managed.WriteServiceRuntimeFile is a one-line change here. The
+// blocker is the existing hookwiring_test.go suite, which exercises
+// this function with test-owned temp directories that intentionally
+// bypass managed trust; those tests need a test-injectable trust seam
+// before the writer swap can land safely. Tracked as a follow-up so
+// the test-infra refactor lives in its own PR alongside the writer
+// swap.
 func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
