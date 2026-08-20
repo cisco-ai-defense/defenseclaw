@@ -98,9 +98,9 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 	return payloads
 }
 
-// CurlTransmittedMetadata keeps HTTP headers, HTTP internal-auth operands, and
-// FTP origin credentials distinct so callers can bind each kind to only the
-// URL schemes where curl transmits it.
+// CurlTransmittedMetadata keeps HTTP headers, HTTP internal-auth operands,
+// FTP origin credentials, and exact-target request bytes distinct so callers
+// can bind each kind to only the URL schemes where curl transmits it.
 type CurlTransmittedMetadata struct {
 	Headers               []string
 	HTTPOriginCredentials []string
@@ -121,11 +121,12 @@ type TransmittedRequestComponent struct {
 
 // StaticCurlTransmittedMetadata returns literal request-metadata operands that
 // a complete curl command uses for origin-bound transmission. Only
-// parser-owned custom headers and origin credentials are exposed. Header
-// files, peer-changing controls, and multiple --next groups are deliberately
-// excluded because the argv alone cannot bind their effective bytes to one
-// network peer. As elsewhere in the POSIX web-transfer parser, this proof uses
-// the package's standard argv-only assumption for ambient curl configuration.
+// parser-owned custom headers, origin credentials, bounded URL components,
+// and literal cookies are exposed. Header files, peer-changing controls, and
+// multiple --next groups are deliberately excluded because the argv alone
+// cannot bind their effective bytes to one network peer. As elsewhere in the
+// POSIX web-transfer parser, this proof uses the package's standard argv-only
+// assumption for ambient curl configuration.
 func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata {
 	if !command.ArgvComplete || !isCurlProgram(command.Program) ||
 		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
@@ -184,11 +185,14 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 
 	metadata := CurlTransmittedMetadata{}
 	httpAuthorizationOverridden := false
+	httpCookieOverridden := false
 	finalUser := ""
 	finalBearer := ""
+	var literalCookies []string
 	for index, option := range parsed.Options {
 		if !option.ValuePresent ||
 			(option.Canonical != "--header" &&
+				option.Canonical != "--cookie" &&
 				(option.Canonical != "--user" || index != lastUser) &&
 				(option.Canonical != "--oauth2-bearer" || index != lastBearer)) {
 			continue
@@ -209,15 +213,23 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		case "--header":
 			if strings.HasPrefix(option.Value, "@") {
 				httpAuthorizationOverridden = true
+				httpCookieOverridden = true
 				continue
 			}
 			if curlHeaderOverridesHTTPAuthorization(option.Value) {
 				httpAuthorizationOverridden = true
 			}
+			if curlHeaderOverridesHTTPCookie(option.Value) {
+				httpCookieOverridden = true
+			}
 			if !curlStaticHTTPHeaderIsTransmitted(option.Value) {
 				continue
 			}
 			metadata.Headers = append(metadata.Headers, option.Value)
+		case "--cookie":
+			if curlCookieBytesPreserved(option.Value) {
+				literalCookies = append(literalCookies, option.Value)
+			}
 		case "--user":
 			finalUser = option.Value
 		case "--oauth2-bearer":
@@ -249,6 +261,14 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 				Scheme: network.Scheme,
 				Host:   network.Host,
 				Port:   network.Port,
+			}
+		}
+		if !httpCookieOverridden {
+			for _, cookie := range literalCookies {
+				metadata.HTTPRequestComponents = append(
+					metadata.HTTPRequestComponents,
+					component(cookie),
+				)
 			}
 		}
 		if lastRequestTarget >= 0 {
@@ -369,6 +389,23 @@ func curlURLPathBytesPreserved(value string) bool {
 	return true
 }
 
+func curlCookieBytesPreserved(value string) bool {
+	if strings.IndexByte(value, '=') <= 0 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			strings.ContainsRune("-._~=", rune(character)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func curlStaticHTTPHeaderIsTransmitted(value string) bool {
 	if value == "" || strings.IndexByte(value, 0) >= 0 {
 		return false
@@ -392,6 +429,11 @@ func curlStaticHTTPHeaderIsTransmitted(value string) bool {
 func curlHeaderOverridesHTTPAuthorization(value string) bool {
 	separator := strings.IndexAny(value, ":;")
 	return separator >= 0 && strings.EqualFold(value[:separator], "authorization")
+}
+
+func curlHeaderOverridesHTTPCookie(value string) bool {
+	separator := strings.IndexAny(value, ":;")
+	return separator >= 0 && strings.EqualFold(value[:separator], "cookie")
 }
 
 // WgetTransmittedMetadata keeps protocol-specific metadata lanes separate so
@@ -489,18 +531,27 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 		if !ok || network.Scheme != "http" && network.Scheme != "https" {
 			continue
 		}
+		component := func(value string) TransmittedRequestComponent {
+			return TransmittedRequestComponent{
+				Value:  value,
+				Scheme: network.Scheme,
+				Host:   network.Host,
+				Port:   network.Port,
+			}
+		}
+		if path := rawHTTPURLPath(target.Value); wgetURLPathBytesPreserved(path) {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(path),
+			)
+		}
 		query := rawURLQuery(target.Value)
 		if query == "" || !wgetQueryBytesPreserved(query) {
 			continue
 		}
 		metadata.HTTPRequestComponents = append(
 			metadata.HTTPRequestComponents,
-			TransmittedRequestComponent{
-				Value:  query,
-				Scheme: network.Scheme,
-				Host:   network.Host,
-				Port:   network.Port,
-			},
+			component(query),
 		)
 	}
 
@@ -586,6 +637,10 @@ func wgetQueryBytesPreserved(value string) bool {
 		return false
 	}
 	return true
+}
+
+func wgetURLPathBytesPreserved(value string) bool {
+	return !strings.Contains(value, "//") && curlURLPathBytesPreserved(value)
 }
 
 func wgetTargetHasUserinfo(value string) bool {

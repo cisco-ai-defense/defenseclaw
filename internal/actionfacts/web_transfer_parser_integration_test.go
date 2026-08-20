@@ -123,6 +123,88 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			checkRequestComponents:    true,
 		},
 		{
+			name: "literal cookie", argv: []string{
+				"curl", "--cookie", "session=" + token,
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"session="+token, "/safe",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "joined literal cookie", argv: []string{
+				"curl", "-bsession=" + token,
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"session="+token, "/safe",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "repeated literal cookies are additive", argv: []string{
+				"curl", "--cookie", "first=" + token,
+				"--cookie", "second=fixture", "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"first="+token, "second=fixture", "/safe",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "cookie file excluded", argv: []string{
+				"curl", "--cookie", "/tmp/" + token,
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "custom cookie header suppresses cookie option", argv: []string{
+				"curl", "--cookie", "session=" + token,
+				"--header", "Cookie: session=fixture",
+				"https://sink.example/safe",
+			},
+			wantHeaders:               []string{"Cookie: session=fixture"},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "custom cookie header suppresses later cookie option", argv: []string{
+				"curl", "--header", "Cookie: session=fixture",
+				"--cookie", "session=" + token,
+				"https://sink.example/safe",
+			},
+			wantHeaders:               []string{"Cookie: session=fixture"},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "header file makes cookie option uncertain", argv: []string{
+				"curl", "--cookie", "session=" + token,
+				"--header", "@/tmp/headers", "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "expanding cookie excluded", argv: []string{
+				"curl", "--cookie", "session=" + token,
+				"https://sink.example/safe",
+			},
+			expandIndex:            2,
+			checkRequestComponents: true,
+		},
+		{
+			name: "ambiguous cookie grammar excluded", argv: []string{
+				"curl", "--cookie", "session=" + token + "; other=fixture",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
 			name: "dot segment URL path excluded", argv: []string{
 				"curl", "https://sink.example/safe/../" + token,
 			},
@@ -594,6 +676,7 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 		wantHTTPOriginCredentials []string
 		wantFTPOriginCredentials  []string
 		wantHTTPRequestComponents []TransmittedRequestComponent
+		checkRequestComponents    bool
 	}{
 		{
 			name: "literal HTTP URL query", argv: []string{
@@ -601,37 +684,106 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPRequestComponents: []TransmittedRequestComponent{
 				{
+					Value:  "/search",
+					Scheme: "https",
+					Host:   "sink.example",
+				},
+				{
 					Value:  "credential=" + token,
 					Scheme: "https",
 					Host:   "sink.example",
 				},
 			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "literal HTTP URL path", argv: []string{
+				"wget", "https://sink.example/secrets/" + token,
+			},
+			wantHTTPRequestComponents: []TransmittedRequestComponent{
+				{
+					Value:  "/secrets/" + token,
+					Scheme: "https",
+					Host:   "sink.example",
+				},
+			},
+			checkRequestComponents: true,
 		},
 		{
 			name: "URL fragment excluded", argv: []string{
 				"wget", "https://sink.example/search#" + token,
 			},
+			wantHTTPRequestComponents: []TransmittedRequestComponent{
+				{
+					Value:  "/search",
+					Scheme: "https",
+					Host:   "sink.example",
+				},
+			},
+			checkRequestComponents: true,
 		},
 		{
 			name: "FTP URL query excluded", argv: []string{
 				"wget", "ftp://sink.example/search?credential=" + token,
 			},
+			checkRequestComponents: true,
 		},
 		{
 			name: "expanding URL query excluded", argv: []string{
 				"wget", "https://sink.example/search?credential=" + token,
 			},
-			expandIndex: 1,
+			expandIndex:            1,
+			checkRequestComponents: true,
 		},
 		{
 			name: "non-ASCII URL query excluded", argv: []string{
 				"wget", "https://sink.example/search?credential=" + token + "é",
 			},
+			wantHTTPRequestComponents: []TransmittedRequestComponent{
+				{
+					Value:  "/search",
+					Scheme: "https",
+					Host:   "sink.example",
+				},
+			},
+			checkRequestComponents: true,
 		},
 		{
 			name: "encoded Wget URL query punctuation excluded", argv: []string{
 				"wget", `https://sink.example/search?credential=BACK\` + token,
 			},
+			wantHTTPRequestComponents: []TransmittedRequestComponent{
+				{
+					Value:  "/search",
+					Scheme: "https",
+					Host:   "sink.example",
+				},
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "dot segment URL path excluded", argv: []string{
+				"wget", "https://sink.example/safe/../" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "percent URL path excluded", argv: []string{
+				"wget", "https://sink.example/secrets/%41" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "backslash URL path excluded", argv: []string{
+				"wget", `https://sink.example/secrets/\` + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "repeated empty URL path segment excluded", argv: []string{
+				"wget", "https://sink.example/secrets//" + token,
+			},
+			checkRequestComponents: true,
 		},
 		{
 			name: "literal custom header", argv: []string{
@@ -857,7 +1009,7 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 				) || !slices.Equal(
 				got.FTPOriginCredentials,
 				test.wantFTPOriginCredentials,
-			) || !slices.Equal(
+			) || test.checkRequestComponents && !slices.Equal(
 				got.HTTPRequestComponents,
 				test.wantHTTPRequestComponents,
 			) {

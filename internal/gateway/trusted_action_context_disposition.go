@@ -369,7 +369,7 @@ func trustedActionContentFindingHasRiskPair(
 				*rule,
 				wgetMetadata.FTPOriginCredentials,
 			)
-		wgetQueryEgress :=
+		wgetRequestComponentEgress :=
 			trustedActionContentRuleMatchesExternalRequestComponents(
 				facts,
 				*rule,
@@ -379,7 +379,7 @@ func trustedActionContentFindingHasRiskPair(
 		if httpMetadataEgress || ftpOriginAuthEgress ||
 			curlRequestComponentEgress ||
 			wgetHTTPMetadataEgress || wgetFTPOriginAuthEgress ||
-			wgetQueryEgress {
+			wgetRequestComponentEgress {
 			return true
 		}
 		if trustedActionStaticContentPipesToExternalEgress(
