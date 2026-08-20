@@ -579,8 +579,30 @@ func trustedActionStaticPrintfEmitsRuleMatch(
 	rule PatternRule,
 	command actionfacts.CommandFact,
 ) bool {
+	for _, segment := range actionfacts.StaticPOSIXPrintfFormatStdoutSegments(command) {
+		if trustedActionRuleMatchesStaticOutputSegment(rule, segment) {
+			return true
+		}
+	}
 	return len(command.Redirects) == 0 &&
 		trustedActionStaticPrintfArgumentMatchesRule(rule, command)
+}
+
+func trustedActionRuleMatchesStaticOutputSegment(
+	rule PatternRule,
+	segment actionfacts.StaticOutputSegment,
+) bool {
+	return firstAcceptedRegexMatchAt(
+		rule.Pattern,
+		segment.Value,
+		func(match string, start, end int) bool {
+			if start == 0 && !segment.LeftExact ||
+				end == len(segment.Value) && !segment.RightExact {
+				return false
+			}
+			return acceptedRuleMatchAt(rule.ID, segment.Value, match, start, end)
+		},
+	) != nil
 }
 
 func trustedActionStaticPrintfArgumentMatchesRule(
