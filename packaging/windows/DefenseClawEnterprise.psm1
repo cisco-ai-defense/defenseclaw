@@ -6173,33 +6173,57 @@ function Start-DefenseClawTransactionServices {
     # an existing enumerator, the Restore call above has already put it
     # back to its recorded start mode — the block below just brings it
     # LIVE if the recorded posture had it running.
+    #
+    # Edge case (CR PRRT_kwDORuAK-s6au6lY): a snapshot with
+    # `running=true, start_mode=4` (running-while-disabled — legal
+    # in Windows: sc.exe config can change start mode without
+    # stopping the process) must ROUND-TRIP back to running-while-
+    # disabled after rollback. Set-DefenseClawServiceStartMode 4
+    # doesn't stop the process; but Start-DefenseClawService on a
+    # disabled service throws. So the sequence is:
+    #   1. Temporarily set demand-start (mode 3).
+    #   2. Start-Service.
+    #   3. Set disabled (mode 4) — SCM allows this while running.
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     $enumeratorState = $states[$enumeratorServiceName]
     $enumeratorService = Microsoft.PowerShell.Management\Get-Service `
         -Name $enumeratorServiceName `
         -ErrorAction SilentlyContinue
     if ($null -ne $enumeratorService) {
-        $enumeratorStartMode = if ($null -ne $enumeratorState -and [bool]$enumeratorState.existed) {
+        $enumeratorRecordedExisted = $null -ne $enumeratorState -and [bool]$enumeratorState.existed
+        $enumeratorTargetStartMode = if ($enumeratorRecordedExisted) {
             [int]$enumeratorState.start_mode
         }
         else {
             # Fresh install: promote to auto-start.
             2
         }
-        Set-DefenseClawServiceStartMode `
-            -Name $enumeratorServiceName `
-            -StartMode $enumeratorStartMode
-        # Start only if the recorded posture had it running OR
-        # this is a fresh install (existed=false → we just
-        # promoted it to auto-start above and want it live now).
-        $enumeratorShouldRun = if ($null -eq $enumeratorState -or -not [bool]$enumeratorState.existed) {
+        # `should run` = recorded-running OR fresh install (we just
+        # created the service and want it live now).
+        $enumeratorShouldRun = if (-not $enumeratorRecordedExisted) {
             $true
         }
         else {
             [bool]$enumeratorState.running
         }
-        if ($enumeratorShouldRun -and $enumeratorStartMode -in @(2, 3)) {
+        if ($enumeratorShouldRun -and $enumeratorTargetStartMode -eq 4) {
+            # Running-while-disabled round-trip: demand-start,
+            # start, disable while running.
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode 3
             Start-DefenseClawService -Name $enumeratorServiceName
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode 4
+        }
+        else {
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode $enumeratorTargetStartMode
+            if ($enumeratorShouldRun -and $enumeratorTargetStartMode -in @(2, 3)) {
+                Start-DefenseClawService -Name $enumeratorServiceName
+            }
         }
     }
 }
@@ -11608,6 +11632,18 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Name $GatewayServiceName `
                 -StartMode 3
             Start-DefenseClawService -Name $GatewayServiceName
+            # Spec 005 D1 (CR PRRT_kwDORuAK-s6au6lZ): the enumerator
+            # must be demand-started + RUNNING before the pending-state
+            # assertion below, which requires every managed service to
+            # be StartMode 3 AND (via -RequireReadiness below) the
+            # enumerator SCM process to be Running. Promotion to
+            # StartMode 2 happens later alongside gateway + guardian
+            # only after full readiness succeeds.
+            $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode 3
+            Start-DefenseClawService -Name $enumeratorServiceName
             Assert-DefenseClawManagedServiceConfigurations `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
@@ -11634,19 +11670,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
                 -StartMode 2
-            # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): promote the
-            # enumerator to auto-start and START IT. Without this,
-            # Set-DefenseClawManagedServices leaves the enumerator at
-            # `disabled` after creation and it never runs — new user
-            # profiles would never be picked up, defeating the whole
-            # point of the workstream. Enumerator starts LAST because
-            # its first tick depends on config.yaml + targets.yaml
-            # provisioning that gateway + guardian activation ensures.
-            $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+            # Spec 005 D1: promote the (already-running) enumerator
+            # from demand-start to auto-start now that readiness has
+            # been proven. Without this, boot would leave the
+            # enumerator disabled and new user profiles would never
+            # get picked up.
             Set-DefenseClawServiceStartMode `
                 -Name $enumeratorServiceName `
                 -StartMode 2
-            Start-DefenseClawService -Name $enumeratorServiceName
             Assert-DefenseClawEnterpriseDeployment `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
