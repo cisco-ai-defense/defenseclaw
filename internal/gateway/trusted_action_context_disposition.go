@@ -348,7 +348,38 @@ func trustedActionContentFindingHasRiskPair(
 				*rule,
 				metadata.FTPOriginCredentials,
 			)
-		if httpMetadataEgress || ftpOriginAuthEgress {
+		curlRequestComponentEgress :=
+			trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				metadata.HTTPRequestComponents,
+			)
+		wgetMetadata := actionfacts.StaticWgetTransmittedMetadata(command)
+		wgetHTTPMetadataEgress := httpEgress &&
+			(trustedActionContentRuleMatchesParsedCandidates(
+				*rule,
+				wgetMetadata.HTTPHeaders,
+			) || trustedActionContentRuleMatchesParsedCandidates(
+				*rule,
+				wgetMetadata.HTTPOriginCredentials,
+			))
+		wgetFTPOriginAuthEgress := ftpEgress &&
+			trustedActionContentRuleMatchesParsedCandidates(
+				*rule,
+				wgetMetadata.FTPOriginCredentials,
+			)
+		wgetQueryEgress :=
+			trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				wgetMetadata.HTTPRequestComponents,
+			)
+		if httpMetadataEgress || ftpOriginAuthEgress ||
+			curlRequestComponentEgress ||
+			wgetHTTPMetadataEgress || wgetFTPOriginAuthEgress ||
+			wgetQueryEgress {
 			return true
 		}
 		if trustedActionStaticContentPipesToExternalEgress(
@@ -549,6 +580,31 @@ func trustedActionContentRuleMatchesParsedCandidates(
 	for _, candidate := range candidates {
 		if firstAcceptedRuleMatch(rule, candidate) != nil {
 			return true
+		}
+	}
+	return false
+}
+
+func trustedActionContentRuleMatchesExternalRequestComponents(
+	facts actionfacts.Facts,
+	rule PatternRule,
+	commandID int64,
+	queries []actionfacts.TransmittedRequestComponent,
+) bool {
+	for _, query := range queries {
+		if firstAcceptedRuleMatch(rule, query.Value) == nil {
+			continue
+		}
+		for _, network := range facts.Network {
+			if network.CommandID == commandID && isExternalNetwork(network) &&
+				networkActionIn(
+					network.Action,
+					actionfacts.NetworkDownload,
+					actionfacts.NetworkUpload,
+				) && strings.EqualFold(network.Scheme, query.Scheme) &&
+				network.Host == query.Host && network.Port == query.Port {
+				return true
+			}
 		}
 	}
 	return false

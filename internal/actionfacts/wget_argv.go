@@ -30,6 +30,11 @@ type wgetArgvValue struct {
 	Joined      bool
 }
 
+type wgetArgvTarget struct {
+	Value     string
+	ArgvIndex int
+}
+
 type wgetRequestBodyIssue string
 
 const (
@@ -51,7 +56,10 @@ type wgetArgvParse struct {
 	Complete bool
 
 	Targets []string
-	Values  []wgetArgvValue
+	// TargetValues retains argv identity for consumers that need to prove
+	// exact target-bound request bytes without re-parsing option ownership.
+	TargetValues []wgetArgvTarget
+	Values       []wgetArgvValue
 
 	OutputSet    bool
 	Output       string
@@ -341,6 +349,10 @@ func parseWgetArgv(argv []string) wgetArgvParse {
 		}
 		if !options || argument == "-" || !strings.HasPrefix(argument, "-") {
 			parsed.Targets = append(parsed.Targets, argument)
+			parsed.TargetValues = append(parsed.TargetValues, wgetArgvTarget{
+				Value:     argument,
+				ArgvIndex: index,
+			})
 			continue
 		}
 
@@ -874,7 +886,7 @@ func validWgetHeader(value string) bool {
 	if value == "" {
 		return true
 	}
-	if strings.ContainsAny(value, "\r\n") {
+	if strings.ContainsAny(value, "\x00\r\n") {
 		return false
 	}
 	name, _, found := strings.Cut(value, ":")
