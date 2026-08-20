@@ -156,6 +156,16 @@ type HealthSnapshot struct {
 	// serves the DefenseClaw ↔ AVC contract. Present only when the
 	// server has been started (managed_enterprise or managed.enabled).
 	Managed *SubsystemHealth `json:"managed,omitempty"`
+	// Enumerator reports the DefenseClawHookEnumerator SCM service's
+	// interval-loop state (spec 005 Workstream D). Present only on
+	// Windows managed_enterprise where the enumerator service runs.
+	// The three-state signal (`starting` / `running` / `error`) lets
+	// operators see whether new user profiles will actually get
+	// picked up on the next tick, distinct from the guardian's own
+	// health (guardian may be READY while enumerator is ERROR — the
+	// existing on-disk targets.yaml still drives reconciles, but new
+	// users won't appear until the enumerator recovers).
+	Enumerator *SubsystemHealth `json:"enumerator,omitempty"`
 	// Connector is the primary/active connector, retained for back-compat
 	// with single-connector clients. Connectors lists every active
 	// connector with its own live counters (multi-connector view).
@@ -184,6 +194,12 @@ type SidecarHealth struct {
 	observabilityV8EventHistoryGeneration uint64
 	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
 	managed                               *SubsystemHealth
+	// enumerator tracks the DefenseClawHookEnumerator SCM service
+	// (spec 005 Workstream D). Nil until SetEnumerator is called at
+	// least once — a nil pointer omits the "enumerator" block from
+	// the snapshot, which is the correct behaviour for every
+	// deployment mode other than managed_enterprise on Windows.
+	enumerator *SubsystemHealth
 
 	// configuration is the collapsed daemon+guardian state (spec 003).
 	// Nil until SetDaemonConfigLoaded is called at least once — a
@@ -925,6 +941,89 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 	h.notifySubscribers()
 }
 
+// SetEnumerator records the current state of the
+// DefenseClawHookEnumerator SCM service's interval loop (spec 005
+// Workstream D). Called from the enumerator CLI subcommand as it
+// moves through:
+//
+//   - Starting: service just booted, initial-cycle-delay running.
+//   - Running:  first successful cycle emitted; subsequent ticks
+//     replace this with the same Running state so the LastError
+//     field clears.
+//   - Error:    a cycle failed (registry unreadable, atomic-replace
+//     failed, YAML marshal error). LastError carries the specific
+//     reason. The interval loop keeps ticking; the state flips back
+//     to Running on the next successful cycle.
+//
+// Nil-safe: the enumerator subcommand may run standalone
+// (`--once` from an installer shell-out) with no SidecarHealth
+// wired; in that case the caller passes a nil *SidecarHealth
+// receiver and this method is a no-op via the Go zero-value
+// method-call semantics (receiver is a pointer, so a nil check up
+// front is enough).
+//
+// `details` is DEEP-COPIED before storage. A caller retaining a
+// reference to the input map cannot mutate the stored subsystem
+// health after the call returns — Snapshot() then serves an equally
+// independent copy so a JSON marshal path and a live setter cannot
+// race on the same map. See CR spec-005:PRRT_kwDORuAK-s6atyfQ.
+func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, details map[string]interface{}) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.enumerator = &SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   cloneSubsystemDetails(details),
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// cloneSubsystemDetails is a shallow-deep hybrid: the top-level map
+// is copied; each value is copied by re-boxing (values are
+// primitives + occasional nested map[string]interface{}). Recurses
+// one level for nested maps — enough for the shapes SetEnumerator
+// callers pass today (cycle_count, elapsed_ms, error_reason,
+// last_success). Callers that need deeper nesting can extend the
+// recursion; the current contract keeps details flat.
+//
+// Returns nil for a nil input so the stored SubsystemHealth.Details
+// carries the same zero-value semantics — a Snapshot consumer sees
+// `"details": null` in JSON only when the caller explicitly wanted
+// that, not because of an internal allocation.
+func cloneSubsystemDetails(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		if nested, ok := v.(map[string]interface{}); ok {
+			out[k] = cloneSubsystemDetails(nested)
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// cloneSubsystemHealth deep-copies a *SubsystemHealth pointer so
+// Snapshot() consumers cannot mutate internal state by holding onto
+// the returned pointer's fields. Returns nil for a nil input.
+func cloneSubsystemHealth(in *SubsystemHealth) *SubsystemHealth {
+	if in == nil {
+		return nil
+	}
+	return &SubsystemHealth{
+		State:     in.State,
+		Since:     in.Since,
+		LastError: in.LastError,
+		Details:   cloneSubsystemDetails(in.Details),
+	}
+}
+
 // Subscribe returns a channel that receives a non-blocking notification
 // (a single struct{} value, buffered depth 1) after every Set* call.
 // Consumers coalesce multiple rapid changes naturally: the channel
@@ -1129,6 +1228,10 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		ApplicationProtection: h.applicationProtection,
 		Sandbox:               h.sandbox,
 		Managed:               h.managed,
+		// Enumerator is deep-cloned so a caller mutating the returned
+		// pointer's Details map cannot race with a concurrent
+		// SetEnumerator. See CR spec-005:PRRT_kwDORuAK-s6atyfQ.
+		Enumerator: cloneSubsystemHealth(h.enumerator),
 	}
 	// Deep-copy the configuration pointer under the read lock so a
 	// caller mutating the returned snapshot cannot race with a Set*

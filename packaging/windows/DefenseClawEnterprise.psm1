@@ -1219,6 +1219,31 @@ function Assert-DefenseClawServiceName {
     }
 }
 
+# Get-DefenseClawEnumeratorServiceName derives the third-service SCM
+# name from the guardian's, matching the same production /
+# certification-run-ID discipline the existing gateway + guardian
+# names already carry (Get-DefenseClawLayout enforces those two).
+#
+# Production: `DefenseClawHookGuardian` → `DefenseClawHookEnumerator`.
+# Certification: `DefenseClawCertGuardian_<10hex>` → `DefenseClawCertEnumerator_<10hex>`.
+#
+# Kept as a derivation rather than a separate parameter across the
+# ~230 GuardianServiceName call-sites so the enumerator's name is
+# always in lockstep with the guardian's. Every caller that today
+# passes `-GuardianServiceName` gets the enumerator name for free
+# via this helper — no threading required. See spec 005 D1.
+function Get-DefenseClawEnumeratorServiceName {
+    param([Parameter(Mandatory)][string]$GuardianServiceName)
+    Assert-DefenseClawServiceName -Name $GuardianServiceName
+    if ($GuardianServiceName -ceq 'DefenseClawHookGuardian') {
+        return 'DefenseClawHookEnumerator'
+    }
+    if ($GuardianServiceName -cmatch '^DefenseClawCertGuardian_([a-f0-9]{10})$') {
+        return "DefenseClawCertEnumerator_$($Matches[1])"
+    }
+    throw "cannot derive enumerator service name from unexpected guardian name: $GuardianServiceName"
+}
+
 function Resolve-DefenseClawCertificationCodexHome {
     param(
         [string]$Path,
@@ -3018,9 +3043,20 @@ function Set-DefenseClawManagedServices {
     )
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    Assert-DefenseClawServiceName -Name $enumeratorServiceName
     $gatewayAccount = "NT SERVICE\$GatewayServiceName"
     $gatewayImage = '"{0}"' -f $GatewayPath
     $guardianImage = '"{0}" enterprise hooks watch --manifest "{1}" --interval 1m' -f $GatewayPath, $ManifestPath
+    # Spec 005 D1: third SCM service reuses the gateway binary, invoked
+    # with the `enterprise windows enumerate` subcommand. Runs as
+    # LocalSystem with the same privilege set as the guardian (needs
+    # SeImpersonatePrivilege to walk per-user profile trees; SeBackupPrivilege
+    # / SeRestorePrivilege for cross-user ACL work); SidType unrestricted so
+    # the virtual NT SERVICE\<name> SID is available for future DACL work
+    # without shipping a fourth ACE today (targets.yaml's existing AdminFile
+    # ACL grants SYSTEM full-control, which covers LocalSystem writes).
+    $enumeratorImage = '"{0}" enterprise windows enumerate --manifest "{1}" --interval 5m' -f $GatewayPath, $ManifestPath
     # Transaction-created or reconfigured services remain disabled while
     # protected state and binaries are being mutated. Demand start is not
     # sufficient: SCM may still execute an already queued failure restart.
@@ -3080,9 +3116,50 @@ function Set-DefenseClawManagedServices {
     Assert-DefenseClawServiceImagePath `
         -Name $GuardianServiceName `
         -ExpectedImage $guardianImage
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfV): authenticate an
+    # existing enumerator BEFORE reconfiguring it, mirroring the
+    # ownership check the uninstall path already does. Without this,
+    # a foreign process that pre-registered a service with the exact
+    # DefenseClawHookEnumerator name would have its ImagePath +
+    # ObjectName silently rewritten. Assert-DefenseClawOwnedService-
+    # OrAbsent refuses foreign ownership; a matching or absent
+    # service proceeds through the create-or-config branch below.
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $enumeratorServiceName `
+        -ExpectedGatewayPath $GatewayPath `
+        -ExpectedManifestPath $ManifestPath `
+        -Enumerator
+    if (Test-DefenseClawServiceExists -Name $enumeratorServiceName) {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+            'config', $enumeratorServiceName,
+            'binPath=', $enumeratorImage,
+            'type=', 'own',
+            'start=', $configuredStart,
+            'error=', 'normal',
+            'depend=', '/',
+            'obj=', 'LocalSystem',
+            'DisplayName=', 'DefenseClaw Enterprise Hook Enumerator'
+        ))
+    }
+    else {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+            'create', $enumeratorServiceName,
+            'binPath=', $enumeratorImage,
+            'type=', 'own',
+            'start=', $configuredStart,
+            'error=', 'normal',
+            'depend=', '/',
+            'obj=', 'LocalSystem',
+            'DisplayName=', 'DefenseClaw Enterprise Hook Enumerator'
+        ))
+    }
+    Assert-DefenseClawServiceImagePath `
+        -Name $enumeratorServiceName `
+        -ExpectedImage $enumeratorImage
 
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GatewayServiceName, 'restricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GuardianServiceName, 'unrestricted'))
+    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $enumeratorServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $GatewayServiceName, 'SeChangeNotifyPrivilege'
     ))
@@ -3090,7 +3167,11 @@ function Set-DefenseClawManagedServices {
         'privs', $GuardianServiceName,
         'SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege'
     ))
-    foreach ($service in @($GatewayServiceName, $GuardianServiceName)) {
+    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+        'privs', $enumeratorServiceName,
+        'SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege'
+    ))
+    foreach ($service in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'failure', $service,
             'reset=', '86400',
@@ -3120,6 +3201,21 @@ function Set-DefenseClawManagedServices {
         -CodexTrustedHookLauncherVerified:$CodexTrustedHookLauncherVerified
     Set-DefenseClawServiceEnvironment `
         -Name $GuardianServiceName `
+        -RuntimeDirectory $RuntimeDirectory `
+        -ConfigPath $ConfigPath `
+        -AuthorizationDirectory $AuthorizationDirectory `
+        -GatewayServiceName $GatewayServiceName `
+        -LogPath $GuardianLogPath `
+        -AgentApplicationControlAttested:$AgentApplicationControlAttested `
+        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified `
+        -CodexTrustedHookLauncherVerified:$CodexTrustedHookLauncherVerified
+    # Spec 005 D1: the enumerator shares the guardian's log directory
+    # via GuardianLogPath — one hook-guardian log surface holds every
+    # guardian + enumerator line, matching macOS's shared
+    # hook-enumerator.log convention. A follow-up may split the paths
+    # if operator log-scraping needs separate surfaces.
+    Set-DefenseClawServiceEnvironment `
+        -Name $enumeratorServiceName `
         -RuntimeDirectory $RuntimeDirectory `
         -ConfigPath $ConfigPath `
         -AuthorizationDirectory $AuthorizationDirectory `
@@ -3358,6 +3454,16 @@ function Get-DefenseClawTransactionServiceStates {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName
     )
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): derive the enumerator's
+    # service name from the guardian's — same shape as the
+    # transaction-open snapshot builder above. Transaction snapshots
+    # written by pre-spec-005 psm1 versions have only 2 services;
+    # loading such a snapshot on a post-spec-005 host is expected
+    # during an upgrade window, so the "missing enumerator state"
+    # check below is a WARN (rather than throw) that treats the
+    # enumerator as absent. Post-upgrade transactions always carry
+    # all 3.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     $states = @{}
     foreach ($service in @($Services)) {
         $nameProperty = $service.PSObject.Properties['name']
@@ -3370,7 +3476,8 @@ function Get-DefenseClawTransactionServiceStates {
         $name = [string]$nameProperty.Value
         $canonicalName = @(
             $GatewayServiceName,
-            $GuardianServiceName
+            $GuardianServiceName,
+            $enumeratorServiceName
         ) | Microsoft.PowerShell.Core\Where-Object {
             [string]::Equals(
                 $_,
@@ -3397,6 +3504,26 @@ function Get-DefenseClawTransactionServiceStates {
             throw "transaction is missing service state for $name"
         }
     }
+    # Enumerator is spec-005-new. A pre-spec-005 transaction snapshot
+    # will not carry it; synthesise an "absent" entry so callers
+    # (Restore-DefenseClawTransactionServiceStartModes) can iterate
+    # all three service names uniformly. Post-spec-005 snapshots
+    # always contain the entry, and Get-DefenseClawTransactionService-
+    # StartMode's absence guard already rejects a running-but-absent
+    # combination.
+    if (-not $states.ContainsKey($enumeratorServiceName)) {
+        $states[$enumeratorServiceName] = [pscustomobject]@{
+            service = [pscustomobject]@{
+                name = $enumeratorServiceName
+                existed = $false
+                running = $false
+                start_mode = 0
+            }
+            existed = $false
+            running = $false
+            start_mode = 0
+        }
+    }
     return $states
 }
 
@@ -3410,12 +3537,19 @@ function Restore-DefenseClawTransactionServiceStartModes {
         -Services $Services `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
-    # Activate the guardian's recorded boot policy first. A power loss during
-    # this sequence can therefore never leave the gateway automatic while the
-    # guardian is still demand-start because of this transaction.
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName)) {
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): restore the enumerator's
+    # recorded start mode too, so a rollback returns all three
+    # services to their pre-transaction posture. Order: guardian →
+    # gateway (existing, preserves the boot-safety invariant that
+    # gateway cannot be automatic while guardian is demand-start)
+    # → enumerator LAST because enumerator's readiness depends on
+    # gateway + guardian being back to their target boot mode; a
+    # crash mid-restore leaves enumerator disabled which is a safe
+    # posture (no targets.yaml writes until the next transaction).
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    foreach ($name in @($GuardianServiceName, $GatewayServiceName, $enumeratorServiceName)) {
         $state = $states[$name]
-        if ([bool]$state.existed) {
+        if ($null -ne $state -and [bool]$state.existed) {
             Set-DefenseClawServiceStartMode `
                 -Name $name `
                 -StartMode ([int]$state.start_mode)
@@ -4187,8 +4321,17 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$ExpectedGatewayPath,
         [string]$ExpectedManifestPath,
-        [switch]$Guardian
+        [switch]$Guardian,
+        # Spec 005 D1: mirrors -Guardian for the third SCM service.
+        # Its ImagePath is the gateway binary invoked with
+        # `enterprise windows enumerate --manifest X --interval 5m`;
+        # its ObjectName is LocalSystem (same as guardian, matching
+        # the account-model choice recorded in the Stage 1 commit).
+        [switch]$Enumerator
     )
+    if ($Guardian -and $Enumerator) {
+        throw '-Guardian and -Enumerator are mutually exclusive'
+    }
     if (-not (Test-DefenseClawServiceExists -Name $Name)) {
         return
     }
@@ -4200,6 +4343,12 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         }
         '"{0}" enterprise hooks watch --manifest "{1}" --interval 1m' -f $ExpectedGatewayPath, $ExpectedManifestPath
     }
+    elseif ($Enumerator) {
+        if ([string]::IsNullOrWhiteSpace($ExpectedManifestPath)) {
+            throw 'enumerator service ownership validation requires its exact manifest path'
+        }
+        '"{0}" enterprise windows enumerate --manifest "{1}" --interval 5m' -f $ExpectedGatewayPath, $ExpectedManifestPath
+    }
     else {
         '"{0}"' -f $ExpectedGatewayPath
     }
@@ -4208,7 +4357,7 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         throw "refusing to replace foreign Windows service $Name with ImagePath $image"
     }
     $objectName = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ObjectName)
-    $expectedAccount = if ($Guardian) { 'LocalSystem' } else { "NT SERVICE\$Name" }
+    $expectedAccount = if ($Guardian -or $Enumerator) { 'LocalSystem' } else { "NT SERVICE\$Name" }
     if (-not [string]::Equals($objectName, $expectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
         throw "refusing to replace service $Name owned by unexpected account $objectName"
     }
@@ -4257,8 +4406,18 @@ function New-DefenseClawTransaction {
         -Root $Layout.StateRoot `
         -Label 'transaction directory'
     New-DefenseClawDirectory -Path $directory
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): transaction snapshots
+    # must record all THREE managed services. The enumerator's
+    # start-mode + running state travel with gateway + guardian so
+    # rollback restores them together — otherwise a failed transaction
+    # could leave the enumerator disabled while gateway + guardian are
+    # restored to auto-start, and new user profiles would stop getting
+    # picked up. Derive the enumerator's service name from the guardian's
+    # via the same helper Set-DefenseClawManagedServices uses so a
+    # certification-run cross-check is enforced.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     $services = [Collections.Generic.List[object]]::new()
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         $service = Microsoft.PowerShell.Management\Get-Service `
             -Name $name `
             -ErrorAction SilentlyContinue
@@ -4311,7 +4470,12 @@ function New-DefenseClawTransaction {
         # Disabled start neutralizes boot activation and any failure restart
         # already queued by SCM. Gateway is disabled first so a crash cannot
         # leave it boot-active while guardian was demoted by this transaction.
-        foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+        # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): disable all THREE
+        # services during the quiesce phase. Enumerator disabled last
+        # so its final cycle (already in flight) can complete and drop
+        # a coherent targets.yaml before the transaction reads it as
+        # a preimage.
+        foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
             $service = $services |
                 Microsoft.PowerShell.Core\Where-Object {
                     [string]::Equals(
@@ -4326,9 +4490,12 @@ function New-DefenseClawTransaction {
             }
         }
 
-        # Quiesce the only LocalSystem writer before reading any shared or
+        # Quiesce every LocalSystem writer before reading any shared or
         # managed file preimage. Stop-Service waits for process exit, so an
         # in-flight guardian reconciliation cannot straddle the snapshot.
+        # Enumerator first — it's the targets.yaml writer, stopping it
+        # first freezes the file the guardian's final reconcile pass reads.
+        Stop-DefenseClawService -Name $enumeratorServiceName
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
         $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
@@ -5998,6 +6165,67 @@ function Start-DefenseClawTransactionServices {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName
     }
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): reactivate the enumerator
+    # too. Restore-DefenseClawTransactionServiceStartModes only restores
+    # `existed=true` services from the pre-transaction snapshot; on a
+    # fresh install the enumerator was `existed=false`, so it stays
+    # disabled without this explicit start. On a snapshot rollback with
+    # an existing enumerator, the Restore call above has already put it
+    # back to its recorded start mode — the block below just brings it
+    # LIVE if the recorded posture had it running.
+    #
+    # Edge case (CR PRRT_kwDORuAK-s6au6lY): a snapshot with
+    # `running=true, start_mode=4` (running-while-disabled — legal
+    # in Windows: sc.exe config can change start mode without
+    # stopping the process) must ROUND-TRIP back to running-while-
+    # disabled after rollback. Set-DefenseClawServiceStartMode 4
+    # doesn't stop the process; but Start-DefenseClawService on a
+    # disabled service throws. So the sequence is:
+    #   1. Temporarily set demand-start (mode 3).
+    #   2. Start-Service.
+    #   3. Set disabled (mode 4) — SCM allows this while running.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $enumeratorState = $states[$enumeratorServiceName]
+    $enumeratorService = Microsoft.PowerShell.Management\Get-Service `
+        -Name $enumeratorServiceName `
+        -ErrorAction SilentlyContinue
+    if ($null -ne $enumeratorService) {
+        $enumeratorRecordedExisted = $null -ne $enumeratorState -and [bool]$enumeratorState.existed
+        $enumeratorTargetStartMode = if ($enumeratorRecordedExisted) {
+            [int]$enumeratorState.start_mode
+        }
+        else {
+            # Fresh install: promote to auto-start.
+            2
+        }
+        # `should run` = recorded-running OR fresh install (we just
+        # created the service and want it live now).
+        $enumeratorShouldRun = if (-not $enumeratorRecordedExisted) {
+            $true
+        }
+        else {
+            [bool]$enumeratorState.running
+        }
+        if ($enumeratorShouldRun -and $enumeratorTargetStartMode -eq 4) {
+            # Running-while-disabled round-trip: demand-start,
+            # start, disable while running.
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode 3
+            Start-DefenseClawService -Name $enumeratorServiceName
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode 4
+        }
+        else {
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode $enumeratorTargetStartMode
+            if ($enumeratorShouldRun -and $enumeratorTargetStartMode -in @(2, 3)) {
+                Start-DefenseClawService -Name $enumeratorServiceName
+            }
+        }
+    }
 }
 
 function Restore-DefenseClawTransactionWithManagedHooksRollback {
@@ -7413,6 +7641,42 @@ function Assert-DefenseClawManagedServiceConfigurations {
         ) `
         -ExpectedEnvironment $guardianEnvironment `
         -ExpectedStartMode $expectedStartMode
+    # Spec 005 D1: third service. Same account model + privilege set
+    # as the guardian (needs SeImpersonate + SeBackup + SeRestore for
+    # per-user profile walks). Shares the guardian's log path — the
+    # enumerator writes one line per cycle to hook-guardian.log rather
+    # than a separate hook-enumerator.log, matching what LocalSystem
+    # can chown without touching a third log-file ACL surface. ImagePath
+    # differs from guardian's watch command: `enterprise windows
+    # enumerate --manifest <path> --interval 5m`.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $enumeratorEnvironment = [string[]]@(
+        Get-DefenseClawServiceEnvironmentValues `
+            -Name $enumeratorServiceName `
+            -RuntimeDirectory $Layout.RuntimeDirectory `
+            -ConfigPath $Layout.ConfigPath `
+            -AuthorizationDirectory $Layout.AuthorizationDirectory `
+            -GatewayServiceName $GatewayServiceName `
+            -LogPath $Layout.GuardianLogPath `
+            -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
+            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
+            -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified
+    )
+    Assert-DefenseClawServiceConfiguration `
+        -Name $enumeratorServiceName `
+        -ExpectedImage ('"{0}" enterprise windows enumerate --manifest "{1}" --interval 5m' -f $Layout.GatewayPath, $Layout.ManifestPath) `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Enterprise Hook Enumerator' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @(
+            'SeTcbPrivilege',
+            'SeImpersonatePrivilege',
+            'SeChangeNotifyPrivilege',
+            'SeBackupPrivilege',
+            'SeRestorePrivilege'
+        ) `
+        -ExpectedEnvironment $enumeratorEnvironment `
+        -ExpectedStartMode $expectedStartMode
 }
 
 function New-DefenseClawRequiredRights {
@@ -8033,6 +8297,44 @@ function Assert-DefenseClawEnterpriseDeployment {
                 'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1'
         )
     }
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): the enumerator is a
+    # third managed SCM service. Its expected env vars mirror the
+    # guardian's (DEFENSECLAW_WINDOWS_SERVICE_NAME differs; everything
+    # else including the shared GuardianLogPath is identical), and
+    # its expected start mode + running state get validated here so
+    # -RequireReadiness catches the case where the enumerator got
+    # left disabled during activation.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $enumeratorEnvironment = [string[]]@(
+        "DEFENSECLAW_HOME=$($Layout.RuntimeDirectory)",
+        "DEFENSECLAW_CONFIG=$($Layout.ConfigPath)",
+        'DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise',
+        "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=$($Layout.AuthorizationDirectory)",
+        "DEFENSECLAW_WINDOWS_SERVICE_NAME=$enumeratorServiceName",
+        "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME=$GatewayServiceName",
+        "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName",
+        "DEFENSECLAW_WINDOWS_SERVICE_LOG=$($Layout.GuardianLogPath)"
+    )
+    if ([bool]$Layout.AgentApplicationControlAttested) {
+        $enumeratorEnvironment = [string[]]@(
+            $enumeratorEnvironment + @(
+                'DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED=1',
+                'DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED=1'
+            )
+        )
+    }
+    if ([bool]$Layout.ClaudeEffectivePolicyVerified) {
+        $enumeratorEnvironment = [string[]]@(
+            $enumeratorEnvironment +
+                'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1'
+        )
+    }
+    if ([bool]$Layout.CodexTrustedHookLauncherVerified) {
+        $enumeratorEnvironment = [string[]]@(
+            $enumeratorEnvironment +
+                'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1'
+        )
+    }
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
@@ -8057,6 +8359,21 @@ function Assert-DefenseClawEnterpriseDeployment {
         ) `
         -ExpectedEnvironment $guardianEnvironment `
         -ExpectedStartMode $expectedServiceStartMode
+    Assert-DefenseClawServiceConfiguration `
+        -Name $enumeratorServiceName `
+        -ExpectedImage ('"{0}" enterprise windows enumerate --manifest "{1}" --interval 5m' -f $Layout.GatewayPath, $Layout.ManifestPath) `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Enterprise Hook Enumerator' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @(
+            'SeTcbPrivilege',
+            'SeImpersonatePrivilege',
+            'SeChangeNotifyPrivilege',
+            'SeBackupPrivilege',
+            'SeRestorePrivilege'
+        ) `
+        -ExpectedEnvironment $enumeratorEnvironment `
+        -ExpectedStartMode $expectedServiceStartMode
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
     [void](Invoke-DefenseClawCodexRequirementsCommand `
         -Layout $Layout `
@@ -8073,6 +8390,24 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GuardianServiceName $GuardianServiceName `
             -LiveVerify)) {
             throw 'guardian SCM process is running but protected target coverage is not verified'
+        }
+        # Spec 005 D1: readiness check for the enumerator SCM
+        # process. Uses the same lightweight "service is running"
+        # probe as Test-DefenseClawGatewayReady rather than a
+        # deeper liveness call — the enumerator has no readiness
+        # RPC of its own; its per-cycle stderr goes to the
+        # guardian's log surface and the sidecar's
+        # SidecarHealth.Enumerator field (spec 005 Stage 9)
+        # carries the per-cycle state. A missing-or-stopped SCM
+        # process here is caught; a hung enumerator loop is a
+        # follow-up to add a health probe for.
+        $enumeratorService = Microsoft.PowerShell.Management\Get-Service `
+            -Name $enumeratorServiceName `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $enumeratorService -or
+            $enumeratorService.Status -ne
+                [ServiceProcess.ServiceControllerStatus]::Running) {
+            throw 'enumerator SCM process is not running; targets.yaml will not refresh for new user profiles'
         }
     }
 }
@@ -11297,6 +11632,18 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Name $GatewayServiceName `
                 -StartMode 3
             Start-DefenseClawService -Name $GatewayServiceName
+            # Spec 005 D1 (CR PRRT_kwDORuAK-s6au6lZ): the enumerator
+            # must be demand-started + RUNNING before the pending-state
+            # assertion below, which requires every managed service to
+            # be StartMode 3 AND (via -RequireReadiness below) the
+            # enumerator SCM process to be Running. Promotion to
+            # StartMode 2 happens later alongside gateway + guardian
+            # only after full readiness succeeds.
+            $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode 3
+            Start-DefenseClawService -Name $enumeratorServiceName
             Assert-DefenseClawManagedServiceConfigurations `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
@@ -11322,6 +11669,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -StartMode 2
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
+                -StartMode 2
+            # Spec 005 D1: promote the (already-running) enumerator
+            # from demand-start to auto-start now that readiness has
+            # been proven. Without this, boot would leave the
+            # enumerator disabled and new user profiles would never
+            # get picked up.
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
                 -StartMode 2
             Assert-DefenseClawEnterpriseDeployment `
                 -Layout $Layout `
@@ -11496,6 +11851,17 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -ServicingTransaction
+        # Spec 005 D1: teardown order enumerator → guardian → gateway.
+        # The enumerator writes targets.yaml; removing it first stops
+        # further writes so the guardian's final reconcile pass sees a
+        # stable file. Guardian teardown after remains unchanged.
+        $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+        Assert-DefenseClawOwnedServiceOrAbsent `
+            -Name $enumeratorServiceName `
+            -ExpectedGatewayPath $Layout.GatewayPath `
+            -ExpectedManifestPath $Layout.ManifestPath `
+            -Enumerator
+        Remove-DefenseClawService -Name $enumeratorServiceName
         Assert-DefenseClawOwnedServiceOrAbsent `
             -Name $GuardianServiceName `
             -ExpectedGatewayPath $Layout.GatewayPath `
