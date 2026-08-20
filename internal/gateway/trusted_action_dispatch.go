@@ -470,7 +470,8 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		detectionOnly: true,
 	},
 	"impact.fork_bomb": {
-		proves: forkBombFallbackProof,
+		proves:        forkBombFallbackProof,
+		detectionOnly: true,
 	},
 	"impact.cryptomining_launch": {
 		proves: cryptominingFallbackProof,

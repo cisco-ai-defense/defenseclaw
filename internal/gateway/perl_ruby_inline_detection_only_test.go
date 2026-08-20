@@ -213,8 +213,8 @@ func TestPerlRubyInlineGenericOwnerAlwaysRemainsAuditOnly(t *testing.T) {
 			}
 			if test.wantForkBombProof {
 				dangerous := findingWithID(findings, "impact.fork_bomb")
-				if dangerous == nil || !dangerous.contributesToEnforcement() {
-					t.Fatalf("specific fork-bomb proof is not enforceable: %+v", findings)
+				if dangerous == nil || dangerous.contributesToEnforcement() {
+					t.Fatalf("specific fork-bomb proof is not detection-only: %+v", findings)
 				}
 			}
 		})
