@@ -363,8 +363,13 @@ func trustedActionStaticPrintfEmitsRuleMatch(
 		!command.ArgvComplete ||
 		command.ParentCommandID != 0 ||
 		command.Program != "printf" ||
-		len(command.Argv) != 3 || command.Argv[0] != "printf" ||
+		len(command.Argv) != 3 || command.Executable != command.Argv[0] ||
 		len(command.Redirects) != 0 || len(command.Wrappers) != 0 {
+		return false
+	}
+	switch command.Executable {
+	case "printf", "/bin/printf", "/sbin/printf", "/usr/bin/printf", "/usr/sbin/printf":
+	default:
 		return false
 	}
 	if len(command.Arguments) != len(command.Argv) {
