@@ -611,22 +611,31 @@ func TestParseWgetArgvFinalRequestBodyFileWins(t *testing.T) {
 
 func TestParseWgetArgvFinalProxyState(t *testing.T) {
 	tests := []struct {
-		name  string
-		argv  []string
-		proxy bool
+		name        string
+		argv        []string
+		proxy       bool
+		optionIndex int
+		valueIndex  int
 	}{
-		{"long disabled", []string{"wget", "--proxy=off", "https://example.test"}, false},
-		{"negated disabled", []string{"wget", "--no-proxy", "https://example.test"}, false},
-		{"short disabled", []string{"wget", "-Y", "off", "https://example.test"}, false},
-		{"final enabled", []string{"wget", "--proxy=off", "--proxy", "https://example.test"}, true},
-		{"final disabled", []string{"wget", "--proxy", "--no-proxy", "https://example.test"}, false},
+		{"long disabled", []string{"wget", "--proxy=off", "https://example.test"}, false, 1, -1},
+		{"negated disabled", []string{"wget", "--no-proxy", "https://example.test"}, false, 1, -1},
+		{"short disabled", []string{"wget", "-Y", "off", "https://example.test"}, false, 1, 2},
+		{"final enabled", []string{"wget", "--proxy=off", "--proxy", "https://example.test"}, true, 2, -1},
+		{"final disabled", []string{"wget", "--proxy", "--no-proxy", "https://example.test"}, false, 2, -1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			parsed := parseWgetArgv(test.argv)
 			if !parsed.Complete || !parsed.ProxySet || parsed.Proxy != test.proxy ||
-				parsed.ProxyOptionIndex < 1 {
-				t.Fatalf("proxy state = %#v, want enabled=%t", parsed, test.proxy)
+				parsed.ProxyOptionIndex != test.optionIndex ||
+				parsed.ProxyValueIndex != test.valueIndex {
+				t.Fatalf(
+					"proxy state = %#v, want enabled=%t option index=%d value index=%d",
+					parsed,
+					test.proxy,
+					test.optionIndex,
+					test.valueIndex,
+				)
 			}
 		})
 	}

@@ -1385,6 +1385,7 @@ func TestCurlURLQueryLengthsValid(t *testing.T) {
 		{"empty first output below repeated cap", []int{0, 99_998}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			if got := curlURLQueryLengthsValid(targets, test.lengths); got != test.want {
 				t.Fatalf("valid = %t, want %t", got, test.want)
 			}
@@ -1910,6 +1911,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{"agent", token},
 			wantFTPOriginCredentials:  []string{"agent", token},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "agent", token,
+			),
 		},
 		{
 			name: "protocol specific credentials", argv: []string{
@@ -1919,6 +1923,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{"http-agent", token},
 			wantFTPOriginCredentials:  []string{"ftp-agent", token},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "http-agent", token,
+			),
 		},
 		{
 			name: "protocol specific credentials override generic per component", argv: []string{
@@ -1928,6 +1935,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{"generic-agent", token},
 			wantFTPOriginCredentials:  []string{token, "generic-password"},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "generic-agent", token,
+			),
 		},
 		{
 			name: "final protocol specific value wins", argv: []string{
@@ -1936,6 +1946,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 				"https://sink.example/download",
 			},
 			wantHTTPOriginCredentials: []string{"agent", "fixture"},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "agent", "fixture",
+			),
 		},
 		{
 			name: "empty protocol specific value overrides generic secret", argv: []string{
@@ -1944,6 +1957,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{"agent"},
 			wantFTPOriginCredentials:  []string{"agent", token},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "agent",
+			),
 		},
 		{
 			name: "custom authorization suppresses protocol specific HTTP auth", argv: []string{
@@ -1965,6 +1981,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 				"--http-password", token, "https://sink.example/download",
 			},
 			expandIndex: 5,
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "agent",
+			),
 		},
 		{
 			name: "lone protocol specific FTP user is transmitted", argv: []string{
@@ -1972,6 +1991,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 				"ftp://sink.example/download",
 			},
 			wantFTPOriginCredentials: []string{token},
+			wantFTPAuthComponents: components(
+				"ftp", "sink.example", token,
+			),
 		},
 		{
 			name: "lone protocol specific FTP password remains uncertain", argv: []string{
@@ -1986,6 +2008,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{"agent", token},
 			wantFTPOriginCredentials:  []string{"agent", token},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "agent", token,
+			),
 		},
 		{
 			name: "ambient config prevents generic auth proof", argv: []string{
@@ -1999,6 +2024,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 				"ftp://sink.example/download",
 			},
 			wantFTPOriginCredentials: []string{token},
+			wantFTPAuthComponents: components(
+				"ftp", "sink.example", token,
+			),
 		},
 		{
 			name: "lone password is not closed FTP metadata", argv: []string{
@@ -2013,6 +2041,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{token},
 			wantFTPOriginCredentials:  []string{token},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", token,
+			),
 		},
 		{
 			name: "empty password preserves user presence", argv: []string{
@@ -2021,6 +2052,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{token},
 			wantFTPOriginCredentials:  []string{token},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", token,
+			),
 		},
 		{
 			name: "final password wins", argv: []string{
@@ -2029,6 +2063,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{"agent", "fixture"},
 			wantFTPOriginCredentials:  []string{"agent", "fixture"},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "agent", "fixture",
+			),
 		},
 		{
 			name: "final empty password drops earlier value", argv: []string{
@@ -2037,6 +2074,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{"agent"},
 			wantFTPOriginCredentials:  []string{"agent"},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "agent",
+			),
 		},
 		{
 			name: "authorization header suppresses HTTP generated auth", argv: []string{
@@ -2063,6 +2103,9 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 			},
 			wantHTTPOriginCredentials: []string{"agent", token},
 			wantFTPOriginCredentials:  []string{"agent", token},
+			wantHTTPAuthComponents: components(
+				"https", "sink.example", "agent", token,
+			),
 		},
 		{
 			name: "URL userinfo overrides generic credentials", argv: []string{
@@ -2198,10 +2241,10 @@ func TestStaticWgetTransmittedMetadata(t *testing.T) {
 				) || !slices.Equal(
 				got.FTPOriginCredentials,
 				test.wantFTPOriginCredentials,
-			) || test.wantHTTPAuthComponents != nil && !slices.Equal(
+			) || !slices.Equal(
 				got.HTTPOriginCredentialComponents,
 				test.wantHTTPAuthComponents,
-			) || test.wantFTPAuthComponents != nil && !slices.Equal(
+			) || !slices.Equal(
 				got.FTPOriginCredentialComponents,
 				test.wantFTPAuthComponents,
 			) || test.checkRequestComponents && !slices.Equal(

@@ -439,12 +439,23 @@ func trustedActionPathReadFeedsExternalUpload(
 ) bool {
 	for _, source := range facts.Commands {
 		if source.ID != candidate.CommandID ||
-			!trustedActionStaticCatEmitsPath(source, candidate) {
+			!trustedActionStaticPathProducerEmitsPath(source, candidate) {
 			continue
 		}
 		return trustedActionCommandFeedsExternalUpload(facts, source.ID)
 	}
 	return false
+}
+
+func trustedActionStaticPathProducerEmitsPath(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if trustedActionStaticCatEmitsPath(command, candidate) {
+		return true
+	}
+	base64Source, ok := actionfacts.StaticPOSIXBase64EncodeStdinSource(command)
+	return ok && base64Source == candidate.Value
 }
 
 func trustedActionStaticCatEmitsPath(
@@ -520,6 +531,10 @@ func trustedActionCommandFeedsExternalUpload(
 				!hasOperation(destination, actionfacts.OperationUpload) {
 				continue
 			}
+			if (destination.Program == "curl" || destination.Program == "curl.exe") &&
+				!trustedActionCurlStdinFeedsExternalUpload(facts, destination) {
+				continue
+			}
 			if hasExternalUpload(facts, destination.ID) &&
 				hasDataFlowFrom(
 					facts,
@@ -527,6 +542,24 @@ func trustedActionCommandFeedsExternalUpload(
 					actionfacts.DataStdin,
 					actionfacts.DataNetwork,
 				) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func trustedActionCurlStdinFeedsExternalUpload(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) bool {
+	for _, target := range actionfacts.StaticCurlStdinUploadTargets(command) {
+		for _, network := range facts.Network {
+			if network.CommandID == command.ID &&
+				network.Action == actionfacts.NetworkUpload &&
+				isExternalNetwork(network) &&
+				strings.EqualFold(network.Scheme, target.Scheme) &&
+				network.Host == target.Host && network.Port == target.Port {
 				return true
 			}
 		}

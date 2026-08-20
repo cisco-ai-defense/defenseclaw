@@ -48,6 +48,65 @@ type curlTransferProjection struct {
 	key          string
 }
 
+// StaticCurlStdinUploadTargets returns the exact parser-owned destination that
+// receives stdin from one literal --data-binary @- or --upload-file - operand.
+// The proof is intentionally an exact minimal invocation: another option or
+// target can consume stdin or route bytes independently of an unrelated
+// NetworkUpload fact on the same command.
+func StaticCurlStdinUploadTargets(command CommandFact) []NetworkFact {
+	if command.Dialect != DialectPOSIX || command.Effect != EffectExecute ||
+		!command.ArgvComplete || command.ParentCommandID != 0 ||
+		len(command.Wrappers) != 0 || command.Program != "curl" ||
+		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		!exactCaseSensitivePOSIXProgram(&command, "curl") ||
+		len(command.Arguments) != len(command.Argv) {
+		return nil
+	}
+	for index := range command.Argv {
+		if !staticCommandArgumentAt(command, index) {
+			return nil
+		}
+	}
+
+	parsed := parseCurlArgv(command.Argv)
+	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
+		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
+		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
+		!curlRangeOptionsValid(parsed) {
+		return nil
+	}
+
+	if len(parsed.Options) != 1 || len(parsed.Targets) != 1 {
+		return nil
+	}
+	option := parsed.Options[0]
+	if option.Group != parsed.Targets[0].Group || !option.ValuePresent ||
+		!staticCurlOptionValue(command, option) {
+		return nil
+	}
+	stdinBody := option.Canonical == "--data-binary" && option.Value == "@-"
+	stdinUpload := option.Canonical == "--upload-file" && option.Value == "-"
+	if !stdinBody && !stdinUpload {
+		return nil
+	}
+
+	target := parsed.Targets[0]
+	if !staticCommandArgumentAt(command, target.ArgvIndex) ||
+		!webMetadataTargetSchemeSupported(target.Value) ||
+		!validLiteralRequestTarget(target.Value) ||
+		curlTargetHasInvalidUserinfo(target.Value) ||
+		curlHasUnmodeledGlob(target.Value) {
+		return nil
+	}
+	network, ok := webTargetFact(command.ID, target.Value, NetworkUpload)
+	if !ok || stdinBody && network.Scheme != "http" && network.Scheme != "https" ||
+		stdinUpload && network.Scheme != "http" && network.Scheme != "https" &&
+			network.Scheme != "ftp" && network.Scheme != "ftps" {
+		return nil
+	}
+	return []NetworkFact{network}
+}
+
 // StaticCurlUploadPayloads returns the literal inline request-body operands
 // that a complete curl command sends. File and stdin upload sources are
 // deliberately excluded: their contents are not represented by argv. Multiple
