@@ -99,9 +99,10 @@ func StaticCurlStdinUploadTargets(command CommandFact) []NetworkFact {
 		return nil
 	}
 	network, ok := webTargetFact(command.ID, target.Value, NetworkUpload)
-	if !ok || stdinBody && network.Scheme != "http" && network.Scheme != "https" ||
-		stdinUpload && network.Scheme != "http" && network.Scheme != "https" &&
-			network.Scheme != "ftp" && network.Scheme != "ftps" {
+	if !ok ||
+		(stdinBody && network.Scheme != "http" && network.Scheme != "https") ||
+		(stdinUpload && network.Scheme != "http" && network.Scheme != "https" &&
+			network.Scheme != "ftp" && network.Scheme != "ftps") {
 		return nil
 	}
 	return []NetworkFact{network}

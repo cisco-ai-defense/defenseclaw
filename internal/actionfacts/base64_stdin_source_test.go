@@ -201,8 +201,7 @@ func TestStaticCurlStdinUploadTargets(t *testing.T) {
 			var got []NetworkFact
 			for _, command := range facts.Commands {
 				if command.Program == "curl" {
-					got = StaticCurlStdinUploadTargets(command)
-					break
+					got = append(got, StaticCurlStdinUploadTargets(command)...)
 				}
 			}
 			if test.wantHost == "" {

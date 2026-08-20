@@ -190,6 +190,13 @@ func TestTrustedActionBase64StdinSourceMustMatchCandidatePath(t *testing.T) {
 	if source.ID == 0 || candidate.CommandID == 0 {
 		t.Fatalf("missing base64 source facts: %#v", facts)
 	}
+	if !trustedActionStaticPathProducerEmitsPath(source, candidate) {
+		t.Fatalf(
+			"matching candidate was rejected: source=%#v candidate=%#v",
+			source,
+			candidate,
+		)
+	}
 	candidate.Value = "/home/alice/.ssh/id_ed25519"
 	if trustedActionStaticPathProducerEmitsPath(source, candidate) {
 		t.Fatalf("mismatched candidate was accepted: source=%#v candidate=%#v", source, candidate)
