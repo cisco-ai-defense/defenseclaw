@@ -950,6 +950,11 @@ func exactCodeGuardStringField(
 	return value, complete && present > 0 && value != "" && value == exact
 }
 
+// CodeGuard reports exact binary matches rather than probabilistic scores. Its
+// scanner findings intentionally leave confidence unset; the gateway projection
+// makes that binary certainty explicit without changing enforcement provenance.
+const codeGuardBinaryConfidence = 1.0
+
 // codeGuardOnlyVerdict builds a verdict from CodeGuard findings alone, for an
 // allow-listed WRITE tool whose content CodeGuard flagged. The allow skipped
 // rule/AID/judge scanning, but CodeGuard is retained (D2); severity and action
@@ -977,7 +982,7 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	return &ToolInspectVerdict{
 		Action:           action,
 		Severity:         severity,
-		Confidence:       1.0,
+		Confidence:       codeGuardBinaryConfidence,
 		Reason:           fmt.Sprintf("allow-listed tool %q: CodeGuard retained on write", req.Tool),
 		Findings:         findingStrs,
 		DetailedFindings: cgFindings,
@@ -1027,7 +1032,7 @@ func codeGuardRuleFindings(
 		}
 		converted := RuleFinding{
 			RuleID: ruleID, Title: title, Severity: string(finding.Severity),
-			Confidence: finding.Confidence, Tags: append([]string(nil), finding.Tags...),
+			Confidence: codeGuardBinaryConfidence, Tags: append([]string(nil), finding.Tags...),
 			ToolCapabilityClass: finding.ToolCapabilityClass,
 		}.withTrustedActionProof(newExactCodeGuardFindingProof(
 			ruleID,

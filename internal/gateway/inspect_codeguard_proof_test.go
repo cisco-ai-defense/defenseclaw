@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -129,7 +130,42 @@ rules:
 			if matched.contributesToEnforcement() != test.wantEnforceable {
 				t.Fatalf("finding enforcement = %t, want %t: %+v", matched.contributesToEnforcement(), test.wantEnforceable, matched)
 			}
+			if matched.Confidence != 1 {
+				t.Fatalf("CodeGuard finding confidence = %v, want binary confidence 1: %+v", matched.Confidence, matched)
+			}
+			if verdict.Confidence != 1 {
+				t.Fatalf("CodeGuard-only verdict confidence = %v, want 1: %+v", verdict.Confidence, verdict)
+			}
 		})
+	}
+}
+
+func TestInspectCodeGuardBinaryConfidenceFlowsToTelemetry(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	verdict := inspectCodeGuardProofTestRequest(
+		t,
+		api,
+		json.RawMessage(`{"path":"/tmp/app.py","content":"os.system(cmd)"}`),
+	)
+	if verdict.Confidence != 1 || len(verdict.DetailedFindings) != 1 ||
+		verdict.DetailedFindings[0].Confidence != 1 {
+		t.Fatalf("CodeGuard binary confidence did not reach verdict/details: %+v", verdict)
+	}
+
+	input, ok := api.inspectTraceV8Input(
+		t.Context(),
+		"write_file",
+		"tool_call",
+		verdict,
+		time.Millisecond,
+		hookEvaluationContext{},
+	)
+	if !ok {
+		t.Fatal("CodeGuard-only inspect trace input was rejected")
+	}
+	confidence, present := input.DefenseClawGuardrailConfidence.Get()
+	if !present || confidence != 1 {
+		t.Fatalf("CodeGuard telemetry confidence = %v (present=%t), want 1", confidence, present)
 	}
 }
 
@@ -170,6 +206,9 @@ rules:
 	if builtinVerdict.Action != guardrailActionAlert || len(builtinVerdict.DetailedFindings) != 1 ||
 		!builtinVerdict.DetailedFindings[0].contributesToEnforcement() {
 		t.Fatalf("allowlisted builtin exact finding lost enforcement: %+v", builtinVerdict)
+	}
+	if builtinVerdict.Confidence != 1 || builtinVerdict.DetailedFindings[0].Confidence != 1 {
+		t.Fatalf("allowlisted CodeGuard confidence is inconsistent: %+v", builtinVerdict)
 	}
 }
 
