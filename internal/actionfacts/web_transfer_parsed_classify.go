@@ -265,6 +265,200 @@ type TransmittedRequestComponent struct {
 	Port   int64
 }
 
+// StaticCurlSMTPRequestComponents returns literal SMTP request operands that
+// a closed curl invocation sends to one exact SMTP(S) peer. An upload emits
+// the final MAIL FROM value and every appended RCPT TO value. Without an
+// upload, curl's default SMTP command sends only the first recipient as VRFY;
+// --mail-from is ignored in that mode.
+//
+// The upload lane accepts only stdin and /dev/null sources whose availability
+// cannot fail before the envelope is sent. Other files, MIME bodies, custom
+// SMTP commands, peer overrides, and multiple transfer groups remain outside
+// this bounded proof.
+func StaticCurlSMTPRequestComponents(
+	command CommandFact,
+) []TransmittedRequestComponent {
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		command.Effect != EffectExecute || !command.ArgvComplete ||
+		command.ParentCommandID != 0 || len(command.Wrappers) != 0 ||
+		len(command.Redirects) != 0 ||
+		command.Program != "curl" || len(command.Argv) == 0 ||
+		command.Executable != command.Argv[0] ||
+		!exactCaseSensitivePOSIXProgram(&command, "curl") ||
+		len(command.Arguments) != len(command.Argv) {
+		return nil
+	}
+	for index := range command.Argv {
+		if !staticCommandArgumentAt(command, index) {
+			return nil
+		}
+	}
+
+	parsed := parseCurlArgv(command.Argv)
+	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
+		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
+		len(parsed.Targets) != 1 || !curlRequestModeValid(parsed) ||
+		!curlRangeOptionsValid(parsed) {
+		return nil
+	}
+	target := parsed.Targets[0]
+	if target.Group != 0 || !staticCommandArgumentAt(command, target.ArgvIndex) ||
+		!validLiteralRequestTarget(target.Value) ||
+		curlHasUnmodeledGlob(target.Value) || webTargetHasUserinfo(target.Value) {
+		return nil
+	}
+	parsedTarget, err := url.Parse(target.Value)
+	if err != nil || parsedTarget.Opaque != "" || parsedTarget.User != nil ||
+		parsedTarget.Host == "" || parsedTarget.RawPath != "" ||
+		(parsedTarget.Path != "" && parsedTarget.Path != "/") ||
+		parsedTarget.RawQuery != "" || parsedTarget.ForceQuery ||
+		parsedTarget.Fragment != "" || parsedTarget.RawFragment != "" {
+		return nil
+	}
+	network, ok := curlSMTPTargetFact(command.ID, target.Value, NetworkDownload)
+	if !ok || network.Scheme != "smtp" && network.Scheme != "smtps" {
+		return nil
+	}
+
+	mailFrom := ""
+	mailFromSet := false
+	var recipients []string
+	uploads := 0
+	for _, option := range parsed.Options {
+		if option.Group != target.Group || !option.Known {
+			return nil
+		}
+		switch option.Canonical {
+		case "--mail-from":
+			wireValue, valid := curlSMTPAddressBytes(option.Value)
+			if !staticCurlOptionValue(command, option) || !valid {
+				return nil
+			}
+			mailFrom = wireValue
+			mailFromSet = true
+		case "--mail-rcpt":
+			if !staticCurlOptionValue(command, option) {
+				return nil
+			}
+			if option.Value == "" {
+				recipients = append(recipients, "")
+				continue
+			}
+			wireValue, valid := curlSMTPAddressBytes(option.Value)
+			if !valid {
+				return nil
+			}
+			recipients = append(recipients, wireValue)
+		case "--mail-auth":
+			// AUTH is server/authentication-state dependent, so it is not a
+			// candidate. A static value cannot suppress the independently
+			// proven MAIL FROM or RCPT TO commands.
+			if !staticCurlOptionValue(command, option) || option.Value == "" {
+				return nil
+			}
+		case "--upload-file":
+			uploads++
+			if !staticCurlOptionValue(command, option) ||
+				!curlSMTPUploadSourceAvailable(option.Value) {
+				return nil
+			}
+		case "--url", "--":
+			// These options do not change the SMTP request bytes or peer.
+		default:
+			if !curlSMTPInertFlag(option) {
+				return nil
+			}
+		}
+	}
+	if len(recipients) == 0 || uploads > 1 ||
+		uploads == 1 && (!target.UploadSet ||
+			!curlSMTPUploadSourceAvailable(target.UploadValue)) ||
+		uploads == 0 && target.UploadSet {
+		return nil
+	}
+	component := func(value string) TransmittedRequestComponent {
+		return TransmittedRequestComponent{
+			Value:  value,
+			Scheme: network.Scheme,
+			Host:   network.Host,
+			Port:   network.Port,
+		}
+	}
+	if uploads == 0 {
+		if recipients[0] == "" {
+			return nil
+		}
+		return []TransmittedRequestComponent{component(recipients[0])}
+	}
+
+	components := make([]TransmittedRequestComponent, 0, len(recipients)+1)
+	if mailFromSet && mailFrom != "" {
+		components = append(components, component(mailFrom))
+	}
+	for _, recipient := range recipients {
+		if recipient == "" {
+			continue
+		}
+		components = append(components, component(recipient))
+	}
+	return components
+}
+
+func curlSMTPAddressBytes(value string) (string, bool) {
+	if value == "" {
+		return "", false
+	}
+	value = strings.TrimPrefix(value, "<")
+	value = strings.TrimSuffix(value, ">")
+	if value == "" {
+		return "", true
+	}
+	for index := range len(value) {
+		if value[index] == 0 {
+			return "", false
+		}
+	}
+	local, host, hasHost := strings.Cut(value, "@")
+	if hasHost {
+		for index := range len(host) {
+			if host[index] >= 0x80 {
+				// Curl may IDN-convert the host, but it preserves the local
+				// bytes before the first '@'. Keep that exact prefix. Curl
+				// ignores the conversion result, so this address cannot erase
+				// independently projected later recipients.
+				return local, true
+			}
+		}
+	}
+	return value, true
+}
+
+func curlSMTPUploadSourceAvailable(value string) bool {
+	switch value {
+	case "/dev/null", "-", ".":
+		return true
+	default:
+		return false
+	}
+}
+
+func curlSMTPInertFlag(option curlOptionToken) bool {
+	if option.TakesValue || option.ValuePresent || option.Role != curlOptionNeutral {
+		return false
+	}
+	switch option.Canonical {
+	case "--append", "--compressed", "--disable", "--globoff", "--http1.0",
+		"--include", "--insecure", "--ipv4", "--ipv6",
+		"--junk-session-cookies", "--list-only", "--location", "--no-buffer",
+		"--no-progress-meter", "--parallel", "--progress-bar", "--remote-time",
+		"--show-error", "--silent", "--sslv2", "--sslv3", "--tlsv1",
+		"--use-ascii", "--verbose", "--mail-rcpt-allowfails":
+		return true
+	default:
+		return false
+	}
+}
+
 // CurlProxyTransmittedMetadata keeps proxy-bound request bytes separate from
 // origin-bound curl metadata. Each component is paired only with the explicit
 // proxy destination that receives it.
@@ -2631,6 +2825,13 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 		}
 
 		fact, ok := webTargetFact(command.ID, target.Value, NetworkDownload)
+		if !ok {
+			fact, ok = curlSMTPTargetFact(
+				command.ID,
+				target.Value,
+				NetworkDownload,
+			)
+		}
 		if !ok {
 			out.markPartial(IssueUnknownOperandGrammar)
 			continue

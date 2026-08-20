@@ -4335,6 +4335,7 @@ func webControlOptionConsumesValue(program, option string) bool {
 			"--data-ascii", "--data-binary", "--data-raw",
 			"--data-urlencode", "--referer", "--form", "--form-string",
 			"--header", "--config", "--output", "--upload-file", "--user",
+			"--mail-auth", "--mail-from", "--mail-rcpt",
 			"--noproxy", "--proxy-header", "--proxy-user", "--write-out",
 			"--request", "--proxy", "--cacert",
 			"--cert", "--connect-to",
@@ -4584,7 +4585,19 @@ func webNoValueOption(program, arg string) bool {
 			"-S", "--show-error", "-L", "--location", "-l", "-i",
 			"--head", "-k", "--insecure", "-N", "--no-buffer", "-g",
 			"--globoff", "-4", "--ipv4", "-6", "--ipv6", "-q", "-v",
-			"--verbose", "--compressed", "--no-progress-meter", "--remote-name":
+			"--verbose", "--compressed", "--no-progress-meter", "--progress-bar",
+			"--remote-name", "--append", "--http1.0", "--junk-session-cookies",
+			"--list-only", "--parallel", "--remote-time", "--sslv2", "--sslv3",
+			"--tlsv1", "--use-ascii",
+			"--mail-rcpt-allowfails", "--no-mail-rcpt-allowfails":
+			return true
+		}
+		switch arg {
+		case "--no-append", "--buffer", "--no-compressed", "--no-globoff",
+			"--no-include", "--no-insecure", "--no-junk-session-cookies",
+			"--no-list-only", "--no-location", "--no-parallel",
+			"--no-progress-bar", "--progress-meter", "--no-remote-time",
+			"--no-show-error", "--no-silent", "--no-use-ascii", "--no-verbose":
 			return true
 		}
 		return curlNoValueShortOptionBundle(arg)
@@ -11540,6 +11553,65 @@ func webTargetFact(commandID int64, raw string, action NetworkAction) (NetworkFa
 		CommandID: commandID,
 		Action:    action,
 		Scheme:    "http",
+		Host:      host,
+		Port:      port,
+	}, true
+}
+
+func curlSMTPTargetFact(
+	commandID int64,
+	raw string,
+	action NetworkAction,
+) (NetworkFact, bool) {
+	schemeEnd := strings.Index(raw, "://")
+	if schemeEnd <= 0 {
+		return NetworkFact{}, false
+	}
+	scheme := strings.ToLower(raw[:schemeEnd])
+	if scheme != "smtp" && scheme != "smtps" {
+		return NetworkFact{}, false
+	}
+	remainder := raw[schemeEnd+3:]
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	authority := remainder[:authorityEnd]
+	rawUserinfo, hostPort, hasUserinfo := strings.Cut(authority, "@")
+	if !hasUserinfo {
+		hostPort = authority
+	} else {
+		if strings.Contains(hostPort, "@") {
+			return NetworkFact{}, false
+		}
+		user, password, _ := strings.Cut(rawUserinfo, ":")
+		if _, valid := curlDecodePercentBytes(user, true); !valid {
+			return NetworkFact{}, false
+		}
+		if _, valid := curlDecodePercentBytes(password, true); !valid {
+			return NetworkFact{}, false
+		}
+	}
+	peerURL := scheme + "://" + hostPort + remainder[authorityEnd:]
+	parsed, err := url.Parse(peerURL)
+	if err != nil || parsed.User != nil || parsed.Hostname() == "" {
+		return NetworkFact{}, false
+	}
+	host, ok := canonicalNetworkHost(parsed.Hostname())
+	if !ok {
+		return NetworkFact{}, false
+	}
+	port := int64(0)
+	if rawPort := parsed.Port(); rawPort != "" {
+		port, ok = parseNetworkPort(rawPort)
+		if !ok {
+			return NetworkFact{}, false
+		}
+	}
+	return NetworkFact{
+		CommandID: commandID,
+		Action:    action,
+		Scheme:    scheme,
 		Host:      host,
 		Port:      port,
 	}, true
