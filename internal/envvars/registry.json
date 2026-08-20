@@ -1017,6 +1017,21 @@
       "security_note": "Managed-runtime writer identity — only the installer-pinned virtual service account may receive the corresponding write grants."
     },
     {
+      "name": "DEFENSECLAW_UNIX_SERVICE_ACCOUNT",
+      "category": "runtime_path",
+      "purpose": "Override the unix service-account username the managed runtime trust check accepts as a legitimate leaf-owner alongside root. Empty falls back to the installer-created \"defenseclaw\" account.",
+      "default": "unset (falls back to \"defenseclaw\")",
+      "accepted_values": ["<local unix username>", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/managed.go", "description": "Defines the optional unix service-account override environment variable"},
+        {"location": "internal/managed/trust_unix.go", "description": "Reads the override inside trustedRuntimeOwner when the packaged service username diverges from the default"}
+      ],
+      "since": "0.8.6",
+      "security_note": "Unix managed-runtime writer identity — a misconfigured value silently drops trust for the real service account. Change only in coordinated custom-packaging setups; never expose to per-user shells."
+    },
+    {
       "name": "DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED",
       "category": "hook_internal",
       "purpose": "Carry protected installer evidence that application control restricts every enabled enterprise agent client to approved binaries.",

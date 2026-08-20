@@ -302,19 +302,23 @@ func rejectWindowsReparsePoint(path, label string) error {
 func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 	account = strings.TrimSpace(account)
 	if account == "" {
-		// Empty account previously fell through to (nil, nil) so callers
-		// with an unset DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT ended up on
-		// the strict-admin trust path — safe in isolation, but on a
-		// managed-enterprise host the runtime tree is intentionally
-		// Administrators-owned with a service-SID writer ACE, so the
-		// strict path then fails validation with a confusing "untrusted
-		// ACE" error rather than surfacing the missing env. Every
-		// caller of WindowsServiceAccountSID / this internal helper now
-		// guards for an empty account explicitly (audit and hook-token
-		// callers already did); the internal ValidateTrustedService*
-		// entry points did not, so return a targeted error here to
-		// point operators at the true root cause.
-		return nil, fmt.Errorf("%s is not set", WindowsServiceAccountEnv)
+		// Empty account falls through to (nil, nil): callers get a nil
+		// `allowedWriter` and the trust check reverts to strict-admin
+		// (Administrators / LocalSystem / TrustedInstaller only). This
+		// is the safe path when no service exception is configured.
+		//
+		// T3.5 finding proposed erroring here, but the fallback is
+		// actually correct behaviour — real callers of
+		// WindowsServiceAccountSID (audit, hook-token) already guard
+		// for empty input and refuse to proceed; internal
+		// ValidateTrustedService* callers legitimately want the
+		// strict-admin trust when the env is not pinned (dev boxes,
+		// non-managed integration tests). Erroring here surfaces a
+		// misleading "not set" error at every managed-mode reload on
+		// a QA host that never authored the pin, and broke sidecar
+		// v8 bootstrap tests that exercise reload paths without
+		// populating the env.
+		return nil, nil
 	}
 	const prefix = `NT SERVICE\`
 	if len(account) <= len(prefix) || !strings.EqualFold(account[:len(prefix)], prefix) {
