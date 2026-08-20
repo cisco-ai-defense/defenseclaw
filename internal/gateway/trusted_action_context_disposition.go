@@ -302,17 +302,22 @@ func trustedActionContentFindingHasRiskPair(
 		return false
 	}
 	for _, command := range facts.Commands {
-		if !trustedActionExecutingCommand(facts, command.ID) ||
-			!trustedActionContentRuleMatchesCommand(*rule, command) {
+		if !trustedActionExecutingCommand(facts, command.ID) {
 			continue
 		}
-		if trustedActionCommandProvesExternalEgress(facts, command.ID) ||
-			trustedActionCommandWritesSensitivePath(facts, command.ID) ||
-			trustedActionCommandPipesToExternalEgress(
-				facts,
-				*rule,
-				command,
-			) {
+		if trustedActionContentRuleMatchesCommand(*rule, command) &&
+			trustedActionCommandWritesSensitivePath(facts, command.ID) {
+			return true
+		}
+		if trustedActionContentRuleMatchesStaticUpload(*rule, command) &&
+			trustedActionCommandProvesExternalEgress(facts, command.ID) {
+			return true
+		}
+		if trustedActionCommandPipesToExternalEgress(
+			facts,
+			*rule,
+			command,
+		) {
 			return true
 		}
 	}
@@ -398,6 +403,23 @@ func trustedActionContentRuleMatchesCommand(
 	candidates := make([]string, 0, len(command.Argv)+1)
 	candidates = append(candidates, command.Argv...)
 	candidates = append(candidates, strings.Join(command.Argv, " "))
+	return trustedActionContentRuleMatchesCandidates(rule, candidates)
+}
+
+func trustedActionContentRuleMatchesStaticUpload(
+	rule PatternRule,
+	command actionfacts.CommandFact,
+) bool {
+	return trustedActionContentRuleMatchesCandidates(
+		rule,
+		actionfacts.StaticCurlUploadPayloads(command),
+	)
+}
+
+func trustedActionContentRuleMatchesCandidates(
+	rule PatternRule,
+	candidates []string,
+) bool {
 	for _, candidate := range candidates {
 		if firstAcceptedRuleMatch(rule, candidate) != nil {
 			return true

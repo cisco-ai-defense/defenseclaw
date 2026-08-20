@@ -44,6 +44,83 @@ type curlTransferProjection struct {
 	key          string
 }
 
+// StaticCurlUploadPayloads returns the literal inline request-body operands
+// that a complete curl command sends. File and stdin upload sources are
+// deliberately excluded: their contents are not represented by argv. Multiple
+// --next groups are also excluded because CommandFact does not retain the
+// per-group network destination needed to prove which body reaches which peer.
+func StaticCurlUploadPayloads(command CommandFact) []string {
+	if !command.ArgvComplete || !isCurlProgram(command.Program) ||
+		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		len(command.Arguments) != len(command.Argv) {
+		return nil
+	}
+	parsed := parseCurlArgv(command.Argv)
+	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
+		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
+		len(parsed.Targets) == 0 {
+		return nil
+	}
+
+	group := parsed.Targets[0].Group
+	for _, target := range parsed.Targets[1:] {
+		if target.Group != group {
+			return nil
+		}
+	}
+
+	var payloads []string
+	for _, option := range parsed.Options {
+		if option.Group != group || !option.ValuePresent {
+			continue
+		}
+		value, literal := staticCurlUploadPayload(option)
+		if !literal {
+			continue
+		}
+		argumentIndex := option.ValueArgvIndex
+		if option.ValueJoined {
+			argumentIndex = option.ArgvIndex
+		}
+		if argumentIndex < 0 || argumentIndex >= len(command.Arguments) {
+			return nil
+		}
+		argument := command.Arguments[argumentIndex]
+		if argument.Expands || argument.Quote == QuoteMixed ||
+			argument.Value != command.Argv[argumentIndex] {
+			return nil
+		}
+		payloads = append(payloads, value)
+	}
+	return payloads
+}
+
+func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
+	value := option.Value
+	switch option.Canonical {
+	case "--data", "--data-ascii", "--data-binary", "--json":
+		if _, _, fileSource := webDataFile(value); fileSource {
+			return "", false
+		}
+		return value, value != ""
+	case "--data-urlencode":
+		_, _, fileSource, valid := curlDataURLEncodeFile(value)
+		return value, valid && !fileSource && value != ""
+	case "--data-raw", "--form-string":
+		return value, value != ""
+	case "--form":
+		if curlFormHasUnmodeledFileReference(value) {
+			return "", false
+		}
+		if _, _, fileSource := webFormFile(value); fileSource {
+			return "", false
+		}
+		return value, value != ""
+	default:
+		return "", false
+	}
+}
+
 func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	parsed := parseCurlArgv(command.Argv)
 	valid := parsed.Complete && !parsed.EmptyTransferGroup &&
