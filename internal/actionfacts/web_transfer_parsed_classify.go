@@ -95,11 +95,14 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 	return payloads
 }
 
-// CurlTransmittedMetadata keeps header and origin-auth operands distinct so a
-// caller can bind each kind to only the URL schemes where curl transmits it.
+// CurlTransmittedMetadata keeps HTTP headers, HTTP internal-auth operands, and
+// FTP origin credentials distinct so callers can bind each kind to only the
+// URL schemes where curl transmits it.
 type CurlTransmittedMetadata struct {
-	Headers           []string
-	OriginCredentials []string
+	Headers               []string
+	HTTPOriginCredentials []string
+	FTPOriginCredentials  []string
+	HTTPBearerTokens      []string
 }
 
 // StaticCurlTransmittedMetadata returns literal request-metadata operands that
@@ -129,6 +132,7 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	}
 
 	lastUser := -1
+	lastBearer := -1
 	for index, option := range parsed.Options {
 		if option.Group != group || option.Role == curlOptionConfig ||
 			option.Role == curlOptionNetworkOverride {
@@ -137,13 +141,20 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		if option.Canonical == "--user" && option.ValuePresent {
 			lastUser = index
 		}
+		if option.Canonical == "--oauth2-bearer" && option.ValuePresent {
+			lastBearer = index
+		}
 	}
 
 	metadata := CurlTransmittedMetadata{}
+	httpAuthorizationOverridden := false
+	finalUser := ""
+	finalBearer := ""
 	for index, option := range parsed.Options {
 		if !option.ValuePresent ||
 			(option.Canonical != "--header" &&
-				(option.Canonical != "--user" || index != lastUser)) {
+				(option.Canonical != "--user" || index != lastUser) &&
+				(option.Canonical != "--oauth2-bearer" || index != lastBearer)) {
 			continue
 		}
 		argumentIndex := option.ValueArgvIndex
@@ -158,20 +169,61 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			argument.Value != command.Argv[argumentIndex] {
 			return CurlTransmittedMetadata{}
 		}
-		if option.Value == "" ||
-			option.Canonical == "--header" && strings.HasPrefix(option.Value, "@") {
-			continue
-		}
-		if option.Canonical == "--header" {
+		switch option.Canonical {
+		case "--header":
+			if strings.HasPrefix(option.Value, "@") {
+				httpAuthorizationOverridden = true
+				continue
+			}
+			if curlHeaderOverridesHTTPAuthorization(option.Value) {
+				httpAuthorizationOverridden = true
+			}
+			if !curlStaticHTTPHeaderIsTransmitted(option.Value) {
+				continue
+			}
 			metadata.Headers = append(metadata.Headers, option.Value)
-		} else {
-			metadata.OriginCredentials = append(
-				metadata.OriginCredentials,
-				option.Value,
-			)
+		case "--user":
+			finalUser = option.Value
+		case "--oauth2-bearer":
+			finalBearer = option.Value
+		}
+	}
+	if finalUser != "" {
+		metadata.FTPOriginCredentials = []string{finalUser}
+	}
+	if !httpAuthorizationOverridden {
+		if finalBearer != "" {
+			metadata.HTTPBearerTokens = []string{finalBearer}
+		} else if finalUser != "" {
+			metadata.HTTPOriginCredentials = []string{finalUser}
 		}
 	}
 	return metadata
+}
+
+func curlStaticHTTPHeaderIsTransmitted(value string) bool {
+	if value == "" || strings.IndexByte(value, 0) >= 0 {
+		return false
+	}
+	// Curl drops bare -H values and colon forms without a field name or a
+	// nonblank value. Without a colon, only the first semicolon terminating the
+	// operand causes curl to send an empty-valued header.
+	if separator := strings.IndexByte(value, ':'); separator >= 0 {
+		return separator > 0 && strings.ContainsFunc(
+			value[separator+1:],
+			func(character rune) bool {
+				return character != ' ' && character != '\t' &&
+					character != '\r' && character != '\n' &&
+					character != '\v' && character != '\f'
+			},
+		)
+	}
+	return len(value) > 1 && strings.IndexByte(value, ';') == len(value)-1
+}
+
+func curlHeaderOverridesHTTPAuthorization(value string) bool {
+	separator := strings.IndexAny(value, ":;")
+	return separator >= 0 && strings.EqualFold(value[:separator], "authorization")
 }
 
 // StaticWgetUploadPayloads returns the final literal inline request body that

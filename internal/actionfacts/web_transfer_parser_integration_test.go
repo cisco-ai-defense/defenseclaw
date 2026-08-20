@@ -95,11 +95,14 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 
 	const token = "test-transmitted-metadata"
 	for _, test := range []struct {
-		name                  string
-		argv                  []string
-		expandIndex           int
-		wantHeaders           []string
-		wantOriginCredentials []string
+		name                      string
+		argv                      []string
+		expandIndex               int
+		mixedIndex                int
+		wantHeaders               []string
+		wantHTTPOriginCredentials []string
+		wantFTPOriginCredentials  []string
+		wantHTTPBearerTokens      []string
 	}{
 		{
 			name: "separate custom header", argv: []string{
@@ -127,28 +130,192 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 				"curl", "--user", "agent:" + token,
 				"https://sink.example/upload",
 			},
-			wantOriginCredentials: []string{"agent:" + token},
+			wantHTTPOriginCredentials: []string{"agent:" + token},
+			wantFTPOriginCredentials:  []string{"agent:" + token},
 		},
 		{
 			name: "joined origin credentials", argv: []string{
 				"curl", "-uagent:" + token,
 				"https://sink.example/upload",
 			},
-			wantOriginCredentials: []string{"agent:" + token},
+			wantHTTPOriginCredentials: []string{"agent:" + token},
+			wantFTPOriginCredentials:  []string{"agent:" + token},
 		},
 		{
 			name: "final origin credentials win", argv: []string{
 				"curl", "--user", "agent:" + token, "--user", "agent:fixture",
 				"https://sink.example/upload",
 			},
-			wantOriginCredentials: []string{"agent:fixture"},
+			wantHTTPOriginCredentials: []string{"agent:fixture"},
+			wantFTPOriginCredentials:  []string{"agent:fixture"},
 		},
 		{
 			name: "final origin credentials are sensitive", argv: []string{
 				"curl", "--user", "agent:fixture", "--user", "agent:" + token,
 				"https://sink.example/upload",
 			},
-			wantOriginCredentials: []string{"agent:" + token},
+			wantHTTPOriginCredentials: []string{"agent:" + token},
+			wantFTPOriginCredentials:  []string{"agent:" + token},
+		},
+		{
+			name: "separate oauth bearer token", argv: []string{
+				"curl", "--oauth2-bearer", token,
+				"https://sink.example/upload",
+			},
+			wantHTTPBearerTokens: []string{token},
+		},
+		{
+			name: "final oauth bearer token wins", argv: []string{
+				"curl", "--oauth2-bearer", token,
+				"--oauth2-bearer", "fixture", "https://sink.example/upload",
+			},
+			wantHTTPBearerTokens: []string{"fixture"},
+		},
+		{
+			name: "final oauth bearer token is sensitive", argv: []string{
+				"curl", "--oauth2-bearer", "fixture",
+				"--oauth2-bearer", token, "https://sink.example/upload",
+			},
+			wantHTTPBearerTokens: []string{token},
+		},
+		{
+			name: "non-authorization header preserves internal auth", argv: []string{
+				"curl", "--user", "agent:" + token,
+				"--header", "X-Fixture: value", "https://sink.example/upload",
+			},
+			wantHeaders:               []string{"X-Fixture: value"},
+			wantHTTPOriginCredentials: []string{"agent:" + token},
+			wantFTPOriginCredentials:  []string{"agent:" + token},
+		},
+		{
+			name: "effective bearer suppresses HTTP origin credentials", argv: []string{
+				"curl", "--user", "agent:" + token,
+				"--oauth2-bearer", "fixture", "https://sink.example/upload",
+			},
+			wantFTPOriginCredentials: []string{"agent:" + token},
+			wantHTTPBearerTokens:     []string{"fixture"},
+		},
+		{
+			name: "authorization header overrides internal HTTP auth", argv: []string{
+				"curl", "--user", "agent:" + token,
+				"--header", "authorization: fixture", "https://sink.example/upload",
+			},
+			wantHeaders:              []string{"authorization: fixture"},
+			wantFTPOriginCredentials: []string{"agent:" + token},
+		},
+		{
+			name: "empty authorization overrides internal HTTP auth", argv: []string{
+				"curl", "--oauth2-bearer", token,
+				"--header", "Authorization:", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "authorization semicolon overrides internal HTTP auth", argv: []string{
+				"curl", "--oauth2-bearer", token,
+				"--header", "Authorization;", "https://sink.example/upload",
+			},
+			wantHeaders: []string{"Authorization;"},
+		},
+		{
+			name: "dropped authorization semicolon value still overrides HTTP auth", argv: []string{
+				"curl", "--oauth2-bearer", token,
+				"--header", "Authorization;ignored", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "field name whitespace preserves HTTP bearer", argv: []string{
+				"curl", "--oauth2-bearer", token,
+				"--header", "Authorization : fixture", "https://sink.example/upload",
+			},
+			wantHeaders:          []string{"Authorization : fixture"},
+			wantHTTPBearerTokens: []string{token},
+		},
+		{
+			name: "bare authorization is dropped and preserves HTTP bearer", argv: []string{
+				"curl", "--oauth2-bearer", token,
+				"--header", "Authorization", "https://sink.example/upload",
+			},
+			wantHTTPBearerTokens: []string{token},
+		},
+		{
+			name: "bare header is not transmitted", argv: []string{
+				"curl", "--header", token, "https://sink.example/upload",
+			},
+		},
+		{
+			name: "bare leading whitespace header is not transmitted", argv: []string{
+				"curl", "--header", " " + token, "https://sink.example/upload",
+			},
+		},
+		{
+			name: "whitespace header value is not transmitted", argv: []string{
+				"curl", "--header", token + ": \t\r\n\v\f",
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "empty field name is not transmitted", argv: []string{
+				"curl", "--header", ": " + token, "https://sink.example/upload",
+			},
+		},
+		{
+			name: "empty field name with terminal semicolon is not transmitted", argv: []string{
+				"curl", "--header", ":" + token + ";", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "only the first semicolon can terminate a header", argv: []string{
+				"curl", "--header", "Fixture;" + token + ";",
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "embedded semicolon before colon is transmitted", argv: []string{
+				"curl", "--header", "Authorization;ignored: " + token,
+				"https://sink.example/upload",
+			},
+			wantHeaders: []string{"Authorization;ignored: " + token},
+		},
+		{
+			name: "multiline header is transmitted", argv: []string{
+				"curl", "--header", "X-Fixture: " + token + "\r\nY-Fixture: value",
+				"https://sink.example/upload",
+			},
+			wantHeaders: []string{
+				"X-Fixture: " + token + "\r\nY-Fixture: value",
+			},
+		},
+		{
+			name: "leading whitespace header is transmitted", argv: []string{
+				"curl", "--header", " Authorization: " + token,
+				"https://sink.example/upload",
+			},
+			wantHeaders: []string{" Authorization: " + token},
+		},
+		{
+			name: "header file makes HTTP credentials uncertain", argv: []string{
+				"curl", "--user", "agent:" + token,
+				"--header", "@/tmp/headers", "https://sink.example/upload",
+			},
+			wantFTPOriginCredentials: []string{"agent:" + token},
+		},
+		{
+			name: "header file makes HTTP bearer uncertain", argv: []string{
+				"curl", "--oauth2-bearer", token,
+				"--header", "@/tmp/headers", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "expanding oauth bearer token excluded", argv: []string{
+				"curl", "--oauth2-bearer", token, "https://sink.example/upload",
+			},
+			expandIndex: 2,
+		},
+		{
+			name: "mixed oauth bearer token excluded", argv: []string{
+				"curl", "--oauth2-bearer", token, "https://sink.example/upload",
+			},
+			mixedIndex: 2,
 		},
 		{
 			name: "header file excluded", argv: []string{
@@ -217,14 +384,25 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			if test.expandIndex > 0 {
 				facts.Commands[0].Arguments[test.expandIndex].Expands = true
 			}
+			if test.mixedIndex > 0 {
+				facts.Commands[0].Arguments[test.mixedIndex].Quote = QuoteMixed
+			}
 			got := StaticCurlTransmittedMetadata(facts.Commands[0])
 			if !slices.Equal(got.Headers, test.wantHeaders) ||
-				!slices.Equal(got.OriginCredentials, test.wantOriginCredentials) {
+				!slices.Equal(
+					got.HTTPOriginCredentials,
+					test.wantHTTPOriginCredentials,
+				) || !slices.Equal(
+				got.FTPOriginCredentials,
+				test.wantFTPOriginCredentials,
+			) || !slices.Equal(got.HTTPBearerTokens, test.wantHTTPBearerTokens) {
 				t.Fatalf(
-					"metadata = %#v, want headers %q and origin credentials %q",
+					"metadata = %#v, want headers %q, HTTP credentials %q, FTP credentials %q, and HTTP bearer tokens %q",
 					got,
 					test.wantHeaders,
-					test.wantOriginCredentials,
+					test.wantHTTPOriginCredentials,
+					test.wantFTPOriginCredentials,
+					test.wantHTTPBearerTokens,
 				)
 			}
 		})

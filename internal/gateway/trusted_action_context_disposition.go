@@ -320,28 +320,35 @@ func trustedActionContentFindingHasRiskPair(
 			return true
 		}
 		metadata := actionfacts.StaticCurlTransmittedMetadata(command)
-		headerEgress := trustedActionContentRuleMatchesParsedCandidates(
-			*rule,
-			metadata.Headers,
-		) &&
-			trustedActionCommandProvesExternalRequestForSchemes(
-				facts,
-				command.ID,
-				"http",
-				"https",
-			)
-		originAuthEgress := trustedActionContentRuleMatchesParsedCandidates(
-			*rule,
-			metadata.OriginCredentials,
-		) && trustedActionCommandProvesExternalRequestForSchemes(
+		httpEgress := trustedActionCommandProvesExternalRequestForSchemes(
 			facts,
 			command.ID,
 			"http",
 			"https",
+		)
+		ftpEgress := trustedActionCommandProvesExternalRequestForSchemes(
+			facts,
+			command.ID,
 			"ftp",
 			"ftps",
 		)
-		if headerEgress || originAuthEgress {
+		httpMetadataEgress := httpEgress &&
+			(trustedActionContentRuleMatchesParsedCandidates(
+				*rule,
+				metadata.Headers,
+			) || trustedActionContentRuleMatchesParsedCandidates(
+				*rule,
+				metadata.HTTPOriginCredentials,
+			) || trustedActionContentRuleMatchesParsedCandidates(
+				*rule,
+				metadata.HTTPBearerTokens,
+			))
+		ftpOriginAuthEgress := ftpEgress &&
+			trustedActionContentRuleMatchesParsedCandidates(
+				*rule,
+				metadata.FTPOriginCredentials,
+			)
+		if httpMetadataEgress || ftpOriginAuthEgress {
 			return true
 		}
 		if trustedActionStaticContentPipesToExternalEgress(

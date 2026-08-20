@@ -127,6 +127,7 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--json":            curlValue("--json", curlOptionNeutral),
 	"--key":             curlValue("--key", curlOptionNeutral),
 	"--max-time":        curlValue("--max-time", curlOptionNeutral),
+	"--oauth2-bearer":   curlValue("--oauth2-bearer", curlOptionNeutral),
 	"--output":          curlValue("--output", curlOptionOutput),
 	"--output-dir":      curlValue("--output-dir", curlOptionNeutral),
 	"--preproxy":        curlValue("--preproxy", curlOptionNetworkOverride),
