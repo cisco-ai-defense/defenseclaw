@@ -127,11 +127,13 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--json":            curlValue("--json", curlOptionNeutral),
 	"--key":             curlValue("--key", curlOptionNeutral),
 	"--max-time":        curlValue("--max-time", curlOptionNeutral),
+	"--noproxy":         curlValue("--noproxy", curlOptionNetworkOverride),
 	"--oauth2-bearer":   curlValue("--oauth2-bearer", curlOptionNeutral),
 	"--output":          curlValue("--output", curlOptionOutput),
 	"--output-dir":      curlValue("--output-dir", curlOptionNeutral),
 	"--preproxy":        curlValue("--preproxy", curlOptionNetworkOverride),
 	"--proxy":           curlValue("--proxy", curlOptionNetworkOverride),
+	"--proxy-header":    curlValue("--proxy-header", curlOptionNeutral),
 	"--proxy-user":      curlValue("--proxy-user", curlOptionNeutral),
 	"--proxy1.0":        curlValue("--proxy1.0", curlOptionNetworkOverride),
 	"--quote":           curlValue("--quote", curlOptionNeutral),
@@ -347,7 +349,8 @@ func curlOptionAllowsEmptyValue(option string) bool {
 	case "--cert", "--connect-to", "--cookie", "--data",
 		"--data-ascii", "--data-binary", "--data-raw",
 		"--data-urlencode", "--doh-url", "--header", "--json",
-		"--proxy", "--proxy-user", "--quote", "--referer",
+		"--noproxy", "--proxy", "--proxy-header", "--proxy-user",
+		"--quote", "--referer",
 		"--telnet-option", "--time-cond", "--user",
 		"--url-query", "--user-agent", "--write-out":
 		return true

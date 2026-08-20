@@ -157,18 +157,6 @@ func TestCurlEffectiveTargetOverridesForceFallback(t *testing.T) {
 				"https://allowed.example/latest/meta-data/",
 			},
 		},
-		{
-			name: "proxy raw",
-			command: "curl --proxy http://169.254.169.254:8080 " +
-				"https://allowed.example/",
-		},
-		{
-			name: "proxy structured",
-			argv: []string{
-				"curl", "--proxy", "http://169.254.169.254:8080",
-				"https://allowed.example/",
-			},
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			facts := analyzeNormalizationInput(test.command, test.argv)

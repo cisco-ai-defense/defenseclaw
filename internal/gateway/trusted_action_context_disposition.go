@@ -372,6 +372,14 @@ func trustedActionContentFindingHasRiskPair(
 				command.ID,
 				metadata.FTPOriginCredentialComponents,
 			)
+		proxyMetadata := actionfacts.StaticCurlProxyTransmittedMetadata(command)
+		curlProxyMetadataEgress :=
+			trustedActionContentRuleMatchesExternalProxyRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				proxyMetadata.ProxyRequestComponents,
+			)
 		wgetMetadata := actionfacts.StaticWgetTransmittedMetadata(command)
 		wgetHTTPMetadataEgress := httpEgress &&
 			(trustedActionContentRuleMatchesParsedCandidates(
@@ -405,7 +413,7 @@ func trustedActionContentFindingHasRiskPair(
 				command.ID,
 				wgetMetadata.FTPOriginCredentialComponents,
 			)
-		if httpMetadataEgress || ftpOriginAuthEgress ||
+		if httpMetadataEgress || ftpOriginAuthEgress || curlProxyMetadataEgress ||
 			curlRequestComponentEgress || curlTargetBoundOriginAuthEgress ||
 			wgetHTTPMetadataEgress || wgetFTPOriginAuthEgress ||
 			wgetRequestComponentEgress || wgetTargetBoundOriginAuthEgress {
@@ -665,6 +673,29 @@ func trustedActionContentRuleMatchesExternalRequestComponents(
 					actionfacts.NetworkUpload,
 				) && strings.EqualFold(network.Scheme, query.Scheme) &&
 				network.Host == query.Host && network.Port == query.Port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func trustedActionContentRuleMatchesExternalProxyRequestComponents(
+	facts actionfacts.Facts,
+	rule PatternRule,
+	commandID int64,
+	components []actionfacts.TransmittedRequestComponent,
+) bool {
+	for _, component := range components {
+		if firstAcceptedRuleMatch(rule, component.Value) == nil {
+			continue
+		}
+		for _, network := range facts.Network {
+			if network.CommandID == commandID &&
+				network.Action == actionfacts.NetworkConnect &&
+				isExternalNetwork(network) &&
+				strings.EqualFold(network.Scheme, component.Scheme) &&
+				network.Host == component.Host && network.Port == component.Port {
 				return true
 			}
 		}

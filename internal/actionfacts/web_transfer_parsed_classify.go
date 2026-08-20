@@ -204,6 +204,417 @@ type TransmittedRequestComponent struct {
 	Port   int64
 }
 
+// CurlProxyTransmittedMetadata keeps proxy-bound request bytes separate from
+// origin-bound curl metadata. Each component is paired only with the explicit
+// proxy destination that receives it.
+type CurlProxyTransmittedMetadata struct {
+	ProxyRequestComponents []TransmittedRequestComponent
+}
+
+// StaticCurlProxyTransmittedMetadata returns literal credentials and custom
+// headers that a closed curl invocation can transmit to one explicit HTTP(S)
+// proxy. This uses the same argv-only/no-ambient-defaults assumption as the
+// origin metadata proof: absent --noproxy means there is no argv proxy bypass,
+// while a final explicit nonempty --noproxy closes this lane.
+func StaticCurlProxyTransmittedMetadata(
+	command CommandFact,
+) CurlProxyTransmittedMetadata {
+	proxy, parsed, ok := staticCurlProxyDestination(command)
+	if !ok {
+		return CurlProxyTransmittedMetadata{}
+	}
+	component := func(value string) TransmittedRequestComponent {
+		return TransmittedRequestComponent{
+			Value:  value,
+			Scheme: proxy.Scheme,
+			Host:   proxy.Host,
+			Port:   proxy.Port,
+		}
+	}
+
+	lastProxy := -1
+	lastProxyUser := -1
+	proxyAuthorizationOverridden := false
+	metadata := CurlProxyTransmittedMetadata{}
+	proxyTunnel := false
+	for _, option := range parsed.Options {
+		proxyTunnel = proxyTunnel || option.Canonical == "--proxytunnel"
+	}
+	for index, option := range parsed.Options {
+		switch option.Canonical {
+		case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
+			"--socks5", "--socks5-hostname":
+			if option.ValuePresent {
+				lastProxy = index
+			}
+		case "--proxy-user":
+			if option.ValuePresent {
+				lastProxyUser = index
+			}
+		case "--proxy-header":
+			if !option.ValuePresent || !staticCurlOptionValue(command, option) ||
+				strings.HasPrefix(option.Value, "@") {
+				return CurlProxyTransmittedMetadata{}
+			}
+			if curlHeaderOverridesHTTPField(
+				option.Value,
+				"proxy-authorization",
+			) {
+				proxyAuthorizationOverridden = true
+			}
+			if curlProxyHeaderCandidateIsTransmitted(
+				option.Value,
+				parsed.Targets,
+				proxy.Scheme,
+				proxyTunnel,
+			) {
+				metadata.ProxyRequestComponents = append(
+					metadata.ProxyRequestComponents,
+					component(option.Value),
+				)
+			}
+		}
+	}
+	credentials := ""
+	candidate := false
+	if lastProxyUser >= 0 {
+		proxyUser := parsed.Options[lastProxyUser]
+		if !staticCurlOptionValue(command, proxyUser) {
+			return CurlProxyTransmittedMetadata{}
+		}
+		var valid bool
+		credentials, candidate, valid =
+			curlDecodedProxyCredentials(proxyUser.Value)
+		if !valid {
+			return CurlProxyTransmittedMetadata{}
+		}
+	}
+	if lastProxy < 0 {
+		return CurlProxyTransmittedMetadata{}
+	}
+	proxyOption := parsed.Options[lastProxy]
+	_, urlCredentials, present, valid := staticCurlHTTPProxyFact(
+		command.ID,
+		proxyOption.Canonical,
+		proxyOption.Value,
+	)
+	if !valid {
+		return CurlProxyTransmittedMetadata{}
+	}
+	if present {
+		credentials = urlCredentials
+		candidate = true
+	}
+	if candidate && !proxyAuthorizationOverridden {
+		metadata.ProxyRequestComponents = append(
+			metadata.ProxyRequestComponents,
+			component(credentials),
+		)
+	}
+	return metadata
+}
+
+func staticCurlProxyDestination(
+	command CommandFact,
+) (NetworkFact, curlArgvParse, bool) {
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		command.Effect != EffectExecute || !command.ArgvComplete ||
+		command.ParentCommandID != 0 || len(command.Wrappers) != 0 ||
+		command.Program != "curl" || len(command.Argv) == 0 ||
+		command.Executable != command.Argv[0] ||
+		!exactCaseSensitivePOSIXProgram(&command, "curl") ||
+		len(command.Arguments) != len(command.Argv) {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	for index := range command.Argv {
+		if !staticCommandArgumentAt(command, index) {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+	}
+
+	parsed := parseCurlArgv(command.Argv)
+	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
+		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
+		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
+		!curlRangeOptionsValid(parsed) {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	group := parsed.Targets[0].Group
+	lastProxy := -1
+	lastNoProxy := -1
+	lastProxyUser := -1
+	fail := false
+	failWithBody := false
+	for index, option := range parsed.Options {
+		if option.Group != group || option.Canonical == "--next" ||
+			option.Role == curlOptionConfig {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+		switch option.Canonical {
+		case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
+			"--socks5", "--socks5-hostname", "--proxy-user",
+			"--proxy-header", "--noproxy", "--url", "--":
+		default:
+			if !curlProxyInertFlag(option) {
+				return NetworkFact{}, curlArgvParse{}, false
+			}
+		}
+		if option.Role == curlOptionNetworkOverride {
+			switch {
+			case curlMainProxyOption(option.Canonical):
+				lastProxy = index
+			case option.Canonical == "--noproxy":
+				lastNoProxy = index
+			default:
+				return NetworkFact{}, curlArgvParse{}, false
+			}
+		}
+		if option.Canonical == "--proxy-user" && option.ValuePresent {
+			lastProxyUser = index
+		}
+		fail = fail || option.Canonical == "--fail"
+		failWithBody = failWithBody || option.Canonical == "--fail-with-body"
+	}
+	if lastProxy < 0 || fail && failWithBody {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	if lastNoProxy >= 0 {
+		noProxy := parsed.Options[lastNoProxy]
+		if !staticCurlOptionValue(command, noProxy) || noProxy.Value != "" {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+	}
+	if lastProxyUser >= 0 {
+		proxyUser := parsed.Options[lastProxyUser]
+		if !staticCurlOptionValue(command, proxyUser) {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+		_, _, valid := curlDecodedProxyCredentials(proxyUser.Value)
+		if !valid {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+	}
+
+	for _, target := range parsed.Targets {
+		lowerTarget := strings.ToLower(target.Value)
+		if target.Group != group ||
+			!staticCommandArgumentAt(command, target.ArgvIndex) ||
+			!validLiteralRequestTarget(target.Value) ||
+			curlHasUnmodeledGlob(target.Value) ||
+			curlTargetHasInvalidUserinfo(target.Value) ||
+			!strings.HasPrefix(lowerTarget, "http://") &&
+				!strings.HasPrefix(lowerTarget, "https://") {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+		targetFact, ok := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkDownload,
+		)
+		if !ok || targetFact.Scheme != "http" && targetFact.Scheme != "https" {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+	}
+
+	proxyOption := parsed.Options[lastProxy]
+	if !staticCurlOptionValue(command, proxyOption) {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	proxy, _, _, ok := staticCurlHTTPProxyFact(
+		command.ID,
+		proxyOption.Canonical,
+		proxyOption.Value,
+	)
+	return proxy, parsed, ok
+}
+
+func staticCurlHTTPProxyFact(
+	commandID int64,
+	canonical string,
+	value string,
+) (NetworkFact, string, bool, bool) {
+	if !validLiteralRequestTarget(value) {
+		return NetworkFact{}, "", false, false
+	}
+	lower := strings.ToLower(value)
+	scheme := ""
+	switch {
+	case strings.HasPrefix(lower, "http://"):
+		scheme = "http"
+	case strings.HasPrefix(lower, "https://"):
+		scheme = "https"
+	default:
+		return NetworkFact{}, "", false, false
+	}
+	if !curlMainProxyOptionUsesHTTP(canonical, scheme) {
+		return NetworkFact{}, "", false, false
+	}
+
+	remainder := value[len(scheme)+3:]
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	authority := remainder[:authorityEnd]
+	rawUserinfo, hostPort, hasUserinfo := strings.Cut(authority, "@")
+	if !hasUserinfo {
+		hostPort = authority
+	}
+	if hostPort == "" || !visibleASCII(hostPort) || strings.Contains(hostPort, "@") {
+		return NetworkFact{}, "", false, false
+	}
+
+	credentials := ""
+	if hasUserinfo {
+		var valid bool
+		credentials, valid = curlDecodedProxyURLCredentials(rawUserinfo)
+		if !valid {
+			return NetworkFact{}, "", true, false
+		}
+	}
+	peerURL := scheme + "://" + hostPort
+	parsed, err := url.Parse(peerURL)
+	if err != nil || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.Host == "" || parsed.Path != "" || parsed.RawPath != "" ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		parsed.RawFragment != "" {
+		return NetworkFact{}, "", hasUserinfo, false
+	}
+	proxy, ok := networkURLFact(commandID, peerURL, NetworkConnect)
+	if ok && proxy.Port == 0 {
+		if scheme == "http" {
+			proxy.Port = 1080
+		} else {
+			proxy.Port = 443
+		}
+	}
+	return proxy, credentials, hasUserinfo, ok
+}
+
+func curlDecodedProxyURLCredentials(raw string) (string, bool) {
+	user, password, hasPassword := strings.Cut(raw, ":")
+	if !hasPassword {
+		password = ""
+	}
+	user, valid := curlDecodePercentBytes(user, true)
+	if !valid {
+		return "", false
+	}
+	password, valid = curlDecodePercentBytes(password, true)
+	if !valid {
+		return "", false
+	}
+	return user + ":" + password, true
+}
+
+func curlDecodedProxyCredentials(
+	value string,
+) (decoded string, candidate bool, valid bool) {
+	user, password, present := strings.Cut(value, ":")
+	if !present && !strings.HasPrefix(value, ";") {
+		return "", false, false
+	}
+	if !present {
+		user = value
+		password = ""
+	}
+	user, valid = curlDecodePercentBytes(user, false)
+	if !valid {
+		return "", false, false
+	}
+	password, valid = curlDecodePercentBytes(password, false)
+	if !valid {
+		return "", false, false
+	}
+	decoded = user + ":" + password
+	return decoded, true, true
+}
+
+func curlDecodePercentBytes(value string, rejectControls bool) (string, bool) {
+	var output strings.Builder
+	output.Grow(len(value))
+	for index := 0; index < len(value); index++ {
+		decoded := value[index]
+		if decoded == '%' && index+2 < len(value) &&
+			isASCIIHexByte(value[index+1]) &&
+			isASCIIHexByte(value[index+2]) {
+			parsed, err := strconv.ParseUint(value[index+1:index+3], 16, 8)
+			if err != nil {
+				return "", false
+			}
+			decoded = byte(parsed)
+			index += 2
+		}
+		if decoded == 0 || rejectControls && decoded < 0x20 {
+			return "", false
+		}
+		output.WriteByte(decoded)
+	}
+	return output.String(), true
+}
+
+func curlMainProxyOption(canonical string) bool {
+	switch canonical {
+	case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
+		"--socks5", "--socks5-hostname":
+		return true
+	default:
+		return false
+	}
+}
+
+func curlMainProxyOptionUsesHTTP(canonical string, scheme string) bool {
+	if scheme == "https" {
+		return curlMainProxyOption(canonical)
+	}
+	return scheme == "http" &&
+		(canonical == "--proxy" || canonical == "--proxy1.0")
+}
+
+func curlProxyInertFlag(option curlOptionToken) bool {
+	if !option.Known || option.ValuePresent || option.TakesValue {
+		return false
+	}
+	switch option.Role {
+	case curlOptionNeutral, curlOptionHead, curlOptionNoHead,
+		curlOptionNoRemoteName, curlOptionNoRemoteNameAll:
+		return true
+	default:
+		return false
+	}
+}
+
+func curlProxyHeaderCandidateIsTransmitted(
+	value string,
+	targets []curlTransferTarget,
+	proxyScheme string,
+	proxyTunnel bool,
+) bool {
+	if proxyScheme == "https" {
+		for _, name := range []string{
+			"host", "upgrade", "connection", "keep-alive",
+			"proxy-connection", "transfer-encoding",
+		} {
+			if curlHeaderOverridesHTTPField(value, name) {
+				return false
+			}
+		}
+	}
+	// Curl's generated Host wins on an HTTP forward-proxy request, while the
+	// custom Host is sent on an HTTPS CONNECT. The bounded proxy lane excludes
+	// request-body modes, so other valid literal proxy headers are transmitted.
+	if curlHeaderOverridesHTTPField(value, "host") {
+		for _, target := range targets {
+			if proxyTunnel ||
+				strings.HasPrefix(strings.ToLower(target.Value), "https://") {
+				return curlStaticHTTPHeaderIsTransmitted(value)
+			}
+		}
+		return false
+	}
+	return curlStaticHTTPHeaderIsTransmitted(value)
+}
+
 // StaticCurlTransmittedMetadata returns literal request-metadata operands that
 // a complete curl command uses for origin-bound transmission. Only
 // parser-owned custom headers, origin credentials, bounded URL components,
@@ -1639,6 +2050,7 @@ func curlDataURLEncodeBytes(value string) (string, bool) {
 
 func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	parsed := parseCurlArgv(command.Argv)
+	proxyNetwork, _, proxyProved := staticCurlProxyDestination(*command)
 	valid := parsed.Complete && !parsed.EmptyTransferGroup &&
 		parsed.hasValidOptionValues() && curlRequestModeValid(parsed) &&
 		curlRangeOptionsValid(parsed)
@@ -1763,9 +2175,24 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 			// A certificate operand may include a password suffix. Until that
 			// grammar is represented, retain it as diagnostic-only context.
 			out.markPartial(IssueUnknownOperandGrammar)
-		case "--connect-to", "--dns-servers", "--doh-url", "--preproxy",
-			"--proxy", "--proxy1.0", "--resolve", "--socks4", "--socks4a",
+		case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
 			"--socks5", "--socks5-hostname":
+			if !proxyProved {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
+		case "--noproxy":
+			if !proxyProved {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
+		case "--proxy-header":
+			if strings.HasPrefix(value, "@") {
+				if path := strings.TrimPrefix(value, "@"); path != "" && path != "-" {
+					appendCommandPath(out, command, PathAccessRead, path)
+				}
+				out.markPartial(IssueUnsupportedConstruct)
+			}
+		case "--connect-to", "--dns-servers", "--doh-url", "--preproxy",
+			"--resolve":
 			// These options can replace the actual peer while leaving the
 			// logical URL unchanged.
 			out.markPartial(IssueUnsupportedConstruct)
@@ -1802,6 +2229,12 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 			group.dumpHeader != "-" {
 			appendCommandPath(out, command, PathAccessWrite, group.dumpHeader)
 			group.hasDownloadFile = true
+		}
+	}
+	if proxyProved {
+		addOperation(command, OperationConnect)
+		if !out.appendNetwork(proxyNetwork) {
+			out.markPartial(IssueUnknownOperandGrammar)
 		}
 	}
 
