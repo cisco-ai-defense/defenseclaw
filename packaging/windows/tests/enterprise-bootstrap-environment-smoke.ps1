@@ -427,6 +427,34 @@ function Invoke-RenderedEnterpriseTargetsVersionProbe {
     return $true
 }
 
+function Invoke-RenderedEnterpriseConfigRulePackProbe {
+    $rendered = Get-DefenseClawRenderedEnterpriseConfig `
+        -Mode 'action' `
+        -Connectors @('claudecode')
+    $guardrailStart = $rendered.IndexOf(
+        "guardrail:$([Environment]::NewLine)",
+        [StringComparison]::Ordinal
+    )
+    $nextSection = $rendered.IndexOf(
+        "ai_discovery:$([Environment]::NewLine)",
+        [StringComparison]::Ordinal
+    )
+    if ($guardrailStart -lt 0 -or $nextSection -le $guardrailStart) {
+        throw 'shorthand config did not emit a bounded guardrail section'
+    }
+    $guardrailBlock = $rendered.Substring(
+        $guardrailStart,
+        $nextSection - $guardrailStart
+    )
+    if ([regex]::Matches(
+            $guardrailBlock,
+            '(?m)^  rule_pack_dir: ""\r?$'
+        ).Count -ne 1) {
+        throw 'shorthand config did not explicitly select embedded rule-pack defaults'
+    }
+    return $true
+}
+
 $expectedWindows = [IO.Path]::GetFullPath(
     [IO.Path]::GetDirectoryName([Environment]::SystemDirectory)
 ).TrimEnd('\')
@@ -626,6 +654,7 @@ if (-not [bool]$status.ok -or [bool]$status.installed -or
 $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
 $renderedTargetsVersionContract = Invoke-RenderedEnterpriseTargetsVersionProbe
+$renderedConfigEmbeddedRulePack = Invoke-RenderedEnterpriseConfigRulePackProbe
 $raceRoot = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
     "DefenseClaw-BootstrapEnvironmentRace-$([Guid]::NewGuid().ToString('N'))"
@@ -756,6 +785,8 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$collisionRejected
     rendered_targets_version_contract =
         [bool]$renderedTargetsVersionContract
+    rendered_config_embedded_rule_pack =
+        [bool]$renderedConfigEmbeddedRulePack
     concurrent_workers = 6
     concurrent_roots_unique = $true
     concurrent_cleanup_verified = $true

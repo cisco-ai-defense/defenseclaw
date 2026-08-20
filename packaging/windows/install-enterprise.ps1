@@ -1425,6 +1425,10 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     # remains the AVC-supplied endpoint override (see the packaging
     # doc); operators who need a non-default endpoint drop that
     # overlay after install and the gateway picks it up dynamically.
+    # rule_pack_dir is the exception: omitting the key activates the
+    # runtime-v8 data-dir migration, which points at an external policy
+    # directory the Windows payload does not ship. An explicit empty
+    # scalar selects the gateway's validated embedded rule-pack defaults.
     param(
         [Parameter(Mandatory)][string]$Mode,
         [Parameter(Mandatory)][string[]]$Connectors
@@ -1446,6 +1450,7 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('guardrail:')
     [void]$sb.AppendLine('  enabled: true')
+    [void]$sb.AppendLine('  rule_pack_dir: ""')
     [void]$sb.AppendLine("  mode: $Mode")
     [void]$sb.AppendLine('  scanner_mode: both')
     [void]$sb.AppendLine('  detection_strategy: regex_only')

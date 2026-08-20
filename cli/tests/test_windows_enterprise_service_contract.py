@@ -59,6 +59,7 @@ WINDOWS_ENV_CONFIG = ROOT / "internal" / "config" / "env_config_windows.go"
 WINDOWS_CODEX_POLICY = ROOT / "internal" / "gateway" / "connector" / "codex_policy_windows.go"
 WINDOWS_MANAGED_RUNTIME = ROOT / "internal" / "enterprisehooks" / "managed_runtime_windows.go"
 WINDOWS_MANAGED_POLICY = ROOT / "internal" / "enterprisehooks" / "managed_policy_windows.go"
+WINDOWS_MANAGED_BUNDLE_BUILDER = ROOT / "packaging" / "scripts" / "build-managed-windows-bundle.sh"
 POWERSHELL = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
 
 
@@ -70,6 +71,9 @@ def read(path: Path) -> str:
 def test_windows_shorthand_targets_require_metadata_versions() -> None:
     installer = read(INSTALLER)
     smoke = read(BOOTSTRAP_ENVIRONMENT_SMOKE)
+    config_renderer_start = installer.index(
+        "function Get-DefenseClawRenderedEnterpriseConfig"
+    )
     discovery_start = installer.index(
         "function Get-DefenseClawConnectorMetadataVersion"
     )
@@ -77,9 +81,11 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
         "function Get-DefenseClawRenderedEnterpriseTargets"
     )
     execution_start = installer.index("$bootstrapEnvironment = $null")
+    config_renderer = installer[config_renderer_start:discovery_start]
     discovery = installer[discovery_start:renderer_start]
     renderer = installer[renderer_start:execution_start]
 
+    assert 'rule_pack_dir: ""' in config_renderer
     assert "Get-DefenseClawConnectorJsonMetadataVersion" in discovery
     assert "AppData\\Roaming\\npm\\node_modules" in discovery
     assert "AppData\\Local\\Programs\\cursor\\resources\\app\\package.json" in discovery
@@ -93,6 +99,20 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert renderer.index("agent_version:") < renderer.index("enabled: true")
     assert "@attacker/not-amp" in smoke
     assert "target renderer emitted an enabled/version contract mismatch" in smoke
+    assert "shorthand config did not explicitly select embedded rule-pack defaults" in smoke
+
+
+def test_unsigned_windows_bundle_instructions_are_claude_only() -> None:
+    builder = read(WINDOWS_MANAGED_BUNDLE_BUILDER)
+    unsigned_instructions = builder[
+        builder.index("Local unsigned build ready") :
+        builder.index("See cmd/defenseclaw-enterprise-setup/platform_windows.go")
+    ]
+
+    assert "--core-hardening-certification --mode action" in unsigned_instructions
+    assert "--connector claudecode" in unsigned_instructions
+    assert "The full profile requires real" in unsigned_instructions
+    assert "WDAC/AppLocker" in unsigned_instructions
 
 
 def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
@@ -1196,6 +1216,7 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "hostile_fixture_cleanup_verified",
                 "existing_collision_rejected_without_acl_seizure",
                 "rendered_targets_version_contract",
+                "rendered_config_embedded_rule_pack",
                 "concurrent_workers",
                 "concurrent_roots_unique",
                 "concurrent_cleanup_verified",

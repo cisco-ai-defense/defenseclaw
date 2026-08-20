@@ -645,7 +645,11 @@ if [[ "${ALLOW_UNSIGNED}" == "true" ]]; then
   echo ""
   echo "Local unsigned build ready. Install on a Windows test box with"
   echo "  DefenseClawSetup-Enterprise-x64.exe /install --allow-unsigned \\"
-  echo "      --certification-codex-home <disposable path>"
+  echo "      --certification-codex-home <disposable path> \\"
+  echo "      --core-hardening-certification --mode action \\"
+  echo "      --connector claudecode"
+  echo "This unsigned example is Claude-only. The full profile requires real"
+  echo "WDAC/AppLocker, Claude-policy, and trusted Codex-launcher attestations."
   echo "See cmd/defenseclaw-enterprise-setup/platform_windows.go for the"
   echo "runtime hash gate that refuses non-disposable scopes."
 else
