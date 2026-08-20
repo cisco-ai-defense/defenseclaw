@@ -123,6 +123,201 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			checkRequestComponents:    true,
 		},
 		{
+			name: "literal user agent", argv: []string{
+				"curl", "--user-agent", token, "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(token, "/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "joined literal user agent", argv: []string{
+				"curl", "-A" + token, "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(token, "/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "final user agent wins", argv: []string{
+				"curl", "--user-agent", token, "--user-agent", "fixture",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("fixture", "/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "final empty user agent removes earlier value", argv: []string{
+				"curl", "--user-agent", token, "--user-agent=",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "custom user agent overrides dedicated option", argv: []string{
+				"curl", "--user-agent", token,
+				"--header", "User-Agent: fixture", "https://sink.example/safe",
+			},
+			wantHeaders:               []string{"User-Agent: fixture"},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "header file makes dedicated headers uncertain", argv: []string{
+				"curl", "--user-agent", token,
+				"--header", "@/tmp/headers", "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "expanding user agent excluded", argv: []string{
+				"curl", "--user-agent", token, "https://sink.example/safe",
+			},
+			expandIndex:            2,
+			checkRequestComponents: true,
+		},
+		{
+			name: "literal referer", argv: []string{
+				"curl", "--referer", "https://" + token + ".example/source",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"https://"+token+".example/source", "/safe",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "first automatic referer marker truncates the value", argv: []string{
+				"curl", "--referer", "https://" + token + ".example;auto/source",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"https://"+token+".example", "/safe",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "final referer wins", argv: []string{
+				"curl", "--referer", "https://" + token + ".example/source",
+				"--referer", "https://fixture.example/source",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"https://fixture.example/source", "/safe",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "custom referer overrides dedicated option", argv: []string{
+				"curl", "--referer", "https://" + token + ".example/source",
+				"--header", "Referer: https://fixture.example",
+				"https://sink.example/safe",
+			},
+			wantHeaders:               []string{"Referer: https://fixture.example"},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "literal HTTP range", argv: []string{
+				"curl", "--range", token, "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(token, "/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "final HTTP range wins", argv: []string{
+				"curl", "--range", token, "--range", "0-1",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("0-1", "/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "custom range overrides dedicated option", argv: []string{
+				"curl", "--range", token, "--header", "Range: bytes=0-1",
+				"https://sink.example/safe",
+			},
+			wantHeaders:               []string{"Range: bytes=0-1"},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "request body makes range wire uncertain", argv: []string{
+				"curl", "--range", token, "--data", "fixture",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "custom content range does not replace default GET range", argv: []string{
+				"curl", "--range", token,
+				"--header", "Content-Range: bytes 0-1/7",
+				"https://sink.example/safe",
+			},
+			wantHeaders: []string{"Content-Range: bytes 0-1/7"},
+			wantHTTPRequestComponents: httpsComponents(
+				token, "/safe",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "custom content range makes dedicated range uncertain", argv: []string{
+				"curl", "--range", token, "--data", "fixture",
+				"--header", "Content-Range: bytes 0-1/7",
+				"https://sink.example/safe",
+			},
+			wantHeaders:               []string{"Content-Range: bytes 0-1/7"},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "continue at makes range uncertain", argv: []string{
+				"curl", "--range", token, "--continue-at", "-",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "request mode control makes range uncertain", argv: []string{
+				"curl", "--range", token, "--get",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "literal custom HTTP method", argv: []string{
+				"curl", "--request", token, "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(token, "/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "final custom HTTP method wins", argv: []string{
+				"curl", "--request", token, "--request", "GET",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("GET", "/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "invalid custom HTTP method excluded", argv: []string{
+				"curl", "--request", token + " invalid",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "peer override excludes dedicated headers", argv: []string{
+				"curl", "--user-agent", token, "--unix-socket", "/tmp/service.sock",
+				"https://sink.example/safe",
+			},
+			checkRequestComponents: true,
+		},
+		{
 			name: "literal cookie", argv: []string{
 				"curl", "--cookie", "session=" + token,
 				"https://sink.example/safe",

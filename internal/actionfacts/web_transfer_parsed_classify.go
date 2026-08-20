@@ -158,6 +158,11 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	lastUser := -1
 	lastBearer := -1
 	lastRequestTarget := -1
+	lastUserAgent := -1
+	lastReferer := -1
+	lastRange := -1
+	lastRequestMethod := -1
+	rangeWireUncertain := false
 	for index, option := range parsed.Options {
 		if option.Group != group || option.Role == curlOptionConfig ||
 			option.Role == curlOptionNetworkOverride {
@@ -171,6 +176,21 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		}
 		if option.Canonical == "--request-target" && option.ValuePresent {
 			lastRequestTarget = index
+		}
+		if option.Canonical == "--user-agent" && option.ValuePresent {
+			lastUserAgent = index
+		}
+		if option.Canonical == "--referer" && option.ValuePresent {
+			lastReferer = index
+		}
+		if option.Canonical == "--range" && option.ValuePresent {
+			lastRange = index
+		}
+		if option.Canonical == "--request" && option.ValuePresent {
+			lastRequestMethod = index
+		}
+		if curlOptionMakesRangeWireUncertain(option.Canonical) {
+			rangeWireUncertain = true
 		}
 	}
 	requestTargetValue := ""
@@ -186,15 +206,27 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	metadata := CurlTransmittedMetadata{}
 	httpAuthorizationOverridden := false
 	httpCookieOverridden := false
+	httpHeaderFileOpaque := false
+	httpUserAgentOverridden := false
+	httpRefererOverridden := false
+	httpRangeOverridden := false
 	finalUser := ""
 	finalBearer := ""
+	finalUserAgent := ""
+	finalReferer := ""
+	finalRange := ""
+	finalRequestMethod := ""
 	var literalCookies []string
 	for index, option := range parsed.Options {
 		if !option.ValuePresent ||
 			(option.Canonical != "--header" &&
 				option.Canonical != "--cookie" &&
 				(option.Canonical != "--user" || index != lastUser) &&
-				(option.Canonical != "--oauth2-bearer" || index != lastBearer)) {
+				(option.Canonical != "--oauth2-bearer" || index != lastBearer) &&
+				(option.Canonical != "--user-agent" || index != lastUserAgent) &&
+				(option.Canonical != "--referer" || index != lastReferer) &&
+				(option.Canonical != "--range" || index != lastRange) &&
+				(option.Canonical != "--request" || index != lastRequestMethod)) {
 			continue
 		}
 		argumentIndex := option.ValueArgvIndex
@@ -214,6 +246,7 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			if strings.HasPrefix(option.Value, "@") {
 				httpAuthorizationOverridden = true
 				httpCookieOverridden = true
+				httpHeaderFileOpaque = true
 				continue
 			}
 			if curlHeaderOverridesHTTPAuthorization(option.Value) {
@@ -221,6 +254,15 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			}
 			if curlHeaderOverridesHTTPCookie(option.Value) {
 				httpCookieOverridden = true
+			}
+			if curlHeaderOverridesHTTPField(option.Value, "user-agent") {
+				httpUserAgentOverridden = true
+			}
+			if curlHeaderOverridesHTTPField(option.Value, "referer") {
+				httpRefererOverridden = true
+			}
+			if curlHeaderOverridesHTTPField(option.Value, "range") {
+				httpRangeOverridden = true
 			}
 			if !curlStaticHTTPHeaderIsTransmitted(option.Value) {
 				continue
@@ -234,8 +276,30 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			finalUser = option.Value
 		case "--oauth2-bearer":
 			finalBearer = option.Value
+		case "--user-agent":
+			if visibleASCII(option.Value) {
+				finalUserAgent = option.Value
+			}
+		case "--referer":
+			wireValue, _, _ := strings.Cut(option.Value, ";auto")
+			if visibleASCII(wireValue) {
+				finalReferer = wireValue
+			}
+		case "--range":
+			if !rangeWireUncertain && visibleASCII(option.Value) {
+				finalRange = option.Value
+			}
+		case "--request":
+			if curlHTTPRequestMethodBytesPreserved(option.Value) {
+				finalRequestMethod = option.Value
+			}
 		}
 	}
+	// --time-cond converts a date or file mtime into a generated HTTP date and
+	// is not a literal-header candidate. Range proof is limited to the closed
+	// default-GET state; body, method-control, and resume options can instead
+	// generate Content-Range or otherwise change precedence. ETag file options
+	// are outside the closed parser, so they make this helper return no metadata.
 	if finalUser != "" {
 		metadata.FTPOriginCredentials = []string{finalUser}
 	}
@@ -270,6 +334,32 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 					component(cookie),
 				)
 			}
+		}
+		if !httpHeaderFileOpaque {
+			if finalUserAgent != "" && !httpUserAgentOverridden {
+				metadata.HTTPRequestComponents = append(
+					metadata.HTTPRequestComponents,
+					component(finalUserAgent),
+				)
+			}
+			if finalReferer != "" && !httpRefererOverridden {
+				metadata.HTTPRequestComponents = append(
+					metadata.HTTPRequestComponents,
+					component(finalReferer),
+				)
+			}
+			if finalRange != "" && !httpRangeOverridden {
+				metadata.HTTPRequestComponents = append(
+					metadata.HTTPRequestComponents,
+					component(finalRange),
+				)
+			}
+		}
+		if finalRequestMethod != "" {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(finalRequestMethod),
+			)
 		}
 		if lastRequestTarget >= 0 {
 			metadata.HTTPRequestComponents = append(
@@ -371,14 +461,7 @@ func curlURLPathBytesPreserved(value string) bool {
 	if value == "" || !strings.HasPrefix(value, "/") {
 		return false
 	}
-	for index := range len(value) {
-		character := value[index]
-		if character >= 'a' && character <= 'z' ||
-			character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' ||
-			strings.ContainsRune("/-._~", rune(character)) {
-			continue
-		}
+	if !webUnreservedBytesPreserved(value, "/-._~") {
 		return false
 	}
 	for _, segment := range strings.Split(value, "/") {
@@ -393,17 +476,42 @@ func curlCookieBytesPreserved(value string) bool {
 	if strings.IndexByte(value, '=') <= 0 {
 		return false
 	}
+	return webUnreservedBytesPreserved(value, "-._~=")
+}
+
+func webUnreservedBytesPreserved(value string, extra string) bool {
 	for index := range len(value) {
 		character := value[index]
 		if character >= 'a' && character <= 'z' ||
 			character >= 'A' && character <= 'Z' ||
 			character >= '0' && character <= '9' ||
-			strings.ContainsRune("-._~=", rune(character)) {
+			strings.ContainsRune(extra, rune(character)) {
 			continue
 		}
 		return false
 	}
 	return true
+}
+
+func curlHTTPRequestMethodBytesPreserved(value string) bool {
+	return value != "" && webUnreservedBytesPreserved(
+		value,
+		"!#$%&'*+-.^_`|~",
+	)
+}
+
+func curlOptionMakesRangeWireUncertain(option string) bool {
+	// This is the closed parser's complete set of options that can change
+	// libcurl's internal HTTP request or resume mode. --request changes only
+	// the wire method and leaves a default-GET Range header intact.
+	switch option {
+	case "--data", "--data-ascii", "--data-binary", "--data-raw",
+		"--data-urlencode", "--json", "--form", "--form-string",
+		"--upload-file", "--get", "--head", "--no-head", "--continue-at":
+		return true
+	default:
+		return false
+	}
 }
 
 func curlStaticHTTPHeaderIsTransmitted(value string) bool {
@@ -432,8 +540,12 @@ func curlHeaderOverridesHTTPAuthorization(value string) bool {
 }
 
 func curlHeaderOverridesHTTPCookie(value string) bool {
+	return curlHeaderOverridesHTTPField(value, "cookie")
+}
+
+func curlHeaderOverridesHTTPField(value string, field string) bool {
 	separator := strings.IndexAny(value, ":;")
-	return separator >= 0 && strings.EqualFold(value[:separator], "cookie")
+	return separator >= 0 && strings.EqualFold(value[:separator], field)
 }
 
 // WgetTransmittedMetadata keeps protocol-specific metadata lanes separate so
@@ -626,17 +738,7 @@ func wgetWireHeader(value string) string {
 }
 
 func wgetQueryBytesPreserved(value string) bool {
-	for index := range len(value) {
-		character := value[index]
-		if character >= 'a' && character <= 'z' ||
-			character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' ||
-			strings.ContainsRune("-._~=&", rune(character)) {
-			continue
-		}
-		return false
-	}
-	return true
+	return webUnreservedBytesPreserved(value, "-._~=&")
 }
 
 func wgetURLPathBytesPreserved(value string) bool {
