@@ -772,7 +772,13 @@ try {
                 [Parameter(Mandatory)][string]$Name,
                 [Parameter(Mandatory)][string]$ExpectedGatewayPath,
                 [string]$ExpectedManifestPath,
-                [switch]$Guardian
+                [switch]$Guardian,
+                # Spec 005 D1: the uninstall path now also calls this
+                # helper with -Enumerator to verify the third service
+                # before removing it. Accepted for parity with the
+                # real function; the mock records the ownership check
+                # without differentiating the switch value.
+                [switch]$Enumerator
             )
             $script:HarnessState.events.Add("owned:$Name")
             $script:HarnessState.owned_checks++
