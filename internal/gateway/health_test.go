@@ -943,3 +943,49 @@ func TestSetEnumeratorJSONShape(t *testing.T) {
 		t.Fatalf("snapshot JSON missing `enumerator` key:\n%s", string(raw))
 	}
 }
+
+// TestSetEnumeratorDeepCopiesDetails is the regression pin CR
+// spec-005:PRRT_kwDORuAK-s6atyfQ asks for: mutating the caller's
+// input map after SetEnumerator MUST NOT mutate the stored
+// subsystem health; mutating the Snapshot()-returned pointer's
+// Details map MUST NOT mutate the stored subsystem health either.
+// Without the boundary-copy discipline, a concurrent JSON marshal
+// and a live setter race on the same map header.
+func TestSetEnumeratorDeepCopiesDetails(t *testing.T) {
+	h := NewSidecarHealth()
+
+	// Round 1: input-map mutation.
+	details := map[string]interface{}{"cycle_count": int64(1)}
+	h.SetEnumerator(StateRunning, "", details)
+	// Caller mutates the map they retained.
+	details["cycle_count"] = int64(99)
+	details["injected"] = "attacker-controlled"
+
+	got := h.Snapshot().Enumerator
+	if got == nil {
+		t.Fatal("Enumerator nil after SetEnumerator")
+	}
+	if got.Details["cycle_count"] != int64(1) {
+		t.Fatalf("input-map mutation leaked: cycle_count = %v, want int64(1)", got.Details["cycle_count"])
+	}
+	if _, present := got.Details["injected"]; present {
+		t.Fatalf("input-map mutation leaked: injected key present in stored details: %+v", got.Details)
+	}
+
+	// Round 2: snapshot-return mutation.
+	snap := h.Snapshot()
+	if snap.Enumerator == nil {
+		t.Fatal("second Snapshot() returned nil Enumerator")
+	}
+	snap.Enumerator.Details["cycle_count"] = int64(-1)
+	snap.Enumerator.Details["poisoned"] = true
+
+	// A fresh snapshot must still show the original value.
+	fresh := h.Snapshot()
+	if fresh.Enumerator.Details["cycle_count"] != int64(1) {
+		t.Fatalf("snapshot mutation leaked: cycle_count = %v, want int64(1)", fresh.Enumerator.Details["cycle_count"])
+	}
+	if _, present := fresh.Enumerator.Details["poisoned"]; present {
+		t.Fatalf("snapshot mutation leaked: poisoned key present: %+v", fresh.Enumerator.Details)
+	}
+}

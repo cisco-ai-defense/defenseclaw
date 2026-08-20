@@ -16,12 +16,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -141,7 +139,6 @@ func TestRunEnterpriseWindowsEnumerateOnceRefusesNonManagedEnterprise(t *testing
 	if !strings.Contains(err.Error(), "managed_enterprise") {
 		t.Fatalf("error should cite managed_enterprise: %v", err)
 	}
-	_ = managed.DeploymentModeManagedEnterprise // ensure the import is used
 }
 
 // TestIsEnterpriseWindowsEnumerateConfigMissingRecognisesBothOSes
@@ -237,25 +234,27 @@ func TestEnterpriseWindowsEnumerateIntervalHonoursCtxCancel(t *testing.T) {
 
 	prev := enterpriseWindowsEnumerateConfigLoader
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
-		return &config.Config{DeploymentMode: string(config.DeploymentModeManagedEnterprise)}, nil
+		return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}, nil
 	}
 	defer func() { enterpriseWindowsEnumerateConfigLoader = prev }()
 
-	// Register a fake writer so RunE writes go somewhere; the CLI
-	// call goes through the shared cobra.Command that
-	// runEnterpriseWindowsEnumerateInterval consults.
-	cmd := &cobra.Command{}
-	cmd.SetErr(new(bytes.Buffer))
+	stderr := new(bytes.Buffer)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel immediately: the initial-delay timer sees ctx.Done()
 	// before it fires, and the loop returns nil.
 	cancel()
 
-	err := runEnterpriseWindowsEnumerateInterval(ctx, os.Stderr, &enterpriseWindowsEnumerateOptions{
+	err := runEnterpriseWindowsEnumerateInterval(ctx, stderr, &enterpriseWindowsEnumerateOptions{
 		manifestPath: manifest,
-		interval:     100, // never actually reached
-		initialDelay: 100,
+		// Both durations are explicit time.Millisecond values;
+		// they never actually fire because ctx is cancelled
+		// before the initial-delay timer, but the numeric shape
+		// documents intent (100ms, not 100ns) for a future maintainer
+		// who removes the pre-cancel. See CR
+		// spec-005:PRRT_kwDORuAK-s6atye4.
+		interval:     100 * time.Millisecond,
+		initialDelay: 100 * time.Millisecond,
 	}, manifest)
 	if err != nil {
 		t.Fatalf("ctx-cancelled interval-loop should return nil; got %v", err)

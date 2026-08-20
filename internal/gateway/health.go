@@ -961,6 +961,12 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 // receiver and this method is a no-op via the Go zero-value
 // method-call semantics (receiver is a pointer, so a nil check up
 // front is enough).
+//
+// `details` is DEEP-COPIED before storage. A caller retaining a
+// reference to the input map cannot mutate the stored subsystem
+// health after the call returns — Snapshot() then serves an equally
+// independent copy so a JSON marshal path and a live setter cannot
+// race on the same map. See CR spec-005:PRRT_kwDORuAK-s6atyfQ.
 func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, details map[string]interface{}) {
 	if h == nil {
 		return
@@ -970,10 +976,52 @@ func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, deta
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
-		Details:   details,
+		Details:   cloneSubsystemDetails(details),
 	}
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+// cloneSubsystemDetails is a shallow-deep hybrid: the top-level map
+// is copied; each value is copied by re-boxing (values are
+// primitives + occasional nested map[string]interface{}). Recurses
+// one level for nested maps — enough for the shapes SetEnumerator
+// callers pass today (cycle_count, elapsed_ms, error_reason,
+// last_success). Callers that need deeper nesting can extend the
+// recursion; the current contract keeps details flat.
+//
+// Returns nil for a nil input so the stored SubsystemHealth.Details
+// carries the same zero-value semantics — a Snapshot consumer sees
+// `"details": null` in JSON only when the caller explicitly wanted
+// that, not because of an internal allocation.
+func cloneSubsystemDetails(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		if nested, ok := v.(map[string]interface{}); ok {
+			out[k] = cloneSubsystemDetails(nested)
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// cloneSubsystemHealth deep-copies a *SubsystemHealth pointer so
+// Snapshot() consumers cannot mutate internal state by holding onto
+// the returned pointer's fields. Returns nil for a nil input.
+func cloneSubsystemHealth(in *SubsystemHealth) *SubsystemHealth {
+	if in == nil {
+		return nil
+	}
+	return &SubsystemHealth{
+		State:     in.State,
+		Since:     in.Since,
+		LastError: in.LastError,
+		Details:   cloneSubsystemDetails(in.Details),
+	}
 }
 
 // Subscribe returns a channel that receives a non-blocking notification
@@ -1180,7 +1228,10 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		ApplicationProtection: h.applicationProtection,
 		Sandbox:               h.sandbox,
 		Managed:               h.managed,
-		Enumerator:            h.enumerator,
+		// Enumerator is deep-cloned so a caller mutating the returned
+		// pointer's Details map cannot race with a concurrent
+		// SetEnumerator. See CR spec-005:PRRT_kwDORuAK-s6atyfQ.
+		Enumerator: cloneSubsystemHealth(h.enumerator),
 	}
 	// Deep-copy the configuration pointer under the read lock so a
 	// caller mutating the returned snapshot cannot race with a Set*

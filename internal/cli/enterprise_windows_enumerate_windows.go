@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"time"
@@ -121,7 +122,7 @@ side; nothing about this subcommand is invoked on non-Windows OSes.
 	flags := cmd.Flags()
 	flags.StringVar(&opts.manifestPath, "manifest", "", "absolute path to the hook-guardian targets.yaml this enumerator maintains (required)")
 	flags.DurationVar(&opts.interval, "interval", enterpriseWindowsEnumerateDefaultInterval, "sleep between enumeration cycles when running as a service")
-	flags.BoolVar(&opts.once, "once", false, "run a single cycle synchronously and exit; ignored when --interval is set to 0")
+	flags.BoolVar(&opts.once, "once", false, "run a single cycle synchronously and exit; --interval is then unused")
 	flags.DurationVar(&opts.initialDelay, "initial-cycle-delay", enterpriseWindowsEnumerateInitialCycleDelay, "wait this long before the first interval-loop cycle so the gateway + guardian can publish their startup health lines first")
 	return cmd
 }
@@ -189,15 +190,12 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 
 	logf := enumerationLoggerForStderr(stderr)
 	start := time.Now()
-	manifest, err := enterprisehooks.EnumerateWindows(cfg, enterprisehooks.EnumerateOptions{
+	manifest, err := enterprisehooks.EnumerateWindows(cycleCtx, cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		Logger:               logf,
 	})
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: walk profiles: %w", err)
-	}
-	if ctxErr := cycleCtx.Err(); ctxErr != nil {
-		return fmt.Errorf("enterprise windows enumerate: cycle timeout / cancel: %w", ctxErr)
 	}
 
 	changed, err := enterprisehooks.WriteTargetsManifestAtomic(manifestPath, manifest)
@@ -297,13 +295,23 @@ var enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
 // treat it as a soft-retry rather than a hard failure. Spec 003
 // added the deferred-config posture; the enumerator's REQ-04 mirrors
 // it.
+//
+// Detection is `errors.Is(err, fs.ErrNotExist)` first — both
+// config.LoadFromFile and the Windows trusted-path validator wrap
+// their underlying os.Open / os.Lstat errors with %w, so the fs
+// sentinel survives the wrap chain. The substring fallback stays
+// for edge cases where a caller loses the chain (e.g. a test
+// harness that stringifies the error before passing it up). See CR
+// spec-005:PRRT_kwDORuAK-s6atyfG — a message-only check would fail
+// on non-English Windows locales where the OS returns a localized
+// "cannot find the file" string.
 func isEnterpriseWindowsEnumerateConfigMissing(err error) bool {
 	if err == nil {
 		return false
 	}
-	// config.LoadFromFile wraps os.Open errors verbatim; a
-	// substring check is more portable than an errors.Is against a
-	// specific sentinel (the wrap chain crosses package boundaries).
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
 	msg := err.Error()
 	return strings.Contains(msg, "no such file or directory") ||
 		strings.Contains(msg, "cannot find the file specified") ||

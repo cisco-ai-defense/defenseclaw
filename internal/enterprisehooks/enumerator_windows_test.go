@@ -14,6 +14,8 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,20 +27,27 @@ import (
 )
 
 // TestSIDIsInteractiveUserAcceptsRealUserSIDs pins the shape spec 005
-// REQ-11 requires: an S-1-5-21-… SID with at least 4 sub-authorities
-// is accepted; anything else is refused. The sub-authority count
-// covers the fabricated "S-1-5-21-1234" case (only 2 sub-authorities)
-// which would otherwise slip past a naive "starts with 5-21" check.
+// REQ-11 requires: an S-1-5-21-… SID with at least 5 sub-authorities
+// (21, A, B, C, RID) is accepted; anything else is refused. The
+// boundary case (`S-1-5-21-A-B-C`, 4 sub-authorities — the bare
+// domain SID without a trailing RID) MUST be rejected: enumerating a
+// bare domain as an interactive user would emit garbage manifest
+// rows. See CR spec-005:PRRT_kwDORuAK-s6atyfL.
 func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
 		want bool
 	}{
-		{"typical local user", "S-1-5-21-1000-2000-3000-1001", true},
-		{"domain user with high RID", "S-1-5-21-1234567890-987654321-1111111111-4321", true},
-		{"bare domain SID (3 sub-auths)", "S-1-5-21-1000-2000-3000", false},
-		{"NT AUTHORITY too short", "S-1-5-21", false},
+		{"typical local user (5 sub-auths)", "S-1-5-21-1000-2000-3000-1001", true},
+		{"domain user with high RID (5 sub-auths)", "S-1-5-21-1234567890-987654321-1111111111-4321", true},
+		// Exact 5-sub-authority boundary — smallest legal user SID.
+		{"minimum accepted (exactly 5 sub-auths)", "S-1-5-21-0-0-0-500", true},
+		// The bare domain SID (`S-1-5-21-A-B-C`) has 4 sub-auths and
+		// MUST be rejected — this is the boundary the earlier
+		// `< 4` check missed.
+		{"bare domain SID (4 sub-auths)", "S-1-5-21-1000-2000-3000", false},
+		{"NT AUTHORITY too short (1 sub-auth)", "S-1-5-21", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,6 +153,24 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 				},
 			},
 			want: []string{"codex"},
+		},
+		{
+			// CR spec-005:PRRT_kwDORuAK-s6atyfM regression:
+			// a disabled map entry MUST beat the scalar
+			// re-declaration. A config that names claudecode
+			// both as the scalar Connector AND as an explicitly
+			// disabled Connectors[claudecode].Enabled=false must
+			// emit ZERO per-user rows for claudecode.
+			name: "map disable beats scalar re-declaration",
+			cfg: &config.Config{
+				Guardrail: config.GuardrailConfig{
+					Connector: "claudecode",
+					Connectors: map[string]config.PerConnectorGuardrailConfig{
+						"claudecode": {Enabled: &disabled},
+					},
+				},
+			},
+			want: []string{},
 		},
 		{
 			name: "map contains gemini (unsupported) alongside codex",
@@ -377,7 +404,7 @@ func TestMarshalTargetsManifestIsDeterministic(t *testing.T) {
 // config would panic on `cfg.Guardrail` deref if we didn't refuse it
 // up front.
 func TestEnumerateWindowsRejectsNilConfig(t *testing.T) {
-	_, err := EnumerateWindows(nil, EnumerateOptions{})
+	_, err := EnumerateWindows(context.Background(), nil, EnumerateOptions{})
 	if err == nil {
 		t.Fatal("EnumerateWindows(nil): want error, got nil")
 	}
@@ -388,7 +415,7 @@ func TestEnumerateWindowsRejectsNilConfig(t *testing.T) {
 // (not nil) so the on-disk YAML always has a well-defined shape.
 func TestEnumerateWindowsEmptyConnectorsReturnsEmptyManifest(t *testing.T) {
 	cfg := &config.Config{} // no guardrail.connector configured
-	m, err := EnumerateWindows(cfg, EnumerateOptions{})
+	m, err := EnumerateWindows(context.Background(), cfg, EnumerateOptions{})
 	if err != nil {
 		t.Fatalf("EnumerateWindows: %v", err)
 	}
@@ -400,5 +427,23 @@ func TestEnumerateWindowsEmptyConnectorsReturnsEmptyManifest(t *testing.T) {
 	}
 	if m.Targets == nil {
 		t.Fatal("Targets is nil; want non-nil empty slice for stable YAML shape")
+	}
+}
+
+// TestEnumerateWindowsHonoursCancelledContext asserts the cycle-
+// timeout invariant CR spec-005:PRRT_kwDORuAK-s6atyfD asks for: a
+// ctx that's already cancelled returns immediately without touching
+// the registry / filesystem. Belt-and-braces on top of the per-row
+// ctx.Err() checks; a cancelled ctx at ENTRY must never proceed.
+func TestEnumerateWindowsHonoursCancelledContext(t *testing.T) {
+	cfg := &config.Config{Guardrail: config.GuardrailConfig{Connector: "codex"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := EnumerateWindows(ctx, cfg, EnumerateOptions{})
+	if err == nil {
+		t.Fatal("cancelled ctx: want error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled ctx: err = %v, want context.Canceled", err)
 	}
 }

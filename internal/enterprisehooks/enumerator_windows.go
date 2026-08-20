@@ -14,6 +14,7 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -105,12 +106,14 @@ type EnumerateOptions struct {
 //
 //  1. SID must be a syntactically-valid Windows SID string.
 //  2. SID must be an interactive-user SID: `S-1-5-21-…` (NT
-//     AUTHORITY, SECURITY_NT_NON_UNIQUE base RID) with at least 4
-//     sub-authorities so it can't be a bare domain SID. Refuses
-//     well-known SIDs (Everyone S-1-1-0, Anonymous S-1-5-7, SYSTEM
-//     S-1-5-18, Authenticated Users S-1-5-11, BUILTIN S-1-5-32-*,
-//     NT SERVICE S-1-5-80-*, etc.) by construction. Belt-and-braces
-//     on top of the CLI-input filter at spec 005 REQ-15.
+//     AUTHORITY, SECURITY_NT_NON_UNIQUE base RID) with at least 5
+//     sub-authorities so the SID names a specific user (the trailing
+//     RID), not the bare domain (`S-1-5-21-A-B-C` has 4 sub-auths
+//     and is rejected). Refuses well-known SIDs (Everyone S-1-1-0,
+//     Anonymous S-1-5-7, SYSTEM S-1-5-18, Authenticated Users
+//     S-1-5-11, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by
+//     construction. Belt-and-braces on top of the CLI-input filter
+//     at spec 005 REQ-15.
 //  3. ProfileImagePath registry value must resolve to an absolute
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
@@ -140,9 +143,20 @@ type EnumerateOptions struct {
 // Rows sorted by (SID, Connector) for deterministic YAML output —
 // the byte-identical-no-op-no-write invariant in
 // `WriteTargetsManifestAtomic` depends on stable serialisation.
-func EnumerateWindows(cfg *config.Config, opts EnumerateOptions) (Manifest, error) {
+func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOptions) (Manifest, error) {
 	if cfg == nil {
 		return Manifest{}, fmt.Errorf("enterprise hooks: enumerate windows: nil config")
+	}
+	if ctx == nil {
+		// A nil context is a caller bug — every real call comes
+		// from the CLI subcommand that wraps a cycle in
+		// context.WithTimeout. Use context.Background() as a
+		// defensive fallback so we don't panic on a stray
+		// unit-test invocation.
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return Manifest{}, err
 	}
 	connectors := effectiveWindowsHookConnectors(cfg)
 	if len(connectors) == 0 {
@@ -165,13 +179,24 @@ func EnumerateWindows(cfg *config.Config, opts EnumerateOptions) (Manifest, erro
 
 	previous := loadPreviousManifestForEnumeration(opts.ExistingManifestPath, opts.Logger)
 
-	profiles, err := listWindowsUserProfiles(opts.Logger)
+	profiles, err := listWindowsUserProfiles(ctx, opts.Logger)
 	if err != nil {
+		return Manifest{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
 
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
+		// Fast-fail per row so a wedged cycle never runs to
+		// completion after ctx has been cancelled — spec 005
+		// REQ-19's 60 s cycle ceiling depends on this loop
+		// noticing the deadline. See CR
+		// spec-005:PRRT_kwDORuAK-s6atyfD.
+		if err := ctx.Err(); err != nil {
+			return Manifest{}, err
+		}
 		if _, skip := exclude[canonicalManifestTargetSID(profile.SID)]; skip {
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
 			continue
@@ -398,7 +423,11 @@ type windowsUserProfile struct {
 //
 // Duplicate SIDs are deduplicated in-place — the newest
 // ProfileImagePath mtime wins, per REQ-10.
-func listWindowsUserProfiles(logf EnumerationLogger) ([]windowsUserProfile, error) {
+//
+// ctx bounds the walk: a per-subkey ctx.Err() check ensures a
+// wedged os.Stat on one profile cannot starve the interval-loop's
+// cycle timeout (spec 005 REQ-19).
+func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger) ([]windowsUserProfile, error) {
 	rootKey, err := registry.OpenKey(
 		registry.LOCAL_MACHINE,
 		profileListRegistryKey,
@@ -416,6 +445,9 @@ func listWindowsUserProfiles(logf EnumerationLogger) ([]windowsUserProfile, erro
 
 	byCanonSID := make(map[string]windowsUserProfile, len(subkeyNames))
 	for _, name := range subkeyNames {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		sid, err := windows.StringToSid(name)
 		if err != nil || sid == nil {
 			logfSafely(logf, name, fmt.Sprintf("not a syntactically-valid SID: %v", err))
@@ -546,8 +578,13 @@ func expandProfileImagePathSystemDrive(profile string) (string, error) {
 // sidIsInteractiveUser reports whether `sid` is an interactive local
 // or domain user SID — i.e. lives under NT AUTHORITY (identifier
 // authority 5) with SubAuthority[0] == SECURITY_NT_NON_UNIQUE (21)
-// and at least 4 sub-authorities so the SID names a specific user,
-// not the bare domain.
+// and at least 5 sub-authorities so the SID names a specific user
+// (the trailing RID), not the bare domain. A user SID has the shape
+// `S-1-5-21-A-B-C-RID` (five sub-authorities: 21, A, B, C, RID). The
+// bare domain SID without the RID (`S-1-5-21-A-B-C`) has four
+// sub-authorities and MUST be rejected — enumerating a bare domain
+// as an interactive user would emit garbage manifest rows. See
+// CR spec-005:PRRT_kwDORuAK-s6atyfL.
 //
 // Every well-known / machine-scoped principal (SYSTEM S-1-5-18,
 // Authenticated Users S-1-5-11, Everyone S-1-1-0, Anonymous
@@ -568,7 +605,7 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 		return false
 	}
 	const securityNTNonUnique uint32 = 21
-	if sid.SubAuthorityCount() < 4 {
+	if sid.SubAuthorityCount() < 5 {
 		return false
 	}
 	return sid.SubAuthority(0) == securityNTNonUnique
@@ -591,8 +628,23 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 //     here.
 //
 // Return value is sorted alphabetically for deterministic output.
+//
+// Precedence: an explicit `Connectors[name].Enabled=false` in the map
+// beats the scalar `Connector` field. A config that sets
+// `guardrail.connector: claudecode` together with
+// `guardrail.connectors.claudecode.enabled: false` emits ZERO
+// per-user rows for claudecode — the disabled map entry is
+// authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
 func effectiveWindowsHookConnectors(cfg *config.Config) []string {
 	seen := make(map[string]struct{})
+	// disabledNames captures every name the operator explicitly
+	// disabled in cfg.Guardrail.Connectors. The scalar-connector
+	// pass then refuses to re-add any name in this set, so the
+	// map's `Enabled=false` decision cannot be silently reversed
+	// by a stale scalar. Populated only by the map pass — the
+	// scalar branch never adds to it, matching the semantic
+	// "map is authoritative for explicit disables".
+	disabledNames := make(map[string]struct{})
 	ordered := make([]string, 0, len(cfg.Guardrail.Connectors)+1)
 	consider := func(name string, explicitlyDisabled bool) {
 		trimmed := strings.ToLower(strings.TrimSpace(name))
@@ -603,6 +655,10 @@ func effectiveWindowsHookConnectors(cfg *config.Config) []string {
 			return
 		}
 		if explicitlyDisabled {
+			disabledNames[trimmed] = struct{}{}
+			return
+		}
+		if _, off := disabledNames[trimmed]; off {
 			return
 		}
 		if _, dup := seen[trimmed]; dup {
