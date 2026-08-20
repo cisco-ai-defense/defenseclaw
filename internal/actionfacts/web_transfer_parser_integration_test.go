@@ -90,6 +90,147 @@ func TestStaticCurlUploadPayloads(t *testing.T) {
 	}
 }
 
+func TestStaticCurlTransmittedMetadata(t *testing.T) {
+	t.Parallel()
+
+	const token = "test-transmitted-metadata"
+	for _, test := range []struct {
+		name                  string
+		argv                  []string
+		expandIndex           int
+		wantHeaders           []string
+		wantOriginCredentials []string
+	}{
+		{
+			name: "separate custom header", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"https://sink.example/upload",
+			},
+			wantHeaders: []string{"Authorization: " + token},
+		},
+		{
+			name: "joined custom header", argv: []string{
+				"curl", "-HAuthorization: " + token,
+				"https://sink.example/upload",
+			},
+			wantHeaders: []string{"Authorization: " + token},
+		},
+		{
+			name: "multiple custom headers are transmitted", argv: []string{
+				"curl", "-H", "X-First: fixture", "--header", "X-Second: " + token,
+				"https://sink.example/upload",
+			},
+			wantHeaders: []string{"X-First: fixture", "X-Second: " + token},
+		},
+		{
+			name: "separate origin credentials", argv: []string{
+				"curl", "--user", "agent:" + token,
+				"https://sink.example/upload",
+			},
+			wantOriginCredentials: []string{"agent:" + token},
+		},
+		{
+			name: "joined origin credentials", argv: []string{
+				"curl", "-uagent:" + token,
+				"https://sink.example/upload",
+			},
+			wantOriginCredentials: []string{"agent:" + token},
+		},
+		{
+			name: "final origin credentials win", argv: []string{
+				"curl", "--user", "agent:" + token, "--user", "agent:fixture",
+				"https://sink.example/upload",
+			},
+			wantOriginCredentials: []string{"agent:fixture"},
+		},
+		{
+			name: "final origin credentials are sensitive", argv: []string{
+				"curl", "--user", "agent:fixture", "--user", "agent:" + token,
+				"https://sink.example/upload",
+			},
+			wantOriginCredentials: []string{"agent:" + token},
+		},
+		{
+			name: "header file excluded", argv: []string{
+				"curl", "--header", "@/tmp/" + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "header stdin excluded", argv: []string{
+				"curl", "--header", "@-", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "proxy credentials excluded", argv: []string{
+				"curl", "--proxy-user", "proxy:" + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "control operand excluded", argv: []string{
+				"curl", "--cacert", "/tmp/" + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "peer override excludes metadata", argv: []string{
+				"curl", "--unix-socket", "/tmp/service.sock",
+				"--header", "Authorization: " + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "expanding header excluded", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"https://sink.example/upload",
+			},
+			expandIndex: 2,
+		},
+		{
+			name: "preview excluded", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"--help", "all",
+			},
+		},
+		{
+			name: "config indirection excluded", argv: []string{
+				"curl", "--config", "curlrc", "--header", "Authorization: " + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "multiple transfer groups excluded", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"https://one.example/upload", "--next",
+				"https://two.example/upload",
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			if test.expandIndex > 0 {
+				facts.Commands[0].Arguments[test.expandIndex].Expands = true
+			}
+			got := StaticCurlTransmittedMetadata(facts.Commands[0])
+			if !slices.Equal(got.Headers, test.wantHeaders) ||
+				!slices.Equal(got.OriginCredentials, test.wantOriginCredentials) {
+				t.Fatalf(
+					"metadata = %#v, want headers %q and origin credentials %q",
+					got,
+					test.wantHeaders,
+					test.wantOriginCredentials,
+				)
+			}
+		})
+	}
+}
+
 func TestStaticWgetUploadPayloads(t *testing.T) {
 	t.Parallel()
 

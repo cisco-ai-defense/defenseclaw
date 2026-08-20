@@ -319,6 +319,31 @@ func trustedActionContentFindingHasRiskPair(
 			trustedActionCommandProvesExternalEgress(facts, command.ID) {
 			return true
 		}
+		metadata := actionfacts.StaticCurlTransmittedMetadata(command)
+		headerEgress := trustedActionContentRuleMatchesParsedCandidates(
+			*rule,
+			metadata.Headers,
+		) &&
+			trustedActionCommandProvesExternalRequestForSchemes(
+				facts,
+				command.ID,
+				"http",
+				"https",
+			)
+		originAuthEgress := trustedActionContentRuleMatchesParsedCandidates(
+			*rule,
+			metadata.OriginCredentials,
+		) && trustedActionCommandProvesExternalRequestForSchemes(
+			facts,
+			command.ID,
+			"http",
+			"https",
+			"ftp",
+			"ftps",
+		)
+		if headerEgress || originAuthEgress {
+			return true
+		}
 		if trustedActionStaticContentPipesToExternalEgress(
 			facts,
 			*rule,
@@ -457,9 +482,20 @@ func trustedActionStaticPrintfArgumentMatchesRule(
 	if command.Dialect != actionfacts.DialectPOSIX ||
 		!command.ArgvComplete ||
 		command.ParentCommandID != 0 ||
-		command.Program != "printf" ||
-		len(command.Argv) != 3 || command.Executable != command.Argv[0] ||
+		command.Program != "printf" || len(command.Argv) < 3 ||
+		command.Executable != command.Argv[0] ||
 		len(command.Wrappers) != 0 {
+		return false
+	}
+	formatIndex := 1
+	switch len(command.Argv) {
+	case 3:
+	case 4:
+		if command.Argv[1] != "--" {
+			return false
+		}
+		formatIndex = 2
+	default:
 		return false
 	}
 	switch command.Executable {
@@ -476,11 +512,11 @@ func trustedActionStaticPrintfArgumentMatchesRule(
 			return false
 		}
 	}
-	format := command.Argv[1]
+	format := command.Argv[formatIndex]
 	if format != `%s` && format != `%s\n` {
 		return false
 	}
-	return firstAcceptedRuleMatch(rule, command.Argv[2]) != nil
+	return firstAcceptedRuleMatch(rule, command.Argv[formatIndex+1]) != nil
 }
 
 func trustedActionContentRuleMatchesStaticUpload(
@@ -548,6 +584,24 @@ func trustedActionCommandProvesExternalEgress(
 			actionfacts.DataProcess,
 			actionfacts.DataNetwork,
 		)
+}
+
+func trustedActionCommandProvesExternalRequestForSchemes(
+	facts actionfacts.Facts,
+	commandID int64,
+	schemes ...string,
+) bool {
+	for _, network := range facts.Network {
+		if network.CommandID == commandID && isExternalNetwork(network) &&
+			networkActionIn(
+				network.Action,
+				actionfacts.NetworkDownload,
+				actionfacts.NetworkUpload,
+			) && slices.Contains(schemes, strings.ToLower(network.Scheme)) {
+			return true
+		}
+	}
+	return false
 }
 
 func trustedActionExecutingCommand(

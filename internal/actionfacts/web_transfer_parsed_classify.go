@@ -95,6 +95,85 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 	return payloads
 }
 
+// CurlTransmittedMetadata keeps header and origin-auth operands distinct so a
+// caller can bind each kind to only the URL schemes where curl transmits it.
+type CurlTransmittedMetadata struct {
+	Headers           []string
+	OriginCredentials []string
+}
+
+// StaticCurlTransmittedMetadata returns literal request-metadata operands that
+// a complete curl command uses for origin-bound transmission. Only
+// parser-owned custom headers and origin credentials are exposed. Header
+// files, peer-changing controls, and multiple --next groups are deliberately
+// excluded because the argv alone cannot bind their effective bytes to one
+// network peer.
+func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata {
+	if !command.ArgvComplete || !isCurlProgram(command.Program) ||
+		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		len(command.Arguments) != len(command.Argv) {
+		return CurlTransmittedMetadata{}
+	}
+	parsed := parseCurlArgv(command.Argv)
+	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
+		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
+		len(parsed.Targets) == 0 {
+		return CurlTransmittedMetadata{}
+	}
+
+	group := parsed.Targets[0].Group
+	for _, target := range parsed.Targets[1:] {
+		if target.Group != group {
+			return CurlTransmittedMetadata{}
+		}
+	}
+
+	lastUser := -1
+	for index, option := range parsed.Options {
+		if option.Group != group || option.Role == curlOptionConfig ||
+			option.Role == curlOptionNetworkOverride {
+			return CurlTransmittedMetadata{}
+		}
+		if option.Canonical == "--user" && option.ValuePresent {
+			lastUser = index
+		}
+	}
+
+	metadata := CurlTransmittedMetadata{}
+	for index, option := range parsed.Options {
+		if !option.ValuePresent ||
+			(option.Canonical != "--header" &&
+				(option.Canonical != "--user" || index != lastUser)) {
+			continue
+		}
+		argumentIndex := option.ValueArgvIndex
+		if option.ValueJoined {
+			argumentIndex = option.ArgvIndex
+		}
+		if argumentIndex < 0 || argumentIndex >= len(command.Arguments) {
+			return CurlTransmittedMetadata{}
+		}
+		argument := command.Arguments[argumentIndex]
+		if argument.Expands || argument.Quote == QuoteMixed ||
+			argument.Value != command.Argv[argumentIndex] {
+			return CurlTransmittedMetadata{}
+		}
+		if option.Value == "" ||
+			option.Canonical == "--header" && strings.HasPrefix(option.Value, "@") {
+			continue
+		}
+		if option.Canonical == "--header" {
+			metadata.Headers = append(metadata.Headers, option.Value)
+		} else {
+			metadata.OriginCredentials = append(
+				metadata.OriginCredentials,
+				option.Value,
+			)
+		}
+	}
+	return metadata
+}
+
 // StaticWgetUploadPayloads returns the final literal inline request body that
 // a complete wget command sends. File-backed bodies and control modes are
 // deliberately excluded because their contents or execution are not proved by
