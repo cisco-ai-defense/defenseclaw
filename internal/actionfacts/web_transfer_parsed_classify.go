@@ -155,13 +155,24 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 		return nil
 	}
 
-	var payloads []string
+	getQueryData := false
+	requestTargetSet := false
 	for _, option := range parsed.Options {
-		if option.Group != group || !option.ValuePresent {
+		if option.Group != group {
 			continue
 		}
-		value, literal := staticCurlUploadPayload(option)
-		if !literal {
+		getQueryData = getQueryData || option.Canonical == "--get"
+		requestTargetSet = requestTargetSet ||
+			option.Canonical == "--request-target" && option.ValuePresent
+	}
+	if getQueryData && requestTargetSet {
+		return nil
+	}
+
+	var payloads []string
+	for _, option := range parsed.Options {
+		if option.Group != group || !option.ValuePresent ||
+			!curlUploadPayloadOption(option.Canonical) {
 			continue
 		}
 		argumentIndex := option.ValueArgvIndex
@@ -176,9 +187,52 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 			argument.Value != command.Argv[argumentIndex] {
 			return nil
 		}
+		if curlUploadPayloadSourceUncertain(option) {
+			return nil
+		}
+		value, literal := staticCurlUploadPayload(option)
+		if !literal {
+			continue
+		}
 		payloads = append(payloads, value)
 	}
 	return payloads
+}
+
+func curlUploadPayloadOption(canonical string) bool {
+	switch canonical {
+	case "--data", "--data-ascii", "--data-binary", "--data-raw",
+		"--data-urlencode", "--json", "--form", "--form-string":
+		return true
+	default:
+		return false
+	}
+}
+
+func curlUploadPayloadSourceUncertain(option curlOptionToken) bool {
+	switch option.Canonical {
+	case "--data", "--data-ascii", "--data-binary", "--json":
+		if strings.HasPrefix(option.Value, "@") {
+			return true
+		}
+		_, _, fileSource := webDataFile(option.Value)
+		return fileSource
+	case "--data-urlencode":
+		_, _, fileSource, valid := curlDataURLEncodeFile(option.Value)
+		if !valid || fileSource {
+			return true
+		}
+		_, valid = curlDataURLEncodeBytes(option.Value)
+		return !valid
+	case "--form":
+		if curlFormHasUnmodeledFileReference(option.Value) {
+			return true
+		}
+		_, _, fileSource := webFormFile(option.Value)
+		return fileSource
+	default:
+		return false
+	}
 }
 
 // CurlTransmittedMetadata keeps HTTP headers, HTTP internal-auth operands,
@@ -2013,7 +2067,8 @@ func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
 		if !valid || fileSource {
 			return "", false
 		}
-		return curlDataURLEncodeBytes(value)
+		encoded, valid := curlDataURLEncodeBytes(value)
+		return encoded, valid && encoded != ""
 	case "--data-raw", "--form-string":
 		return value, value != ""
 	case "--form":
@@ -2033,20 +2088,45 @@ func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
 func curlDataURLEncodeBytes(value string) (string, bool) {
 	name, content, hasEquals := strings.Cut(value, "=")
 	if hasEquals {
-		if !webUnreservedBytesPreserved(name, "-._~") ||
-			!webUnreservedBytesPreserved(content, "-._~") {
+		encoded, valid := curlFormURLEncodeBytes(content)
+		if !valid || strings.IndexByte(name, 0) >= 0 {
 			return "", false
 		}
 		if name == "" {
-			return content, content != ""
+			return encoded, true
 		}
-		return name + "=" + content, true
+		return name + "=" + encoded, true
 	}
-	if strings.Contains(value, "@") ||
-		!webUnreservedBytesPreserved(value, "-._~") {
+	if strings.Contains(value, "@") {
 		return "", false
 	}
-	return value, value != ""
+	encoded, valid := curlFormURLEncodeBytes(value)
+	return encoded, valid
+}
+
+func curlFormURLEncodeBytes(value string) (string, bool) {
+	const upperHex = "0123456789ABCDEF"
+	var encoded strings.Builder
+	for index := range len(value) {
+		character := value[index]
+		switch {
+		case character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '.' ||
+			character == '_' || character == '~':
+			encoded.WriteByte(character)
+		case character == ' ':
+			encoded.WriteByte('+')
+		case character == 0:
+			return "", false
+		default:
+			encoded.WriteByte('%')
+			encoded.WriteByte(upperHex[character>>4])
+			encoded.WriteByte(upperHex[character&0x0f])
+		}
+	}
+	return encoded.String(), true
 }
 
 func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
@@ -2516,6 +2596,11 @@ func containsCookieLiteral(value string) bool {
 func curlDataURLEncodeFile(
 	value string,
 ) (path string, stdin bool, fileForm bool, valid bool) {
+	// Curl gives the first '=' precedence over '@' file syntax. In that form
+	// the name is transmitted raw and only the content after '=' is encoded.
+	if strings.Contains(value, "=") {
+		return "", false, false, true
+	}
 	candidate := ""
 	switch {
 	case strings.HasPrefix(value, "@"):

