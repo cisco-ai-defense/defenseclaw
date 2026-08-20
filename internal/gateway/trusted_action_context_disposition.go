@@ -275,6 +275,9 @@ func trustedActionClassifySensitivePathRisk(
 			if trustedActionCommandProvesExternalEgress(
 				facts,
 				candidate.CommandID,
+			) || trustedActionPathReadFeedsExternalUpload(
+				facts,
+				candidate,
 			) {
 				return trustedActionSensitivePathReadEgress
 			}
@@ -305,15 +308,18 @@ func trustedActionContentFindingHasRiskPair(
 		if !trustedActionExecutingCommand(facts, command.ID) {
 			continue
 		}
-		if trustedActionContentRuleMatchesCommand(*rule, command) &&
-			trustedActionCommandWritesSensitivePath(facts, command.ID) {
+		if trustedActionStaticPrintfWritesSensitivePath(
+			facts,
+			*rule,
+			command,
+		) {
 			return true
 		}
 		if trustedActionContentRuleMatchesStaticUpload(*rule, command) &&
 			trustedActionCommandProvesExternalEgress(facts, command.ID) {
 			return true
 		}
-		if trustedActionCommandPipesToExternalEgress(
+		if trustedActionStaticContentPipesToExternalEgress(
 			facts,
 			*rule,
 			command,
@@ -324,13 +330,72 @@ func trustedActionContentFindingHasRiskPair(
 	return false
 }
 
-func trustedActionCommandPipesToExternalEgress(
+func trustedActionStaticContentPipesToExternalEgress(
 	facts actionfacts.Facts,
 	rule PatternRule,
 	source actionfacts.CommandFact,
 ) bool {
+	if !trustedActionStaticPrintfEmitsRuleMatch(rule, source) {
+		return false
+	}
+	return trustedActionCommandFeedsExternalUpload(facts, source.ID)
+}
+
+func trustedActionPathReadFeedsExternalUpload(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	for _, source := range facts.Commands {
+		if source.ID != candidate.CommandID ||
+			!trustedActionStaticCatEmitsPath(source, candidate) {
+			continue
+		}
+		return trustedActionCommandFeedsExternalUpload(facts, source.ID)
+	}
+	return false
+}
+
+func trustedActionStaticCatEmitsPath(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if command.Dialect != actionfacts.DialectPOSIX ||
+		!command.ArgvComplete || command.ParentCommandID != 0 ||
+		command.Program != "cat" || len(command.Argv) != 2 ||
+		command.Executable != command.Argv[0] ||
+		command.Argv[1] != candidate.Value || len(command.Wrappers) != 0 {
+		return false
+	}
+	if len(command.Arguments) != len(command.Argv) {
+		return false
+	}
+	for index, argument := range command.Arguments {
+		if argument.Expands || argument.Quote == actionfacts.QuoteMixed ||
+			argument.Value != command.Argv[index] {
+			return false
+		}
+	}
+	switch command.Executable {
+	case "cat", "/bin/cat", "/sbin/cat", "/usr/bin/cat", "/usr/sbin/cat":
+		return true
+	default:
+		return false
+	}
+}
+
+func trustedActionCommandFeedsExternalUpload(
+	facts actionfacts.Facts,
+	sourceCommandID int64,
+) bool {
+	var source actionfacts.CommandFact
+	for _, command := range facts.Commands {
+		if command.ID == sourceCommandID {
+			source = command
+			break
+		}
+	}
 	if source.PipelineID == 0 ||
-		!trustedActionStaticPrintfEmitsRuleMatch(rule, source) {
+		!trustedActionExecutingCommand(facts, source.ID) {
 		return false
 	}
 	for _, flow := range facts.DataFlows {
@@ -364,12 +429,20 @@ func trustedActionStaticPrintfEmitsRuleMatch(
 	rule PatternRule,
 	command actionfacts.CommandFact,
 ) bool {
+	return len(command.Redirects) == 0 &&
+		trustedActionStaticPrintfArgumentMatchesRule(rule, command)
+}
+
+func trustedActionStaticPrintfArgumentMatchesRule(
+	rule PatternRule,
+	command actionfacts.CommandFact,
+) bool {
 	if command.Dialect != actionfacts.DialectPOSIX ||
 		!command.ArgvComplete ||
 		command.ParentCommandID != 0 ||
 		command.Program != "printf" ||
 		len(command.Argv) != 3 || command.Executable != command.Argv[0] ||
-		len(command.Redirects) != 0 || len(command.Wrappers) != 0 {
+		len(command.Wrappers) != 0 {
 		return false
 	}
 	switch command.Executable {
@@ -391,19 +464,6 @@ func trustedActionStaticPrintfEmitsRuleMatch(
 		return false
 	}
 	return firstAcceptedRuleMatch(rule, command.Argv[2]) != nil
-}
-
-func trustedActionContentRuleMatchesCommand(
-	rule PatternRule,
-	command actionfacts.CommandFact,
-) bool {
-	if !command.ArgvComplete || len(command.Argv) == 0 {
-		return false
-	}
-	candidates := make([]string, 0, len(command.Argv)+1)
-	candidates = append(candidates, command.Argv...)
-	candidates = append(candidates, strings.Join(command.Argv, " "))
-	return trustedActionContentRuleMatchesCandidates(rule, candidates)
 }
 
 func trustedActionContentRuleMatchesStaticUpload(
@@ -433,14 +493,25 @@ func trustedActionContentRuleMatchesCandidates(
 	return false
 }
 
-func trustedActionCommandWritesSensitivePath(
+func trustedActionStaticPrintfWritesSensitivePath(
 	facts actionfacts.Facts,
-	commandID int64,
+	rule PatternRule,
+	command actionfacts.CommandFact,
 ) bool {
+	if len(command.Redirects) != 1 ||
+		!trustedActionStaticPrintfArgumentMatchesRule(rule, command) {
+		return false
+	}
+	redirect := command.Redirects[0]
+	if redirect.FD != 1 || redirect.Expands ||
+		(redirect.Access != actionfacts.PathAccessWrite &&
+			redirect.Access != actionfacts.PathAccessAppend) {
+		return false
+	}
 	for _, candidate := range facts.Paths {
-		if candidate.CommandID == commandID &&
-			(candidate.Access == actionfacts.PathAccessWrite ||
-				candidate.Access == actionfacts.PathAccessAppend) &&
+		if candidate.CommandID == command.ID &&
+			candidate.Access == redirect.Access &&
+			candidate.Value == redirect.Target &&
 			matchesActiveSensitivePath(facts, candidate) {
 			return true
 		}
