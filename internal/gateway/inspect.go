@@ -979,10 +979,14 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	for _, cf := range cgFindings {
 		findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.RuleID, cf.Title))
 	}
+	confidence := 0.0
+	if len(cgFindings) > 0 {
+		confidence = codeGuardBinaryConfidence
+	}
 	return &ToolInspectVerdict{
 		Action:           action,
 		Severity:         severity,
-		Confidence:       codeGuardBinaryConfidence,
+		Confidence:       confidence,
 		Reason:           fmt.Sprintf("allow-listed tool %q: CodeGuard retained on write", req.Tool),
 		Findings:         findingStrs,
 		DetailedFindings: cgFindings,

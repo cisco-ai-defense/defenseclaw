@@ -179,6 +179,11 @@ rules:
     title: Custom regex
     pattern: CUSTOM_ONLY_MATCH
     extensions: [.py]
+  - id: ""
+    severity: critical
+    title: Empty ID custom regex
+    pattern: EMPTY_ID_MATCH
+    extensions: [.py]
 `
 	if err := os.WriteFile(filepath.Join(rulesDir, "custom.yaml"), []byte(custom), 0o600); err != nil {
 		t.Fatal(err)
@@ -186,6 +191,16 @@ rules:
 	api.scannerCfg.Scanners.CodeGuard = rulesDir
 	if err := enforce.NewPolicyEngine(api.store).AllowToolForConnector("write_file", "", "test allow"); err != nil {
 		t.Fatal(err)
+	}
+
+	cleanVerdict := inspectCodeGuardProofTestRequest(
+		t,
+		api,
+		json.RawMessage(`{"path":"/tmp/app.py","content":"EMPTY_ID_MATCH"}`),
+	)
+	if cleanVerdict.Action != guardrailActionAllow || cleanVerdict.Severity != "NONE" ||
+		cleanVerdict.Confidence != 0 || len(cleanVerdict.DetailedFindings) != 0 {
+		t.Fatalf("allowlisted clean CodeGuard verdict = %+v, want zero-confidence clean allow", cleanVerdict)
 	}
 
 	customVerdict := inspectCodeGuardProofTestRequest(

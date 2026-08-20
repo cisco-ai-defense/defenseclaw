@@ -224,7 +224,13 @@ func curlUploadPayloadSourceUncertain(option curlOptionToken) bool {
 		}
 		_, valid = curlDataURLEncodeBytes(option.Value)
 		return !valid
-	case "--form":
+	case "--form", "--form-string":
+		if !curlStaticFormOperandValid(option) {
+			return true
+		}
+		if option.Canonical == "--form-string" {
+			return false
+		}
 		if curlFormHasUnmodeledFileReference(option.Value) {
 			return true
 		}
@@ -266,6 +272,56 @@ type CurlProxyTransmittedMetadata struct {
 	ProxyRequestComponents []TransmittedRequestComponent
 }
 
+// StaticCurlProxyUploadPayloads returns exact inline body bytes that curl sends
+// in plaintext to an explicit HTTP(S) proxy. Only HTTP origin targets use the
+// forward-proxy request form; HTTPS origin bodies travel inside the CONNECT
+// tunnel and therefore are not proxy-visible plaintext candidates.
+func StaticCurlProxyUploadPayloads(
+	command CommandFact,
+) []TransmittedRequestComponent {
+	proxy, parsed, ok := staticCurlProxyDestination(command)
+	if !ok {
+		return nil
+	}
+	hasHTTPOrigin := false
+	for _, option := range parsed.Options {
+		if option.Canonical == "--get" {
+			// Curl moves data options into the URL query under --get; they are
+			// not request-body bytes in the forward-proxy request.
+			return nil
+		}
+	}
+	for _, target := range parsed.Targets {
+		targetFact, valid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkUpload,
+		)
+		if !valid {
+			return nil
+		}
+		hasHTTPOrigin = hasHTTPOrigin || targetFact.Scheme == "http"
+	}
+	if !hasHTTPOrigin {
+		return nil
+	}
+
+	payloads := StaticCurlUploadPayloads(command)
+	if len(payloads) == 0 {
+		return nil
+	}
+	components := make([]TransmittedRequestComponent, 0, len(payloads))
+	for _, payload := range payloads {
+		components = append(components, TransmittedRequestComponent{
+			Value:  payload,
+			Scheme: proxy.Scheme,
+			Host:   proxy.Host,
+			Port:   proxy.Port,
+		})
+	}
+	return components
+}
+
 // StaticCurlProxyTransmittedMetadata returns literal credentials and custom
 // headers that a closed curl invocation can transmit to one explicit HTTP(S)
 // proxy. This uses the same argv-only/no-ambient-defaults assumption as the
@@ -290,10 +346,28 @@ func StaticCurlProxyTransmittedMetadata(
 	lastProxy := -1
 	lastProxyUser := -1
 	proxyAuthorizationOverridden := false
+	ordinaryProxyAuthorizationOverridden := false
 	metadata := CurlProxyTransmittedMetadata{}
 	proxyTunnel := false
+	formBody := false
+	separateProxyHeaders := false
 	for _, option := range parsed.Options {
 		proxyTunnel = proxyTunnel || option.Canonical == "--proxytunnel"
+		formBody = formBody || option.Canonical == "--form" ||
+			option.Canonical == "--form-string"
+		separateProxyHeaders = separateProxyHeaders ||
+			option.Canonical == "--proxy-header"
+	}
+	ordinaryHeaderTargets := parsed.Targets
+	if separateProxyHeaders {
+		ordinaryHeaderTargets = nil
+		if !proxyTunnel {
+			for _, target := range parsed.Targets {
+				if strings.HasPrefix(strings.ToLower(target.Value), "http://") {
+					ordinaryHeaderTargets = append(ordinaryHeaderTargets, target)
+				}
+			}
+		}
 	}
 	for index, option := range parsed.Options {
 		switch option.Canonical {
@@ -322,11 +396,32 @@ func StaticCurlProxyTransmittedMetadata(
 				parsed.Targets,
 				proxy.Scheme,
 				proxyTunnel,
+				formBody,
 			) {
 				metadata.ProxyRequestComponents = append(
 					metadata.ProxyRequestComponents,
 					component(option.Value),
 				)
+			}
+		case "--header":
+			if curlProxyHeaderCandidateIsTransmitted(
+				option.Value,
+				ordinaryHeaderTargets,
+				proxy.Scheme,
+				proxyTunnel && !separateProxyHeaders,
+				formBody,
+			) {
+				metadata.ProxyRequestComponents = append(
+					metadata.ProxyRequestComponents,
+					component(option.Value),
+				)
+			}
+			if !separateProxyHeaders &&
+				curlHeaderOverridesHTTPField(
+					option.Value,
+					"proxy-authorization",
+				) {
+				ordinaryProxyAuthorizationOverridden = true
 			}
 		}
 	}
@@ -360,7 +455,8 @@ func StaticCurlProxyTransmittedMetadata(
 		credentials = urlCredentials
 		candidate = true
 	}
-	if candidate && !proxyAuthorizationOverridden {
+	if candidate && !proxyAuthorizationOverridden &&
+		!ordinaryProxyAuthorizationOverridden {
 		metadata.ProxyRequestComponents = append(
 			metadata.ProxyRequestComponents,
 			component(credentials),
@@ -391,7 +487,8 @@ func staticCurlProxyDestination(
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
-		!curlRangeOptionsValid(parsed) {
+		!curlRangeOptionsValid(parsed) ||
+		!curlProxyURLQueryOptionsValid(parsed) {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	group := parsed.Targets[0].Group
@@ -405,14 +502,8 @@ func staticCurlProxyDestination(
 			option.Role == curlOptionConfig {
 			return NetworkFact{}, curlArgvParse{}, false
 		}
-		switch option.Canonical {
-		case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
-			"--socks5", "--socks5-hostname", "--proxy-user",
-			"--proxy-header", "--noproxy", "--url", "--":
-		default:
-			if !curlProxyInertFlag(option) {
-				return NetworkFact{}, curlArgvParse{}, false
-			}
+		if !curlProxyOptionPreservesDestination(command, option) {
+			return NetworkFact{}, curlArgvParse{}, false
 		}
 		if option.Role == curlOptionNetworkOverride {
 			switch {
@@ -481,6 +572,145 @@ func staticCurlProxyDestination(
 		proxyOption.Value,
 	)
 	return proxy, parsed, ok
+}
+
+func curlProxyOptionPreservesDestination(
+	command CommandFact,
+	option curlOptionToken,
+) bool {
+	if !option.Known || option.Role == curlOptionConfig ||
+		option.Role == curlOptionPreview {
+		return false
+	}
+	if option.Role == curlOptionNetworkOverride {
+		return curlMainProxyOption(option.Canonical) ||
+			option.Canonical == "--noproxy"
+	}
+	if option.TakesValue && !staticCurlOptionValue(command, option) {
+		return false
+	}
+	if option.Role == curlOptionUpload || option.Role == curlOptionRemoteName ||
+		option.Role == curlOptionRemoteNameAll {
+		// Upload-file sources can fail or drain stdin before a request is sent;
+		// remote-name can fail before connect when a URL has no filename. This
+		// body-proof lane models only deterministic inline request data and
+		// output modes that cannot preempt the first request.
+		return false
+	}
+	if curlUploadPayloadOption(option.Canonical) {
+		return curlProxyInlinePayloadOptionValid(command, option)
+	}
+	if !curlProxyNumericOptionWithinPortableBounds(option) {
+		return false
+	}
+	switch option.Canonical {
+	case "--header", "--proxy-header", "--write-out":
+		return !strings.HasPrefix(option.Value, "@")
+	case "--url-query":
+		return true
+	case "--cacert", "--cert", "--key", "--continue-at", "--dump-header":
+		// These operands can deterministically abort before the first request;
+		// their file/resume/output validity is not represented by ActionFacts.
+		return false
+	default:
+		return true
+	}
+}
+
+func curlProxyURLQueryOptionsValid(parsed curlArgvParse) bool {
+	var outputLengths []int
+	for _, option := range parsed.Options {
+		if option.Canonical != "--url-query" {
+			continue
+		}
+		if raw, rawForm := strings.CutPrefix(option.Value, "+"); rawForm {
+			if !visibleASCII(raw) {
+				return false
+			}
+			outputLengths = append(outputLengths, len(raw))
+			continue
+		}
+		_, _, fileSource, valid := curlDataURLEncodeFile(option.Value)
+		if !valid || fileSource {
+			return false
+		}
+		if wireValue, preserved := curlURLQueryOptionBytes(option.Value); preserved {
+			outputLengths = append(outputLengths, len(wireValue))
+			continue
+		}
+		if len(option.Value) >= 8_000_000/3 {
+			return false
+		}
+		outputLengths = append(outputLengths, 3*len(option.Value))
+	}
+	return curlURLQueryLengthsValid(parsed.Targets, outputLengths)
+}
+
+func curlProxyNumericOptionWithinPortableBounds(option curlOptionToken) bool {
+	switch option.Canonical {
+	case "--retry", "--speed-limit", "--speed-time":
+		return decimalIntegerAtMost(option.Value, "2147483647")
+	case "--retry-delay", "--retry-max-time":
+		return decimalIntegerAtMost(option.Value, "2147483")
+	case "--connect-timeout", "--max-time":
+		return decimalAtMost(option.Value, "2147483", "647")
+	default:
+		return true
+	}
+}
+
+func decimalIntegerAtMost(value string, maximum string) bool {
+	value = strings.TrimLeft(value, "0")
+	if value == "" {
+		value = "0"
+	}
+	return len(value) < len(maximum) ||
+		len(value) == len(maximum) && value <= maximum
+}
+
+func decimalAtMost(value string, maxInteger string, maxFraction string) bool {
+	integer, fraction, _ := strings.Cut(value, ".")
+	integer = strings.TrimLeft(integer, "0")
+	if integer == "" {
+		integer = "0"
+	}
+	if len(integer) != len(maxInteger) {
+		return len(integer) < len(maxInteger)
+	}
+	if integer != maxInteger {
+		return integer < maxInteger
+	}
+	fraction = strings.TrimRight(fraction, "0")
+	width := max(len(fraction), len(maxFraction))
+	fraction += strings.Repeat("0", width-len(fraction))
+	maximum := maxFraction + strings.Repeat("0", width-len(maxFraction))
+	return fraction <= maximum
+}
+
+func curlProxyInlinePayloadOptionValid(
+	command CommandFact,
+	option curlOptionToken,
+) bool {
+	if !curlUploadPayloadOption(option.Canonical) ||
+		!staticCurlOptionValue(command, option) ||
+		curlUploadPayloadSourceUncertain(option) {
+		return false
+	}
+	if _, literal := staticCurlUploadPayload(option); literal {
+		return true
+	}
+	if option.Value != "" {
+		return false
+	}
+	// These options accept an empty inline value and still issue the request.
+	// Multipart options reject an empty operand in hasValidOptionValues.
+	switch option.Canonical {
+	case "--data", "--data-ascii", "--data-binary", "--data-raw",
+		"--data-urlencode", "--json":
+		return true
+	default:
+		return false
+	}
 }
 
 func staticCurlHTTPProxyFact(
@@ -644,7 +874,11 @@ func curlProxyHeaderCandidateIsTransmitted(
 	targets []curlTransferTarget,
 	proxyScheme string,
 	proxyTunnel bool,
+	formBody bool,
 ) bool {
+	if len(targets) == 0 {
+		return false
+	}
 	if proxyScheme == "https" {
 		for _, name := range []string{
 			"host", "upgrade", "connection", "keep-alive",
@@ -655,9 +889,14 @@ func curlProxyHeaderCandidateIsTransmitted(
 			}
 		}
 	}
+	// Curl's generated multipart Content-Type wins over a same-request custom
+	// proxy header in forward-proxy mode. Conservatively omit this field for
+	// every form request rather than claiming mode-dependent bytes.
+	if formBody && curlHeaderOverridesHTTPField(value, "content-type") {
+		return false
+	}
 	// Curl's generated Host wins on an HTTP forward-proxy request, while the
-	// custom Host is sent on an HTTPS CONNECT. The bounded proxy lane excludes
-	// request-body modes, so other valid literal proxy headers are transmitted.
+	// custom Host is sent on an HTTPS CONNECT.
 	if curlHeaderOverridesHTTPField(value, "host") {
 		for _, target := range targets {
 			if proxyTunnel ||
@@ -2070,9 +2309,14 @@ func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
 		encoded, valid := curlDataURLEncodeBytes(value)
 		return encoded, valid && encoded != ""
 	case "--data-raw", "--form-string":
+		if option.Canonical == "--form-string" &&
+			!curlStaticFormOperandValid(option) {
+			return "", false
+		}
 		return value, value != ""
 	case "--form":
-		if curlFormHasUnmodeledFileReference(value) ||
+		if !curlStaticFormOperandValid(option) ||
+			curlFormHasUnmodeledFileReference(value) ||
 			curlFormHasEncoderParameter(value) {
 			return "", false
 		}
@@ -2083,6 +2327,24 @@ func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func curlStaticFormOperandValid(option curlOptionToken) bool {
+	name, content, found := strings.Cut(option.Value, "=")
+	if !found || name == "" ||
+		!webUnreservedBytesPreserved(name, "-._~") {
+		return false
+	}
+	if option.Canonical == "--form-string" {
+		return true
+	}
+	if option.Canonical != "--form" || strings.Contains(content, ";") {
+		return false
+	}
+	content = strings.TrimLeft(content, " \t")
+	return !strings.HasPrefix(content, "@") &&
+		!strings.HasPrefix(content, "<") &&
+		!strings.HasPrefix(content, "(")
 }
 
 func curlDataURLEncodeBytes(value string) (string, bool) {

@@ -380,6 +380,13 @@ func trustedActionContentFindingHasRiskPair(
 				command.ID,
 				proxyMetadata.ProxyRequestComponents,
 			)
+		curlProxyUploadEgress :=
+			trustedActionContentRuleMatchesExternalProxyRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				actionfacts.StaticCurlProxyUploadPayloads(command),
+			)
 		wgetMetadata := actionfacts.StaticWgetTransmittedMetadata(command)
 		wgetHTTPMetadataEgress := httpEgress &&
 			(trustedActionContentRuleMatchesParsedCandidates(
@@ -414,6 +421,7 @@ func trustedActionContentFindingHasRiskPair(
 				wgetMetadata.FTPOriginCredentialComponents,
 			)
 		if httpMetadataEgress || ftpOriginAuthEgress || curlProxyMetadataEgress ||
+			curlProxyUploadEgress ||
 			curlRequestComponentEgress || curlTargetBoundOriginAuthEgress ||
 			wgetHTTPMetadataEgress || wgetFTPOriginAuthEgress ||
 			wgetRequestComponentEgress || wgetTargetBoundOriginAuthEgress {
