@@ -105,11 +105,10 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			want:        true,
 		},
 		{
-			name:        "unresolved POSIX case variant is not trusted",
+			name:        "unresolved POSIX parent variant is not declared safe",
 			ruleID:      "COG-AGENTS-MD",
 			command:     "printf updated > /repo/AGENTS.md",
 			activeFiles: []string{"/Repo/AGENTS.md"},
-			wantSafe:    true,
 		},
 		{
 			name:        "untrusted lowercase active basename stays inactive",
@@ -127,12 +126,11 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			want:        true,
 		},
 		{
-			name:        "Windows distinct path stays inactive",
+			name:        "Windows distinct path is not declared safe",
 			ruleID:      "COG-AGENTS-MD",
 			command:     `Set-Content -LiteralPath 'C:\Repo\AGENTS.md' -Value updated`,
 			dialect:     actionfacts.DialectPowerShell,
 			activeFiles: []string{`C:\Other\AGENTS.md`},
-			wantSafe:    true,
 		},
 		{
 			name:        "active MEMORY mutation",
@@ -149,10 +147,28 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			wantSafe:    true,
 		},
 		{
-			name:        "inactive same basename",
+			name:        "distinct same basename is not declared safe",
 			ruleID:      "COG-AGENTS-MD",
 			command:     "printf updated > /repo/other/AGENTS.md",
 			activeFiles: []string{"/repo/AGENTS.md"},
+		},
+		{
+			name:        "external alias shape is not declared safe",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /tmp/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+		},
+		{
+			name:        "fixture alias shape is not declared safe",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/testdata/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+		},
+		{
+			name:        "other instruction kind proves known empty",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /tmp/AGENTS.md",
+			activeFiles: []string{"/repo/MEMORY.md"},
 			wantSafe:    true,
 		},
 		{
@@ -169,11 +185,10 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			want:             true,
 		},
 		{
-			name:             "uncertain context preserves POSIX basename case",
+			name:             "uncertain context does not declare folded basename safe",
 			ruleID:           "COG-AGENTS-MD",
 			command:          "printf updated > /repo/agents.md",
 			contextUncertain: true,
-			wantSafe:         true,
 		},
 		{
 			name:             "uncertain context preserves Windows case folding",
@@ -194,6 +209,13 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			name:        "filename mention",
 			ruleID:      "COG-AGENTS-MD",
 			command:     "rg -n AGENTS.md internal/gateway",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "external path mention",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "echo /tmp/AGENTS.md",
 			activeFiles: []string{"/repo/AGENTS.md"},
 			wantSafe:    true,
 		},
@@ -249,8 +271,8 @@ func TestActiveAgentInstructionMutationUsesCachedPOSIXCaseSemantics(t *testing.T
 	}
 
 	facts.ActiveAgentFilesCaseInsensitive = nil
-	if owner.prerequisite(facts) || !owner.suppressFallback(facts) {
-		t.Fatalf("unmarked POSIX case variant did not remain a safe negative: %+v", facts)
+	if owner.prerequisite(facts) || owner.suppressFallback(facts) {
+		t.Fatalf("unmarked POSIX case variant was declared safe: %+v", facts)
 	}
 
 	parentVariant := actionfacts.Analyze(actionfacts.Input{
@@ -260,8 +282,8 @@ func TestActiveAgentInstructionMutationUsesCachedPOSIXCaseSemantics(t *testing.T
 		ActiveAgentFiles:                []string{"/Repo/AGENTS.md"},
 		ActiveAgentFilesCaseInsensitive: []string{"/Repo/AGENTS.md"},
 	})
-	if owner.prerequisite(parentVariant) || !owner.suppressFallback(parentVariant) {
-		t.Fatalf("cached basename proof folded an unproven parent: %+v", parentVariant)
+	if owner.prerequisite(parentVariant) || owner.suppressFallback(parentVariant) {
+		t.Fatalf("unproven parent alias was enforced or declared safe: %+v", parentVariant)
 	}
 	if activeAgentInstructionPathsMatch(
 		activePath,
@@ -301,15 +323,16 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 		}
 	})
 
-	t.Run("unmarked POSIX casing alias stays safe", func(t *testing.T) {
+	t.Run("unmarked POSIX casing alias remains detection only", func(t *testing.T) {
 		const command = "printf updated > /repo/agents.md"
-		if finding := findingWithID(dispatch(actionfacts.Input{
+		finding := findingWithID(dispatch(actionfacts.Input{
 			Tool:             "shell",
 			Command:          command,
 			CWD:              "/repo",
 			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
-		}), "COG-AGENTS-MD"); finding != nil {
-			t.Fatalf("unmarked POSIX case alias produced finding: %+v", *finding)
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("unmarked POSIX case alias finding = %+v, want detection-only", finding)
 		}
 	})
 
@@ -352,31 +375,97 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 		}
 	})
 
-	t.Run("cached basename proof does not fold parent", func(t *testing.T) {
+	t.Run("cached basename proof does not enforce parent alias", func(t *testing.T) {
 		const activePath = "/Repo/AGENTS.md"
 		const command = "printf updated > /repo/agents.md"
-		if finding := findingWithID(dispatch(actionfacts.Input{
+		finding := findingWithID(dispatch(actionfacts.Input{
 			Tool:                            "shell",
 			Command:                         command,
 			CWD:                             "/repo",
 			ActiveAgentFiles:                []string{activePath},
 			ActiveAgentFilesCaseInsensitive: []string{activePath},
-		}), "COG-AGENTS-MD"); finding != nil {
-			t.Fatalf("unproven parent casing produced finding: %+v", *finding)
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("unproven parent alias finding = %+v, want detection-only", finding)
 		}
 	})
 
-	t.Run("unrelated lowercase POSIX path stays safe", func(t *testing.T) {
+	t.Run("distinct same-kind POSIX path remains detection only", func(t *testing.T) {
 		const activePath = "/repo/MEMORY.md"
 		const command = "printf updated > /repo/unrelated/memory.md"
-		if finding := findingWithID(dispatch(actionfacts.Input{
+		finding := findingWithID(dispatch(actionfacts.Input{
 			Tool:                            "shell",
 			Command:                         command,
 			CWD:                             "/repo",
 			ActiveAgentFiles:                []string{activePath},
 			ActiveAgentFilesCaseInsensitive: []string{activePath},
-		}), "COG-MEMORY"); finding != nil {
-			t.Fatalf("unrelated lowercase path produced finding: %+v", *finding)
+		}), "COG-MEMORY")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("distinct same-kind finding = %+v, want detection-only", finding)
+		}
+	})
+
+	t.Run("external lexical alias remains detection only", func(t *testing.T) {
+		const command = "printf updated > /tmp/AGENTS.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          command,
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("external alias finding = %+v, want detection-only", finding)
+		}
+	})
+
+	t.Run("fixture-shaped lexical alias remains detection only", func(t *testing.T) {
+		const command = "printf updated > /repo/testdata/AGENTS.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          command,
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("fixture alias finding = %+v, want detection-only", finding)
+		}
+	})
+
+	t.Run("known-empty instruction context stays quiet", func(t *testing.T) {
+		for _, activeFiles := range [][]string{
+			nil,
+			{"/repo/MEMORY.md"},
+		} {
+			if finding := findingWithID(dispatch(actionfacts.Input{
+				Tool:             "shell",
+				Command:          "printf updated > /tmp/AGENTS.md",
+				CWD:              "/repo",
+				ActiveAgentFiles: activeFiles,
+			}), "COG-AGENTS-MD"); finding != nil {
+				t.Fatalf("known-empty context produced finding: %+v", *finding)
+			}
+		}
+	})
+
+	t.Run("distinct active-file read stays quiet", func(t *testing.T) {
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          "cat /tmp/AGENTS.md",
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD"); finding != nil {
+			t.Fatalf("read-only alias produced finding: %+v", *finding)
+		}
+	})
+
+	t.Run("external active-file mention stays quiet", func(t *testing.T) {
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          "echo /tmp/AGENTS.md",
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD"); finding != nil {
+			t.Fatalf("external path mention produced finding: %+v", *finding)
 		}
 	})
 

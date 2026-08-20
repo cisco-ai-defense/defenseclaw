@@ -197,35 +197,52 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 		}
 		return false
 	}
-	return integrityMutationOwner(
-		isCandidate,
-		isActive,
-		func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
-			resolved := candidate.Resolved
-			if resolved == "" {
-				resolved = candidate.Normalized
-			}
-			flavor := candidate.Flavor
-			if flavor != actionfacts.PathFlavorPOSIX &&
-				flavor != actionfacts.PathFlavorWindows {
-				normalized := strings.ReplaceAll(resolved, `\`, "/")
-				switch {
-				case strings.HasPrefix(normalized, "//") ||
-					len(normalized) >= 3 && normalized[1] == ':' && normalized[2] == '/':
-					flavor = actionfacts.PathFlavorWindows
-				case strings.HasPrefix(normalized, "/"):
-					flavor = actionfacts.PathFlavorPOSIX
-				default:
-					return false
-				}
-			}
-			if _, ok := activeAgentInstructionPath(resolved, flavor); !ok {
+	isSafe := func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		resolved := candidate.Resolved
+		if resolved == "" {
+			resolved = candidate.Normalized
+		}
+		flavor := candidate.Flavor
+		if flavor != actionfacts.PathFlavorPOSIX &&
+			flavor != actionfacts.PathFlavorWindows {
+			normalized := strings.ReplaceAll(resolved, `\`, "/")
+			switch {
+			case strings.HasPrefix(normalized, "//") ||
+				len(normalized) >= 3 && normalized[1] == ':' && normalized[2] == '/':
+				flavor = actionfacts.PathFlavorWindows
+			case strings.HasPrefix(normalized, "/"):
+				flavor = actionfacts.PathFlavorPOSIX
+			default:
 				return false
 			}
-			candidate.Flavor = flavor
-			return !isActive(facts, candidate)
-		},
+		}
+		if _, ok := activeAgentInstructionPath(resolved, flavor); !ok {
+			return false
+		}
+		if !activeAgentInstructionCandidateMutatesPath(facts, candidate) {
+			return true
+		}
+		// A distinct path may still be a hard-link or symlink alias of a
+		// retained active file. The synchronous decision path deliberately does
+		// not touch the filesystem, so keep that ambiguity visible instead of
+		// declaring it safe. A known-empty rule-specific context remains quiet.
+		return !activeAgentInstructionContextPresent(facts, flavor, fileName)
+	}
+	owner := integrityMutationOwner(
+		isCandidate,
+		isActive,
+		isSafe,
 	)
+	// A fixture-looking path can alias the active file just as any other path
+	// can. Known-empty context is already handled by isSafe; do not let the
+	// generic lexical fixture exemption erase an unresolved alias finding.
+	owner.suppressFallback = integrityMutationSafeNegativeWithFixture(
+		isCandidate,
+		isActive,
+		isSafe,
+		nil,
+	)
+	return owner
 }
 
 // exactSemanticPathValue intentionally does not use semanticPathValue: that
@@ -339,6 +356,48 @@ func activeAgentFileCaseInsensitive(
 	return false
 }
 
+func activeAgentInstructionContextPresent(
+	facts actionfacts.Facts,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	if facts.ActiveAgentFilesUncertain {
+		return true
+	}
+	for _, activePath := range facts.ActiveAgentFiles {
+		canonicalActivePath, active := activeAgentInstructionPath(
+			activePath,
+			flavor,
+		)
+		if active && activeAgentInstructionBaseMatches(
+			canonicalActivePath,
+			flavor,
+			fileName,
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+func activeAgentInstructionCandidateMutatesPath(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	candidatePath := semanticPathValue(candidate)
+	for _, pathCandidate := range facts.Paths {
+		if pathCandidate.CommandID != candidate.CommandID ||
+			semanticPathValue(pathCandidate) != candidatePath {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, pathCandidate.CommandID)
+		if ok && integrityCommandMutatesPath(command, pathCandidate) {
+			return true
+		}
+	}
+	return false
+}
+
 func isASCIIPathLetter(value byte) bool {
 	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
@@ -446,6 +505,20 @@ func integrityMutationSafeNegative(
 	isActive integrityPathMatcher,
 	isSafe integrityPathMatcher,
 ) semanticOwnerPrerequisite {
+	return integrityMutationSafeNegativeWithFixture(
+		isCandidate,
+		isActive,
+		isSafe,
+		isDefiniteFixturePath,
+	)
+}
+
+func integrityMutationSafeNegativeWithFixture(
+	isCandidate semanticPathCandidate,
+	isActive integrityPathMatcher,
+	isSafe integrityPathMatcher,
+	isFixture integrityPathMatcher,
+) semanticOwnerPrerequisite {
 	return func(facts actionfacts.Facts) bool {
 		if !facts.Authoritative() {
 			return false
@@ -474,7 +547,7 @@ func integrityMutationSafeNegative(
 			}
 			if isActive(facts, candidate) ||
 				isSafe != nil && isSafe(facts, candidate) ||
-				isDefiniteFixturePath(facts, candidate) {
+				isFixture != nil && isFixture(facts, candidate) {
 				continue
 			}
 			return false
