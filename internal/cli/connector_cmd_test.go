@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,20 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// scrubExitHelperEnv drives the *exec.ExitError self-exec assertion
+	// in TestExitCodeFor_HandlesAllContracts. When set to a numeric
+	// string, exit immediately with that status BEFORE any test cases
+	// run so the parent test can construct a real *exec.ExitError
+	// without depending on /bin/sh being installed. See
+	// internal/cli/enterprise_hooks_scrub_test.go for the pairing.
+	if raw, ok := os.LookupEnv(scrubExitHelperEnv); ok {
+		code, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scrub test helper: bad %s=%q: %v\n", scrubExitHelperEnv, raw, err)
+			os.Exit(120)
+		}
+		os.Exit(code)
+	}
 	if len(os.Args) >= 3 && os.Args[1] == "app-server" && os.Args[2] == "--stdio" {
 		serveCodexPolicyFixture()
 		os.Exit(0)

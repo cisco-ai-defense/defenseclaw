@@ -26,7 +26,7 @@ ships in this folder.
 | \`com.cisco.secureclient.defenseclaw.plist\` | LaunchDaemon plist                                  |
 | \`lib/installer_lib.sh\`          | Pure helpers (sourced by install.sh)                |
 | \`lib/render-targets.sh\`          | Hook-guardian target manifest renderer              |
-| \`lib/scrub_agent_configs.py\`    | Agent hook config scrubber (stdlib Python)          |
+| \`lib/scrub_agent_configs.py\`    | Agent hook config scrubber for the \`amp\` connector (stdlib Python) |
 | \`com.cisco.secureclient.defenseclaw.hook-guardian.plist\` | Guardian LaunchDaemon definition |
 | \`com.cisco.secureclient.defenseclaw.hook-enumerator.plist\` | Enumerator LaunchDaemon definition |
 
@@ -79,7 +79,17 @@ sudo ./uninstall.sh --purge -y
 
 ## Requirements
 
-- macOS with \`launchctl\` and \`/usr/bin/python3\` (stdlib only).
+- macOS with \`launchctl\` (base image; no Xcode Command Line Tools
+  required for install, upgrade, or a standard uninstall — those
+  paths are shell-only or delegate to the bundled DefenseClaw
+  binary).
+- Python 3 (\`/usr/bin/python3\`) is required ONLY when
+  \`sudo ./uninstall.sh --purge\` runs against a host with the \`amp\`
+  connector installed. The Amp scrubber
+  (\`lib/scrub_agent_configs.py\`) restores the pre-install plugin
+  from a signed backup and needs Python's stdlib crypto for
+  SHA-256 verification. Other connectors (Codex / Claude Code /
+  Cursor) scrub through the Go binary and do not need Python.
 - Root privileges (\`sudo\`).
 - Target user's home directory must not be group/other-writable
   (installer will refuse with an exact \`chmod\` fix).

@@ -49,12 +49,13 @@ die() { printf '[hook-enumerator] ERROR: %s\n' "$*" >&2; exit 1; }
 # when present; fall back to the primary. Keep this tiny and side-effect
 # free — Python is available on every macOS box we ship to.
 extract_connectors() {
-  # Regex-only scanner over the shape render_config emits. Deliberately
-  # avoids importing PyYAML: it isn't part of macOS's system Python and
-  # is often installed only in a user's Library/Python/*/site-packages,
-  # invisible to a root-launched daemon. render_config's output is stable
-  # and simple enough (two-space indent, keys on their own lines) that a
-  # regex scan is more portable than a YAML dependency.
+  # Regex-only scanner over the shape render_config emits. Uses awk
+  # (macOS base image, no CLT / interpreter dependency) rather than
+  # `/usr/bin/python3` — the QA regression on stock macOS is that
+  # `[ -x /usr/bin/python3 ]` passes but the stub fails to launch
+  # without Xcode Command Line Tools. render_config's output is stable
+  # and simple enough (two-space indent, keys on their own lines) that
+  # a regex scan is more portable than a YAML library dependency.
   #
   # render_config emits BOTH:
   #   guardrail:
@@ -67,56 +68,81 @@ extract_connectors() {
   # So we prefer the map when present (returns every connector) and fall
   # back to the scalar (primary only) when the map is absent. Duplicates
   # are dropped preserving first-seen order.
-  /usr/bin/python3 - "${CONFIG_PATH}" <<'PY'
-import re, sys
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    text = f.read()
-
-primary = None
-connectors_map = []
-in_guardrail = False
-in_connectors = False
-for line in text.splitlines():
-    if re.match(r"^guardrail:\s*$", line):
-        in_guardrail = True
-        in_connectors = False
-        continue
-    if in_guardrail and line and not line.startswith(" "):
-        # Left the guardrail: block.
-        in_guardrail = False
-        in_connectors = False
-        continue
-    if not in_guardrail:
-        continue
-    if not in_connectors:
-        if re.match(r"^  connectors:\s*$", line):
-            in_connectors = True
-            continue
-        m = re.match(r"^  connector:\s*(\S+)\s*$", line)
-        if m and primary is None:
-            primary = m.group(1)
-    else:
-        m = re.match(r"^    ([a-z0-9][a-z0-9_-]*):\s*$", line)
-        if m:
-            connectors_map.append(m.group(1))
-            continue
-        if line and not line.startswith("      ") and not line.startswith("    "):
-            in_connectors = False
-
-# Prefer the map when populated; fall back to the primary scalar.
-result = connectors_map if connectors_map else ([primary] if primary else [])
-# Dedupe preserving first-seen order (defence-in-depth against future edits
-# to render_config that might list the same connector under both forms).
-seen = set()
-deduped = []
-for c in result:
-    if c and c not in seen:
-        seen.add(c)
-        deduped.append(c)
-for c in deduped:
-    print(c)
-PY
+  awk '
+    BEGIN {
+      in_guardrail = 0
+      in_connectors = 0
+      primary = ""
+      n_map = 0
+      # seen[] tracks first-seen dedupe order across BOTH sources so
+      # a future edit to render_config that lists the primary under
+      # both forms produces exactly one output line.
+    }
+    /^guardrail:[ \t]*$/ {
+      in_guardrail = 1
+      in_connectors = 0
+      next
+    }
+    {
+      if (in_guardrail && $0 != "" && substr($0, 1, 1) != " " && substr($0, 1, 1) != "\t") {
+        # Left the guardrail block.
+        in_guardrail = 0
+        in_connectors = 0
+      }
+      if (!in_guardrail) next
+      # Clear in_connectors BEFORE the dispatch below when a sibling
+      # key at the connectors-parent depth ends the map block, so the
+      # terminating line still gets a chance to match the
+      # `  connector: <primary>` scalar branch. The prior placement
+      # (at the tail of the else-branch) consumed that line inside the
+      # block-exit and would have lost the primary if render_config
+      # ever emitted `connectors:` (empty) before `connector:`.
+      # Purely defensive — the current emitter order is stable — but
+      # it makes the scanner robust to a future config-generation
+      # reordering that would otherwise silently drop the primary.
+      if (in_connectors && $0 != "" && $0 !~ /^      / && $0 !~ /^    /) {
+        in_connectors = 0
+      }
+      if (!in_connectors) {
+        if ($0 ~ /^  connectors:[ \t]*$/) {
+          in_connectors = 1
+          next
+        }
+        if ($0 ~ /^  connector:[ \t]+[^ \t]+[ \t]*$/) {
+          if (primary == "") {
+            # Extract the value after the colon.
+            line = $0
+            sub(/^  connector:[ \t]+/, "", line)
+            sub(/[ \t]+$/, "", line)
+            primary = line
+          }
+          next
+        }
+      } else {
+        if ($0 ~ /^    [a-z0-9][a-z0-9_-]*:[ \t]*$/) {
+          line = $0
+          sub(/^    /, "", line)
+          sub(/:[ \t]*$/, "", line)
+          n_map++
+          mapc[n_map] = line
+          next
+        }
+      }
+    }
+    END {
+      # Prefer the map when non-empty; fall back to the scalar.
+      if (n_map > 0) {
+        for (i = 1; i <= n_map; i++) {
+          v = mapc[i]
+          if (v == "" || v in seen) continue
+          seen[v] = 1
+          print v
+        }
+      } else if (primary != "") {
+        print primary
+      }
+    }
+  ' "${CONFIG_PATH}"
 }
 
 connectors_lines="$(extract_connectors 2>/dev/null || true)"

@@ -101,6 +101,98 @@ t_install_bootstraps_guardian_and_enumerator() {
     "install.sh enumerates local users via the shared helper"
 }
 
+t_install_survives_zero_target_manifest() {
+  # AIFW-31486 regression guard: on a fresh customer box the AVC-shipped
+  # .pkg lands before the user has installed any supported connector CLI
+  # (Codex / ClaudeCode / Cursor). The zero-target render used to `die`
+  # here, which surfaced as the AVC postinstall logging
+  # "DefenseClaw install failed with exit code 1; continuing AVC install"
+  # and left the box with no hook-guardian daemon running at all.
+  #
+  # The new contract: warn and proceed. The hook-enumerator LaunchDaemon
+  # re-renders targets.yaml every 5 min, so the guardian picks up hooks
+  # the moment a connector CLI appears — no operator action required.
+  local body
+  body="$(cat "${PKG_DIR}/install.sh")"
+  # No `die` referencing the zero-target manifest condition may remain.
+  if grep -nE 'die[[:space:]].*hook-guardian manifest has zero targets' "${PKG_DIR}/install.sh" >/dev/null; then
+    _fail "install.sh still die()s on a zero-target manifest — regresses AIFW-31486; must warn+proceed so the enumerator can pick up connectors later"
+    return 1
+  fi
+  # And there must be an explicit warn on both branches of the classify
+  # helper so an operator scanning /var/log/install.log can tell why
+  # hooks aren't wired yet AND which corrective action (if any) matters.
+  assert_contains "${body}" 'warn "hook-guardian manifest has zero targets:' \
+    "install.sh warns loudly on the all-unsupported branch (AIFW-31486)"
+  assert_contains "${body}" 'warn "hook-guardian manifest has zero targets (users=' \
+    "install.sh warns loudly on the none-installed branch (AIFW-31486)"
+  # The classification helper MUST be invoked so the two branches get
+  # different guidance. Without this the warn is a single generic line.
+  assert_contains "${body}" 'classify_zero_target_reason "${CONNECTOR}"' \
+    "install.sh consults classify_zero_target_reason to distinguish all-unsupported vs none-installed"
+
+  # Branch-to-bootstrap control-flow guard (CodeRabbit finding 2):
+  # a source scan alone can't prove the zero-target branch actually
+  # falls through to the launchctl bootstrap. Assert that the
+  # `if [[ ${MANIFEST_TARGETS} == "0" ]]` block itself contains NO
+  # `die` — if a future edit re-adds one there, a fresh customer
+  # install would still fail to start any daemon even though a warn
+  # text is present. Legitimate `die`s guarding unrelated file-integrity
+  # (symlink refusal, atomic-move failure) live OUTSIDE this block and
+  # must stay untouched.
+  local py_rc=0
+  /usr/bin/python3 - "${PKG_DIR}/install.sh" >/dev/null 2>&1 <<'PY' || py_rc=$?
+import re, sys
+src = open(sys.argv[1]).read()
+# Find the zero-target if-block header.
+header = re.search(
+    r'if\s+\[\[\s+"\$\{MANIFEST_TARGETS\}"\s*==\s*"0"\s*\]\]\s+&&\s+\[\[\s+-n\s+"\$\{USER_LINES\}"\s*\]\]\s*;\s*then',
+    src,
+)
+if not header:
+    print("zero-target if header not found — install.sh contract changed", file=sys.stderr)
+    sys.exit(2)
+# Walk forward from the header to find the matching `fi`, tracking nesting.
+body_start = header.end()
+i = body_start
+depth = 1
+while i < len(src) and depth > 0:
+    m_if = re.match(r'\s*if\s', src[i:])
+    m_fi = re.match(r'\s*fi(\s|$)', src[i:])
+    # Move line-by-line to keep the walk simple; scan the current line's
+    # first token for if/fi.
+    nl = src.find('\n', i)
+    if nl == -1:
+        nl = len(src)
+    line = src[i:nl]
+    stripped_line = re.sub(r'^\s*', '', line)
+    stripped_line = re.sub(r'(?<!\\)#.*$', '', stripped_line).rstrip()
+    if re.match(r'if\b', stripped_line) or re.match(r'case\b', stripped_line):
+        depth += 1
+    elif re.match(r'fi\b', stripped_line) or re.match(r'esac\b', stripped_line):
+        depth -= 1
+        if depth == 0:
+            block_end = i + len(line)  # up to and including the `fi` line
+            break
+    i = nl + 1
+else:
+    print("could not find closing fi for zero-target block", file=sys.stderr)
+    sys.exit(3)
+body = src[body_start:block_end]
+# Strip line comments so a `# die ...` in prose doesn't false-positive.
+stripped = re.sub(r'(?m)^\s*#.*$', '', body)
+hit = re.search(r'(^|[^_a-zA-Z0-9])die\s', stripped)
+if hit:
+    ctx = stripped[max(0, hit.start()-40):hit.end()+80]
+    print(f"die() found INSIDE the zero-target block near: {ctx!r}", file=sys.stderr)
+    sys.exit(1)
+PY
+  if [[ "${py_rc}" -ne 0 ]]; then
+    _fail "install.sh has a die() inside the MANIFEST_TARGETS==0 block — regresses AIFW-31486 (daemons never start on a zero-target box); python check exited with ${py_rc}"
+    return 1
+  fi
+}
+
 t_install_no_longer_hardcodes_single_target_user() {
   # Regression guard: the pre-2026.7.3 flow called
   #   "${GATEWAY_BIN}" enterprise hooks install --connector ... --user "${TARGET_USER}"
@@ -601,6 +693,7 @@ run_case "plist exists and lints"     t_plist_exists_and_parses
 run_case "guardian + enumerator plists exist and lint" t_guardian_and_enumerator_plists_exist_and_parse
 run_case "render-targets.sh present + executable + parses" t_render_targets_sh_exists_and_is_executable
 run_case "install.sh bootstraps guardian + enumerator daemons" t_install_bootstraps_guardian_and_enumerator
+run_case "install.sh survives zero-target manifest (AIFW-31486)" t_install_survives_zero_target_manifest
 run_case "install.sh no longer inline-calls 'enterprise hooks install'" t_install_no_longer_hardcodes_single_target_user
 run_case "plist references managed paths" t_plist_contains_managed_paths
 run_case "install.log sink is set up AFTER fresh-host preflight + LOGS_DIR create" t_install_log_sink_is_after_preflight

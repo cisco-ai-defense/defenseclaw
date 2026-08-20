@@ -92,6 +92,17 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	if versionJSON {
 		return nil
 	}
+	// Skip the full-daemon bootstrap (config load + audit store + PID
+	// registration + telemetry) for lifecycle utilities that operate on
+	// operator-supplied paths and do not touch DefenseClaw state. These
+	// subcommands must run on hosts where the daemon has NOT been
+	// installed yet (e.g. inside macOS uninstall.sh's --purge path,
+	// which runs on hosts that may be halfway through a partial
+	// install with no v8 config). Opting-in via the shared annotation
+	// keeps the exemption discoverable in one place.
+	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+		return nil
+	}
 	// Enterprise hook commands also use this initializer so they receive the
 	// same authenticated v8 runtime context as the root sidecar command.
 	// A Windows daemon may explicitly break away from the TUI's Job Object.
@@ -322,19 +333,80 @@ func Execute() int {
 // entry point so SERVICE_CONTROL_STOP and SERVICE_CONTROL_SHUTDOWN can cancel
 // the long-running gateway or hook-guardian command without terminating the
 // process abruptly.
+//
+// Two error-carrier contracts converge here after the
+// windows-enterprise-integration merge:
+//
+//   - *scrubExitError (main-branch, see enterprise_hooks_scrub.go)
+//     ships a specific rc for `enterprise hooks scrub` (rc 2/3/4/5).
+//   - *exitCodeError (integration-branch, see exit_code.go) ships a
+//     specific rc for the withExitCode helper the Windows enterprise
+//     lifecycle command uses (rc 1603 on preflight failures).
+//
+// exitCodeFor handles the scrub carrier; commandExitCode handles the
+// integration carrier. Layered so exitCodeFor wins on ambiguity —
+// scrub is the more specific subcommand.
 func ExecuteContext(ctx context.Context) int {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		// Cancellation is the expected completion path for an SCM stop. Do not
-		// report it as a service failure or trigger failure-recovery restarts.
-		if errors.Is(err, context.Canceled) {
-			return 0
-		}
-		return commandExitCode(err)
+	err := rootCmd.ExecuteContext(ctx)
+	if err == nil {
+		return 0
 	}
-	return 0
+	// Cancellation is the expected completion path for an SCM stop. Do not
+	// report it as a service failure or trigger failure-recovery restarts.
+	if errors.Is(err, context.Canceled) {
+		return 0
+	}
+	// scrubExitError check first (main-branch contract).
+	if rc := exitCodeFor(err); rc != 1 {
+		return rc
+	}
+	// integration-branch withExitCode helper.
+	return commandExitCode(err)
+}
+
+// exitCodeFor is the pure error-to-int mapping for the scrub subcommand.
+// Kept split so tests can drive it directly without spinning up the
+// root Cobra command.
+//
+// Contract:
+//
+//   - err == nil                       -> rc 0
+//   - err chain contains a
+//     *scrubExitError                  -> that specific exit code
+//   - anything else                    -> rc 1
+//
+// Matched against the CONCRETE type (*scrubExitError) rather than a
+// generic `interface{ ExitCode() int }` on purpose. Go's stdlib
+// exposes several unrelated error types that satisfy the same
+// interface — most importantly *os/exec.ExitError (returned when a
+// spawned subprocess exits non-zero). If a future RunE calls out to
+// a helper binary and returns the resulting *exec.ExitError up the
+// chain, an interface-based match would silently propagate that
+// subprocess's exit code as OUR exit code (e.g. rc 127 = "command
+// not found" from a broken PATH, rc 2 from unrelated tools) —
+// meaningless in DefenseClaw's contract and prone to colliding with
+// our own well-defined codes (uninstall.sh: rc 2 = missing file, rc
+// 3 = unknown connector, rc 4 = parse failure). Anchoring on the
+// concrete type keeps the contract auditable: exit-code propagation
+// requires an explicit scrubExitError construction, never a
+// coincidental interface satisfaction.
+//
+// errors.As still walks the wrap chain so
+// `fmt.Errorf("context: %w", scrubExitErr)` continues to propagate
+// correctly — the concrete-type constraint only affects what
+// counts as a "carrier".
+func exitCodeFor(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ec *scrubExitError
+	if errors.As(err, &ec) {
+		return ec.ExitCode()
+	}
+	return 1
 }
 
 // loadDotEnvIntoOS reads KEY=VALUE pairs from path and sets them as
