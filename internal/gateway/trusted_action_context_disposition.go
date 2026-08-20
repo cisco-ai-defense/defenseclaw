@@ -361,9 +361,26 @@ func trustedActionStaticCatEmitsPath(
 ) bool {
 	if command.Dialect != actionfacts.DialectPOSIX ||
 		!command.ArgvComplete || command.ParentCommandID != 0 ||
-		command.Program != "cat" || len(command.Argv) != 2 ||
+		command.Program != "cat" || len(command.Argv) < 2 ||
 		command.Executable != command.Argv[0] ||
-		command.Argv[1] != candidate.Value || len(command.Wrappers) != 0 {
+		len(command.Wrappers) != 0 {
+		return false
+	}
+	pathIndex := 1
+	switch len(command.Argv) {
+	case 2:
+		if strings.HasPrefix(command.Argv[pathIndex], "-") {
+			return false
+		}
+	case 3:
+		if command.Argv[1] != "--" {
+			return false
+		}
+		pathIndex = 2
+	default:
+		return false
+	}
+	if command.Argv[pathIndex] != candidate.Value {
 		return false
 	}
 	if len(command.Arguments) != len(command.Argv) {
