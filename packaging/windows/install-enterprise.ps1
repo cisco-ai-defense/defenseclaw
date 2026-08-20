@@ -24,6 +24,25 @@ param(
     [string]$Config,
     [string]$Manifest,
 
+    # QA-friendly shorthand: when -Mode + -Connector are supplied and
+    # -Config / -Manifest are empty, the installer renders a minimal
+    # managed_enterprise config.yaml and per-user targets.yaml into the
+    # protected bootstrap staging directory before the module import,
+    # then continues the lifecycle as if those paths had been supplied
+    # directly. Mirrors the macOS install.sh --mode/--connector
+    # shorthand and the render_config / render_targets_manifest helpers
+    # in packaging/macos/lib/installer_lib.sh.
+    #
+    # -Mode is passed verbatim to guardrail.mode; -Connector is a
+    # comma-separated list whose first entry becomes guardrail.connector
+    # (primary) and every entry becomes both a targets.yaml row (one per
+    # eligible interactive-user profile) and a guardrail.connectors map
+    # entry. Both are mutually exclusive with -Config / -Manifest and
+    # with -DeferredConfig.
+    [ValidateSet('', 'observe', 'action')]
+    [string]$Mode = '',
+    [string]$Connector = '',
+
     [string]$InstallRoot,
     [string]$StateRoot,
     [string]$GatewayServiceName = 'DefenseClawGateway',
@@ -1362,6 +1381,168 @@ function Assert-DefenseClawBootstrapModuleTrust {
     return $full
 }
 
+# ---------------------------------------------------------------------------
+# QA shorthand renderer helpers (-Mode / -Connector). Mirror the macOS
+# install.sh render_config + render_targets_manifest heredocs
+# (packaging/macos/lib/installer_lib.sh:1061, :1336) closely enough for the
+# resulting config.yaml + targets.yaml to satisfy the Windows lifecycle's
+# managed_enterprise trust check. Kept minimal on purpose: only the fields
+# the running gateway requires are emitted; the rest come from the Go
+# config loader's defaults, so a mismatch between platforms cannot open a
+# per-key drift regression during a QA install.
+# ---------------------------------------------------------------------------
+
+$script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp')
+
+function ConvertTo-DefenseClawConnectorList {
+    param([Parameter(Mandatory)][string]$Connector)
+    $raw = $Connector -split ','
+    $normalized = [Collections.Generic.List[string]]::new()
+    foreach ($entry in $raw) {
+        $trimmed = $entry.Trim().ToLowerInvariant()
+        if ([string]::IsNullOrEmpty($trimmed)) { continue }
+        if ($trimmed -notin $script:DefenseClawSupportedConnectors) {
+            throw "-Connector entry '$trimmed' is not supported; expected one or more of: $($script:DefenseClawSupportedConnectors -join ', ')"
+        }
+        if ($normalized -notcontains $trimmed) {
+            $normalized.Add($trimmed) | Out-Null
+        }
+    }
+    if ($normalized.Count -eq 0) {
+        throw "-Connector produced no valid entries after trimming and deduplication: $Connector"
+    }
+    return $normalized.ToArray()
+}
+
+function Get-DefenseClawRenderedEnterpriseConfig {
+    # Emit a minimal managed_enterprise config.yaml body. This is
+    # intentionally NARROWER than the macOS render_config output —
+    # data_dir, device_key_file, observability.local.path,
+    # judge_bodies_path, and cisco_ai_defense.endpoint are all left to
+    # the Windows Go loader's defaults so they land under the
+    # canonical %ProgramData%\Cisco\Cisco Secure Client\DefenseClaw
+    # tree without hard-coding drive letters here. env_config.json
+    # remains the AVC-supplied endpoint override (see the packaging
+    # doc); operators who need a non-default endpoint drop that
+    # overlay after install and the gateway picks it up dynamically.
+    param(
+        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][string[]]$Connectors
+    )
+    $primary = $Connectors[0]
+    $sb = [Text.StringBuilder]::new()
+    [void]$sb.AppendLine('config_version: 8')
+    [void]$sb.AppendLine('deployment_mode: managed_enterprise')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('observability:')
+    [void]$sb.AppendLine('  defaults:')
+    [void]$sb.AppendLine('    redaction_profile: sensitive')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('gateway:')
+    [void]$sb.AppendLine('  api_bind: 127.0.0.1')
+    [void]$sb.AppendLine('  api_port: 18970')
+    [void]$sb.AppendLine('  watcher:')
+    [void]$sb.AppendLine('    enabled: false')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('guardrail:')
+    [void]$sb.AppendLine('  enabled: true')
+    [void]$sb.AppendLine("  mode: $Mode")
+    [void]$sb.AppendLine('  scanner_mode: both')
+    [void]$sb.AppendLine('  detection_strategy: regex_only')
+    [void]$sb.AppendLine('  judge:')
+    [void]$sb.AppendLine('    enabled: false')
+    [void]$sb.AppendLine("  connector: $primary")
+    if ($Connectors.Count -gt 1) {
+        [void]$sb.AppendLine('  connectors:')
+        foreach ($c in $Connectors) {
+            [void]$sb.AppendLine("    ${c}:")
+            [void]$sb.AppendLine('      enabled: true')
+            [void]$sb.AppendLine("      mode: $Mode")
+        }
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('ai_discovery:')
+    [void]$sb.AppendLine('  enabled: true')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('asset_policy:')
+    [void]$sb.AppendLine('  enabled: false')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('application_protection:')
+    [void]$sb.AppendLine('  enabled: false')
+    return $sb.ToString()
+}
+
+function Get-DefenseClawEligibleInteractiveUserProfiles {
+    # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
+    # and return one PSCustomObject per eligible interactive user
+    # (SID starts with S-1-5-21-, has a resolvable ProfileImagePath
+    # that exists on disk, and the SID translates to a live NTAccount).
+    # Mirrors internal/enterprisehooks/enumerator_windows.go's
+    # listWindowsUserProfiles filter chain — same rejection semantics
+    # so the shorthand-rendered targets.yaml matches what the running
+    # enumerator would re-render on its next tick.
+    $rootKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    $out = [Collections.Generic.List[psobject]]::new()
+    if (-not (Test-Path -LiteralPath $rootKey)) {
+        return $out.ToArray()
+    }
+    foreach ($sub in Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue) {
+        $sid = $sub.PSChildName
+        if (-not $sid.StartsWith('S-1-5-21-')) { continue }
+        $image = $null
+        try {
+            $image = (Get-ItemProperty -LiteralPath $sub.PSPath `
+                -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+        }
+        catch { continue }
+        if ([string]::IsNullOrWhiteSpace($image)) { continue }
+        $image = [Environment]::ExpandEnvironmentVariables($image)
+        if (-not [IO.Directory]::Exists($image)) { continue }
+        $account = $null
+        try {
+            $account = ([Security.Principal.SecurityIdentifier]::new($sid)).Translate(
+                [Security.Principal.NTAccount]
+            ).Value
+        }
+        catch { continue }
+        $userName = $account
+        $backslash = $account.IndexOf('\')
+        if ($backslash -ge 0) { $userName = $account.Substring($backslash + 1) }
+        $out.Add([pscustomobject]@{
+            SID = $sid
+            NTAccount = $account
+            UserName = $userName
+            UserHome = ([IO.Path]::GetFullPath($image)).TrimEnd('\')
+        }) | Out-Null
+    }
+    return $out.ToArray()
+}
+
+function Get-DefenseClawRenderedEnterpriseTargets {
+    param([Parameter(Mandatory)][string[]]$Connectors)
+    $sb = [Text.StringBuilder]::new()
+    [void]$sb.AppendLine('version: 1')
+    [void]$sb.AppendLine('targets:')
+    $users = Get-DefenseClawEligibleInteractiveUserProfiles
+    if ($users.Count -eq 0) {
+        # An empty manifest is valid YAML; the guardian re-scans on its
+        # interval, so a new user appearing after install is picked up
+        # by the enumerator without a reinstall. The bootstrap install
+        # simply lands with no rows for now.
+        return $sb.ToString()
+    }
+    foreach ($u in $users) {
+        foreach ($c in $Connectors) {
+            [void]$sb.AppendLine("  - user: `"$($u.UserName -replace '"','\"')`"")
+            [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
+            [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
+            [void]$sb.AppendLine("    connector: `"$c`"")
+            [void]$sb.AppendLine('    enabled: true')
+        }
+    }
+    return $sb.ToString()
+}
+
 $bootstrapEnvironment = $null
 $result = $null
 $failureMessage = $null
@@ -1415,6 +1596,46 @@ try {
             '-CoreHardeningCertification cannot be combined with production ' +
             'application-control, Claude-policy, or trusted-launcher attestations'
         )
+    }
+    # -Mode / -Connector shorthand handling. Validated + rendered BEFORE
+    # the module import so a bad grammar surfaces the error at the
+    # bootstrap boundary rather than deep inside the transaction. The
+    # rendered YAML lands in the bootstrap environment's protected
+    # SYSTEM/Administrators-only directory (same path Setup.exe uses for
+    # its embedded payload staging), so the module reads them under the
+    # same trust invariants as an operator-supplied -Config / -Manifest.
+    $modeSupplied = -not [string]::IsNullOrWhiteSpace($Mode)
+    $connectorSupplied = -not [string]::IsNullOrWhiteSpace($Connector)
+    if ($modeSupplied -xor $connectorSupplied) {
+        throw '-Mode and -Connector must be supplied together (they are the QA shorthand pair)'
+    }
+    if ($modeSupplied -and (-not [string]::IsNullOrWhiteSpace($Config) -or
+            -not [string]::IsNullOrWhiteSpace($Manifest))) {
+        throw '-Mode / -Connector are mutually exclusive with -Config / -Manifest'
+    }
+    if ($modeSupplied -and [bool]$DeferredConfig) {
+        throw '-Mode / -Connector cannot be combined with -DeferredConfig'
+    }
+    if ($modeSupplied -and $Action -ne 'Install' -and $Action -ne 'Upgrade' -and $Action -ne 'Repair') {
+        throw '-Mode / -Connector are valid only with Install, Upgrade, or Repair'
+    }
+    if ($modeSupplied) {
+        $renderedConnectors = ConvertTo-DefenseClawConnectorList -Connector $Connector
+        $renderedConfigBody = Get-DefenseClawRenderedEnterpriseConfig `
+            -Mode $Mode -Connectors $renderedConnectors
+        $renderedManifestBody = Get-DefenseClawRenderedEnterpriseTargets `
+            -Connectors $renderedConnectors
+        $renderRoot = $bootstrapEnvironment.Path
+        $renderedConfigPath = [IO.Path]::Combine($renderRoot, 'rendered-config.yaml')
+        $renderedManifestPath = [IO.Path]::Combine($renderRoot, 'rendered-targets.yaml')
+        [IO.File]::WriteAllText(
+            $renderedConfigPath, $renderedConfigBody, [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            $renderedManifestPath, $renderedManifestBody, [Text.UTF8Encoding]::new($false)
+        )
+        $Config = $renderedConfigPath
+        $Manifest = $renderedManifestPath
     }
     try {
         $modulePath = Assert-DefenseClawBootstrapModuleTrust `

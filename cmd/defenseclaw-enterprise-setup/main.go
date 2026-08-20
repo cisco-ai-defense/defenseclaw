@@ -71,7 +71,16 @@ type enterpriseSetupOptions struct {
 	// installer provisions the canonical drop-point directories with
 	// ACLs but writes no file bodies; the daemon + guardian fsnotify-
 	// wait for UCB to atomically drop them later.
-	DeferredConfig   bool
+	DeferredConfig bool
+	// Mode / Connector are the macOS-parity QA shorthand: when both are
+	// supplied (and --config / --manifest are empty) the installed
+	// install-enterprise.ps1 renders a minimal managed_enterprise
+	// config.yaml + per-user targets.yaml into the bootstrap staging
+	// directory before invoking the lifecycle. See install-enterprise.ps1
+	// (Get-DefenseClawRenderedEnterpriseConfig +
+	// Get-DefenseClawRenderedEnterpriseTargets) for the renderer.
+	Mode             string
+	Connector        string
 	LifecycleTimeout time.Duration
 }
 
@@ -132,6 +141,8 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	flags.StringVar(&opts.Action, "action", "", "enterprise lifecycle action")
 	flags.StringVar(&opts.Config, "config", "", "administrator-approved config.yaml")
 	flags.StringVar(&opts.Manifest, "manifest", "", "administrator-approved targets.yaml")
+	flags.StringVar(&opts.Mode, "mode", "", "QA shorthand: observe|action (paired with --connector; renders config.yaml + targets.yaml in-installer)")
+	flags.StringVar(&opts.Connector, "connector", "", "QA shorthand: comma-separated connector list (paired with --mode)")
 	flags.StringVar(&opts.InstallRoot, "install-root", "", "certification-only install root")
 	flags.StringVar(&opts.StateRoot, "state-root", "", "certification-only state root")
 	flags.StringVar(&opts.GatewayServiceName, "gateway-service-name", "", "certification-only gateway service name")
@@ -163,14 +174,40 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	if !validActions[opts.Action] {
 		return opts, false, errors.New("--action must be install, upgrade, repair, reconcile, status, verify, or uninstall")
 	}
-	if opts.Action == "install" && !opts.DeferredConfig &&
+	modeSupplied := strings.TrimSpace(opts.Mode) != ""
+	connectorSupplied := strings.TrimSpace(opts.Connector) != ""
+	if modeSupplied != connectorSupplied {
+		return opts, false, errors.New("--mode and --connector must be supplied together (they are the QA shorthand pair)")
+	}
+	if modeSupplied && (strings.TrimSpace(opts.Config) != "" ||
+		strings.TrimSpace(opts.Manifest) != "") {
+		return opts, false, errors.New("--mode / --connector are mutually exclusive with --config / --manifest")
+	}
+	if modeSupplied && opts.DeferredConfig {
+		return opts, false, errors.New("--mode / --connector cannot be combined with --deferred-config")
+	}
+	if modeSupplied {
+		mode := strings.ToLower(strings.TrimSpace(opts.Mode))
+		if mode != "observe" && mode != "action" {
+			return opts, false, errors.New("--mode must be observe or action")
+		}
+		opts.Mode = mode
+		mutationAction := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
+		if !mutationAction {
+			return opts, false, errors.New("--mode / --connector are valid only with install, upgrade, or repair")
+		}
+	}
+	if opts.Action == "install" && !opts.DeferredConfig && !modeSupplied &&
 		(strings.TrimSpace(opts.Config) == "" || strings.TrimSpace(opts.Manifest) == "") {
 		// --deferred-config bypasses the config/manifest requirement:
 		// the installer will provision the drop-point directories
 		// with ACLs but write no file bodies; UCB atomically writes
 		// the bodies later, and the daemon + guardian fsnotify-wait
 		// pick them up. Spec 003 REQ-02 / REQ-03.
-		return opts, false, errors.New("install requires both --config and --manifest (or --deferred-config for the UCB-friendly late-arrival path)")
+		// --mode + --connector also bypass it: install-enterprise.ps1
+		// renders config.yaml + targets.yaml into the bootstrap
+		// staging directory before invoking the lifecycle.
+		return opts, false, errors.New("install requires both --config and --manifest (or --mode/--connector, or --deferred-config)")
 	}
 	if opts.DeferredConfig && opts.Action != "install" {
 		// Spec 003 --deferred-config is meaningful only at initial
@@ -213,6 +250,7 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 	normalized := make([]string, 0, len(arguments))
 	valueNames := map[string]string{
 		"action": "action", "config": "config", "manifest": "manifest",
+		"mode": "mode", "connector": "connector",
 		"installroot": "install-root", "stateroot": "state-root",
 		"gatewayservicename": "gateway-service-name", "guardianservicename": "guardian-service-name",
 		"certificationcodexhome":         "certification-codex-home",

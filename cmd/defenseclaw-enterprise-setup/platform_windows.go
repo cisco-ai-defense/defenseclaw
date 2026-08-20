@@ -329,6 +329,12 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		appendValue("--cli-binary", filepath.Join(stageRoot, "defenseclaw.exe"))
 		appendValue("--config", opts.Config)
 		appendValue("--manifest", opts.Manifest)
+		// QA shorthand pair. Forwarded only when both are non-empty
+		// so the CLI's own opts.Mode / opts.Connector validation
+		// (parseEnterpriseSetupOptions in main.go) has already
+		// rejected the half-supplied grammar.
+		appendValue("--mode", opts.Mode)
+		appendValue("--connector", opts.Connector)
 	}
 	appendValue("--install-root", opts.InstallRoot)
 	appendValue("--state-root", opts.StateRoot)

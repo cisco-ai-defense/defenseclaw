@@ -58,6 +58,47 @@ func TestParseEnterpriseSetupAcceptsDeploymentSystemNoOps(t *testing.T) {
 	}
 }
 
+// TestParseEnterpriseSetupShorthandAcceptsModeAndConnector pins the
+// macOS-parity QA shorthand: MODE + CONNECTOR alone satisfy the install
+// contract (config / manifest are rendered by install-enterprise.ps1
+// inside its bootstrap staging directory).
+func TestParseEnterpriseSetupShorthandAcceptsModeAndConnector(t *testing.T) {
+	opts, help, err := parseEnterpriseSetupOptions([]string{
+		"/install",
+		"MODE=action",
+		"CONNECTOR=codex,cursor,claudecode",
+		"JSON=1",
+	})
+	if err != nil || help {
+		t.Fatalf("shorthand install: help=%v err=%v", help, err)
+	}
+	if opts.Action != "install" || opts.Mode != "action" ||
+		opts.Connector != "codex,cursor,claudecode" || !opts.JSON {
+		t.Fatalf("parsed = %+v", opts)
+	}
+	if opts.Config != "" || opts.Manifest != "" {
+		t.Fatalf("shorthand must leave config/manifest empty, got %+v", opts)
+	}
+}
+
+// TestParseEnterpriseSetupShorthandRejectsBadGrammar covers the
+// mutual-exclusion and pairing invariants the shorthand enforces.
+func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
+	tests := map[string][]string{
+		"mode without connector": {"/install", "MODE=action"},
+		"connector without mode": {"/install", "CONNECTOR=codex"},
+		"mode + config":          {"/install", "MODE=action", "CONNECTOR=codex", "CONFIG=x.yaml"},
+		"mode + manifest":        {"/install", "MODE=action", "CONNECTOR=codex", "MANIFEST=x.yaml"},
+		"invalid mode":           {"/install", "MODE=paranoid", "CONNECTOR=codex"},
+		"shorthand on status":    {"/status", "MODE=action", "CONNECTOR=codex"},
+	}
+	for name, arguments := range tests {
+		if _, _, err := parseEnterpriseSetupOptions(arguments); err == nil {
+			t.Errorf("%s: parseEnterpriseSetupOptions(%q) unexpectedly succeeded", name, arguments)
+		}
+	}
+}
+
 func TestPlaceholderBuildFailsClosedWithoutEnterprisePayload(t *testing.T) {
 	_, err := loadEmbeddedEnterprisePayload()
 	if err == nil || !strings.Contains(err.Error(), "build-windows-enterprise-installer.ps1") {

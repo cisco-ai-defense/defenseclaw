@@ -76,7 +76,14 @@ type windowsEnterpriseLifecycleOptions struct {
 	// atomically drops them. See
 	// docs/specs/003-windows-deferred-config/.
 	deferredConfig bool
-	jsonOutput     bool
+	// mode / connector are the macOS-parity QA shorthand. When both
+	// are supplied (and configPath / manifestPath are empty),
+	// install-enterprise.ps1 renders a minimal managed_enterprise
+	// config.yaml + per-user targets.yaml into its protected bootstrap
+	// directory before invoking the lifecycle transaction.
+	mode       string
+	connector  string
+	jsonOutput bool
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -214,6 +221,10 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	// installer, not here (this flag is a passthrough).
 	flags.BoolVar(&opts.deferredConfig, "deferred-config", false,
 		"provision drop points and register services stopped; config.yaml and targets.yaml may arrive later via UCB")
+	flags.StringVar(&opts.mode, "mode", "",
+		"QA shorthand: observe|action (paired with --connector; the installed install-enterprise.ps1 renders config.yaml + targets.yaml)")
+	flags.StringVar(&opts.connector, "connector", "",
+		"QA shorthand: comma-separated connector list (paired with --mode)")
 	flags.BoolVar(&opts.jsonOutput, "json", false, "emit machine-readable JSON")
 	return cmd
 }
@@ -496,6 +507,8 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-CLIBinary", opts.cliBinary)
 	appendValue("-Config", opts.configPath)
 	appendValue("-Manifest", opts.manifestPath)
+	appendValue("-Mode", opts.mode)
+	appendValue("-Connector", opts.connector)
 	appendValue("-InstallRoot", opts.installRoot)
 	appendValue("-StateRoot", opts.stateRoot)
 	appendValue("-GatewayServiceName", opts.gatewayServiceName)
@@ -609,6 +622,40 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 		return fmt.Errorf(
 			"--deferred-config is valid only with install (got: %s)", action,
 		)
+	}
+	// QA shorthand pair. Matches install-enterprise.ps1's
+	// -Mode / -Connector validation so a bad grammar surfaces at the
+	// CLI boundary rather than deep inside the PowerShell transaction.
+	modeSupplied := strings.TrimSpace(opts.mode) != ""
+	connectorSupplied := strings.TrimSpace(opts.connector) != ""
+	if modeSupplied != connectorSupplied {
+		return errors.New(
+			"--mode and --connector must be supplied together (they are the QA shorthand pair)",
+		)
+	}
+	if modeSupplied && (strings.TrimSpace(opts.configPath) != "" ||
+		strings.TrimSpace(opts.manifestPath) != "") {
+		return errors.New(
+			"--mode / --connector are mutually exclusive with --config / --manifest",
+		)
+	}
+	if modeSupplied && opts.deferredConfig {
+		return errors.New(
+			"--mode / --connector cannot be combined with --deferred-config",
+		)
+	}
+	if modeSupplied {
+		mode := strings.ToLower(strings.TrimSpace(opts.mode))
+		if mode != "observe" && mode != "action" {
+			return errors.New("--mode must be observe or action")
+		}
+		opts.mode = mode
+		if action != "install" && action != "upgrade" && action != "repair" {
+			return fmt.Errorf(
+				"--mode / --connector are valid only with install, upgrade, or repair (got: %s)",
+				action,
+			)
+		}
 	}
 	return nil
 }
