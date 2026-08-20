@@ -26,20 +26,24 @@ func readCodexSystemRequirements(path string, managedEnterprise bool) ([]byte, b
 	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		// The file itself is absent — the managed installer either has
-		// not landed yet or intentionally omitted a policy pin. Trust
-		// the parent directory anyway so a future attacker-controlled
-		// write cannot create a look-alike file in a world-writable
-		// staging tree that would be silently accepted on the next
-		// scan (mirrors the parent-only trust branch in
-		// codex_policy_windows.go).
+		// The file itself is absent — the managed installer either
+		// has not landed yet or intentionally omitted a policy pin.
+		// Unlike Windows (%ProgramData%\OpenAI\Codex is always
+		// pre-provisioned by the installer, so a missing parent is
+		// a hard error), the unix installer does not create /etc/codex
+		// eagerly, so a missing parent is the common case on a fresh
+		// unix host and must not fail reconcile.
+		//
+		// When the parent DOES exist, validate its trust anyway so a
+		// future attacker-controlled write into a world-writable
+		// staging tree cannot land a look-alike file that would be
+		// silently accepted on the next scan. When it doesn't exist,
+		// there is no attack surface to guard against and we return
+		// "no pin" without failure.
 		parent := filepath.Dir(path)
 		parentInfo, parentErr := os.Lstat(parent)
 		if errors.Is(parentErr, os.ErrNotExist) {
-			return nil, false, fmt.Errorf(
-				"managed Codex requirements parent %s is missing; pre-provision it with root-only owner and mode",
-				parent,
-			)
+			return nil, false, nil
 		}
 		if parentErr != nil {
 			return nil, false, fmt.Errorf("inspect managed Codex requirements parent %s: %w", parent, parentErr)
