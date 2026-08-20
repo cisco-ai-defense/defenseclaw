@@ -855,6 +855,15 @@ func filterExactFallbackFindings(
 	enforcementCapable bool,
 ) []RuleFinding {
 	enforcementFacts := facts.EnforcementProjection()
+	var nestedActions []trustedNestedAction
+	nestedActionsReady := false
+	getNestedActions := func() []trustedNestedAction {
+		if !nestedActionsReady {
+			nestedActions = trustedNestedExecutionActions(input, facts)
+			nestedActionsReady = true
+		}
+		return nestedActions
+	}
 	suppressAuthorizedKeysPathFallback := false
 	suppressPowerShellDownloadAlias := false
 	for _, finding := range findings {
@@ -897,8 +906,7 @@ func filterExactFallbackFindings(
 		if !matched {
 			matched = trustedNestedExactFallbackMatch(
 				contract,
-				input,
-				facts,
+				getNestedActions(),
 			)
 		}
 		if !preserveUnstructured && !matched {
@@ -912,8 +920,7 @@ func filterExactFallbackFindings(
 		if proofBoundary && !proven {
 			proven = trustedNestedExactFallbackProof(
 				contract,
-				input,
-				facts,
+				getNestedActions(),
 			)
 		}
 		if contract.detectionOnly || !enforcementCapable || !proven {
@@ -937,13 +944,12 @@ func filterExactFallbackFindings(
 
 func trustedNestedExactFallbackMatch(
 	contract exactFallbackContract,
-	input actionfacts.Input,
-	facts actionfacts.Facts,
+	nestedActions []trustedNestedAction,
 ) bool {
 	if contract.proves == nil {
 		return false
 	}
-	for _, nested := range trustedNestedExecutionActions(input, facts) {
+	for _, nested := range nestedActions {
 		if !nested.rawFallback && contract.proves(nested.input, nested.facts) {
 			return true
 		}
@@ -953,12 +959,11 @@ func trustedNestedExactFallbackMatch(
 
 func trustedNestedExactFallbackProof(
 	contract exactFallbackContract,
-	input actionfacts.Input,
-	facts actionfacts.Facts,
+	nestedActions []trustedNestedAction,
 ) bool {
 	return trustedNestedExactFallbackProofFromActions(
 		contract,
-		trustedNestedExecutionActions(input, facts),
+		nestedActions,
 	)
 }
 

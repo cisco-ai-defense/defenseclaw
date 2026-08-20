@@ -307,11 +307,80 @@ func trustedActionContentFindingHasRiskPair(
 			continue
 		}
 		if trustedActionCommandProvesExternalEgress(facts, command.ID) ||
-			trustedActionCommandWritesSensitivePath(facts, command.ID) {
+			trustedActionCommandWritesSensitivePath(facts, command.ID) ||
+			trustedActionCommandPipesToExternalEgress(
+				facts,
+				*rule,
+				command,
+			) {
 			return true
 		}
 	}
 	return false
+}
+
+func trustedActionCommandPipesToExternalEgress(
+	facts actionfacts.Facts,
+	rule PatternRule,
+	source actionfacts.CommandFact,
+) bool {
+	if source.PipelineID == 0 ||
+		!trustedActionStaticPrintfEmitsRuleMatch(rule, source) {
+		return false
+	}
+	for _, flow := range facts.DataFlows {
+		if flow.FromCommandID != source.ID || flow.ToCommandID == 0 ||
+			flow.From != actionfacts.DataStdout ||
+			flow.To != actionfacts.DataStdin {
+			continue
+		}
+		for _, destination := range facts.Commands {
+			if destination.ID != flow.ToCommandID ||
+				destination.PipelineID != source.PipelineID ||
+				!trustedActionExecutingCommand(facts, destination.ID) ||
+				!hasOperation(destination, actionfacts.OperationUpload) {
+				continue
+			}
+			if hasExternalUpload(facts, destination.ID) &&
+				hasDataFlowFrom(
+					facts,
+					destination.ID,
+					actionfacts.DataStdin,
+					actionfacts.DataNetwork,
+				) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func trustedActionStaticPrintfEmitsRuleMatch(
+	rule PatternRule,
+	command actionfacts.CommandFact,
+) bool {
+	if command.Dialect != actionfacts.DialectPOSIX ||
+		!command.ArgvComplete ||
+		command.ParentCommandID != 0 ||
+		command.Program != "printf" ||
+		len(command.Argv) != 3 || command.Argv[0] != "printf" ||
+		len(command.Redirects) != 0 || len(command.Wrappers) != 0 {
+		return false
+	}
+	if len(command.Arguments) != len(command.Argv) {
+		return false
+	}
+	for index, argument := range command.Arguments {
+		if argument.Expands || argument.Quote == actionfacts.QuoteMixed ||
+			argument.Value != command.Argv[index] {
+			return false
+		}
+	}
+	format := command.Argv[1]
+	if format != `%s` && format != `%s\n` {
+		return false
+	}
+	return firstAcceptedRuleMatch(rule, command.Argv[2]) != nil
 }
 
 func trustedActionContentRuleMatchesCommand(
