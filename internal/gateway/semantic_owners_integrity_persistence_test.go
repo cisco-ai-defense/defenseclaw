@@ -1142,9 +1142,10 @@ func TestCloudMetadataPrerequisiteRequiresHTTPFamily(t *testing.T) {
 		{scheme: "HTTPS", want: true},
 		{scheme: "smtp"},
 		{scheme: "smtps"},
+		{scheme: ""},
 	} {
 		test := test
-		t.Run(test.scheme, func(t *testing.T) {
+		t.Run("scheme="+test.scheme, func(t *testing.T) {
 			t.Parallel()
 			facts := actionfacts.Facts{
 				Commands: []actionfacts.CommandFact{{

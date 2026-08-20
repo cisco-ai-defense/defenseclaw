@@ -989,7 +989,7 @@ func TestCurlProxyURLQueryOptionsValid(t *testing.T) {
 		"--url-query", "tail=x", "http://origin.example",
 	})
 	if !curlProxyURLQueryOptionsValid(parsed) {
-		t.Fatal("exact 66,676-byte encoded repeated URL query unexpectedly invalid")
+		t.Fatal("exact 33,343-byte encoded repeated URL query unexpectedly invalid")
 	}
 }
 

@@ -495,9 +495,19 @@ func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
 	if out == nil || command == nil {
 		return false
 	}
-	commandsByID := make(map[int64]*CommandFact, len(out.commands))
-	for index := range out.commands {
-		candidate := &out.commands[index]
+	return isolatedPOSIXCommandFacts(out.commands, command)
+}
+
+func isolatedPOSIXCommandFacts(
+	commands []CommandFact,
+	command *CommandFact,
+) bool {
+	if command == nil {
+		return false
+	}
+	commandsByID := make(map[int64]*CommandFact, len(commands))
+	for index := range commands {
+		candidate := &commands[index]
 		if candidate.ID == 0 {
 			return false
 		}
@@ -510,7 +520,7 @@ func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
 	if !ok {
 		return false
 	}
-	visited := make(map[int64]struct{}, len(out.commands))
+	visited := make(map[int64]struct{}, len(commands))
 	for {
 		if current.ID == 0 {
 			return false

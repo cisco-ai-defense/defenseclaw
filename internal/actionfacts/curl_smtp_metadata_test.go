@@ -22,7 +22,7 @@ func TestParseCurlArgvOwnsSMTPOptionValues(t *testing.T) {
 		"--no-progress-bar", "--progress-meter", "--no-remote-time",
 		"--no-show-error", "--no-silent", "--no-use-ascii", "--no-verbose",
 		"--mail-from", "--help",
-		"--mail-rcpt=recipient@example.org",
+		"--mail-rcpt", "recipient@example.org",
 		"--mail-auth", "--version",
 		"--mail-rcpt-allowfails",
 		"--no-mail-rcpt-allowfails",
@@ -125,12 +125,12 @@ func TestStaticCurlSMTPRequestComponents(t *testing.T) {
 				"curl", "--silent", "--show-error", "--verbose",
 				"--no-progress-meter", "--progress-bar", "--no-buffer",
 				"--mail-from", "old@example.org",
-				"--mail-from=final@example.org",
+				"--mail-from", "final@example.org",
 				"--mail-auth", "relay@example.org",
 				"--mail-rcpt", "one@example.org",
-				"--mail-rcpt=two@example.org",
+				"--mail-rcpt", "two@example.org",
 				"--mail-rcpt-allowfails", "--no-mail-rcpt-allowfails",
-				"--upload-file", "-", "--url=smtps://sink.example:465/",
+				"--upload-file", "-", "--url", "smtps://sink.example:465/",
 			},
 			want: component(
 				"smtps", "sink.example", 465,
@@ -466,6 +466,9 @@ func TestStaticCurlSMTPRequestComponents(t *testing.T) {
 			if len(facts.Commands) != 1 {
 				t.Fatalf("commands = %#v", facts.Commands)
 			}
+			if slices.Contains(test.argv, "/dev/null") {
+				facts.Commands[0].Dialect = DialectPOSIX
+			}
 			if test.expandIndex > 0 {
 				facts.Commands[0].Arguments[test.expandIndex].Expands = true
 			}
@@ -499,6 +502,32 @@ func TestStaticCurlSMTPRequestComponents(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestStaticCurlSMTPNullDeviceRequiresPOSIX(t *testing.T) {
+	t.Parallel()
+
+	argv := []string{
+		"curl", "--mail-from", "sender@example.org",
+		"--mail-rcpt", "recipient@example.org", "--upload-file", "/dev/null",
+		"smtp://sink.example",
+	}
+	facts := Analyze(Input{Tool: "exec", Argv: argv})
+	if len(facts.Commands) != 1 {
+		t.Fatalf("commands = %#v", facts.Commands)
+	}
+	if got := StaticCurlSMTPRequestComponents(facts.Commands[0]); got != nil {
+		t.Fatalf("argv dialect components = %#v, want nil", got)
+	}
+
+	facts.Commands[0].Dialect = DialectPOSIX
+	want := []TransmittedRequestComponent{
+		{Value: "sender@example.org", Scheme: "smtp", Host: "sink.example"},
+		{Value: "recipient@example.org", Scheme: "smtp", Host: "sink.example"},
+	}
+	if got := StaticCurlSMTPRequestComponents(facts.Commands[0]); !slices.Equal(got, want) {
+		t.Fatalf("POSIX components = %#v, want %#v", got, want)
 	}
 }
 

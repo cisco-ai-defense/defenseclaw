@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -182,7 +183,9 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 		if option.Group != group {
 			continue
 		}
-		getQueryData = getQueryData || option.Canonical == "--get"
+		if option.Canonical == "--get" {
+			getQueryData = option.Name != "--no-get"
+		}
 		requestTargetSet = requestTargetSet ||
 			option.Canonical == "--request-target" && option.ValuePresent
 	}
@@ -267,17 +270,24 @@ func staticCurlPostDataBytes(
 			continue
 		}
 		hasPostData = true
-		if !option.ValuePresent || !staticCurlOptionValue(command, option) ||
-			curlUploadPayloadSourceUncertain(option) {
-			return "", true, false
-		}
-		values, literal, _ := staticCurlUploadPayloads(option)
-		if !literal || len(values) > 1 {
+		if !option.ValuePresent || !staticCurlOptionValue(command, option) {
 			return "", true, false
 		}
 		value := ""
-		if len(values) == 1 {
-			value = values[0]
+		if curlUploadPayloadSourceUncertain(option) {
+			var nullSource bool
+			value, nullSource = curlPOSIXNullPostDataValue(command, option)
+			if !nullSource {
+				return "", true, false
+			}
+		} else {
+			values, literal, _ := staticCurlUploadPayloads(option)
+			if !literal || len(values) > 1 {
+				return "", true, false
+			}
+			if len(values) == 1 {
+				value = values[0]
+			}
 		}
 		separatorLength := 0
 		if postData.Len() > 0 && option.Canonical != "--json" {
@@ -293,6 +303,31 @@ func staticCurlPostDataBytes(
 		postData.WriteString(value)
 	}
 	return postData.String(), hasPostData, true
+}
+
+func curlPOSIXNullPostDataValue(
+	command CommandFact,
+	option curlOptionToken,
+) (string, bool) {
+	if command.Dialect != DialectPOSIX {
+		return "", false
+	}
+	switch option.Canonical {
+	case "--data", "--data-ascii", "--data-binary", "--json":
+		return "", option.Value == "@/dev/null"
+	case "--data-urlencode":
+		path, stdin, fileSource, valid := curlDataURLEncodeFile(option.Value)
+		if !valid || !fileSource || stdin || path != "/dev/null" {
+			return "", false
+		}
+		name, _, _ := strings.Cut(option.Value, "@")
+		if name == "" {
+			return "", true
+		}
+		return name + "=", true
+	default:
+		return "", false
+	}
 }
 
 func curlGETPostDataQueryBytes(value string) (string, bool) {
@@ -341,7 +376,7 @@ func staticCurlGETPostDataProjection(
 	httpGetSet := false
 	for _, option := range parsed.Options {
 		if option.Group == group && option.Canonical == "--get" {
-			httpGetSet = true
+			httpGetSet = option.Name != "--no-get"
 		}
 	}
 	if !httpGetSet {
@@ -352,7 +387,13 @@ func staticCurlGETPostDataProjection(
 		return "", valid
 	}
 	query, valid := curlGETPostDataQueryBytes(postData)
-	if !valid || !curlGETPostDataURLLengthsValid(parsed.Targets, postData) {
+	var targets []curlTransferTarget
+	for _, target := range parsed.Targets {
+		if target.Group == group {
+			targets = append(targets, target)
+		}
+	}
+	if !valid || !curlGETPostDataURLLengthsValid(targets, postData) {
 		return "", false
 	}
 	return query, true
@@ -379,6 +420,64 @@ func curlUploadPayloadSourceUncertain(option curlOptionToken) bool {
 	default:
 		return false
 	}
+}
+
+func curlFormUsesPOSIXNullDevice(value string) bool {
+	_, specification, found := strings.Cut(value, "=")
+	if !found {
+		return false
+	}
+	if strings.HasPrefix(specification, "@") {
+		fileEntries, valid := curlMIMEFormFileEntries(specification[1:])
+		if valid && len(fileEntries) > 1 {
+			for _, fileEntry := range fileEntries {
+				if curlFormUsesPOSIXNullDevice("=@" + fileEntry) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	position := 0
+	if strings.HasPrefix(specification, "@") ||
+		strings.HasPrefix(specification, "<") {
+		position = curlSkipFormSpace(specification, 1)
+		source, next := curlFormParameterWord(specification, position)
+		if source == "/dev/null" {
+			return true
+		}
+		position = next
+	} else {
+		position = curlSkipFormSpace(specification, 0)
+		_, position = curlFormParameterWord(specification, position)
+	}
+	for position < len(specification) {
+		if specification[position] != ';' {
+			return false
+		}
+		position = curlSkipFormSpace(specification, position+1)
+		if !curlFormHasFoldedPrefix(specification, position, "headers=") {
+			_, position = curlFormParameterWord(specification, position)
+			continue
+		}
+		position += len("headers=")
+		if position >= len(specification) ||
+			(specification[position] != '@' && specification[position] != '<') {
+			_, position = curlFormParameterWord(specification, position)
+			continue
+		}
+		position = curlSkipFormSpace(specification, position+1)
+		source, next := curlFormParameterWord(specification, position)
+		if source == "/dev/null" {
+			return true
+		}
+		position = next
+	}
+	return false
+}
+
+func curlPOSIXNullDeviceAvailable(command CommandFact) bool {
+	return command.Dialect == DialectPOSIX
 }
 
 // CurlTransmittedMetadata keeps HTTP headers, HTTP internal-auth operands,
@@ -411,10 +510,10 @@ type TransmittedRequestComponent struct {
 // upload, curl's default SMTP command sends only the first recipient as VRFY;
 // --mail-from is ignored in that mode.
 //
-// The upload lane accepts only stdin and /dev/null sources whose availability
-// cannot fail before the envelope is sent. Other files, MIME bodies, custom
-// SMTP commands, peer overrides, and multiple transfer groups remain outside
-// this bounded proof.
+// The upload lane accepts only stdin and, for POSIX commands, /dev/null sources
+// whose availability cannot fail before the envelope is sent. Other files,
+// MIME bodies, custom SMTP commands, peer overrides, and multiple transfer
+// groups remain outside this bounded proof.
 func StaticCurlSMTPRequestComponents(
 	command CommandFact,
 ) []TransmittedRequestComponent {
@@ -499,7 +598,7 @@ func StaticCurlSMTPRequestComponents(
 		case "--upload-file":
 			uploads++
 			if !staticCurlOptionValue(command, option) ||
-				!curlSMTPUploadSourceAvailable(option.Value) {
+				!curlSMTPUploadSourceAvailable(command, option.Value) {
 				return nil
 			}
 		case "--url", "--":
@@ -512,7 +611,7 @@ func StaticCurlSMTPRequestComponents(
 	}
 	if len(recipients) == 0 || uploads > 1 ||
 		uploads == 1 && (!target.UploadSet ||
-			!curlSMTPUploadSourceAvailable(target.UploadValue)) ||
+			!curlSMTPUploadSourceAvailable(command, target.UploadValue)) ||
 		uploads == 0 && target.UploadSet {
 		return nil
 	}
@@ -573,9 +672,11 @@ func curlSMTPAddressBytes(value string) (string, bool) {
 	return value, true
 }
 
-func curlSMTPUploadSourceAvailable(value string) bool {
+func curlSMTPUploadSourceAvailable(command CommandFact, value string) bool {
 	switch value {
-	case "/dev/null", "-", ".":
+	case "/dev/null":
+		return curlPOSIXNullDeviceAvailable(command)
+	case "-", ".":
 		return true
 	default:
 		return false
@@ -618,12 +719,16 @@ func StaticCurlProxyUploadPayloads(
 		return nil
 	}
 	hasHTTPOrigin := false
+	httpGet := false
 	for _, option := range parsed.Options {
 		if option.Canonical == "--get" {
-			// Curl moves data options into the URL query under --get; they are
-			// not request-body bytes in the forward-proxy request.
-			return nil
+			httpGet = option.Name != "--no-get"
 		}
+	}
+	if httpGet {
+		// Curl moves data options into the URL query under --get; they are
+		// not request-body bytes in the forward-proxy request.
+		return nil
 	}
 	for _, target := range parsed.Targets {
 		targetFact, valid := webTargetFact(
@@ -661,7 +766,7 @@ func StaticCurlProxyUploadPayloads(
 // proxy. This uses the same argv-only/no-ambient-defaults assumption as the
 // origin metadata proof: absent --noproxy means there is no argv proxy bypass,
 // while a final explicit nonempty --noproxy closes this lane.
-func StaticCurlProxyTransmittedMetadata(
+func staticCurlHTTPProxyTransmittedMetadata(
 	command CommandFact,
 ) CurlProxyTransmittedMetadata {
 	proxy, parsed, ok := staticCurlProxyDestination(command)
@@ -682,11 +787,10 @@ func StaticCurlProxyTransmittedMetadata(
 	proxyAuthorizationOverridden := false
 	ordinaryProxyAuthorizationOverridden := false
 	metadata := CurlProxyTransmittedMetadata{}
-	proxyTunnel := false
+	proxyTunnel := curlProxyTunnelEnabled(parsed, parsed.Targets[0].Group)
 	formBody := false
 	separateProxyHeaders := false
 	for _, option := range parsed.Options {
-		proxyTunnel = proxyTunnel || option.Canonical == "--proxytunnel"
 		formBody = formBody || option.Canonical == "--form" ||
 			option.Canonical == "--form-string"
 		separateProxyHeaders = separateProxyHeaders ||
@@ -860,6 +964,21 @@ func StaticCurlProxyTransmittedMetadata(
 	return metadata
 }
 
+// StaticCurlProxyTransmittedMetadata returns literal bytes that a closed curl
+// invocation can expose to an exact explicit proxy. HTTP proxy metadata and
+// FTP control-channel metadata use separate protocol proofs, then share the
+// same proxy-bound request-component representation.
+func StaticCurlProxyTransmittedMetadata(
+	command CommandFact,
+) CurlProxyTransmittedMetadata {
+	metadata := staticCurlHTTPProxyTransmittedMetadata(command)
+	metadata.ProxyRequestComponents = append(
+		metadata.ProxyRequestComponents,
+		staticCurlFTPProxyRequestComponents(command)...,
+	)
+	return metadata
+}
+
 func staticCurlProxyDestination(
 	command CommandFact,
 ) (NetworkFact, curlArgvParse, bool) {
@@ -925,8 +1044,12 @@ func staticCurlProxyDestination(
 		if option.Canonical == "--proxy-user" && option.ValuePresent {
 			lastProxyUser = index
 		}
-		fail = fail || option.Canonical == "--fail"
-		failWithBody = failWithBody || option.Canonical == "--fail-with-body"
+		if option.Canonical == "--fail" {
+			fail = option.Name != "--no-fail"
+		}
+		if option.Canonical == "--fail-with-body" {
+			failWithBody = option.Name != "--no-fail-with-body"
+		}
 	}
 	if lastProxy < 0 || fail && failWithBody {
 		return NetworkFact{}, curlArgvParse{}, false
@@ -1028,7 +1151,9 @@ func curlProxyURLQueryOptionsValid(parsed curlArgvParse) bool {
 	httpGetSet := false
 	getQueryDataSet := false
 	for _, option := range parsed.Options {
-		httpGetSet = httpGetSet || option.Canonical == "--get"
+		if option.Canonical == "--get" {
+			httpGetSet = option.Name != "--no-get"
+		}
 		getQueryDataSet = getQueryDataSet ||
 			curlOptionProvidesGETQueryData(option.Canonical)
 	}
@@ -1078,7 +1203,9 @@ func staticCurlHTTPRequestComponentProjection(
 		if option.Canonical == "--request-target" && option.ValuePresent {
 			lastRequestTarget = index
 		}
-		httpGetSet = httpGetSet || option.Canonical == "--get"
+		if option.Canonical == "--get" {
+			httpGetSet = option.Name != "--no-get"
+		}
 		getQueryDataSet = getQueryDataSet ||
 			curlOptionProvidesGETQueryData(option.Canonical)
 	}
@@ -1233,8 +1360,30 @@ func staticCurlHTTPProxyFact(
 	if !curlMainProxyOptionUsesHTTP(canonical, scheme) {
 		return NetworkFact{}, "", false, false
 	}
+	defaultPort := int64(1080)
+	if scheme == "https" {
+		defaultPort = 443
+	}
+	return staticCurlProxyAuthorityFact(
+		commandID, value, scheme, scheme, defaultPort,
+	)
+}
 
-	remainder := value[len(scheme)+3:]
+func staticCurlProxyAuthorityFact(
+	commandID int64,
+	value string,
+	inputScheme string,
+	factScheme string,
+	defaultPort int64,
+) (NetworkFact, string, bool, bool) {
+	remainder := value
+	if inputScheme != "" {
+		remainder = value[len(inputScheme)+3:]
+	} else if strings.HasPrefix(remainder, "//") {
+		// Curl 8.7.1 accepts a bare host[:port] proxy but rejects URL
+		// scheme-relative spelling as an unsupported proxy syntax.
+		return NetworkFact{}, "", false, false
+	}
 	authorityEnd := strings.IndexAny(remainder, "/?#")
 	if authorityEnd < 0 {
 		authorityEnd = len(remainder)
@@ -1247,6 +1396,11 @@ func staticCurlHTTPProxyFact(
 	if hostPort == "" || !visibleASCII(hostPort) || strings.Contains(hostPort, "@") {
 		return NetworkFact{}, "", false, false
 	}
+	if inputScheme == "" && strings.HasSuffix(hostPort, ":") {
+		// Curl accepts an empty port after an explicit proxy scheme as the
+		// default, but rejects the same spelling in a bare host:port value.
+		return NetworkFact{}, "", hasUserinfo, false
+	}
 
 	credentials := ""
 	if hasUserinfo {
@@ -1256,7 +1410,7 @@ func staticCurlHTTPProxyFact(
 			return NetworkFact{}, "", true, false
 		}
 	}
-	peerURL := scheme + "://" + hostPort
+	peerURL := factScheme + "://" + hostPort
 	parsed, err := url.Parse(peerURL)
 	if err != nil || parsed.Opaque != "" || parsed.User != nil ||
 		parsed.Host == "" || parsed.Path != "" || parsed.RawPath != "" ||
@@ -1264,13 +1418,16 @@ func staticCurlHTTPProxyFact(
 		parsed.RawFragment != "" {
 		return NetworkFact{}, "", hasUserinfo, false
 	}
-	proxy, ok := networkURLFact(commandID, peerURL, NetworkConnect)
-	if ok && proxy.Port == 0 {
-		if scheme == "http" {
-			proxy.Port = 1080
-		} else {
-			proxy.Port = 443
+	rawPort := parsed.Port()
+	if rawPort != "" {
+		port, valid := parseNetworkPort(rawPort)
+		if !valid || port == 0 {
+			return NetworkFact{}, "", hasUserinfo, false
 		}
+	}
+	proxy, ok := networkURLFact(commandID, peerURL, NetworkConnect)
+	if ok && rawPort == "" {
+		proxy.Port = defaultPort
 	}
 	return proxy, credentials, hasUserinfo, ok
 }
@@ -1345,6 +1502,17 @@ func curlMainProxyOption(canonical string) bool {
 	default:
 		return false
 	}
+}
+
+func curlProxyTunnelEnabled(parsed curlArgvParse, group int) bool {
+	enabled := false
+	for _, option := range parsed.Options {
+		if option.Group != group || option.Canonical != "--proxytunnel" {
+			continue
+		}
+		enabled = option.Name != "--no-proxytunnel"
+	}
+	return enabled
 }
 
 func curlMainProxyOptionUsesHTTP(canonical string, scheme string) bool {
@@ -1465,10 +1633,7 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	_, _, explicitProxyValid := staticCurlProxyDestination(command)
 	allTargetsTunnelled := false
 	if explicitProxyValid {
-		proxyTunnel := false
-		for _, option := range parsed.Options {
-			proxyTunnel = proxyTunnel || option.Canonical == "--proxytunnel"
-		}
+		proxyTunnel := curlProxyTunnelEnabled(parsed, group)
 		allTargetsTunnelled = true
 		for _, target := range parsed.Targets {
 			if !proxyTunnel &&
@@ -1857,6 +2022,35 @@ func curlProxiedOriginRequestMetadata(
 	return metadata
 }
 
+func curlProxiedFTPControlMetadata(
+	command CommandFact,
+	parsed curlArgvParse,
+	values []string,
+	mode curlFTPProxyTunnelMode,
+) CurlTransmittedMetadata {
+	metadata := CurlTransmittedMetadata{}
+	if len(values) == 0 || mode == curlFTPProxyTunnelNone {
+		return metadata
+	}
+	for _, target := range parsed.Targets {
+		network, ok := webTargetFact(command.ID, target.Value, NetworkDownload)
+		if !ok || network.Scheme != "ftp" && network.Scheme != "ftps" ||
+			mode == curlFTPProxyTunnelFTPS && network.Scheme != "ftps" {
+			continue
+		}
+		for _, value := range values {
+			metadata.FTPRequestComponents = append(
+				metadata.FTPRequestComponents,
+				TransmittedRequestComponent{
+					Value: value, Scheme: network.Scheme,
+					Host: network.Host, Port: network.Port,
+				},
+			)
+		}
+	}
+	return metadata
+}
+
 func staticCommandArgumentAt(command CommandFact, index int) bool {
 	if index < 0 || index >= len(command.Arguments) ||
 		index >= len(command.Argv) {
@@ -1873,6 +2067,38 @@ func staticCurlOptionValue(command CommandFact, option curlOptionToken) bool {
 		argumentIndex = option.ArgvIndex
 	}
 	return option.ValuePresent && staticCommandArgumentAt(command, argumentIndex)
+}
+
+func staticCurlPOSIXNullConfigOnly(
+	command CommandFact,
+	parsed curlArgvParse,
+) bool {
+	if command.Dialect != DialectPOSIX || !parsed.ConfigOpaque ||
+		len(parsed.Unresolved) == 0 {
+		return false
+	}
+	for _, option := range parsed.Options {
+		if option.Role == curlOptionConfig &&
+			(option.Value != "/dev/null" || !staticCurlOptionValue(command, option)) {
+			return false
+		}
+	}
+	for _, unresolved := range parsed.Unresolved {
+		matched := false
+		for _, option := range parsed.Options {
+			if option.Role == curlOptionConfig &&
+				option.ArgvIndex == unresolved.ArgvIndex &&
+				option.Value == "/dev/null" &&
+				staticCurlOptionValue(command, option) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func validLiteralRequestTarget(value string) bool {
@@ -1947,6 +2173,1415 @@ func curlFTPQuoteBytes(value string) (string, bool) {
 	}
 	value = strings.TrimPrefix(value, "*")
 	return value, printableASCII(value)
+}
+
+type curlFTPProxyTunnelMode uint8
+
+const (
+	curlFTPProxyTunnelNone curlFTPProxyTunnelMode = iota
+	curlFTPProxyTunnelFTPS
+	curlFTPProxyTunnelAll
+)
+
+type curlFTPProxyRouting struct {
+	Networks   []NetworkFact
+	Observers  []NetworkFact
+	Explicit   bool
+	Disabled   bool
+	TunnelMode curlFTPProxyTunnelMode
+	NoProxy    string
+}
+
+// staticCurlFTPProxyRoute proves the final explicit proxy state for an
+// FTP(S)-only transfer group. HTTP proxies forward plain FTP as HTTP unless
+// -p is set, while FTPS implicitly uses CONNECT. SOCKS proxies always carry
+// the FTP control protocol, including the login exchange.
+func staticCurlFTPProxyRoute(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) (curlFTPProxyRouting, bool) {
+	proxyTunnel := curlProxyTunnelEnabled(parsed, group)
+	lastProxy := -1
+	lastPreproxy := -1
+	lastNoProxy := -1
+	lastProxyUser := -1
+	lastInterface := -1
+	hasPlainFTP := false
+	hasFTPS := false
+	for _, target := range parsed.Targets {
+		if target.Group != group {
+			continue
+		}
+		lowerTarget := strings.ToLower(target.Value)
+		switch {
+		case strings.HasPrefix(lowerTarget, "ftp://"):
+			hasPlainFTP = true
+		case strings.HasPrefix(lowerTarget, "ftps://"):
+			hasFTPS = true
+		default:
+			// Other targets in the same operation do not alter curl's final
+			// FTP proxy state. Their own classifier lanes decide whether the
+			// complete command remains authoritative.
+			continue
+		}
+	}
+	if !hasPlainFTP && !hasFTPS {
+		return curlFTPProxyRouting{}, false
+	}
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if !staticCommandArgumentAt(command, option.ArgvIndex) ||
+			option.TakesValue && !staticCurlOptionValue(command, option) {
+			return curlFTPProxyRouting{}, false
+		}
+		if option.Role != curlOptionNetworkOverride {
+			if option.Canonical == "--proxy-user" && option.ValuePresent {
+				lastProxyUser = index
+			}
+			continue
+		}
+		switch {
+		case curlMainProxyOption(option.Canonical):
+			lastProxy = index
+		case option.Canonical == "--preproxy":
+			lastPreproxy = index
+		case option.Canonical == "--noproxy":
+			lastNoProxy = index
+		case option.Canonical == "--interface":
+			lastInterface = index
+		default:
+			return curlFTPProxyRouting{}, false
+		}
+	}
+	if lastProxyUser >= 0 {
+		_, _, valid := curlDecodedProxyCredentials(
+			parsed.Options[lastProxyUser].Value,
+		)
+		if !valid {
+			return curlFTPProxyRouting{}, false
+		}
+	}
+	mainDisabled := false
+	if lastProxy >= 0 {
+		proxyOption := parsed.Options[lastProxy]
+		switch {
+		case proxyOption.Value == "":
+			if proxyOption.Canonical != "--proxy" {
+				return curlFTPProxyRouting{}, false
+			}
+			mainDisabled = true
+			lastProxy = -1
+		case curlProxyDecodedControlUserinfoDisables(
+			command.ID,
+			proxyOption.Canonical,
+			proxyOption.Value,
+		):
+			mainDisabled = true
+			lastProxy = -1
+		}
+	}
+	if lastPreproxy >= 0 && curlProxyDecodedControlUserinfoDisables(
+		command.ID,
+		"--proxy",
+		parsed.Options[lastPreproxy].Value,
+	) {
+		lastPreproxy = -1
+	}
+	if lastProxy < 0 && lastPreproxy < 0 {
+		route := curlFTPProxyRouting{Disabled: mainDisabled}
+		if !curlFTPRoutePeerOptionsValid(
+			parsed, group, route, lastInterface,
+		) {
+			return curlFTPProxyRouting{}, false
+		}
+		return route, true
+	}
+	proxy := NetworkFact{}
+	socks := false
+	networks := []NetworkFact(nil)
+	observers := []NetworkFact(nil)
+	if lastProxy < 0 {
+		preproxyOption := parsed.Options[lastPreproxy]
+		preproxyScheme := ""
+		if delimiter := strings.Index(
+			strings.ToLower(preproxyOption.Value),
+			"://",
+		); delimiter >= 0 {
+			preproxyScheme = strings.ToLower(preproxyOption.Value[:delimiter])
+		}
+		switch preproxyScheme {
+		case "socks", "socks4", "socks4a", "socks5", "socks5h":
+		default:
+			return curlFTPProxyRouting{}, false
+		}
+		var valid bool
+		proxy, socks, valid = staticCurlFTPProxyFact(
+			command.ID, "--proxy", preproxyOption.Value,
+		)
+		if !valid || !socks {
+			return curlFTPProxyRouting{}, false
+		}
+		proxyUser := ""
+		if lastProxyUser >= 0 {
+			proxyUser = parsed.Options[lastProxyUser].Value
+		}
+		if !curlSOCKS4UserWithinBounds(
+			"--proxy", preproxyOption.Value, proxyUser, true,
+		) {
+			return curlFTPProxyRouting{}, false
+		}
+		networks = []NetworkFact{proxy}
+		observers = []NetworkFact{proxy}
+		lastPreproxy = -1
+	} else {
+		proxyOption := parsed.Options[lastProxy]
+		var valid bool
+		proxy, socks, valid = staticCurlFTPProxyFact(
+			command.ID,
+			proxyOption.Canonical,
+			proxyOption.Value,
+		)
+		if !valid {
+			return curlFTPProxyRouting{}, false
+		}
+		proxyUser := ""
+		if lastProxyUser >= 0 {
+			proxyUser = parsed.Options[lastProxyUser].Value
+		}
+		if !curlSOCKS4UserWithinBounds(
+			proxyOption.Canonical, proxyOption.Value, proxyUser, true,
+		) {
+			return curlFTPProxyRouting{}, false
+		}
+		networks = []NetworkFact{proxy}
+		observers = []NetworkFact{proxy}
+	}
+	if lastPreproxy >= 0 {
+		if socks {
+			return curlFTPProxyRouting{}, false
+		}
+		preproxyOption := parsed.Options[lastPreproxy]
+		preproxyScheme := ""
+		if delimiter := strings.Index(
+			strings.ToLower(preproxyOption.Value),
+			"://",
+		); delimiter >= 0 {
+			preproxyScheme = strings.ToLower(preproxyOption.Value[:delimiter])
+		}
+		switch preproxyScheme {
+		case "socks", "socks4", "socks4a", "socks5", "socks5h":
+		default:
+			return curlFTPProxyRouting{}, false
+		}
+		preproxy, preproxySOCKS, preproxyValid := staticCurlFTPProxyFact(
+			command.ID, "--proxy", preproxyOption.Value,
+		)
+		if !preproxyValid || !preproxySOCKS {
+			return curlFTPProxyRouting{}, false
+		}
+		if !curlSOCKS4UserWithinBounds(
+			"--proxy", preproxyOption.Value, "", false,
+		) {
+			return curlFTPProxyRouting{}, false
+		}
+		networks = []NetworkFact{preproxy, proxy}
+		observers = []NetworkFact{proxy}
+		if proxy.Scheme == "http" {
+			observers = append([]NetworkFact{preproxy}, observers...)
+		}
+	}
+	mode := curlFTPProxyTunnelFTPS
+	if socks || proxyTunnel {
+		mode = curlFTPProxyTunnelAll
+	}
+	noProxy := ""
+	if lastNoProxy >= 0 {
+		noProxy = parsed.Options[lastNoProxy].Value
+	}
+	if noProxy != "" {
+		if noProxy == "*" {
+			route := curlFTPProxyRouting{
+				Disabled: true, TunnelMode: curlFTPProxyTunnelAll,
+				NoProxy: noProxy,
+			}
+			if !curlFTPRoutePeerOptionsValid(
+				parsed, group, route, lastInterface,
+			) {
+				return curlFTPProxyRouting{}, false
+			}
+			return route, true
+		}
+		if _, valid := curlNoProxyMatches(noProxy, "validation.invalid"); !valid {
+			return curlFTPProxyRouting{}, false
+		}
+		proxyContact := false
+		for _, target := range parsed.Targets {
+			if target.Group != group {
+				continue
+			}
+			targetFact, valid := webTargetFact(
+				command.ID,
+				target.Value,
+				NetworkDownload,
+			)
+			if !valid || targetFact.Scheme != "ftp" && targetFact.Scheme != "ftps" {
+				continue
+			}
+			noProxyHost, valid := curlNoProxyTargetHost(target.Value)
+			if !valid {
+				return curlFTPProxyRouting{}, false
+			}
+			bypassed, valid := curlNoProxyMatches(noProxy, noProxyHost)
+			if !valid {
+				return curlFTPProxyRouting{}, false
+			}
+			proxyContact = proxyContact || !bypassed
+		}
+		if !proxyContact {
+			networks = nil
+		}
+	}
+	route := curlFTPProxyRouting{
+		Networks: networks, Observers: observers,
+		Explicit: true, TunnelMode: mode, NoProxy: noProxy,
+	}
+	if !curlFTPRoutePeerOptionsValid(parsed, group, route, lastInterface) {
+		return curlFTPProxyRouting{}, false
+	}
+	return route, true
+}
+
+func curlFTPRoutePeerOptionsValid(
+	parsed curlArgvParse,
+	group int,
+	route curlFTPProxyRouting,
+	lastInterface int,
+) bool {
+	ipv4Only, _ := curlEffectiveIPv4Only(parsed, group)
+	if !ipv4Only && lastInterface < 0 {
+		return true
+	}
+	if lastInterface >= 0 && parsed.Options[lastInterface].Value != "0.0.0.0" {
+		return false
+	}
+	proxied := false
+	for _, target := range parsed.Targets {
+		if target.Group != group {
+			continue
+		}
+		lower := strings.ToLower(target.Value)
+		if !strings.HasPrefix(lower, "ftp://") &&
+			!strings.HasPrefix(lower, "ftps://") {
+			continue
+		}
+		bypassed := !route.Explicit || route.Disabled
+		if route.NoProxy != "" {
+			host, hostValid := curlNoProxyTargetHost(target.Value)
+			if !hostValid {
+				return false
+			}
+			var matchValid bool
+			bypassed, matchValid = curlNoProxyMatches(route.NoProxy, host)
+			if !matchValid {
+				return false
+			}
+		}
+		if !bypassed {
+			proxied = true
+			continue
+		}
+		parsedTarget, err := url.Parse(target.Value)
+		if err != nil || !curlPeerMatchesAddressOptions(
+			parsedTarget.Hostname(), ipv4Only, lastInterface >= 0,
+		) {
+			return false
+		}
+	}
+	if !proxied {
+		return true
+	}
+	if len(route.Networks) == 0 {
+		return false
+	}
+	for _, network := range route.Networks {
+		if !curlPeerMatchesAddressOptions(
+			network.Host, ipv4Only, lastInterface >= 0,
+		) {
+			return false
+		}
+	}
+	return true
+}
+
+func curlPeerMatchesAddressOptions(
+	host string,
+	ipv4Only bool,
+	wildcardIPv4Interface bool,
+) bool {
+	address, addressError := netip.ParseAddr(host)
+	if ipv4Only && addressError == nil && address.Is6() {
+		return false
+	}
+	return !wildcardIPv4Interface || addressError == nil && address.Is4()
+}
+
+func curlEffectiveIPv4Only(parsed curlArgvParse, group int) (bool, int) {
+	ipv4Only := false
+	last := -1
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		switch option.Canonical {
+		case "--ipv4":
+			ipv4Only = true
+			last = index
+		case "--ipv6":
+			ipv4Only = false
+			last = index
+		}
+	}
+	return ipv4Only, last
+}
+
+func curlNoProxyMatches(value string, host string) (bool, bool) {
+	if value == "" {
+		return false, true
+	}
+	if value == "*" {
+		return true, true
+	}
+	host = strings.TrimSuffix(host, ".")
+	hostIP, hostIsIP := netip.ParseAddr(host)
+	tokens := strings.FieldsFunc(value, func(character rune) bool {
+		return character == ',' || character == ' ' || character == '\t'
+	})
+	for _, rawToken := range tokens {
+		if rawToken == "" || rawToken == "*" {
+			continue
+		}
+		if rawAddress, rawBits, cidr := strings.Cut(rawToken, "/"); cidr {
+			address, addressError := netip.ParseAddr(rawAddress)
+			if addressError != nil || hostIsIP != nil {
+				continue
+			}
+			if address.Is6() {
+				// Curl 8.7.1 classifies bracket-stripped IPv6 URL hosts as
+				// hostnames in its no-proxy caller and also has nonstandard
+				// partial-bit CIDR behavior. Keep that lossy boundary closed.
+				return false, false
+			}
+			bits, bitsValid := curlNoProxyIPv4CIDRBits(rawBits)
+			if !bitsValid {
+				return false, false
+			}
+			if bits == 0 {
+				if address == hostIP {
+					return true, true
+				}
+				continue
+			}
+			if bits <= 32 && netip.PrefixFrom(address, bits).Contains(hostIP) {
+				return true, true
+			}
+			continue
+		}
+		if tokenIP, err := netip.ParseAddr(rawToken); err == nil {
+			if hostIsIP == nil && tokenIP == hostIP {
+				return true, true
+			}
+			continue
+		}
+		// Non-IP CIDR-shaped and wildcard-bearing tokens are ordinary
+		// nonmatches in curl 8.7.1, not option-parse failures.
+		if strings.ContainsAny(rawToken, "/*") || hostIsIP == nil {
+			continue
+		}
+		token := strings.TrimPrefix(rawToken, ".")
+		token = strings.TrimSuffix(token, ".")
+		if token == "" {
+			continue
+		}
+		lowerHost := strings.ToLower(host)
+		lowerToken := strings.ToLower(token)
+		if lowerHost == lowerToken || strings.HasSuffix(lowerHost, "."+lowerToken) {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+func curlNoProxyTargetHost(value string) (string, bool) {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Hostname() == "" {
+		return "", false
+	}
+	host := parsed.Hostname()
+	if _, addressError := netip.ParseAddr(host); addressError != nil &&
+		strings.IndexFunc(host, func(character rune) bool {
+			return character != '.' && character != 'x' && character != 'X' &&
+				(character < '0' || character > '9') &&
+				(character < 'a' || character > 'f') &&
+				(character < 'A' || character > 'F')
+		}) < 0 {
+		// Curl's URL API expands legacy numeric IPv4 spellings (for example,
+		// 127.1) before no-proxy matching. net/url preserves them, so keep
+		// this lossy spelling class outside the exact routing lane.
+		return "", false
+	}
+	return host, true
+}
+
+func curlNoProxyIPv4CIDRBits(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for index := range len(value) {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, false
+		}
+	}
+	// Curl 8.7.1 uses C atoi and assigns the result to an unsigned integer.
+	// Only the portable nonnegative int32 subset has platform-independent
+	// semantics; larger and signed spellings keep proxy routing unproved.
+	bits, err := strconv.ParseUint(value, 10, 31)
+	return int(bits), err == nil
+}
+
+func curlProxyDecodedControlUserinfoDisables(
+	commandID int64,
+	canonical string,
+	value string,
+) bool {
+	if !validLiteralRequestTarget(value) {
+		return false
+	}
+	remainder := value
+	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+		scheme := strings.ToLower(value[:delimiter])
+		switch scheme {
+		case "http", "https", "socks", "socks4", "socks4a", "socks5", "socks5h":
+		default:
+			return false
+		}
+		remainder = value[delimiter+3:]
+	} else if strings.HasPrefix(remainder, "//") {
+		remainder = remainder[2:]
+	}
+	if end := strings.IndexAny(remainder, "/?#"); end >= 0 {
+		remainder = remainder[:end]
+	}
+	rawUserinfo, rawHost, present := strings.Cut(remainder, "@")
+	if !present || rawHost == "" || strings.Contains(rawHost, "@") {
+		return false
+	}
+	_, valid := curlDecodedProxyURLCredentials(rawUserinfo)
+	if valid {
+		return false
+	}
+
+	// Curl 8.7.1 silently disables a proxy when decoding control bytes in
+	// proxy userinfo, but only after the rest of the proxy URL has parsed. Prove
+	// that authority independently with harmless credentials so malformed hosts
+	// and ports cannot be mistaken for the silent-disable path.
+	authorityStart := strings.Index(value, remainder)
+	if authorityStart < 0 {
+		return false
+	}
+	authorityEnd := authorityStart + len(remainder)
+	if suffix := strings.IndexAny(remainder, "/?#"); suffix >= 0 {
+		authorityEnd = authorityStart + suffix
+	}
+	sanitized := value[:authorityStart] + "u:p@" + rawHost + value[authorityEnd:]
+	_, _, parsed := staticCurlFTPProxyFact(commandID, canonical, sanitized)
+	return parsed
+}
+
+// staticCurlFTPProxyFact resolves the finite proxy URL grammar relevant to
+// FTP control-channel routing. Curl's final proxy setter supplies the default
+// type, then an explicit https:// or socks*:// scheme overrides it. An
+// explicit http:// scheme deliberately does not override a SOCKS-named setter.
+func staticCurlFTPProxyFact(
+	commandID int64,
+	canonical string,
+	value string,
+) (NetworkFact, bool, bool) {
+	if !validLiteralRequestTarget(value) {
+		return NetworkFact{}, false, false
+	}
+	socks := canonical == "--socks4" || canonical == "--socks4a" ||
+		canonical == "--socks5" || canonical == "--socks5-hostname"
+	lower := strings.ToLower(value)
+	explicitScheme := ""
+	if delimiter := strings.Index(lower, "://"); delimiter >= 0 {
+		explicitScheme = lower[:delimiter]
+		switch explicitScheme {
+		case "https":
+			socks = false
+		case "socks", "socks4", "socks4a", "socks5", "socks5h":
+			socks = true
+		case "http":
+		default:
+			return NetworkFact{}, false, false
+		}
+	}
+	scheme := "http"
+	if socks {
+		scheme = "tcp"
+	} else if explicitScheme == "https" {
+		scheme = "https"
+	}
+	defaultPort := int64(1080)
+	if scheme == "https" {
+		defaultPort = 443
+	}
+	proxy, _, _, valid := staticCurlProxyAuthorityFact(
+		commandID, value, explicitScheme, scheme, defaultPort,
+	)
+	if valid && socks && strings.EqualFold(proxy.Host, "localhost") {
+		remainder := value
+		if explicitScheme != "" {
+			remainder = value[len(explicitScheme)+3:]
+		} else if strings.HasPrefix(remainder, "//") {
+			remainder = remainder[2:]
+		}
+		if suffix := strings.IndexAny(remainder, "/?#"); suffix >= 0 &&
+			strings.HasPrefix(remainder[suffix:], "/") {
+			path := remainder[suffix:]
+			if end := strings.IndexAny(path, "?#"); end >= 0 {
+				path = path[:end]
+			}
+			if path != "/" {
+				return NetworkFact{}, false, false
+			}
+		}
+	}
+	return proxy, socks, valid
+}
+
+func curlSOCKS4UserWithinBounds(
+	canonical string,
+	value string,
+	fallbackProxyUser string,
+	allowFallback bool,
+) bool {
+	if !curlProxyUsesSOCKS4(canonical, value) {
+		return true
+	}
+	remainder := value
+	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+		remainder = value[delimiter+3:]
+	} else if strings.HasPrefix(remainder, "//") {
+		remainder = remainder[2:]
+	}
+	if end := strings.IndexAny(remainder, "/?#"); end >= 0 {
+		remainder = remainder[:end]
+	}
+	if rawUserinfo, _, present := strings.Cut(remainder, "@"); present {
+		rawUser, _, _ := strings.Cut(rawUserinfo, ":")
+		user, valid := curlDecodePercentBytes(rawUser, true)
+		if !valid {
+			return false
+		}
+		return len(user) <= 255
+	}
+	if !allowFallback || fallbackProxyUser == "" {
+		return true
+	}
+	rawUser, _, _ := strings.Cut(fallbackProxyUser, ":")
+	user, valid := curlDecodePercentBytes(rawUser, false)
+	if !valid {
+		return false
+	}
+	return len(user) <= 255
+}
+
+func curlProxyUsesSOCKS4(canonical string, value string) bool {
+	socks4 := canonical == "--socks4" || canonical == "--socks4a"
+	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+		switch strings.ToLower(value[:delimiter]) {
+		case "socks", "socks4", "socks4a":
+			return true
+		case "socks5", "socks5h", "https":
+			return false
+		case "http":
+			return socks4
+		}
+	}
+	return socks4
+}
+
+// StaticCurlFTPControlRequestComponents returns exact, target-bound FTP(S)
+// login operands without depending on HTTP request-metadata projection.
+func StaticCurlFTPControlRequestComponents(
+	command CommandFact,
+) []TransmittedRequestComponent {
+	origin, _ := staticCurlFTPControlRequestComponents(command)
+	return origin
+}
+
+// StaticCurlFTPControlRequestComponentsForFacts admits an exactly isolated
+// curl child beneath transparent env/command/exec launchers. Traversing the
+// complete command hierarchy is required because parent redirects or pipeline
+// setup can fail before the child starts; a CommandFact alone cannot prove
+// those ancestors.
+func StaticCurlFTPControlRequestComponentsForFacts(
+	facts Facts,
+	commandID int64,
+) []TransmittedRequestComponent {
+	command, valid := staticCurlFTPCommandForFacts(facts, commandID)
+	if !valid {
+		return nil
+	}
+	return StaticCurlFTPControlRequestComponents(command)
+}
+
+// StaticCurlFTPProxyRequestComponentsForFacts is the proxy-observer companion
+// to StaticCurlFTPControlRequestComponentsForFacts.
+func StaticCurlFTPProxyRequestComponentsForFacts(
+	facts Facts,
+	commandID int64,
+) []TransmittedRequestComponent {
+	command, valid := staticCurlFTPCommandForFacts(facts, commandID)
+	if !valid {
+		return nil
+	}
+	return staticCurlFTPProxyRequestComponents(command)
+}
+
+func staticCurlFTPCommandForFacts(
+	facts Facts,
+	commandID int64,
+) (CommandFact, bool) {
+	if commandID == 0 || !facts.Authoritative() || !facts.EnforcementEligible() {
+		return CommandFact{}, false
+	}
+	for index := range facts.Commands {
+		command := &facts.Commands[index]
+		if command.ID != commandID {
+			continue
+		}
+		if !isolatedPOSIXCommandFacts(facts.Commands, command) {
+			return CommandFact{}, false
+		}
+		isolated := *command
+		isolated.ParentCommandID = 0
+		isolated.Wrappers = nil
+		return isolated, true
+	}
+	return CommandFact{}, false
+}
+
+func staticCurlFTPProxyRequestComponents(
+	command CommandFact,
+) []TransmittedRequestComponent {
+	_, proxy := staticCurlFTPControlRequestComponents(command)
+	return proxy
+}
+
+func staticCurlFTPControlRequestComponents(
+	command CommandFact,
+) ([]TransmittedRequestComponent, []TransmittedRequestComponent) {
+	executionEligible := (command.Dialect == DialectPOSIX ||
+		command.Dialect == DialectArgv) && command.Effect == EffectExecute &&
+		command.ParentCommandID == 0 && len(command.Wrappers) == 0 &&
+		len(command.Redirects) == 0 &&
+		exactCaseSensitivePOSIXProgram(&command, "curl")
+	if !executionEligible || !command.ArgvComplete || len(command.Argv) == 0 ||
+		command.Executable != command.Argv[0] ||
+		len(command.Arguments) != len(command.Argv) {
+		return nil, nil
+	}
+	parsed := parseCurlArgv(command.Argv)
+	nullConfigOnly := staticCurlPOSIXNullConfigOnly(command, parsed)
+	if (!parsed.Complete && !nullConfigOnly) || parsed.Preview ||
+		!parsed.hasValidOptionValues() || len(parsed.Targets) == 0 ||
+		!curlRangeOptionsValid(parsed) {
+		return nil, nil
+	}
+	if !staticCurlFTPEagerPreparseValid(command, parsed) {
+		return nil, nil
+	}
+	if !staticCurlFTPParallelSetupValid(command, parsed) {
+		return nil, nil
+	}
+	for _, target := range parsed.Targets {
+		lowerTarget := strings.ToLower(target.Value)
+		if !strings.HasPrefix(lowerTarget, "ftp://") &&
+			!strings.HasPrefix(lowerTarget, "ftps://") {
+			continue
+		}
+		if !validLiteralRequestTarget(target.Value) ||
+			curlTargetHasInvalidUserinfo(target.Value) ||
+			curlHasUnmodeledGlob(target.Value) ||
+			!staticCommandArgumentAt(command, target.ArgvIndex) {
+			return nil, nil
+		}
+		if _, finalUser := curlFinalGroupOption(
+			parsed, target.Group, "--user",
+		); !finalUser && !curlFTPURLCredentialsWithinCommandBounds(target.Value) {
+			return nil, nil
+		}
+	}
+	groups := make(map[int]struct{})
+	maximumGroup := 0
+	for _, target := range parsed.Targets {
+		groups[target.Group] = struct{}{}
+		maximumGroup = max(maximumGroup, target.Group)
+	}
+	var components []TransmittedRequestComponent
+	var proxyComponents []TransmittedRequestComponent
+	for group := 0; group <= maximumGroup; group++ {
+		if _, present := groups[group]; !present {
+			continue
+		}
+		if !staticCurlFTPGroupSetupValid(command, parsed, group) {
+			break
+		}
+		if !curlRequestModeValidForGroup(parsed, group) ||
+			!staticCurlGETPostDataValid(command, parsed, group) ||
+			!staticCurlFTPURLQueryOptionsValid(command, parsed, group) ||
+			!curlFTPRemoteNameTargetsValid(command, parsed, group) ||
+			!curlStaticFormSequenceValid(command, parsed, group) ||
+			!curlOriginRequestBuildAllowsPayload(command, parsed, group) {
+			continue
+		}
+		route, routeProved := staticCurlFTPProxyRoute(command, parsed, group)
+		if !routeProved {
+			continue
+		}
+		values := staticCurlFTPControlRequestValues(command, parsed, group)
+		if len(values) == 0 {
+			continue
+		}
+		tlsState := curlEffectiveFTPTLSState(parsed, group)
+		for _, target := range parsed.Targets {
+			if target.Group != group {
+				continue
+			}
+			network, valid := webTargetFact(command.ID, target.Value, NetworkDownload)
+			if !valid || network.Scheme != "ftp" && network.Scheme != "ftps" {
+				continue
+			}
+			bypassed := route.Disabled
+			if route.NoProxy != "" {
+				var matchValid bool
+				noProxyHost, hostValid := curlNoProxyTargetHost(target.Value)
+				if !hostValid {
+					continue
+				}
+				bypassed, matchValid = curlNoProxyMatches(
+					route.NoProxy,
+					noProxyHost,
+				)
+				if !matchValid {
+					continue
+				}
+			}
+			if !bypassed && route.Explicit &&
+				(route.TunnelMode == curlFTPProxyTunnelNone ||
+					route.TunnelMode == curlFTPProxyTunnelFTPS &&
+						network.Scheme != "ftps") {
+				continue
+			}
+			if tlsState.requiredForScheme(network.Scheme) &&
+				(tlsState.certificate != "" ||
+					tlsState.caCertificate != "" && !tlsState.insecure) {
+				continue
+			}
+			for _, value := range values {
+				components = append(components, TransmittedRequestComponent{
+					Value: value, Scheme: network.Scheme,
+					Host: network.Host, Port: network.Port,
+				})
+				if network.Scheme == "ftp" && !bypassed && route.Explicit &&
+					route.TunnelMode == curlFTPProxyTunnelAll &&
+					!tlsState.requiredForScheme(network.Scheme) {
+					for _, observer := range route.Observers {
+						proxyComponents = append(
+							proxyComponents,
+							TransmittedRequestComponent{
+								Value: value, Scheme: observer.Scheme,
+								Host: observer.Host, Port: observer.Port,
+							},
+						)
+					}
+				}
+			}
+		}
+	}
+	return components, proxyComponents
+}
+
+func staticCurlFTPParallelSetupValid(
+	command CommandFact,
+	parsed curlArgvParse,
+) bool {
+	parallel := false
+	for _, option := range parsed.Options {
+		if option.Canonical == "--parallel" {
+			parallel = option.Name != "--no-parallel"
+		}
+	}
+	if !parallel {
+		return true
+	}
+	groups := make(map[int]struct{})
+	for _, target := range parsed.Targets {
+		groups[target.Group] = struct{}{}
+	}
+	for _, option := range parsed.Options {
+		groups[option.Group] = struct{}{}
+	}
+	for group := range groups {
+		if !staticCurlFTPGroupSetupValid(command, parsed, group) {
+			return false
+		}
+	}
+	return true
+}
+
+func staticCurlFTPGroupSetupValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	if !curlFTPContinueAtSetupValid(parsed, group) {
+		return false
+	}
+	posixNullDevice := command.Dialect == DialectPOSIX
+	for _, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		switch option.Canonical {
+		case "--upload-file":
+			if option.Value != "" && option.Value != "-" && option.Value != "." &&
+				(!posixNullDevice || option.Value != "/dev/null") {
+				return false
+			}
+		case "--form", "--form-string":
+			if curlUploadPayloadSourceUncertain(option) {
+				return false
+			}
+			if option.Canonical == "--form" &&
+				curlFormUsesPOSIXNullDevice(option.Value) && !posixNullDevice {
+				return false
+			}
+		case "--dump-header":
+			if option.Value != "-" &&
+				(!posixNullDevice || option.Value != "/dev/null") {
+				return false
+			}
+		}
+	}
+	return curlRequestModeValidForGroup(parsed, group) &&
+		curlFTPRemoteNameTargetsValid(command, parsed, group) &&
+		curlStaticFormSequenceValid(command, parsed, group)
+}
+
+func curlFTPContinueAtSetupValid(parsed curlArgvParse, group int) bool {
+	value := ""
+	found := false
+	for _, option := range parsed.Options {
+		if option.Group == group && option.Canonical == "--continue-at" {
+			value = option.Value
+			found = true
+		}
+	}
+	if !found {
+		return true
+	}
+	if value == "-" || !curlContinueAtValueValid(value) ||
+		curlFTPGroupHasActiveUpload(parsed, group) {
+		return false
+	}
+	resume, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return false
+	}
+	if resume == 0 {
+		return true
+	}
+	for _, target := range parsed.Targets {
+		if target.Group == group && target.Output != curlOutputStdout {
+			// Curl opens resumed output files in append mode before connecting.
+			return false
+		}
+	}
+	return true
+}
+
+func curlFTPGroupHasActiveUpload(parsed curlArgvParse, group int) bool {
+	for _, target := range parsed.Targets {
+		if target.Group == group && target.UploadSet && target.UploadValue != "" {
+			return true
+		}
+	}
+	get := false
+	hasData := false
+	for _, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if option.Canonical == "--get" {
+			get = option.Name != "--no-get"
+		}
+		switch option.Canonical {
+		case "--form", "--form-string":
+			return true
+		case "--data", "--data-ascii", "--data-binary", "--data-raw",
+			"--data-urlencode", "--json":
+			hasData = true
+		}
+	}
+	return hasData && !get
+}
+
+func staticCurlFTPEagerPreparseValid(
+	command CommandFact,
+	parsed curlArgvParse,
+) bool {
+	if !staticCurlFTPEagerOptionConflictsValid(parsed) ||
+		!curlStaticFormEagerSyntaxValid(parsed) {
+		return false
+	}
+	posixNullDevice := command.Dialect == DialectPOSIX
+	lastUser := make(map[int]int)
+	lastProxyUser := make(map[int]int)
+	lastBearer := make(map[int]string)
+	for _, option := range parsed.Options {
+		if !staticCommandArgumentAt(command, option.ArgvIndex) ||
+			option.TakesValue && !staticCurlOptionValue(command, option) ||
+			!curlProxyNumericOptionWithinPortableBounds(option) {
+			return false
+		}
+		if option.Role == curlOptionConfig &&
+			(!posixNullDevice || option.Value != "/dev/null") {
+			return false
+		}
+		switch option.Canonical {
+		case "--user":
+			lastUser[option.Group] = option.ArgvIndex
+		case "--proxy-user":
+			lastProxyUser[option.Group] = option.ArgvIndex
+		case "--oauth2-bearer":
+			lastBearer[option.Group] = option.Value
+		case "--header", "--proxy-header", "--write-out":
+			if strings.HasPrefix(option.Value, "@") &&
+				(!posixNullDevice || option.Value != "@/dev/null") {
+				return false
+			}
+		case "--data", "--data-ascii", "--data-binary", "--json":
+			if strings.HasPrefix(option.Value, "@") &&
+				(!posixNullDevice || option.Value != "@/dev/null") {
+				return false
+			}
+		case "--data-urlencode", "--url-query":
+			path, stdin, fileSource, valid := curlDataURLEncodeFile(option.Value)
+			if !valid || fileSource &&
+				(!posixNullDevice || stdin || path != "/dev/null") {
+				return false
+			}
+		case "--continue-at":
+			if !curlContinueAtValueValid(option.Value) {
+				return false
+			}
+		}
+	}
+	for group := range lastUser {
+		option, found := curlFinalGroupOption(parsed, group, "--user")
+		if !found || !curlOriginUserAvoidsPrompt(
+			option.Value,
+			lastBearer[group] != "",
+		) {
+			return false
+		}
+	}
+	for group := range lastProxyUser {
+		option, found := curlFinalGroupOption(parsed, group, "--proxy-user")
+		if !found {
+			return false
+		}
+		if _, _, valid := curlDecodedProxyCredentials(option.Value); !valid {
+			return false
+		}
+	}
+	groups := make(map[int]struct{})
+	for _, target := range parsed.Targets {
+		groups[target.Group] = struct{}{}
+	}
+	for _, option := range parsed.Options {
+		groups[option.Group] = struct{}{}
+	}
+	for group := range groups {
+		if !staticCurlGETPostDataValid(command, parsed, group) ||
+			!staticCurlFTPURLQueryOptionsValid(command, parsed, group) {
+			return false
+		}
+	}
+	return true
+}
+
+func curlContinueAtValueValid(value string) bool {
+	if value == "-" {
+		return true
+	}
+	if value == "" {
+		return false
+	}
+	for index := range len(value) {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseInt(value, 10, 64)
+	return err == nil
+}
+
+func staticCurlFTPEagerOptionConflictsValid(parsed curlArgvParse) bool {
+	type eagerState struct {
+		fail         bool
+		failWithBody bool
+		requestMode  curlRequestMode
+	}
+	states := make(map[int]eagerState)
+	for _, option := range parsed.Options {
+		state := states[option.Group]
+		switch option.Canonical {
+		case "--fail":
+			state.fail = option.Name != "--no-fail"
+			if state.fail && state.failWithBody {
+				return false
+			}
+		case "--fail-with-body":
+			state.failWithBody = option.Name != "--no-fail-with-body"
+			if state.fail && state.failWithBody {
+				return false
+			}
+		case "--form", "--form-string":
+			if state.requestMode != curlRequestModeUnspecified &&
+				state.requestMode != curlRequestModeForm {
+				return false
+			}
+			state.requestMode = curlRequestModeForm
+		case "--head":
+			if state.requestMode != curlRequestModeUnspecified &&
+				state.requestMode != curlRequestModeHead {
+				return false
+			}
+			state.requestMode = curlRequestModeHead
+		case "--no-head":
+			if state.requestMode != curlRequestModeUnspecified &&
+				state.requestMode != curlRequestModeGet {
+				return false
+			}
+			state.requestMode = curlRequestModeGet
+		}
+		states[option.Group] = state
+	}
+	return true
+}
+
+func curlFinalGroupOption(
+	parsed curlArgvParse,
+	group int,
+	canonical string,
+) (curlOptionToken, bool) {
+	var final curlOptionToken
+	found := false
+	for _, option := range parsed.Options {
+		if option.Group == group && option.Canonical == canonical &&
+			option.ValuePresent {
+			final = option
+			found = true
+		}
+	}
+	return final, found
+}
+
+func curlOriginUserAvoidsPrompt(value string, bearerSet bool) bool {
+	if strings.IndexByte(value, 0) >= 0 {
+		return false
+	}
+	const maximumFTPLoginFieldLength = 65_528
+	user, password, hasPassword := strings.Cut(value, ":")
+	if hasPassword {
+		return len(user) <= maximumFTPLoginFieldLength &&
+			len(password) <= maximumFTPLoginFieldLength
+	}
+	return len(value) <= maximumFTPLoginFieldLength &&
+		(bearerSet || strings.HasPrefix(value, ";"))
+}
+
+func curlFTPURLCredentialsWithinCommandBounds(value string) bool {
+	user, userPresent, password, passwordPresent := webTargetUserinfo(value)
+	if !userPresent {
+		return true
+	}
+	const maximumFTPLoginFieldLength = 65_528
+	return len(user) <= maximumFTPLoginFieldLength &&
+		(!passwordPresent || len(password) <= maximumFTPLoginFieldLength)
+}
+
+func staticCurlFTPURLQueryOptionsValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	hasGet := false
+	hasData := false
+	for _, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if option.Canonical == "--get" {
+			hasGet = option.Name != "--no-get"
+		}
+		hasData = hasData || curlOptionProvidesGETQueryData(option.Canonical)
+	}
+	replaced := hasGet && hasData
+	var outputLengths []int
+	for _, option := range parsed.Options {
+		if option.Group != group || option.Canonical != "--url-query" {
+			continue
+		}
+		if !staticCurlOptionValue(command, option) {
+			return false
+		}
+		path, stdin, fileSource, fileValid :=
+			curlDataURLEncodeFile(option.Value)
+		wireValue := ""
+		valid := false
+		if fileSource {
+			if !fileValid || stdin || command.Dialect != DialectPOSIX ||
+				path != "/dev/null" {
+				return false
+			}
+			if name, _, named := strings.Cut(option.Value, "@"); named {
+				if name != "" {
+					wireValue = name + "="
+				}
+			}
+			valid = strings.IndexByte(wireValue, 0) < 0 &&
+				(replaced || curlURLQueryWireBytesValid(wireValue))
+		} else if replaced {
+			wireValue, valid = curlURLQueryConfigBytes(option.Value)
+		} else {
+			wireValue, valid = curlURLQueryOptionBytes(option.Value)
+		}
+		if !valid {
+			return false
+		}
+		outputLengths = append(outputLengths, len(wireValue))
+	}
+	if replaced {
+		return curlURLQueryConfigLengthsValid(outputLengths)
+	}
+	var targets []curlTransferTarget
+	for _, target := range parsed.Targets {
+		if target.Group == group {
+			targets = append(targets, target)
+		}
+	}
+	return curlURLQueryLengthsValid(targets, outputLengths)
+}
+
+func curlFTPRemoteNameTargetsValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	for _, target := range parsed.Targets {
+		if target.Group != group || target.Output != curlOutputRemoteName {
+			continue
+		}
+		if _, valid := curlRemoteNameFilename(command, target); !valid {
+			return false
+		}
+	}
+	return true
+}
+
+func curlRemoteNameFilename(
+	command CommandFact,
+	target curlTransferTarget,
+) (string, bool) {
+	lower := strings.ToLower(target.Value)
+	schemeEnd := strings.Index(lower, "://")
+	if schemeEnd < 0 {
+		return "", false
+	}
+	remainder := target.Value[schemeEnd+3:]
+	path := "/"
+	if pathStart := strings.IndexAny(remainder, `/\?#`); pathStart >= 0 &&
+		(remainder[pathStart] == '/' || remainder[pathStart] == '\\') {
+		path = remainder[pathStart:]
+		if suffix := strings.IndexAny(path, "?#"); suffix >= 0 {
+			path = path[:suffix]
+		}
+	}
+	filename := path
+	if separator := strings.LastIndexAny(filename, `/\`); separator >= 0 {
+		filename = filename[separator+1:]
+	}
+	if filename == "" || filename == "." || filename == ".." ||
+		command.Dialect == DialectArgv &&
+			(len(filename) > 255 || strings.TrimRight(filename, " .") == "") {
+		return "", false
+	}
+	return filename, true
+}
+
+// staticCurlFTPControlRequestValues returns the final literal operands that
+// curl 8.7.1 can put on an FTP(S) control channel while authenticating. ACCT
+// prefixes its operand with "ACCT "; the alternative-to-USER operand is sent
+// as the complete command. Both are server-response dependent, but neither is
+// transformed before transmission.
+//
+// The tool opens or reads several local file operands before it starts the
+// transfer. Keep those failures component-local: they suppress these login
+// candidates without discarding independently proven HTTP/FTP metadata.
+func staticCurlFTPControlRequestValues(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) []string {
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		command.Effect != EffectExecute || command.ParentCommandID != 0 ||
+		len(command.Wrappers) != 0 || len(command.Redirects) != 0 ||
+		!exactCaseSensitivePOSIXProgram(&command, "curl") {
+		return nil
+	}
+	if !curlFTPContinueAtSetupValid(parsed, group) {
+		return nil
+	}
+	lastAccount := -1
+	lastAlternative := -1
+	lastUser := -1
+	lastProxyUser := -1
+	lastBearer := -1
+	netrcEnabled := false
+	netrcFile := ""
+	posixNullDevice := command.Dialect == DialectPOSIX
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if !staticCommandArgumentAt(command, option.ArgvIndex) ||
+			option.TakesValue && !staticCurlOptionValue(command, option) {
+			return nil
+		}
+		if !curlProxyNumericOptionWithinPortableBounds(option) {
+			return nil
+		}
+		if option.Role == curlOptionConfig &&
+			(!posixNullDevice || option.Value != "/dev/null") {
+			return nil
+		}
+		switch option.Canonical {
+		case "--netrc":
+			netrcEnabled = option.Name != "--no-netrc"
+		case "--netrc-optional":
+			netrcEnabled = option.Name != "--no-netrc-optional"
+		case "--netrc-file":
+			netrcFile = option.Value
+		case "--ftp-account":
+			lastAccount = index
+		case "--ftp-alternative-to-user":
+			lastAlternative = index
+		case "--user":
+			lastUser = index
+		case "--proxy-user":
+			lastProxyUser = index
+		case "--oauth2-bearer":
+			lastBearer = index
+		case "--upload-file":
+			if option.Value != "" && option.Value != "-" && option.Value != "." &&
+				(option.Value != "/dev/null" || !posixNullDevice) {
+				return nil
+			}
+		case "--data", "--data-ascii", "--data-binary", "--data-raw", "--json":
+			if curlUploadPayloadSourceUncertain(option) &&
+				(option.Value != "@/dev/null" || !posixNullDevice) {
+				return nil
+			}
+		case "--data-urlencode":
+			path, stdin, fileSource, valid := curlDataURLEncodeFile(option.Value)
+			if !valid || fileSource &&
+				(!posixNullDevice || stdin || path != "/dev/null") {
+				return nil
+			}
+		case "--form", "--form-string":
+			if curlUploadPayloadSourceUncertain(option) {
+				return nil
+			}
+			if option.Canonical == "--form" &&
+				curlFormUsesPOSIXNullDevice(option.Value) && !posixNullDevice {
+				return nil
+			}
+		case "--header", "--proxy-header", "--write-out":
+			if strings.HasPrefix(option.Value, "@") &&
+				(option.Value != "@/dev/null" || !posixNullDevice) {
+				return nil
+			}
+		case "--dump-header":
+			if option.Value != "-" &&
+				(option.Value != "/dev/null" || !posixNullDevice) {
+				return nil
+			}
+		case "--url-query":
+			path, stdin, fileSource, valid := curlDataURLEncodeFile(option.Value)
+			if !valid || fileSource &&
+				(!posixNullDevice || stdin || path != "/dev/null") {
+				return nil
+			}
+		}
+	}
+	if lastUser >= 0 {
+		// An explicit --user sets libcurl's username even when empty, so
+		// curl does not consult netrc for this operation.
+	} else if netrcFile != "" {
+		if !posixNullDevice || netrcFile != "/dev/null" {
+			return nil
+		}
+	} else if netrcEnabled {
+		return nil
+	}
+	if lastUser >= 0 && !curlOriginUserAvoidsPrompt(
+		parsed.Options[lastUser].Value,
+		lastBearer >= 0 && parsed.Options[lastBearer].Value != "",
+	) {
+		return nil
+	}
+	if lastProxyUser >= 0 {
+		if _, _, valid := curlDecodedProxyCredentials(
+			parsed.Options[lastProxyUser].Value,
+		); !valid {
+			return nil
+		}
+	}
+	const (
+		maximumAccountLength     = 65_528
+		maximumAlternativeLength = 65_533
+	)
+	values := make([]string, 0, 2)
+	appendFinal := func(index int, maximum int) {
+		if index < 0 {
+			return
+		}
+		value := parsed.Options[index].Value
+		if value != "" && strings.IndexByte(value, 0) < 0 &&
+			len(value) <= maximum {
+			values = append(values, value)
+		}
+	}
+	appendFinal(lastAccount, maximumAccountLength)
+	appendFinal(lastAlternative, maximumAlternativeLength)
+	return values
 }
 
 func curlURLPathBytesPreserved(value string) bool {
@@ -2241,6 +3876,22 @@ const (
 )
 
 func curlRequestModeValid(parsed curlArgvParse) bool {
+	groups := make(map[int]struct{})
+	for _, option := range parsed.Options {
+		groups[option.Group] = struct{}{}
+	}
+	for _, target := range parsed.Targets {
+		groups[target.Group] = struct{}{}
+	}
+	for group := range groups {
+		if !curlRequestModeValidForGroup(parsed, group) {
+			return false
+		}
+	}
+	return true
+}
+
+func curlRequestModeValidForGroup(parsed curlArgvParse, group int) bool {
 	mode := curlRequestModeUnspecified
 	setMode := func(next curlRequestMode) bool {
 		if mode != curlRequestModeUnspecified && mode != next {
@@ -2253,6 +3904,9 @@ func curlRequestModeValid(parsed curlArgvParse) bool {
 	hasData := false
 	useHTTPGet := false
 	for _, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
 		switch option.Canonical {
 		case "--form", "--form-string":
 			if !setMode(curlRequestModeForm) {
@@ -2269,7 +3923,7 @@ func curlRequestModeValid(parsed curlArgvParse) bool {
 				return false
 			}
 		case "--get":
-			useHTTPGet = true
+			useHTTPGet = option.Name != "--no-get"
 		default:
 			if curlOptionProvidesGETQueryData(option.Canonical) {
 				hasData = true
@@ -2289,7 +3943,7 @@ func curlRequestModeValid(parsed curlArgvParse) bool {
 		}
 	}
 	for _, target := range parsed.Targets {
-		if target.UploadSet && target.UploadValue != "" &&
+		if target.Group == group && target.UploadSet && target.UploadValue != "" &&
 			!setMode(curlRequestModePut) {
 			return false
 		}
@@ -2963,6 +4617,11 @@ func curlStaticFormSequenceValid(
 		if !staticCurlOptionValue(command, option) {
 			return false
 		}
+		if option.Canonical == "--form" &&
+			curlFormUsesPOSIXNullDevice(option.Value) &&
+			!curlPOSIXNullDeviceAvailable(command) {
+			return false
+		}
 		if option.Canonical == "--form" {
 			name, specification, found := strings.Cut(option.Value, "=")
 			if !found {
@@ -2984,6 +4643,153 @@ func curlStaticFormSequenceValid(
 	}
 	// Curl transmits an unterminated nested multipart by implicitly closing it.
 	return true
+}
+
+// curlStaticFormEagerSyntaxValid mirrors the syntax-only part of curl 8.7.1's
+// formparse/get_param_part pass. Curl parses every operation before starting
+// the first transfer, so malformed syntax in a later --next group prevents an
+// earlier FTP login. Ordinary form file availability remains a per-transfer
+// setup concern and is deliberately not checked here.
+func curlStaticFormEagerSyntaxValid(parsed curlArgvParse) bool {
+	depths := make(map[int]int)
+	for _, option := range parsed.Options {
+		if option.Canonical != "--form" && option.Canonical != "--form-string" {
+			continue
+		}
+		if strings.IndexByte(option.Value, 0) >= 0 {
+			return false
+		}
+		name, specification, found := strings.Cut(option.Value, "=")
+		if !found {
+			return false
+		}
+		if option.Canonical == "--form-string" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(specification, "("):
+			if _, _, valid := curlFormParameterSyntax(
+				specification, 0, 0,
+			); !valid {
+				return false
+			}
+			depths[option.Group]++
+		case name == "" && specification == ")":
+			if depths[option.Group] == 0 {
+				return false
+			}
+			depths[option.Group]--
+		case strings.HasPrefix(specification, "@"):
+			position := 1
+			for {
+				next, separator, valid := curlFormParameterSyntax(
+					specification, position, ',',
+				)
+				if !valid {
+					return false
+				}
+				if separator == 0 {
+					break
+				}
+				position = next + 1
+			}
+		case strings.HasPrefix(specification, "<"):
+			if _, _, valid := curlFormParameterSyntax(
+				specification, 1, 0,
+			); !valid {
+				return false
+			}
+		default:
+			if _, _, valid := curlFormParameterSyntax(
+				specification, 0, 0,
+			); !valid {
+				return false
+			}
+		}
+	}
+	// Curl implicitly closes an unterminated multipart at operation teardown.
+	return true
+}
+
+// curlFormParameterSyntax mirrors get_param_part without opening any of the
+// referenced files. The returned position points at the terminating comma
+// when endCharacter is nonzero.
+func curlFormParameterSyntax(
+	value string,
+	position int,
+	endCharacter byte,
+) (int, byte, bool) {
+	position = curlSkipFormSpace(value, position)
+	endCharacters := ";"
+	if endCharacter != 0 {
+		endCharacters += string(endCharacter)
+	}
+	_, position = curlFormParameterWordUntil(
+		value, position, endCharacters,
+	)
+	separator := byte(0)
+	if position < len(value) {
+		separator = value[position]
+	}
+	typeActive := false
+	for separator == ';' {
+		position = curlSkipFormSpace(value, position+1)
+		switch {
+		case !typeActive && curlFormHasFoldedPrefix(value, position, "type="):
+			position = curlSkipFormSpace(value, position+len("type="))
+			var valid bool
+			position, valid = curlFormTypePrefix(value, position)
+			if !valid {
+				return 0, 0, false
+			}
+			for position < len(value) && value[position] != ';' &&
+				(endCharacter == 0 || value[position] != endCharacter) {
+				position++
+			}
+			typeActive = true
+		case curlFormHasFoldedPrefix(value, position, "filename="):
+			typeActive = false
+			position = curlSkipFormSpace(value, position+len("filename="))
+			_, position = curlFormParameterWordUntil(
+				value, position, endCharacters,
+			)
+		case curlFormHasFoldedPrefix(value, position, "headers="):
+			typeActive = false
+			position += len("headers=")
+			if position < len(value) &&
+				(value[position] == '@' || value[position] == '<') {
+				position = curlSkipFormSpace(value, position+1)
+			} else {
+				position = curlSkipFormSpace(value, position)
+			}
+			_, position = curlFormParameterWordUntil(
+				value, position, endCharacters,
+			)
+		case curlFormHasFoldedPrefix(value, position, "encoder="):
+			typeActive = false
+			position = curlSkipFormSpace(value, position+len("encoder="))
+			_, position = curlFormParameterWordUntil(
+				value, position, endCharacters,
+			)
+		case typeActive:
+			for position < len(value) && value[position] != ';' &&
+				(endCharacter == 0 || value[position] != endCharacter) {
+				position++
+			}
+		default:
+			_, position = curlFormParameterWordUntil(
+				value, position, endCharacters,
+			)
+		}
+		separator = 0
+		if position < len(value) {
+			separator = value[position]
+		}
+	}
+	if separator != 0 && separator != endCharacter {
+		return 0, 0, false
+	}
+	return position, separator, true
 }
 
 // curlStaticFormPayloads projects only contiguous bytes that curl 8.7.1 puts
@@ -3539,10 +5345,149 @@ func curlFormURLEncodeBytes(value string) (string, bool) {
 	return encoded.String(), true
 }
 
+func curlGroupTargetsAreFTPFamily(parsed curlArgvParse, group int) bool {
+	found := false
+	for _, target := range parsed.Targets {
+		if target.Group != group {
+			continue
+		}
+		found = true
+		lower := strings.ToLower(target.Value)
+		if !strings.HasPrefix(lower, "ftp://") &&
+			!strings.HasPrefix(lower, "ftps://") {
+			return false
+		}
+	}
+	return found
+}
+
+type curlFTPTLSState struct {
+	try           bool
+	required      bool
+	control       bool
+	insecure      bool
+	certificate   string
+	caCertificate string
+}
+
+func curlEffectiveFTPTLSState(parsed curlArgvParse, group int) curlFTPTLSState {
+	state := curlFTPTLSState{}
+	for _, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		switch option.Canonical {
+		case "--ssl":
+			state.try = option.Name != "--no-ssl" &&
+				option.Name != "--no-ftp-ssl"
+		case "--ssl-reqd":
+			state.required = option.Name != "--no-ssl-reqd" &&
+				option.Name != "--no-ftp-ssl-reqd"
+		case "--ftp-ssl-control":
+			state.control = option.Name != "--no-ftp-ssl-control"
+		case "--insecure":
+			state.insecure = option.Name != "--no-insecure"
+		case "--cert":
+			state.certificate = option.Value
+		case "--cacert":
+			state.caCertificate = option.Value
+		}
+	}
+	return state
+}
+
+func (state curlFTPTLSState) requiredForScheme(scheme string) bool {
+	switch scheme {
+	case "https", "ftps", "smtps", "wss":
+		return true
+	case "ftp", "smtp":
+		return state.required || state.control && !state.try
+	default:
+		return false
+	}
+}
+
+func curlGroupRequiresPreloginTLS(parsed curlArgvParse, group int) bool {
+	state := curlEffectiveFTPTLSState(parsed, group)
+	for _, target := range parsed.Targets {
+		if target.Group != group {
+			continue
+		}
+		network, valid := webTargetFact(0, target.Value, NetworkDownload)
+		if !valid {
+			network, valid = curlSMTPTargetFact(
+				0,
+				target.Value,
+				NetworkDownload,
+			)
+		}
+		if valid && state.requiredForScheme(network.Scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+func curlGroupHasPlainFTPUpgradeTLS(parsed curlArgvParse, group int) bool {
+	state := curlEffectiveFTPTLSState(parsed, group)
+	if !state.requiredForScheme("ftp") {
+		return false
+	}
+	for _, target := range parsed.Targets {
+		if target.Group == group &&
+			strings.HasPrefix(strings.ToLower(target.Value), "ftp://") {
+			return true
+		}
+	}
+	return false
+}
+
+func curlGroupFinalOptionValue(
+	parsed curlArgvParse,
+	group int,
+	canonical string,
+) string {
+	value := ""
+	for _, option := range parsed.Options {
+		if option.Group == group && option.Canonical == canonical &&
+			option.ValuePresent {
+			value = option.Value
+		}
+	}
+	return value
+}
+
 func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	parsed := parseCurlArgv(command.Argv)
 	proxyNetwork, _, proxyProved := staticCurlProxyDestination(*command)
-	valid := parsed.Complete && !parsed.EmptyTransferGroup &&
+	proxyNetworks := []NetworkFact(nil)
+	proxyRoutingProved := make(map[int]bool)
+	if proxyProved {
+		proxyNetworks = append(proxyNetworks, proxyNetwork)
+		if len(parsed.Targets) > 0 {
+			proxyRoutingProved[parsed.Targets[0].Group] = true
+		}
+	}
+	if !proxyProved && len(parsed.Targets) > 0 {
+		groups := make(map[int]struct{})
+		for _, target := range parsed.Targets {
+			groups[target.Group] = struct{}{}
+		}
+		for group := range groups {
+			ftpProxyRoute, proved := staticCurlFTPProxyRoute(
+				*command, parsed, group,
+			)
+			proved = proved && curlGroupTargetsAreFTPFamily(parsed, group)
+			proxyRoutingProved[group] = proved
+			if proved && len(ftpProxyRoute.Networks) != 0 {
+				proxyNetworks = append(proxyNetworks, ftpProxyRoute.Networks...)
+				proxyProved = true
+			}
+		}
+	}
+	nullConfigOnly := staticCurlPOSIXNullConfigOnly(*command, parsed)
+	valid := (parsed.Complete || nullConfigOnly) &&
+		!parsed.EmptyTransferGroup &&
 		parsed.hasValidOptionValues() && curlRequestModeValid(parsed) &&
 		curlRangeOptionsValid(parsed)
 	if !valid {
@@ -3573,6 +5518,9 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 		value := option.Value
 		switch option.Canonical {
 		case "--config":
+			if nullConfigOnly && value == "/dev/null" {
+				continue
+			}
 			if value != "" && value != "-" {
 				appendCommandPath(out, command, PathAccessRead, value)
 			}
@@ -3655,7 +5603,13 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 		case "--output-dir":
 			group.hasOutputDir = true
 			group.outputDir = value
-			out.markPartial(IssueUnsupportedConstruct)
+			for _, target := range parsed.Targets {
+				if target.Group == option.Group &&
+					target.Output != curlOutputStdout {
+					out.markPartial(IssueUnsupportedConstruct)
+					break
+				}
+			}
 		case "--cacert":
 			group.hasCACert = true
 			group.cacert = value
@@ -3665,24 +5619,38 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 		case "--cert":
 			// A certificate operand may include a password suffix. Until that
 			// grammar is represented, retain it as diagnostic-only context.
-			out.markPartial(IssueUnknownOperandGrammar)
+			if curlGroupRequiresPreloginTLS(parsed, option.Group) &&
+				curlGroupFinalOptionValue(parsed, option.Group, "--cert") != "" {
+				out.markPartial(IssueUnknownOperandGrammar)
+			}
 		case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
-			"--socks5", "--socks5-hostname":
-			if !proxyProved {
+			"--socks5", "--socks5-hostname", "--preproxy":
+			if !proxyRoutingProved[option.Group] {
 				out.markPartial(IssueUnsupportedConstruct)
 			}
 		case "--noproxy":
-			if !proxyProved {
+			if !proxyRoutingProved[option.Group] {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
+		case "--interface":
+			final, found := curlFinalGroupOption(
+				parsed, option.Group, "--interface",
+			)
+			if found && option.ArgvIndex == final.ArgvIndex &&
+				!proxyRoutingProved[option.Group] {
 				out.markPartial(IssueUnsupportedConstruct)
 			}
 		case "--proxy-header":
 			if strings.HasPrefix(value, "@") {
+				if value == "@/dev/null" && command.Dialect == DialectPOSIX {
+					continue
+				}
 				if path := strings.TrimPrefix(value, "@"); path != "" && path != "-" {
 					appendCommandPath(out, command, PathAccessRead, path)
 				}
 				out.markPartial(IssueUnsupportedConstruct)
 			}
-		case "--connect-to", "--dns-servers", "--doh-url", "--preproxy",
+		case "--connect-to", "--dns-servers", "--doh-url",
 			"--resolve":
 			// These options can replace the actual peer while leaving the
 			// logical URL unchanged.
@@ -3692,14 +5660,40 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 
 	for index := range groups {
 		group := &groups[index]
+		ipv4Only, _ := curlEffectiveIPv4Only(parsed, index)
+		if ipv4Only && curlGroupTargetsAreFTPFamily(parsed, index) &&
+			!proxyRoutingProved[index] {
+			out.markPartial(IssueUnsupportedConstruct)
+		}
+		requiresTLS := curlGroupRequiresPreloginTLS(parsed, index)
+		tlsState := curlEffectiveFTPTLSState(parsed, index)
+		activeCert := tlsState.certificate != ""
+		insecure := tlsState.insecure
+		if curlGroupHasPlainFTPUpgradeTLS(parsed, index) &&
+			(group.hasCACert && group.cacert != "" && group.cacert != "-" &&
+				!insecure ||
+				tlsState.certificate != "" && tlsState.certificate != "-" ||
+				group.hasKey && group.key != "" && group.key != "-" && activeCert) {
+			// TLS support-file reads are not request payloads. Preserve the
+			// pre-existing detection-only boundary for newly owned FTP upgrade
+			// modes until path facts can distinguish trust inputs from uploads.
+			out.markPartial(IssueUnsupportedConstruct)
+		}
 		for _, input := range []struct {
 			set   bool
 			value string
+			used  bool
 		}{
-			{set: group.hasCACert, value: group.cacert},
-			{set: group.hasKey, value: group.key},
+			{
+				set: group.hasCACert, value: group.cacert,
+				used: requiresTLS && !insecure,
+			},
+			{
+				set: group.hasKey, value: group.key,
+				used: requiresTLS && activeCert,
+			},
 		} {
-			if input.set && input.value != "" && input.value != "-" {
+			if input.used && input.set && input.value != "" && input.value != "-" {
 				appendCommandPath(out, command, PathAccessRead, input.value)
 			}
 		}
@@ -3724,8 +5718,10 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	}
 	if proxyProved {
 		addOperation(command, OperationConnect)
-		if !out.appendNetwork(proxyNetwork) {
-			out.markPartial(IssueUnknownOperandGrammar)
+		for _, network := range proxyNetworks {
+			if !out.appendNetwork(network) {
+				out.markPartial(IssueUnknownOperandGrammar)
+			}
 		}
 	}
 
@@ -3747,7 +5743,7 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 			case "-", ".":
 				group.hasUploadStdin = true
 			case "":
-				out.markPartial(IssueUnknownOperandGrammar)
+				// An empty --upload-file clears upload for this target.
 			default:
 				appendLiteralTransferPath(
 					out,
@@ -3774,7 +5770,16 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 				)
 				group.hasDownloadFile = true
 			}
-		case curlOutputRemoteName, curlOutputUnknown:
+		case curlOutputRemoteName:
+			filename, filenameValid := curlRemoteNameFilename(*command, target)
+			if command.Dialect != DialectPOSIX || !filenameValid ||
+				group.hasOutputDir {
+				out.markPartial(IssueUnknownOperandGrammar)
+				break
+			}
+			appendCommandPath(out, command, PathAccessWrite, filename)
+			group.hasDownloadFile = true
+		case curlOutputUnknown:
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
 
@@ -3790,7 +5795,7 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 			out.markPartial(IssueUnknownOperandGrammar)
 			continue
 		}
-		targetUpload := target.UploadSet || group.upload &&
+		targetUpload := target.UploadSet && target.UploadValue != "" || group.upload &&
 			(fact.Scheme == "http" || fact.Scheme == "https")
 		if targetUpload {
 			fact.Action = NetworkUpload

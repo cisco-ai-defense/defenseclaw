@@ -28,14 +28,14 @@ func TestHelpControlRequiresExactOptionOwnership(t *testing.T) {
 		{
 			name:    "curl raw",
 			command: "curl --output-dir --help http://127.0.0.1:1/",
-			status:  StatusPartial,
+			status:  StatusComplete,
 		},
 		{
 			name: "curl structured",
 			argv: []string{
 				"curl", "--output-dir", "--help", "http://127.0.0.1:1/",
 			},
-			status: StatusPartial,
+			status: StatusComplete,
 		},
 		{
 			name: "docker raw",

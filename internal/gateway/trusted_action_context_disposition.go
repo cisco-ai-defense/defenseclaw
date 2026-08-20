@@ -359,6 +359,14 @@ func trustedActionContentFindingHasRiskPair(
 				*rule,
 				command.ID,
 				metadata.FTPRequestComponents,
+			) || trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				actionfacts.StaticCurlFTPControlRequestComponentsForFacts(
+					facts,
+					command.ID,
+				),
 			)
 		curlTargetBoundOriginAuthEgress :=
 			trustedActionContentRuleMatchesExternalRequestComponents(
@@ -386,6 +394,16 @@ func trustedActionContentFindingHasRiskPair(
 				*rule,
 				command.ID,
 				proxyMetadata.ProxyRequestComponents,
+			)
+		curlFTPProxyMetadataEgress :=
+			trustedActionContentRuleMatchesExternalProxyRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				actionfacts.StaticCurlFTPProxyRequestComponentsForFacts(
+					facts,
+					command.ID,
+				),
 			)
 		curlProxyUploadEgress :=
 			trustedActionContentRuleMatchesExternalProxyRequestComponents(
@@ -428,6 +446,7 @@ func trustedActionContentFindingHasRiskPair(
 				wgetMetadata.FTPOriginCredentialComponents,
 			)
 		if httpMetadataEgress || ftpOriginAuthEgress || curlProxyMetadataEgress ||
+			curlFTPProxyMetadataEgress ||
 			curlProxyUploadEgress ||
 			curlRequestComponentEgress || curlTargetBoundOriginAuthEgress ||
 			curlSMTPRequestEgress ||

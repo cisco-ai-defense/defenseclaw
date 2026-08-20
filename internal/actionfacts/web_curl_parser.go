@@ -74,26 +74,85 @@ func curlOptionalValue(canonical string, role curlOptionRole) curlOptionSpec {
 // classification, and exact-output consumers together when they integrate
 // with parseCurlArgv.
 var curlLongOptionSpecs = map[string]curlOptionSpec{
-	"--append":         curlFlag("--append", curlOptionNeutral),
-	"--no-append":      curlFlag("--append", curlOptionNeutral),
-	"--buffer":         curlFlag("--no-buffer", curlOptionNeutral),
-	"--compressed":     curlFlag("--compressed", curlOptionNeutral),
-	"--no-compressed":  curlFlag("--compressed", curlOptionNeutral),
-	"--disable":        curlFlag("--disable", curlOptionNeutral),
+	"--append":        curlFlag("--append", curlOptionNeutral),
+	"--no-append":     curlFlag("--append", curlOptionNeutral),
+	"--buffer":        curlFlag("--no-buffer", curlOptionNeutral),
+	"--compressed":    curlFlag("--compressed", curlOptionNeutral),
+	"--no-compressed": curlFlag("--compressed", curlOptionNeutral),
+	"--disable":       curlFlag("--disable", curlOptionNeutral),
+	"--disable-eprt":  curlFlag("--disable-eprt", curlOptionNeutral),
+	"--no-disable-eprt": curlFlag(
+		"--disable-eprt",
+		curlOptionNeutral,
+	),
+	"--eprt":         curlFlag("--disable-eprt", curlOptionNeutral),
+	"--no-eprt":      curlFlag("--disable-eprt", curlOptionNeutral),
+	"--disable-epsv": curlFlag("--disable-epsv", curlOptionNeutral),
+	"--no-disable-epsv": curlFlag(
+		"--disable-epsv",
+		curlOptionNeutral,
+	),
+	"--epsv":           curlFlag("--disable-epsv", curlOptionNeutral),
+	"--no-epsv":        curlFlag("--disable-epsv", curlOptionNeutral),
 	"--fail":           curlFlag("--fail", curlOptionNeutral),
+	"--no-fail":        curlFlag("--fail", curlOptionNeutral),
 	"--fail-with-body": curlFlag("--fail-with-body", curlOptionNeutral),
-	"--get":            curlFlag("--get", curlOptionNeutral),
-	"--globoff":        curlFlag("--globoff", curlOptionNeutral),
-	"--no-globoff":     curlFlag("--globoff", curlOptionNeutral),
-	"--head":           curlFlag("--head", curlOptionHead),
-	"--http1.0":        curlFlag("--http1.0", curlOptionNeutral),
-	"--help":           curlOptionalValue("--help", curlOptionPreview),
-	"--include":        curlFlag("--include", curlOptionNeutral),
-	"--no-include":     curlFlag("--include", curlOptionNeutral),
-	"--insecure":       curlFlag("--insecure", curlOptionNeutral),
-	"--no-insecure":    curlFlag("--insecure", curlOptionNeutral),
-	"--ipv4":           curlFlag("--ipv4", curlOptionNeutral),
-	"--ipv6":           curlFlag("--ipv6", curlOptionNeutral),
+	"--no-fail-with-body": curlFlag(
+		"--fail-with-body",
+		curlOptionNeutral,
+	),
+	"--get":         curlFlag("--get", curlOptionNeutral),
+	"--no-get":      curlFlag("--get", curlOptionNeutral),
+	"--globoff":     curlFlag("--globoff", curlOptionNeutral),
+	"--no-globoff":  curlFlag("--globoff", curlOptionNeutral),
+	"--head":        curlFlag("--head", curlOptionHead),
+	"--http1.0":     curlFlag("--http1.0", curlOptionNeutral),
+	"--help":        curlOptionalValue("--help", curlOptionPreview),
+	"--include":     curlFlag("--include", curlOptionNeutral),
+	"--no-include":  curlFlag("--include", curlOptionNeutral),
+	"--insecure":    curlFlag("--insecure", curlOptionNeutral),
+	"--no-insecure": curlFlag("--insecure", curlOptionNeutral),
+	"--ipv4":        curlFlag("--ipv4", curlOptionNeutral),
+	"--ipv6":        curlFlag("--ipv6", curlOptionNeutral),
+	"--crlf":        curlFlag("--crlf", curlOptionNeutral),
+	"--no-crlf":     curlFlag("--crlf", curlOptionNeutral),
+	"--ftp-create-dirs": curlFlag(
+		"--ftp-create-dirs",
+		curlOptionNeutral,
+	),
+	"--no-ftp-create-dirs": curlFlag(
+		"--ftp-create-dirs",
+		curlOptionNeutral,
+	),
+	"--ftp-pasv":         curlFlag("--ftp-pasv", curlOptionNeutral),
+	"--no-ftp-pasv":      curlFlag("--ftp-pasv", curlOptionNeutral),
+	"--ftp-pret":         curlFlag("--ftp-pret", curlOptionNeutral),
+	"--no-ftp-pret":      curlFlag("--ftp-pret", curlOptionNeutral),
+	"--ftp-skip-pasv-ip": curlFlag("--ftp-skip-pasv-ip", curlOptionNeutral),
+	"--no-ftp-skip-pasv-ip": curlFlag(
+		"--ftp-skip-pasv-ip",
+		curlOptionNeutral,
+	),
+	"--ftp-ssl-ccc":    curlFlag("--ftp-ssl-ccc", curlOptionNeutral),
+	"--no-ftp-ssl-ccc": curlFlag("--ftp-ssl-ccc", curlOptionNeutral),
+	"--ignore-content-length": curlFlag(
+		"--ignore-content-length",
+		curlOptionNeutral,
+	),
+	"--no-ignore-content-length": curlFlag(
+		"--ignore-content-length",
+		curlOptionNeutral,
+	),
+	"--ssl":                curlFlag("--ssl", curlOptionNeutral),
+	"--no-ssl":             curlFlag("--ssl", curlOptionNeutral),
+	"--ftp-ssl":            curlFlag("--ssl", curlOptionNeutral),
+	"--no-ftp-ssl":         curlFlag("--ssl", curlOptionNeutral),
+	"--ssl-reqd":           curlFlag("--ssl-reqd", curlOptionNeutral),
+	"--no-ssl-reqd":        curlFlag("--ssl-reqd", curlOptionNeutral),
+	"--ftp-ssl-reqd":       curlFlag("--ssl-reqd", curlOptionNeutral),
+	"--no-ftp-ssl-reqd":    curlFlag("--ssl-reqd", curlOptionNeutral),
+	"--ftp-ssl-control":    curlFlag("--ftp-ssl-control", curlOptionNeutral),
+	"--no-ftp-ssl-control": curlFlag("--ftp-ssl-control", curlOptionNeutral),
 	"--junk-session-cookies": curlFlag(
 		"--junk-session-cookies",
 		curlOptionNeutral,
@@ -109,6 +168,10 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--manual":             curlFlag("--manual", curlOptionPreview),
 	"--no-buffer":          curlFlag("--no-buffer", curlOptionNeutral),
 	"--no-head":            curlFlag("--no-head", curlOptionNoHead),
+	"--netrc":              curlFlag("--netrc", curlOptionNeutral),
+	"--no-netrc":           curlFlag("--netrc", curlOptionNeutral),
+	"--netrc-optional":     curlFlag("--netrc-optional", curlOptionNeutral),
+	"--no-netrc-optional":  curlFlag("--netrc-optional", curlOptionNeutral),
 	"--no-progress-meter":  curlFlag("--no-progress-meter", curlOptionNeutral),
 	"--no-remote-name":     curlFlag("--no-remote-name", curlOptionNoRemoteName),
 	"--no-remote-name-all": curlFlag("--no-remote-name-all", curlOptionNoRemoteNameAll),
@@ -117,6 +180,8 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--progress-bar":       curlFlag("--progress-bar", curlOptionNeutral),
 	"--no-progress-bar":    curlFlag("--progress-bar", curlOptionNeutral),
 	"--progress-meter":     curlFlag("--no-progress-meter", curlOptionNeutral),
+	"--proxytunnel":        curlFlag("--proxytunnel", curlOptionNeutral),
+	"--no-proxytunnel":     curlFlag("--proxytunnel", curlOptionNeutral),
 	"--remote-name":        curlFlag("--remote-name", curlOptionRemoteName),
 	"--remote-name-all":    curlFlag("--remote-name-all", curlOptionRemoteNameAll),
 	"--remote-time":        curlFlag("--remote-time", curlOptionNeutral),
@@ -152,14 +217,24 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--dump-header":     curlValue("--dump-header", curlOptionNeutral),
 	"--form":            curlValue("--form", curlOptionNeutral),
 	"--form-string":     curlValue("--form-string", curlOptionNeutral),
-	"--ftp-port":        curlValue("--ftp-port", curlOptionNeutral),
-	"--header":          curlValue("--header", curlOptionNeutral),
-	"--interface":       curlValue("--interface", curlOptionNetworkOverride),
-	"--json":            curlValue("--json", curlOptionNeutral),
-	"--key":             curlValue("--key", curlOptionNeutral),
-	"--mail-auth":       curlValue("--mail-auth", curlOptionNeutral),
-	"--mail-from":       curlValue("--mail-from", curlOptionNeutral),
-	"--mail-rcpt":       curlValue("--mail-rcpt", curlOptionNeutral),
+	"--ftp-account":     curlValue("--ftp-account", curlOptionNeutral),
+	"--ftp-alternative-to-user": curlValue(
+		"--ftp-alternative-to-user",
+		curlOptionNeutral,
+	),
+	"--ftp-port":   curlValue("--ftp-port", curlOptionNeutral),
+	"--ftp-method": curlValue("--ftp-method", curlOptionNeutral),
+	"--ftp-ssl-ccc-mode": curlValue(
+		"--ftp-ssl-ccc-mode",
+		curlOptionNeutral,
+	),
+	"--header":    curlValue("--header", curlOptionNeutral),
+	"--interface": curlValue("--interface", curlOptionNetworkOverride),
+	"--json":      curlValue("--json", curlOptionNeutral),
+	"--key":       curlValue("--key", curlOptionNeutral),
+	"--mail-auth": curlValue("--mail-auth", curlOptionNeutral),
+	"--mail-from": curlValue("--mail-from", curlOptionNeutral),
+	"--mail-rcpt": curlValue("--mail-rcpt", curlOptionNeutral),
 	"--mail-rcpt-allowfails": curlFlag(
 		"--mail-rcpt-allowfails",
 		curlOptionNeutral,
@@ -169,6 +244,7 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 		curlOptionNeutral,
 	),
 	"--max-time":        curlValue("--max-time", curlOptionNeutral),
+	"--netrc-file":      curlValue("--netrc-file", curlOptionNeutral),
 	"--noproxy":         curlValue("--noproxy", curlOptionNetworkOverride),
 	"--oauth2-bearer":   curlValue("--oauth2-bearer", curlOptionNeutral),
 	"--output":          curlValue("--output", curlOptionOutput),
@@ -391,7 +467,8 @@ func curlOptionAllowsEmptyValue(option string) bool {
 	case "--cert", "--connect-to", "--cookie", "--data",
 		"--data-ascii", "--data-binary", "--data-raw",
 		"--data-urlencode", "--doh-url", "--header", "--json",
-		"--mail-rcpt", "--noproxy", "--proxy", "--proxy-header", "--proxy-user",
+		"--ftp-method", "--ftp-ssl-ccc-mode", "--mail-rcpt", "--noproxy",
+		"--proxy", "--proxy-header", "--proxy-user", "--upload-file",
 		"--quote", "--referer",
 		"--telnet-option", "--time-cond", "--user",
 		"--url-query", "--user-agent", "--write-out":
@@ -555,6 +632,15 @@ func (parsed *curlArgvParse) parseLongOption(
 	option.Canonical = spec.canonical
 	option.Role = spec.role
 	option.TakesValue = spec.arity != curlOptionNoValue
+	if joined {
+		parsed.Options = append(parsed.Options, option)
+		parsed.markUnresolved(
+			*index,
+			argument,
+			"joined value is not accepted for this curl option",
+		)
+		return
+	}
 
 	switch spec.arity {
 	case curlOptionNoValue:
@@ -717,8 +803,8 @@ func (parsed *curlArgvParse) applyOption(
 		}
 		group.method = option.Value
 	case curlOptionUpload:
-		if !option.ValuePresent || option.Value == "" {
-			parsed.markUnresolved(option.ArgvIndex, option.Raw, "empty upload file")
+		if !option.ValuePresent {
+			parsed.markUnresolved(option.ArgvIndex, option.Raw, "missing upload file")
 			return
 		}
 		group.uploads = append(group.uploads, curlUploadSlot{

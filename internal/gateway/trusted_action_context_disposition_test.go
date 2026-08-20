@@ -2056,6 +2056,18 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 			wantSeverity: "CRITICAL",
 		},
 		{
+			name:   "FTP TLS support file and upload remains detection only",
+			ruleID: "PATH-SSH-KEY",
+			facts: actionfacts.Analyze(actionfacts.Input{
+				Tool: "exec",
+				Command: "curl --ssl-reqd --cacert /home/alice/.ssh/id_ed25519 " +
+					"--upload-file /dev/null ftp://sink.example/file",
+				CWD:        "/workspace",
+				ActiveHome: "/home/alice",
+			}),
+			wantSeverity: "CRITICAL",
+		},
+		{
 			name:   "pipeline SSH read and egress is enforceable",
 			ruleID: "PATH-SSH-KEY",
 			facts: actionfacts.Analyze(actionfacts.Input{

@@ -135,7 +135,7 @@ func TestParseCurlArgvOwnsOptionLookingAndEmptyValues(t *testing.T) {
 		},
 		{
 			name:      "empty data value is present",
-			argv:      []string{"curl", "--data=", "https://files.invalid/run"},
+			argv:      []string{"curl", "--data", "", "https://files.invalid/run"},
 			canonical: "--data",
 			value:     "",
 		},
@@ -169,8 +169,7 @@ func TestParseCurlArgvOwnsURLQueryValues(t *testing.T) {
 
 	for _, argv := range [][]string{
 		{"curl", "--url-query", "key=value", "https://files.invalid/run"},
-		{"curl", "--url-query=key=value", "https://files.invalid/run"},
-		{"curl", "--url-query=", "https://files.invalid/run"},
+		{"curl", "--url-query", "", "https://files.invalid/run"},
 	} {
 		parsed := parseCurlArgv(argv)
 		option := requireCurlParsedOption(t, parsed, "--url-query")
@@ -188,7 +187,6 @@ func TestParseCurlArgvShortAliasAndNoValueBundleParity(t *testing.T) {
 		{"curl", "-m", "1", "https://files.invalid/run"},
 		{"curl", "-m1", "https://files.invalid/run"},
 		{"curl", "--max-time", "1", "https://files.invalid/run"},
-		{"curl", "--max-time=1", "https://files.invalid/run"},
 	} {
 		parsed := parseCurlArgv(argv)
 		option := requireCurlParsedOption(t, parsed, "--max-time")
@@ -207,13 +205,13 @@ func TestParseCurlArgvShortAliasAndNoValueBundleParity(t *testing.T) {
 	}{
 		{
 			short:     []string{"curl", "-Uproxy:user", "https://files.invalid/run"},
-			long:      []string{"curl", "--proxy-user=proxy:user", "https://files.invalid/run"},
+			long:      []string{"curl", "--proxy-user", "proxy:user", "https://files.invalid/run"},
 			canonical: "--proxy-user",
 			value:     "proxy:user",
 		},
 		{
 			short:     []string{"curl", "-Eclient.pem", "https://files.invalid/run"},
-			long:      []string{"curl", "--cert=client.pem", "https://files.invalid/run"},
+			long:      []string{"curl", "--cert", "client.pem", "https://files.invalid/run"},
 			canonical: "--cert",
 			value:     "client.pem",
 		},
@@ -247,6 +245,37 @@ func TestParseCurlArgvShortAliasAndNoValueBundleParity(t *testing.T) {
 		explicitStdout.Targets[0].Output != curlOutputStdout ||
 		!explicitStdout.provesResponseStdout() {
 		t.Fatalf("explicit stdout bundle = %#v", explicitStdout)
+	}
+}
+
+func TestParseCurlArgvRejectsJoinedLongOptionValues(t *testing.T) {
+	t.Parallel()
+
+	for _, argv := range [][]string{
+		{"curl", "--data=fixture", "https://files.invalid/run"},
+		{"curl", "--data=", "https://files.invalid/run"},
+		{"curl", "--max-time=1", "https://files.invalid/run"},
+		{"curl", "--request=GET", "https://files.invalid/run"},
+		{"curl", "--url=https://files.invalid/run"},
+		{"curl", "--silent=true", "https://files.invalid/run"},
+	} {
+		parsed := parseCurlArgv(argv)
+		if parsed.Complete || len(parsed.Unresolved) != 1 ||
+			parsed.Unresolved[0].Raw != argv[1] ||
+			parsed.Unresolved[0].Reason !=
+				"joined value is not accepted for this curl option" ||
+			len(parsed.Options) != 1 || parsed.Options[0].ValuePresent ||
+			parsed.provesResponseStdout() {
+			t.Fatalf("joined long argv=%v parse=%#v", argv, parsed)
+		}
+	}
+
+	shortJoined := parseCurlArgv([]string{
+		"curl", "-m1", "-XGET", "https://files.invalid/run",
+	})
+	if !shortJoined.Complete || !shortJoined.hasValidOptionValues() ||
+		!shortJoined.provesResponseStdout() {
+		t.Fatalf("short joined options lost authority: %#v", shortJoined)
 	}
 }
 
@@ -415,7 +444,7 @@ func TestParseCurlArgvMethodHeadConfigUnknownAndNoTarget(t *testing.T) {
 	}
 
 	finalGet := parseCurlArgv([]string{
-		"curl", "-sXHEAD", "--request=GET", "https://files.invalid/run",
+		"curl", "-sXHEAD", "--request", "GET", "https://files.invalid/run",
 	})
 	if !finalGet.Complete || len(finalGet.Targets) != 1 ||
 		finalGet.Targets[0].Method != "GET" ||

