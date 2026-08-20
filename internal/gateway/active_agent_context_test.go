@@ -364,6 +364,15 @@ func TestActiveAgentContextEvictionCarriesOnlyActualAuthority(t *testing.T) {
 		caseSensitiveEvicted.caseInsensitiveUncertain {
 		t.Fatalf("case-sensitive eviction = %#v", caseSensitiveEvicted)
 	}
+	unrelated := cache.snapshot("claudecode", "unrelated-session")
+	if unrelated.uncertain || unrelated.caseInsensitiveUncertain {
+		t.Fatalf("unrelated session inherited eviction uncertainty: %#v", unrelated)
+	}
+	cache.end("claudecode", caseSensitiveSession)
+	ended := cache.snapshot("claudecode", caseSensitiveSession)
+	if ended.uncertain || ended.caseInsensitiveUncertain {
+		t.Fatalf("SessionEnd retained evicted uncertainty: %#v", ended)
+	}
 
 	cache.begin("claudecode", "session-new-3")
 	caseInsensitiveEvicted := cache.snapshot("claudecode", caseInsensitiveSession)
@@ -741,12 +750,65 @@ func TestActiveAgentContextIsBoundedAndRetainsIdleSessions(t *testing.T) {
 	}
 	cache.mu.Lock()
 	count := len(cache.sessions)
+	evictionCount := len(cache.evictions)
 	cache.mu.Unlock()
 	if count != maxActiveAgentContextSessions {
 		t.Fatalf("session cache size = %d, want %d", count, maxActiveAgentContextSessions)
 	}
+	if evictionCount != 1 {
+		t.Fatalf("session eviction index size = %d, want 1", evictionCount)
+	}
 	if got := cache.snapshot("claudecode", "session-000"); len(got.files) != 0 || !got.uncertain {
 		t.Fatalf("evicted session loss was not explicit: %#v", got)
+	}
+}
+
+func TestActiveAgentContextEvictionIndexIsBoundedAndFailsClosedOnOverflow(t *testing.T) {
+	cache := activeAgentContextCache{}
+	for index := 0; index < maxActiveAgentContextSessions; index++ {
+		cache.seedLoadedFile(
+			activeAgentContextKey{
+				connector: "claudecode",
+				sessionID: fmt.Sprintf("session-%03d", index),
+			},
+			fmt.Sprintf("/repo/session-%03d/AGENTS.md", index),
+			false,
+			time.Unix(int64(index+1), 0),
+		)
+	}
+	for index := 0; index < maxActiveAgentContextEvictions; index++ {
+		cache.seedLoadedFile(
+			activeAgentContextKey{
+				connector: "claudecode",
+				sessionID: fmt.Sprintf("replacement-%03d", index),
+			},
+			fmt.Sprintf("/repo/replacement-%03d/AGENTS.md", index),
+			index == 0,
+			time.Unix(int64(maxActiveAgentContextSessions+index+1), 0),
+		)
+	}
+	cache.seedLoadedFile(
+		activeAgentContextKey{connector: "claudecode", sessionID: "overflow"},
+		"/repo/overflow/AGENTS.md",
+		false,
+		time.Unix(2*maxActiveAgentContextSessions+1, 0),
+	)
+
+	cache.mu.Lock()
+	sessionCount := len(cache.sessions)
+	evictionCount := len(cache.evictions)
+	cache.mu.Unlock()
+	if sessionCount != maxActiveAgentContextSessions ||
+		evictionCount != maxActiveAgentContextEvictions {
+		t.Fatalf(
+			"bounded indexes = sessions:%d evictions:%d, want %d each",
+			sessionCount,
+			evictionCount,
+			maxActiveAgentContextSessions,
+		)
+	}
+	if got := cache.snapshot("claudecode", "missing-after-overflow"); !got.uncertain || !got.caseInsensitiveUncertain {
+		t.Fatalf("eviction-index overflow did not preserve lost authority: %#v", got)
 	}
 }
 
@@ -839,6 +901,44 @@ func TestClaudeCodeActiveAgentContextCapacityLossUsesProvenCaseSemantics(t *test
 	}
 
 	ctx := authenticatedClaudeCodeTestContext()
+	unrelated := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PreToolUse",
+		"unrelated-session",
+		nil,
+		"Write",
+		mutation,
+	)
+	if unrelated.facts.ActiveAgentFilesUncertain ||
+		unrelated.facts.ActiveAgentFilesCaseInsensitiveUncertain {
+		t.Fatalf("unrelated session inherited capacity loss: %+v", unrelated.facts)
+	}
+	if finding := findingWithID(unrelated.findings, "COG-AGENTS-MD"); finding != nil {
+		t.Fatalf("unrelated session inherited active-file enforcement: %+v", unrelated.findings)
+	}
+
+	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "SessionEnd",
+		SessionID:     "session-000",
+	})
+	ended := evaluateClaudeCodeToolFacts(
+		t,
+		api,
+		"PreToolUse",
+		"session-000",
+		nil,
+		"Write",
+		mutation,
+	)
+	if ended.facts.ActiveAgentFilesUncertain ||
+		ended.facts.ActiveAgentFilesCaseInsensitiveUncertain {
+		t.Fatalf("SessionEnd retained evicted capacity loss: %+v", ended.facts)
+	}
+	if finding := findingWithID(ended.findings, "COG-AGENTS-MD"); finding != nil {
+		t.Fatalf("SessionEnd retained active-file enforcement: %+v", ended.findings)
+	}
+
 	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
 		HookEventName: "SessionStart",
 		SessionID:     "session-000",

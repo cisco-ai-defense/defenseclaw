@@ -28,10 +28,11 @@ import (
 )
 
 const (
-	maxActiveAgentContextFiles    = 32
-	maxActiveAgentContextSessions = 256
-	maxActiveAgentContextPathSize = 4 << 10
-	maxActiveAgentSessionIDSize   = 512
+	maxActiveAgentContextFiles     = 32
+	maxActiveAgentContextSessions  = 256
+	maxActiveAgentContextEvictions = maxActiveAgentContextSessions
+	maxActiveAgentContextPathSize  = 4 << 10
+	maxActiveAgentSessionIDSize    = 512
 )
 
 type authenticatedHookConnectorContextKey struct{}
@@ -75,12 +76,19 @@ type activeAgentContextSnapshot struct {
 	uncertain                bool
 }
 
+type activeAgentContextEviction struct {
+	caseInsensitiveUncertain bool
+}
+
 // activeAgentContextCache is an APIServer-owned, process-local authority
 // cache. Its zero value is ready for use so tests and small server fixtures
 // that construct APIServer directly retain the production behavior.
 type activeAgentContextCache struct {
-	mu                       sync.Mutex
-	sessions                 map[activeAgentContextKey]activeAgentContextSession
+	mu        sync.Mutex
+	sessions  map[activeAgentContextKey]activeAgentContextSession
+	evictions map[activeAgentContextKey]activeAgentContextEviction
+	// These flags are a fail-closed fallback only if the independently bounded
+	// eviction index itself saturates.
 	uncertain                bool
 	caseInsensitiveUncertain bool
 	now                      func() time.Time
@@ -248,16 +256,50 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 		evicted := cache.sessions[oldestKey]
 		delete(cache.sessions, oldestKey)
 		if evicted.uncertain || len(evicted.files) != 0 {
-			// A session with active or already-incomplete authority may still be
-			// live. Preserve that loss globally, while an authenticated
-			// known-empty session can be discarded without poisoning later lookups.
-			cache.uncertain = true
-			if evicted.caseInsensitiveUncertain ||
-				len(evicted.caseInsensitiveFiles) != 0 {
-				cache.caseInsensitiveUncertain = true
-			}
+			cache.rememberEvictionLocked(oldestKey, evicted)
 		}
 	}
+}
+
+func (cache *activeAgentContextCache) rememberEvictionLocked(
+	key activeAgentContextKey,
+	session activeAgentContextSession,
+) {
+	caseInsensitive := session.caseInsensitiveUncertain ||
+		len(session.caseInsensitiveFiles) != 0
+	if eviction, exists := cache.evictions[key]; exists {
+		eviction.caseInsensitiveUncertain =
+			eviction.caseInsensitiveUncertain || caseInsensitive
+		cache.evictions[key] = eviction
+		return
+	}
+	if len(cache.evictions) < maxActiveAgentContextEvictions {
+		if cache.evictions == nil {
+			cache.evictions = make(
+				map[activeAgentContextKey]activeAgentContextEviction,
+			)
+		}
+		cache.evictions[key] = activeAgentContextEviction{
+			caseInsensitiveUncertain: caseInsensitive,
+		}
+		return
+	}
+	// Never drop authority loss when both bounded indexes saturate. This rare
+	// fallback retains the previous fail-closed behavior without making the
+	// ordinary single-cache-eviction path process-wide.
+	cache.uncertain = true
+	cache.caseInsensitiveUncertain =
+		cache.caseInsensitiveUncertain || caseInsensitive
+}
+
+func (cache *activeAgentContextCache) consumeEvictionLocked(
+	key activeAgentContextKey,
+) (bool, bool) {
+	if eviction, exists := cache.evictions[key]; exists {
+		delete(cache.evictions, key)
+		return true, eviction.caseInsensitiveUncertain
+	}
+	return cache.uncertain, cache.caseInsensitiveUncertain
 }
 
 func activeAgentContextKeyLess(left, right activeAgentContextKey) bool {
@@ -298,10 +340,12 @@ func (cache *activeAgentContextCache) markUncertain(
 	}
 	session, exists := cache.sessions[key]
 	if !exists {
+		uncertain, caseInsensitiveUncertain :=
+			cache.consumeEvictionLocked(key)
 		cache.makeRoomLocked()
 		session = activeAgentContextSession{
-			caseInsensitiveUncertain: cache.caseInsensitiveUncertain,
-			uncertain:                cache.uncertain,
+			caseInsensitiveUncertain: caseInsensitiveUncertain,
+			uncertain:                uncertain,
 		}
 	}
 	// The authenticated event identifies an instruction-file candidate, but
@@ -325,10 +369,12 @@ func (cache *activeAgentContextCache) seedLoadedFile(
 	}
 	session, exists := cache.sessions[key]
 	if !exists {
+		uncertain, caseInsensitiveUncertain :=
+			cache.consumeEvictionLocked(key)
 		cache.makeRoomLocked()
 		session = activeAgentContextSession{
-			caseInsensitiveUncertain: cache.caseInsensitiveUncertain,
-			uncertain:                cache.uncertain,
+			caseInsensitiveUncertain: caseInsensitiveUncertain,
+			uncertain:                uncertain,
 			updatedAt:                now,
 		}
 	}
@@ -385,6 +431,7 @@ func (cache *activeAgentContextCache) begin(connectorName, sessionID string) {
 	if cache.sessions == nil {
 		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
 	}
+	delete(cache.evictions, key)
 	if _, exists := cache.sessions[key]; !exists {
 		cache.makeRoomLocked()
 	}
@@ -400,6 +447,7 @@ func (cache *activeAgentContextCache) end(connectorName, sessionID string) {
 	}
 	cache.mu.Lock()
 	delete(cache.sessions, key)
+	delete(cache.evictions, key)
 	cache.mu.Unlock()
 }
 
@@ -413,6 +461,12 @@ func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) 
 	defer cache.mu.Unlock()
 	session, ok := cache.sessions[key]
 	if !ok {
+		if eviction, exists := cache.evictions[key]; exists {
+			return activeAgentContextSnapshot{
+				caseInsensitiveUncertain: eviction.caseInsensitiveUncertain,
+				uncertain:                true,
+			}
+		}
 		return activeAgentContextSnapshot{
 			caseInsensitiveUncertain: cache.caseInsensitiveUncertain,
 			uncertain:                cache.uncertain,
