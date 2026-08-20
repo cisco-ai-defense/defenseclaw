@@ -199,7 +199,7 @@ type SidecarHealth struct {
 	// least once — a nil pointer omits the "enumerator" block from
 	// the snapshot, which is the correct behaviour for every
 	// deployment mode other than managed_enterprise on Windows.
-	enumerator                            *SubsystemHealth
+	enumerator *SubsystemHealth
 
 	// configuration is the collapsed daemon+guardian state (spec 003).
 	// Nil until SetDaemonConfigLoaded is called at least once — a

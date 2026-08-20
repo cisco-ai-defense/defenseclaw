@@ -35,7 +35,8 @@ import (
 // directory.
 //
 // See MS docs:
-//   https://learn.microsoft.com/en-us/windows/win32/win7appqual/user-profile-service---policy
+//
+//	https://learn.microsoft.com/en-us/windows/win32/win7appqual/user-profile-service---policy
 //
 // The macOS analogue is `dscl . -list /Users UniqueID`; the shape is
 // identical (one row per profile, keyed on SID vs. uid). Documented
