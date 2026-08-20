@@ -3116,6 +3116,19 @@ function Set-DefenseClawManagedServices {
     Assert-DefenseClawServiceImagePath `
         -Name $GuardianServiceName `
         -ExpectedImage $guardianImage
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfV): authenticate an
+    # existing enumerator BEFORE reconfiguring it, mirroring the
+    # ownership check the uninstall path already does. Without this,
+    # a foreign process that pre-registered a service with the exact
+    # DefenseClawHookEnumerator name would have its ImagePath +
+    # ObjectName silently rewritten. Assert-DefenseClawOwnedService-
+    # OrAbsent refuses foreign ownership; a matching or absent
+    # service proceeds through the create-or-config branch below.
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $enumeratorServiceName `
+        -ExpectedGatewayPath $GatewayPath `
+        -ExpectedManifestPath $ManifestPath `
+        -Enumerator
     if (Test-DefenseClawServiceExists -Name $enumeratorServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'config', $enumeratorServiceName,
@@ -3441,6 +3454,16 @@ function Get-DefenseClawTransactionServiceStates {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName
     )
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): derive the enumerator's
+    # service name from the guardian's — same shape as the
+    # transaction-open snapshot builder above. Transaction snapshots
+    # written by pre-spec-005 psm1 versions have only 2 services;
+    # loading such a snapshot on a post-spec-005 host is expected
+    # during an upgrade window, so the "missing enumerator state"
+    # check below is a WARN (rather than throw) that treats the
+    # enumerator as absent. Post-upgrade transactions always carry
+    # all 3.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     $states = @{}
     foreach ($service in @($Services)) {
         $nameProperty = $service.PSObject.Properties['name']
@@ -3453,7 +3476,8 @@ function Get-DefenseClawTransactionServiceStates {
         $name = [string]$nameProperty.Value
         $canonicalName = @(
             $GatewayServiceName,
-            $GuardianServiceName
+            $GuardianServiceName,
+            $enumeratorServiceName
         ) | Microsoft.PowerShell.Core\Where-Object {
             [string]::Equals(
                 $_,
@@ -3480,6 +3504,26 @@ function Get-DefenseClawTransactionServiceStates {
             throw "transaction is missing service state for $name"
         }
     }
+    # Enumerator is spec-005-new. A pre-spec-005 transaction snapshot
+    # will not carry it; synthesise an "absent" entry so callers
+    # (Restore-DefenseClawTransactionServiceStartModes) can iterate
+    # all three service names uniformly. Post-spec-005 snapshots
+    # always contain the entry, and Get-DefenseClawTransactionService-
+    # StartMode's absence guard already rejects a running-but-absent
+    # combination.
+    if (-not $states.ContainsKey($enumeratorServiceName)) {
+        $states[$enumeratorServiceName] = [pscustomobject]@{
+            service = [pscustomobject]@{
+                name = $enumeratorServiceName
+                existed = $false
+                running = $false
+                start_mode = 0
+            }
+            existed = $false
+            running = $false
+            start_mode = 0
+        }
+    }
     return $states
 }
 
@@ -3493,12 +3537,19 @@ function Restore-DefenseClawTransactionServiceStartModes {
         -Services $Services `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
-    # Activate the guardian's recorded boot policy first. A power loss during
-    # this sequence can therefore never leave the gateway automatic while the
-    # guardian is still demand-start because of this transaction.
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName)) {
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): restore the enumerator's
+    # recorded start mode too, so a rollback returns all three
+    # services to their pre-transaction posture. Order: guardian →
+    # gateway (existing, preserves the boot-safety invariant that
+    # gateway cannot be automatic while guardian is demand-start)
+    # → enumerator LAST because enumerator's readiness depends on
+    # gateway + guardian being back to their target boot mode; a
+    # crash mid-restore leaves enumerator disabled which is a safe
+    # posture (no targets.yaml writes until the next transaction).
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    foreach ($name in @($GuardianServiceName, $GatewayServiceName, $enumeratorServiceName)) {
         $state = $states[$name]
-        if ([bool]$state.existed) {
+        if ($null -ne $state -and [bool]$state.existed) {
             Set-DefenseClawServiceStartMode `
                 -Name $name `
                 -StartMode ([int]$state.start_mode)
@@ -4355,8 +4406,18 @@ function New-DefenseClawTransaction {
         -Root $Layout.StateRoot `
         -Label 'transaction directory'
     New-DefenseClawDirectory -Path $directory
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): transaction snapshots
+    # must record all THREE managed services. The enumerator's
+    # start-mode + running state travel with gateway + guardian so
+    # rollback restores them together — otherwise a failed transaction
+    # could leave the enumerator disabled while gateway + guardian are
+    # restored to auto-start, and new user profiles would stop getting
+    # picked up. Derive the enumerator's service name from the guardian's
+    # via the same helper Set-DefenseClawManagedServices uses so a
+    # certification-run cross-check is enforced.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     $services = [Collections.Generic.List[object]]::new()
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         $service = Microsoft.PowerShell.Management\Get-Service `
             -Name $name `
             -ErrorAction SilentlyContinue
@@ -4409,7 +4470,12 @@ function New-DefenseClawTransaction {
         # Disabled start neutralizes boot activation and any failure restart
         # already queued by SCM. Gateway is disabled first so a crash cannot
         # leave it boot-active while guardian was demoted by this transaction.
-        foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+        # Spec 005 D1 (CR PRRT_kwDORuAK-s6atyfZ): disable all THREE
+        # services during the quiesce phase. Enumerator disabled last
+        # so its final cycle (already in flight) can complete and drop
+        # a coherent targets.yaml before the transaction reads it as
+        # a preimage.
+        foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
             $service = $services |
                 Microsoft.PowerShell.Core\Where-Object {
                     [string]::Equals(
@@ -4424,9 +4490,12 @@ function New-DefenseClawTransaction {
             }
         }
 
-        # Quiesce the only LocalSystem writer before reading any shared or
+        # Quiesce every LocalSystem writer before reading any shared or
         # managed file preimage. Stop-Service waits for process exit, so an
         # in-flight guardian reconciliation cannot straddle the snapshot.
+        # Enumerator first — it's the targets.yaml writer, stopping it
+        # first freezes the file the guardian's final reconcile pass reads.
+        Stop-DefenseClawService -Name $enumeratorServiceName
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
         $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
