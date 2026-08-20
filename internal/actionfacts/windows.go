@@ -1542,6 +1542,7 @@ func windowsClassifyPowerShell(
 		return
 	case "get-content", "gc", "cat", "type":
 		filesystem, environment := windowsAddPowerShellPaths(
+			"get-content",
 			command.ID,
 			PathAccessRead,
 			args,
@@ -1564,9 +1565,17 @@ func windowsClassifyPowerShell(
 		windowsAddPowerShellPrimaryPath(command.ID, PathAccessAppend, args, true, builder)
 	case "remove-item", "ri", "rm", "del", "erase", "rmdir", "rd":
 		windowsAddOperation(command, OperationDelete)
-		windowsAddPowerShellPaths(command.ID, PathAccessDelete, args, false, builder)
+		windowsAddPowerShellPaths(
+			"remove-item",
+			command.ID,
+			PathAccessDelete,
+			args,
+			false,
+			builder,
+		)
 	case "get-childitem", "gci", "ls", "dir":
 		filesystem, environment := windowsAddPowerShellPaths(
+			"get-childitem",
 			command.ID,
 			PathAccessList,
 			args,
@@ -1605,7 +1614,14 @@ func windowsClassifyPowerShell(
 		windowsAddPowerShellSourceDestination(command.ID, args, true, builder)
 	case "select-string":
 		windowsAddOperation(command, OperationSearch)
-		windowsAddPowerShellPaths(command.ID, PathAccessRead, args, false, builder)
+		windowsAddPowerShellPaths(
+			"select-string",
+			command.ID,
+			PathAccessRead,
+			args,
+			false,
+			builder,
+		)
 	case "invoke-webrequest", "iwr", "invoke-restmethod", "irm",
 		"curl", "curl.exe", "wget", "wget.exe":
 		windowsClassifyWeb(command, args, true, builder)
@@ -3391,6 +3407,7 @@ func windowsValidateCMDDeleteOptions(
 }
 
 func windowsAddPowerShellPaths(
+	program string,
 	commandID int64,
 	access PathAccess,
 	args []windowsWord,
@@ -3412,6 +3429,10 @@ func windowsAddPowerShellPaths(
 	found := false
 	filesystemFound := false
 	environmentFound := false
+	var seenRecursiveForce map[string]struct{}
+	if program == "remove-item" {
+		seenRecursiveForce = make(map[string]struct{})
+	}
 	addOperand := func(value string) {
 		if windowsEnvironmentProviderPath(value) {
 			if allowEnvironment {
@@ -3428,8 +3449,19 @@ func windowsAddPowerShellPaths(
 	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg.quote == QuoteNone && windowsKnownRecursiveForceSwitchValue(arg.value) {
-			continue
+		if arg.quote == QuoteNone {
+			if name, known := windowsKnownRecursiveForceSwitch(
+				program,
+				arg.value,
+			); known {
+				if program == "remove-item" {
+					if _, duplicate := seenRecursiveForce[name]; duplicate {
+						builder.out.markPartial(IssueUnknownOperandGrammar)
+					}
+					seenRecursiveForce[name] = struct{}{}
+				}
+				continue
+			}
 		}
 		if arg.expands {
 			builder.out.markPartial(IssueDynamicWord)
@@ -3437,6 +3469,9 @@ func windowsAddPowerShellPaths(
 		}
 		lower := strings.ToLower(arg.value)
 		unquoted := arg.quote == QuoteNone
+		if unquoted {
+			lower = canonicalPowerShellPathMutatorParameter(program, lower)
+		}
 		if unquoted && pathParams[lower] {
 			if i+1 >= len(args) || args[i+1].expands {
 				builder.out.markPartial(IssueUnknownOperandGrammar)
@@ -3470,16 +3505,20 @@ func windowsAddPowerShellPaths(
 	return filesystemFound, environmentFound
 }
 
-func windowsKnownRecursiveForceSwitchValue(value string) bool {
+func windowsKnownRecursiveForceSwitch(program, value string) (string, bool) {
 	name, switchValue, joined := strings.Cut(strings.ToLower(value), ":")
-	if !joined || name != "-force" && name != "-recurse" {
-		return false
+	name = canonicalPowerShellPathMutatorParameter(program, name)
+	if name != "-force" && name != "-recurse" {
+		return "", false
+	}
+	if !joined {
+		return name, true
 	}
 	switch switchValue {
 	case "$true", "true", "1", "$false", "false", "0":
-		return true
+		return name, true
 	default:
-		return false
+		return "", false
 	}
 }
 

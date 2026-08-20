@@ -1014,6 +1014,25 @@ func powerShellParameter(arg string) (string, string, bool) {
 	return strings.ToLower(key), value, joined
 }
 
+// canonicalPowerShellPathMutatorParameter owns the narrow set of reviewed
+// PowerShell parameter abbreviations shared by the raw and structured
+// Remove-Item parsers. Do not infer arbitrary prefixes here: PowerShell's
+// abbreviation binding is cmdlet-specific, and accepting a prefix that is
+// ambiguous with an unmodeled parameter would manufacture typed proof.
+func canonicalPowerShellPathMutatorParameter(program, key string) string {
+	if program != "remove-item" {
+		return key
+	}
+	switch key {
+	case "-rec":
+		return "-recurse"
+	case "-fo":
+		return "-force"
+	default:
+		return key
+	}
+}
+
 type structuredPowerShellControlState struct {
 	whatIfSeen  bool
 	confirmSeen bool
@@ -1836,6 +1855,7 @@ func classifyStructuredPowerShellPathMutator(
 			continue
 		}
 		key, joinedValue, joined := powerShellParameter(arg)
+		key = canonicalPowerShellPathMutatorParameter(program, key)
 		consume := func() (string, bool) {
 			if _, duplicate := seen[key]; duplicate {
 				return "", false

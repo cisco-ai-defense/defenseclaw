@@ -4112,6 +4112,107 @@ func TestPowerShellRecursiveForceJoinedBooleanValues(t *testing.T) {
 	}
 }
 
+func TestPowerShellRemoveItemReviewedSwitchAbbreviations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		source string
+		argv   []string
+	}{
+		{
+			name:   "separate switches",
+			source: `Remove-Item C:\ -rec -fo`,
+			argv:   []string{"Remove-Item", `C:\`, "-rec", "-fo"},
+		},
+		{
+			name:   "joined true switches",
+			source: `ri -rec:$true -fo:true C:\`,
+			argv:   []string{"ri", "-rec:$true", "-fo:true", `C:\`},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			out := parsePowerShell(test.source, 1, 0)
+			classifyOutput(&out)
+			if out.status != StatusComplete || len(out.commands) != 1 ||
+				!commandHasOperation(out.commands[0], OperationDelete) ||
+				!containsPath(out.paths, pathExpectation{
+					commandID: 1,
+					access:    PathAccessDelete,
+					value:     `C:\`,
+				}) {
+				t.Fatalf("raw abbreviation parse was not authoritative: %#v", out)
+			}
+
+			facts := Analyze(Input{
+				Tool:        "powershell",
+				Argv:        test.argv,
+				DialectHint: DialectPowerShell,
+			})
+			if !facts.Authoritative() || !facts.EnforcementEligible() ||
+				len(facts.Commands) != 1 ||
+				!commandHasOperation(facts.Commands[0], OperationDelete) ||
+				len(facts.Paths) != 1 ||
+				facts.Paths[0].Access != PathAccessDelete ||
+				facts.Paths[0].Normalized != `C:/` {
+				t.Fatalf("structured abbreviation parse was not authoritative: %#v", facts)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		source string
+		argv   []string
+	}{
+		{
+			name:   "unreviewed recurse prefix",
+			source: `Remove-Item C:\ -re -fo`,
+			argv:   []string{"Remove-Item", `C:\`, "-re", "-fo"},
+		},
+		{
+			name:   "ambiguous force prefix",
+			source: `Remove-Item C:\ -rec -f`,
+			argv:   []string{"Remove-Item", `C:\`, "-rec", "-f"},
+		},
+		{
+			name:   "duplicate canonical recurse switch",
+			source: `Remove-Item C:\ -rec -Recurse -fo`,
+			argv: []string{
+				"Remove-Item", `C:\`, "-rec", "-Recurse", "-fo",
+			},
+		},
+		{
+			name:   "duplicate canonical force switch",
+			source: `Remove-Item C:\ -rec -fo -Force`,
+			argv: []string{
+				"Remove-Item", `C:\`, "-rec", "-fo", "-Force",
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			out := parsePowerShell(test.source, 1, 0)
+			classifyOutput(&out)
+			if out.status != StatusPartial {
+				t.Fatalf("unreviewed raw prefix was authoritative: %#v", out)
+			}
+			facts := Analyze(Input{
+				Tool:        "powershell",
+				Argv:        test.argv,
+				DialectHint: DialectPowerShell,
+			})
+			if facts.Authoritative() || facts.EnforcementEligible() {
+				t.Fatalf("unreviewed structured prefix was authoritative: %#v", facts)
+			}
+		})
+	}
+}
+
 func TestPowerShellStartProcessArgumentListIsNonAuthoritative(t *testing.T) {
 	t.Parallel()
 

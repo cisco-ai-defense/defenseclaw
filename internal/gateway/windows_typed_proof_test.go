@@ -81,6 +81,15 @@ func TestWindowsHighRiskOwnersRequireCompleteCriticalTypedFacts(t *testing.T) {
 				Command: `ri -fo C:\ -rec`,
 			},
 			ruleID: "CMD-WIN-REMOVE-ITEM-RF",
+			want:   true,
+		},
+		{
+			name: "powershell unreviewed recurse prefix",
+			input: actionfacts.Input{
+				Tool:    "PowerShell",
+				Command: `Remove-Item C:\ -re -fo`,
+			},
+			ruleID: "CMD-WIN-REMOVE-ITEM-RF",
 			want:   false,
 		},
 		{

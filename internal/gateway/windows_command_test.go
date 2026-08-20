@@ -184,6 +184,10 @@ func TestWindowsCommandHookParityObserveAndAction(t *testing.T) {
 		enforce bool
 	}{
 		{`Remove-Item -Force C:\ -Recurse`, true},
+		{`Remove-Item C:\ -rec -fo`, true},
+		{`Remove-Item C:\ -rec:$true -fo:true`, true},
+		{`Remove-Item C:\ -re -fo`, false},
+		{`Remove-Item C:\ -rec -Recurse -fo`, false},
 		{`powershell.exe -NoProfile -Command "REMOVE-ITEM C:\ -fOrCe -rEcUrSe"`, true},
 		{`pwsh -c 'ri -fo C:\ -rec'`, false},
 		{`Remove-Item C:\ -Recurse:$true -Force:$true`, true},
@@ -246,6 +250,7 @@ func TestWindowsCommandHookParityObserveAndAction(t *testing.T) {
 			`Remove-Item -Force C:\Temp\fixture.txt`,
 			`Remove-Item C:\Temp\fixture -Recurse`,
 			`Remove-Item C:\Temp\fixture -Recurse:$false -Force:$true`,
+			`Remove-Item C:\ -rec:$false -fo:$true`,
 			`Get-ChildItem -Recurse C:\Temp\fixture`,
 			`rd /S C:/Temp/fixture /Q`,
 			`cmd.exe /c rmdir /s C:\Temp\fixture`,
