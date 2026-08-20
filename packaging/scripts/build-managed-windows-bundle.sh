@@ -361,8 +361,16 @@ echo "==> resolving trimmed import graph (go list -deps)"
 # resolve. Include both the outer Setup command AND the emitter — the
 # emitter builds during assemble.sh stage 0 via `go run`, so its
 # dependency closure has to ship inside the kit too.
+#
+# GOOS=windows GOARCH=amd64 is load-bearing: without it, `go list`
+# runs with the host GOOS (macOS/Linux in local --allow-unsigned mode)
+# and its build constraints skip every //go:build windows file. That
+# hides the imports platform_windows.go (managed, processutil,
+# winpath) declares, and the kit's trimmed source tree ends up
+# missing them. AVC's Windows runners already resolve with the right
+# GOOS by default; this fixes the local dev loop.
 TRIM_PKGS=$(
-  cd "${REPO_ROOT}" && go list -deps \
+  cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 go list -deps \
     ./cmd/defenseclaw-enterprise-setup/... \
     ./cmd/windows-repro-manifest/... \
   | grep -E '^github\.com/defenseclaw/defenseclaw($|/)' \
