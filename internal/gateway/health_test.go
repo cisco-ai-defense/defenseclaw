@@ -850,3 +850,96 @@ func stringContains(value, fragment string) bool {
 	}
 	return false
 }
+
+// TestSetEnumeratorPublishesSubsystem pins the wire contract spec 005
+// Workstream D introduces: SidecarHealth.Enumerator is nil until
+// SetEnumerator is called, then holds the last-published state +
+// LastError + Details verbatim. Snapshot() must surface the field
+// in the JSON payload so a Cisco Secure Client IPC consumer can
+// render "enumerator error: <reason>" alongside the gateway +
+// guardian tiles.
+func TestSetEnumeratorPublishesSubsystem(t *testing.T) {
+	h := NewSidecarHealth()
+
+	// Pre-call: enumerator absent from the snapshot (nil pointer
+	// omits the field in JSON via omitempty).
+	before := h.Snapshot()
+	if before.Enumerator != nil {
+		t.Fatalf("Enumerator should be nil before SetEnumerator; got %+v", before.Enumerator)
+	}
+
+	h.SetEnumerator(StateRunning, "", map[string]interface{}{"cycle_count": int64(3)})
+
+	after := h.Snapshot()
+	if after.Enumerator == nil {
+		t.Fatal("Enumerator should be non-nil after SetEnumerator")
+	}
+	if after.Enumerator.State != StateRunning {
+		t.Fatalf("Enumerator.State = %v, want %v", after.Enumerator.State, StateRunning)
+	}
+	if after.Enumerator.LastError != "" {
+		t.Fatalf("Enumerator.LastError = %q, want empty", after.Enumerator.LastError)
+	}
+	if v, ok := after.Enumerator.Details["cycle_count"].(int64); !ok || v != 3 {
+		t.Fatalf("Enumerator.Details[cycle_count] = %v, want int64(3)", after.Enumerator.Details["cycle_count"])
+	}
+
+	// Second call flips the state and clears LastError back to empty.
+	h.SetEnumerator(StateError, "walk profiles: registry unreadable", nil)
+	after2 := h.Snapshot()
+	if after2.Enumerator.State != StateError {
+		t.Fatalf("after second SetEnumerator: State = %v, want %v", after2.Enumerator.State, StateError)
+	}
+	if after2.Enumerator.LastError != "walk profiles: registry unreadable" {
+		t.Fatalf("LastError not surfaced: %q", after2.Enumerator.LastError)
+	}
+}
+
+// TestSetEnumeratorNilReceiverIsSafe asserts SetEnumerator can be
+// called against a nil *SidecarHealth without panicking. The
+// enumerator CLI subcommand may run standalone (`--once` from an
+// installer shell-out) with no sidecar wired; the CLI passes a
+// nil receiver in that case and expects a no-op.
+func TestSetEnumeratorNilReceiverIsSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("SetEnumerator on nil receiver panicked: %v", r)
+		}
+	}()
+	var h *SidecarHealth
+	h.SetEnumerator(StateStarting, "", nil)
+}
+
+// TestSetEnumeratorNotifiesSubscribers asserts the pub/sub wake-up
+// invariant SetEnumerator inherits from the pattern SetManaged /
+// SetGuardrail / etc. use — a change to the enumerator's state
+// wakes any registered subscriber exactly once.
+func TestSetEnumeratorNotifiesSubscribers(t *testing.T) {
+	h := NewSidecarHealth()
+	ch, cancel := h.Subscribe()
+	defer cancel()
+
+	h.SetEnumerator(StateStarting, "", nil)
+
+	select {
+	case <-ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("SetEnumerator did not wake subscriber within 500ms")
+	}
+}
+
+// TestSetEnumeratorJSONShape asserts the field appears in the
+// wire-level JSON payload as `enumerator` (lower-case, matches the
+// json tag) — a rename here would break every downstream dashboard
+// or CI check keyed on the field.
+func TestSetEnumeratorJSONShape(t *testing.T) {
+	h := NewSidecarHealth()
+	h.SetEnumerator(StateRunning, "", nil)
+	raw, err := json.Marshal(h.Snapshot())
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if !stringContains(string(raw), `"enumerator":`) {
+		t.Fatalf("snapshot JSON missing `enumerator` key:\n%s", string(raw))
+	}
+}

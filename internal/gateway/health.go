@@ -156,6 +156,16 @@ type HealthSnapshot struct {
 	// serves the DefenseClaw ↔ AVC contract. Present only when the
 	// server has been started (managed_enterprise or managed.enabled).
 	Managed *SubsystemHealth `json:"managed,omitempty"`
+	// Enumerator reports the DefenseClawHookEnumerator SCM service's
+	// interval-loop state (spec 005 Workstream D). Present only on
+	// Windows managed_enterprise where the enumerator service runs.
+	// The three-state signal (`starting` / `running` / `error`) lets
+	// operators see whether new user profiles will actually get
+	// picked up on the next tick, distinct from the guardian's own
+	// health (guardian may be READY while enumerator is ERROR — the
+	// existing on-disk targets.yaml still drives reconciles, but new
+	// users won't appear until the enumerator recovers).
+	Enumerator *SubsystemHealth `json:"enumerator,omitempty"`
 	// Connector is the primary/active connector, retained for back-compat
 	// with single-connector clients. Connectors lists every active
 	// connector with its own live counters (multi-connector view).
@@ -184,6 +194,12 @@ type SidecarHealth struct {
 	observabilityV8EventHistoryGeneration uint64
 	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
 	managed                               *SubsystemHealth
+	// enumerator tracks the DefenseClawHookEnumerator SCM service
+	// (spec 005 Workstream D). Nil until SetEnumerator is called at
+	// least once — a nil pointer omits the "enumerator" block from
+	// the snapshot, which is the correct behaviour for every
+	// deployment mode other than managed_enterprise on Windows.
+	enumerator                            *SubsystemHealth
 
 	// configuration is the collapsed daemon+guardian state (spec 003).
 	// Nil until SetDaemonConfigLoaded is called at least once — a
@@ -925,6 +941,41 @@ func (h *SidecarHealth) SetManaged(state SubsystemState, lastErr string, details
 	h.notifySubscribers()
 }
 
+// SetEnumerator records the current state of the
+// DefenseClawHookEnumerator SCM service's interval loop (spec 005
+// Workstream D). Called from the enumerator CLI subcommand as it
+// moves through:
+//
+//   - Starting: service just booted, initial-cycle-delay running.
+//   - Running:  first successful cycle emitted; subsequent ticks
+//     replace this with the same Running state so the LastError
+//     field clears.
+//   - Error:    a cycle failed (registry unreadable, atomic-replace
+//     failed, YAML marshal error). LastError carries the specific
+//     reason. The interval loop keeps ticking; the state flips back
+//     to Running on the next successful cycle.
+//
+// Nil-safe: the enumerator subcommand may run standalone
+// (`--once` from an installer shell-out) with no SidecarHealth
+// wired; in that case the caller passes a nil *SidecarHealth
+// receiver and this method is a no-op via the Go zero-value
+// method-call semantics (receiver is a pointer, so a nil check up
+// front is enough).
+func (h *SidecarHealth) SetEnumerator(state SubsystemState, lastErr string, details map[string]interface{}) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.enumerator = &SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
 // Subscribe returns a channel that receives a non-blocking notification
 // (a single struct{} value, buffered depth 1) after every Set* call.
 // Consumers coalesce multiple rapid changes naturally: the channel
@@ -1129,6 +1180,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		ApplicationProtection: h.applicationProtection,
 		Sandbox:               h.sandbox,
 		Managed:               h.managed,
+		Enumerator:            h.enumerator,
 	}
 	// Deep-copy the configuration pointer under the read lock so a
 	// caller mutating the returned snapshot cannot race with a Set*
