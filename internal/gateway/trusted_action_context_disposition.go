@@ -473,6 +473,9 @@ func trustedActionContentRuleMatchesStaticUpload(
 	return trustedActionContentRuleMatchesCandidates(
 		rule,
 		actionfacts.StaticCurlUploadPayloads(command),
+	) || trustedActionContentRuleMatchesCandidates(
+		rule,
+		actionfacts.StaticWgetUploadPayloads(command),
 	)
 }
 

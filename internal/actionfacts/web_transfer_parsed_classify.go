@@ -95,6 +95,58 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 	return payloads
 }
 
+// StaticWgetUploadPayloads returns the final literal inline request body that
+// a complete wget command sends. File-backed bodies and control modes are
+// deliberately excluded because their contents or execution are not proved by
+// the argv value itself.
+func StaticWgetUploadPayloads(command CommandFact) []string {
+	if !command.ArgvComplete || !isWgetProgram(command.Program) ||
+		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		len(command.Arguments) != len(command.Argv) {
+		return nil
+	}
+	parsed := parseWgetArgv(command.Argv)
+	if !parsed.Complete || !parsed.RequestBodyValid || parsed.Preview ||
+		parsed.Background || parsed.ConfigIndirect || parsed.InputFileSet ||
+		parsed.Spider || len(parsed.Targets) == 0 {
+		return nil
+	}
+
+	optionName := ""
+	payload := ""
+	switch {
+	case parsed.PostDataSet:
+		optionName = "--post-data"
+		payload = parsed.PostData
+	case parsed.BodyDataSet:
+		optionName = "--body-data"
+		payload = parsed.BodyData
+	default:
+		return nil
+	}
+	if payload == "" {
+		return nil
+	}
+
+	for index := len(parsed.Values) - 1; index >= 0; index-- {
+		value := parsed.Values[index]
+		if value.Option != optionName {
+			continue
+		}
+		if value.Value != payload || value.ValueIndex < 0 ||
+			value.ValueIndex >= len(command.Arguments) {
+			return nil
+		}
+		argument := command.Arguments[value.ValueIndex]
+		if argument.Expands || argument.Quote == QuoteMixed ||
+			argument.Value != command.Argv[value.ValueIndex] {
+			return nil
+		}
+		return []string{payload}
+	}
+	return nil
+}
+
 func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
 	value := option.Value
 	switch option.Canonical {
