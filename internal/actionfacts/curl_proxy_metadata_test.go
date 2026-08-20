@@ -144,6 +144,61 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
+			name: "URL query reaches external proxy for local HTTP origin", argv: []string{
+				"curl", "--noproxy", "", "--proxy", "http://proxy.example",
+				"--url-query", "key=" + token + " value", "http://127.0.0.1/",
+			},
+			want: components(
+				"http", "proxy.example", 1080, "key="+token+"+value",
+			),
+			wantAuthoritative: true,
+		},
+		{
+			name: "path reaches external proxy for local HTTP origin", argv: []string{
+				"curl", "--proxy", "http://proxy.example",
+				"http://127.0.0.1/secrets/" + token,
+			},
+			want: components(
+				"http", "proxy.example", 1080, "/secrets/"+token,
+			),
+			wantAuthoritative: true,
+		},
+		{
+			name: "request target replaces proxy path and query", argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--url-query",
+				"hidden=" + token, "--request-target", "/exact/" + token,
+				"http://127.0.0.1/original",
+			},
+			want: components(
+				"http", "proxy.example", 1080, "/exact/"+token,
+			),
+			wantAuthoritative: true,
+		},
+		{
+			name: "HTTPS local origin query stays inside CONNECT", argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--url-query",
+				"key=" + token, "https://127.0.0.1/",
+			},
+			wantAuthoritative: true,
+		},
+		{
+			name: "proxy tunnel hides HTTP origin query", argv: []string{
+				"curl", "-p", "--proxy", "http://proxy.example",
+				"--url-query", "key=" + token, "http://127.0.0.1/",
+			},
+			wantAuthoritative: true,
+		},
+		{
+			name: "HTTPS scheme overrides SOCKS option alias", argv: []string{
+				"curl", "--socks5", "https://proxy.example", "--url-query",
+				"key=" + token, "http://127.0.0.1/",
+			},
+			want: components(
+				"https", "proxy.example", 443, "key="+token,
+			),
+			wantAuthoritative: true,
+		},
+		{
 			name: "ordinary header reaches CONNECT without separate list", argv: []string{
 				"curl", "--proxy", "http://proxy.example", "--header",
 				"X-Proxy-Key: " + token, "https://origin.example",
@@ -667,7 +722,7 @@ func TestStaticCurlProxyDestinationInlinePayloadBoundary(t *testing.T) {
 				"key=" + token, "http://origin.example",
 			},
 			want:             true,
-			wantProxyPayload: []string{"key=" + token},
+			wantProxyPayload: []string{"key", token},
 		},
 		{
 			name: "safe literal multipart form preserves proxy proof",
@@ -676,7 +731,7 @@ func TestStaticCurlProxyDestinationInlinePayloadBoundary(t *testing.T) {
 				"key=" + token, "http://origin.example",
 			},
 			want:             true,
-			wantProxyPayload: []string{"key=" + token},
+			wantProxyPayload: []string{"key", token},
 		},
 		{
 			name: "data raw at prefix remains literal",
@@ -732,6 +787,7 @@ func TestStaticCurlProxyDestinationInlinePayloadBoundary(t *testing.T) {
 			},
 			want:             true,
 			wantProxyPayload: []string{token},
+			wantMetadata:     []string{"key=safe%2fvalue"},
 		},
 		{
 			name: "invalid raw URL query aborts before proxy",
@@ -775,7 +831,25 @@ func TestStaticCurlProxyDestinationInlinePayloadBoundary(t *testing.T) {
 				"curl", "--proxy", "http://proxy.example", "--get", "--data",
 				token, "http://origin.example",
 			},
-			want: true,
+			want:         true,
+			wantMetadata: []string{token},
+		},
+		{
+			name: "invalid GET aggregate aborts before proxy",
+			argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--get", "--data",
+				"bad space", "--proxy-user", token, "http://origin.example",
+			},
+		},
+		{
+			name: "GET data ignores wire-invalid replaced URL query at proxy",
+			argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--get", "--data",
+				"safe=value", "--url-query", "bad name=" + token,
+				"--proxy-user", "proxy:safe", "http://origin.example",
+			},
+			want:         true,
+			wantMetadata: []string{"proxy:safe", "safe=value"},
 		},
 		{
 			name: "file backed body cannot prove proxy reachability",
@@ -805,6 +879,8 @@ func TestStaticCurlProxyDestinationInlinePayloadBoundary(t *testing.T) {
 				"curl", "--proxy", "http://proxy.example", "--form",
 				"key=" + token + ";encoder=base64", "http://origin.example",
 			},
+			want:             true,
+			wantProxyPayload: []string{"key"},
 		},
 		{
 			name: "malformed form aborts before proxy",
@@ -905,6 +981,106 @@ func TestCurlProxyURLQueryOptionsValid(t *testing.T) {
 	})
 	if curlProxyURLQueryOptionsValid(parsed) {
 		t.Fatal("repeated 100,001-byte URL query unexpectedly valid")
+	}
+
+	parsed = parseCurlArgv([]string{
+		"curl", "--proxy", "http://proxy.example", "--data", "safe",
+		"--url-query", "key=" + strings.Repeat(" ", 33_332),
+		"--url-query", "tail=x", "http://origin.example",
+	})
+	if !curlProxyURLQueryOptionsValid(parsed) {
+		t.Fatal("exact 66,676-byte encoded repeated URL query unexpectedly invalid")
+	}
+}
+
+func TestCurlHTTPRequestProjectionRetainsReplacedURLQueryCaps(t *testing.T) {
+	t.Parallel()
+
+	argv := []string{
+		"curl", "--get", "--data", "safe=value",
+		"--url-query", "+" + strings.Repeat("a", 50_000),
+		"--url-query", "+" + strings.Repeat("b", 50_000),
+		"https://origin.example/safe",
+	}
+	arguments := make([]ArgumentFact, 0, len(argv))
+	for _, value := range argv {
+		arguments = append(arguments, ArgumentFact{Value: value})
+	}
+	command := CommandFact{
+		Program: "curl", Executable: "curl", Argv: argv,
+		Arguments: arguments, ArgvComplete: true,
+	}
+	parsed := parseCurlArgv(argv)
+	if len(parsed.Targets) != 1 {
+		t.Fatalf("targets = %#v", parsed.Targets)
+	}
+	if projection, valid := staticCurlHTTPRequestComponentProjection(
+		command,
+		parsed,
+		parsed.Targets[0].Group,
+	); valid {
+		t.Fatalf("projection = %#v, want prewire cap rejection", projection)
+	}
+}
+
+func TestCurlURLQueryOptionBytesRawHighByteBoundary(t *testing.T) {
+	t.Parallel()
+
+	raw := "+key=token" + string([]byte{0x80, 0xff})
+	want := strings.TrimPrefix(raw, "+")
+	if got, valid := curlURLQueryOptionBytes(raw); !valid || got != want {
+		t.Fatalf("curlURLQueryOptionBytes(raw) = %q, %t; want %q, true", got, valid, want)
+	}
+	for _, raw := range []string{"+key=bad value", "+key=bad\tvalue", "+key=bad\x7fvalue"} {
+		if got, valid := curlURLQueryOptionBytes(raw); valid {
+			t.Fatalf("curlURLQueryOptionBytes(%q) = %q, true; want invalid", raw, got)
+		}
+	}
+}
+
+func TestCurlReplacedURLQueryConfigBuilderLengthBoundary(t *testing.T) {
+	t.Parallel()
+
+	if !curlURLQueryConfigLengthsValid([]int{24_000_000}) {
+		t.Fatal("single ignored config query unexpectedly capped")
+	}
+	if curlURLQueryConfigLengthsValid([]int{50_000, 50_000}) {
+		t.Fatal("repeated config query at builder cap unexpectedly valid")
+	}
+}
+
+func TestStaticCurlPostDataEightMegabyteBoundary(t *testing.T) {
+	t.Parallel()
+
+	postData := strings.Repeat("a", 8_000_000)
+	argv := []string{"curl", "--data", postData, "https://origin.example/upload"}
+	arguments := make([]ArgumentFact, 0, len(argv))
+	for _, value := range argv {
+		arguments = append(arguments, ArgumentFact{Value: value})
+	}
+	command := CommandFact{
+		Program: "curl", Executable: "curl", Argv: argv,
+		Arguments: arguments, ArgvComplete: true,
+	}
+	parsed := parseCurlArgv(argv)
+	got, present, valid := staticCurlPostDataBytes(command, parsed, 0)
+	if !valid || !present || len(got) != len(postData) {
+		t.Fatalf("POST aggregate = length %d, present %t, valid %t", len(got), present, valid)
+	}
+
+	getArgv := []string{
+		"curl", "--get", "--data", postData, "https://origin.example/upload",
+	}
+	getArguments := make([]ArgumentFact, 0, len(getArgv))
+	for _, value := range getArgv {
+		getArguments = append(getArguments, ArgumentFact{Value: value})
+	}
+	getCommand := CommandFact{
+		Program: "curl", Executable: "curl", Argv: getArgv,
+		Arguments: getArguments, ArgvComplete: true,
+	}
+	if staticCurlGETPostDataValid(getCommand, parseCurlArgv(getArgv), 0) {
+		t.Fatal("8 MB GET aggregate unexpectedly fit final URL cap")
 	}
 }
 

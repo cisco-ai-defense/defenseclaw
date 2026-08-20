@@ -1131,6 +1131,41 @@ func TestIntegrityPersistenceEndpointPrecision(t *testing.T) {
 	}
 }
 
+func TestCloudMetadataPrerequisiteRequiresHTTPFamily(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		scheme string
+		want   bool
+	}{
+		{scheme: "http", want: true},
+		{scheme: "HTTPS", want: true},
+		{scheme: "smtp"},
+		{scheme: "smtps"},
+	} {
+		test := test
+		t.Run(test.scheme, func(t *testing.T) {
+			t.Parallel()
+			facts := actionfacts.Facts{
+				Commands: []actionfacts.CommandFact{{
+					ID:         1,
+					Effect:     actionfacts.EffectExecute,
+					Operations: []actionfacts.OperationKind{actionfacts.OperationFetch},
+				}},
+				Network: []actionfacts.NetworkFact{{
+					CommandID:      1,
+					Action:         actionfacts.NetworkDownload,
+					Scheme:         test.scheme,
+					NormalizedHost: "169.254.169.254",
+				}},
+			}
+			if got := cloudMetadataPrerequisite(facts); got != test.want {
+				t.Fatalf("cloudMetadataPrerequisite(%q) = %t, want %t", test.scheme, got, test.want)
+			}
+		})
+	}
+}
+
 func analyzeIntegrityCommand(
 	t *testing.T,
 	command string,

@@ -924,6 +924,20 @@ func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
 			},
 		},
 		{
+			name: "external curl encoded URL query option", program: "curl",
+			argv: []string{
+				"--url-query", "key=" + trustedActionDispositionTestToken + " value",
+				"https://sink.example/safe",
+			},
+		},
+		{
+			name: "encoded URL query hash remains transmitted", program: "curl",
+			argv: []string{
+				"--url-query", "key=" + trustedActionDispositionTestToken + "#suffix",
+				"https://sink.example/safe",
+			},
+		},
+		{
 			name: "external curl raw URL query option", program: "curl",
 			argv: []string{
 				"--url-query", "+key=" + trustedActionDispositionTestToken + "%2f",
@@ -935,6 +949,14 @@ func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
 			argv: []string{
 				"--url-query", "+#fragment", "--url-query",
 				"+" + trustedActionDispositionTestToken,
+				"https://sink.example/safe",
+			},
+			wantAudit: true,
+		},
+		{
+			name: "curl encoded-form raw name fragment suppresses content", program: "curl",
+			argv: []string{
+				"--url-query", "prefix#fragment=" + trustedActionDispositionTestToken,
 				"https://sink.example/safe",
 			},
 			wantAudit: true,
@@ -956,10 +978,27 @@ func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
 			wantAudit: true,
 		},
 		{
+			name: "curl request target suppresses encoded URL query option", program: "curl",
+			argv: []string{
+				"--url-query", "key=" + trustedActionDispositionTestToken + " value",
+				"--request-target", "/safe", "https://sink.example/original",
+			},
+			wantAudit: true,
+		},
+		{
 			name: "curl GET data suppresses URL query option", program: "curl",
 			argv: []string{
 				"--get", "--data", "fixture=value", "--url-query",
 				"key=" + trustedActionDispositionTestToken,
+				"https://sink.example/safe",
+			},
+			wantAudit: true,
+		},
+		{
+			name: "curl GET data suppresses encoded URL query option", program: "curl",
+			argv: []string{
+				"--get", "--data", "fixture=value", "--url-query",
+				"key=" + trustedActionDispositionTestToken + " value",
 				"https://sink.example/safe",
 			},
 			wantAudit: true,

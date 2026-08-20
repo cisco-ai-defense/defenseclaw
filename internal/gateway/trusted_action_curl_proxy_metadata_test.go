@@ -137,9 +137,10 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 				"' --form-string key=safe http://127.0.0.1/upload",
 		},
 		{
-			name: "get moves data outside proxy body lane",
+			name: "GET data reaches forward proxy as query",
 			command: "curl --proxy http://proxy.example --get --data '" + token +
 				"' http://127.0.0.1/upload",
+			wantEnforce: true,
 		},
 		{
 			name: "file backed body remains detection only",
@@ -472,10 +473,11 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 				token + " https://one.example --next https://two.example",
 		},
 		{
-			name: "origin header cannot use proxy proof",
+			name: "HTTPS tunneled origin header retains origin proof",
 			command: "curl --proxy https://proxy.example --proxy-header " +
 				"'X-Proxy: safe' --header 'X-Origin-Key: " + token + "' " +
 				"https://origin.example",
+			wantEnforce: true,
 		},
 		{
 			name: "ordinary authorization header closes narrow proxy lane",

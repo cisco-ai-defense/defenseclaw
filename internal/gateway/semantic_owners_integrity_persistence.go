@@ -1486,6 +1486,8 @@ func cloudMetadataPrerequisite(facts actionfacts.Facts) bool {
 		}
 		for _, network := range facts.Network {
 			if network.CommandID == command.ID &&
+				(strings.EqualFold(network.Scheme, "http") ||
+					strings.EqualFold(network.Scheme, "https")) &&
 				networkActionIn(
 					network.Action,
 					actionfacts.NetworkDownload,

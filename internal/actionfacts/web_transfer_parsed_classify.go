@@ -154,6 +154,27 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 	if !hasHTTPTarget {
 		return nil
 	}
+	if _, valid := staticCurlHTTPRequestComponentProjection(
+		command,
+		parsed,
+		group,
+	); !valid {
+		return nil
+	}
+	if !curlOriginRequestBuildAllowsPayload(command, parsed, group) {
+		return nil
+	}
+	if !curlStaticFormSequenceValid(command, parsed, group) {
+		return nil
+	}
+	postData, hasPostData, postDataValid := staticCurlPostDataBytes(
+		command,
+		parsed,
+		group,
+	)
+	if !postDataValid {
+		return nil
+	}
 
 	getQueryData := false
 	requestTargetSet := false
@@ -166,13 +187,31 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 			option.Canonical == "--request-target" && option.ValuePresent
 	}
 	if getQueryData && requestTargetSet {
+		if hasPostData {
+			if _, valid := curlGETPostDataQueryBytes(postData); !valid ||
+				!curlGETPostDataURLLengthsValid(parsed.Targets, postData) {
+				return nil
+			}
+		}
 		return nil
+	}
+	if getQueryData && hasPostData {
+		fullPostData := postData
+		var valid bool
+		postData, valid = curlGETPostDataQueryBytes(fullPostData)
+		if !valid ||
+			!curlGETPostDataURLLengthsValid(parsed.Targets, fullPostData) {
+			return nil
+		}
 	}
 
 	var payloads []string
 	for _, option := range parsed.Options {
 		if option.Group != group || !option.ValuePresent ||
 			!curlUploadPayloadOption(option.Canonical) {
+			continue
+		}
+		if curlOptionProvidesGETQueryData(option.Canonical) {
 			continue
 		}
 		argumentIndex := option.ValueArgvIndex
@@ -190,11 +229,17 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 		if curlUploadPayloadSourceUncertain(option) {
 			return nil
 		}
-		value, literal := staticCurlUploadPayload(option)
+		values, literal, transmissionStops := staticCurlUploadPayloads(option)
 		if !literal {
 			continue
 		}
-		payloads = append(payloads, value)
+		payloads = append(payloads, values...)
+		if transmissionStops {
+			break
+		}
+	}
+	if hasPostData && postData != "" {
+		payloads = append(payloads, postData)
 	}
 	return payloads
 }
@@ -207,6 +252,110 @@ func curlUploadPayloadOption(canonical string) bool {
 	default:
 		return false
 	}
+}
+
+func staticCurlPostDataBytes(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) (string, bool, bool) {
+	var postData strings.Builder
+	hasPostData := false
+	for _, option := range parsed.Options {
+		if option.Group != group ||
+			!curlOptionProvidesGETQueryData(option.Canonical) {
+			continue
+		}
+		hasPostData = true
+		if !option.ValuePresent || !staticCurlOptionValue(command, option) ||
+			curlUploadPayloadSourceUncertain(option) {
+			return "", true, false
+		}
+		values, literal, _ := staticCurlUploadPayloads(option)
+		if !literal || len(values) > 1 {
+			return "", true, false
+		}
+		value := ""
+		if len(values) == 1 {
+			value = values[0]
+		}
+		separatorLength := 0
+		if postData.Len() > 0 && option.Canonical != "--json" {
+			separatorLength = 1
+		}
+		const maximumFileToMemory = 1 << 30
+		if len(value) >= maximumFileToMemory-postData.Len()-separatorLength {
+			return "", true, false
+		}
+		if separatorLength != 0 {
+			postData.WriteByte('&')
+		}
+		postData.WriteString(value)
+	}
+	return postData.String(), hasPostData, true
+}
+
+func curlGETPostDataQueryBytes(value string) (string, bool) {
+	if !curlURLQueryWireBytesValid(value) {
+		return "", false
+	}
+	value = curlCanonicalURLQueryPercentHex(value)
+	prefix, _, _ := strings.Cut(value, "#")
+	return prefix, true
+}
+
+func curlGETPostDataURLLengthsValid(
+	targets []curlTransferTarget,
+	postData string,
+) bool {
+	for _, target := range targets {
+		beforeFragment, _, _ := strings.Cut(target.Value, "#")
+		separatorLength := 1
+		if queryStart := strings.IndexByte(beforeFragment, '?'); queryStart >= 0 {
+			query := beforeFragment[queryStart+1:]
+			if query == "" || strings.HasSuffix(query, "&") {
+				separatorLength = 0
+			}
+		}
+		if len(postData) >= 8_000_000-len(target.Value)-separatorLength {
+			return false
+		}
+	}
+	return true
+}
+
+func staticCurlGETPostDataValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	_, valid := staticCurlGETPostDataProjection(command, parsed, group)
+	return valid
+}
+
+func staticCurlGETPostDataProjection(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) (string, bool) {
+	httpGetSet := false
+	for _, option := range parsed.Options {
+		if option.Group == group && option.Canonical == "--get" {
+			httpGetSet = true
+		}
+	}
+	if !httpGetSet {
+		return "", true
+	}
+	postData, hasPostData, valid := staticCurlPostDataBytes(command, parsed, group)
+	if !valid || !hasPostData {
+		return "", valid
+	}
+	query, valid := curlGETPostDataQueryBytes(postData)
+	if !valid || !curlGETPostDataURLLengthsValid(parsed.Targets, postData) {
+		return "", false
+	}
+	return query, true
 }
 
 func curlUploadPayloadSourceUncertain(option curlOptionToken) bool {
@@ -225,17 +374,8 @@ func curlUploadPayloadSourceUncertain(option curlOptionToken) bool {
 		_, valid = curlDataURLEncodeBytes(option.Value)
 		return !valid
 	case "--form", "--form-string":
-		if !curlStaticFormOperandValid(option) {
-			return true
-		}
-		if option.Canonical == "--form-string" {
-			return false
-		}
-		if curlFormHasUnmodeledFileReference(option.Value) {
-			return true
-		}
-		_, _, fileSource := webFormFile(option.Value)
-		return fileSource
+		_, valid, _ := curlStaticFormPayloads(option)
+		return !valid
 	default:
 		return false
 	}
@@ -656,6 +796,67 @@ func StaticCurlProxyTransmittedMetadata(
 			component(credentials),
 		)
 	}
+	// staticCurlProxyDestination accepts only an effective HTTP(S) proxy.
+	// An explicit http(s):// scheme overrides a SOCKS-named option alias, so
+	// every validated non-tunnel destination uses HTTP forward request form.
+	if proxyTunnel {
+		return metadata
+	}
+	requestProjection, valid := staticCurlHTTPRequestComponentProjection(
+		command,
+		parsed,
+		parsed.Targets[0].Group,
+	)
+	if !valid {
+		return CurlProxyTransmittedMetadata{}
+	}
+	getPostData, valid := staticCurlGETPostDataProjection(
+		command,
+		parsed,
+		parsed.Targets[0].Group,
+	)
+	if !valid {
+		return CurlProxyTransmittedMetadata{}
+	}
+	for _, target := range parsed.Targets {
+		if !strings.HasPrefix(strings.ToLower(target.Value), "http://") {
+			continue
+		}
+		if requestProjection.requestTargetSet {
+			if requestProjection.requestTarget != "" {
+				metadata.ProxyRequestComponents = append(
+					metadata.ProxyRequestComponents,
+					component(requestProjection.requestTarget),
+				)
+			}
+			continue
+		}
+		if path := rawHTTPURLPath(target.Value); path != "/" &&
+			curlURLPathBytesPreserved(path) {
+			metadata.ProxyRequestComponents = append(
+				metadata.ProxyRequestComponents,
+				component(path),
+			)
+		}
+		if query := rawURLQuery(target.Value); query != "" && visibleASCII(query) {
+			metadata.ProxyRequestComponents = append(
+				metadata.ProxyRequestComponents,
+				component(query),
+			)
+		}
+		for _, query := range requestProjection.urlQueries {
+			metadata.ProxyRequestComponents = append(
+				metadata.ProxyRequestComponents,
+				component(query),
+			)
+		}
+		if getPostData != "" {
+			metadata.ProxyRequestComponents = append(
+				metadata.ProxyRequestComponents,
+				component(getPostData),
+			)
+		}
+	}
 	return metadata
 }
 
@@ -681,11 +882,23 @@ func staticCurlProxyDestination(
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
-		!curlRangeOptionsValid(parsed) ||
-		!curlProxyURLQueryOptionsValid(parsed) {
+		!curlRangeOptionsValid(parsed) {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	group := parsed.Targets[0].Group
+	if !staticCurlGETPostDataValid(command, parsed, group) {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	if _, valid := staticCurlHTTPRequestComponentProjection(
+		command,
+		parsed,
+		group,
+	); !valid {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	if !curlStaticFormSequenceValid(command, parsed, group) {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
 	lastProxy := -1
 	lastNoProxy := -1
 	lastProxyUser := -1
@@ -812,32 +1025,124 @@ func curlProxyOptionPreservesDestination(
 }
 
 func curlProxyURLQueryOptionsValid(parsed curlArgvParse) bool {
+	httpGetSet := false
+	getQueryDataSet := false
+	for _, option := range parsed.Options {
+		httpGetSet = httpGetSet || option.Canonical == "--get"
+		getQueryDataSet = getQueryDataSet ||
+			curlOptionProvidesGETQueryData(option.Canonical)
+	}
+	replaced := httpGetSet && getQueryDataSet
 	var outputLengths []int
 	for _, option := range parsed.Options {
 		if option.Canonical != "--url-query" {
 			continue
 		}
-		if raw, rawForm := strings.CutPrefix(option.Value, "+"); rawForm {
-			if !visibleASCII(raw) {
-				return false
-			}
-			outputLengths = append(outputLengths, len(raw))
-			continue
+		wireValue := ""
+		valid := false
+		if replaced {
+			wireValue, valid = curlURLQueryConfigBytes(option.Value)
+		} else {
+			wireValue, valid = curlURLQueryOptionBytes(option.Value)
 		}
-		_, _, fileSource, valid := curlDataURLEncodeFile(option.Value)
-		if !valid || fileSource {
+		if !valid {
 			return false
 		}
-		if wireValue, preserved := curlURLQueryOptionBytes(option.Value); preserved {
-			outputLengths = append(outputLengths, len(wireValue))
-			continue
-		}
-		if len(option.Value) >= 8_000_000/3 {
-			return false
-		}
-		outputLengths = append(outputLengths, 3*len(option.Value))
+		outputLengths = append(outputLengths, len(wireValue))
+	}
+	if replaced {
+		return curlURLQueryConfigLengthsValid(outputLengths)
 	}
 	return curlURLQueryLengthsValid(parsed.Targets, outputLengths)
+}
+
+type curlHTTPRequestComponentProjection struct {
+	requestTargetSet bool
+	requestTarget    string
+	urlQueries       []string
+}
+
+func staticCurlHTTPRequestComponentProjection(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) (curlHTTPRequestComponentProjection, bool) {
+	projection := curlHTTPRequestComponentProjection{}
+	lastRequestTarget := -1
+	httpGetSet := false
+	getQueryDataSet := false
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if option.Canonical == "--request-target" && option.ValuePresent {
+			lastRequestTarget = index
+		}
+		httpGetSet = httpGetSet || option.Canonical == "--get"
+		getQueryDataSet = getQueryDataSet ||
+			curlOptionProvidesGETQueryData(option.Canonical)
+	}
+	replaced := httpGetSet && getQueryDataSet
+	fragmentSeen := false
+	var outputLengths []int
+	for _, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if option.Canonical != "--url-query" {
+			continue
+		}
+		if !staticCurlOptionValue(command, option) {
+			return curlHTTPRequestComponentProjection{}, false
+		}
+		wireValue := ""
+		valid := false
+		if replaced {
+			wireValue, valid = curlURLQueryConfigBytes(option.Value)
+		} else {
+			wireValue, valid = curlURLQueryOptionBytes(option.Value)
+		}
+		if !valid {
+			return curlHTTPRequestComponentProjection{}, false
+		}
+		// The full transformed value participates in curl's applicable bounds,
+		// even though a raw '#' moves its suffix and all later values into the
+		// client-side fragment rather than the HTTP request query.
+		outputLengths = append(outputLengths, len(wireValue))
+		if replaced {
+			continue
+		}
+		prefix, _, fragment := strings.Cut(wireValue, "#")
+		if !fragmentSeen && prefix != "" {
+			projection.urlQueries = append(projection.urlQueries, prefix)
+		}
+		fragmentSeen = fragmentSeen || fragment
+	}
+	if replaced {
+		// In curl 8.7.1, -G with a data option replaces --url-query as the
+		// appended query source instead of combining the two. The CLI has already
+		// produced config->query and applied its repeated-value builder cap, but
+		// httpgetfields bypasses that value at the later URL API phase. Retain the
+		// config lengths even though none remain request components or participate
+		// in the final target-plus-query allocation.
+		projection.urlQueries = nil
+	}
+	lengthsValid := curlURLQueryLengthsValid(parsed.Targets, outputLengths)
+	if replaced {
+		lengthsValid = curlURLQueryConfigLengthsValid(outputLengths)
+	}
+	if !lengthsValid {
+		return curlHTTPRequestComponentProjection{}, false
+	}
+	projection.requestTargetSet = lastRequestTarget >= 0
+	if lastRequestTarget >= 0 {
+		requestTarget := parsed.Options[lastRequestTarget]
+		if staticCurlOptionValue(command, requestTarget) &&
+			curlHTTPRequestLineBytesPreserved(requestTarget.Value) {
+			projection.requestTarget = requestTarget.Value
+		}
+	}
+	return projection, true
 }
 
 func curlProxyNumericOptionWithinPortableBounds(option curlOptionToken) bool {
@@ -890,7 +1195,7 @@ func curlProxyInlinePayloadOptionValid(
 		curlUploadPayloadSourceUncertain(option) {
 		return false
 	}
-	if _, literal := staticCurlUploadPayload(option); literal {
+	if _, literal, _ := staticCurlUploadPayloads(option); literal {
 		return true
 	}
 	if option.Value != "" {
@@ -1131,6 +1436,15 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			return CurlTransmittedMetadata{}
 		}
 	}
+	if !staticCurlGETPostDataValid(command, parsed, group) {
+		return CurlTransmittedMetadata{}
+	}
+	if !curlStaticFormSequenceValid(command, parsed, group) {
+		return CurlTransmittedMetadata{}
+	}
+	if !curlOriginRequestBuildAllowsPayload(command, parsed, group) {
+		return CurlTransmittedMetadata{}
+	}
 	for _, target := range parsed.Targets {
 		if !webMetadataTargetSchemeSupported(target.Value) ||
 			!validLiteralRequestTarget(target.Value) ||
@@ -1140,25 +1454,56 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			return CurlTransmittedMetadata{}
 		}
 	}
+	requestProjection, valid := staticCurlHTTPRequestComponentProjection(
+		command,
+		parsed,
+		group,
+	)
+	if !valid {
+		return CurlTransmittedMetadata{}
+	}
+	_, _, explicitProxyValid := staticCurlProxyDestination(command)
+	allTargetsTunnelled := false
+	if explicitProxyValid {
+		proxyTunnel := false
+		for _, option := range parsed.Options {
+			proxyTunnel = proxyTunnel || option.Canonical == "--proxytunnel"
+		}
+		allTargetsTunnelled = true
+		for _, target := range parsed.Targets {
+			if !proxyTunnel &&
+				!strings.HasPrefix(strings.ToLower(target.Value), "https://") {
+				allTargetsTunnelled = false
+				break
+			}
+		}
+		if !allTargetsTunnelled {
+			return curlProxiedOriginRequestMetadata(
+				command,
+				parsed,
+				requestProjection,
+				proxyTunnel,
+			)
+		}
+	}
 
 	lastUser := -1
 	lastBearer := -1
-	lastRequestTarget := -1
 	lastUserAgent := -1
 	lastReferer := -1
 	lastRange := -1
 	lastRequestMethod := -1
 	rangeWireUncertain := false
-	getQueryDataSet := false
-	httpGetSet := false
 	netrcSet := false
-	var urlQueryValues []string
-	var urlQueryOutputLengths []int
-	urlQueryFragmentSeen := false
 	var ftpQuoteValues []string
 	for index, option := range parsed.Options {
-		if option.Group != group || option.Role == curlOptionConfig ||
-			option.Role == curlOptionNetworkOverride {
+		if option.Group != group || option.Role == curlOptionConfig {
+			return CurlTransmittedMetadata{}
+		}
+		if option.Role == curlOptionNetworkOverride &&
+			(!explicitProxyValid || !allTargetsTunnelled ||
+				!curlMainProxyOption(option.Canonical) &&
+					option.Canonical != "--noproxy") {
 			return CurlTransmittedMetadata{}
 		}
 		if option.Canonical == "--user" && option.ValuePresent {
@@ -1166,9 +1511,6 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		}
 		if option.Canonical == "--oauth2-bearer" && option.ValuePresent {
 			lastBearer = index
-		}
-		if option.Canonical == "--request-target" && option.ValuePresent {
-			lastRequestTarget = index
 		}
 		if option.Canonical == "--user-agent" && option.ValuePresent {
 			lastUserAgent = index
@@ -1182,58 +1524,8 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		if option.Canonical == "--request" && option.ValuePresent {
 			lastRequestMethod = index
 		}
-		if option.Canonical == "--get" {
-			httpGetSet = true
-		}
 		if option.Canonical == "--netrc" {
 			netrcSet = true
-		}
-		if curlOptionProvidesGETQueryData(option.Canonical) {
-			getQueryDataSet = true
-		}
-		if option.Canonical == "--url-query" {
-			if !staticCurlOptionValue(command, option) {
-				return CurlTransmittedMetadata{}
-			}
-			wireValue, preserved := curlURLQueryOptionBytes(option.Value)
-			if !preserved {
-				if raw, rawForm := strings.CutPrefix(option.Value, "+"); rawForm {
-					if !visibleASCII(raw) {
-						return CurlTransmittedMetadata{}
-					}
-					// Curl retains an empty output as the first query buffer, so a
-					// later occurrence still incurs the joining ampersand and the
-					// repeated-query size cap.
-					urlQueryOutputLengths = append(urlQueryOutputLengths, len(raw))
-					prefix, _, fragment := strings.Cut(raw, "#")
-					if !urlQueryFragmentSeen && prefix != "" {
-						urlQueryValues = append(urlQueryValues, prefix)
-					}
-					urlQueryFragmentSeen = urlQueryFragmentSeen || fragment
-					continue
-				}
-				_, _, fileForm, valid := curlDataURLEncodeFile(option.Value)
-				if !valid || fileForm {
-					return CurlTransmittedMetadata{}
-				}
-				// Non-file data-urlencode forms may transform their content.
-				// Omit only that candidate; they do not invalidate independent
-				// literal headers or credentials from the same request.
-				if len(option.Value) >= 8_000_000/3 {
-					return CurlTransmittedMetadata{}
-				}
-				urlQueryOutputLengths = append(
-					urlQueryOutputLengths,
-					3*len(option.Value),
-				)
-				continue
-			}
-			if wireValue != "" {
-				if !urlQueryFragmentSeen {
-					urlQueryValues = append(urlQueryValues, wireValue)
-				}
-			}
-			urlQueryOutputLengths = append(urlQueryOutputLengths, len(wireValue))
 		}
 		if option.Canonical == "--quote" {
 			wireValue, preserved := curlFTPQuoteBytes(option.Value)
@@ -1245,25 +1537,6 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			rangeWireUncertain = true
 		}
 	}
-	if httpGetSet && getQueryDataSet {
-		// In curl 8.7.1, -G with a data option replaces --url-query as the
-		// appended query source instead of combining the two.
-		urlQueryValues = nil
-		urlQueryOutputLengths = nil
-	}
-	if !curlURLQueryLengthsValid(parsed.Targets, urlQueryOutputLengths) {
-		return CurlTransmittedMetadata{}
-	}
-	requestTargetValue := ""
-	requestTargetSet := lastRequestTarget >= 0
-	if lastRequestTarget >= 0 {
-		requestTarget := parsed.Options[lastRequestTarget]
-		if staticCurlOptionValue(command, requestTarget) &&
-			curlHTTPRequestLineBytesPreserved(requestTarget.Value) {
-			requestTargetValue = requestTarget.Value
-		}
-	}
-
 	metadata := CurlTransmittedMetadata{}
 	httpAuthorizationOverridden := false
 	httpCookieOverridden := false
@@ -1503,11 +1776,11 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 				component(finalRequestMethod),
 			)
 		}
-		if requestTargetSet {
-			if requestTargetValue != "" {
+		if requestProjection.requestTargetSet {
+			if requestProjection.requestTarget != "" {
 				metadata.HTTPRequestComponents = append(
 					metadata.HTTPRequestComponents,
-					component(requestTargetValue),
+					component(requestProjection.requestTarget),
 				)
 			}
 			continue
@@ -1525,7 +1798,56 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 				component(query),
 			)
 		}
-		for _, query := range urlQueryValues {
+		for _, query := range requestProjection.urlQueries {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(query),
+			)
+		}
+	}
+	return metadata
+}
+
+func curlProxiedOriginRequestMetadata(
+	command CommandFact,
+	parsed curlArgvParse,
+	projection curlHTTPRequestComponentProjection,
+	proxyTunnel bool,
+) CurlTransmittedMetadata {
+	metadata := CurlTransmittedMetadata{}
+	for _, target := range parsed.Targets {
+		network, ok := webTargetFact(command.ID, target.Value, NetworkDownload)
+		if !ok || !proxyTunnel && network.Scheme != "https" {
+			continue
+		}
+		component := func(value string) TransmittedRequestComponent {
+			return TransmittedRequestComponent{
+				Value: value, Scheme: network.Scheme,
+				Host: network.Host, Port: network.Port,
+			}
+		}
+		if projection.requestTargetSet {
+			if projection.requestTarget != "" {
+				metadata.HTTPRequestComponents = append(
+					metadata.HTTPRequestComponents,
+					component(projection.requestTarget),
+				)
+			}
+			continue
+		}
+		if path := rawHTTPURLPath(target.Value); curlURLPathBytesPreserved(path) {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(path),
+			)
+		}
+		if query := rawURLQuery(target.Value); query != "" && visibleASCII(query) {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(query),
+			)
+		}
+		for _, query := range projection.urlQueries {
 			metadata.HTTPRequestComponents = append(
 				metadata.HTTPRequestComponents,
 				component(query),
@@ -1683,6 +2005,55 @@ func curlHTTPRequestLineBytesPreserved(value string) bool {
 	return value != "" && visibleASCII(value)
 }
 
+// Curl can write unusual request-line bytes through HTTP/1.x, but an LF in
+// the effective method or request target can make an HTTPS HTTP/2 request fail
+// before its origin headers or body are streamed. All-HTTP targets have a
+// proven H1 lane; any HTTPS target requires --http1.0 to retain authority.
+func curlOriginRequestBuildAllowsPayload(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	hasHTTPS := false
+	for _, target := range parsed.Targets {
+		if target.Group != group {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(target.Value), "https://") {
+			hasHTTPS = true
+		}
+	}
+	if !hasHTTPS {
+		return true
+	}
+	lastRequest := -1
+	lastRequestTarget := -1
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if option.Canonical == "--http1.0" {
+			return true
+		}
+		if option.Canonical == "--request" && option.ValuePresent {
+			lastRequest = index
+		}
+		if option.Canonical == "--request-target" && option.ValuePresent {
+			lastRequestTarget = index
+		}
+	}
+	for _, index := range []int{lastRequest, lastRequestTarget} {
+		if index >= 0 {
+			option := parsed.Options[index]
+			if !staticCurlOptionValue(command, option) ||
+				strings.ContainsRune(option.Value, '\n') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func wgetUserAgentBytesPreserved(value string) bool {
 	return value != "" && validWgetUserAgent(value)
 }
@@ -1693,28 +2064,69 @@ func wgetRefererBytesPreserved(value string) bool {
 
 func curlURLQueryOptionBytes(value string) (string, bool) {
 	if raw, found := strings.CutPrefix(value, "+"); found {
-		return raw, curlRawURLQueryBytesPreserved(raw)
-	}
-	name, content, hasEquals := strings.Cut(value, "=")
-	if hasEquals {
-		if !webUnreservedBytesPreserved(name, "-._~") ||
-			!webUnreservedBytesPreserved(content, "-._~") {
+		if !curlURLQueryWireBytesValid(raw) {
 			return "", false
 		}
-		if name == "" {
-			return content, true
-		}
-		return name + "=" + content, true
+		return curlCanonicalURLQueryPercentHex(raw), true
 	}
-	if strings.Contains(value, "@") ||
-		!webUnreservedBytesPreserved(value, "-._~") {
+	_, _, fileSource, valid := curlDataURLEncodeFile(value)
+	if !valid || fileSource {
 		return "", false
 	}
-	return value, true
+	wireValue, valid := curlDataURLEncodeBytes(value)
+	if !valid || !curlURLQueryWireBytesValid(wireValue) {
+		return "", false
+	}
+	return curlCanonicalURLQueryPercentHex(wireValue), true
 }
 
-func curlRawURLQueryBytesPreserved(value string) bool {
-	return visibleASCII(value) && !strings.Contains(value, "#")
+func curlURLQueryConfigBytes(value string) (string, bool) {
+	if raw, found := strings.CutPrefix(value, "+"); found {
+		return raw, strings.IndexByte(raw, 0) < 0
+	}
+	_, _, fileSource, valid := curlDataURLEncodeFile(value)
+	if !valid || fileSource {
+		return "", false
+	}
+	return curlDataURLEncodeBytes(value)
+}
+
+func curlCanonicalURLQueryPercentHex(value string) string {
+	var canonical strings.Builder
+	canonical.Grow(len(value))
+	for index := 0; index < len(value); index++ {
+		canonical.WriteByte(value[index])
+		if value[index] != '%' || index+2 >= len(value) ||
+			!isASCIIHex(value[index+1]) || !isASCIIHex(value[index+2]) {
+			continue
+		}
+		canonical.WriteByte(asciiLowerHex(value[index+1]))
+		canonical.WriteByte(asciiLowerHex(value[index+2]))
+		index += 2
+	}
+	return canonical.String()
+}
+
+func isASCIIHex(value byte) bool {
+	return value >= '0' && value <= '9' ||
+		value >= 'a' && value <= 'f' ||
+		value >= 'A' && value <= 'F'
+}
+
+func asciiLowerHex(value byte) byte {
+	if value >= 'A' && value <= 'F' {
+		return value + ('a' - 'A')
+	}
+	return value
+}
+
+func curlURLQueryWireBytesValid(value string) bool {
+	for index := range len(value) {
+		if value[index] <= 0x20 || value[index] == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func curlURLQueryLengthsValid(
@@ -1742,6 +2154,20 @@ func curlURLQueryLengthsValid(
 		if len(target.Value) >= 8_000_000-total-1 {
 			return false
 		}
+	}
+	return true
+}
+
+func curlURLQueryConfigLengthsValid(outputLengths []int) bool {
+	if len(outputLengths) <= 1 {
+		return len(outputLengths) == 0 || outputLengths[0] >= 0
+	}
+	total := len(outputLengths) - 1
+	for _, length := range outputLengths {
+		if length < 0 || length >= 100_000 || total >= 100_000-length {
+			return false
+		}
+		total += length
 	}
 	return true
 }
@@ -2487,58 +2913,586 @@ func StaticWgetUploadPayloads(command CommandFact) []string {
 	return nil
 }
 
-func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
+func staticCurlUploadPayloads(option curlOptionToken) ([]string, bool, bool) {
 	value := option.Value
 	switch option.Canonical {
 	case "--data", "--data-ascii", "--data-binary", "--json":
 		if _, _, fileSource := webDataFile(value); fileSource {
-			return "", false
+			return nil, false, false
 		}
-		return value, value != ""
+		if value == "" {
+			return nil, true, false
+		}
+		return []string{value}, true, false
 	case "--data-urlencode":
 		_, _, fileSource, valid := curlDataURLEncodeFile(value)
 		if !valid || fileSource {
-			return "", false
+			return nil, false, false
 		}
 		encoded, valid := curlDataURLEncodeBytes(value)
-		return encoded, valid && encoded != ""
-	case "--data-raw", "--form-string":
-		if option.Canonical == "--form-string" &&
-			!curlStaticFormOperandValid(option) {
-			return "", false
+		if !valid {
+			return nil, false, false
 		}
-		return value, value != ""
-	case "--form":
-		if !curlStaticFormOperandValid(option) ||
-			curlFormHasUnmodeledFileReference(value) ||
-			curlFormHasEncoderParameter(value) {
-			return "", false
+		if encoded == "" {
+			return nil, true, false
 		}
-		if _, _, fileSource := webFormFile(value); fileSource {
-			return "", false
+		return []string{encoded}, true, false
+	case "--data-raw":
+		if value == "" {
+			return nil, true, false
 		}
-		return value, value != ""
+		return []string{value}, true, false
+	case "--form", "--form-string":
+		return curlStaticFormPayloads(option)
 	default:
-		return "", false
+		return nil, false, false
 	}
 }
 
-func curlStaticFormOperandValid(option curlOptionToken) bool {
-	name, content, found := strings.Cut(option.Value, "=")
-	if !found || name == "" ||
-		!webUnreservedBytesPreserved(name, "-._~") {
-		return false
+func curlStaticFormSequenceValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	depth := 0
+	for _, option := range parsed.Options {
+		if option.Group != group ||
+			(option.Canonical != "--form" && option.Canonical != "--form-string") {
+			continue
+		}
+		if !staticCurlOptionValue(command, option) {
+			return false
+		}
+		if option.Canonical == "--form" {
+			name, specification, found := strings.Cut(option.Value, "=")
+			if !found {
+				return false
+			}
+			switch {
+			case strings.HasPrefix(specification, "("):
+				depth++
+			case name == "" && specification == ")":
+				if depth == 0 {
+					return false
+				}
+				depth--
+			}
+		}
+		if _, valid, _ := curlStaticFormPayloads(option); !valid {
+			return false
+		}
+	}
+	// Curl transmits an unterminated nested multipart by implicitly closing it.
+	return true
+}
+
+// curlStaticFormPayloads projects only contiguous bytes that curl 8.7.1 puts
+// on the wire for the closed literal multipart subset below. In particular,
+// name=content is not itself a wire substring: the name is emitted in the
+// part headers and the parsed content is emitted later as the MIME body.
+func curlStaticFormPayloads(option curlOptionToken) ([]string, bool, bool) {
+	if strings.IndexByte(option.Value, 0) >= 0 {
+		return nil, false, false
+	}
+	name, specification, found := strings.Cut(option.Value, "=")
+	if !found {
+		return nil, false, false
 	}
 	if option.Canonical == "--form-string" {
-		return true
+		nameComponent, valid := curlStaticFormNameComponent(name)
+		if !valid {
+			return nil, false, false
+		}
+		components := nameComponent
+		if specification != "" {
+			components = append(components, specification)
+		}
+		return components, true, false
 	}
-	if option.Canonical != "--form" || strings.Contains(content, ";") {
+	if option.Canonical != "--form" {
+		return nil, false, false
+	}
+	if strings.HasPrefix(specification, "@") {
+		fileEntries, valid := curlMIMEFormFileEntries(specification[1:])
+		if !valid {
+			return nil, false, false
+		}
+		if len(fileEntries) > 1 {
+			components, valid := curlStaticFormNameComponent(name)
+			if !valid {
+				return nil, false, false
+			}
+			for _, fileEntry := range fileEntries {
+				fileOption := option
+				fileOption.Value = "=@" + fileEntry
+				fileComponents, valid, transmissionStops :=
+					curlStaticFormPayloads(fileOption)
+				if !valid || transmissionStops {
+					return nil, false, false
+				}
+				components = append(components, fileComponents...)
+			}
+			return components, true, false
+		}
+	}
+	multipartOpener := strings.HasPrefix(specification, "(")
+	if name == "" && specification == ")" {
+		return nil, true, false
+	}
+
+	body := ""
+	position := 0
+	fileSourceMarker := byte(0)
+	if strings.HasPrefix(specification, "@") ||
+		strings.HasPrefix(specification, "<") {
+		fileSourceMarker = specification[0]
+		// The fixed POSIX null device cannot fail after argv validation and has
+		// no body bytes. Every other file/stdin source remains opaque.
+		var source string
+		position = curlSkipFormSpace(specification, 1)
+		source, position = curlFormParameterWord(specification, position)
+		if source != "/dev/null" {
+			return nil, false, false
+		}
+	} else {
+		position = curlSkipFormSpace(specification, 0)
+		body, position = curlFormParameterWord(specification, position)
+	}
+	typeActive := false
+	typeStart := 0
+	effectiveType := ""
+	effectiveFilename := ""
+	var inlineHeaders []string
+	contentDispositionOverridden := false
+	inlineContentType := ""
+	inlineContentTypeSet := false
+	encoder := ""
+	encoderSet := false
+	for position < len(specification) {
+		if specification[position] != ';' {
+			return nil, false, false
+		}
+		position = curlSkipFormSpace(specification, position+1)
+		switch {
+		case !typeActive && curlFormHasFoldedPrefix(specification, position, "type="):
+			position = curlSkipFormSpace(specification, position+len("type="))
+			typeStart = position
+			var valid bool
+			position, valid = curlFormTypePrefix(specification, position)
+			if !valid {
+				return nil, false, false
+			}
+			for position < len(specification) && specification[position] != ';' {
+				position++
+			}
+			effectiveType = curlTrimRightFormSpace(specification[typeStart:position])
+			typeActive = true
+		case curlFormHasFoldedPrefix(specification, position, "filename="):
+			typeActive = false
+			position = curlSkipFormSpace(specification, position+len("filename="))
+			effectiveFilename, position = curlFormParameterWord(specification, position)
+		case curlFormHasFoldedPrefix(specification, position, "headers="):
+			typeActive = false
+			position += len("headers=")
+			if position < len(specification) &&
+				(specification[position] == '@' || specification[position] == '<') {
+				position++
+				position = curlSkipFormSpace(specification, position)
+				headerSource, nextPosition := curlFormParameterWord(
+					specification,
+					position,
+				)
+				if headerSource != "" && headerSource != "/dev/null" {
+					return nil, false, false
+				}
+				// fopen("") fails non-fatally and /dev/null is empty; curl
+				// continues without adding a header in either finite case, so
+				// neither source hides the literal body.
+				position = nextPosition
+				continue
+			}
+			position = curlSkipFormSpace(specification, position)
+			var header string
+			header, position = curlFormParameterWord(specification, position)
+			inlineHeaders = append(inlineHeaders, header)
+			contentDispositionOverridden = contentDispositionOverridden ||
+				curlMIMEHeaderOverridesField(header, "content-disposition")
+			if contentType, matches := curlMIMEHeaderFieldValue(
+				header,
+				"content-type",
+			); matches && !inlineContentTypeSet {
+				inlineContentType = contentType
+				inlineContentTypeSet = true
+			}
+		case curlFormHasFoldedPrefix(specification, position, "encoder="):
+			typeActive = false
+			position = curlSkipFormSpace(specification, position+len("encoder="))
+			encoder, position = curlFormParameterWord(specification, position)
+			encoderSet = true
+		case typeActive:
+			for position < len(specification) && specification[position] != ';' {
+				position++
+			}
+			effectiveType = curlTrimRightFormSpace(specification[typeStart:position])
+		default:
+			_, position = curlFormParameterWord(specification, position)
+		}
+	}
+	var components []string
+	if !contentDispositionOverridden {
+		nameComponent, valid := curlStaticFormNameComponent(name)
+		if !valid {
+			return nil, false, false
+		}
+		components = append(components, nameComponent...)
+		if !multipartOpener && fileSourceMarker != '<' && effectiveFilename != "" {
+			filenameComponent, valid := curlMIMEFormEscape(effectiveFilename)
+			if !valid {
+				return nil, false, false
+			}
+			components = append(components, filenameComponent)
+		}
+	}
+	// A type= attribute takes precedence over every inline Content-Type header.
+	// Without type=, curl uses the first inline Content-Type value to generate
+	// the part header. The original Content-Type userheaders are then skipped.
+	if effectiveType != "" {
+		components = append(components, effectiveType)
+	} else if inlineContentTypeSet && inlineContentType != "" {
+		components = append(components, inlineContentType)
+	}
+	for _, header := range inlineHeaders {
+		if _, contentType := curlMIMEHeaderFieldValue(
+			header,
+			"content-type",
+		); contentType {
+			continue
+		}
+		if header != "" {
+			components = append(components, header)
+		}
+	}
+	if multipartOpener {
+		// filename= and encoder= are parsed but ignored for a multipart node;
+		// type and inline headers are handled above, and header files stay opaque.
+		return components, true, false
+	}
+	bodyComponent := body
+	transmissionStops := false
+	if encoderSet {
+		switch {
+		case curlASCIIEqualFold(encoder, "binary"),
+			curlASCIIEqualFold(encoder, "8bit"):
+		case curlASCIIEqualFold(encoder, "7bit"):
+			for index := 0; index < len(body); index++ {
+				if body[index]&0x80 != 0 {
+					// The encoder reports an error at the first high byte, but curl
+					// may already have transmitted the exact ASCII prefix.
+					bodyComponent = body[:index]
+					transmissionStops = true
+					break
+				}
+			}
+		case curlASCIIEqualFold(encoder, "quoted-printable"):
+			bodyComponent = curlMIMEQuotedPrintableBytes(body)
+		case curlASCIIEqualFold(encoder, "base64"):
+			bodyComponent = ""
+		default:
+			// curl_mime_encoder rejects unknown encoders before the request.
+			return nil, false, false
+		}
+	}
+	if bodyComponent != "" {
+		components = append(components, bodyComponent)
+	}
+	return components, true, transmissionStops
+}
+
+// curlMIMEQuotedPrintableBytes mirrors curl 8.7.1's encoder_qp_read for an
+// in-memory literal body. Its line position excludes CRLF and soft breaks.
+func curlMIMEQuotedPrintableBytes(value string) string {
+	const maximumEncodedLineLength = 76
+
+	var encoded strings.Builder
+	linePosition := 0
+	for inputPosition := 0; inputPosition < len(value); {
+		if value[inputPosition] == '\r' && inputPosition+1 < len(value) &&
+			value[inputPosition+1] == '\n' {
+			encoded.WriteString("\r\n")
+			linePosition = 0
+			inputPosition += 2
+			continue
+		}
+
+		character := value[inputPosition]
+		nextPosition := inputPosition + 1
+		nextIsEnd := nextPosition == len(value)
+		nextIsCRLF := nextPosition+1 < len(value) &&
+			value[nextPosition] == '\r' && value[nextPosition+1] == '\n'
+		unitLength := 1
+		raw := character >= 0x21 && character <= 0x3c ||
+			character >= 0x3e && character <= 0x7e
+		if character == ' ' || character == '\t' {
+			raw = !nextIsEnd && !nextIsCRLF
+		}
+		if !raw {
+			unitLength = 3
+		}
+		if linePosition+unitLength > maximumEncodedLineLength ||
+			linePosition+unitLength == maximumEncodedLineLength &&
+				!nextIsEnd && !nextIsCRLF {
+			encoded.WriteString("=\r\n")
+			linePosition = 0
+		}
+		if raw {
+			encoded.WriteByte(character)
+		} else {
+			const uppercaseHex = "0123456789ABCDEF"
+			encoded.WriteByte('=')
+			encoded.WriteByte(uppercaseHex[character>>4])
+			encoded.WriteByte(uppercaseHex[character&0x0f])
+		}
+		linePosition += unitLength
+		inputPosition++
+	}
+	return encoded.String()
+}
+
+func curlStaticFormNameComponent(name string) ([]string, bool) {
+	if name == "" {
+		return nil, true
+	}
+	escaped, valid := curlMIMEFormEscape(name)
+	if !valid {
+		return nil, false
+	}
+	return []string{escaped}, true
+}
+
+// curlMIMEFormEscape mirrors curl 8.7.1's default form-data name and filename
+// escaping. --form-escape is outside the closed parser, so only quote, CR, and
+// LF are replaced; all other bytes, including UTF-8, remain exact.
+func curlMIMEFormEscape(value string) (string, bool) {
+	outputLength := 0
+	for index := range len(value) {
+		switch value[index] {
+		case '"', '\r', '\n':
+			outputLength += 3
+		default:
+			outputLength++
+		}
+		if outputLength >= 8_000_000 {
+			return "", false
+		}
+	}
+	if outputLength == len(value) {
+		return value, true
+	}
+	var escaped strings.Builder
+	escaped.Grow(outputLength)
+	for index := range len(value) {
+		switch value[index] {
+		case '"':
+			escaped.WriteString("%22")
+		case '\r':
+			escaped.WriteString("%0D")
+		case '\n':
+			escaped.WriteString("%0A")
+		default:
+			escaped.WriteByte(value[index])
+		}
+	}
+	return escaped.String(), true
+}
+
+func curlSkipFormSpace(value string, position int) int {
+	for position < len(value) && curlFormSpace(value[position]) {
+		position++
+	}
+	return position
+}
+
+func curlTrimRightFormSpace(value string) string {
+	for len(value) > 0 && curlFormSpace(value[len(value)-1]) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func curlFormSpace(value byte) bool {
+	switch value {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	default:
 		return false
 	}
-	content = strings.TrimLeft(content, " \t")
-	return !strings.HasPrefix(content, "@") &&
-		!strings.HasPrefix(content, "<") &&
-		!strings.HasPrefix(content, "(")
+}
+
+// curlFormParameterWord mirrors curl 8.7.1's get_param_word for a form part:
+// quoted words lose their quotes and only escaped backslashes and quotes are
+// unescaped; an unclosed quote falls back to the ordinary unquoted grammar.
+func curlFormParameterWord(value string, position int) (string, int) {
+	return curlFormParameterWordUntil(value, position, ";")
+}
+
+func curlFormParameterWordUntil(
+	value string,
+	position int,
+	endCharacters string,
+) (string, int) {
+	start := position
+	if position < len(value) && value[position] == '"' {
+		position++
+		var word strings.Builder
+		for position < len(value) {
+			if value[position] == '\\' && position+1 < len(value) &&
+				(value[position+1] == '\\' || value[position+1] == '"') {
+				word.WriteByte(value[position+1])
+				position += 2
+				continue
+			}
+			if value[position] == '"' {
+				position++
+				for position < len(value) &&
+					!strings.ContainsRune(endCharacters, rune(value[position])) {
+					position++
+				}
+				return word.String(), position
+			}
+			word.WriteByte(value[position])
+			position++
+		}
+		position = start
+	}
+	for position < len(value) &&
+		!strings.ContainsRune(endCharacters, rune(value[position])) {
+		position++
+	}
+	end := position
+	for end > start && curlFormSpace(value[end-1]) {
+		end--
+	}
+	return value[start:end], position
+}
+
+func curlMIMEFormFileEntries(value string) ([]string, bool) {
+	var entries []string
+	entryStart := 0
+	position := 0
+	for {
+		typeActive := false
+		position = curlSkipFormSpace(value, position)
+		_, position = curlFormParameterWordUntil(value, position, ";,")
+		for position < len(value) && value[position] == ';' {
+			position = curlSkipFormSpace(value, position+1)
+			switch {
+			case !typeActive && curlFormHasFoldedPrefix(value, position, "type="):
+				position = curlSkipFormSpace(value, position+len("type="))
+				for position < len(value) && value[position] != ';' &&
+					value[position] != ',' {
+					position++
+				}
+				typeActive = true
+			case curlFormHasFoldedPrefix(value, position, "filename="):
+				typeActive = false
+				position = curlSkipFormSpace(value, position+len("filename="))
+				_, position = curlFormParameterWordUntil(value, position, ";,")
+			case curlFormHasFoldedPrefix(value, position, "headers="):
+				typeActive = false
+				position += len("headers=")
+				if position < len(value) &&
+					(value[position] == '@' || value[position] == '<') {
+					position = curlSkipFormSpace(value, position+1)
+				}
+				_, position = curlFormParameterWordUntil(value, position, ";,")
+			case curlFormHasFoldedPrefix(value, position, "encoder="):
+				typeActive = false
+				position = curlSkipFormSpace(value, position+len("encoder="))
+				_, position = curlFormParameterWordUntil(value, position, ";,")
+			case typeActive:
+				// Curl's endct branch extends the active Content-Type by scanning
+				// raw bytes. Quotes do not protect a comma here: that comma starts
+				// the next file entry and can make the command fail before connect.
+				for position < len(value) && value[position] != ';' &&
+					value[position] != ',' {
+					position++
+				}
+			default:
+				_, position = curlFormParameterWordUntil(value, position, ";,")
+			}
+		}
+		if position < len(value) && value[position] != ',' {
+			return nil, false
+		}
+		entries = append(entries, value[entryStart:position])
+		if position == len(value) {
+			return entries, true
+		}
+		position++
+		entryStart = position
+	}
+}
+
+func curlFormHasFoldedPrefix(value string, position int, prefix string) bool {
+	return position >= 0 && position+len(prefix) <= len(value) &&
+		curlASCIIEqualFold(value[position:position+len(prefix)], prefix)
+}
+
+func curlMIMEHeaderOverridesField(value string, field string) bool {
+	return len(value) > len(field) &&
+		curlASCIIEqualFold(value[:len(field)], field) && value[len(field)] == ':'
+}
+
+func curlASCIIEqualFold(value string, expected string) bool {
+	if len(value) != len(expected) {
+		return false
+	}
+	for index := range len(value) {
+		left := value[index]
+		right := expected[index]
+		if left >= 'A' && left <= 'Z' {
+			left += 'a' - 'A'
+		}
+		if right >= 'A' && right <= 'Z' {
+			right += 'a' - 'A'
+		}
+		if left != right {
+			return false
+		}
+	}
+	return true
+}
+
+func curlMIMEHeaderFieldValue(value string, field string) (string, bool) {
+	if !curlMIMEHeaderOverridesField(value, field) {
+		return "", false
+	}
+	// mime.c's match_header skips only literal spaces after the colon.
+	return strings.TrimLeft(value[len(field)+1:], " "), true
+}
+
+// curlFormTypePrefix mirrors the two bounded scansets used by curl 8.7.1's
+// get_param_part. The caller consumes any remaining type text up to ';'.
+func curlFormTypePrefix(value string, position int) (int, bool) {
+	majorStart := position
+	for position < len(value) && position-majorStart < 127 &&
+		value[position] != '/' && value[position] != ' ' {
+		position++
+	}
+	if position == majorStart || position >= len(value) || value[position] != '/' {
+		return 0, false
+	}
+	position++
+	minorStart := position
+	for position < len(value) && position-minorStart < 127 {
+		switch value[position] {
+		case ';', ',', ' ', '\n':
+			return position, position > minorStart
+		default:
+			position++
+		}
+	}
+	return position, position > minorStart
 }
 
 func curlDataURLEncodeBytes(value string) (string, bool) {
@@ -3091,12 +4045,23 @@ func curlDataURLEncodeFile(
 func curlFormHasUnmodeledFileReference(value string) bool {
 	for _, parameter := range strings.Split(value, ";")[1:] {
 		parameter = strings.TrimLeft(parameter, " \t")
-		if strings.HasPrefix(strings.ToLower(parameter), "headers=") {
+		if curlFormHasFoldedPrefix(parameter, 0, "headers=") {
 			// Curl applies its own quoted header-source grammar after shell quote
-			// removal and permits whitespace before the parameter. Keep every
-			// headers= form partial until that grammar is projected, rather than
-			// silently omitting an @file read.
-			return true
+			// removal. Only an immediate @ or < after '=' selects a file; leading
+			// whitespace instead makes the value an inline literal header.
+			header := parameter[len("headers="):]
+			if strings.HasPrefix(header, "@") || strings.HasPrefix(header, "<") {
+				position := curlSkipFormSpace(header, 1)
+				source, _ := curlFormParameterWord(header, position)
+				if source != "" && source != "/dev/null" {
+					return true
+				}
+				continue
+			}
+			if strings.HasPrefix(header, `"@`) || strings.HasPrefix(header, `"<`) ||
+				strings.HasPrefix(header, `'@`) || strings.HasPrefix(header, `'<`) {
+				return true
+			}
 		}
 	}
 	_, payload, hasName := strings.Cut(value, "=")
@@ -3105,6 +4070,21 @@ func curlFormHasUnmodeledFileReference(value string) bool {
 	}
 	if payload == "" || payload[0] != '@' && payload[0] != '<' {
 		return false
+	}
+	if payload[0] == '@' {
+		fileEntries, valid := curlMIMEFormFileEntries(payload[1:])
+		if valid && len(fileEntries) > 1 {
+			for _, fileEntry := range fileEntries {
+				_, entryValid, _ := curlStaticFormPayloads(curlOptionToken{
+					Canonical: "--form",
+					Value:     "=@" + fileEntry,
+				})
+				if !entryValid {
+					return true
+				}
+			}
+			return false
+		}
 	}
 	fileSpec := payload[1:]
 	if separator := strings.Index(fileSpec, ";"); separator >= 0 {
@@ -3115,16 +4095,6 @@ func curlFormHasUnmodeledFileReference(value string) bool {
 	// not ambiguous by itself. webFormFile handles only the single literal path
 	// subset.
 	return strings.ContainsAny(fileSpec, ",\"'")
-}
-
-func curlFormHasEncoderParameter(value string) bool {
-	for _, parameter := range strings.Split(value, ";")[1:] {
-		name, _, found := strings.Cut(parameter, "=")
-		if found && strings.EqualFold(strings.TrimSpace(name), "encoder") {
-			return true
-		}
-	}
-	return false
 }
 
 func curlHasUnmodeledGlob(value string) bool {

