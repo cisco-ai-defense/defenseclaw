@@ -1663,19 +1663,19 @@ function Get-DefenseClawConnectorMetadataVersion {
     )
 
     try {
-        $home = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
+        $userHomeFull = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
     }
     catch {
         return ''
     }
-    if (-not [IO.Directory]::Exists($home)) { return '' }
+    if (-not [IO.Directory]::Exists($userHomeFull)) { return '' }
 
     if ($Connector -eq 'cursor') {
         foreach ($candidate in @(
             [pscustomobject]@{
-                Root = $home
+                Root = $userHomeFull
                 Path = [IO.Path]::Combine(
-                    $home,
+                    $userHomeFull,
                     'AppData\Local\Programs\cursor\resources\app\package.json'
                 )
             },
@@ -1712,9 +1712,16 @@ function Get-DefenseClawConnectorMetadataVersion {
         '.npm-global\lib\node_modules',
         '.local\lib\node_modules'
     )) {
-        $candidate = [IO.Path]::Combine($home, $prefix, $package, 'package.json')
+        $candidate = [IO.Path]::Combine(
+            $userHomeFull,
+            $prefix,
+            $package,
+            'package.json'
+        )
         $version = Get-DefenseClawConnectorJsonMetadataVersion `
-            -Root $home -Path $candidate -ExpectedNames @($expectedName)
+            -Root $userHomeFull `
+            -Path $candidate `
+            -ExpectedNames @($expectedName)
         if (-not [string]::IsNullOrWhiteSpace($version)) {
             return $version
         }
@@ -1738,11 +1745,13 @@ function Get-DefenseClawConnectorMetadataVersion {
             '.vscode\extensions'
         )) {
             $extensionRoot = [IO.Path]::Combine(
-                $home,
+                $userHomeFull,
                 $relativeExtensionRoot
             )
             if (-not (Test-DefenseClawConnectorMetadataPath `
-                    -Root $home -Path $extensionRoot -Directory)) {
+                    -Root $userHomeFull `
+                    -Path $extensionRoot `
+                    -Directory)) {
                 continue
             }
             $examined = 0
@@ -1755,7 +1764,7 @@ function Get-DefenseClawConnectorMetadataVersion {
                 if ($examined -gt 256) { break }
                 $candidate = [IO.Path]::Combine($extension, 'package.json')
                 $version = Get-DefenseClawConnectorJsonMetadataVersion `
-                    -Root $home `
+                    -Root $userHomeFull `
                     -Path $candidate `
                     -ExpectedNames @('claude-code')
                 if (-not [string]::IsNullOrWhiteSpace($version)) {
@@ -1775,12 +1784,14 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     $sb = [Text.StringBuilder]::new()
     [void]$sb.AppendLine('version: 1')
     [void]$sb.AppendLine('targets:')
-    $users = if ($PSBoundParameters.ContainsKey('Profiles')) {
-        @($Profiles)
-    }
-    else {
-        @(Get-DefenseClawEligibleInteractiveUserProfiles)
-    }
+    $users = @(
+        if ($PSBoundParameters.ContainsKey('Profiles')) {
+            $Profiles
+        }
+        else {
+            Get-DefenseClawEligibleInteractiveUserProfiles
+        }
+    )
     if ($users.Count -eq 0) {
         # An empty manifest is valid YAML; the guardian re-scans on its
         # interval, so a new user appearing after install is picked up

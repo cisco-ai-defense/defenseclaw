@@ -84,7 +84,10 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "AppData\\Roaming\\npm\\node_modules" in discovery
     assert "AppData\\Local\\Programs\\cursor\\resources\\app\\package.json" in discovery
     assert "anthropic.claude-code-*" in discovery
+    assert "$userHomeFull =" in discovery
+    assert "$home =" not in discovery.casefold()
     assert "Get-DefenseClawConnectorMetadataVersion" in renderer
+    assert "$users = @(" in renderer
     assert "agent_version:" in renderer
     assert "enabled: false" in renderer
     assert renderer.index("agent_version:") < renderer.index("enabled: true")
