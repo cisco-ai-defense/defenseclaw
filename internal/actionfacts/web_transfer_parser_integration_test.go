@@ -24,7 +24,7 @@ import (
 func TestStaticCurlUploadPayloads(t *testing.T) {
 	t.Parallel()
 
-	const token = "sk-proj-A7b9C2d4E6f8G1h3J5k7L9m2"
+	const token = "test-inline-payload"
 	for _, test := range []struct {
 		name        string
 		argv        []string
