@@ -470,26 +470,24 @@ func trustedActionContentRuleMatchesStaticUpload(
 	rule PatternRule,
 	command actionfacts.CommandFact,
 ) bool {
-	return trustedActionContentRuleMatchesCandidates(
+	return trustedActionContentRuleMatchesParsedCandidates(
 		rule,
 		actionfacts.StaticCurlUploadPayloads(command),
-	) || trustedActionContentRuleMatchesCandidates(
+	) || trustedActionContentRuleMatchesParsedCandidates(
 		rule,
 		actionfacts.StaticWgetUploadPayloads(command),
 	)
 }
 
-func trustedActionContentRuleMatchesCandidates(
+// These candidates are effective argv operands from complete curl/wget
+// parsers. Match their bytes exactly: shell normalization here would change
+// the body that the uploader actually transmits.
+func trustedActionContentRuleMatchesParsedCandidates(
 	rule PatternRule,
 	candidates []string,
 ) bool {
 	for _, candidate := range candidates {
 		if firstAcceptedRuleMatch(rule, candidate) != nil {
-			return true
-		}
-		normalized := normalizeShell(candidate)
-		if normalized != candidate &&
-			firstAcceptedRuleMatch(rule, normalized) != nil {
 			return true
 		}
 	}
