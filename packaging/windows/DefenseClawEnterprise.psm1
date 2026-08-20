@@ -6165,6 +6165,43 @@ function Start-DefenseClawTransactionServices {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName
     }
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): reactivate the enumerator
+    # too. Restore-DefenseClawTransactionServiceStartModes only restores
+    # `existed=true` services from the pre-transaction snapshot; on a
+    # fresh install the enumerator was `existed=false`, so it stays
+    # disabled without this explicit start. On a snapshot rollback with
+    # an existing enumerator, the Restore call above has already put it
+    # back to its recorded start mode — the block below just brings it
+    # LIVE if the recorded posture had it running.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $enumeratorState = $states[$enumeratorServiceName]
+    $enumeratorService = Microsoft.PowerShell.Management\Get-Service `
+        -Name $enumeratorServiceName `
+        -ErrorAction SilentlyContinue
+    if ($null -ne $enumeratorService) {
+        $enumeratorStartMode = if ($null -ne $enumeratorState -and [bool]$enumeratorState.existed) {
+            [int]$enumeratorState.start_mode
+        }
+        else {
+            # Fresh install: promote to auto-start.
+            2
+        }
+        Set-DefenseClawServiceStartMode `
+            -Name $enumeratorServiceName `
+            -StartMode $enumeratorStartMode
+        # Start only if the recorded posture had it running OR
+        # this is a fresh install (existed=false → we just
+        # promoted it to auto-start above and want it live now).
+        $enumeratorShouldRun = if ($null -eq $enumeratorState -or -not [bool]$enumeratorState.existed) {
+            $true
+        }
+        else {
+            [bool]$enumeratorState.running
+        }
+        if ($enumeratorShouldRun -and $enumeratorStartMode -in @(2, 3)) {
+            Start-DefenseClawService -Name $enumeratorServiceName
+        }
+    }
 }
 
 function Restore-DefenseClawTransactionWithManagedHooksRollback {
@@ -8236,6 +8273,44 @@ function Assert-DefenseClawEnterpriseDeployment {
                 'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1'
         )
     }
+    # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): the enumerator is a
+    # third managed SCM service. Its expected env vars mirror the
+    # guardian's (DEFENSECLAW_WINDOWS_SERVICE_NAME differs; everything
+    # else including the shared GuardianLogPath is identical), and
+    # its expected start mode + running state get validated here so
+    # -RequireReadiness catches the case where the enumerator got
+    # left disabled during activation.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $enumeratorEnvironment = [string[]]@(
+        "DEFENSECLAW_HOME=$($Layout.RuntimeDirectory)",
+        "DEFENSECLAW_CONFIG=$($Layout.ConfigPath)",
+        'DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise',
+        "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=$($Layout.AuthorizationDirectory)",
+        "DEFENSECLAW_WINDOWS_SERVICE_NAME=$enumeratorServiceName",
+        "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME=$GatewayServiceName",
+        "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName",
+        "DEFENSECLAW_WINDOWS_SERVICE_LOG=$($Layout.GuardianLogPath)"
+    )
+    if ([bool]$Layout.AgentApplicationControlAttested) {
+        $enumeratorEnvironment = [string[]]@(
+            $enumeratorEnvironment + @(
+                'DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED=1',
+                'DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED=1'
+            )
+        )
+    }
+    if ([bool]$Layout.ClaudeEffectivePolicyVerified) {
+        $enumeratorEnvironment = [string[]]@(
+            $enumeratorEnvironment +
+                'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1'
+        )
+    }
+    if ([bool]$Layout.CodexTrustedHookLauncherVerified) {
+        $enumeratorEnvironment = [string[]]@(
+            $enumeratorEnvironment +
+                'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1'
+        )
+    }
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
@@ -8260,6 +8335,21 @@ function Assert-DefenseClawEnterpriseDeployment {
         ) `
         -ExpectedEnvironment $guardianEnvironment `
         -ExpectedStartMode $expectedServiceStartMode
+    Assert-DefenseClawServiceConfiguration `
+        -Name $enumeratorServiceName `
+        -ExpectedImage ('"{0}" enterprise windows enumerate --manifest "{1}" --interval 5m' -f $Layout.GatewayPath, $Layout.ManifestPath) `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Enterprise Hook Enumerator' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @(
+            'SeTcbPrivilege',
+            'SeImpersonatePrivilege',
+            'SeChangeNotifyPrivilege',
+            'SeBackupPrivilege',
+            'SeRestorePrivilege'
+        ) `
+        -ExpectedEnvironment $enumeratorEnvironment `
+        -ExpectedStartMode $expectedServiceStartMode
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
     [void](Invoke-DefenseClawCodexRequirementsCommand `
         -Layout $Layout `
@@ -8276,6 +8366,24 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GuardianServiceName $GuardianServiceName `
             -LiveVerify)) {
             throw 'guardian SCM process is running but protected target coverage is not verified'
+        }
+        # Spec 005 D1: readiness check for the enumerator SCM
+        # process. Uses the same lightweight "service is running"
+        # probe as Test-DefenseClawGatewayReady rather than a
+        # deeper liveness call — the enumerator has no readiness
+        # RPC of its own; its per-cycle stderr goes to the
+        # guardian's log surface and the sidecar's
+        # SidecarHealth.Enumerator field (spec 005 Stage 9)
+        # carries the per-cycle state. A missing-or-stopped SCM
+        # process here is caught; a hung enumerator loop is a
+        # follow-up to add a health probe for.
+        $enumeratorService = Microsoft.PowerShell.Management\Get-Service `
+            -Name $enumeratorServiceName `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $enumeratorService -or
+            $enumeratorService.Status -ne
+                [ServiceProcess.ServiceControllerStatus]::Running) {
+            throw 'enumerator SCM process is not running; targets.yaml will not refresh for new user profiles'
         }
     }
 }
@@ -11526,6 +11634,19 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
                 -StartMode 2
+            # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): promote the
+            # enumerator to auto-start and START IT. Without this,
+            # Set-DefenseClawManagedServices leaves the enumerator at
+            # `disabled` after creation and it never runs — new user
+            # profiles would never be picked up, defeating the whole
+            # point of the workstream. Enumerator starts LAST because
+            # its first tick depends on config.yaml + targets.yaml
+            # provisioning that gateway + guardian activation ensures.
+            $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+            Set-DefenseClawServiceStartMode `
+                -Name $enumeratorServiceName `
+                -StartMode 2
+            Start-DefenseClawService -Name $enumeratorServiceName
             Assert-DefenseClawEnterpriseDeployment `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
