@@ -137,6 +137,35 @@ func TestParseWgetArgvValueTokenMetadata(t *testing.T) {
 	}
 }
 
+func TestParseWgetArgvProtocolCredentialOwnership(t *testing.T) {
+	parsed := parseWgetArgv([]string{
+		"wget", "--http-user=http-agent", "--http-password", "http-secret",
+		"--ftp-user=ftp-agent", "--ftp-password", "ftp-secret",
+		"https://example.test/payload",
+	})
+	want := []wgetArgvValue{
+		{
+			Option: "--http-user", Value: "http-agent",
+			OptionIndex: 1, ValueIndex: 1, Joined: true,
+		},
+		{
+			Option: "--http-password", Value: "http-secret",
+			OptionIndex: 2, ValueIndex: 3,
+		},
+		{
+			Option: "--ftp-user", Value: "ftp-agent",
+			OptionIndex: 4, ValueIndex: 4, Joined: true,
+		},
+		{
+			Option: "--ftp-password", Value: "ftp-secret",
+			OptionIndex: 5, ValueIndex: 6,
+		},
+	}
+	if !parsed.Complete || !reflect.DeepEqual(parsed.Values, want) {
+		t.Fatalf("parse = %#v, want values %#v", parsed, want)
+	}
+}
+
 func TestParseWgetArgvFinalOutputWins(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -429,6 +458,12 @@ func TestParseWgetArgvMethodAndBodyConstraints(t *testing.T) {
 			spider:    false,
 		},
 		{
+			name:      "empty custom method remains parser complete",
+			argv:      []string{"wget", "--method=", "https://example.test"},
+			complete:  true,
+			bodyValid: true,
+		},
+		{
 			name:      "final explicit no spider wins without head",
 			argv:      []string{"wget", "--spider", "--no-spider", "--method=GET", "https://example.test"},
 			complete:  true,
@@ -459,6 +494,24 @@ func TestParseWgetArgvMethodAndBodyConstraints(t *testing.T) {
 				t.Fatalf("method/spider = (%q, %t), want (%q, %t): %#v", parsed.Method, parsed.Spider, test.method, test.spider, parsed)
 			}
 		})
+	}
+}
+
+func TestWgetDedicatedRequestByteGrammar(t *testing.T) {
+	if !validWgetUserAgent("agent\tvalue") || validWgetUserAgent("agent\nvalue") ||
+		validWgetUserAgent("agent"+string(rune(0))+"value") {
+		t.Fatal("Wget user-agent byte grammar mismatch")
+	}
+	if !wgetRefererBytesPreserved("source\nvalue") ||
+		wgetRefererBytesPreserved("source"+string(rune(0))+"value") {
+		t.Fatal("Wget referer byte grammar mismatch")
+	}
+	if !validWgetMethod("") || !validWgetMethod("x-method\t") ||
+		validWgetMethod("x-method"+string(rune(0))) {
+		t.Fatal("Wget method byte grammar mismatch")
+	}
+	if got, want := wgetUpperASCII("x-é\t"), "X-é\t"; got != want {
+		t.Fatalf("bytewise uppercase = %q, want %q", got, want)
 	}
 }
 
@@ -553,6 +606,29 @@ func TestParseWgetArgvFinalRequestBodyFileWins(t *testing.T) {
 	})
 	if !body.Complete || !body.RequestBodyValid || body.BodyFile != "payload.bin" {
 		t.Fatalf("final body file did not replace empty value: %#v", body)
+	}
+}
+
+func TestParseWgetArgvFinalProxyState(t *testing.T) {
+	tests := []struct {
+		name  string
+		argv  []string
+		proxy bool
+	}{
+		{"long disabled", []string{"wget", "--proxy=off", "https://example.test"}, false},
+		{"negated disabled", []string{"wget", "--no-proxy", "https://example.test"}, false},
+		{"short disabled", []string{"wget", "-Y", "off", "https://example.test"}, false},
+		{"final enabled", []string{"wget", "--proxy=off", "--proxy", "https://example.test"}, true},
+		{"final disabled", []string{"wget", "--proxy", "--no-proxy", "https://example.test"}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parsed := parseWgetArgv(test.argv)
+			if !parsed.Complete || !parsed.ProxySet || parsed.Proxy != test.proxy ||
+				parsed.ProxyOptionIndex < 1 {
+				t.Fatalf("proxy state = %#v, want enabled=%t", parsed, test.proxy)
+			}
+		})
 	}
 }
 

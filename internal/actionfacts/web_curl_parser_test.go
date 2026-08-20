@@ -164,6 +164,23 @@ func TestParseCurlArgvOwnsOptionLookingAndEmptyValues(t *testing.T) {
 	}
 }
 
+func TestParseCurlArgvOwnsURLQueryValues(t *testing.T) {
+	t.Parallel()
+
+	for _, argv := range [][]string{
+		{"curl", "--url-query", "key=value", "https://files.invalid/run"},
+		{"curl", "--url-query=key=value", "https://files.invalid/run"},
+		{"curl", "--url-query=", "https://files.invalid/run"},
+	} {
+		parsed := parseCurlArgv(argv)
+		option := requireCurlParsedOption(t, parsed, "--url-query")
+		if !parsed.Complete || len(parsed.Targets) != 1 ||
+			!option.ValuePresent || !parsed.hasValidOptionValues() {
+			t.Fatalf("parse = %#v", parsed)
+		}
+	}
+}
+
 func TestParseCurlArgvShortAliasAndNoValueBundleParity(t *testing.T) {
 	t.Parallel()
 

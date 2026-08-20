@@ -354,6 +354,23 @@ func trustedActionContentFindingHasRiskPair(
 				*rule,
 				command.ID,
 				metadata.HTTPRequestComponents,
+			) || trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				metadata.FTPRequestComponents,
+			)
+		curlTargetBoundOriginAuthEgress :=
+			trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				metadata.HTTPOriginCredentialComponents,
+			) || trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				metadata.FTPOriginCredentialComponents,
 			)
 		wgetMetadata := actionfacts.StaticWgetTransmittedMetadata(command)
 		wgetHTTPMetadataEgress := httpEgress &&
@@ -376,10 +393,22 @@ func trustedActionContentFindingHasRiskPair(
 				command.ID,
 				wgetMetadata.HTTPRequestComponents,
 			)
+		wgetTargetBoundOriginAuthEgress :=
+			trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				wgetMetadata.HTTPOriginCredentialComponents,
+			) || trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				wgetMetadata.FTPOriginCredentialComponents,
+			)
 		if httpMetadataEgress || ftpOriginAuthEgress ||
-			curlRequestComponentEgress ||
+			curlRequestComponentEgress || curlTargetBoundOriginAuthEgress ||
 			wgetHTTPMetadataEgress || wgetFTPOriginAuthEgress ||
-			wgetRequestComponentEgress {
+			wgetRequestComponentEgress || wgetTargetBoundOriginAuthEgress {
 			return true
 		}
 		if trustedActionStaticContentPipesToExternalEgress(

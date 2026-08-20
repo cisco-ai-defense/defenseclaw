@@ -18,6 +18,7 @@ package actionfacts
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -61,7 +62,8 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 	parsed := parseCurlArgv(command.Argv)
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
-		len(parsed.Targets) == 0 {
+		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
+		!curlRangeOptionsValid(parsed) {
 		return nil
 	}
 
@@ -70,6 +72,27 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 		if target.Group != group {
 			return nil
 		}
+	}
+	hasHTTPTarget := false
+	for _, target := range parsed.Targets {
+		network, ok := webTargetFact(command.ID, target.Value, NetworkUpload)
+		if !ok || !webMetadataTargetSchemeSupported(target.Value) ||
+			!staticCommandArgumentAt(command, target.ArgvIndex) ||
+			!validLiteralRequestTarget(target.Value) ||
+			curlTargetHasInvalidUserinfo(target.Value) ||
+			curlHasUnmodeledGlob(target.Value) {
+			return nil
+		}
+		switch network.Scheme {
+		case "http", "https":
+			hasHTTPTarget = true
+		case "ftp", "ftps":
+		default:
+			return nil
+		}
+	}
+	if !hasHTTPTarget {
+		return nil
 	}
 
 	var payloads []string
@@ -102,11 +125,14 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 // FTP origin credentials, and exact-target request bytes distinct so callers
 // can bind each kind to only the URL schemes where curl transmits it.
 type CurlTransmittedMetadata struct {
-	Headers               []string
-	HTTPOriginCredentials []string
-	FTPOriginCredentials  []string
-	HTTPBearerTokens      []string
-	HTTPRequestComponents []TransmittedRequestComponent
+	Headers                        []string
+	HTTPOriginCredentials          []string
+	FTPOriginCredentials           []string
+	HTTPBearerTokens               []string
+	HTTPRequestComponents          []TransmittedRequestComponent
+	FTPRequestComponents           []TransmittedRequestComponent
+	HTTPOriginCredentialComponents []TransmittedRequestComponent
+	FTPOriginCredentialComponents  []TransmittedRequestComponent
 }
 
 // TransmittedRequestComponent binds literal request bytes to the exact parser-owned
@@ -136,7 +162,8 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	parsed := parseCurlArgv(command.Argv)
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
-		len(parsed.Targets) == 0 {
+		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
+		!curlRangeOptionsValid(parsed) {
 		return CurlTransmittedMetadata{}
 	}
 
@@ -149,6 +176,7 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	for _, target := range parsed.Targets {
 		if !webMetadataTargetSchemeSupported(target.Value) ||
 			!validLiteralRequestTarget(target.Value) ||
+			curlTargetHasInvalidUserinfo(target.Value) ||
 			curlHasUnmodeledGlob(target.Value) ||
 			!staticCommandArgumentAt(command, target.ArgvIndex) {
 			return CurlTransmittedMetadata{}
@@ -163,6 +191,13 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	lastRange := -1
 	lastRequestMethod := -1
 	rangeWireUncertain := false
+	getQueryDataSet := false
+	httpGetSet := false
+	netrcSet := false
+	var urlQueryValues []string
+	var urlQueryOutputLengths []int
+	urlQueryFragmentSeen := false
+	var ftpQuoteValues []string
 	for index, option := range parsed.Options {
 		if option.Group != group || option.Role == curlOptionConfig ||
 			option.Role == curlOptionNetworkOverride {
@@ -189,18 +224,86 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		if option.Canonical == "--request" && option.ValuePresent {
 			lastRequestMethod = index
 		}
+		if option.Canonical == "--get" {
+			httpGetSet = true
+		}
+		if option.Canonical == "--netrc" {
+			netrcSet = true
+		}
+		if curlOptionProvidesGETQueryData(option.Canonical) {
+			getQueryDataSet = true
+		}
+		if option.Canonical == "--url-query" {
+			if !staticCurlOptionValue(command, option) {
+				return CurlTransmittedMetadata{}
+			}
+			wireValue, preserved := curlURLQueryOptionBytes(option.Value)
+			if !preserved {
+				if raw, rawForm := strings.CutPrefix(option.Value, "+"); rawForm {
+					if !visibleASCII(raw) {
+						return CurlTransmittedMetadata{}
+					}
+					// Curl retains an empty output as the first query buffer, so a
+					// later occurrence still incurs the joining ampersand and the
+					// repeated-query size cap.
+					urlQueryOutputLengths = append(urlQueryOutputLengths, len(raw))
+					prefix, _, fragment := strings.Cut(raw, "#")
+					if !urlQueryFragmentSeen && prefix != "" {
+						urlQueryValues = append(urlQueryValues, prefix)
+					}
+					urlQueryFragmentSeen = urlQueryFragmentSeen || fragment
+					continue
+				}
+				_, _, fileForm, valid := curlDataURLEncodeFile(option.Value)
+				if !valid || fileForm {
+					return CurlTransmittedMetadata{}
+				}
+				// Non-file data-urlencode forms may transform their content.
+				// Omit only that candidate; they do not invalidate independent
+				// literal headers or credentials from the same request.
+				if len(option.Value) >= 8_000_000/3 {
+					return CurlTransmittedMetadata{}
+				}
+				urlQueryOutputLengths = append(
+					urlQueryOutputLengths,
+					3*len(option.Value),
+				)
+				continue
+			}
+			if wireValue != "" {
+				if !urlQueryFragmentSeen {
+					urlQueryValues = append(urlQueryValues, wireValue)
+				}
+			}
+			urlQueryOutputLengths = append(urlQueryOutputLengths, len(wireValue))
+		}
+		if option.Canonical == "--quote" {
+			wireValue, preserved := curlFTPQuoteBytes(option.Value)
+			if staticCurlOptionValue(command, option) && preserved {
+				ftpQuoteValues = append(ftpQuoteValues, wireValue)
+			}
+		}
 		if curlOptionMakesRangeWireUncertain(option.Canonical) {
 			rangeWireUncertain = true
 		}
 	}
+	if httpGetSet && getQueryDataSet {
+		// In curl 8.7.1, -G with a data option replaces --url-query as the
+		// appended query source instead of combining the two.
+		urlQueryValues = nil
+		urlQueryOutputLengths = nil
+	}
+	if !curlURLQueryLengthsValid(parsed.Targets, urlQueryOutputLengths) {
+		return CurlTransmittedMetadata{}
+	}
 	requestTargetValue := ""
+	requestTargetSet := lastRequestTarget >= 0
 	if lastRequestTarget >= 0 {
 		requestTarget := parsed.Options[lastRequestTarget]
-		if !staticCurlOptionValue(command, requestTarget) ||
-			requestTarget.Value == "" || !visibleASCII(requestTarget.Value) {
-			return CurlTransmittedMetadata{}
+		if staticCurlOptionValue(command, requestTarget) &&
+			curlHTTPRequestLineBytesPreserved(requestTarget.Value) {
+			requestTargetValue = requestTarget.Value
 		}
-		requestTargetValue = requestTarget.Value
 	}
 
 	metadata := CurlTransmittedMetadata{}
@@ -216,6 +319,7 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	finalReferer := ""
 	finalRange := ""
 	finalRequestMethod := ""
+	finalFTPRequestCommand := ""
 	var literalCookies []string
 	for index, option := range parsed.Options {
 		if !option.ValuePresent ||
@@ -277,21 +381,24 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		case "--oauth2-bearer":
 			finalBearer = option.Value
 		case "--user-agent":
-			if visibleASCII(option.Value) {
+			if curlHTTPOWSBoundedHeaderBytesPreserved(option.Value) {
 				finalUserAgent = option.Value
 			}
 		case "--referer":
 			wireValue, _, _ := strings.Cut(option.Value, ";auto")
-			if visibleASCII(wireValue) {
+			if curlHTTPOWSBoundedHeaderBytesPreserved(wireValue) {
 				finalReferer = wireValue
 			}
 		case "--range":
-			if !rangeWireUncertain && visibleASCII(option.Value) {
+			if !rangeWireUncertain && curlRangeBytesPreserved(option.Value) {
 				finalRange = option.Value
 			}
 		case "--request":
 			if curlHTTPRequestMethodBytesPreserved(option.Value) {
 				finalRequestMethod = option.Value
+			}
+			if printableASCII(option.Value) {
+				finalFTPRequestCommand = option.Value
 			}
 		}
 	}
@@ -300,14 +407,26 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	// default-GET state; body, method-control, and resume options can instead
 	// generate Content-Range or otherwise change precedence. ETag file options
 	// are outside the closed parser, so they make this helper return no metadata.
-	if finalUser != "" {
-		metadata.FTPOriginCredentials = []string{finalUser}
+	originAuthTargetBound := lastUser >= 0 || finalBearer != ""
+	if !originAuthTargetBound {
+		originAuthTargetBound = true
+		for _, target := range parsed.Targets {
+			if webTargetHasUserinfo(target.Value) {
+				originAuthTargetBound = false
+				break
+			}
+		}
 	}
-	if !httpAuthorizationOverridden {
-		if finalBearer != "" {
-			metadata.HTTPBearerTokens = []string{finalBearer}
-		} else if finalUser != "" {
-			metadata.HTTPOriginCredentials = []string{finalUser}
+	if originAuthTargetBound {
+		if finalUser != "" {
+			metadata.FTPOriginCredentials = []string{finalUser}
+		}
+		if !httpAuthorizationOverridden {
+			if finalBearer != "" {
+				metadata.HTTPBearerTokens = []string{finalBearer}
+			} else if finalUser != "" {
+				metadata.HTTPOriginCredentials = []string{finalUser}
+			}
 		}
 	}
 	for _, target := range parsed.Targets {
@@ -316,7 +435,7 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			target.Value,
 			NetworkDownload,
 		)
-		if !ok || network.Scheme != "http" && network.Scheme != "https" {
+		if !ok {
 			continue
 		}
 		component := func(value string) TransmittedRequestComponent {
@@ -326,6 +445,71 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 				Host:   network.Host,
 				Port:   network.Port,
 			}
+		}
+		if lastUser < 0 && !netrcSet {
+			user, userPresent, password, passwordPresent :=
+				webTargetUserinfo(target.Value)
+			userinfoBytesProved :=
+				(!userPresent || printableASCII(user)) &&
+					(!passwordPresent || printableASCII(password))
+			switch network.Scheme {
+			case "http", "https":
+				if userinfoBytesProved && !httpAuthorizationOverridden && finalBearer == "" {
+					if userPresent {
+						metadata.HTTPOriginCredentialComponents = append(
+							metadata.HTTPOriginCredentialComponents,
+							component(user),
+						)
+					}
+					if passwordPresent {
+						metadata.HTTPOriginCredentialComponents = append(
+							metadata.HTTPOriginCredentialComponents,
+							component(password),
+						)
+					}
+				}
+			case "ftp", "ftps":
+				if userinfoBytesProved && userPresent {
+					metadata.FTPOriginCredentialComponents = append(
+						metadata.FTPOriginCredentialComponents,
+						component(user),
+					)
+				}
+				if userinfoBytesProved && passwordPresent {
+					metadata.FTPOriginCredentialComponents = append(
+						metadata.FTPOriginCredentialComponents,
+						component(password),
+					)
+				}
+			}
+		}
+		if network.Scheme == "ftp" || network.Scheme == "ftps" {
+			path := rawHTTPURLPath(target.Value)
+			pathIsDirectory := path == "/" || strings.HasSuffix(path, "/")
+			requestModeProved := curlFTPURLPathModeProved(path) &&
+				!(target.UploadSet && pathIsDirectory)
+			if requestModeProved {
+				for _, quote := range ftpQuoteValues {
+					metadata.FTPRequestComponents = append(
+						metadata.FTPRequestComponents,
+						component(quote),
+					)
+				}
+			}
+			if requestModeProved && finalFTPRequestCommand != "" &&
+				!target.Head && !target.UploadSet && pathIsDirectory {
+				metadata.FTPRequestComponents = append(
+					metadata.FTPRequestComponents,
+					component(finalFTPRequestCommand),
+				)
+			}
+			// Leading +/- quote phases vary with transfer success and target
+			// mode, so they remain detection-only until those phases are
+			// represented by the closed parser.
+			continue
+		}
+		if network.Scheme != "http" && network.Scheme != "https" {
+			continue
 		}
 		if !httpCookieOverridden {
 			for _, cookie := range literalCookies {
@@ -361,11 +545,13 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 				component(finalRequestMethod),
 			)
 		}
-		if lastRequestTarget >= 0 {
-			metadata.HTTPRequestComponents = append(
-				metadata.HTTPRequestComponents,
-				component(requestTargetValue),
-			)
+		if requestTargetSet {
+			if requestTargetValue != "" {
+				metadata.HTTPRequestComponents = append(
+					metadata.HTTPRequestComponents,
+					component(requestTargetValue),
+				)
+			}
 			continue
 		}
 		if path := rawHTTPURLPath(target.Value); curlURLPathBytesPreserved(path) {
@@ -376,6 +562,12 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		}
 		query := rawURLQuery(target.Value)
 		if query != "" && visibleASCII(query) {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(query),
+			)
+		}
+		for _, query := range urlQueryValues {
 			metadata.HTTPRequestComponents = append(
 				metadata.HTTPRequestComponents,
 				component(query),
@@ -457,11 +649,41 @@ func visibleASCII(value string) bool {
 	return true
 }
 
-func curlURLPathBytesPreserved(value string) bool {
-	if value == "" || !strings.HasPrefix(value, "/") {
+func printableASCII(value string) bool {
+	if value == "" || strings.Trim(value, " ") == "" {
 		return false
 	}
-	if !webUnreservedBytesPreserved(value, "/-._~") {
+	for index := range len(value) {
+		if value[index] < 0x20 || value[index] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func curlFTPQuoteBytes(value string) (string, bool) {
+	if strings.HasPrefix(value, "+") || strings.HasPrefix(value, "-") {
+		return "", false
+	}
+	value = strings.TrimPrefix(value, "*")
+	return value, printableASCII(value)
+}
+
+func curlURLPathBytesPreserved(value string) bool {
+	if value == "" || !strings.HasPrefix(value, "/") || !visibleASCII(value) {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func curlFTPURLPathModeProved(value string) bool {
+	if !strings.HasPrefix(value, "/") ||
+		!webUnreservedBytesPreserved(value, "/-._~") {
 		return false
 	}
 	for _, segment := range strings.Split(value, "/") {
@@ -473,10 +695,97 @@ func curlURLPathBytesPreserved(value string) bool {
 }
 
 func curlCookieBytesPreserved(value string) bool {
-	if strings.IndexByte(value, '=') <= 0 {
+	return strings.Contains(value, "=") &&
+		curlHTTPOWSBoundedHeaderBytesPreserved(value)
+}
+
+func curlHTTPHeaderValueBytesPreserved(value string) bool {
+	if value == "" {
 		return false
 	}
-	return webUnreservedBytesPreserved(value, "-._~=")
+	for index := range len(value) {
+		if value[index] != '\t' && (value[index] < 0x20 || value[index] > 0x7e) {
+			return false
+		}
+	}
+	return true
+}
+
+func curlHTTPOWSBoundedHeaderBytesPreserved(value string) bool {
+	return curlHTTPHeaderValueBytesPreserved(value) &&
+		!isHTTPOptionalWhitespace(value[0]) &&
+		!isHTTPOptionalWhitespace(value[len(value)-1])
+}
+
+func isHTTPOptionalWhitespace(value byte) bool {
+	return value == ' ' || value == '\t'
+}
+
+func curlHTTPRequestLineBytesPreserved(value string) bool {
+	return value != "" && visibleASCII(value)
+}
+
+func wgetUserAgentBytesPreserved(value string) bool {
+	return value != "" && validWgetUserAgent(value)
+}
+
+func wgetRefererBytesPreserved(value string) bool {
+	return value != "" && !strings.ContainsRune(value, 0)
+}
+
+func curlURLQueryOptionBytes(value string) (string, bool) {
+	if raw, found := strings.CutPrefix(value, "+"); found {
+		return raw, curlRawURLQueryBytesPreserved(raw)
+	}
+	name, content, hasEquals := strings.Cut(value, "=")
+	if hasEquals {
+		if !webUnreservedBytesPreserved(name, "-._~") ||
+			!webUnreservedBytesPreserved(content, "-._~") {
+			return "", false
+		}
+		if name == "" {
+			return content, true
+		}
+		return name + "=" + content, true
+	}
+	if strings.Contains(value, "@") ||
+		!webUnreservedBytesPreserved(value, "-._~") {
+		return "", false
+	}
+	return value, true
+}
+
+func curlRawURLQueryBytesPreserved(value string) bool {
+	return visibleASCII(value) && !strings.Contains(value, "#")
+}
+
+func curlURLQueryLengthsValid(
+	targets []curlTransferTarget,
+	outputLengths []int,
+) bool {
+	if len(outputLengths) == 0 {
+		return true
+	}
+	total := len(outputLengths) - 1
+	for _, length := range outputLengths {
+		if length < 0 || total >= 8_000_000-length {
+			return false
+		}
+		total += length
+	}
+	// Curl 8.7.1 caps only the buffer created while combining repeated
+	// --url-query outputs; the first lone output bypasses this smaller cap.
+	if len(outputLengths) > 1 && total >= 100_000 {
+		return false
+	}
+	for _, target := range targets {
+		// Reserve one byte for the separator between the target and appended
+		// query. Curl's full URL allocation must remain below 8 MB.
+		if len(target.Value) >= 8_000_000-total-1 {
+			return false
+		}
+	}
+	return true
 }
 
 func webUnreservedBytesPreserved(value string, extra string) bool {
@@ -494,10 +803,114 @@ func webUnreservedBytesPreserved(value string, extra string) bool {
 }
 
 func curlHTTPRequestMethodBytesPreserved(value string) bool {
-	return value != "" && webUnreservedBytesPreserved(
-		value,
-		"!#$%&'*+-.^_`|~",
-	)
+	return curlHTTPRequestLineBytesPreserved(value)
+}
+
+func curlRangeBytesPreserved(value string) bool {
+	if !curlHTTPHeaderValueBytesPreserved(value) ||
+		isHTTPOptionalWhitespace(value[len(value)-1]) {
+		return false
+	}
+	// Curl parses any dashless value beginning with a digit as a numeric
+	// offset, discards its suffix, and sends a normalized N- form.
+	return value == "" || value[0] < '0' || value[0] > '9' ||
+		strings.Contains(value, "-")
+}
+
+func curlRangeOptionsValid(parsed curlArgvParse) bool {
+	for _, option := range parsed.Options {
+		value := option.Value
+		if option.Canonical != "--range" || value == "" ||
+			value[0] < '0' || value[0] > '9' || strings.Contains(value, "-") {
+			continue
+		}
+		end := 0
+		for end < len(value) && value[end] >= '0' && value[end] <= '9' {
+			end++
+		}
+		if _, err := strconv.ParseInt(value[:end], 10, 64); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func curlOptionProvidesGETQueryData(option string) bool {
+	switch option {
+	case "--data", "--data-ascii", "--data-binary", "--data-raw",
+		"--data-urlencode", "--json":
+		return true
+	default:
+		return false
+	}
+}
+
+type curlRequestMode uint8
+
+const (
+	curlRequestModeUnspecified curlRequestMode = iota
+	curlRequestModeGet
+	curlRequestModeHead
+	curlRequestModeForm
+	curlRequestModePost
+	curlRequestModePut
+)
+
+func curlRequestModeValid(parsed curlArgvParse) bool {
+	mode := curlRequestModeUnspecified
+	setMode := func(next curlRequestMode) bool {
+		if mode != curlRequestModeUnspecified && mode != next {
+			return false
+		}
+		mode = next
+		return true
+	}
+	noBody := false
+	hasData := false
+	useHTTPGet := false
+	for _, option := range parsed.Options {
+		switch option.Canonical {
+		case "--form", "--form-string":
+			if !setMode(curlRequestModeForm) {
+				return false
+			}
+		case "--head":
+			noBody = true
+			if !setMode(curlRequestModeHead) {
+				return false
+			}
+		case "--no-head":
+			noBody = false
+			if !setMode(curlRequestModeGet) {
+				return false
+			}
+		case "--get":
+			useHTTPGet = true
+		default:
+			if curlOptionProvidesGETQueryData(option.Canonical) {
+				hasData = true
+			}
+		}
+	}
+	if hasData {
+		dataMode := curlRequestModePost
+		if useHTTPGet {
+			dataMode = curlRequestModeGet
+			if noBody {
+				dataMode = curlRequestModeHead
+			}
+		}
+		if !setMode(dataMode) {
+			return false
+		}
+	}
+	for _, target := range parsed.Targets {
+		if target.UploadSet && target.UploadValue != "" &&
+			!setMode(curlRequestModePut) {
+			return false
+		}
+	}
+	return true
 }
 
 func curlOptionMakesRangeWireUncertain(option string) bool {
@@ -553,17 +966,20 @@ func curlHeaderOverridesHTTPField(value string, field string) bool {
 // origin credentials are returned only when the closed argv state proves
 // their effective values.
 type WgetTransmittedMetadata struct {
-	HTTPHeaders           []string
-	HTTPOriginCredentials []string
-	FTPOriginCredentials  []string
-	HTTPRequestComponents []TransmittedRequestComponent
+	HTTPHeaders                    []string
+	HTTPOriginCredentials          []string
+	FTPOriginCredentials           []string
+	HTTPRequestComponents          []TransmittedRequestComponent
+	HTTPOriginCredentialComponents []TransmittedRequestComponent
+	FTPOriginCredentialComponents  []TransmittedRequestComponent
 }
 
-// StaticWgetTransmittedMetadata returns effective literal custom headers and
-// generic origin credentials owned by the closed Wget parser. Repeated header
-// names replace case-insensitively, and an empty --header clears all earlier
-// custom headers. Generic credentials require --no-config because protocol-
-// specific values from ambient wgetrc files otherwise have higher priority.
+// StaticWgetTransmittedMetadata returns effective literal custom headers,
+// dedicated request fields, and origin credentials owned by the closed Wget
+// parser. Repeated header names replace case-insensitively, and an empty
+// --header clears all earlier custom headers. Credentials and dedicated fields
+// require --no-config because ambient wgetrc values can otherwise affect their
+// effective request bytes.
 func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata {
 	if !command.ArgvComplete || !isWgetProgram(command.Program) ||
 		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
@@ -571,7 +987,8 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 		return WgetTransmittedMetadata{}
 	}
 	parsed := parseWgetArgv(command.Argv)
-	if !parsed.Complete || parsed.Preview || parsed.Background ||
+	if !parsed.Complete || !parsed.RequestBodyValid ||
+		parsed.Preview || parsed.Background ||
 		parsed.ConfigIndirect || parsed.InputFileSet ||
 		len(parsed.Targets) == 0 {
 		return WgetTransmittedMetadata{}
@@ -582,7 +999,8 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 	for _, target := range parsed.TargetValues {
 		if !webMetadataTargetSchemeSupported(target.Value) ||
 			!validLiteralRequestTarget(target.Value) ||
-			!staticCommandArgumentAt(command, target.ArgvIndex) {
+			!staticCommandArgumentAt(command, target.ArgvIndex) ||
+			wgetTargetHasInvalidUserinfo(target.Value) {
 			return WgetTransmittedMetadata{}
 		}
 	}
@@ -590,6 +1008,13 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 	lastHeaders := make(map[string]int)
 	lastUser := -1
 	lastPassword := -1
+	lastHTTPUser := -1
+	lastHTTPPassword := -1
+	lastFTPUser := -1
+	lastFTPPassword := -1
+	lastUserAgent := -1
+	lastReferer := -1
+	lastMethod := -1
 	for index, value := range parsed.Values {
 		switch value.Option {
 		case "--header":
@@ -609,11 +1034,27 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 			lastUser = index
 		case "--password":
 			lastPassword = index
+		case "--http-user":
+			lastHTTPUser = index
+		case "--http-password":
+			lastHTTPPassword = index
+		case "--ftp-user":
+			lastFTPUser = index
+		case "--ftp-password":
+			lastFTPPassword = index
+		case "--user-agent":
+			lastUserAgent = index
+		case "--referer":
+			lastReferer = index
+		case "--method":
+			lastMethod = index
 		}
 	}
 
 	metadata := WgetTransmittedMetadata{}
 	httpAuthorizationOverridden := false
+	proxyAuthorizationHeader := ""
+	proxyExplicitlyDisabled := staticWgetProxyDisabled(command, parsed)
 	for index, value := range parsed.Values {
 		if value.Option != "--header" || value.Value == "" {
 			continue
@@ -624,6 +1065,9 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 			continue
 		}
 		if strings.EqualFold(name, "proxy-authorization") {
+			if proxyExplicitlyDisabled {
+				proxyAuthorizationHeader = wgetWireHeader(value.Value)
+			}
 			continue
 		}
 		metadata.HTTPHeaders = append(
@@ -634,13 +1078,64 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 			httpAuthorizationOverridden = true
 		}
 	}
+	_, httpUserAgentOverridden := lastHeaders["user-agent"]
+	_, httpRefererOverridden := lastHeaders["referer"]
+	finalUserAgent := ""
+	finalReferer := ""
+	finalMethod := ""
+	httpUserOption := wgetCredentialCandidate{}
+	httpPasswordOption := wgetCredentialCandidate{}
+	ftpUserOption := wgetCredentialCandidate{}
+	ftpPasswordOption := wgetCredentialCandidate{}
+	if parsed.ConfigDisabled {
+		if lastUserAgent >= 0 {
+			value := parsed.Values[lastUserAgent]
+			if staticWgetValueArgument(command, value) &&
+				wgetUserAgentBytesPreserved(value.Value) {
+				finalUserAgent = value.Value
+			}
+		}
+		if lastReferer >= 0 {
+			value := parsed.Values[lastReferer]
+			if staticWgetValueArgument(command, value) &&
+				wgetRefererBytesPreserved(value.Value) {
+				finalReferer = value.Value
+			}
+		}
+		if lastMethod >= 0 {
+			value := parsed.Values[lastMethod]
+			if staticWgetValueArgument(command, value) {
+				finalMethod = parsed.Method
+			}
+		}
+		httpUserOption = staticWgetCredentialAt(
+			command,
+			parsed.Values,
+			wgetEffectiveCredentialIndex(lastHTTPUser, lastUser),
+		)
+		httpPasswordOption = staticWgetCredentialAt(
+			command,
+			parsed.Values,
+			wgetEffectiveCredentialIndex(lastHTTPPassword, lastPassword),
+		)
+		ftpUserOption = staticWgetCredentialAt(
+			command,
+			parsed.Values,
+			wgetEffectiveCredentialIndex(lastFTPUser, lastUser),
+		)
+		ftpPasswordOption = staticWgetCredentialAt(
+			command,
+			parsed.Values,
+			wgetEffectiveCredentialIndex(lastFTPPassword, lastPassword),
+		)
+	}
 	for _, target := range parsed.TargetValues {
 		network, ok := webTargetFact(
 			command.ID,
 			target.Value,
 			NetworkDownload,
 		)
-		if !ok || network.Scheme != "http" && network.Scheme != "https" {
+		if !ok {
 			continue
 		}
 		component := func(value string) TransmittedRequestComponent {
@@ -650,6 +1145,82 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 				Host:   network.Host,
 				Port:   network.Port,
 			}
+		}
+		urlUser, urlUserPresent, urlPassword, urlPasswordPresent :=
+			webTargetUserinfo(target.Value)
+		switch network.Scheme {
+		case "http", "https":
+			user := httpUserOption
+			password := httpPasswordOption
+			if urlUserPresent {
+				user = wgetCredentialCandidate{
+					Value: urlUser, Present: true, Static: true,
+				}
+			}
+			if urlPasswordPresent {
+				password = wgetCredentialCandidate{
+					Value: urlPassword, Present: true, Static: true,
+				}
+			}
+			if parsed.ConfigDisabled && user.Present && password.Present &&
+				!httpAuthorizationOverridden {
+				metadata.HTTPOriginCredentialComponents =
+					appendWgetCredentialComponents(
+						metadata.HTTPOriginCredentialComponents,
+						component,
+						user,
+						password,
+					)
+			}
+		case "ftp", "ftps":
+			user := ftpUserOption
+			password := ftpPasswordOption
+			if urlUserPresent {
+				user = wgetCredentialCandidate{
+					Value: urlUser, Present: true, Static: true,
+				}
+			}
+			if urlPasswordPresent {
+				password = wgetCredentialCandidate{
+					Value: urlPassword, Present: true, Static: true,
+				}
+			}
+			if user.Present {
+				metadata.FTPOriginCredentialComponents =
+					appendWgetCredentialComponents(
+						metadata.FTPOriginCredentialComponents,
+						component,
+						user,
+						password,
+					)
+			}
+		}
+		if network.Scheme != "http" && network.Scheme != "https" {
+			continue
+		}
+		if proxyAuthorizationHeader != "" {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(proxyAuthorizationHeader),
+			)
+		}
+		if finalUserAgent != "" && !httpUserAgentOverridden {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(finalUserAgent),
+			)
+		}
+		if finalReferer != "" && !httpRefererOverridden {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(finalReferer),
+			)
+		}
+		if finalMethod != "" {
+			metadata.HTTPRequestComponents = append(
+				metadata.HTTPRequestComponents,
+				component(finalMethod),
+			)
 		}
 		if path := rawHTTPURLPath(target.Value); wgetURLPathBytesPreserved(path) {
 			metadata.HTTPRequestComponents = append(
@@ -668,58 +1239,129 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 	}
 
 	if !parsed.ConfigDisabled || len(parsed.Targets) != 1 ||
-		wgetTargetHasUserinfo(parsed.Targets[0]) {
+		webTargetHasUserinfo(parsed.Targets[0]) {
 		return metadata
 	}
-	if lastUser < 0 && lastPassword < 0 {
-		return metadata
-	}
-
-	user := ""
-	password := ""
-	if lastUser >= 0 {
-		value := parsed.Values[lastUser]
-		if !staticWgetValueArgument(command, value) {
-			return metadata
-		}
-		user = value.Value
-	}
-	if lastPassword >= 0 {
-		value := parsed.Values[lastPassword]
-		if !staticWgetValueArgument(command, value) {
-			return metadata
-		}
-		password = value.Value
-	}
-
-	if user != "" {
-		metadata.FTPOriginCredentials = append(
-			metadata.FTPOriginCredentials,
-			user,
-		)
-	}
-	if password != "" && lastUser >= 0 {
-		metadata.FTPOriginCredentials = append(
-			metadata.FTPOriginCredentials,
-			password,
-		)
-	}
-	if lastUser >= 0 && lastPassword >= 0 &&
+	httpUserIndex := wgetEffectiveCredentialIndex(lastHTTPUser, lastUser)
+	httpPasswordIndex := wgetEffectiveCredentialIndex(
+		lastHTTPPassword,
+		lastPassword,
+	)
+	if httpUserIndex >= 0 && httpPasswordIndex >= 0 &&
 		!httpAuthorizationOverridden {
-		if user != "" {
+		httpUser, userStatic := staticWgetValueAt(
+			command,
+			parsed.Values,
+			httpUserIndex,
+		)
+		httpPassword, passwordStatic := staticWgetValueAt(
+			command,
+			parsed.Values,
+			httpPasswordIndex,
+		)
+		if userStatic && passwordStatic && httpUser != "" {
 			metadata.HTTPOriginCredentials = append(
 				metadata.HTTPOriginCredentials,
-				user,
+				httpUser,
 			)
 		}
-		if password != "" {
+		if userStatic && passwordStatic && httpPassword != "" {
 			metadata.HTTPOriginCredentials = append(
 				metadata.HTTPOriginCredentials,
-				password,
+				httpPassword,
+			)
+		}
+	}
+
+	ftpUserIndex := wgetEffectiveCredentialIndex(lastFTPUser, lastUser)
+	ftpPasswordIndex := wgetEffectiveCredentialIndex(
+		lastFTPPassword,
+		lastPassword,
+	)
+	if ftpUserIndex < 0 {
+		return metadata
+	}
+	ftpUser, userStatic := staticWgetValueAt(
+		command,
+		parsed.Values,
+		ftpUserIndex,
+	)
+	if !userStatic {
+		return metadata
+	}
+	if ftpUser != "" {
+		metadata.FTPOriginCredentials = append(
+			metadata.FTPOriginCredentials,
+			ftpUser,
+		)
+	}
+	if ftpPasswordIndex >= 0 {
+		ftpPassword, passwordStatic := staticWgetValueAt(
+			command,
+			parsed.Values,
+			ftpPasswordIndex,
+		)
+		if passwordStatic && ftpPassword != "" {
+			metadata.FTPOriginCredentials = append(
+				metadata.FTPOriginCredentials,
+				ftpPassword,
 			)
 		}
 	}
 	return metadata
+}
+
+func wgetEffectiveCredentialIndex(protocolSpecific int, generic int) int {
+	if protocolSpecific >= 0 {
+		return protocolSpecific
+	}
+	return generic
+}
+
+func staticWgetValueAt(
+	command CommandFact,
+	values []wgetArgvValue,
+	index int,
+) (string, bool) {
+	if index < 0 || index >= len(values) ||
+		!staticWgetValueArgument(command, values[index]) {
+		return "", false
+	}
+	return values[index].Value, true
+}
+
+type wgetCredentialCandidate struct {
+	Value   string
+	Present bool
+	Static  bool
+}
+
+func staticWgetCredentialAt(
+	command CommandFact,
+	values []wgetArgvValue,
+	index int,
+) wgetCredentialCandidate {
+	if index < 0 || index >= len(values) {
+		return wgetCredentialCandidate{}
+	}
+	value, static := staticWgetValueAt(command, values, index)
+	return wgetCredentialCandidate{
+		Value: value, Present: true, Static: static,
+	}
+}
+
+func appendWgetCredentialComponents(
+	destination []TransmittedRequestComponent,
+	component func(string) TransmittedRequestComponent,
+	candidates ...wgetCredentialCandidate,
+) []TransmittedRequestComponent {
+	for _, candidate := range candidates {
+		if candidate.Static && candidate.Value != "" &&
+			printableASCII(candidate.Value) {
+			destination = append(destination, component(candidate.Value))
+		}
+	}
+	return destination
 }
 
 func staticWgetValueArgument(command CommandFact, value wgetArgvValue) bool {
@@ -727,6 +1369,19 @@ func staticWgetValueArgument(command CommandFact, value wgetArgvValue) bool {
 		command,
 		value.ValueIndex,
 	)
+}
+
+func staticWgetProxyDisabled(
+	command CommandFact,
+	parsed wgetArgvParse,
+) bool {
+	if !parsed.ProxySet || parsed.Proxy || parsed.ProxyOptionIndex < 0 ||
+		!staticCommandArgumentAt(command, parsed.ProxyOptionIndex) {
+		return false
+	}
+	return parsed.ProxyValueIndex < 0 ||
+		parsed.ProxyValueIndex == parsed.ProxyOptionIndex ||
+		staticCommandArgumentAt(command, parsed.ProxyValueIndex)
 }
 
 func wgetWireHeader(value string) string {
@@ -738,16 +1393,69 @@ func wgetWireHeader(value string) string {
 }
 
 func wgetQueryBytesPreserved(value string) bool {
-	return webUnreservedBytesPreserved(value, "-._~=&")
+	return wgetURLBytesPreserved(value, "!$&'()*+,-./:;=?@[]_~")
 }
 
 func wgetURLPathBytesPreserved(value string) bool {
-	return !strings.Contains(value, "//") && curlURLPathBytesPreserved(value)
+	if !strings.HasPrefix(value, "/") || strings.Contains(value, "//") ||
+		!wgetURLBytesPreserved(value, "!$&'()*+,-./:;=@[]_~") {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
-func wgetTargetHasUserinfo(value string) bool {
+func wgetURLBytesPreserved(value string, punctuation string) bool {
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if isASCIIAlphaNumeric(character) ||
+			strings.ContainsRune(punctuation, rune(character)) {
+			continue
+		}
+		if character != '%' || index+2 >= len(value) ||
+			!isASCIIHexByte(value[index+1]) || !isASCIIHexByte(value[index+2]) {
+			return false
+		}
+		index += 2
+	}
+	return true
+}
+
+func isASCIIHexByte(value byte) bool {
+	return value >= '0' && value <= '9' ||
+		value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F'
+}
+
+func webTargetHasUserinfo(value string) bool {
 	parsed, err := url.Parse(value)
 	return err != nil || parsed.User != nil
+}
+
+func webTargetUserinfo(
+	value string,
+) (user string, userPresent bool, password string, passwordPresent bool) {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User == nil {
+		return "", false, "", false
+	}
+	user = parsed.User.Username()
+	password, passwordPresent = parsed.User.Password()
+	return user, true, password, passwordPresent
+}
+
+func curlTargetHasInvalidUserinfo(value string) bool {
+	user, userPresent, password, passwordPresent := webTargetUserinfo(value)
+	return userPresent && !printableASCII(user) ||
+		passwordPresent && !printableASCII(password)
+}
+
+func wgetTargetHasInvalidUserinfo(value string) bool {
+	user, present, _, _ := webTargetUserinfo(value)
+	return present && user == ""
 }
 
 // StaticWgetUploadPayloads returns the final literal inline request body that
@@ -763,7 +1471,26 @@ func StaticWgetUploadPayloads(command CommandFact) []string {
 	parsed := parseWgetArgv(command.Argv)
 	if !parsed.Complete || !parsed.RequestBodyValid || parsed.Preview ||
 		parsed.Background || parsed.ConfigIndirect || parsed.InputFileSet ||
-		parsed.Spider || len(parsed.Targets) == 0 {
+		len(parsed.Targets) == 0 {
+		return nil
+	}
+	hasHTTPTarget := false
+	for _, target := range parsed.TargetValues {
+		network, ok := webTargetFact(command.ID, target.Value, NetworkUpload)
+		if !ok || !webMetadataTargetSchemeSupported(target.Value) ||
+			!staticCommandArgumentAt(command, target.ArgvIndex) ||
+			wgetTargetHasInvalidUserinfo(target.Value) {
+			return nil
+		}
+		switch network.Scheme {
+		case "http", "https":
+			hasHTTPTarget = true
+		case "ftp", "ftps":
+		default:
+			return nil
+		}
+	}
+	if !hasHTTPTarget {
 		return nil
 	}
 
@@ -812,11 +1539,15 @@ func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
 		return value, value != ""
 	case "--data-urlencode":
 		_, _, fileSource, valid := curlDataURLEncodeFile(value)
-		return value, valid && !fileSource && value != ""
+		if !valid || fileSource {
+			return "", false
+		}
+		return curlDataURLEncodeBytes(value)
 	case "--data-raw", "--form-string":
 		return value, value != ""
 	case "--form":
-		if curlFormHasUnmodeledFileReference(value) {
+		if curlFormHasUnmodeledFileReference(value) ||
+			curlFormHasEncoderParameter(value) {
 			return "", false
 		}
 		if _, _, fileSource := webFormFile(value); fileSource {
@@ -828,10 +1559,30 @@ func staticCurlUploadPayload(option curlOptionToken) (string, bool) {
 	}
 }
 
+func curlDataURLEncodeBytes(value string) (string, bool) {
+	name, content, hasEquals := strings.Cut(value, "=")
+	if hasEquals {
+		if !webUnreservedBytesPreserved(name, "-._~") ||
+			!webUnreservedBytesPreserved(content, "-._~") {
+			return "", false
+		}
+		if name == "" {
+			return content, content != ""
+		}
+		return name + "=" + content, true
+	}
+	if strings.Contains(value, "@") ||
+		!webUnreservedBytesPreserved(value, "-._~") {
+		return "", false
+	}
+	return value, value != ""
+}
+
 func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	parsed := parseCurlArgv(command.Argv)
 	valid := parsed.Complete && !parsed.EmptyTransferGroup &&
-		parsed.hasValidOptionValues()
+		parsed.hasValidOptionValues() && curlRequestModeValid(parsed) &&
+		curlRangeOptionsValid(parsed)
 	if !valid {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
@@ -1008,7 +1759,6 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 				curlOutputHasUnmodeledGlobReference(target.OutputValue) {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
-		targetUpload := group.upload || target.UploadSet
 		if target.UploadSet {
 			switch target.UploadValue {
 			case "-", ".":
@@ -1045,17 +1795,18 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
 
-		action := NetworkDownload
-		if targetUpload {
-			action = NetworkUpload
-			group.hasUploadTarget = true
-		} else {
-			group.hasDownloadTarget = true
-		}
-		fact, ok := webTargetFact(command.ID, target.Value, action)
+		fact, ok := webTargetFact(command.ID, target.Value, NetworkDownload)
 		if !ok {
 			out.markPartial(IssueUnknownOperandGrammar)
 			continue
+		}
+		targetUpload := target.UploadSet || group.upload &&
+			(fact.Scheme == "http" || fact.Scheme == "https")
+		if targetUpload {
+			fact.Action = NetworkUpload
+			group.hasUploadTarget = true
+		} else {
+			group.hasDownloadTarget = true
 		}
 		if out.appendNetwork(fact) {
 			if targetUpload {
@@ -1160,7 +1911,7 @@ func classifyParsedWgetTransfer(out *parseOutput, command *CommandFact) {
 		hasDownloadFile = true
 	}
 
-	if !parsed.Spider {
+	if parsed.RequestBodyValid {
 		if parsed.PostDataSet || parsed.BodyDataSet {
 			upload = true
 			hasProcessUpload = true
@@ -1186,36 +1937,57 @@ func classifyParsedWgetTransfer(out *parseOutput, command *CommandFact) {
 		}
 	}
 
-	action := NetworkDownload
-	if upload {
-		action = NetworkUpload
-		addOperation(command, OperationUpload)
-	} else {
-		addOperation(command, OperationFetch)
-	}
+	hasUploadNetwork := false
+	hasDownloadNetwork := false
 	for _, target := range parsed.Targets {
-		fact, ok := webTargetFact(command.ID, target, action)
+		fact, ok := webTargetFact(command.ID, target, NetworkDownload)
 		if !ok {
 			out.markPartial(IssueUnknownOperandGrammar)
 			continue
 		}
+		targetUpload := upload &&
+			(fact.Scheme == "http" || fact.Scheme == "https")
+		if targetUpload {
+			fact.Action = NetworkUpload
+		}
 		if out.appendNetwork(fact) {
 			hasNetwork = true
+			if targetUpload {
+				hasUploadNetwork = true
+			} else {
+				hasDownloadNetwork = true
+			}
 		}
 	}
 	if !hasNetwork {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
-	addWebTransferFlows(
-		out,
-		command.ID,
-		upload,
-		hasNetwork,
-		hasUploadFile,
-		false,
-		hasProcessUpload,
-		hasDownloadFile,
-	)
+	if hasUploadNetwork {
+		addOperation(command, OperationUpload)
+		addWebTransferFlows(
+			out,
+			command.ID,
+			true,
+			true,
+			hasUploadFile,
+			false,
+			hasProcessUpload,
+			hasDownloadFile,
+		)
+	}
+	if hasDownloadNetwork {
+		addOperation(command, OperationFetch)
+		addWebTransferFlows(
+			out,
+			command.ID,
+			false,
+			true,
+			false,
+			false,
+			false,
+			hasDownloadFile,
+		)
+	}
 }
 
 func appendLiteralTransferPath(
@@ -1302,6 +2074,16 @@ func curlFormHasUnmodeledFileReference(value string) bool {
 	// not ambiguous by itself. webFormFile handles only the single literal path
 	// subset.
 	return strings.ContainsAny(fileSpec, ",\"'")
+}
+
+func curlFormHasEncoderParameter(value string) bool {
+	for _, parameter := range strings.Split(value, ";")[1:] {
+		name, _, found := strings.Cut(parameter, "=")
+		if found && strings.EqualFold(strings.TrimSpace(name), "encoder") {
+			return true
+		}
+	}
+	return false
 }
 
 func curlHasUnmodeledGlob(value string) bool {

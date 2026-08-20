@@ -154,6 +154,7 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--unix-socket":     curlValue("--unix-socket", curlOptionNetworkOverride),
 	"--upload-file":     curlValue("--upload-file", curlOptionUpload),
 	"--url":             curlValue("--url", curlOptionTarget),
+	"--url-query":       curlValue("--url-query", curlOptionNeutral),
 	"--user":            curlValue("--user", curlOptionNeutral),
 	"--user-agent":      curlValue("--user-agent", curlOptionNeutral),
 	"--write-out":       curlValue("--write-out", curlOptionNeutral),
@@ -348,7 +349,7 @@ func curlOptionAllowsEmptyValue(option string) bool {
 		"--data-urlencode", "--doh-url", "--header", "--json",
 		"--proxy", "--proxy-user", "--quote", "--referer",
 		"--telnet-option", "--time-cond", "--user",
-		"--user-agent", "--write-out":
+		"--url-query", "--user-agent", "--write-out":
 		return true
 	default:
 		return false

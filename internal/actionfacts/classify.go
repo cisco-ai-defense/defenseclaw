@@ -4339,7 +4339,7 @@ func webControlOptionConsumesValue(program, option string) bool {
 			"--cert", "--connect-to",
 			"--connect-timeout", "--dns-servers", "--interface", "--json",
 			"--key", "--max-time", "--output-dir", "--request-target",
-			"--resolve", "--unix-socket", "--url", "--doh-url",
+			"--resolve", "--unix-socket", "--url", "--url-query", "--doh-url",
 			"--preproxy", "--proxy1.0", "--socks4", "--socks4a",
 			"--socks5", "--socks5-hostname":
 			return true
@@ -4361,6 +4361,8 @@ func webControlOptionConsumesValue(program, option string) bool {
 		switch key {
 		case "--append-output", "--bind-address", "--body-data",
 			"--body-file", "--execute", "--header", "--input-file",
+			"--ftp-password", "--ftp-user", "--http-password", "--http-user",
+			"--method",
 			"--output-file", "--output-document", "--password", "--post-data",
 			"--post-file", "--directory-prefix", "--proxy-password", "--proxy-user",
 			"--referer", "--timeout", "--tries", "--user",
