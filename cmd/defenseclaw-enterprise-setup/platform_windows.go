@@ -195,6 +195,10 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 	}
 	cleanup := func() error { return cleanupEnterpriseSetupStage(stageRoot, programData) }
 	for _, name := range requiredPayloadFiles {
+		expected, ok := payload.Files[name]
+		if !ok {
+			return "", nil, errors.Join(fmt.Errorf("validated enterprise payload is missing manifest entry %s", name), cleanup())
+		}
 		path := filepath.Join(stageRoot, name)
 		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
@@ -228,7 +232,8 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 		if err := errors.Join(verifyErr, readCloseErr); err != nil {
 			return "", nil, errors.Join(fmt.Errorf("verify staged enterprise payload %s: %w", name, err), cleanup())
 		}
-		if verifiedBytes != written || !strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), payload.Manifest.Files[name]) {
+		if verifiedBytes != written || verifiedBytes != expected.Size ||
+			!strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), expected.SHA256) {
 			return "", nil, errors.Join(fmt.Errorf("staged enterprise payload digest mismatch: %s", name), cleanup())
 		}
 	}

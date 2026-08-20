@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -28,12 +29,14 @@ import (
 var embeddedPayload embed.FS
 
 const (
-	enterpriseSetupArtifactName = "DefenseClawSetup-Enterprise-x64.exe"
-	enterpriseFailureExitCode   = 1603
-	defaultLifecycleTimeout     = 30 * time.Minute
-	maximumLifecycleTimeout     = 2 * time.Hour
-	maximumPayloadFileBytes     = int64(512 << 20)
-	maximumPayloadTotalBytes    = int64(1 << 30)
+	enterpriseSetupArtifactName     = "DefenseClawSetup-Enterprise-x64.exe"
+	enterpriseFailureExitCode       = 1603
+	defaultLifecycleTimeout         = 30 * time.Minute
+	maximumLifecycleTimeout         = 2 * time.Hour
+	maximumPayloadFileBytes         = int64(512 << 20)
+	maximumPayloadTotalBytes        = int64(1 << 30)
+	managedEnterpriseFlavor         = "managed-enterprise"
+	managedEnterpriseUnsignedFlavor = "managed-enterprise-unsigned"
 )
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -85,16 +88,23 @@ type enterpriseSetupOptions struct {
 }
 
 type enterprisePayloadManifest struct {
-	SchemaVersion      int               `json:"schema_version"`
-	Version            string            `json:"version"`
-	SourceCommit       string            `json:"source_commit"`
-	DistributionFlavor string            `json:"distribution_flavor"`
-	Unsigned           bool              `json:"unsigned"`
-	Files              map[string]string `json:"files"`
+	SchemaVersion      int                             `json:"schema_version"`
+	Version            string                          `json:"version"`
+	SourceCommit       string                          `json:"source_commit"`
+	DistributionFlavor string                          `json:"distribution_flavor"`
+	Unsigned           bool                            `json:"unsigned"`
+	Files              []enterprisePayloadManifestFile `json:"files"`
+}
+
+type enterprisePayloadManifestFile struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
 }
 
 type enterprisePayload struct {
 	Manifest enterprisePayloadManifest
+	Files    map[string]enterprisePayloadManifestFile
 }
 
 type enterpriseSetupFailure struct {
@@ -317,44 +327,76 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 }
 
 func loadEmbeddedEnterprisePayload() (enterprisePayload, error) {
-	manifestBytes, err := fs.ReadFile(embeddedPayload, "payload/manifest.json")
+	return loadEnterprisePayload(embeddedPayload)
+}
+
+func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
+	manifestBytes, err := fs.ReadFile(payloadFS, "payload/manifest.json")
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return enterprisePayload{}, errors.New("enterprise payload missing; build with scripts/build-windows-enterprise-installer.ps1")
 		}
 		return enterprisePayload{}, fmt.Errorf("read embedded enterprise manifest: %w", err)
 	}
+	decoder := json.NewDecoder(bytes.NewReader(manifestBytes))
+	decoder.DisallowUnknownFields()
 	var manifest enterprisePayloadManifest
-	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+	if err := decoder.Decode(&manifest); err != nil {
 		return enterprisePayload{}, fmt.Errorf("parse embedded enterprise manifest: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return enterprisePayload{}, errors.New("parse embedded enterprise manifest: trailing JSON data")
+	}
+	expectedFlavor := managedEnterpriseFlavor
+	if manifest.Unsigned {
+		expectedFlavor = managedEnterpriseUnsignedFlavor
 	}
 	if manifest.SchemaVersion != 1 || strings.TrimSpace(manifest.Version) == "" ||
 		!sourceCommitPattern.MatchString(manifest.SourceCommit) ||
-		manifest.DistributionFlavor != "managed-enterprise" {
+		manifest.DistributionFlavor != expectedFlavor {
 		return enterprisePayload{}, errors.New("embedded enterprise manifest identity is invalid")
 	}
 	if len(manifest.Files) != len(requiredPayloadFiles) {
 		return enterprisePayload{}, errors.New("embedded enterprise manifest has an unexpected file inventory")
 	}
-	var totalSize int64
+	required := make(map[string]struct{}, len(requiredPayloadFiles))
 	for _, name := range requiredPayloadFiles {
-		expected, ok := manifest.Files[name]
-		if !ok || !sha256Pattern.MatchString(expected) {
-			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest is missing a valid SHA-256 for %s", name)
+		required[name] = struct{}{}
+	}
+	files := make(map[string]enterprisePayloadManifestFile, len(manifest.Files))
+	var totalSize int64
+	for _, entry := range manifest.Files {
+		if _, ok := required[entry.Name]; !ok {
+			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest contains unexpected file %q", entry.Name)
 		}
-		info, err := fs.Stat(embeddedPayload, "payload/"+name)
+		if _, duplicate := files[entry.Name]; duplicate {
+			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest contains duplicate file %q", entry.Name)
+		}
+		if !sha256Pattern.MatchString(entry.SHA256) {
+			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest has an invalid SHA-256 for %s", entry.Name)
+		}
+		if entry.Size <= 0 || entry.Size > maximumPayloadFileBytes {
+			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest has an invalid size for %s", entry.Name)
+		}
+		info, err := fs.Stat(payloadFS, "payload/"+entry.Name)
 		if err != nil {
-			return enterprisePayload{}, fmt.Errorf("inspect embedded enterprise payload %s: %w", name, err)
+			return enterprisePayload{}, fmt.Errorf("inspect embedded enterprise payload %s: %w", entry.Name, err)
 		}
-		if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximumPayloadFileBytes {
-			return enterprisePayload{}, fmt.Errorf("embedded enterprise payload has invalid type or size: %s", name)
+		if !info.Mode().IsRegular() || info.Size() != entry.Size {
+			return enterprisePayload{}, fmt.Errorf("embedded enterprise payload type or size does not match manifest: %s", entry.Name)
 		}
-		totalSize += info.Size()
-		if totalSize > maximumPayloadTotalBytes {
+		if entry.Size > maximumPayloadTotalBytes-totalSize {
 			return enterprisePayload{}, fmt.Errorf("embedded enterprise payload exceeds %d bytes", maximumPayloadTotalBytes)
 		}
+		totalSize += entry.Size
+		files[entry.Name] = entry
 	}
-	return enterprisePayload{Manifest: manifest}, nil
+	for _, name := range requiredPayloadFiles {
+		if _, ok := files[name]; !ok {
+			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest is missing required file %s", name)
+		}
+	}
+	return enterprisePayload{Manifest: manifest, Files: files}, nil
 }
 
 func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupOptions, err error) {
