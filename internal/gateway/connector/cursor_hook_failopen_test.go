@@ -74,7 +74,12 @@ func runCursorHookWithInput(
 
 	cmd := exec.Command("bash", filepath.Join(dir, "cursor-hook.sh"))
 	cmd.Stdin = strings.NewReader(input)
-	cmd.Env = append(os.Environ(),
+	// sanitizedTestEnv strips DEFENSECLAW_* from the inherited env so a
+	// developer's `DEFENSECLAW_FAIL_MODE=closed` (or CI job's leak) can
+	// not override the fail-mode this test explicitly renders into the
+	// hook. Tests that need to exercise those vars append them via
+	// extraEnv AFTER the sanitization.
+	cmd.Env = append(sanitizedTestEnv(),
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
@@ -161,7 +166,10 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 
 	cmd := exec.Command("bash", filepath.Join(dir, "cursor-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"beforeShellExecution"}`)
-	cmd.Env = append(os.Environ(),
+	// Sanitize inherited DEFENSECLAW_* so a leaked FAIL_MODE / strict
+	// override from the dev shell cannot flip .disabled's fail-open
+	// path into a spurious block.
+	cmd.Env = append(sanitizedTestEnv(),
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
