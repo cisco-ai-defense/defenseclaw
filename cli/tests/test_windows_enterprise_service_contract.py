@@ -423,7 +423,11 @@ def test_enterprise_process_json_and_machine_root_contracts() -> None:
     assert "$null -eq $argument -or $argument -isnot [string]" in command_line_encoder
     assert "CharSet = CharSet.Unicode" in module_smoke
     assert "ExactSpelling = true" in module_smoke
-    assert module.count("Assert-DefenseClawServiceImagePath `") == 2
+    # Spec 005 D1 (docs/specs/005-windows-per-user-hook-lifecycle/):
+    # third `Assert-DefenseClawServiceImagePath` call pins the
+    # DefenseClawHookEnumerator SCM service's ImagePath alongside
+    # the existing gateway + guardian.
+    assert module.count("Assert-DefenseClawServiceImagePath `") == 3
     assert "[Text.UTF8Encoding]::new($false)" in module
 
     requirements_report = module[
