@@ -2060,6 +2060,54 @@ class NotificationsConfig:
 
 
 @dataclass
+class RoutingConfig:
+    """Semantic model routing configuration."""
+
+    enabled: bool = False
+    version: str = ""
+    port: int = 0
+    algorithm: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"enabled": self.enabled}
+        if self.version:
+            d["version"] = self.version
+        if self.port:
+            d["port"] = self.port
+        if self.algorithm:
+            d["algorithm"] = self.algorithm
+        return d
+
+
+@dataclass
+class TrainingConfig:
+    """Training pipeline configuration. Mirrors internal/config.TrainingConfig."""
+
+    enabled: bool = False
+    backend: str = ""
+    models_dir: str = ""
+    llama_server_port: int = 0
+
+
+@dataclass
+class PrivacyConfig:
+    """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
+
+    ``disable_redaction`` is the persistent kill-switch documented in
+    the Go redaction package: when True the sidecar bypasses every
+    ForSink* helper at startup, including persistent sinks (audit DB,
+    OTel logs, Splunk HEC, webhooks). It violates the
+    unconditional-redaction contract documented in OBSERVABILITY.md
+    by design — only enable on single-tenant installs where every
+    downstream sink lives inside the same trust boundary.
+    The CLI emits a warning on flip, and config loaders emit a
+    once-per-process warning when they observe it.
+    """
+
+    disable_redaction: bool = False
+
+
+@dataclass
 class AIDiscoveryConfig:
     enabled: bool = False
     mode: str = "enhanced"
@@ -2298,6 +2346,8 @@ class Config:
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -4635,6 +4685,8 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
+        routing=_merge_routing(raw.get("routing")),
+        training=_merge_training(raw.get("training")),
     )
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
@@ -4667,6 +4719,32 @@ def _exact_config_version(value: Any) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return 0
+
+
+def _merge_training(raw: dict[str, Any] | None) -> TrainingConfig:
+    """Build a :class:`TrainingConfig` from the YAML ``training:`` block."""
+    if not isinstance(raw, dict):
+        return TrainingConfig()
+    return TrainingConfig(
+        enabled=bool(raw.get("enabled", False)),
+        backend=raw.get("backend", ""),
+        models_dir=raw.get("models_dir", ""),
+        llama_server_port=_as_int(raw.get("llama_server_port"), 0),
+    )
+
+
+def _merge_privacy(raw: dict[str, Any] | None) -> PrivacyConfig:
+    """Build a :class:`PrivacyConfig` from the YAML ``privacy:`` block.
+
+    Defaults match the Go side (``disable_redaction: false``) so a
+    config without the block keeps the historical
+    redact-by-default contract.
+    """
+    if not isinstance(raw, dict):
+        return PrivacyConfig()
+    return PrivacyConfig(
+        disable_redaction=bool(raw.get("disable_redaction", False)),
+    )
 
 
 def _audit_database_path(raw: dict[str, Any], data_dir: str, source_version: int) -> str:
@@ -4842,6 +4920,18 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
         sources=sources,
         dedup_window=dedup_window,
         max_per_minute=max_per_minute,
+    )
+
+
+def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
+    """Build a :class:`RoutingConfig` from the YAML ``routing:`` block."""
+    if not isinstance(raw, dict):
+        return RoutingConfig()
+    return RoutingConfig(
+        enabled=bool(raw.get("enabled", False)),
+        version=str(raw.get("version", "") or ""),
+        port=int(raw.get("port", 0) or 0),
+        algorithm=str(raw.get("algorithm", "") or ""),
     )
 
 

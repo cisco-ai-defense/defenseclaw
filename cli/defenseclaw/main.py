@@ -53,6 +53,7 @@ from defenseclaw.commands.cmd_setup import setup
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
+from defenseclaw.commands.cmd_training import training
 from defenseclaw.commands.cmd_tui import tui
 from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
 from defenseclaw.commands.cmd_upgrade import (
@@ -332,6 +333,7 @@ cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
 cli.add_command(observability_cmd, "observability")
 cli.add_command(settings_cmd, "settings")
+cli.add_command(training)
 cli.add_command(uninstall_cmd, "uninstall")
 cli.add_command(reset_cmd, "reset")
 cli.add_command(version_cmd, "version")
