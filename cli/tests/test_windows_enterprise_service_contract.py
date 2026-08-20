@@ -67,6 +67,31 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def test_windows_shorthand_targets_require_metadata_versions() -> None:
+    installer = read(INSTALLER)
+    smoke = read(BOOTSTRAP_ENVIRONMENT_SMOKE)
+    discovery_start = installer.index(
+        "function Get-DefenseClawConnectorMetadataVersion"
+    )
+    renderer_start = installer.index(
+        "function Get-DefenseClawRenderedEnterpriseTargets"
+    )
+    execution_start = installer.index("$bootstrapEnvironment = $null")
+    discovery = installer[discovery_start:renderer_start]
+    renderer = installer[renderer_start:execution_start]
+
+    assert "Get-DefenseClawConnectorJsonMetadataVersion" in discovery
+    assert "AppData\\Roaming\\npm\\node_modules" in discovery
+    assert "AppData\\Local\\Programs\\cursor\\resources\\app\\package.json" in discovery
+    assert "anthropic.claude-code-*" in discovery
+    assert "Get-DefenseClawConnectorMetadataVersion" in renderer
+    assert "agent_version:" in renderer
+    assert "enabled: false" in renderer
+    assert renderer.index("agent_version:") < renderer.index("enabled: true")
+    assert "@attacker/not-amp" in smoke
+    assert "target renderer emitted an enabled/version contract mismatch" in smoke
+
+
 def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
     installer = read(INSTALLER)
     module = read(MODULE)
@@ -1167,6 +1192,7 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "environment_restore_verified",
                 "hostile_fixture_cleanup_verified",
                 "existing_collision_rejected_without_acl_seizure",
+                "rendered_targets_version_contract",
                 "concurrent_workers",
                 "concurrent_roots_unique",
                 "concurrent_cleanup_verified",

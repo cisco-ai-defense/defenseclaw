@@ -1518,12 +1518,269 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     return $out.ToArray()
 }
 
+function ConvertTo-DefenseClawConnectorMetadataVersion {
+    param([AllowNull()][object]$Value)
+
+    if ($Value -isnot [string]) { return '' }
+    $version = ([string]$Value).Trim()
+    if ($version.Length -eq 0 -or $version.Length -gt 128 -or
+        $version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
+        return ''
+    }
+    return $version
+}
+
+function Test-DefenseClawConnectorMetadataPath {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Directory
+    )
+
+    try {
+        $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+        $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+        $driveRoot = [IO.Path]::GetPathRoot($full)
+        if ([string]::IsNullOrWhiteSpace($rootFull) -or
+            [string]::IsNullOrWhiteSpace($driveRoot) -or
+            $driveRoot -cnotmatch '^[A-Za-z]:\\$' -or
+            $full.StartsWith('\\') -or
+            $full.StartsWith('//') -or
+            $full.StartsWith('\\?\') -or
+            $full.StartsWith('\\.\') -or
+            -not $full.StartsWith(
+                $rootFull + '\',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            return $false
+        }
+
+        $current = $full
+        while ($true) {
+            $attributes = [IO.File]::GetAttributes($current)
+            if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $false
+            }
+            if ([string]::Equals(
+                    $current,
+                    $full,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                $isDirectory =
+                    ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+                if ($isDirectory -ne [bool]$Directory) { return $false }
+            }
+            if ([string]::Equals(
+                    $current,
+                    $rootFull,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                break
+            }
+            $parent = [IO.Path]::GetDirectoryName($current)
+            if ([string]::IsNullOrWhiteSpace($parent) -or
+                [string]::Equals(
+                    $parent,
+                    $current,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                return $false
+            }
+            $current = $parent.TrimEnd('\')
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-DefenseClawConnectorJsonMetadataVersion {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path,
+        [string[]]$ExpectedNames = @()
+    )
+
+    if (-not (Test-DefenseClawConnectorMetadataPath `
+            -Root $Root -Path $Path)) {
+        return ''
+    }
+
+    # Package metadata belongs to the target user and is therefore evidence,
+    # not trusted code. Read a bounded UTF-8 JSON document and constrain the
+    # only value that crosses into targets.yaml. Never invoke a user-installed
+    # executable from this elevated installer merely to obtain --version.
+    $stream = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            [IO.Path]::GetFullPath($Path),
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+        )
+        $maximumBytes = 1MB
+        $buffer = [byte[]]::new($maximumBytes + 1)
+        $total = 0
+        while ($total -lt $buffer.Length) {
+            $read = $stream.Read($buffer, $total, $buffer.Length - $total)
+            if ($read -eq 0) { break }
+            $total += $read
+        }
+        if ($total -eq 0 -or $total -gt $maximumBytes) { return '' }
+        $utf8 = [Text.UTF8Encoding]::new($false, $true)
+        $document = Microsoft.PowerShell.Utility\ConvertFrom-Json `
+            -InputObject ($utf8.GetString($buffer, 0, $total))
+        if ($null -eq $document) { return '' }
+        $nameProperty = $document.PSObject.Properties['name']
+        $versionProperty = $document.PSObject.Properties['version']
+        if ($null -eq $versionProperty -or
+            $versionProperty.Value -isnot [string]) {
+            return ''
+        }
+        if ($ExpectedNames.Count -gt 0) {
+            if ($null -eq $nameProperty -or
+                $nameProperty.Value -isnot [string] -or
+                ([string]$nameProperty.Value) -cnotin $ExpectedNames) {
+                return ''
+            }
+        }
+        return ConvertTo-DefenseClawConnectorMetadataVersion `
+            -Value $versionProperty.Value
+    }
+    catch {
+        return ''
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Get-DefenseClawConnectorMetadataVersion {
+    param(
+        [Parameter(Mandatory)][string]$Connector,
+        [Parameter(Mandatory)][string]$UserHome
+    )
+
+    try {
+        $home = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
+    }
+    catch {
+        return ''
+    }
+    if (-not [IO.Directory]::Exists($home)) { return '' }
+
+    if ($Connector -eq 'cursor') {
+        foreach ($candidate in @(
+            [pscustomobject]@{
+                Root = $home
+                Path = [IO.Path]::Combine(
+                    $home,
+                    'AppData\Local\Programs\cursor\resources\app\package.json'
+                )
+            },
+            [pscustomobject]@{
+                Root = $trustedProgramFiles
+                Path = [IO.Path]::Combine(
+                    $trustedProgramFiles,
+                    'Cursor\resources\app\package.json'
+                )
+            }
+        )) {
+            # Cursor's exact application-bundle path is the identity boundary;
+            # upstream package names have varied, so do not key this probe on
+            # an unstable JSON name field.
+            $version = Get-DefenseClawConnectorJsonMetadataVersion `
+                -Root $candidate.Root -Path $candidate.Path
+            if (-not [string]::IsNullOrWhiteSpace($version)) {
+                return $version
+            }
+        }
+        return ''
+    }
+
+    $package = switch ($Connector) {
+        'codex' { '@openai\codex'; break }
+        'claudecode' { '@anthropic-ai\claude-code'; break }
+        'amp' { '@ampcode\cli'; break }
+        default { return '' }
+    }
+    $expectedName = $package -replace '\\', '/'
+    foreach ($prefix in @(
+        'AppData\Roaming\npm\node_modules',
+        '.npm-global\node_modules',
+        '.npm-global\lib\node_modules',
+        '.local\lib\node_modules'
+    )) {
+        $candidate = [IO.Path]::Combine($home, $prefix, $package, 'package.json')
+        $version = Get-DefenseClawConnectorJsonMetadataVersion `
+            -Root $home -Path $candidate -ExpectedNames @($expectedName)
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+    }
+
+    $machinePackage = [IO.Path]::Combine(
+        $trustedProgramFiles,
+        'nodejs\node_modules',
+        $package,
+        'package.json'
+    )
+    $version = Get-DefenseClawConnectorJsonMetadataVersion `
+        -Root $trustedProgramFiles `
+        -Path $machinePackage `
+        -ExpectedNames @($expectedName)
+    if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
+
+    if ($Connector -eq 'claudecode') {
+        foreach ($relativeExtensionRoot in @(
+            '.cursor\extensions',
+            '.vscode\extensions'
+        )) {
+            $extensionRoot = [IO.Path]::Combine(
+                $home,
+                $relativeExtensionRoot
+            )
+            if (-not (Test-DefenseClawConnectorMetadataPath `
+                    -Root $home -Path $extensionRoot -Directory)) {
+                continue
+            }
+            $examined = 0
+            foreach ($extension in [IO.Directory]::EnumerateDirectories(
+                    $extensionRoot,
+                    'anthropic.claude-code-*',
+                    [IO.SearchOption]::TopDirectoryOnly
+                )) {
+                $examined++
+                if ($examined -gt 256) { break }
+                $candidate = [IO.Path]::Combine($extension, 'package.json')
+                $version = Get-DefenseClawConnectorJsonMetadataVersion `
+                    -Root $home `
+                    -Path $candidate `
+                    -ExpectedNames @('claude-code')
+                if (-not [string]::IsNullOrWhiteSpace($version)) {
+                    return $version
+                }
+            }
+        }
+    }
+    return ''
+}
+
 function Get-DefenseClawRenderedEnterpriseTargets {
-    param([Parameter(Mandatory)][string[]]$Connectors)
+    param(
+        [Parameter(Mandatory)][string[]]$Connectors,
+        [object[]]$Profiles
+    )
     $sb = [Text.StringBuilder]::new()
     [void]$sb.AppendLine('version: 1')
     [void]$sb.AppendLine('targets:')
-    $users = Get-DefenseClawEligibleInteractiveUserProfiles
+    $users = if ($PSBoundParameters.ContainsKey('Profiles')) {
+        @($Profiles)
+    }
+    else {
+        @(Get-DefenseClawEligibleInteractiveUserProfiles)
+    }
     if ($users.Count -eq 0) {
         # An empty manifest is valid YAML; the guardian re-scans on its
         # interval, so a new user appearing after install is picked up
@@ -1533,11 +1790,31 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     }
     foreach ($u in $users) {
         foreach ($c in $Connectors) {
+            $version = ''
+            try {
+                $version = Get-DefenseClawConnectorMetadataVersion `
+                    -Connector $c -UserHome ([string]$u.UserHome)
+            }
+            catch {
+                # Discovery is best-effort. Unreadable or concurrently changed
+                # user metadata must produce a disabled row, not abort Setup.
+                $version = ''
+            }
+            $version = ConvertTo-DefenseClawConnectorMetadataVersion `
+                -Value $version
             [void]$sb.AppendLine("  - user: `"$($u.UserName -replace '"','\"')`"")
             [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
             [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
             [void]$sb.AppendLine("    connector: `"$c`"")
-            [void]$sb.AppendLine('    enabled: true')
+            if ([string]::IsNullOrWhiteSpace($version)) {
+                # Disabled rows remain valid and let the guardian preserve the
+                # discovered identity until an admin supplies a real version.
+                [void]$sb.AppendLine('    enabled: false')
+            }
+            else {
+                [void]$sb.AppendLine("    agent_version: `"$version`"")
+                [void]$sb.AppendLine('    enabled: true')
+            }
         }
     }
     return $sb.ToString()

@@ -333,6 +333,100 @@ function Invoke-CollisionNoSeizeProbe {
     return $true
 }
 
+function Invoke-RenderedEnterpriseTargetsVersionProbe {
+    $fixtureRoot = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        "DefenseClaw-TargetMetadata-$([Guid]::NewGuid().ToString('N'))"
+    )
+    [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    try {
+        $fixtures = @(
+            [pscustomobject]@{
+                RelativePath = 'AppData\Roaming\npm\node_modules\@openai\codex\package.json'
+                Body = '{"name":"@openai/codex","version":"0.144.3"}'
+            },
+            [pscustomobject]@{
+                RelativePath = 'AppData\Local\Programs\cursor\resources\app\package.json'
+                Body = '{"name":"cursor","version":"1.7.54"}'
+            },
+            [pscustomobject]@{
+                RelativePath = '.cursor\extensions\anthropic.claude-code-2.1.208-win32-x64\package.json'
+                Body = '{"name":"claude-code","version":"2.1.208"}'
+            },
+            [pscustomobject]@{
+                RelativePath = 'AppData\Roaming\npm\node_modules\@ampcode\cli\package.json'
+                Body = '{"name":"@attacker/not-amp","version":"9.9.9"}'
+            }
+        )
+        foreach ($fixture in $fixtures) {
+            $path = [IO.Path]::Combine($fixtureRoot, $fixture.RelativePath)
+            [void][IO.Directory]::CreateDirectory(
+                [IO.Path]::GetDirectoryName($path)
+            )
+            [IO.File]::WriteAllText(
+                $path,
+                [string]$fixture.Body,
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+
+        $rendered = Get-DefenseClawRenderedEnterpriseTargets `
+            -Connectors @('codex', 'cursor', 'claudecode', 'amp') `
+            -Profiles @([pscustomobject]@{
+                SID = 'S-1-5-21-1000-1000-1000-1001'
+                UserName = 'fixture-user'
+                UserHome = $fixtureRoot
+            })
+        $blocks = @(
+            [regex]::Split($rendered, '(?m)(?=^  - user: )') |
+                Where-Object { $_.StartsWith('  - user: ') }
+        )
+        if ($blocks.Count -ne 4) {
+            throw "target renderer emitted $($blocks.Count) rows instead of four"
+        }
+        foreach ($block in $blocks) {
+            $enabled = $block -match '(?m)^    enabled: true\r?$'
+            $hasVersion =
+                $block -match '(?m)^    agent_version: "[^"]+"\r?$'
+            if ($enabled -ne $hasVersion) {
+                throw 'target renderer emitted an enabled/version contract mismatch'
+            }
+        }
+        foreach ($expectedVersion in @('0.144.3', '1.7.54', '2.1.208')) {
+            if ($rendered -notmatch (
+                    '(?m)^    agent_version: "' +
+                    [regex]::Escape($expectedVersion) +
+                    '"\r?$'
+                )) {
+                throw "target renderer omitted discovered version $expectedVersion"
+            }
+        }
+        $ampBlock = @(
+            $blocks |
+                Where-Object { $_ -match '(?m)^    connector: "amp"\r?$' }
+        )
+        if ($ampBlock.Count -ne 1 -or
+            $ampBlock[0] -notmatch '(?m)^    enabled: false\r?$' -or
+            $ampBlock[0] -match '(?m)^    agent_version:' -or
+            $rendered.Contains('9.9.9')) {
+            throw 'target renderer enabled Amp from mismatched package metadata'
+        }
+        $hostileVersion = "9.9.9`n    enabled: true"
+        if (-not [string]::IsNullOrEmpty(
+                (ConvertTo-DefenseClawConnectorMetadataVersion `
+                    -Value $hostileVersion)
+            )) {
+            throw 'target renderer accepted a YAML-shaping metadata version'
+        }
+    }
+    finally {
+        if ([IO.Directory]::Exists($fixtureRoot)) {
+            [IO.Directory]::Delete($fixtureRoot, $true)
+        }
+    }
+    return $true
+}
+
 $expectedWindows = [IO.Path]::GetFullPath(
     [IO.Path]::GetDirectoryName([Environment]::SystemDirectory)
 ).TrimEnd('\')
@@ -531,6 +625,7 @@ if (-not [bool]$status.ok -or [bool]$status.installed -or
 
 $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
+$renderedTargetsVersionContract = Invoke-RenderedEnterpriseTargetsVersionProbe
 $raceRoot = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
     "DefenseClaw-BootstrapEnvironmentRace-$([Guid]::NewGuid().ToString('N'))"
@@ -659,6 +754,8 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$single.hostile_fixture_cleanup_verified
     existing_collision_rejected_without_acl_seizure =
         [bool]$collisionRejected
+    rendered_targets_version_contract =
+        [bool]$renderedTargetsVersionContract
     concurrent_workers = 6
     concurrent_roots_unique = $true
     concurrent_cleanup_verified = $true
