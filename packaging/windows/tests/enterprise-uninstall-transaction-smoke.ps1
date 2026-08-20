@@ -1203,14 +1203,20 @@ try {
                                 -Force
                         }
                     }
+                    # Spec 005 D1 (PR #766): third managed service.
+                    # The self-uninstall shortcut mock fakes removal of
+                    # all three services to stay consistent with the
+                    # full transactional path in the real code (which
+                    # removes enumerator + guardian + gateway).
                     foreach ($name in @(
                         'DefenseClawGateway',
-                        'DefenseClawHookGuardian'
+                        'DefenseClawHookGuardian',
+                        'DefenseClawHookEnumerator'
                     )) {
                         $script:HarnessState.service_exists[$name] = $false
                         $script:HarnessState.service_start_modes[$name] = 0
                     }
-                    $script:HarnessState.removed_services += 2
+                    $script:HarnessState.removed_services += 3
                     $script:HarnessState.installed = $false
                     $script:HarnessState.services_running = $false
                     return
@@ -1891,9 +1897,14 @@ try {
                         $script:HarnessState.service_contract_checks -eq 2
                     ) `
                     -Message "$Name did not verify the full service contract twice"
+                # Spec 005 D1 (PR #766): the full uninstall path now
+                # removes enumerator + guardian + gateway (three
+                # services). Each `Remove-DefenseClawService` mock
+                # invocation increments `removed_services`, so the
+                # expected count is 3 not 2.
                 Assert-Harness `
-                    -Condition ($script:HarnessState.removed_services -eq 2) `
-                    -Message "$Name did not delete both exactly rechecked services"
+                    -Condition ($script:HarnessState.removed_services -eq 3) `
+                    -Message "$Name did not delete all three exactly rechecked services"
                 Assert-Harness `
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.ManagedHooksTeardownJournalPath)) `
@@ -2167,11 +2178,14 @@ targets:
                         -Message 'fresh Install -NoStart retry did not leave both services disabled'
                 }
             }
+            # Spec 005 D1 (PR #766): rollback removes all three managed
+            # services (Set-DefenseClawManagedServices creates the
+            # enumerator alongside gateway + guardian).
             Assert-Harness `
                 -Condition (
                     $script:HarnessState.transaction_calls -eq 2 -and
                     $script:HarnessState.restore_calls -eq 1 -and
-                    $script:HarnessState.removed_services -eq 2
+                    $script:HarnessState.removed_services -eq 3
                 ) `
                 -Message 'fresh install fault/retry did not use exact transactional rollback'
             $uninstallResults.Add([pscustomobject]@{
