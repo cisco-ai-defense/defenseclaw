@@ -2624,19 +2624,6 @@ func StaticCurlSOCKSProxyCredentialComponentsForFacts(
 	return StaticCurlSOCKSProxyCredentialComponents(command)
 }
 
-func curlSOCKSCredentialInertFlag(option curlOptionToken) bool {
-	if option.TakesValue || option.ValuePresent || option.Role != curlOptionNeutral {
-		return false
-	}
-	switch option.Canonical {
-	case "--disable", "--globoff", "--no-buffer", "--no-progress-meter",
-		"--progress-bar", "--show-error", "--silent", "--verbose":
-		return true
-	default:
-		return false
-	}
-}
-
 func curlSOCKS5BasicAuthenticationEnabled(
 	parsed curlArgvParse,
 	group int,
