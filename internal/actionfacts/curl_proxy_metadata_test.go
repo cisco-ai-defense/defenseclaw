@@ -574,10 +574,12 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 			},
 		},
 		{
-			name: "SOCKS proxy is outside HTTP metadata lane", argv: []string{
+			name: "SOCKS proxy credentials use their own metadata lane", argv: []string{
 				"curl", "--proxy", "socks5://proxy.example", "--proxy-user",
 				"proxy:" + token, "https://origin.example",
 			},
+			want:              components("tcp", "proxy.example", 1080, "proxy", token),
+			wantAuthoritative: true,
 		},
 		{
 			name: "FTP proxy scheme is unsupported", argv: []string{
@@ -631,6 +633,8 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 				"http://proxy.example", "--proxy-user", "proxy:" + token,
 				"https://origin.example",
 			},
+			want:              components("tcp", "proxy.example", 1080, "proxy", token),
+			wantAuthoritative: true,
 		},
 		{
 			name: "multiple groups are ambiguous", argv: []string{

@@ -19,8 +19,10 @@ package actionfacts
 import (
 	"net/netip"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type curlTransferProjection struct {
@@ -700,6 +702,1241 @@ func curlSMTPInertFlag(option curlOptionToken) bool {
 	}
 }
 
+// StaticCurlTelnetOptionRequestComponents returns exact Telnet negotiation
+// fields from a closed curl 8.7.1 invocation, bound to one literal Telnet
+// origin. TTYPE and XDISPLOC are final-value settings. NEW_ENV is additive and
+// replaces its first comma with the Telnet VAR/VALUE marker on the wire.
+// Transmission remains conditional on the peer requesting the corresponding
+// negotiation, just as FTP account commands are conditional on peer replies.
+func StaticCurlTelnetOptionRequestComponents(
+	command CommandFact,
+) []TransmittedRequestComponent {
+	parsed := parseCurlArgv(command.Argv)
+	network, values, valid := staticCurlTelnetOptionProjection(command, parsed)
+	if !valid {
+		return nil
+	}
+	components := make([]TransmittedRequestComponent, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		components = append(components, TransmittedRequestComponent{
+			Value: value, Scheme: network.Scheme,
+			Host: network.Host, Port: network.Port,
+		})
+	}
+	return components
+}
+
+// StaticCurlTelnetOptionRequestComponentsForFacts admits a curl child beneath
+// exact env/command/exec wrappers. POSIX stdin, stdout, and stderr redirects
+// to /dev/null are erased as deterministic I/O sinks; every other ancestor
+// redirect or pipeline keeps the proof closed.
+func StaticCurlTelnetOptionRequestComponentsForFacts(
+	facts Facts,
+	commandID int64,
+) []TransmittedRequestComponent {
+	if commandID == 0 || !facts.Authoritative() || !facts.EnforcementEligible() {
+		return nil
+	}
+	command, valid := staticCurlTelnetCommandForCommands(
+		facts.Commands,
+		commandID,
+	)
+	if !valid {
+		return nil
+	}
+	return StaticCurlTelnetOptionRequestComponents(command)
+}
+
+func staticCurlTelnetOptionProjection(
+	command CommandFact,
+	parsed curlArgvParse,
+) (NetworkFact, []string, bool) {
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		command.Effect != EffectExecute || !command.ArgvComplete ||
+		command.ParentCommandID != 0 || command.PipelineID != 0 ||
+		len(command.Wrappers) != 0 ||
+		!curlTelnetOutputRedirectsSafe(command) || command.Program != "curl" ||
+		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		!exactCaseSensitivePOSIXProgram(&command, "curl") ||
+		len(command.Arguments) != len(command.Argv) {
+		return NetworkFact{}, nil, false
+	}
+	for index := range command.Argv {
+		if !staticCommandArgumentAt(command, index) {
+			return NetworkFact{}, nil, false
+		}
+	}
+
+	nullConfigOnly := staticCurlPOSIXNullConfigOnly(command, parsed)
+	if (!parsed.Complete && !nullConfigOnly) ||
+		parsed.ConfigOpaque && !nullConfigOnly || parsed.Preview ||
+		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
+		len(parsed.Targets) != 1 || !curlRequestModeValid(parsed) ||
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFTPEagerOptionConflictsValid(parsed) {
+		return NetworkFact{}, nil, false
+	}
+	target := parsed.Targets[0]
+	outputSafe := target.Output == curlOutputStdout ||
+		target.Output == curlOutputFile && target.OutputValue == "/dev/null" &&
+			curlPOSIXNullDeviceAvailable(command)
+	uploadSafe := !target.UploadSet || target.UploadValue == "" ||
+		target.UploadValue == "/dev/null" && curlPOSIXNullDeviceAvailable(command)
+	if target.Group != 0 || !outputSafe ||
+		!uploadSafe || !staticCommandArgumentAt(command, target.ArgvIndex) ||
+		!validLiteralRequestTarget(target.Value) ||
+		curlHasUnmodeledGlob(target.Value) {
+		return NetworkFact{}, nil, false
+	}
+	telnetTarget, valid := curlTelnetEffectiveTarget(command, parsed, target)
+	if !valid {
+		return NetworkFact{}, nil, false
+	}
+	network, valid := curlTelnetTargetFact(
+		command.ID,
+		telnetTarget,
+		NetworkDownload,
+	)
+	if !valid {
+		return NetworkFact{}, nil, false
+	}
+	if !staticCurlTelnetNetrcSetupValid(command, parsed, target.Group) {
+		return NetworkFact{}, nil, false
+	}
+
+	lastMainProxy := -1
+	lastPreproxy := -1
+	lastNoProxy := -1
+	for index, option := range parsed.Options {
+		if option.Group != target.Group {
+			continue
+		}
+		switch {
+		case curlMainProxyOption(option.Canonical):
+			lastMainProxy = index
+		case option.Canonical == "--preproxy":
+			lastPreproxy = index
+		case option.Canonical == "--noproxy":
+			lastNoProxy = index
+		}
+	}
+	mainProxyDisabled := false
+	mainProxyActive := false
+	if lastMainProxy >= 0 {
+		option := parsed.Options[lastMainProxy]
+		if !staticCurlOptionValue(command, option) {
+			return NetworkFact{}, nil, false
+		}
+		mainProxyDisabled = option.Canonical == "--proxy" && option.Value == "" ||
+			curlProxyDecodedControlUserinfoDisables(
+				command.ID,
+				option.Canonical,
+				option.Value,
+			)
+		mainProxyActive = !mainProxyDisabled
+	}
+	noProxyBypassesPeer := false
+	if lastNoProxy >= 0 {
+		option := parsed.Options[lastNoProxy]
+		if !staticCurlOptionValue(command, option) {
+			return NetworkFact{}, nil, false
+		}
+		noProxyBypassesPeer, valid = curlNoProxyMatches(option.Value, network.Host)
+		if !valid {
+			return NetworkFact{}, nil, false
+		}
+	}
+	if !noProxyBypassesPeer && (lastPreproxy >= 0 || mainProxyActive ||
+		lastNoProxy >= 0 && !mainProxyDisabled) {
+		return NetworkFact{}, nil, false
+	}
+	ipv4Only, _ := curlEffectiveIPv4Only(parsed, target.Group)
+	if !curlPeerMatchesAddressOptions(network.Host, ipv4Only, false) {
+		return NetworkFact{}, nil, false
+	}
+	telnetUser, telnetUserSet, valid := curlTelnetEffectiveUser(
+		command,
+		parsed,
+		target,
+		telnetTarget,
+	)
+	if !valid {
+		return NetworkFact{}, nil, false
+	}
+	if !staticCurlTelnetTransferSetupValid(
+		command,
+		parsed,
+		target,
+		telnetTarget,
+	) {
+		return NetworkFact{}, nil, false
+	}
+
+	var telnetOptions []string
+	for _, option := range parsed.Options {
+		if option.Group != target.Group || !option.Known {
+			return NetworkFact{}, nil, false
+		}
+		switch option.Canonical {
+		case "--telnet-option":
+			if !staticCurlOptionValue(command, option) {
+				return NetworkFact{}, nil, false
+			}
+			telnetOptions = append(telnetOptions, option.Value)
+		case "--", "--url":
+		case "--output":
+			if !staticCurlOptionValue(command, option) ||
+				option.Value != "-" &&
+					(option.Value != "/dev/null" ||
+						!curlPOSIXNullDeviceAvailable(command)) {
+				return NetworkFact{}, nil, false
+			}
+		case "--cacert", "--cert", "--key":
+			// Telnet never initializes TLS, so these support-file settings are
+			// not opened and cannot preempt option negotiation.
+			if !staticCurlOptionValue(command, option) {
+				return NetworkFact{}, nil, false
+			}
+		case "--user":
+			// Only the final value is effective. Its prompt safety, username
+			// bytes, and USER/NEW_ENV buffer occupancy were validated above.
+			if !staticCurlOptionValue(command, option) {
+				return NetworkFact{}, nil, false
+			}
+		case "--config":
+			if !staticCurlOptionValue(command, option) ||
+				option.Value != "/dev/null" ||
+				!curlPOSIXNullDeviceAvailable(command) {
+				return NetworkFact{}, nil, false
+			}
+		case "--upload-file":
+			if !staticCurlOptionValue(command, option) ||
+				option.Value != "" &&
+					(option.Value != "/dev/null" ||
+						!curlPOSIXNullDeviceAvailable(command)) {
+				return NetworkFact{}, nil, false
+			}
+		case "--write-out":
+			if !staticCurlOptionValue(command, option) ||
+				strings.HasPrefix(option.Value, "@") &&
+					(option.Value != "@/dev/null" ||
+						!curlPOSIXNullDeviceAvailable(command)) {
+				return NetworkFact{}, nil, false
+			}
+		case "--connect-timeout", "--max-time", "--retry", "--retry-delay",
+			"--retry-max-time", "--speed-limit", "--speed-time":
+			if !staticCurlOptionValue(command, option) ||
+				!curlTelnetNumericValueIsZero(option.Canonical, option.Value) {
+				return NetworkFact{}, nil, false
+			}
+		case "--aws-sigv4", "--capath", "--cert-type", "--ciphers", "--crlfile",
+			"--curves", "--egd-file", "--ftp-account", "--ftp-alternative-to-user",
+			"--ftp-method", "--ftp-port", "--ftp-ssl-ccc-mode", "--mail-from",
+			"--mail-rcpt", "--netrc-file", "--oauth2-bearer", "--random-file",
+			"--referer", "--request", "--request-target", "--user-agent",
+			"--haproxy-clientip", "--hostpubsha256", "--ipfs-gateway", "--key-type",
+			"--login-options", "--pass", "--pinnedpubkey", "--proxy-cacert",
+			"--proxy-capath", "--proxy-cert", "--proxy-cert-type", "--proxy-ciphers",
+			"--proxy-crlfile", "--proxy-key", "--proxy-key-type", "--proxy-pass",
+			"--proxy-pinnedpubkey", "--proxy-service-name",
+			"--proxy-tls13-ciphers", "--pubkey", "--service-name", "--tls13-ciphers":
+			// These values are either unused by Telnet or were reduced to a
+			// preconnect-safe final state above. random-file is a documented
+			// compatibility no-op in curl 8.7.1.
+			if !staticCurlOptionValue(command, option) {
+				return NetworkFact{}, nil, false
+			}
+		case "--header", "--proxy-header":
+			if !staticCurlHeaderSetupValid(command, option) {
+				return NetworkFact{}, nil, false
+			}
+		case "--cookie":
+			if !staticCurlOptionValue(command, option) ||
+				!containsCookieLiteral(option.Value) {
+				return NetworkFact{}, nil, false
+			}
+		case "--cookie-jar", "--continue-at", "--data", "--data-ascii",
+			"--data-binary", "--data-raw", "--data-urlencode", "--doh-url",
+			"--dump-header", "--form", "--form-string", "--json", "--output-dir",
+			"--proxy-user", "--quote", "--range", "--time-cond", "--url-query":
+			// Aggregate and final-state semantics were validated together above.
+			if !staticCurlOptionValue(command, option) {
+				return NetworkFact{}, nil, false
+			}
+		case "--create-file-mode", "--delegation", "--expect100-timeout",
+			"--happy-eyeballs-timeout-ms", "--hostpubmd5", "--keepalive-time",
+			"--limit-rate", "--local-port", "--max-filesize", "--max-redirs",
+			"--parallel-max", "--proto", "--proto-redir", "--rate",
+			"--tftp-blksize", "--tls-max", "--trace-config", "--variable":
+			if !staticCurlOptionValue(command, option) ||
+				!curlTelnetBoundedValueValid(option) {
+				return NetworkFact{}, nil, false
+			}
+		case "--etag-compare", "--etag-save", "--trace", "--trace-ascii":
+			if !staticCurlOptionValue(command, option) ||
+				!curlTelnetNullSinkValueValid(command, option) {
+				return NetworkFact{}, nil, false
+			}
+		case "--proto-default":
+			if !staticCurlOptionValue(command, option) ||
+				!curlTelnetProtoDefaultValueValid(option.Value) {
+				return NetworkFact{}, nil, false
+			}
+		case "--stderr":
+			if !staticCurlOptionValue(command, option) ||
+				option.Value != "-" &&
+					(option.Value != "/dev/null" ||
+						!curlPOSIXNullDeviceAvailable(command)) {
+				return NetworkFact{}, nil, false
+			}
+		case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
+			"--socks5", "--socks5-hostname", "--preproxy", "--noproxy":
+			// Final direct-route state was validated above. Earlier settings
+			// are overwritten; a final --proxy '' disables the main proxy and
+			// a final --noproxy '*' bypasses an otherwise active main proxy.
+		case "--disallow-username-in-url", "--remote-header-name":
+			// Conditional final flag state was validated above.
+			if !curlTelnetInertFlag(option) {
+				return NetworkFact{}, nil, false
+			}
+		default:
+			if !curlTelnetInertFlag(option) {
+				return NetworkFact{}, nil, false
+			}
+		}
+	}
+	values, valid := curlTelnetOptionWireValues(
+		telnetOptions,
+		telnetUser,
+		telnetUserSet,
+	)
+	if !valid {
+		return NetworkFact{}, nil, false
+	}
+	return network, values, true
+}
+
+func staticCurlTelnetTransferSetupValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	target curlTransferTarget,
+	telnetTarget string,
+) bool {
+	group := target.Group
+	explicitTelnet := curlTargetHasExplicitTelnetScheme(target.Value)
+	hasPostData := false
+	hasURLQuery := false
+	finalGet := false
+	showHeaders := false
+	contentDisposition := false
+	haproxyProtocol := false
+	disallowURLUser := false
+	continueSet := false
+	continueCurrent := false
+	continueOffset := int64(0)
+	dohURLSet := false
+	dohURL := ""
+	dumpHeaderSet := false
+	dumpHeader := ""
+	proxyUserSet := false
+	proxyUser := ""
+	outputDirSet := false
+	finalHappyEyeballs := ""
+	finalKeepaliveTime := ""
+	finalLimitRate := ""
+	finalLocalPort := ""
+	finalMaxFilesize := ""
+
+	for _, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if option.ValuePresent && !staticCurlOptionValue(command, option) {
+			return false
+		}
+		switch option.Canonical {
+		case "--get":
+			finalGet = curlTelnetBooleanOptionEnabled(option)
+		case "--include":
+			showHeaders = curlTelnetBooleanOptionEnabled(option)
+		case "--head":
+			showHeaders = curlTelnetBooleanOptionEnabled(option)
+		case "--no-head":
+			showHeaders = false
+		case "--remote-header-name":
+			contentDisposition = curlTelnetBooleanOptionEnabled(option)
+		case "--haproxy-protocol":
+			haproxyProtocol = curlTelnetBooleanOptionEnabled(option)
+		case "--disallow-username-in-url":
+			disallowURLUser = curlTelnetBooleanOptionEnabled(option)
+		case "--data", "--data-ascii", "--data-binary", "--json":
+			hasPostData = true
+			if strings.HasPrefix(option.Value, "@") {
+				return false
+			}
+		case "--data-raw":
+			hasPostData = true
+		case "--data-urlencode":
+			hasPostData = true
+			if !curlTelnetDataURLEncodeIsInline(option.Value) {
+				return false
+			}
+		case "--form", "--form-string":
+			if !curlTelnetLiteralFormValid(option) {
+				return false
+			}
+		case "--url-query":
+			hasURLQuery = true
+			if !curlTelnetURLQueryIsInline(option.Value) {
+				return false
+			}
+		case "--continue-at":
+			continueSet = true
+			var valid bool
+			continueOffset, continueCurrent, valid =
+				curlTelnetContinueAtValue(option.Value)
+			if !valid {
+				return false
+			}
+		case "--doh-url":
+			dohURLSet = true
+			dohURL = option.Value
+		case "--dump-header":
+			dumpHeaderSet = true
+			dumpHeader = option.Value
+		case "--proxy-user":
+			proxyUserSet = true
+			proxyUser = option.Value
+		case "--output-dir":
+			outputDirSet = true
+		case "--time-cond":
+			if !curlTelnetKnownTimeCondition(option.Value) {
+				return false
+			}
+		case "--happy-eyeballs-timeout-ms":
+			finalHappyEyeballs = option.Value
+		case "--keepalive-time":
+			finalKeepaliveTime = option.Value
+		case "--limit-rate":
+			finalLimitRate = option.Value
+		case "--local-port":
+			finalLocalPort = option.Value
+		case "--max-filesize":
+			finalMaxFilesize = option.Value
+		}
+	}
+
+	_, _, postDataValid := staticCurlPostDataBytes(command, parsed, group)
+	if !postDataValid || !curlStaticFormSequenceValid(command, parsed, group) {
+		return false
+	}
+	if hasPostData && finalGet &&
+		(!explicitTelnet || !staticCurlGETPostDataValid(command, parsed, group)) {
+		return false
+	}
+	if hasURLQuery &&
+		(!explicitTelnet ||
+			!staticCurlFTPURLQueryOptionsValid(command, parsed, group)) {
+		return false
+	}
+	if continueSet && (continueCurrent || continueOffset != 0) {
+		return false
+	}
+	if dohURLSet && dohURL != "" {
+		return false
+	}
+	if dumpHeaderSet && dumpHeader != "-" &&
+		(dumpHeader != "/dev/null" || !curlPOSIXNullDeviceAvailable(command)) {
+		return false
+	}
+	if proxyUserSet {
+		if !curlTelnetUserAvoidsPrompt(proxyUser, false) {
+			return false
+		}
+		if _, _, valid := curlDecodedProxyCredentials(proxyUser); !valid {
+			return false
+		}
+	}
+	if outputDirSet && target.Output != curlOutputStdout {
+		return false
+	}
+	if contentDisposition && (showHeaders || continueCurrent) || haproxyProtocol {
+		return false
+	}
+	if disallowURLUser {
+		_, _, userPresent, _, _, valid := curlTelnetURLParts(telnetTarget)
+		if !valid || userPresent {
+			return false
+		}
+	}
+	if finalHappyEyeballs != "" {
+		value, valid := curlUnsignedLong(finalHappyEyeballs)
+		if !valid || value != 200 {
+			return false
+		}
+	}
+	if finalKeepaliveTime != "" {
+		value, valid := curlUnsignedLong(finalKeepaliveTime)
+		if !valid || value != 0 {
+			return false
+		}
+	}
+	if finalLimitRate != "" {
+		value, valid := curlTelnetSizeValue(finalLimitRate)
+		if !valid || value != 0 {
+			return false
+		}
+	}
+	if finalLocalPort != "" {
+		start, _, hasRange, valid := curlTelnetLocalPortValue(finalLocalPort)
+		if !valid || start != 0 || hasRange {
+			return false
+		}
+	}
+	if finalMaxFilesize != "" {
+		value, valid := curlTelnetSizeValue(finalMaxFilesize)
+		if !valid || value != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func curlTargetHasExplicitTelnetScheme(value string) bool {
+	delimiter := strings.IndexByte(value, ':')
+	return delimiter > 0 && curlASCIIEqualFold(value[:delimiter], "telnet")
+}
+
+func curlTelnetBooleanOptionEnabled(option curlOptionToken) bool {
+	return !strings.HasPrefix(option.Name, "--no-")
+}
+
+func curlTelnetDataURLEncodeIsInline(value string) bool {
+	return strings.Contains(value, "=") || !strings.Contains(value, "@")
+}
+
+func curlTelnetURLQueryIsInline(value string) bool {
+	return strings.HasPrefix(value, "+") ||
+		curlTelnetDataURLEncodeIsInline(value)
+}
+
+func curlTelnetContinueAtValue(value string) (int64, bool, bool) {
+	if value == "-" {
+		return 0, true, true
+	}
+	offset, valid := curlTelnetNonnegativeOffT(value)
+	return offset, false, valid
+}
+
+func curlTelnetNonnegativeOffT(value string) (int64, bool) {
+	// curlx_strtoofft skips SP/HTAB rather than the full C whitespace set.
+	// Its positive-only mode accepts an optional plus but rejects every minus,
+	// including -0. Keep this portable across curl's off_t/long build split.
+	value = strings.TrimLeft(value, " \t")
+	if value == "" {
+		return 0, false
+	}
+	if value[0] == '+' {
+		value = value[1:]
+	}
+	if value == "" {
+		return 0, false
+	}
+	for index := range len(value) {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.ParseUint(value, 10, 63)
+	return int64(parsed), err == nil
+}
+
+func curlTelnetSignedDecimal(value string) (int64, bool) {
+	value = strings.TrimLeftFunc(value, curlCWhitespace)
+	if value == "" {
+		return 0, false
+	}
+	index := 0
+	if value[index] == '+' || value[index] == '-' {
+		index++
+	}
+	if index == len(value) {
+		return 0, false
+	}
+	for ; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	return parsed, err == nil
+}
+
+func curlTelnetKnownTimeCondition(value string) bool {
+	if value != "" && (value[0] == '+' || value[0] == '-' || value[0] == '=') {
+		value = value[1:]
+	}
+	_, err := time.Parse(time.RFC1123, value)
+	return err == nil
+}
+
+func curlTelnetLiteralFormValid(option curlOptionToken) bool {
+	if _, valid, _ := curlStaticFormPayloads(option); !valid {
+		return false
+	}
+	if option.Canonical == "--form-string" {
+		return true
+	}
+	if option.Canonical != "--form" {
+		return false
+	}
+	_, specification, found := strings.Cut(option.Value, "=")
+	if !found || strings.HasPrefix(specification, "@") ||
+		strings.HasPrefix(specification, "<") {
+		return false
+	}
+	position := curlSkipFormSpace(specification, 0)
+	_, position = curlFormParameterWord(specification, position)
+	typeActive := false
+	for position < len(specification) {
+		if specification[position] != ';' {
+			return false
+		}
+		position = curlSkipFormSpace(specification, position+1)
+		switch {
+		case !typeActive && curlFormHasFoldedPrefix(specification, position, "type="):
+			position = curlSkipFormSpace(specification, position+len("type="))
+			var valid bool
+			position, valid = curlFormTypePrefix(specification, position)
+			if !valid {
+				return false
+			}
+			for position < len(specification) && specification[position] != ';' {
+				position++
+			}
+			typeActive = true
+		case curlFormHasFoldedPrefix(specification, position, "filename="):
+			typeActive = false
+			position = curlSkipFormSpace(specification, position+len("filename="))
+			_, position = curlFormParameterWord(specification, position)
+		case curlFormHasFoldedPrefix(specification, position, "headers="):
+			typeActive = false
+			position += len("headers=")
+			if position < len(specification) &&
+				(specification[position] == '@' || specification[position] == '<') {
+				return false
+			}
+			position = curlSkipFormSpace(specification, position)
+			_, position = curlFormParameterWord(specification, position)
+		case curlFormHasFoldedPrefix(specification, position, "encoder="):
+			typeActive = false
+			position = curlSkipFormSpace(specification, position+len("encoder="))
+			_, position = curlFormParameterWord(specification, position)
+		case typeActive:
+			for position < len(specification) && specification[position] != ';' {
+				position++
+			}
+		default:
+			_, position = curlFormParameterWord(specification, position)
+		}
+	}
+	return true
+}
+
+func curlTelnetBoundedValueValid(option curlOptionToken) bool {
+	switch option.Canonical {
+	case "--create-file-mode":
+		value, valid := curlTelnetOctalLong(option.Value)
+		return valid && value <= 0o777
+	case "--delegation":
+		return curlASCIIEqualFold(option.Value, "none")
+	case "--expect100-timeout":
+		_, valid := curlSecondsMilliseconds(option.Value)
+		return valid
+	case "--happy-eyeballs-timeout-ms", "--keepalive-time", "--parallel-max",
+		"--tftp-blksize":
+		_, valid := curlUnsignedLong(option.Value)
+		return valid
+	case "--hostpubmd5":
+		return len(option.Value) == 32
+	case "--limit-rate", "--max-filesize":
+		_, valid := curlTelnetSizeValue(option.Value)
+		return valid
+	case "--local-port":
+		_, _, _, valid := curlTelnetLocalPortValue(option.Value)
+		return valid
+	case "--max-redirs":
+		value, valid := curlTelnetSignedLong(option.Value)
+		return valid && value >= -1
+	case "--proto", "--proto-redir":
+		value := option.Value
+		if value != "" && (value[0] == '+' || value[0] == '=') {
+			value = value[1:]
+		}
+		return curlASCIIEqualFold(value, "telnet")
+	case "--rate":
+		return curlTelnetRateValid(option.Value)
+	case "--tls-max":
+		switch option.Value {
+		case "default", "1.0", "1.1", "1.2", "1.3":
+			return true
+		default:
+			return false
+		}
+	case "--trace-config":
+		return curlTelnetTraceConfigValid(option.Value)
+	case "--variable":
+		return curlTelnetLiteralVariableValid(option.Value)
+	default:
+		return false
+	}
+}
+
+func curlTelnetOctalLong(value string) (uint64, bool) {
+	value = strings.TrimLeftFunc(value, curlCWhitespace)
+	if value == "" {
+		return 0, false
+	}
+	negative := false
+	if value[0] == '+' || value[0] == '-' {
+		negative = value[0] == '-'
+		value = value[1:]
+	}
+	if value == "" {
+		return 0, false
+	}
+	for index := range len(value) {
+		if value[index] < '0' || value[index] > '7' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.ParseUint(value, 8, 64)
+	if err != nil || parsed > curlPortableLongMaximum() || negative && parsed != 0 {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func curlTelnetSignedLong(value string) (int64, bool) {
+	parsed, valid := curlTelnetSignedDecimal(value)
+	if !valid || parsed < -int64(curlPortableLongMaximum())-1 ||
+		parsed > int64(curlPortableLongMaximum()) {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func curlTelnetSizeValue(value string) (int64, bool) {
+	value = strings.TrimLeft(value, " \t")
+	if value == "" {
+		return 0, false
+	}
+	multiplier := int64(1)
+	last := value[len(value)-1]
+	switch last {
+	case 'b', 'B':
+		value = value[:len(value)-1]
+	case 'k', 'K':
+		value = value[:len(value)-1]
+		multiplier = 1024
+	case 'm', 'M':
+		value = value[:len(value)-1]
+		multiplier = 1024 * 1024
+	case 'g', 'G':
+		value = value[:len(value)-1]
+		multiplier = 1024 * 1024 * 1024
+	}
+	parsed, valid := curlTelnetNonnegativeOffT(value)
+	if !valid || parsed > int64(^uint64(0)>>1)/multiplier {
+		return 0, false
+	}
+	return parsed * multiplier, true
+}
+
+func curlTelnetLocalPortValue(value string) (
+	start uint64,
+	end uint64,
+	hasRange bool,
+	valid bool,
+) {
+	index := 0
+	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+		index++
+	}
+	if index == 0 {
+		return 0, 0, false, false
+	}
+	parsedStart, err := strconv.ParseUint(value[:index], 10, 64)
+	if err != nil || parsedStart > 65535 {
+		return 0, 0, false, false
+	}
+	if index == len(value) {
+		return parsedStart, parsedStart, false, true
+	}
+	for index < len(value) && (value[index] == ' ' || value[index] == '\t') {
+		index++
+	}
+	if index >= len(value) || value[index] != '-' {
+		return 0, 0, false, false
+	}
+	index++
+	for index < len(value) && (value[index] == ' ' || value[index] == '\t') {
+		index++
+	}
+	endStart := index
+	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+		index++
+	}
+	if endStart == index || index != len(value) || index-endStart > 6 {
+		return 0, 0, false, false
+	}
+	parsedEnd, err := strconv.ParseUint(value[endStart:index], 10, 64)
+	if err != nil || parsedEnd > 65535 || parsedEnd < parsedStart {
+		return 0, 0, false, false
+	}
+	return parsedStart, parsedEnd, true, true
+}
+
+func curlTelnetRateValid(value string) bool {
+	unit := byte('h')
+	number := value
+	if slash := strings.IndexByte(value, '/'); slash >= 0 {
+		if slash+1 >= len(value) {
+			return false
+		}
+		number = value[:slash]
+		unit = value[slash+1]
+	}
+	if len(number) > 25 {
+		return false
+	}
+	denominator, valid := curlUnsignedLong(number)
+	if !valid || denominator == 0 {
+		return false
+	}
+	numerator := uint64(60 * 60 * 1000)
+	switch unit {
+	case 's':
+		numerator = 1000
+	case 'm':
+		numerator = 60 * 1000
+	case 'h':
+	case 'd':
+		numerator = 24 * 60 * 60 * 1000
+	default:
+		return false
+	}
+	return denominator <= numerator
+}
+
+func curlTelnetTraceConfigValid(value string) bool {
+	start := 0
+	for start < len(value) {
+		for start < len(value) && (value[start] == ',' || value[start] == ' ') {
+			start++
+		}
+		if start == len(value) {
+			return true
+		}
+		end := start
+		for end < len(value) && value[end] != ',' && value[end] != ' ' {
+			end++
+		}
+		token := value[start:end]
+		if token != "" && (token[0] == '+' || token[0] == '-') {
+			token = token[1:]
+		}
+		if !curlASCIIEqualFold(token, "ids") &&
+			!curlASCIIEqualFold(token, "time") {
+			return false
+		}
+		start = end
+	}
+	return true
+}
+
+func curlTelnetLiteralVariableValid(value string) bool {
+	name, _, found := strings.Cut(value, "=")
+	if !found || len(name) == 0 || len(name) >= 128 {
+		return false
+	}
+	for index := range len(name) {
+		character := name[index]
+		if character != '_' &&
+			(character < '0' || character > '9') &&
+			(character < 'A' || character > 'Z') &&
+			(character < 'a' || character > 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+func curlTelnetNullSinkValueValid(
+	command CommandFact,
+	option curlOptionToken,
+) bool {
+	if (option.Canonical == "--trace" || option.Canonical == "--trace-ascii") &&
+		option.Value == "-" {
+		return true
+	}
+	return option.Value == "/dev/null" && curlPOSIXNullDeviceAvailable(command)
+}
+
+func curlTelnetEffectiveUser(
+	command CommandFact,
+	parsed curlArgvParse,
+	target curlTransferTarget,
+	telnetTarget string,
+) (string, bool, bool) {
+	if option, present := curlFinalGroupOption(parsed, target.Group, "--user"); present {
+		bearer, bearerPresent := curlFinalGroupOption(
+			parsed, target.Group, "--oauth2-bearer",
+		)
+		if !staticCurlOptionValue(command, option) ||
+			!curlTelnetUserAvoidsPrompt(
+				option.Value,
+				bearerPresent && bearer.Value != "",
+			) {
+			return "", false, false
+		}
+		user, _, _ := strings.Cut(option.Value, ":")
+		if curlTelnetValueHasHighByte(user) {
+			return "", false, false
+		}
+		return user, true, true
+	}
+
+	_, user, userSet, _, _, valid := curlTelnetURLParts(telnetTarget)
+	if !valid {
+		return "", false, false
+	}
+	if !userSet {
+		return "", false, true
+	}
+	if curlTelnetValueHasHighByte(user) {
+		return "", false, false
+	}
+	return user, true, true
+}
+
+func curlTelnetEffectiveTarget(
+	command CommandFact,
+	parsed curlArgvParse,
+	target curlTransferTarget,
+) (string, bool) {
+	protoDefault := ""
+	if option, present := curlFinalGroupOption(
+		parsed, target.Group, "--proto-default",
+	); present {
+		if !staticCurlOptionValue(command, option) ||
+			!curlTelnetProtoDefaultValueValid(option.Value) {
+			return "", false
+		}
+		protoDefault = option.Value
+	}
+	if delimiter := strings.IndexByte(target.Value, ':'); delimiter > 0 &&
+		curlASCIIEqualFold(target.Value[:delimiter], "telnet") {
+		return curlCanonicalTelnetURL(target.Value)
+	}
+	if strings.Contains(target.Value, "://") {
+		return "", false
+	}
+	if !curlASCIIEqualFold(protoDefault, "telnet") ||
+		strings.HasPrefix(target.Value, "//") {
+		return "", false
+	}
+	return "telnet://" + target.Value, true
+}
+
+func curlTargetSelectsTelnet(parsed curlArgvParse, target curlTransferTarget) bool {
+	if delimiter := strings.IndexByte(target.Value, ':'); delimiter > 0 {
+		return curlASCIIEqualFold(target.Value[:delimiter], "telnet")
+	}
+	option, present := curlFinalGroupOption(
+		parsed, target.Group, "--proto-default",
+	)
+	return present && curlASCIIEqualFold(option.Value, "telnet")
+}
+
+func curlCanonicalTelnetURL(value string) (string, bool) {
+	delimiter := strings.IndexByte(value, ':')
+	if delimiter <= 0 || !curlASCIIEqualFold(value[:delimiter], "telnet") {
+		return "", false
+	}
+	remainder := value[delimiter+1:]
+	slashes := 0
+	for slashes < len(remainder) && remainder[slashes] == '/' {
+		slashes++
+	}
+	if slashes < 1 || slashes > 3 || slashes == len(remainder) {
+		return "", false
+	}
+	return "telnet://" + remainder[slashes:], true
+}
+
+func curlTelnetNumericValueIsZero(canonical string, value string) bool {
+	switch canonical {
+	case "--connect-timeout", "--max-time":
+		milliseconds, valid := curlSecondsMilliseconds(value)
+		return valid && milliseconds == 0
+	case "--retry", "--retry-delay", "--retry-max-time", "--speed-limit",
+		"--speed-time":
+		parsed, valid := curlUnsignedLong(value)
+		return valid && parsed == 0
+	default:
+		return false
+	}
+}
+
+func curlTelnetProtoDefaultValueValid(value string) bool {
+	// Curl validates every occurrence against the protocols compiled into the
+	// selected binary. ActionFacts does not identify that binary or expose its
+	// runtime protocol manifest, so a non-Telnet value is capability-dependent
+	// even when a later occurrence overwrites it. The lane already requires
+	// Telnet itself; keep only that build-independent premise authoritative.
+	return curlASCIIEqualFold(value, "telnet")
+}
+
+func staticCurlHeaderSetupValid(
+	command CommandFact,
+	option curlOptionToken,
+) bool {
+	if !staticCurlOptionValue(command, option) {
+		return false
+	}
+	if !strings.HasPrefix(option.Value, "@") {
+		return true
+	}
+	return option.Value == "@/dev/null" &&
+		curlPOSIXNullDeviceAvailable(command)
+}
+
+func curlTelnetUserAvoidsPrompt(value string, bearerSet bool) bool {
+	return strings.IndexByte(value, 0) < 0 &&
+		(strings.Contains(value, ":") || strings.HasPrefix(value, ";") ||
+			bearerSet)
+}
+
+func curlTelnetInertFlag(option curlOptionToken) bool {
+	if option.TakesValue || option.ValuePresent {
+		return false
+	}
+	if curlTelnetFeatureDependentPositiveFlag(option) {
+		return false
+	}
+	switch option.Role {
+	case curlOptionNeutral, curlOptionHead, curlOptionNoHead,
+		curlOptionNoRemoteName, curlOptionNoRemoteNameAll,
+		curlOptionTelnetProof:
+		return true
+	default:
+		return false
+	}
+}
+
+func curlTelnetFeatureDependentPositiveFlag(option curlOptionToken) bool {
+	switch option.Canonical {
+	case "--metalink", "--proxy-http2", "--proxy-negotiate", "--proxy-ntlm",
+		"--tcp-fastopen", "--wdebug":
+		// Both spellings are closed: curl 8.7.1 either capability-checks the
+		// negative form too, always errors, or ignores the toggle and enables
+		// platform-sensitive TCP Fast Open.
+		return true
+	}
+	if strings.HasPrefix(option.Name, "--no-") {
+		return false
+	}
+	switch option.Canonical {
+	case "--compressed", "--ftp-ssl-control", "--http2",
+		"--http2-prior-knowledge", "--http3", "--http3-only", "--negotiate",
+		"--ntlm", "--ntlm-wb", "--ssl", "--ssl-reqd":
+		return true
+	default:
+		return false
+	}
+}
+
+func curlTelnetOutputRedirectsSafe(command CommandFact) bool {
+	if len(command.Redirects) == 0 {
+		return true
+	}
+	if command.Dialect != DialectPOSIX {
+		return false
+	}
+	for _, redirect := range command.Redirects {
+		if redirect.Expands || redirect.Target != "/dev/null" {
+			return false
+		}
+		readNull := redirect.FD == 0 && redirect.Access == PathAccessRead
+		writeNull := (redirect.FD == -1 || redirect.FD == 1 || redirect.FD == 2) &&
+			(redirect.Access == PathAccessWrite ||
+				redirect.Access == PathAccessAppend)
+		if !readNull && !writeNull {
+			return false
+		}
+	}
+	return true
+}
+
+func curlTelnetOptionWireValues(
+	options []string,
+	user string,
+	userSet bool,
+) ([]string, bool) {
+	ttype := ""
+	ttypeSet := false
+	xDisplay := ""
+	xDisplaySet := false
+	environmentLength := 4
+	var environment []string
+	if userSet {
+		// check_telnet_options prepends USER through a 256-byte snprintf
+		// buffer. "USER," occupies five bytes, leaving at most 250 username
+		// bytes plus the NUL terminator. The resulting entry is then inserted
+		// before every explicit NEW_ENV option.
+		if len(user) > 250 {
+			user = user[:250]
+		}
+		environmentLength += 6 + len(user)
+		environment = append(environment, "USER")
+		if user != "" {
+			environment = append(environment, user)
+		}
+	}
+	for _, option := range options {
+		name, value, present := strings.Cut(option, "=")
+		if !present || strings.IndexByte(value, 0) >= 0 {
+			return nil, false
+		}
+		if curlTelnetValueHasHighByte(value) {
+			// Curl silently ignores a non-ASCII value before it validates the
+			// option name. An earlier valid setting therefore remains active.
+			continue
+		}
+		switch {
+		case curlASCIIEqualFold(name, "TTYPE"):
+			if len(value) >= 32 {
+				return nil, false
+			}
+			ttype = value
+			ttypeSet = true
+		case curlASCIIEqualFold(name, "XDISPLOC"):
+			if len(value) >= 128 {
+				return nil, false
+			}
+			xDisplay = value
+			xDisplaySet = true
+		case curlASCIIEqualFold(name, "NEW_ENV"):
+			// libcurl uses a fixed 2048-byte negotiation buffer. Each entry
+			// replaces at most its first comma with a one-byte VALUE marker,
+			// so the encoded entry occupies len(value)+1 bytes. Entries that do
+			// not fit are skipped without preventing later short entries.
+			entryLength := len(value) + 1
+			if environmentLength+entryLength >= 2048-6 {
+				continue
+			}
+			environmentLength += entryLength
+			variable, environmentValue, hasValue := strings.Cut(value, ",")
+			if variable != "" {
+				environment = append(environment, variable)
+			}
+			if hasValue && environmentValue != "" {
+				environment = append(environment, environmentValue)
+			}
+		case curlASCIIEqualFold(name, "WS"):
+			if !curlTelnetWindowSizeValid(value) {
+				return nil, false
+			}
+		case curlASCIIEqualFold(name, "BINARY"):
+			// Curl uses atoi: exactly 1 enables binary negotiation and every
+			// other 7-bit spelling disables it. Neither form carries candidate
+			// bytes in the modeled peer-controlled subnegotiations.
+		default:
+			return nil, false
+		}
+	}
+	values := make([]string, 0, 2+len(environment))
+	if ttypeSet && ttype != "" {
+		values = append(values, ttype)
+	}
+	if xDisplaySet && xDisplay != "" {
+		values = append(values, xDisplay)
+	}
+	return append(values, environment...), true
+}
+
+func curlTelnetValueHasHighByte(value string) bool {
+	for index := range len(value) {
+		if value[index] >= 0x80 {
+			return true
+		}
+	}
+	return false
+}
+
+func curlTelnetWindowSizeValid(value string) bool {
+	width, delimiter, valid := curlTelnetStrtoulPrefix(value)
+	if !valid || delimiter >= len(value) ||
+		value[delimiter] != 'x' && value[delimiter] != 'X' {
+		return false
+	}
+	height, _, valid := curlTelnetStrtoulPrefix(value[delimiter+1:])
+	return valid && width != 0 && height != 0
+}
+
+func curlTelnetStrtoulPrefix(value string) (uint64, int, bool) {
+	index := 0
+	for index < len(value) {
+		switch value[index] {
+		case ' ', '\t', '\n', '\v', '\f', '\r':
+			index++
+		default:
+			goto sign
+		}
+	}
+sign:
+	negative := false
+	if index < len(value) && value[index] == '+' {
+		index++
+	} else if index < len(value) && value[index] == '-' {
+		negative = true
+		index++
+	}
+	start := index
+	var parsed uint64
+	unsignedLongMax := uint64(^uint32(0))
+	if runtime.GOOS != "windows" && strconv.IntSize == 64 {
+		unsignedLongMax = ^uint64(0)
+	}
+	overflow := false
+	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+		digit := uint64(value[index] - '0')
+		if !overflow {
+			if parsed > (unsignedLongMax-digit)/10 {
+				overflow = true
+			} else {
+				parsed = parsed*10 + digit
+			}
+		}
+		index++
+	}
+	if index == start || overflow {
+		return 0, index, false
+	}
+	if negative {
+		if unsignedLongMax == uint64(^uint32(0)) {
+			parsed = uint64(-uint32(parsed))
+		} else {
+			parsed = -parsed
+		}
+	}
+	return parsed, index, parsed <= 65535
+}
+
 // CurlProxyTransmittedMetadata keeps proxy-bound request bytes separate from
 // origin-bound curl metadata. Each component is paired only with the explicit
 // proxy destination that receives it.
@@ -715,7 +1952,7 @@ func StaticCurlProxyUploadPayloads(
 	command CommandFact,
 ) []TransmittedRequestComponent {
 	proxy, parsed, ok := staticCurlProxyDestination(command)
-	if !ok {
+	if !ok || proxy.Scheme != "http" && proxy.Scheme != "https" {
 		return nil
 	}
 	hasHTTPOrigin := false
@@ -770,7 +2007,7 @@ func staticCurlHTTPProxyTransmittedMetadata(
 	command CommandFact,
 ) CurlProxyTransmittedMetadata {
 	proxy, parsed, ok := staticCurlProxyDestination(command)
-	if !ok {
+	if !ok || proxy.Scheme != "http" && proxy.Scheme != "https" {
 		return CurlProxyTransmittedMetadata{}
 	}
 	component := func(value string) TransmittedRequestComponent {
@@ -900,9 +2137,9 @@ func staticCurlHTTPProxyTransmittedMetadata(
 			component(credentials),
 		)
 	}
-	// staticCurlProxyDestination accepts only an effective HTTP(S) proxy.
-	// An explicit http(s):// scheme overrides a SOCKS-named option alias, so
-	// every validated non-tunnel destination uses HTTP forward request form.
+	// This HTTP-only caller rejected a SOCKS destination above. An explicit
+	// http(s):// scheme overrides a SOCKS-named option alias, so every remaining
+	// validated non-tunnel destination uses HTTP forward request form.
 	if proxyTunnel {
 		return metadata
 	}
@@ -974,9 +2211,294 @@ func StaticCurlProxyTransmittedMetadata(
 	metadata := staticCurlHTTPProxyTransmittedMetadata(command)
 	metadata.ProxyRequestComponents = append(
 		metadata.ProxyRequestComponents,
+		StaticCurlSOCKSProxyCredentialComponents(command)...,
+	)
+	metadata.ProxyRequestComponents = append(
+		metadata.ProxyRequestComponents,
 		staticCurlFTPProxyRequestComponents(command)...,
 	)
 	return metadata
+}
+
+// StaticCurlSOCKSProxyCredentialComponents returns the final static username
+// and password fields that a closed curl 8.7.1 command can expose to one
+// explicit SOCKS peer. SOCKS4 transmits only the username. SOCKS5 transmits
+// the two fields separately and only when username/password authentication is
+// enabled and selected by the server.
+//
+// The shared destination proof owns direct HTTP(S)/FTP(S) routes and a sole
+// SOCKS preproxy. A separately closed FTP route owns the two-hop
+// SOCKS-preproxy + HTTP-main case: --proxy-user belongs to the main HTTP proxy,
+// while only URL credentials belong to that SOCKS preproxy.
+func StaticCurlSOCKSProxyCredentialComponents(
+	command CommandFact,
+) []TransmittedRequestComponent {
+	proxy, parsed, ok := staticCurlProxyDestination(command)
+	chainProxyIndex := -1
+	chainProxyCanonical := ""
+	chainGroup := 0
+	if !ok {
+		proxy, parsed, chainGroup, chainProxyIndex, chainProxyCanonical, ok =
+			staticCurlFTPSOCKSPreproxyCredentialRoute(command)
+	}
+	if !ok || proxy.Scheme != "tcp" || len(command.Redirects) != 0 ||
+		command.PipelineID != 0 || len(parsed.Targets) == 0 {
+		return nil
+	}
+	target := parsed.Targets[0]
+	if target.Group != 0 || chainProxyIndex >= 0 && target.Group != chainGroup {
+		return nil
+	}
+
+	lastProxy := -1
+	lastPreproxy := -1
+	lastProxyUser := -1
+	for index, option := range parsed.Options {
+		if option.Group != target.Group || !option.Known {
+			return nil
+		}
+		switch option.Canonical {
+		case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
+			"--socks5", "--socks5-hostname":
+			lastProxy = index
+		case "--preproxy":
+			lastPreproxy = index
+		case "--proxy-user":
+			lastProxyUser = index
+		}
+	}
+	disabledMainCanonical := ""
+	if chainProxyIndex < 0 && lastProxy >= 0 {
+		option := parsed.Options[lastProxy]
+		if option.Canonical == "--proxy" && option.Value == "" {
+			lastProxy = -1
+		} else if curlProxyDecodedControlUserinfoDisables(
+			command.ID,
+			option.Canonical,
+			option.Value,
+		) {
+			disabledMainCanonical = option.Canonical
+			lastProxy = -1
+		}
+	}
+	if chainProxyIndex < 0 && lastProxy < 0 && lastPreproxy < 0 {
+		return nil
+	}
+	proxyIndex := chainProxyIndex
+	proxyCanonical := chainProxyCanonical
+	if proxyIndex < 0 {
+		proxyIndex = lastProxy
+	}
+	if proxyIndex < 0 {
+		proxyIndex = lastPreproxy
+		var canonicalValid bool
+		proxyCanonical, canonicalValid = curlStandalonePreproxyCanonical(
+			parsed.Options[proxyIndex].Value,
+			disabledMainCanonical,
+		)
+		if !canonicalValid {
+			return nil
+		}
+	}
+	proxyOption := parsed.Options[proxyIndex]
+	if proxyCanonical == "" {
+		proxyCanonical = proxyOption.Canonical
+	}
+	_, _, _, socks, valid := staticCurlProxyFact(
+		command.ID,
+		proxyCanonical,
+		proxyOption.Value,
+	)
+	if !valid || !socks {
+		return nil
+	}
+
+	username := ""
+	password := ""
+	candidate := false
+	if chainProxyIndex < 0 && lastProxyUser >= 0 {
+		var fieldsValid bool
+		username, password, candidate, fieldsValid =
+			curlDecodedProxyCredentialFields(parsed.Options[lastProxyUser].Value)
+		if !fieldsValid {
+			return nil
+		}
+	}
+	urlUser, urlPassword, urlCredentials, fieldsValid :=
+		curlProxyURLCredentialFields(proxyOption.Value)
+	if !fieldsValid {
+		return nil
+	}
+	if urlCredentials {
+		username = urlUser
+		password = urlPassword
+		candidate = true
+	}
+	if !candidate || len(username) > 255 {
+		return nil
+	}
+
+	socks4 := curlProxyUsesSOCKS4(
+		proxyCanonical,
+		proxyOption.Value,
+	)
+	if !socks4 && !curlSOCKS5BasicAuthenticationEnabled(parsed, target.Group) {
+		return nil
+	}
+	component := func(value string) TransmittedRequestComponent {
+		return TransmittedRequestComponent{
+			Value: value, Scheme: proxy.Scheme, Host: proxy.Host, Port: proxy.Port,
+		}
+	}
+	if socks4 {
+		if username == "" {
+			return nil
+		}
+		return []TransmittedRequestComponent{component(username)}
+	}
+	if len(password) > 255 {
+		return nil
+	}
+	components := make([]TransmittedRequestComponent, 0, 2)
+	if username != "" {
+		components = append(components, component(username))
+	}
+	if password != "" {
+		components = append(components, component(password))
+	}
+	return components
+}
+
+func staticCurlFTPSOCKSPreproxyCredentialRoute(
+	command CommandFact,
+) (NetworkFact, curlArgvParse, int, int, string, bool) {
+	empty := func() (NetworkFact, curlArgvParse, int, int, string, bool) {
+		return NetworkFact{}, curlArgvParse{}, 0, -1, "", false
+	}
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		command.Effect != EffectExecute || !command.ArgvComplete ||
+		command.ParentCommandID != 0 || command.PipelineID != 0 ||
+		len(command.Wrappers) != 0 || len(command.Redirects) != 0 ||
+		command.Program != "curl" || len(command.Argv) == 0 ||
+		command.Executable != command.Argv[0] ||
+		!exactCaseSensitivePOSIXProgram(&command, "curl") ||
+		len(command.Arguments) != len(command.Argv) {
+		return empty()
+	}
+	for index := range command.Argv {
+		if !staticCommandArgumentAt(command, index) {
+			return empty()
+		}
+	}
+
+	parsed := parseCurlArgv(command.Argv)
+	nullConfigOnly := staticCurlPOSIXNullConfigOnly(command, parsed)
+	if (!parsed.Complete && !nullConfigOnly) || parsed.ConfigOpaque ||
+		parsed.Preview || parsed.EmptyTransferGroup ||
+		!parsed.hasValidOptionValues() || len(parsed.Targets) == 0 ||
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFTPEagerPreparseValid(command, parsed) ||
+		!staticCurlFTPParallelSetupValid(command, parsed) {
+		return empty()
+	}
+	group := parsed.Targets[0].Group
+	if group != 0 || !curlGroupTargetsAreFTPFamily(parsed, group) ||
+		!staticCurlFTPGroupSetupValid(command, parsed, group) ||
+		!staticCurlGETPostDataValid(command, parsed, group) ||
+		!staticCurlFTPURLQueryOptionsValid(command, parsed, group) ||
+		!curlStaticFormSequenceValid(command, parsed, group) ||
+		!curlOriginRequestBuildAllowsPayload(command, parsed, group) {
+		return empty()
+	}
+	for _, target := range parsed.Targets {
+		if target.Group != group ||
+			!staticCommandArgumentAt(command, target.ArgvIndex) ||
+			!validLiteralRequestTarget(target.Value) ||
+			curlTargetHasInvalidUserinfo(target.Value) ||
+			curlHasUnmodeledGlob(target.Value) {
+			return empty()
+		}
+	}
+
+	route, valid := staticCurlFTPProxyRoute(command, parsed, group)
+	if !valid || route.Disabled || len(route.Networks) != 2 ||
+		route.Networks[0].Scheme != "tcp" ||
+		(route.Networks[1].Scheme != "http" &&
+			route.Networks[1].Scheme != "https") {
+		return empty()
+	}
+	lastPreproxy := -1
+	for index, option := range parsed.Options {
+		if option.Group == group && option.Canonical == "--preproxy" {
+			lastPreproxy = index
+		}
+	}
+	if lastPreproxy < 0 ||
+		!curlExplicitSOCKSProxyURL(parsed.Options[lastPreproxy].Value) {
+		return empty()
+	}
+	return route.Networks[0], parsed, group, lastPreproxy, "--proxy", true
+}
+
+// StaticCurlSOCKSProxyCredentialComponentsForFacts admits an exactly isolated
+// curl child beneath transparent env/command/exec launchers. Ancestor
+// redirects and pipelines remain outside this proof because they can prevent
+// the SOCKS handshake from starting.
+func StaticCurlSOCKSProxyCredentialComponentsForFacts(
+	facts Facts,
+	commandID int64,
+) []TransmittedRequestComponent {
+	command, valid := staticCurlCommandForFacts(facts, commandID)
+	if !valid {
+		return nil
+	}
+	return StaticCurlSOCKSProxyCredentialComponents(command)
+}
+
+func curlSOCKSCredentialInertFlag(option curlOptionToken) bool {
+	if option.TakesValue || option.ValuePresent || option.Role != curlOptionNeutral {
+		return false
+	}
+	switch option.Canonical {
+	case "--disable", "--globoff", "--no-buffer", "--no-progress-meter",
+		"--progress-bar", "--show-error", "--silent", "--verbose":
+		return true
+	default:
+		return false
+	}
+}
+
+func curlSOCKS5BasicAuthenticationEnabled(
+	parsed curlArgvParse,
+	group int,
+) bool {
+	const (
+		basic = 1 << iota
+		gssapi
+	)
+	authentication := 0
+	for _, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		switch option.Canonical {
+		case "--socks5-basic":
+			if option.Name == "--no-socks5-basic" {
+				authentication &^= basic
+			} else {
+				authentication |= basic
+			}
+		case "--socks5-gssapi":
+			if option.Name == "--no-socks5-gssapi" {
+				authentication &^= gssapi
+			} else {
+				authentication |= gssapi
+			}
+		}
+	}
+	// Curl leaves CURLOPT_SOCKS5_AUTH at libcurl's default when the CLI
+	// bitmask is zero. That default includes username/password auth.
+	return authentication == 0 || authentication&basic != 0
 }
 
 func staticCurlProxyDestination(
@@ -1005,6 +2527,9 @@ func staticCurlProxyDestination(
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	group := parsed.Targets[0].Group
+	if !staticCurlNetrcSetupValid(command, parsed, group) {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
 	if !staticCurlGETPostDataValid(command, parsed, group) {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
@@ -1019,6 +2544,7 @@ func staticCurlProxyDestination(
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	lastProxy := -1
+	lastPreproxy := -1
 	lastNoProxy := -1
 	lastProxyUser := -1
 	fail := false
@@ -1035,6 +2561,8 @@ func staticCurlProxyDestination(
 			switch {
 			case curlMainProxyOption(option.Canonical):
 				lastProxy = index
+			case option.Canonical == "--preproxy":
+				lastPreproxy = index
 			case option.Canonical == "--noproxy":
 				lastNoProxy = index
 			default:
@@ -1051,12 +2579,27 @@ func staticCurlProxyDestination(
 			failWithBody = option.Name != "--no-fail-with-body"
 		}
 	}
-	if lastProxy < 0 || fail && failWithBody {
+	disabledMainCanonical := ""
+	if lastProxy >= 0 {
+		option := parsed.Options[lastProxy]
+		if option.Canonical == "--proxy" && option.Value == "" {
+			lastProxy = -1
+		} else if curlProxyDecodedControlUserinfoDisables(
+			command.ID,
+			option.Canonical,
+			option.Value,
+		) {
+			disabledMainCanonical = option.Canonical
+			lastProxy = -1
+		}
+	}
+	if lastProxy < 0 && lastPreproxy < 0 ||
+		lastProxy >= 0 && lastPreproxy >= 0 || fail && failWithBody {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	if lastNoProxy >= 0 {
 		noProxy := parsed.Options[lastNoProxy]
-		if !staticCurlOptionValue(command, noProxy) || noProxy.Value != "" {
+		if !staticCurlOptionValue(command, noProxy) {
 			return NetworkFact{}, curlArgvParse{}, false
 		}
 	}
@@ -1071,6 +2614,7 @@ func staticCurlProxyDestination(
 		}
 	}
 
+	hasFTPTarget := false
 	for _, target := range parsed.Targets {
 		lowerTarget := strings.ToLower(target.Value)
 		if target.Group != group ||
@@ -1079,7 +2623,9 @@ func staticCurlProxyDestination(
 			curlHasUnmodeledGlob(target.Value) ||
 			curlTargetHasInvalidUserinfo(target.Value) ||
 			!strings.HasPrefix(lowerTarget, "http://") &&
-				!strings.HasPrefix(lowerTarget, "https://") {
+				!strings.HasPrefix(lowerTarget, "https://") &&
+				!strings.HasPrefix(lowerTarget, "ftp://") &&
+				!strings.HasPrefix(lowerTarget, "ftps://") {
 			return NetworkFact{}, curlArgvParse{}, false
 		}
 		targetFact, ok := webTargetFact(
@@ -1087,21 +2633,110 @@ func staticCurlProxyDestination(
 			target.Value,
 			NetworkDownload,
 		)
-		if !ok || targetFact.Scheme != "http" && targetFact.Scheme != "https" {
+		if !ok || targetFact.Scheme != "http" && targetFact.Scheme != "https" &&
+			targetFact.Scheme != "ftp" && targetFact.Scheme != "ftps" {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+		hasFTPTarget = hasFTPTarget || targetFact.Scheme == "ftp" ||
+			targetFact.Scheme == "ftps"
+	}
+	if lastNoProxy >= 0 && parsed.Options[lastNoProxy].Value != "" {
+		noProxy := parsed.Options[lastNoProxy].Value
+		proxyContact := false
+		for _, target := range parsed.Targets {
+			host, valid := curlNoProxyTargetHost(target.Value)
+			if !valid {
+				return NetworkFact{}, curlArgvParse{}, false
+			}
+			bypassed, valid := curlNoProxyMatches(noProxy, host)
+			if !valid {
+				return NetworkFact{}, curlArgvParse{}, false
+			}
+			proxyContact = proxyContact || !bypassed
+		}
+		if !proxyContact {
 			return NetworkFact{}, curlArgvParse{}, false
 		}
 	}
 
-	proxyOption := parsed.Options[lastProxy]
+	proxyIndex := lastProxy
+	proxyCanonical := ""
+	if proxyIndex < 0 {
+		proxyIndex = lastPreproxy
+		var canonicalValid bool
+		proxyCanonical, canonicalValid = curlStandalonePreproxyCanonical(
+			parsed.Options[proxyIndex].Value,
+			disabledMainCanonical,
+		)
+		if !canonicalValid {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+	}
+	proxyOption := parsed.Options[proxyIndex]
+	if proxyCanonical == "" {
+		proxyCanonical = proxyOption.Canonical
+	}
 	if !staticCurlOptionValue(command, proxyOption) {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
-	proxy, _, _, ok := staticCurlHTTPProxyFact(
-		command.ID,
-		proxyOption.Canonical,
-		proxyOption.Value,
-	)
+	proxy := NetworkFact{}
+	ok := false
+	if lastProxy >= 0 {
+		proxy, _, _, ok = staticCurlHTTPProxyFact(
+			command.ID,
+			proxyCanonical,
+			proxyOption.Value,
+		)
+	}
+	if !ok {
+		var socks bool
+		proxy, socks, ok = staticCurlFTPProxyFact(
+			command.ID,
+			proxyCanonical,
+			proxyOption.Value,
+		)
+		ok = ok && socks
+		if ok {
+			proxyUser := ""
+			if lastProxyUser >= 0 {
+				proxyUser = parsed.Options[lastProxyUser].Value
+			}
+			ok = curlSOCKS4UserWithinBounds(
+				proxyCanonical,
+				proxyOption.Value,
+				proxyUser,
+				true,
+			)
+			if ok && curlProxyUsesSOCKS4(
+				proxyCanonical,
+				proxyOption.Value,
+			) && !curlProxyUsesSOCKS4A(
+				proxyCanonical,
+				proxyOption.Value,
+			) {
+				ok = curlSOCKS4TargetsEncodable(parsed, group)
+			}
+		}
+	}
+	if ok && !curlProxyPeerMatchesIPVersion(proxy, parsed, group) {
+		ok = false
+	}
+	if ok && hasFTPTarget && proxy.Scheme != "tcp" {
+		// Plain FTP through an HTTP proxy has forward-proxy semantics that the
+		// dedicated FTP route owns. This shared extension is only for SOCKS
+		// authentication, which is protocol-agnostic.
+		ok = false
+	}
 	return proxy, parsed, ok
+}
+
+func curlProxyPeerMatchesIPVersion(
+	proxy NetworkFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	ipv4Only, _ := curlEffectiveIPv4Only(parsed, group)
+	return curlPeerMatchesAddressOptions(proxy.Host, ipv4Only, false)
 }
 
 func curlProxyOptionPreservesDestination(
@@ -1112,9 +2747,15 @@ func curlProxyOptionPreservesDestination(
 		option.Role == curlOptionPreview {
 		return false
 	}
+	if option.Canonical == "--proto-default" {
+		// The shared HTTP/FTP proxy proof interprets schemeless targets with
+		// its own fallback. Keep protocol-default rewriting in the dedicated
+		// Telnet projector so those targets cannot be misclassified as HTTP.
+		return false
+	}
 	if option.Role == curlOptionNetworkOverride {
 		return curlMainProxyOption(option.Canonical) ||
-			option.Canonical == "--noproxy"
+			option.Canonical == "--preproxy" || option.Canonical == "--noproxy"
 	}
 	if option.TakesValue && !staticCurlOptionValue(command, option) {
 		return false
@@ -1136,6 +2777,9 @@ func curlProxyOptionPreservesDestination(
 	switch option.Canonical {
 	case "--header", "--proxy-header", "--write-out":
 		return !strings.HasPrefix(option.Value, "@")
+	case "--stderr":
+		return option.Value == "-" || option.Value == "/dev/null" &&
+			curlPOSIXNullDeviceAvailable(command)
 	case "--url-query":
 		return true
 	case "--cacert", "--cert", "--key", "--continue-at", "--dump-header":
@@ -1275,42 +2919,17 @@ func staticCurlHTTPRequestComponentProjection(
 func curlProxyNumericOptionWithinPortableBounds(option curlOptionToken) bool {
 	switch option.Canonical {
 	case "--retry", "--speed-limit", "--speed-time":
-		return decimalIntegerAtMost(option.Value, "2147483647")
+		_, valid := curlUnsignedLong(option.Value)
+		return valid
 	case "--retry-delay", "--retry-max-time":
-		return decimalIntegerAtMost(option.Value, "2147483")
+		value, valid := curlUnsignedLong(option.Value)
+		return valid && value <= curlPortableLongMaximum()/1000
 	case "--connect-timeout", "--max-time":
-		return decimalAtMost(option.Value, "2147483", "647")
+		_, valid := curlSecondsMilliseconds(option.Value)
+		return valid
 	default:
 		return true
 	}
-}
-
-func decimalIntegerAtMost(value string, maximum string) bool {
-	value = strings.TrimLeft(value, "0")
-	if value == "" {
-		value = "0"
-	}
-	return len(value) < len(maximum) ||
-		len(value) == len(maximum) && value <= maximum
-}
-
-func decimalAtMost(value string, maxInteger string, maxFraction string) bool {
-	integer, fraction, _ := strings.Cut(value, ".")
-	integer = strings.TrimLeft(integer, "0")
-	if integer == "" {
-		integer = "0"
-	}
-	if len(integer) != len(maxInteger) {
-		return len(integer) < len(maxInteger)
-	}
-	if integer != maxInteger {
-		return integer < maxInteger
-	}
-	fraction = strings.TrimRight(fraction, "0")
-	width := max(len(fraction), len(maxFraction))
-	fraction += strings.Repeat("0", width-len(fraction))
-	maximum := maxFraction + strings.Repeat("0", width-len(maxFraction))
-	return fraction <= maximum
 }
 
 func curlProxyInlinePayloadOptionValid(
@@ -1433,27 +3052,47 @@ func staticCurlProxyAuthorityFact(
 }
 
 func curlDecodedProxyURLCredentials(raw string) (string, bool) {
-	user, password, hasPassword := strings.Cut(raw, ":")
-	if !hasPassword {
-		password = ""
-	}
-	user, valid := curlDecodePercentBytes(user, true)
-	if !valid {
-		return "", false
-	}
-	password, valid = curlDecodePercentBytes(password, true)
+	user, password, valid := curlDecodedProxyURLCredentialFields(raw)
 	if !valid {
 		return "", false
 	}
 	return user + ":" + password, true
 }
 
+func curlDecodedProxyURLCredentialFields(
+	raw string,
+) (string, string, bool) {
+	user, password, hasPassword := strings.Cut(raw, ":")
+	if !hasPassword {
+		password = ""
+	}
+	user, valid := curlDecodePercentBytes(user, true)
+	if !valid {
+		return "", "", false
+	}
+	password, valid = curlDecodePercentBytes(password, true)
+	if !valid {
+		return "", "", false
+	}
+	return user, password, true
+}
+
 func curlDecodedProxyCredentials(
 	value string,
 ) (decoded string, candidate bool, valid bool) {
+	user, password, candidate, valid := curlDecodedProxyCredentialFields(value)
+	if !valid {
+		return "", false, false
+	}
+	return user + ":" + password, candidate, true
+}
+
+func curlDecodedProxyCredentialFields(
+	value string,
+) (user string, password string, candidate bool, valid bool) {
 	user, password, present := strings.Cut(value, ":")
 	if !present && !strings.HasPrefix(value, ";") {
-		return "", false, false
+		return "", "", false, false
 	}
 	if !present {
 		user = value
@@ -1461,14 +3100,36 @@ func curlDecodedProxyCredentials(
 	}
 	user, valid = curlDecodePercentBytes(user, false)
 	if !valid {
-		return "", false, false
+		return "", "", false, false
 	}
 	password, valid = curlDecodePercentBytes(password, false)
 	if !valid {
-		return "", false, false
+		return "", "", false, false
 	}
-	decoded = user + ":" + password
-	return decoded, true, true
+	return user, password, true, true
+}
+
+func curlProxyURLCredentialFields(
+	value string,
+) (user string, password string, present bool, valid bool) {
+	remainder := value
+	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+		remainder = value[delimiter+3:]
+	} else if strings.HasPrefix(remainder, "//") {
+		remainder = remainder[2:]
+	}
+	if end := strings.IndexAny(remainder, "/?#"); end >= 0 {
+		remainder = remainder[:end]
+	}
+	rawUserinfo, host, present := strings.Cut(remainder, "@")
+	if !present {
+		return "", "", false, true
+	}
+	if host == "" || strings.Contains(host, "@") {
+		return "", "", true, false
+	}
+	user, password, valid = curlDecodedProxyURLCredentialFields(rawUserinfo)
+	return user, password, true, valid
 }
 
 func curlDecodePercentBytes(value string, rejectControls bool) (string, bool) {
@@ -1630,16 +3291,19 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	if !valid {
 		return CurlTransmittedMetadata{}
 	}
-	_, _, explicitProxyValid := staticCurlProxyDestination(command)
+	explicitProxy, _, explicitProxyValid := staticCurlProxyDestination(command)
 	allTargetsTunnelled := false
 	if explicitProxyValid {
 		proxyTunnel := curlProxyTunnelEnabled(parsed, group)
-		allTargetsTunnelled = true
-		for _, target := range parsed.Targets {
-			if !proxyTunnel &&
-				!strings.HasPrefix(strings.ToLower(target.Value), "https://") {
-				allTargetsTunnelled = false
-				break
+		allTargetsTunnelled = explicitProxy.Scheme == "tcp"
+		if !allTargetsTunnelled {
+			allTargetsTunnelled = true
+			for _, target := range parsed.Targets {
+				if !proxyTunnel &&
+					!strings.HasPrefix(strings.ToLower(target.Value), "https://") {
+					allTargetsTunnelled = false
+					break
+				}
 			}
 		}
 		if !allTargetsTunnelled {
@@ -2229,6 +3893,9 @@ func staticCurlFTPProxyRoute(
 	if !hasPlainFTP && !hasFTPS {
 		return curlFTPProxyRouting{}, false
 	}
+	if !staticCurlNetrcSetupValid(command, parsed, group) {
+		return curlFTPProxyRouting{}, false
+	}
 	for index, option := range parsed.Options {
 		if option.Group != group {
 			continue
@@ -2265,6 +3932,7 @@ func staticCurlFTPProxyRoute(
 		}
 	}
 	mainDisabled := false
+	disabledMainCanonical := ""
 	if lastProxy >= 0 {
 		proxyOption := parsed.Options[lastProxy]
 		switch {
@@ -2280,6 +3948,7 @@ func staticCurlFTPProxyRoute(
 			proxyOption.Value,
 		):
 			mainDisabled = true
+			disabledMainCanonical = proxyOption.Canonical
 			lastProxy = -1
 		}
 	}
@@ -2305,21 +3974,17 @@ func staticCurlFTPProxyRoute(
 	observers := []NetworkFact(nil)
 	if lastProxy < 0 {
 		preproxyOption := parsed.Options[lastPreproxy]
-		preproxyScheme := ""
-		if delimiter := strings.Index(
-			strings.ToLower(preproxyOption.Value),
-			"://",
-		); delimiter >= 0 {
-			preproxyScheme = strings.ToLower(preproxyOption.Value[:delimiter])
-		}
-		switch preproxyScheme {
-		case "socks", "socks4", "socks4a", "socks5", "socks5h":
-		default:
+		preproxyCanonical, canonicalValid :=
+			curlStandalonePreproxyCanonical(
+				preproxyOption.Value,
+				disabledMainCanonical,
+			)
+		if !canonicalValid {
 			return curlFTPProxyRouting{}, false
 		}
 		var valid bool
 		proxy, socks, valid = staticCurlFTPProxyFact(
-			command.ID, "--proxy", preproxyOption.Value,
+			command.ID, preproxyCanonical, preproxyOption.Value,
 		)
 		if !valid || !socks {
 			return curlFTPProxyRouting{}, false
@@ -2329,7 +3994,7 @@ func staticCurlFTPProxyRoute(
 			proxyUser = parsed.Options[lastProxyUser].Value
 		}
 		if !curlSOCKS4UserWithinBounds(
-			"--proxy", preproxyOption.Value, proxyUser, true,
+			preproxyCanonical, preproxyOption.Value, proxyUser, true,
 		) {
 			return curlFTPProxyRouting{}, false
 		}
@@ -2386,6 +4051,13 @@ func staticCurlFTPProxyRoute(
 			"--proxy", preproxyOption.Value, "", false,
 		) {
 			return curlFTPProxyRouting{}, false
+		}
+		if curlProxyUsesSOCKS4("--proxy", preproxyOption.Value) &&
+			!curlProxyUsesSOCKS4A("--proxy", preproxyOption.Value) {
+			address, addressError := netip.ParseAddr(proxy.Host)
+			if addressError == nil && address.Is6() {
+				return curlFTPProxyRouting{}, false
+			}
 		}
 		networks = []NetworkFact{preproxy, proxy}
 		observers = []NetworkFact{proxy}
@@ -2709,8 +4381,25 @@ func staticCurlFTPProxyFact(
 	canonical string,
 	value string,
 ) (NetworkFact, bool, bool) {
+	proxy, _, _, socks, valid := staticCurlProxyFact(
+		commandID,
+		canonical,
+		value,
+	)
+	return proxy, socks, valid
+}
+
+// staticCurlProxyFact retains decoded URL credentials alongside the exact
+// explicit proxy peer. HTTP callers can ignore the SOCKS bit; SOCKS credential
+// callers use it to avoid treating an HTTP proxy's authentication fields as a
+// SOCKS handshake.
+func staticCurlProxyFact(
+	commandID int64,
+	canonical string,
+	value string,
+) (NetworkFact, string, bool, bool, bool) {
 	if !validLiteralRequestTarget(value) {
-		return NetworkFact{}, false, false
+		return NetworkFact{}, "", false, false, false
 	}
 	socks := canonical == "--socks4" || canonical == "--socks4a" ||
 		canonical == "--socks5" || canonical == "--socks5-hostname"
@@ -2725,7 +4414,7 @@ func staticCurlFTPProxyFact(
 			socks = true
 		case "http":
 		default:
-			return NetworkFact{}, false, false
+			return NetworkFact{}, "", false, false, false
 		}
 	}
 	scheme := "http"
@@ -2738,7 +4427,7 @@ func staticCurlFTPProxyFact(
 	if scheme == "https" {
 		defaultPort = 443
 	}
-	proxy, _, _, valid := staticCurlProxyAuthorityFact(
+	proxy, credentials, credentialsPresent, valid := staticCurlProxyAuthorityFact(
 		commandID, value, explicitScheme, scheme, defaultPort,
 	)
 	if valid && socks && strings.EqualFold(proxy.Host, "localhost") {
@@ -2755,11 +4444,11 @@ func staticCurlFTPProxyFact(
 				path = path[:end]
 			}
 			if path != "/" {
-				return NetworkFact{}, false, false
+				return NetworkFact{}, "", false, false, false
 			}
 		}
 	}
-	return proxy, socks, valid
+	return proxy, credentials, credentialsPresent, socks, valid
 }
 
 func curlSOCKS4UserWithinBounds(
@@ -2814,6 +4503,70 @@ func curlProxyUsesSOCKS4(canonical string, value string) bool {
 	return socks4
 }
 
+func curlProxyUsesSOCKS4A(canonical string, value string) bool {
+	socks4a := canonical == "--socks4a"
+	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+		switch strings.ToLower(value[:delimiter]) {
+		case "socks4a":
+			return true
+		case "socks", "socks4", "socks5", "socks5h", "https":
+			return false
+		case "http":
+			return socks4a
+		}
+	}
+	return socks4a
+}
+
+func curlSOCKS4TargetsEncodable(parsed curlArgvParse, group int) bool {
+	for _, target := range parsed.Targets {
+		if target.Group != group {
+			continue
+		}
+		parsedTarget, err := url.Parse(target.Value)
+		if err != nil {
+			return false
+		}
+		address, err := netip.ParseAddr(parsedTarget.Hostname())
+		if err == nil && address.Is6() {
+			return false
+		}
+	}
+	return true
+}
+
+func curlExplicitSOCKSProxyURL(value string) bool {
+	delimiter := strings.Index(value, "://")
+	if delimiter <= 0 {
+		return false
+	}
+	switch strings.ToLower(value[:delimiter]) {
+	case "socks", "socks4", "socks4a", "socks5", "socks5h":
+		return true
+	default:
+		return false
+	}
+}
+
+func curlStandalonePreproxyCanonical(
+	value string,
+	disabledMainCanonical string,
+) (string, bool) {
+	if curlExplicitSOCKSProxyURL(value) {
+		return "--proxy", true
+	}
+	switch disabledMainCanonical {
+	case "--socks4", "--socks4a", "--socks5", "--socks5-hostname":
+		// Curl retains the proxy type selected by a SOCKS-named setter even
+		// when decoded control bytes disable that main proxy. A following bare
+		// (or http://) preproxy inherits the retained type; https:// can still
+		// override it and is rejected later when it resolves as non-SOCKS.
+		return disabledMainCanonical, true
+	default:
+		return "", false
+	}
+}
+
 // StaticCurlFTPControlRequestComponents returns exact, target-bound FTP(S)
 // login operands without depending on HTTP request-metadata projection.
 func StaticCurlFTPControlRequestComponents(
@@ -2832,7 +4585,7 @@ func StaticCurlFTPControlRequestComponentsForFacts(
 	facts Facts,
 	commandID int64,
 ) []TransmittedRequestComponent {
-	command, valid := staticCurlFTPCommandForFacts(facts, commandID)
+	command, valid := staticCurlCommandForFacts(facts, commandID)
 	if !valid {
 		return nil
 	}
@@ -2845,14 +4598,14 @@ func StaticCurlFTPProxyRequestComponentsForFacts(
 	facts Facts,
 	commandID int64,
 ) []TransmittedRequestComponent {
-	command, valid := staticCurlFTPCommandForFacts(facts, commandID)
+	command, valid := staticCurlCommandForFacts(facts, commandID)
 	if !valid {
 		return nil
 	}
 	return staticCurlFTPProxyRequestComponents(command)
 }
 
-func staticCurlFTPCommandForFacts(
+func staticCurlCommandForFacts(
 	facts Facts,
 	commandID int64,
 ) (CommandFact, bool) {
@@ -2873,6 +4626,41 @@ func staticCurlFTPCommandForFacts(
 		return isolated, true
 	}
 	return CommandFact{}, false
+}
+
+func staticCurlTelnetCommandForCommands(
+	commands []CommandFact,
+	commandID int64,
+) (CommandFact, bool) {
+	if commandID == 0 {
+		return CommandFact{}, false
+	}
+	// isolatedPOSIXCommandFacts intentionally rejects every redirect. Erase
+	// only the output-to-/dev/null forms that cannot prevent Telnet startup;
+	// unsafe redirects remain and are rejected while traversing the ancestry.
+	isolatedCommands := cloneSlice(commands)
+	commandIndex := -1
+	for index := range isolatedCommands {
+		if curlTelnetOutputRedirectsSafe(isolatedCommands[index]) {
+			isolatedCommands[index].Redirects = nil
+		}
+		if isolatedCommands[index].ID == commandID {
+			if commandIndex >= 0 {
+				return CommandFact{}, false
+			}
+			commandIndex = index
+		}
+	}
+	if commandIndex < 0 || !isolatedPOSIXCommandFacts(
+		isolatedCommands,
+		&isolatedCommands[commandIndex],
+	) {
+		return CommandFact{}, false
+	}
+	isolated := isolatedCommands[commandIndex]
+	isolated.ParentCommandID = 0
+	isolated.Wrappers = nil
+	return isolated, true
 }
 
 func staticCurlFTPProxyRequestComponents(
@@ -3170,7 +4958,11 @@ func staticCurlFTPEagerPreparseValid(
 			lastProxyUser[option.Group] = option.ArgvIndex
 		case "--oauth2-bearer":
 			lastBearer[option.Group] = option.Value
-		case "--header", "--proxy-header", "--write-out":
+		case "--header", "--proxy-header":
+			if !staticCurlHeaderSetupValid(command, option) {
+				return false
+			}
+		case "--write-out":
 			if strings.HasPrefix(option.Value, "@") &&
 				(!posixNullDevice || option.Value != "@/dev/null") {
 				return false
@@ -3188,6 +4980,11 @@ func staticCurlFTPEagerPreparseValid(
 			}
 		case "--continue-at":
 			if !curlContinueAtValueValid(option.Value) {
+				return false
+			}
+		case "--stderr":
+			if option.Value != "-" &&
+				(!posixNullDevice || option.Value != "/dev/null") {
 				return false
 			}
 		}
@@ -3315,6 +5112,91 @@ func curlOriginUserAvoidsPrompt(value string, bearerSet bool) bool {
 	}
 	return len(value) <= maximumFTPLoginFieldLength &&
 		(bearerSet || strings.HasPrefix(value, ";"))
+}
+
+func staticCurlNetrcSetupValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	netrc := false
+	netrcOptional := false
+	netrcFile := ""
+	lastUser := -1
+	lastBearer := ""
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		switch option.Canonical {
+		case "--netrc":
+			netrc = option.Name != "--no-netrc"
+		case "--netrc-optional":
+			netrcOptional = option.Name != "--no-netrc-optional"
+		case "--netrc-file":
+			if !staticCurlOptionValue(command, option) {
+				return false
+			}
+			netrcFile = option.Value
+		case "--user":
+			lastUser = index
+		case "--oauth2-bearer":
+			lastBearer = option.Value
+		}
+	}
+	if lastUser >= 0 {
+		option := parsed.Options[lastUser]
+		return staticCurlOptionValue(command, option) &&
+			curlOriginUserAvoidsPrompt(option.Value, lastBearer != "")
+	}
+	if !netrc && !netrcOptional && netrcFile == "" {
+		return true
+	}
+	return command.Dialect == DialectPOSIX && netrcFile == "/dev/null"
+}
+
+func staticCurlTelnetNetrcSetupValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	netrc := false
+	netrcOptional := false
+	netrcFile := ""
+	lastUser := -1
+	bearer := ""
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		switch option.Canonical {
+		case "--netrc":
+			netrc = option.Name != "--no-netrc"
+		case "--netrc-optional":
+			netrcOptional = option.Name != "--no-netrc-optional"
+		case "--netrc-file":
+			if !staticCurlOptionValue(command, option) {
+				return false
+			}
+			netrcFile = option.Value
+		case "--user":
+			lastUser = index
+		case "--oauth2-bearer":
+			if !staticCurlOptionValue(command, option) {
+				return false
+			}
+			bearer = option.Value
+		}
+	}
+	if lastUser >= 0 {
+		option := parsed.Options[lastUser]
+		return staticCurlOptionValue(command, option) &&
+			curlTelnetUserAvoidsPrompt(option.Value, bearer != "")
+	}
+	if !netrc && !netrcOptional && netrcFile == "" {
+		return true
+	}
+	return curlPOSIXNullDeviceAvailable(command) && netrcFile == "/dev/null"
 }
 
 func curlFTPURLCredentialsWithinCommandBounds(value string) bool {
@@ -3523,7 +5405,11 @@ func staticCurlFTPControlRequestValues(
 				curlFormUsesPOSIXNullDevice(option.Value) && !posixNullDevice {
 				return nil
 			}
-		case "--header", "--proxy-header", "--write-out":
+		case "--header", "--proxy-header":
+			if !staticCurlHeaderSetupValid(command, option) {
+				return nil
+			}
+		case "--write-out":
 			if strings.HasPrefix(option.Value, "@") &&
 				(option.Value != "@/dev/null" || !posixNullDevice) {
 				return nil
@@ -5459,7 +7345,14 @@ func curlGroupFinalOptionValue(
 
 func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	parsed := parseCurlArgv(command.Argv)
-	proxyNetwork, _, proxyProved := staticCurlProxyDestination(*command)
+	proxyCommand := *command
+	if command.ParentCommandID != 0 || len(command.Wrappers) != 0 {
+		if isolatedPOSIXCommand(out, command) {
+			proxyCommand.ParentCommandID = 0
+			proxyCommand.Wrappers = nil
+		}
+	}
+	proxyNetwork, _, proxyProved := staticCurlProxyDestination(proxyCommand)
 	proxyNetworks := []NetworkFact(nil)
 	proxyRoutingProved := make(map[int]bool)
 	if proxyProved {
@@ -5500,6 +7393,19 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	if len(parsed.Targets) == 0 {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
+	telnetNetwork := NetworkFact{}
+	telnetRoutingProved := false
+	if telnetCommand, isolated := staticCurlTelnetCommandForCommands(
+		out.commands,
+		command.ID,
+	); isolated {
+		var telnetValid bool
+		telnetNetwork, _, telnetValid = staticCurlTelnetOptionProjection(
+			telnetCommand,
+			parsed,
+		)
+		telnetRoutingProved = telnetValid
+	}
 
 	groupCount := 1
 	for _, option := range parsed.Options {
@@ -5511,6 +7417,17 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	groups := make([]curlTransferProjection, groupCount)
 
 	for _, option := range parsed.Options {
+		if option.Canonical == "--proto-default" && !telnetRoutingProved {
+			// A schemeless target is not generically HTTP once curl has a
+			// protocol default. Only the exact Telnet projector currently owns
+			// this runtime-capability-dependent route selection.
+			out.markPartial(IssueUnsupportedConstruct)
+		}
+		if option.Role == curlOptionTelnetProof && !telnetRoutingProved {
+			// Parser ownership for the exact Telnet projector must not make a
+			// previously unknown option authoritative for generic curl targets.
+			out.markPartial(IssueUnsupportedConstruct)
+		}
 		if !option.ValuePresent {
 			continue
 		}
@@ -5597,6 +7514,18 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 		case "--dump-header":
 			group.hasDump = true
 			group.dumpHeader = value
+		case "--stderr":
+			if value == "-" ||
+				command.Dialect == DialectPOSIX && value == "/dev/null" {
+				continue
+			}
+			if value != "" && value != "-" {
+				appendCommandPath(out, command, PathAccessWrite, value)
+			}
+			// Curl opens this destination before connecting. Without a proven
+			// null device the transfer can deterministically fail before any
+			// projected network bytes are sent.
+			out.markPartial(IssueUnsupportedConstruct)
 		case "--unix-socket":
 			group.hasUnix = true
 			group.unixSocket = value
@@ -5625,11 +7554,11 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 			}
 		case "--proxy", "--proxy1.0", "--socks4", "--socks4a",
 			"--socks5", "--socks5-hostname", "--preproxy":
-			if !proxyRoutingProved[option.Group] {
+			if !proxyRoutingProved[option.Group] && !telnetRoutingProved {
 				out.markPartial(IssueUnsupportedConstruct)
 			}
 		case "--noproxy":
-			if !proxyRoutingProved[option.Group] {
+			if !proxyRoutingProved[option.Group] && !telnetRoutingProved {
 				out.markPartial(IssueUnsupportedConstruct)
 			}
 		case "--interface":
@@ -5650,11 +7579,14 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 				}
 				out.markPartial(IssueUnsupportedConstruct)
 			}
-		case "--connect-to", "--dns-servers", "--doh-url",
-			"--resolve":
+		case "--connect-to", "--dns-servers", "--resolve":
 			// These options can replace the actual peer while leaving the
 			// logical URL unchanged.
 			out.markPartial(IssueUnsupportedConstruct)
+		case "--doh-url":
+			if !telnetRoutingProved {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
 		}
 	}
 
@@ -5783,7 +7715,17 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
 
-		fact, ok := webTargetFact(command.ID, target.Value, NetworkDownload)
+		fact := NetworkFact{}
+		ok := false
+		if telnetRoutingProved {
+			// The Telnet projector has already proved the command has exactly
+			// one target. Prefer its normalized fact so --proto-default telnet
+			// cannot be reinterpreted as the generic schemeless HTTP fallback.
+			fact = telnetNetwork
+			ok = true
+		} else if !curlTargetSelectsTelnet(parsed, target) {
+			fact, ok = webTargetFact(command.ID, target.Value, NetworkDownload)
+		}
 		if !ok {
 			fact, ok = curlSMTPTargetFact(
 				command.ID,

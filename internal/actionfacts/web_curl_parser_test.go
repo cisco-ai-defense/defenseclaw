@@ -556,6 +556,45 @@ func TestParseCurlArgvExactProofRequiresValidValuesAndTarget(t *testing.T) {
 	}
 }
 
+func TestParseCurlArgvNumericGrammarMatchesCurl87(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		canonical string
+		value     string
+		valid     bool
+	}{
+		{name: "leading whitespace signed decimal zero", canonical: "--max-time", value: "\t+0", valid: true},
+		{name: "negative decimal zero", canonical: "--connect-timeout", value: "-0", valid: true},
+		{name: "decimal exponent", canonical: "--max-time", value: "0e3", valid: true},
+		{name: "sub millisecond decimal", canonical: "--max-time", value: ".000999999999", valid: true},
+		{name: "hex float exponent", canonical: "--max-time", value: "0x1p-11", valid: true},
+		{name: "hex float implicit exponent", canonical: "--max-time", value: "+0x0.", valid: true},
+		{name: "Go underscore rejected", canonical: "--max-time", value: "0_0"},
+		{name: "NaN rejected", canonical: "--max-time", value: "NaN"},
+		{name: "infinity rejected", canonical: "--max-time", value: "Inf"},
+		{name: "trailing whitespace rejected", canonical: "--max-time", value: "0 "},
+		{name: "negative nonzero rejected", canonical: "--max-time", value: "-0.0001"},
+		{name: "signed integer zero", canonical: "--retry", value: "-000", valid: true},
+		{name: "leading whitespace integer zero", canonical: "--speed-time", value: "\t+000", valid: true},
+		{name: "integer decimal rejected", canonical: "--retry", value: "0.0"},
+		{name: "integer exponent rejected", canonical: "--retry-delay", value: "0e1"},
+		{name: "integer hex rejected", canonical: "--retry-max-time", value: "0x0"},
+		{name: "integer underscore rejected", canonical: "--speed-limit", value: "0_0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			parsed := parseCurlArgv([]string{
+				"curl", test.canonical, test.value, "https://files.invalid/run",
+			})
+			if got := parsed.hasValidOptionValues(); got != test.valid {
+				t.Fatalf("hasValidOptionValues = %t, want %t; parse = %#v", got, test.valid, parsed)
+			}
+		})
+	}
+}
+
 func requireCurlParsedOption(
 	t *testing.T,
 	parsed curlArgvParse,

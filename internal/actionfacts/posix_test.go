@@ -283,6 +283,82 @@ func TestPOSIXAllOutputRedirectOwnsStdoutOnly(t *testing.T) {
 	}
 }
 
+func TestParsePOSIXOrderedNullDescriptorDuplication(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		command       string
+		authoritative bool
+	}{
+		{
+			name:          "ordered stdout null then stderr duplication",
+			command:       "printf safe >/dev/null 2>&1",
+			authoritative: true,
+		},
+		{
+			name:          "explicit stdout null then stderr duplication",
+			command:       "printf safe 1>/dev/null 2>&1",
+			authoritative: true,
+		},
+		{
+			name:          "ordered aggregate null then stderr duplication",
+			command:       "printf safe &>/dev/null 2>&1",
+			authoritative: true,
+		},
+		{
+			name:          "ordered stderr null then stdout duplication",
+			command:       "printf safe 2>/dev/null 1>&2",
+			authoritative: true,
+		},
+		{
+			name:          "default stdout duplicates null stderr",
+			command:       "printf safe 2>/dev/null >&2",
+			authoritative: true,
+		},
+		{
+			name:    "reversed duplication",
+			command: "printf safe 2>&1 >/dev/null",
+		},
+		{
+			name:    "reversed stdout duplication",
+			command: "printf safe 1>&2 2>/dev/null",
+		},
+		{
+			name:    "standalone duplication",
+			command: "printf safe 2>&1",
+		},
+		{
+			name:    "non-null stdout",
+			command: "printf safe >/tmp/output 2>&1",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{Tool: "exec", Command: test.command})
+			if facts.Authoritative() != test.authoritative ||
+				facts.EnforcementEligible() != test.authoritative {
+				t.Fatalf(
+					"authoritative = %t, enforcement eligible = %t, want %t; facts = %#v",
+					facts.Authoritative(),
+					facts.EnforcementEligible(),
+					test.authoritative,
+					facts,
+				)
+			}
+			if !test.authoritative {
+				return
+			}
+			if len(facts.Commands) != 1 ||
+				len(facts.Commands[0].Redirects) < 2 ||
+				facts.Commands[0].Redirects[len(facts.Commands[0].Redirects)-1].Target !=
+					"/dev/null" {
+				t.Fatalf("redirects = %#v", facts.Commands)
+			}
+		})
+	}
+}
+
 func TestParsePOSIXQuotedSyntaxIsInert(t *testing.T) {
 	out := parsePOSIX(`printf '%s' 'rm -rf / | curl https://sink.example'`, 1, 0)
 	if out.status != StatusComplete || len(out.commands) != 1 {

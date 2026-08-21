@@ -6,7 +6,11 @@
 
 package actionfacts
 
-import "strings"
+import (
+	"math"
+	"strconv"
+	"strings"
+)
 
 // curlOptionArity describes lexical operand ownership. In particular, a
 // required operand owns the next argv element even when it is empty or starts
@@ -40,6 +44,10 @@ const (
 	curlOptionNoHead
 	curlOptionPreview
 	curlOptionNetworkOverride
+	// curlOptionTelnetProof owns curl 8.7.1 grammar that is closed for the
+	// exact direct-Telnet projector. Generic curl classification must remain
+	// partial until another protocol lane proves the same option semantics.
+	curlOptionTelnetProof
 )
 
 type curlOptionSpec struct {
@@ -74,6 +82,138 @@ func curlOptionalValue(canonical string, role curlOptionRole) curlOptionSpec {
 // classification, and exact-output consumers together when they integrate
 // with parseCurlArgv.
 var curlLongOptionSpecs = map[string]curlOptionSpec{
+	// These curl 8.7.1 options are owned for the exact direct-Telnet proof.
+	// Keeping their role distinct prevents parser ownership from silently
+	// broadening generic HTTP/FTP authority.
+	"--alpn":                          curlFlag("--alpn", curlOptionTelnetProof),
+	"--no-alpn":                       curlFlag("--alpn", curlOptionTelnetProof),
+	"--anyauth":                       curlFlag("--anyauth", curlOptionTelnetProof),
+	"--no-anyauth":                    curlFlag("--anyauth", curlOptionTelnetProof),
+	"--basic":                         curlFlag("--basic", curlOptionTelnetProof),
+	"--no-basic":                      curlFlag("--basic", curlOptionTelnetProof),
+	"--ca-native":                     curlFlag("--ca-native", curlOptionTelnetProof),
+	"--no-ca-native":                  curlFlag("--ca-native", curlOptionTelnetProof),
+	"--cert-status":                   curlFlag("--cert-status", curlOptionTelnetProof),
+	"--no-cert-status":                curlFlag("--cert-status", curlOptionTelnetProof),
+	"--clobber":                       curlFlag("--clobber", curlOptionTelnetProof),
+	"--no-clobber":                    curlFlag("--clobber", curlOptionTelnetProof),
+	"--compressed-ssh":                curlFlag("--compressed-ssh", curlOptionTelnetProof),
+	"--no-compressed-ssh":             curlFlag("--compressed-ssh", curlOptionTelnetProof),
+	"--create-dirs":                   curlFlag("--create-dirs", curlOptionTelnetProof),
+	"--no-create-dirs":                curlFlag("--create-dirs", curlOptionTelnetProof),
+	"--digest":                        curlFlag("--digest", curlOptionTelnetProof),
+	"--no-digest":                     curlFlag("--digest", curlOptionTelnetProof),
+	"--disallow-username-in-url":      curlFlag("--disallow-username-in-url", curlOptionTelnetProof),
+	"--no-disallow-username-in-url":   curlFlag("--disallow-username-in-url", curlOptionTelnetProof),
+	"--doh-cert-status":               curlFlag("--doh-cert-status", curlOptionTelnetProof),
+	"--no-doh-cert-status":            curlFlag("--doh-cert-status", curlOptionTelnetProof),
+	"--doh-insecure":                  curlFlag("--doh-insecure", curlOptionTelnetProof),
+	"--no-doh-insecure":               curlFlag("--doh-insecure", curlOptionTelnetProof),
+	"--fail-early":                    curlFlag("--fail-early", curlOptionTelnetProof),
+	"--no-fail-early":                 curlFlag("--fail-early", curlOptionTelnetProof),
+	"--false-start":                   curlFlag("--false-start", curlOptionTelnetProof),
+	"--no-false-start":                curlFlag("--false-start", curlOptionTelnetProof),
+	"--form-escape":                   curlFlag("--form-escape", curlOptionTelnetProof),
+	"--no-form-escape":                curlFlag("--form-escape", curlOptionTelnetProof),
+	"--haproxy-protocol":              curlFlag("--haproxy-protocol", curlOptionTelnetProof),
+	"--no-haproxy-protocol":           curlFlag("--haproxy-protocol", curlOptionTelnetProof),
+	"--http0.9":                       curlFlag("--http0.9", curlOptionTelnetProof),
+	"--no-http0.9":                    curlFlag("--http0.9", curlOptionTelnetProof),
+	"--http1.1":                       curlFlag("--http1.1", curlOptionTelnetProof),
+	"--http2":                         curlFlag("--http2", curlOptionTelnetProof),
+	"--http2-prior-knowledge":         curlFlag("--http2-prior-knowledge", curlOptionTelnetProof),
+	"--http3":                         curlFlag("--http3", curlOptionTelnetProof),
+	"--http3-only":                    curlFlag("--http3-only", curlOptionTelnetProof),
+	"--keepalive":                     curlFlag("--keepalive", curlOptionTelnetProof),
+	"--no-keepalive":                  curlFlag("--keepalive", curlOptionTelnetProof),
+	"--location-trusted":              curlFlag("--location-trusted", curlOptionTelnetProof),
+	"--no-location-trusted":           curlFlag("--location-trusted", curlOptionTelnetProof),
+	"--metalink":                      curlFlag("--metalink", curlOptionTelnetProof),
+	"--no-metalink":                   curlFlag("--metalink", curlOptionTelnetProof),
+	"--negotiate":                     curlFlag("--negotiate", curlOptionTelnetProof),
+	"--no-negotiate":                  curlFlag("--negotiate", curlOptionTelnetProof),
+	"--ntlm":                          curlFlag("--ntlm", curlOptionTelnetProof),
+	"--no-ntlm":                       curlFlag("--ntlm", curlOptionTelnetProof),
+	"--ntlm-wb":                       curlFlag("--ntlm-wb", curlOptionTelnetProof),
+	"--no-ntlm-wb":                    curlFlag("--ntlm-wb", curlOptionTelnetProof),
+	"--parallel-immediate":            curlFlag("--parallel-immediate", curlOptionTelnetProof),
+	"--no-parallel-immediate":         curlFlag("--parallel-immediate", curlOptionTelnetProof),
+	"--post301":                       curlFlag("--post301", curlOptionTelnetProof),
+	"--no-post301":                    curlFlag("--post301", curlOptionTelnetProof),
+	"--post302":                       curlFlag("--post302", curlOptionTelnetProof),
+	"--no-post302":                    curlFlag("--post302", curlOptionTelnetProof),
+	"--post303":                       curlFlag("--post303", curlOptionTelnetProof),
+	"--no-post303":                    curlFlag("--post303", curlOptionTelnetProof),
+	"--proxy-anyauth":                 curlFlag("--proxy-anyauth", curlOptionTelnetProof),
+	"--no-proxy-anyauth":              curlFlag("--proxy-anyauth", curlOptionTelnetProof),
+	"--proxy-basic":                   curlFlag("--proxy-basic", curlOptionTelnetProof),
+	"--no-proxy-basic":                curlFlag("--proxy-basic", curlOptionTelnetProof),
+	"--proxy-ca-native":               curlFlag("--proxy-ca-native", curlOptionTelnetProof),
+	"--no-proxy-ca-native":            curlFlag("--proxy-ca-native", curlOptionTelnetProof),
+	"--proxy-digest":                  curlFlag("--proxy-digest", curlOptionTelnetProof),
+	"--no-proxy-digest":               curlFlag("--proxy-digest", curlOptionTelnetProof),
+	"--proxy-http2":                   curlFlag("--proxy-http2", curlOptionTelnetProof),
+	"--no-proxy-http2":                curlFlag("--proxy-http2", curlOptionTelnetProof),
+	"--proxy-insecure":                curlFlag("--proxy-insecure", curlOptionTelnetProof),
+	"--no-proxy-insecure":             curlFlag("--proxy-insecure", curlOptionTelnetProof),
+	"--proxy-negotiate":               curlFlag("--proxy-negotiate", curlOptionTelnetProof),
+	"--no-proxy-negotiate":            curlFlag("--proxy-negotiate", curlOptionTelnetProof),
+	"--proxy-ntlm":                    curlFlag("--proxy-ntlm", curlOptionTelnetProof),
+	"--no-proxy-ntlm":                 curlFlag("--proxy-ntlm", curlOptionTelnetProof),
+	"--proxy-ssl-allow-beast":         curlFlag("--proxy-ssl-allow-beast", curlOptionTelnetProof),
+	"--no-proxy-ssl-allow-beast":      curlFlag("--proxy-ssl-allow-beast", curlOptionTelnetProof),
+	"--proxy-ssl-auto-client-cert":    curlFlag("--proxy-ssl-auto-client-cert", curlOptionTelnetProof),
+	"--no-proxy-ssl-auto-client-cert": curlFlag("--proxy-ssl-auto-client-cert", curlOptionTelnetProof),
+	"--proxy-tlsv1":                   curlFlag("--proxy-tlsv1", curlOptionTelnetProof),
+	"--raw":                           curlFlag("--raw", curlOptionTelnetProof),
+	"--no-raw":                        curlFlag("--raw", curlOptionTelnetProof),
+	"--remote-header-name":            curlFlag("--remote-header-name", curlOptionTelnetProof),
+	"--no-remote-header-name":         curlFlag("--remote-header-name", curlOptionTelnetProof),
+	"--remove-on-error":               curlFlag("--remove-on-error", curlOptionTelnetProof),
+	"--no-remove-on-error":            curlFlag("--remove-on-error", curlOptionTelnetProof),
+	"--retry-all-errors":              curlFlag("--retry-all-errors", curlOptionTelnetProof),
+	"--no-retry-all-errors":           curlFlag("--retry-all-errors", curlOptionTelnetProof),
+	"--retry-connrefused":             curlFlag("--retry-connrefused", curlOptionTelnetProof),
+	"--no-retry-connrefused":          curlFlag("--retry-connrefused", curlOptionTelnetProof),
+	"--sasl-ir":                       curlFlag("--sasl-ir", curlOptionTelnetProof),
+	"--no-sasl-ir":                    curlFlag("--sasl-ir", curlOptionTelnetProof),
+	"--sessionid":                     curlFlag("--sessionid", curlOptionTelnetProof),
+	"--no-sessionid":                  curlFlag("--sessionid", curlOptionTelnetProof),
+	"--ssl-allow-beast":               curlFlag("--ssl-allow-beast", curlOptionTelnetProof),
+	"--no-ssl-allow-beast":            curlFlag("--ssl-allow-beast", curlOptionTelnetProof),
+	"--ssl-auto-client-cert":          curlFlag("--ssl-auto-client-cert", curlOptionTelnetProof),
+	"--no-ssl-auto-client-cert":       curlFlag("--ssl-auto-client-cert", curlOptionTelnetProof),
+	"--ssl-no-revoke":                 curlFlag("--ssl-no-revoke", curlOptionTelnetProof),
+	"--no-ssl-no-revoke":              curlFlag("--ssl-no-revoke", curlOptionTelnetProof),
+	"--ssl-revoke-best-effort":        curlFlag("--ssl-revoke-best-effort", curlOptionTelnetProof),
+	"--no-ssl-revoke-best-effort":     curlFlag("--ssl-revoke-best-effort", curlOptionTelnetProof),
+	"--styled-output":                 curlFlag("--styled-output", curlOptionTelnetProof),
+	"--no-styled-output":              curlFlag("--styled-output", curlOptionTelnetProof),
+	"--suppress-connect-headers":      curlFlag("--suppress-connect-headers", curlOptionTelnetProof),
+	"--no-suppress-connect-headers":   curlFlag("--suppress-connect-headers", curlOptionTelnetProof),
+	"--tcp-fastopen":                  curlFlag("--tcp-fastopen", curlOptionTelnetProof),
+	"--no-tcp-fastopen":               curlFlag("--tcp-fastopen", curlOptionTelnetProof),
+	"--tcp-nodelay":                   curlFlag("--tcp-nodelay", curlOptionTelnetProof),
+	"--no-tcp-nodelay":                curlFlag("--tcp-nodelay", curlOptionTelnetProof),
+	"--test-event":                    curlFlag("--test-event", curlOptionTelnetProof),
+	"--no-test-event":                 curlFlag("--test-event", curlOptionTelnetProof),
+	"--tftp-no-options":               curlFlag("--tftp-no-options", curlOptionTelnetProof),
+	"--no-tftp-no-options":            curlFlag("--tftp-no-options", curlOptionTelnetProof),
+	"--tlsv1.0":                       curlFlag("--tlsv1.0", curlOptionTelnetProof),
+	"--tlsv1.1":                       curlFlag("--tlsv1.1", curlOptionTelnetProof),
+	"--tlsv1.2":                       curlFlag("--tlsv1.2", curlOptionTelnetProof),
+	"--tlsv1.3":                       curlFlag("--tlsv1.3", curlOptionTelnetProof),
+	"--tr-encoding":                   curlFlag("--tr-encoding", curlOptionTelnetProof),
+	"--no-tr-encoding":                curlFlag("--tr-encoding", curlOptionTelnetProof),
+	"--trace-ids":                     curlFlag("--trace-ids", curlOptionTelnetProof),
+	"--no-trace-ids":                  curlFlag("--trace-ids", curlOptionTelnetProof),
+	"--trace-time":                    curlFlag("--trace-time", curlOptionTelnetProof),
+	"--no-trace-time":                 curlFlag("--trace-time", curlOptionTelnetProof),
+	"--wdebug":                        curlFlag("--wdebug", curlOptionTelnetProof),
+	"--no-wdebug":                     curlFlag("--wdebug", curlOptionTelnetProof),
+	"--xattr":                         curlFlag("--xattr", curlOptionTelnetProof),
+	"--no-xattr":                      curlFlag("--xattr", curlOptionTelnetProof),
+
 	"--append":        curlFlag("--append", curlOptionNeutral),
 	"--no-append":     curlFlag("--append", curlOptionNeutral),
 	"--buffer":        curlFlag("--no-buffer", curlOptionNeutral),
@@ -173,10 +313,14 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--netrc-optional":     curlFlag("--netrc-optional", curlOptionNeutral),
 	"--no-netrc-optional":  curlFlag("--netrc-optional", curlOptionNeutral),
 	"--no-progress-meter":  curlFlag("--no-progress-meter", curlOptionNeutral),
+	"--npn":                curlFlag("--npn", curlOptionNeutral),
+	"--no-npn":             curlFlag("--npn", curlOptionNeutral),
 	"--no-remote-name":     curlFlag("--no-remote-name", curlOptionNoRemoteName),
 	"--no-remote-name-all": curlFlag("--no-remote-name-all", curlOptionNoRemoteNameAll),
 	"--parallel":           curlFlag("--parallel", curlOptionNeutral),
 	"--no-parallel":        curlFlag("--parallel", curlOptionNeutral),
+	"--path-as-is":         curlFlag("--path-as-is", curlOptionNeutral),
+	"--no-path-as-is":      curlFlag("--path-as-is", curlOptionNeutral),
 	"--progress-bar":       curlFlag("--progress-bar", curlOptionNeutral),
 	"--no-progress-bar":    curlFlag("--progress-bar", curlOptionNeutral),
 	"--progress-meter":     curlFlag("--no-progress-meter", curlOptionNeutral),
@@ -190,14 +334,97 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--no-show-error":      curlFlag("--show-error", curlOptionNeutral),
 	"--silent":             curlFlag("--silent", curlOptionNeutral),
 	"--no-silent":          curlFlag("--silent", curlOptionNeutral),
-	"--sslv2":              curlFlag("--sslv2", curlOptionNeutral),
-	"--sslv3":              curlFlag("--sslv3", curlOptionNeutral),
-	"--tlsv1":              curlFlag("--tlsv1", curlOptionNeutral),
-	"--use-ascii":          curlFlag("--use-ascii", curlOptionNeutral),
-	"--no-use-ascii":       curlFlag("--use-ascii", curlOptionNeutral),
-	"--verbose":            curlFlag("--verbose", curlOptionNeutral),
-	"--no-verbose":         curlFlag("--verbose", curlOptionNeutral),
-	"--version":            curlFlag("--version", curlOptionPreview),
+	"--socks5-basic":       curlFlag("--socks5-basic", curlOptionNeutral),
+	"--no-socks5-basic":    curlFlag("--socks5-basic", curlOptionNeutral),
+	"--socks5-gssapi":      curlFlag("--socks5-gssapi", curlOptionNeutral),
+	"--no-socks5-gssapi":   curlFlag("--socks5-gssapi", curlOptionNeutral),
+	"--socks5-gssapi-nec": curlFlag(
+		"--socks5-gssapi-nec",
+		curlOptionNeutral,
+	),
+	"--no-socks5-gssapi-nec": curlFlag(
+		"--socks5-gssapi-nec",
+		curlOptionNeutral,
+	),
+	"--sslv2":        curlFlag("--sslv2", curlOptionNeutral),
+	"--sslv3":        curlFlag("--sslv3", curlOptionNeutral),
+	"--tlsv1":        curlFlag("--tlsv1", curlOptionNeutral),
+	"--use-ascii":    curlFlag("--use-ascii", curlOptionNeutral),
+	"--no-use-ascii": curlFlag("--use-ascii", curlOptionNeutral),
+	"--verbose":      curlFlag("--verbose", curlOptionNeutral),
+	"--no-verbose":   curlFlag("--verbose", curlOptionNeutral),
+	"--version":      curlFlag("--version", curlOptionPreview),
+
+	"--abstract-unix-socket": curlValue(
+		"--abstract-unix-socket",
+		curlOptionTelnetProof,
+	),
+	"--alt-svc":                   curlValue("--alt-svc", curlOptionTelnetProof),
+	"--aws-sigv4":                 curlValue("--aws-sigv4", curlOptionTelnetProof),
+	"--capath":                    curlValue("--capath", curlOptionTelnetProof),
+	"--cert-type":                 curlValue("--cert-type", curlOptionTelnetProof),
+	"--ciphers":                   curlValue("--ciphers", curlOptionTelnetProof),
+	"--create-file-mode":          curlValue("--create-file-mode", curlOptionTelnetProof),
+	"--crlfile":                   curlValue("--crlfile", curlOptionTelnetProof),
+	"--curves":                    curlValue("--curves", curlOptionTelnetProof),
+	"--delegation":                curlValue("--delegation", curlOptionTelnetProof),
+	"--dns-interface":             curlValue("--dns-interface", curlOptionTelnetProof),
+	"--dns-ipv4-addr":             curlValue("--dns-ipv4-addr", curlOptionTelnetProof),
+	"--dns-ipv6-addr":             curlValue("--dns-ipv6-addr", curlOptionTelnetProof),
+	"--engine":                    curlValue("--engine", curlOptionTelnetProof),
+	"--etag-compare":              curlValue("--etag-compare", curlOptionTelnetProof),
+	"--etag-save":                 curlValue("--etag-save", curlOptionTelnetProof),
+	"--expect100-timeout":         curlValue("--expect100-timeout", curlOptionTelnetProof),
+	"--happy-eyeballs-timeout-ms": curlValue("--happy-eyeballs-timeout-ms", curlOptionTelnetProof),
+	"--haproxy-clientip":          curlValue("--haproxy-clientip", curlOptionTelnetProof),
+	"--hostpubmd5":                curlValue("--hostpubmd5", curlOptionTelnetProof),
+	"--hostpubsha256":             curlValue("--hostpubsha256", curlOptionTelnetProof),
+	"--hsts":                      curlValue("--hsts", curlOptionTelnetProof),
+	"--ipfs-gateway":              curlValue("--ipfs-gateway", curlOptionTelnetProof),
+	"--keepalive-time":            curlValue("--keepalive-time", curlOptionTelnetProof),
+	"--key-type":                  curlValue("--key-type", curlOptionTelnetProof),
+	"--krb":                       curlValue("--krb", curlOptionTelnetProof),
+	"--krb4":                      curlValue("--krb4", curlOptionTelnetProof),
+	"--libcurl":                   curlValue("--libcurl", curlOptionTelnetProof),
+	"--limit-rate":                curlValue("--limit-rate", curlOptionTelnetProof),
+	"--local-port":                curlValue("--local-port", curlOptionTelnetProof),
+	"--login-options":             curlValue("--login-options", curlOptionTelnetProof),
+	"--max-filesize":              curlValue("--max-filesize", curlOptionTelnetProof),
+	"--max-redirs":                curlValue("--max-redirs", curlOptionTelnetProof),
+	"--parallel-max":              curlValue("--parallel-max", curlOptionTelnetProof),
+	"--pass":                      curlValue("--pass", curlOptionTelnetProof),
+	"--pinnedpubkey":              curlValue("--pinnedpubkey", curlOptionTelnetProof),
+	"--proto":                     curlValue("--proto", curlOptionTelnetProof),
+	"--proto-redir":               curlValue("--proto-redir", curlOptionTelnetProof),
+	"--proxy-cacert":              curlValue("--proxy-cacert", curlOptionTelnetProof),
+	"--proxy-capath":              curlValue("--proxy-capath", curlOptionTelnetProof),
+	"--proxy-cert":                curlValue("--proxy-cert", curlOptionTelnetProof),
+	"--proxy-cert-type":           curlValue("--proxy-cert-type", curlOptionTelnetProof),
+	"--proxy-ciphers":             curlValue("--proxy-ciphers", curlOptionTelnetProof),
+	"--proxy-crlfile":             curlValue("--proxy-crlfile", curlOptionTelnetProof),
+	"--proxy-key":                 curlValue("--proxy-key", curlOptionTelnetProof),
+	"--proxy-key-type":            curlValue("--proxy-key-type", curlOptionTelnetProof),
+	"--proxy-pass":                curlValue("--proxy-pass", curlOptionTelnetProof),
+	"--proxy-pinnedpubkey":        curlValue("--proxy-pinnedpubkey", curlOptionTelnetProof),
+	"--proxy-service-name":        curlValue("--proxy-service-name", curlOptionTelnetProof),
+	"--proxy-tls13-ciphers":       curlValue("--proxy-tls13-ciphers", curlOptionTelnetProof),
+	"--proxy-tlsauthtype":         curlValue("--proxy-tlsauthtype", curlOptionTelnetProof),
+	"--proxy-tlspassword":         curlValue("--proxy-tlspassword", curlOptionTelnetProof),
+	"--proxy-tlsuser":             curlValue("--proxy-tlsuser", curlOptionTelnetProof),
+	"--pubkey":                    curlValue("--pubkey", curlOptionTelnetProof),
+	"--rate":                      curlValue("--rate", curlOptionTelnetProof),
+	"--sasl-authzid":              curlValue("--sasl-authzid", curlOptionTelnetProof),
+	"--service-name":              curlValue("--service-name", curlOptionTelnetProof),
+	"--tftp-blksize":              curlValue("--tftp-blksize", curlOptionTelnetProof),
+	"--tls-max":                   curlValue("--tls-max", curlOptionTelnetProof),
+	"--tls13-ciphers":             curlValue("--tls13-ciphers", curlOptionTelnetProof),
+	"--tlsauthtype":               curlValue("--tlsauthtype", curlOptionTelnetProof),
+	"--tlspassword":               curlValue("--tlspassword", curlOptionTelnetProof),
+	"--tlsuser":                   curlValue("--tlsuser", curlOptionTelnetProof),
+	"--trace":                     curlValue("--trace", curlOptionTelnetProof),
+	"--trace-ascii":               curlValue("--trace-ascii", curlOptionTelnetProof),
+	"--trace-config":              curlValue("--trace-config", curlOptionTelnetProof),
+	"--variable":                  curlValue("--variable", curlOptionTelnetProof),
 
 	"--cacert":          curlValue("--cacert", curlOptionNeutral),
 	"--cert":            curlValue("--cert", curlOptionNeutral),
@@ -215,6 +442,7 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--dns-servers":     curlValue("--dns-servers", curlOptionNetworkOverride),
 	"--doh-url":         curlValue("--doh-url", curlOptionNetworkOverride),
 	"--dump-header":     curlValue("--dump-header", curlOptionNeutral),
+	"--egd-file":        curlValue("--egd-file", curlOptionNeutral),
 	"--form":            curlValue("--form", curlOptionNeutral),
 	"--form-string":     curlValue("--form-string", curlOptionNeutral),
 	"--ftp-account":     curlValue("--ftp-account", curlOptionNeutral),
@@ -250,11 +478,13 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--output":          curlValue("--output", curlOptionOutput),
 	"--output-dir":      curlValue("--output-dir", curlOptionNeutral),
 	"--preproxy":        curlValue("--preproxy", curlOptionNetworkOverride),
+	"--proto-default":   curlValue("--proto-default", curlOptionNeutral),
 	"--proxy":           curlValue("--proxy", curlOptionNetworkOverride),
 	"--proxy-header":    curlValue("--proxy-header", curlOptionNeutral),
 	"--proxy-user":      curlValue("--proxy-user", curlOptionNeutral),
 	"--proxy1.0":        curlValue("--proxy1.0", curlOptionNetworkOverride),
 	"--quote":           curlValue("--quote", curlOptionNeutral),
+	"--random-file":     curlValue("--random-file", curlOptionNeutral),
 	"--range":           curlValue("--range", curlOptionNeutral),
 	"--referer":         curlValue("--referer", curlOptionNeutral),
 	"--request":         curlValue("--request", curlOptionMethod),
@@ -267,17 +497,22 @@ var curlLongOptionSpecs = map[string]curlOptionSpec{
 	"--socks4a":         curlValue("--socks4a", curlOptionNetworkOverride),
 	"--socks5":          curlValue("--socks5", curlOptionNetworkOverride),
 	"--socks5-hostname": curlValue("--socks5-hostname", curlOptionNetworkOverride),
-	"--speed-limit":     curlValue("--speed-limit", curlOptionNeutral),
-	"--speed-time":      curlValue("--speed-time", curlOptionNeutral),
-	"--telnet-option":   curlValue("--telnet-option", curlOptionNeutral),
-	"--time-cond":       curlValue("--time-cond", curlOptionNeutral),
-	"--unix-socket":     curlValue("--unix-socket", curlOptionNetworkOverride),
-	"--upload-file":     curlValue("--upload-file", curlOptionUpload),
-	"--url":             curlValue("--url", curlOptionTarget),
-	"--url-query":       curlValue("--url-query", curlOptionNeutral),
-	"--user":            curlValue("--user", curlOptionNeutral),
-	"--user-agent":      curlValue("--user-agent", curlOptionNeutral),
-	"--write-out":       curlValue("--write-out", curlOptionNeutral),
+	"--socks5-gssapi-service": curlValue(
+		"--socks5-gssapi-service",
+		curlOptionNeutral,
+	),
+	"--speed-limit":   curlValue("--speed-limit", curlOptionNeutral),
+	"--speed-time":    curlValue("--speed-time", curlOptionNeutral),
+	"--stderr":        curlValue("--stderr", curlOptionNeutral),
+	"--telnet-option": curlValue("--telnet-option", curlOptionNeutral),
+	"--time-cond":     curlValue("--time-cond", curlOptionNeutral),
+	"--unix-socket":   curlValue("--unix-socket", curlOptionNetworkOverride),
+	"--upload-file":   curlValue("--upload-file", curlOptionUpload),
+	"--url":           curlValue("--url", curlOptionTarget),
+	"--url-query":     curlValue("--url-query", curlOptionNeutral),
+	"--user":          curlValue("--user", curlOptionNeutral),
+	"--user-agent":    curlValue("--user-agent", curlOptionNeutral),
+	"--write-out":     curlValue("--write-out", curlOptionNeutral),
 }
 
 var curlShortOptionSpecs = map[byte]curlOptionSpec{
@@ -295,6 +530,7 @@ var curlShortOptionSpecs = map[byte]curlOptionSpec{
 	'g': curlFlag("--globoff", curlOptionNeutral),
 	'I': curlFlag("--head", curlOptionHead),
 	'i': curlFlag("--include", curlOptionNeutral),
+	'J': curlFlag("--remote-header-name", curlOptionTelnetProof),
 	'j': curlFlag("--junk-session-cookies", curlOptionNeutral),
 	'k': curlFlag("--insecure", curlOptionNeutral),
 	'L': curlFlag("--location", curlOptionNeutral),
@@ -452,8 +688,12 @@ func (parsed curlArgvParse) hasValidOptionValues() bool {
 			if !validCurlDecimal(option.Value) {
 				return false
 			}
-		case "--retry", "--retry-delay", "--retry-max-time",
-			"--speed-limit", "--speed-time":
+		case "--retry-delay", "--retry-max-time":
+			parsed, valid := curlUnsignedLong(option.Value)
+			if !valid || parsed > curlPortableLongMaximum()/1000 {
+				return false
+			}
+		case "--retry", "--speed-limit", "--speed-time":
 			if !validCurlUnsignedInteger(option.Value) {
 				return false
 			}
@@ -468,10 +708,11 @@ func curlOptionAllowsEmptyValue(option string) bool {
 		"--data-ascii", "--data-binary", "--data-raw",
 		"--data-urlencode", "--doh-url", "--header", "--json",
 		"--ftp-method", "--ftp-ssl-ccc-mode", "--mail-rcpt", "--noproxy",
-		"--proxy", "--proxy-header", "--proxy-user", "--upload-file",
-		"--quote", "--referer",
+		"--login-options", "--proxy", "--proxy-cert", "--proxy-header",
+		"--proxy-key", "--proxy-pass", "--proxy-user", "--upload-file",
+		"--quote", "--random-file", "--egd-file", "--referer",
 		"--telnet-option", "--time-cond", "--user",
-		"--url-query", "--user-agent", "--write-out":
+		"--trace-config", "--url-query", "--user-agent", "--write-out":
 		return true
 	default:
 		return false
@@ -479,34 +720,158 @@ func curlOptionAllowsEmptyValue(option string) bool {
 }
 
 func validCurlDecimal(value string) bool {
-	if value == "" {
-		return false
-	}
-	digits := 0
-	dots := 0
-	for _, character := range value {
-		switch {
-		case character >= '0' && character <= '9':
-			digits++
-		case character == '.':
-			dots++
-		default:
-			return false
-		}
-	}
-	return digits > 0 && dots <= 1
+	_, valid := curlSecondsMilliseconds(value)
+	return valid
 }
 
 func validCurlUnsignedInteger(value string) bool {
+	_, valid := curlUnsignedLong(value)
+	return valid
+}
+
+func curlUnsignedLong(value string) (uint64, bool) {
+	value = strings.TrimLeftFunc(value, curlCWhitespace)
 	if value == "" {
-		return false
+		return 0, false
 	}
-	for _, character := range value {
-		if character < '0' || character > '9' {
-			return false
+	negative := false
+	switch value[0] {
+	case '+':
+		value = value[1:]
+	case '-':
+		negative = true
+		value = value[1:]
+	}
+	if value == "" {
+		return 0, false
+	}
+	for index := range len(value) {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, false
 		}
 	}
-	return true
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || parsed > curlPortableLongMaximum() || negative && parsed != 0 {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func curlSecondsMilliseconds(value string) (int64, bool) {
+	value = strings.TrimLeftFunc(value, curlCWhitespace)
+	if value == "" {
+		return 0, false
+	}
+	normalized, valid := curlCLocaleFloatSyntax(value)
+	if !valid {
+		return 0, false
+	}
+	seconds, err := strconv.ParseFloat(normalized, 64)
+	if err != nil || math.IsInf(seconds, 0) || math.IsNaN(seconds) ||
+		seconds < 0 || seconds > float64(curlPortableLongMaximum())/1000 {
+		return 0, false
+	}
+	return int64(seconds * 1000), true
+}
+
+// curlCLocaleFloatSyntax accepts the finite numeric subject sequences that C
+// strtod recognizes in the C locale, excluding implementation-specific
+// infinity/NaN and locale spellings. strconv.ParseFloat then performs the
+// range conversion; this lexical gate notably rejects Go-only underscores.
+func curlCLocaleFloatSyntax(value string) (string, bool) {
+	index := 0
+	if index < len(value) && (value[index] == '+' || value[index] == '-') {
+		index++
+	}
+	if index >= len(value) {
+		return "", false
+	}
+	if index+2 <= len(value) && value[index] == '0' &&
+		(value[index+1] == 'x' || value[index+1] == 'X') {
+		index += 2
+		digits := 0
+		for index < len(value) && curlHexDigit(value[index]) {
+			index++
+			digits++
+		}
+		if index < len(value) && value[index] == '.' {
+			index++
+			for index < len(value) && curlHexDigit(value[index]) {
+				index++
+				digits++
+			}
+		}
+		if digits == 0 {
+			return "", false
+		}
+		if index == len(value) {
+			// C strtod accepts a hexadecimal significand without an explicit
+			// binary exponent, while Go's ParseFloat requires one.
+			return value + "p0", true
+		}
+		if value[index] != 'p' && value[index] != 'P' {
+			return "", false
+		}
+		index++
+		if !curlDecimalExponentConsumesRemainder(value, index) {
+			return "", false
+		}
+		return value, true
+	}
+	digits := 0
+	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+		index++
+		digits++
+	}
+	if index < len(value) && value[index] == '.' {
+		index++
+		for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+			index++
+			digits++
+		}
+	}
+	if digits == 0 {
+		return "", false
+	}
+	if index < len(value) && (value[index] == 'e' || value[index] == 'E') {
+		index++
+		if !curlDecimalExponentConsumesRemainder(value, index) {
+			return "", false
+		}
+		return value, true
+	}
+	return value, index == len(value)
+}
+
+func curlDecimalExponentConsumesRemainder(value string, index int) bool {
+	if index < len(value) && (value[index] == '+' || value[index] == '-') {
+		index++
+	}
+	start := index
+	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+		index++
+	}
+	return index > start && index == len(value)
+}
+
+func curlHexDigit(value byte) bool {
+	return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' ||
+		value >= 'A' && value <= 'F'
+}
+
+func curlCWhitespace(character rune) bool {
+	switch character {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	default:
+		return false
+	}
+}
+
+func curlPortableLongMaximum() uint64 {
+	// The parsed command does not identify whether curl is a 32- or 64-bit
+	// executable. Stay within the signed-long range accepted by both builds.
+	return uint64(math.MaxInt32)
 }
 
 type curlTargetOperand struct {

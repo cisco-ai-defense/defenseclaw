@@ -19,6 +19,7 @@
 package actionfacts
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -49,8 +50,17 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	parser := syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
 	file, err := parser.Parse(strings.NewReader(source), "")
 	if err != nil {
-		out.markInvalid(IssueInvalidSyntax)
-		return out
+		normalized, valid := normalizePOSIXNullAggregateRedirects(source)
+		if !valid {
+			out.markInvalid(IssueInvalidSyntax)
+			return out
+		}
+		parser = syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
+		file, err = parser.Parse(strings.NewReader(normalized), "")
+		if err != nil {
+			out.markInvalid(IssueInvalidSyntax)
+			return out
+		}
 	}
 	if !checkPOSIXBounds(file, &out) {
 		return out
@@ -108,6 +118,74 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		out.markUnsupported(IssueUnsupportedConstruct)
 	}
 	return out
+}
+
+// normalizePOSIXNullAggregateRedirects recognizes the one Bash-only redirect
+// extension whose complete effect can be represented without broadening the
+// POSIX grammar: an exact, nonexpanding &>/dev/null (or append/clobber sibling).
+// It rewrites that redirect into separate stdout and stderr null redirects,
+// then the ordinary POSIX parser validates every other byte. Bash-only syntax
+// elsewhere therefore remains invalid.
+func normalizePOSIXNullAggregateRedirects(source string) (string, bool) {
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	file, err := parser.Parse(strings.NewReader(source), "")
+	if err != nil {
+		return "", false
+	}
+	type replacement struct {
+		start int
+		end   int
+		value string
+	}
+	var replacements []replacement
+	valid := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok {
+			return valid
+		}
+		appendMode := false
+		switch redirect.Op {
+		case syntax.RdrAll, syntax.RdrAllClob:
+		case syntax.AppAll, syntax.AppAllClob:
+			appendMode = true
+		default:
+			return valid
+		}
+		target := projectPOSIXWord(redirect.Word)
+		if target.Expands || target.Value != "/dev/null" {
+			valid = false
+			return false
+		}
+		start := int(redirect.OpPos.Offset())
+		end := int(redirect.End().Offset())
+		if start < 0 || end <= start || end > len(source) || source[start] != '&' {
+			valid = false
+			return false
+		}
+		segment := source[start:end]
+		stderr := " 2>/dev/null"
+		if appendMode {
+			stderr = " 2>>/dev/null"
+		}
+		replacements = append(replacements, replacement{
+			start: start,
+			end:   end,
+			value: segment[1:] + stderr,
+		})
+		return valid
+	})
+	if !valid || len(replacements) == 0 {
+		return "", false
+	}
+	sort.Slice(replacements, func(i, j int) bool {
+		return replacements[i].start > replacements[j].start
+	})
+	result := source
+	for _, edit := range replacements {
+		result = result[:edit.start] + edit.value + result[edit.end:]
+	}
+	return result, true
 }
 
 func checkPOSIXBounds(root syntax.Node, out *parseOutput) bool {
@@ -439,6 +517,28 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 				}
 				fd = parsed
 			}
+			target := projectPOSIXWord(redirection.Word)
+			targetFD, targetFDErr := strconv.ParseInt(target.Value, 10, 64)
+			if redirection.Op == syntax.DplOut && !target.Expands &&
+				targetFDErr == nil &&
+				target.Value == strconv.FormatInt(targetFD, 10) &&
+				(fd == 2 && targetFD == 1 || fd == 1 && targetFD == 2) &&
+				posixDescriptorAlreadyRedirectedToNull(
+					command.Redirects,
+					targetFD,
+				) {
+				// Resolve only an ordered descriptor copy whose source descriptor
+				// already names a static null sink. This covers the deterministic
+				// `>/dev/null 2>&1`, `&>/dev/null 2>&1`, and
+				// `2>/dev/null 1>&2` forms. Every other descriptor duplication
+				// remains non-authoritative below.
+				if !out.appendRedirects(command, RedirectFact{
+					FD: fd, Access: access, Target: "/dev/null",
+				}) {
+					return
+				}
+				continue
+			}
 			// Descriptor duplication changes structural stdin/stdout ownership,
 			// but its operand is another descriptor rather than a path. Retain
 			// only the affected descriptor so flow projection fails closed.
@@ -493,6 +593,23 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			out.markPartial(IssueUnsupportedConstruct)
 		}
 	}
+}
+
+func posixDescriptorAlreadyRedirectedToNull(
+	redirects []RedirectFact,
+	fd int64,
+) bool {
+	for index := len(redirects) - 1; index >= 0; index-- {
+		redirect := redirects[index]
+		if redirect.FD != fd && redirect.FD != -1 {
+			continue
+		}
+		return !redirect.Expands &&
+			redirect.Target == "/dev/null" &&
+			(redirect.Access == PathAccessWrite ||
+				redirect.Access == PathAccessAppend)
+	}
+	return false
 }
 
 func posixRedirectAccess(operator syntax.RedirOperator) (PathAccess, bool) {

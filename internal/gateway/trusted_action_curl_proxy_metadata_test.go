@@ -418,9 +418,10 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 				" https://origin.example",
 		},
 		{
-			name: "SOCKS proxy is outside HTTP metadata lane",
+			name: "SOCKS proxy credentials use their own metadata lane",
 			command: "curl --proxy socks5://proxy.example --proxy-user proxy:" +
 				token + " https://origin.example",
+			wantEnforce: true,
 		},
 		{
 			name: "proxy header does not authorize SOCKS peer",
@@ -466,6 +467,7 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 			command: "curl --proxy https://proxy.example --socks5 " +
 				"http://proxy.example --proxy-user proxy:" + token +
 				" https://origin.example",
+			wantEnforce: true,
 		},
 		{
 			name: "multiple groups remain ambiguous",

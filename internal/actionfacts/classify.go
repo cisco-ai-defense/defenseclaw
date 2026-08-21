@@ -11617,6 +11617,91 @@ func curlSMTPTargetFact(
 	}, true
 }
 
+// curlTelnetTargetFact is intentionally curl-local. Telnet is not part of the
+// generic web target grammar, and admitting it through networkURLFact would
+// incorrectly broaden wget and generic upload projections.
+func curlTelnetTargetFact(
+	commandID int64,
+	raw string,
+	action NetworkAction,
+) (NetworkFact, bool) {
+	hostPort, _, _, _, _, valid := curlTelnetURLParts(raw)
+	if !valid {
+		return NetworkFact{}, false
+	}
+	parsed, err := url.Parse("http://" + hostPort)
+	if err != nil || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.Hostname() == "" || parsed.Path != "" || parsed.RawQuery != "" ||
+		parsed.Fragment != "" {
+		return NetworkFact{}, false
+	}
+	host, ok := canonicalNetworkHost(parsed.Hostname())
+	if !ok {
+		return NetworkFact{}, false
+	}
+	port := int64(0)
+	if rawPort := parsed.Port(); rawPort != "" {
+		port, ok = parseNetworkPort(rawPort)
+		if !ok {
+			return NetworkFact{}, false
+		}
+	}
+	return NetworkFact{
+		CommandID: commandID,
+		Action:    action,
+		Scheme:    "telnet",
+		Host:      host,
+		Port:      port,
+	}, true
+}
+
+func curlTelnetURLParts(
+	raw string,
+) (
+	hostPort string,
+	user string,
+	userPresent bool,
+	password string,
+	passwordPresent bool,
+	valid bool,
+) {
+	canonical, valid := curlCanonicalTelnetURL(raw)
+	if !valid {
+		return "", "", false, "", false, false
+	}
+	remainder := strings.TrimPrefix(canonical, "telnet://")
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	authority := remainder[:authorityEnd]
+	if authority == "" || strings.Count(authority, "@") > 1 {
+		return "", "", false, "", false, false
+	}
+	rawUserinfo, hostPort, userPresent := strings.Cut(authority, "@")
+	if !userPresent {
+		hostPort = authority
+	} else {
+		rawUser, rawPassword, hasPassword := strings.Cut(rawUserinfo, ":")
+		var decoded bool
+		user, decoded = curlDecodePercentBytes(rawUser, true)
+		if !decoded {
+			return "", "", false, "", false, false
+		}
+		if hasPassword {
+			password, decoded = curlDecodePercentBytes(rawPassword, true)
+			if !decoded {
+				return "", "", false, "", false, false
+			}
+			passwordPresent = true
+		}
+	}
+	if hostPort == "" || strings.Contains(hostPort, "@") {
+		return "", "", false, "", false, false
+	}
+	return hostPort, user, userPresent, password, passwordPresent, true
+}
+
 func splitHostPortLoose(value string) (string, int64) {
 	if value == "" || strings.TrimSpace(value) != value ||
 		strings.Contains(value, "://") || strings.ContainsAny(value, `/\`) {
