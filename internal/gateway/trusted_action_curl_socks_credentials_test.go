@@ -36,10 +36,28 @@ func TestEvaluateCodexHookCurlSOCKSProxyCredentialEgress(t *testing.T) {
 			wantBlock: true,
 		},
 		{
-			name: "positive GSSAPI NEC compatibility preserves credential egress",
+			name: "positive GSSAPI NEC compatibility is capability dependent",
 			command: "curl --socks5-hostname proxy.example --socks5-gssapi-nec " +
 				"--proxy-user proxy:" + key + " https://origin.example",
+		},
+		{
+			name: "disabled GSSAPI NEC compatibility preserves credential egress",
+			command: "curl --socks5-hostname proxy.example --no-socks5-gssapi-nec " +
+				"--proxy-user proxy:" + key + " https://origin.example",
 			wantBlock: true,
+		},
+		{
+			name: "final disabled GSSAPI NEC compatibility restores credential egress",
+			command: "curl --socks5-hostname proxy.example --socks5-gssapi-nec " +
+				"--no-socks5-gssapi-nec --proxy-user proxy:" + key +
+				" https://origin.example",
+			wantBlock: true,
+		},
+		{
+			name: "final enabled GSSAPI NEC compatibility stays capability dependent",
+			command: "curl --socks5-hostname proxy.example --no-socks5-gssapi-nec " +
+				"--socks5-gssapi-nec --proxy-user proxy:" + key +
+				" https://origin.example",
 		},
 		{
 			name: "transparent env wrapper preserves credential egress",
@@ -143,8 +161,13 @@ func TestEvaluateCodexHookCurlSOCKSProxyCredentialEgress(t *testing.T) {
 			wantBlock: true,
 		},
 		{
-			name: "FTP chain NEC compatibility preserves preproxy credentials",
+			name: "FTP chain positive NEC compatibility is capability dependent",
 			command: "curl --socks5-gssapi-nec --preproxy socks5h://pre:" + key +
+				"@first.example --proxy http://main.example ftp://127.0.0.1/file",
+		},
+		{
+			name: "FTP chain disabled NEC compatibility preserves preproxy credentials",
+			command: "curl --no-socks5-gssapi-nec --preproxy socks5h://pre:" + key +
 				"@first.example --proxy http://main.example ftp://127.0.0.1/file",
 			wantBlock: true,
 		},

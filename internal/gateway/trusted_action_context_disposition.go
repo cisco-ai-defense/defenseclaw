@@ -433,6 +433,11 @@ func trustedActionContentFindingHasRiskPair(
 				facts,
 				*rule,
 				command.ID,
+				metadata.HTTPDestinationHostnameComponents,
+			) || trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
 				metadata.FTPRequestComponents,
 			) || trustedActionContentRuleMatchesExternalRequestComponents(
 				facts,
@@ -479,6 +484,11 @@ func trustedActionContentFindingHasRiskPair(
 				*rule,
 				command.ID,
 				proxyMetadata.ProxyRequestComponents,
+			) || trustedActionContentRuleMatchesExternalProxyRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				proxyMetadata.ProxyDestinationHostnameComponents,
 			)
 		curlSOCKSProxyCredentialEgress :=
 			trustedActionContentRuleMatchesExternalProxyRequestComponents(
@@ -527,6 +537,11 @@ func trustedActionContentFindingHasRiskPair(
 				*rule,
 				command.ID,
 				wgetMetadata.HTTPRequestComponents,
+			) || trustedActionContentRuleMatchesExternalRequestComponents(
+				facts,
+				*rule,
+				command.ID,
+				wgetMetadata.HTTPDestinationHostnameComponents,
 			)
 		wgetTargetBoundOriginAuthEgress :=
 			trustedActionContentRuleMatchesExternalRequestComponents(

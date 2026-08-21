@@ -4476,9 +4476,18 @@ func windowsClassifyWeb(
 	if command.Program == "wget" &&
 		(!powerShell || command.Executable == "wget.exe") {
 		// PowerShell's unqualified wget alias owns Invoke-WebRequest
-		// parameters such as -InFile. A real wget executable has a different
-		// option grammar; keep it on the non-authoritative fallback until that
-		// grammar is parsed independently.
+		// parameters such as -InFile. Only a literal real wget executable argv
+		// can inherit the independently closed GNU Wget grammar.
+		if !windowsNativeWebArgvUncertain(command) &&
+			windowsExactNativeWebArgv(command, args) {
+			parsed := parseWgetArgv(command.Argv)
+			if parsed.ConfigDisabled &&
+				staticWgetMetadataParseValid(*command, parsed) &&
+				staticWgetHostnameFirstWireSetupValid(*command, parsed) {
+				classifyParsedWgetTransfer(builder.out, command)
+				return
+			}
+		}
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
@@ -4654,7 +4663,7 @@ func windowsClassifyCurl(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
-	if windowsCurlNativeArgvUncertain(command) {
+	if windowsNativeWebArgvUncertain(command) {
 		// Windows PowerShell 5.1 reserializes native argv through a legacy
 		// quoting layer. Literal double quotes, standalone empty arguments,
 		// and unquoted expression delimiters can therefore change the argv
@@ -4663,7 +4672,7 @@ func windowsClassifyCurl(
 		windowsClassifyCurlRecovery(command, args, builder)
 		return
 	}
-	if windowsExactCurlArgv(command, args) {
+	if windowsExactNativeWebArgv(command, args) {
 		// The Windows lexer has already removed the surrounding PowerShell/cmd
 		// quotes while retaining expansion provenance in Arguments. Reuse the
 		// complete curl grammar only for a literal, internally consistent argv;
@@ -4674,7 +4683,7 @@ func windowsClassifyCurl(
 	windowsClassifyCurlRecovery(command, args, builder)
 }
 
-func windowsCurlNativeArgvUncertain(command *CommandFact) bool {
+func windowsNativeWebArgvUncertain(command *CommandFact) bool {
 	if command == nil || command.Dialect != DialectPowerShell {
 		return false
 	}
@@ -4688,7 +4697,7 @@ func windowsCurlNativeArgvUncertain(command *CommandFact) bool {
 	return false
 }
 
-func windowsExactCurlArgv(command *CommandFact, args []windowsWord) bool {
+func windowsExactNativeWebArgv(command *CommandFact, args []windowsWord) bool {
 	if command == nil || !command.ArgvComplete || len(command.Argv) == 0 ||
 		len(command.Argv) != len(command.Arguments) ||
 		len(command.Argv) != len(args)+1 ||

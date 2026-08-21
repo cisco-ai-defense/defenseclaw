@@ -536,13 +536,11 @@ func TestStaticCurlSOCKSProxyCredentialComponents(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
-			name: "positive GSSAPI NEC option is preconnect inert",
+			name: "positive GSSAPI NEC option is capability dependent",
 			argv: []string{
 				"curl", "--socks5", "proxy.example", "--socks5-gssapi-nec",
 				"--proxy-user", "proxy:" + token, "https://origin.example",
 			},
-			want:              components("proxy.example", 1080, "proxy", token),
-			wantAuthoritative: true,
 		},
 		{
 			name: "negative GSSAPI NEC option is inert",
@@ -554,10 +552,37 @@ func TestStaticCurlSOCKSProxyCredentialComponents(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
-			name: "FTP chain positive GSSAPI NEC option is preconnect inert",
+			name: "final disabled GSSAPI NEC option restores credentials",
+			argv: []string{
+				"curl", "--socks5", "proxy.example", "--socks5-gssapi-nec",
+				"--no-socks5-gssapi-nec", "--proxy-user", "proxy:" + token,
+				"https://origin.example",
+			},
+			want:              components("proxy.example", 1080, "proxy", token),
+			wantAuthoritative: true,
+		},
+		{
+			name: "final enabled GSSAPI NEC option remains capability dependent",
+			argv: []string{
+				"curl", "--socks5", "proxy.example", "--no-socks5-gssapi-nec",
+				"--socks5-gssapi-nec", "--proxy-user", "proxy:" + token,
+				"https://origin.example",
+			},
+		},
+		{
+			name: "FTP chain positive GSSAPI NEC option is capability dependent",
 			argv: []string{
 				"curl", "--preproxy", "socks5h://pre:" + token + "@first.example",
 				"--proxy", "http://main.example", "--socks5-gssapi-nec",
+				"ftp://origin.example/file",
+			},
+			wantAuthoritative: true,
+		},
+		{
+			name: "FTP chain disabled GSSAPI NEC option is build independent",
+			argv: []string{
+				"curl", "--preproxy", "socks5h://pre:" + token + "@first.example",
+				"--proxy", "http://main.example", "--no-socks5-gssapi-nec",
 				"ftp://origin.example/file",
 			},
 			want:              components("first.example", 1080, "pre", token),

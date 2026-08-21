@@ -75,7 +75,8 @@ func StaticCurlStdinUploadTargets(command CommandFact) []NetworkFact {
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
-		!curlRangeOptionsValid(parsed) {
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
 		return nil
 	}
 
@@ -126,7 +127,8 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
-		!curlRangeOptionsValid(parsed) {
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
 		return nil
 	}
 
@@ -483,22 +485,25 @@ func curlPOSIXNullDeviceAvailable(command CommandFact) bool {
 }
 
 // CurlTransmittedMetadata keeps HTTP headers, HTTP internal-auth operands,
-// FTP origin credentials, and exact-target request bytes distinct so callers
-// can bind each kind to only the URL schemes where curl transmits it.
+// FTP origin credentials, generated HTTP authority hostnames, and exact-target
+// request bytes distinct so callers can bind each kind to only the URL schemes
+// where curl transmits it.
 type CurlTransmittedMetadata struct {
-	Headers                        []string
-	HTTPOriginCredentials          []string
-	FTPOriginCredentials           []string
-	HTTPBearerTokens               []string
-	HTTPRequestComponents          []TransmittedRequestComponent
-	FTPRequestComponents           []TransmittedRequestComponent
-	HTTPOriginCredentialComponents []TransmittedRequestComponent
-	FTPOriginCredentialComponents  []TransmittedRequestComponent
+	Headers                           []string
+	HTTPOriginCredentials             []string
+	FTPOriginCredentials              []string
+	HTTPBearerTokens                  []string
+	HTTPRequestComponents             []TransmittedRequestComponent
+	HTTPDestinationHostnameComponents []TransmittedRequestComponent
+	FTPRequestComponents              []TransmittedRequestComponent
+	HTTPOriginCredentialComponents    []TransmittedRequestComponent
+	FTPOriginCredentialComponents     []TransmittedRequestComponent
 }
 
-// TransmittedRequestComponent binds literal request bytes to the exact parser-owned
-// request target that transmits it. Callers must pair all three destination
-// fields with a same-command network fact before treating Value as egress.
+// TransmittedRequestComponent binds exact protocol-visible bytes to the
+// parser-owned destination that receives them. Callers must pair all three
+// destination fields with a same-command network fact before treating Value as
+// egress.
 type TransmittedRequestComponent struct {
 	Value  string
 	Scheme string
@@ -538,7 +543,9 @@ func StaticCurlUploadFileSources(command CommandFact) []TransmittedFileSource {
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
-		!curlRangeOptionsValid(parsed) || !curlStaticFormEagerSyntaxValid(parsed) {
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) ||
+		!curlStaticFormEagerSyntaxValid(parsed) {
 		return nil
 	}
 
@@ -708,7 +715,8 @@ func StaticCurlSMTPRequestComponents(
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) != 1 || !curlRequestModeValid(parsed) ||
-		!curlRangeOptionsValid(parsed) {
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
 		return nil
 	}
 	target := parsed.Targets[0]
@@ -855,7 +863,15 @@ func curlSMTPUploadSourceAvailable(command CommandFact, value string) bool {
 }
 
 func curlSMTPInertFlag(option curlOptionToken) bool {
-	if option.TakesValue || option.ValuePresent || option.Role != curlOptionNeutral {
+	if option.TakesValue || option.ValuePresent {
+		return false
+	}
+	if option.Canonical == "--socks5-gssapi-nec" {
+		// The common setup gate admits these occurrences only when the final
+		// state is disabled, so neither spelling reaches CURLOPT setup.
+		return true
+	}
+	if option.Role != curlOptionNeutral {
 		return false
 	}
 	switch option.Canonical {
@@ -945,7 +961,8 @@ func staticCurlTelnetOptionProjection(
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) != 1 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFTPEagerOptionConflictsValid(parsed) {
+		!staticCurlFTPEagerOptionConflictsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
 		return NetworkFact{}, nil, false
 	}
 	target := parsed.Targets[0]
@@ -1894,7 +1911,7 @@ func curlTelnetInertFlag(option curlOptionToken) bool {
 	if option.TakesValue || option.ValuePresent {
 		return false
 	}
-	if curlTelnetFeatureDependentPositiveFlag(option) {
+	if curlFeatureDependentPositiveFlag(option) {
 		return false
 	}
 	switch option.Role {
@@ -1907,7 +1924,7 @@ func curlTelnetInertFlag(option curlOptionToken) bool {
 	}
 }
 
-func curlTelnetFeatureDependentPositiveFlag(option curlOptionToken) bool {
+func curlFeatureDependentPositiveFlag(option curlOptionToken) bool {
 	switch option.Canonical {
 	case "--metalink", "--proxy-http2", "--proxy-negotiate", "--proxy-ntlm",
 		"--tcp-fastopen", "--wdebug":
@@ -1927,6 +1944,32 @@ func curlTelnetFeatureDependentPositiveFlag(option curlOptionToken) bool {
 	default:
 		return false
 	}
+}
+
+// staticCurlFeatureDependentPositiveOptionsValid excludes switches whose
+// positive form can make curl abort during tool setup when an optional build
+// feature is unavailable. ActionFacts has no executable capability manifest,
+// so exact transmission projectors may retain only the build-independent
+// subset. Most options are validated eagerly per occurrence; the SOCKS5
+// GSSAPI-NEC compatibility bit is applied only when its final state is enabled.
+func staticCurlFeatureDependentPositiveOptionsValid(parsed curlArgvParse) bool {
+	socks5GSSAPINEC := make(map[int]bool)
+	for _, option := range parsed.Options {
+		if option.Canonical == "--socks5-gssapi-nec" {
+			socks5GSSAPINEC[option.Group] =
+				option.Name != "--no-socks5-gssapi-nec"
+			continue
+		}
+		if curlFeatureDependentPositiveFlag(option) {
+			return false
+		}
+	}
+	for _, enabled := range socks5GSSAPINEC {
+		if enabled {
+			return false
+		}
+	}
+	return true
 }
 
 func curlTelnetOutputRedirectsSafe(command CommandFact) bool {
@@ -2106,22 +2149,34 @@ sign:
 	return parsed, index, parsed <= 65535
 }
 
-// CurlProxyTransmittedMetadata keeps proxy-bound request bytes separate from
-// origin-bound curl metadata. Each component is paired only with the explicit
-// proxy destination that receives it.
+// CurlProxyTransmittedMetadata keeps proxy-bound request and handshake bytes
+// separate from origin-bound curl metadata. Each component is paired only with
+// the explicit proxy destination that receives it.
 type CurlProxyTransmittedMetadata struct {
-	ProxyRequestComponents []TransmittedRequestComponent
+	ProxyRequestComponents             []TransmittedRequestComponent
+	ProxyDestinationHostnameComponents []TransmittedRequestComponent
 }
 
 // StaticCurlProxyUploadPayloads returns exact inline body bytes that curl sends
-// in plaintext to an explicit HTTP(S) proxy. Only HTTP origin targets use the
-// forward-proxy request form; HTTPS origin bodies travel inside the CONNECT
-// tunnel and therefore are not proxy-visible plaintext candidates.
+// in plaintext through an explicit HTTP(S) or SOCKS proxy. Only HTTP origin
+// requests are visible to the relay; HTTPS origin bodies travel inside TLS and
+// therefore are not proxy-visible plaintext candidates.
 func StaticCurlProxyUploadPayloads(
 	command CommandFact,
 ) []TransmittedRequestComponent {
 	proxy, parsed, ok := staticCurlProxyDestination(command)
-	if !ok || proxy.Scheme != "http" && proxy.Scheme != "https" {
+	if !ok || proxy.Scheme != "http" && proxy.Scheme != "https" &&
+		proxy.Scheme != "tcp" {
+		return nil
+	}
+	if proxy.Scheme == "tcp" && !staticCurlHostnameFirstWireSetupValid(
+		command,
+		parsed,
+		parsed.Targets[0].Group,
+	) {
+		// The SOCKS relay can observe an HTTP body only after curl completes
+		// local setup and reaches the proxy. Keep this new observer lane on the
+		// same conservative first-wire boundary as SOCKS request metadata.
 		return nil
 	}
 	hasHTTPOrigin := false
@@ -2137,6 +2192,9 @@ func StaticCurlProxyUploadPayloads(
 		return nil
 	}
 	for _, target := range parsed.Targets {
+		if !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
 		targetFact, valid := webTargetFact(
 			command.ID,
 			target.Value,
@@ -2187,12 +2245,33 @@ func staticCurlHTTPProxyTransmittedMetadata(
 			Port:   proxy.Port,
 		}
 	}
-
+	metadata := CurlProxyTransmittedMetadata{}
+	// HTTPS proxy support is a separate libcurl build capability. Without an
+	// executable capability fact, curl can reject an https:// proxy before it
+	// resolves or connects, so no proxy-bound destination hostname is exact.
+	hostnameSetupValid := proxy.Scheme != "https" &&
+		staticCurlHostnameFirstWireSetupValid(
+			command,
+			parsed,
+			parsed.Targets[0].Group,
+		)
+	appendProxyDestinationHostname := func(value string) {
+		candidate := component(value)
+		for _, existing := range metadata.ProxyDestinationHostnameComponents {
+			if existing == candidate {
+				return
+			}
+		}
+		metadata.ProxyDestinationHostnameComponents = append(
+			metadata.ProxyDestinationHostnameComponents,
+			candidate,
+		)
+	}
 	lastProxy := -1
 	lastProxyUser := -1
 	proxyAuthorizationOverridden := false
 	ordinaryProxyAuthorizationOverridden := false
-	metadata := CurlProxyTransmittedMetadata{}
+	originHostOverridden := false
 	proxyTunnel := curlProxyTunnelEnabled(parsed, parsed.Targets[0].Group)
 	formBody := false
 	separateProxyHeaders := false
@@ -2202,15 +2281,14 @@ func staticCurlHTTPProxyTransmittedMetadata(
 		separateProxyHeaders = separateProxyHeaders ||
 			option.Canonical == "--proxy-header"
 	}
-	ordinaryHeaderTargets := parsed.Targets
-	if separateProxyHeaders {
-		ordinaryHeaderTargets = nil
-		if !proxyTunnel {
-			for _, target := range parsed.Targets {
-				if strings.HasPrefix(strings.ToLower(target.Value), "http://") {
-					ordinaryHeaderTargets = append(ordinaryHeaderTargets, target)
-				}
-			}
+	ordinaryHeaderTargets := make([]curlTransferTarget, 0, len(parsed.Targets))
+	for _, target := range parsed.Targets {
+		if !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		if !separateProxyHeaders || !proxyTunnel &&
+			strings.HasPrefix(strings.ToLower(target.Value), "http://") {
+			ordinaryHeaderTargets = append(ordinaryHeaderTargets, target)
 		}
 	}
 	for index, option := range parsed.Options {
@@ -2248,6 +2326,10 @@ func staticCurlHTTPProxyTransmittedMetadata(
 				)
 			}
 		case "--header":
+			originHostOverridden = originHostOverridden ||
+				!staticCurlOptionValue(command, option) ||
+				strings.HasPrefix(option.Value, "@") ||
+				curlHeaderOverridesHTTPField(option.Value, "host")
 			if curlProxyHeaderCandidateIsTransmitted(
 				option.Value,
 				ordinaryHeaderTargets,
@@ -2306,6 +2388,38 @@ func staticCurlHTTPProxyTransmittedMetadata(
 			component(credentials),
 		)
 	}
+	appendProxyHostname := func(
+		target curlTransferTarget,
+		targetFact NetworkFact,
+	) {
+		if !hostnameSetupValid {
+			return
+		}
+		hostname, hostnameValid := staticHTTPDestinationHostnameComponent(
+			target.Value,
+			targetFact,
+		)
+		if hostnameValid {
+			appendProxyDestinationHostname(hostname.Value)
+		}
+	}
+	for _, target := range parsed.Targets {
+		if !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		targetFact, targetValid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkDownload,
+		)
+		if !targetValid ||
+			(targetFact.Scheme != "http" && targetFact.Scheme != "https") {
+			continue
+		}
+		if proxyTunnel || targetFact.Scheme == "https" {
+			appendProxyHostname(target, targetFact)
+		}
+	}
 	// This HTTP-only caller rejected a SOCKS destination above. An explicit
 	// http(s):// scheme overrides a SOCKS-named option alias, so every remaining
 	// validated non-tunnel destination uses HTTP forward request form.
@@ -2320,6 +2434,21 @@ func staticCurlHTTPProxyTransmittedMetadata(
 	if !valid {
 		return CurlProxyTransmittedMetadata{}
 	}
+	for _, target := range parsed.Targets {
+		if !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		targetFact, targetValid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkDownload,
+		)
+		if !targetValid || targetFact.Scheme != "http" ||
+			(requestProjection.requestTargetSet && originHostOverridden) {
+			continue
+		}
+		appendProxyHostname(target, targetFact)
+	}
 	getPostData, valid := staticCurlGETPostDataProjection(
 		command,
 		parsed,
@@ -2329,7 +2458,8 @@ func staticCurlHTTPProxyTransmittedMetadata(
 		return CurlProxyTransmittedMetadata{}
 	}
 	for _, target := range parsed.Targets {
-		if !strings.HasPrefix(strings.ToLower(target.Value), "http://") {
+		if !curlTargetUsesExplicitProxy(parsed, target) ||
+			!strings.HasPrefix(strings.ToLower(target.Value), "http://") {
 			continue
 		}
 		if requestProjection.requestTargetSet {
@@ -2370,14 +2500,22 @@ func staticCurlHTTPProxyTransmittedMetadata(
 	return metadata
 }
 
-// StaticCurlProxyTransmittedMetadata returns literal bytes that a closed curl
-// invocation can expose to an exact explicit proxy. HTTP proxy metadata and
-// FTP control-channel metadata use separate protocol proofs, then share the
-// same proxy-bound request-component representation.
+// StaticCurlProxyTransmittedMetadata returns exact protocol bytes that a closed
+// curl invocation can expose to an explicit proxy. HTTP proxy metadata, remote
+// SOCKS hostname fields, and FTP control-channel metadata use separate protocol
+// proofs, then share the same proxy-bound component representation.
 func StaticCurlProxyTransmittedMetadata(
 	command CommandFact,
 ) CurlProxyTransmittedMetadata {
 	metadata := staticCurlHTTPProxyTransmittedMetadata(command)
+	metadata.ProxyDestinationHostnameComponents = append(
+		metadata.ProxyDestinationHostnameComponents,
+		staticCurlSOCKSDestinationHostnameComponents(command)...,
+	)
+	metadata.ProxyRequestComponents = append(
+		metadata.ProxyRequestComponents,
+		staticCurlSOCKSPlaintextHTTPRequestComponents(command)...,
+	)
 	metadata.ProxyRequestComponents = append(
 		metadata.ProxyRequestComponents,
 		StaticCurlSOCKSProxyCredentialComponents(command)...,
@@ -2387,6 +2525,268 @@ func StaticCurlProxyTransmittedMetadata(
 		staticCurlFTPProxyRequestComponents(command)...,
 	)
 	return metadata
+}
+
+// staticCurlSOCKSPlaintextHTTPRequestComponents rebinds already-proved origin
+// HTTP bytes to the explicit SOCKS relay that can observe them after its
+// handshake. HTTPS request bytes remain encrypted and are excluded; their
+// visible SNI is owned by the destination-hostname helper above.
+func staticCurlSOCKSPlaintextHTTPRequestComponents(
+	command CommandFact,
+) []TransmittedRequestComponent {
+	proxy, parsed, valid := staticCurlProxyDestination(command)
+	if !valid || proxy.Scheme != "tcp" || len(parsed.Targets) == 0 {
+		return nil
+	}
+	group := parsed.Targets[0].Group
+	if !staticCurlHostnameFirstWireSetupValid(command, parsed, group) {
+		return nil
+	}
+
+	var proxiedHTTP []NetworkFact
+	for _, target := range parsed.Targets {
+		if target.Group != group || !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		targetFact, targetValid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkDownload,
+		)
+		if targetValid && targetFact.Scheme == "http" {
+			proxiedHTTP = append(proxiedHTTP, targetFact)
+		}
+	}
+	if len(proxiedHTTP) == 0 {
+		return nil
+	}
+
+	origin := StaticCurlTransmittedMetadata(command)
+	component := func(value string) TransmittedRequestComponent {
+		return TransmittedRequestComponent{
+			Value: value, Scheme: proxy.Scheme, Host: proxy.Host, Port: proxy.Port,
+		}
+	}
+	var components []TransmittedRequestComponent
+	appendComponent := func(value string) {
+		candidate := component(value)
+		for _, existing := range components {
+			if existing == candidate {
+				return
+			}
+		}
+		components = append(components, candidate)
+	}
+	for _, value := range origin.Headers {
+		appendComponent(value)
+	}
+	for _, value := range origin.HTTPOriginCredentials {
+		appendComponent(value)
+	}
+	for _, value := range origin.HTTPBearerTokens {
+		appendComponent(value)
+	}
+	appendTargetBound := func(candidates []TransmittedRequestComponent) {
+		for _, candidate := range candidates {
+			for _, target := range proxiedHTTP {
+				if candidate.Scheme == target.Scheme &&
+					candidate.Host == target.Host && candidate.Port == target.Port {
+					appendComponent(candidate.Value)
+					break
+				}
+			}
+		}
+	}
+	appendTargetBound(origin.HTTPRequestComponents)
+	appendTargetBound(origin.HTTPOriginCredentialComponents)
+	return components
+}
+
+// staticCurlSOCKSDestinationHostnameComponents projects hostname bytes visible
+// to an explicit SOCKS peer. Remote-resolving SOCKS4a/SOCKS5h exposes the raw
+// hostname in its destination request. A locally resolving SOCKS relay still
+// observes plaintext HTTP Host or canonical HTTPS TLS SNI after the handshake.
+func staticCurlSOCKSDestinationHostnameComponents(
+	command CommandFact,
+) []TransmittedRequestComponent {
+	proxy, parsed, valid := staticCurlProxyDestination(command)
+	if !valid || proxy.Scheme != "tcp" || len(parsed.Targets) == 0 {
+		return nil
+	}
+	group := parsed.Targets[0].Group
+	if !staticCurlHostnameFirstWireSetupValid(command, parsed, group) {
+		return nil
+	}
+	canonical, proxyValue, valid := curlEffectiveSOCKSProxyOption(
+		command.ID,
+		parsed,
+		group,
+	)
+	if !valid {
+		return nil
+	}
+	remoteResolved := curlProxyResolvesTargetHostname(canonical, proxyValue)
+	component := func(value string) TransmittedRequestComponent {
+		return TransmittedRequestComponent{
+			Value: value, Scheme: proxy.Scheme, Host: proxy.Host, Port: proxy.Port,
+		}
+	}
+	var components []TransmittedRequestComponent
+	appendComponent := func(value string) {
+		candidate := component(value)
+		for _, existing := range components {
+			if existing == candidate {
+				return
+			}
+		}
+		components = append(components, candidate)
+	}
+	for _, target := range parsed.Targets {
+		if target.Group != group || !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		targetFact, targetValid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkDownload,
+		)
+		if !targetValid ||
+			(targetFact.Scheme != "http" && targetFact.Scheme != "https") {
+			continue
+		}
+		hostname, hostnameValid := staticHTTPDestinationHostnameComponent(
+			target.Value,
+			targetFact,
+		)
+		if !hostnameValid {
+			continue
+		}
+		if remoteResolved {
+			appendComponent(hostname.Value)
+		}
+		switch targetFact.Scheme {
+		case "http":
+			if !remoteResolved && !curlOriginHostHeaderOverridden(
+				command,
+				parsed,
+				target.Group,
+			) {
+				appendComponent(hostname.Value)
+			}
+		case "https":
+			sni, sniValid := staticHTTPSDestinationSNIComponent(
+				target.Value,
+				targetFact,
+			)
+			if sniValid {
+				appendComponent(sni.Value)
+			}
+		}
+	}
+	return components
+}
+
+// curlEffectiveSOCKSProxyOption recovers the final SOCKS setter already
+// validated by staticCurlProxyDestination, including a standalone preproxy
+// that inherits the type of a disabled SOCKS-named main option.
+func curlEffectiveSOCKSProxyOption(
+	commandID int64,
+	parsed curlArgvParse,
+	group int,
+) (string, string, bool) {
+	lastProxy := -1
+	lastPreproxy := -1
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if curlMainProxyOption(option.Canonical) {
+			lastProxy = index
+		} else if option.Canonical == "--preproxy" {
+			lastPreproxy = index
+		}
+	}
+	disabledMainCanonical := ""
+	if lastProxy >= 0 {
+		option := parsed.Options[lastProxy]
+		if option.Canonical == "--proxy" && option.Value == "" {
+			lastProxy = -1
+		} else if curlProxyDecodedControlUserinfoDisables(
+			commandID,
+			option.Canonical,
+			option.Value,
+		) {
+			disabledMainCanonical = option.Canonical
+			lastProxy = -1
+		}
+	}
+	if lastProxy >= 0 && lastPreproxy >= 0 ||
+		lastProxy < 0 && lastPreproxy < 0 {
+		return "", "", false
+	}
+	proxyIndex := lastProxy
+	canonical := ""
+	if proxyIndex < 0 {
+		proxyIndex = lastPreproxy
+		var canonicalValid bool
+		canonical, canonicalValid = curlStandalonePreproxyCanonical(
+			parsed.Options[proxyIndex].Value,
+			disabledMainCanonical,
+		)
+		if !canonicalValid {
+			return "", "", false
+		}
+	}
+	option := parsed.Options[proxyIndex]
+	if canonical == "" {
+		canonical = option.Canonical
+	}
+	_, _, _, socks, valid := staticCurlProxyFact(
+		commandID,
+		canonical,
+		option.Value,
+	)
+	return canonical, option.Value, valid && socks
+}
+
+// curlProxyResolvesTargetHostname reports whether the effective SOCKS mode
+// carries the URL hostname to the proxy instead of resolving it locally.
+func curlProxyResolvesTargetHostname(canonical string, value string) bool {
+	if delimiter := strings.Index(strings.ToLower(value), "://"); delimiter >= 0 {
+		switch strings.ToLower(value[:delimiter]) {
+		case "socks4a", "socks5h":
+			return true
+		case "socks", "socks4", "socks5", "https":
+			return false
+		case "http":
+			// An http:// value does not override the type selected by a
+			// SOCKS-named option alias in curl 8.7.1.
+		}
+	}
+	return canonical == "--socks4a" || canonical == "--socks5-hostname"
+}
+
+// curlTargetUsesExplicitProxy applies curl's final --noproxy selection to one
+// target without pairing another target's route with its hostname bytes.
+func curlTargetUsesExplicitProxy(parsed curlArgvParse, target curlTransferTarget) bool {
+	lastNoProxy := -1
+	for index, option := range parsed.Options {
+		if option.Group == target.Group && option.Canonical == "--noproxy" {
+			lastNoProxy = index
+		}
+	}
+	if lastNoProxy < 0 || parsed.Options[lastNoProxy].Value == "" {
+		return true
+	}
+	host, valid := curlNoProxyTargetHost(target.Value)
+	if !valid {
+		return false
+	}
+	bypassed, valid := curlNoProxyMatches(
+		parsed.Options[lastNoProxy].Value,
+		host,
+	)
+	return valid && !bypassed
 }
 
 // StaticCurlSOCKSProxyCredentialComponents returns the final static username
@@ -2566,6 +2966,7 @@ func staticCurlFTPSOCKSPreproxyCredentialRoute(
 		parsed.Preview || parsed.EmptyTransferGroup ||
 		!parsed.hasValidOptionValues() || len(parsed.Targets) == 0 ||
 		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) ||
 		!staticCurlFTPEagerPreparseValid(command, parsed) ||
 		!staticCurlFTPParallelSetupValid(command, parsed) {
 		return empty()
@@ -2678,7 +3079,8 @@ func staticCurlProxyDestination(
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
-		!curlRangeOptionsValid(parsed) {
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	group := parsed.Targets[0].Group
@@ -2963,13 +3365,77 @@ func curlProxyOptionPreservesDestination(
 			curlPOSIXNullDeviceAvailable(command)
 	case "--url-query":
 		return true
-	case "--cacert", "--cert", "--key", "--continue-at", "--dump-header":
+	case "--cacert", "--cert", "--key", "--continue-at", "--dump-header",
+		"--proxy-cacert", "--proxy-capath", "--proxy-cert",
+		"--proxy-cert-type", "--proxy-ciphers", "--proxy-crlfile",
+		"--proxy-key", "--proxy-key-type", "--proxy-pass",
+		"--proxy-pinnedpubkey", "--proxy-tls13-ciphers",
+		"--proxy-tlsauthtype", "--proxy-tlspassword", "--proxy-tlsuser":
 		// These operands can deterministically abort before the first request;
 		// their file/resume/output validity is not represented by ActionFacts.
 		return false
 	default:
 		return true
 	}
+}
+
+// staticCurlHostnameFirstWireSetupValid is the conservative local-setup gate
+// for the new destination-hostname lanes. It intentionally leaves legacy
+// request-metadata behavior unchanged while excluding inputs and
+// backend-dependent controls that can abort before Host, CONNECT, SOCKS, or
+// TLS SNI bytes are emitted.
+func staticCurlHostnameFirstWireSetupValid(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	if command.Effect != EffectExecute || !staticCurlProgramIdentity(command) ||
+		command.PipelineID != 0 ||
+		command.ParentCommandID != 0 ||
+		len(command.Wrappers) != 0 || len(command.Redirects) != 0 {
+		return false
+	}
+	if !staticCurlFTPEagerOptionConflictsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		return false
+	}
+	if !staticCurlNetrcSetupValid(command, parsed, group) {
+		return false
+	}
+	lastProxyUser := -1
+	for index, option := range parsed.Options {
+		if option.Group != group {
+			continue
+		}
+		if option.Canonical == "--proxy-user" && option.ValuePresent {
+			lastProxyUser = index
+		}
+		if option.ValuePresent && !staticCurlOptionValue(command, option) ||
+			!curlProxyOptionPreservesDestination(command, option) ||
+			option.Role == curlOptionTelnetProof {
+			return false
+		}
+		switch option.Canonical {
+		case "--sslv2", "--sslv3", "--tlsv1":
+			// These legacy-neutral TLS selectors remain backend-dependent even
+			// though their parser role predates the exact Telnet option set.
+			return false
+		case "--cookie":
+			if !containsCookieLiteral(option.Value) {
+				// A cookie argument without '=' is a file/stdin source that can
+				// preempt the first network byte.
+				return false
+			}
+		}
+	}
+	if lastProxyUser >= 0 {
+		option := parsed.Options[lastProxyUser]
+		if !staticCurlOptionValue(command, option) ||
+			!curlOriginUserAvoidsPrompt(option.Value, false) {
+			return false
+		}
+	}
+	return true
 }
 
 func curlProxyURLQueryOptionsValid(parsed curlArgvParse) bool {
@@ -3436,7 +3902,8 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
-		!curlRangeOptionsValid(parsed) {
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
 		return CurlTransmittedMetadata{}
 	}
 
@@ -3548,9 +4015,15 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		}
 	}
 	metadata := CurlTransmittedMetadata{}
+	hostnameSetupValid := staticCurlHostnameFirstWireSetupValid(
+		command,
+		parsed,
+		group,
+	)
 	httpAuthorizationOverridden := false
 	httpCookieOverridden := false
 	httpHeaderFileOpaque := false
+	httpHostOverridden := false
 	httpUserAgentOverridden := false
 	httpRefererOverridden := false
 	httpRangeOverridden := false
@@ -3599,6 +4072,9 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 			}
 			if curlHeaderOverridesHTTPCookie(option.Value) {
 				httpCookieOverridden = true
+			}
+			if curlHeaderOverridesHTTPField(option.Value, "host") {
+				httpHostOverridden = true
 			}
 			if curlHeaderOverridesHTTPField(option.Value, "user-agent") {
 				httpUserAgentOverridden = true
@@ -3752,6 +4228,29 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		if network.Scheme != "http" && network.Scheme != "https" {
 			continue
 		}
+		targetUsesUnsupportedHTTPSProxy := explicitProxyValid &&
+			explicitProxy.Scheme == "https" &&
+			curlTargetUsesExplicitProxy(parsed, target)
+		if hostnameSetupValid && !targetUsesUnsupportedHTTPSProxy {
+			hostname, hostnameValid := staticHTTPDestinationHostnameComponent(
+				target.Value,
+				network,
+			)
+			if httpHeaderFileOpaque || httpHostOverridden {
+				// An overridden HTTP Host removes curl's generated authority, but
+				// HTTPS still sends the canonical URL hostname in TLS SNI.
+				hostname, hostnameValid = staticHTTPSDestinationSNIComponent(
+					target.Value,
+					network,
+				)
+			}
+			if hostnameValid {
+				metadata.HTTPDestinationHostnameComponents = append(
+					metadata.HTTPDestinationHostnameComponents,
+					hostname,
+				)
+			}
+		}
 		if !httpCookieOverridden {
 			for _, cookie := range literalCookies {
 				metadata.HTTPRequestComponents = append(
@@ -3825,15 +4324,44 @@ func curlProxiedOriginRequestMetadata(
 	proxyTunnel bool,
 ) CurlTransmittedMetadata {
 	metadata := CurlTransmittedMetadata{}
+	explicitProxy, _, explicitProxyValid := staticCurlProxyDestination(command)
+	hostnameSetupValid := staticCurlHostnameFirstWireSetupValid(
+		command,
+		parsed,
+		parsed.Targets[0].Group,
+	)
 	for _, target := range parsed.Targets {
 		network, ok := webTargetFact(command.ID, target.Value, NetworkDownload)
-		if !ok || !proxyTunnel && network.Scheme != "https" {
+		if !ok || network.Scheme != "http" && network.Scheme != "https" ||
+			curlTargetUsesExplicitProxy(parsed, target) &&
+				!proxyTunnel && network.Scheme != "https" {
 			continue
 		}
 		component := func(value string) TransmittedRequestComponent {
 			return TransmittedRequestComponent{
 				Value: value, Scheme: network.Scheme,
 				Host: network.Host, Port: network.Port,
+			}
+		}
+		targetUsesUnsupportedHTTPSProxy := explicitProxyValid &&
+			explicitProxy.Scheme == "https" &&
+			curlTargetUsesExplicitProxy(parsed, target)
+		if hostnameSetupValid && !targetUsesUnsupportedHTTPSProxy {
+			hostname, hostnameValid := staticHTTPDestinationHostnameComponent(
+				target.Value,
+				network,
+			)
+			if curlOriginHostHeaderOverridden(command, parsed, target.Group) {
+				hostname, hostnameValid = staticHTTPSDestinationSNIComponent(
+					target.Value,
+					network,
+				)
+			}
+			if hostnameValid {
+				metadata.HTTPDestinationHostnameComponents = append(
+					metadata.HTTPDestinationHostnameComponents,
+					hostname,
+				)
 			}
 		}
 		if projection.requestTargetSet {
@@ -3904,6 +4432,91 @@ func staticCommandArgumentAt(command CommandFact, index int) bool {
 	argument := command.Arguments[index]
 	return !argument.Expands && argument.Quote != QuoteMixed &&
 		argument.Value == command.Argv[index]
+}
+
+// staticHTTPDestinationHostnameComponent preserves curl's exact ASCII DNS
+// authority spelling while retaining canonical destination fields for
+// same-command network-fact correlation. Numeric and IDN spellings stay out of
+// this closed hostname lane.
+func staticHTTPDestinationHostnameComponent(
+	target string,
+	destination NetworkFact,
+) (TransmittedRequestComponent, bool) {
+	if destination.Scheme != "http" && destination.Scheme != "https" {
+		return TransmittedRequestComponent{}, false
+	}
+	if _, addressError := netip.ParseAddr(destination.Host); addressError == nil {
+		// Numeric IP literals do not use the generated DNS-hostname authority
+		// grammar and are prone to matching unrelated numeric-content rules.
+		return TransmittedRequestComponent{}, false
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || !strings.EqualFold(parsed.Scheme, destination.Scheme) {
+		return TransmittedRequestComponent{}, false
+	}
+	hostname := parsed.Hostname()
+	canonical, valid := canonicalNetworkHost(hostname)
+	if !valid || canonical != destination.Host || !visibleASCII(hostname) {
+		return TransmittedRequestComponent{}, false
+	}
+	return TransmittedRequestComponent{
+		Value: hostname, Scheme: destination.Scheme,
+		Host: destination.Host, Port: destination.Port,
+	}, true
+}
+
+// staticHTTPSDestinationSNIComponent projects curl and GNU Wget's canonical
+// ASCII DNS server name when an HTTP Host override removes the generated
+// request authority. TLS still sends this hostname before the HTTP request.
+func staticHTTPSDestinationSNIComponent(
+	target string,
+	destination NetworkFact,
+) (TransmittedRequestComponent, bool) {
+	if destination.Scheme != "https" {
+		return TransmittedRequestComponent{}, false
+	}
+	component, valid := staticHTTPDestinationHostnameComponent(target, destination)
+	if !valid {
+		return TransmittedRequestComponent{}, false
+	}
+	component.Value = destination.Host
+	return component, true
+}
+
+// staticWgetHTTPDestinationHostnameComponent applies GNU Wget's lowercase
+// authority canonicalization to the shared exact-target projection.
+func staticWgetHTTPDestinationHostnameComponent(
+	target string,
+	destination NetworkFact,
+) (TransmittedRequestComponent, bool) {
+	component, valid := staticHTTPDestinationHostnameComponent(target, destination)
+	if !valid {
+		return TransmittedRequestComponent{}, false
+	}
+	// GNU Wget canonicalizes ASCII URL hostnames to lowercase before it
+	// constructs Host, CONNECT, and absolute-form proxy request authorities.
+	component.Value = destination.Host
+	return component, true
+}
+
+// curlOriginHostHeaderOverridden treats literal Host replacements and opaque
+// header sources as possible replacements for curl's generated authority.
+func curlOriginHostHeaderOverridden(
+	command CommandFact,
+	parsed curlArgvParse,
+	group int,
+) bool {
+	for _, option := range parsed.Options {
+		if option.Group != group || option.Canonical != "--header" {
+			continue
+		}
+		if !staticCurlOptionValue(command, option) ||
+			strings.HasPrefix(option.Value, "@") ||
+			curlHeaderOverridesHTTPField(option.Value, "host") {
+			return true
+		}
+	}
+	return false
 }
 
 func staticCurlOptionValue(command CommandFact, option curlOptionToken) bool {
@@ -4868,7 +5481,8 @@ func staticCurlFTPControlRequestComponents(
 	nullConfigOnly := staticCurlPOSIXNullConfigOnly(command, parsed)
 	if (!parsed.Complete && !nullConfigOnly) || parsed.Preview ||
 		!parsed.hasValidOptionValues() || len(parsed.Targets) == 0 ||
-		!curlRangeOptionsValid(parsed) {
+		!curlRangeOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
 		return nil, nil
 	}
 	if !staticCurlFTPEagerPreparseValid(command, parsed) {
@@ -5756,6 +6370,78 @@ func curlOriginRequestBuildAllowsPayload(
 	return true
 }
 
+// staticWgetHostnameFirstWireSetupValid excludes local setup that GNU Wget
+// performs before its first request authority or TLS SNI bytes. Final output
+// and log overrides are honored; stdout cannot fail through an unrepresented
+// path, while file destinations and upload files remain outside this lane.
+func staticWgetHostnameFirstWireSetupValid(
+	command CommandFact,
+	parsed wgetArgvParse,
+) bool {
+	if command.Effect != EffectExecute || !staticWgetProgramIdentity(command) ||
+		command.PipelineID != 0 ||
+		command.ParentCommandID != 0 ||
+		len(command.Wrappers) != 0 || len(command.Redirects) != 0 {
+		return false
+	}
+	for _, value := range parsed.Values {
+		if !staticWgetValueArgument(command, value) ||
+			value.Option == "--bind-address" {
+			return false
+		}
+	}
+	return (!parsed.OutputSet || parsed.Output == "-") &&
+		(!parsed.LogOutputSet || parsed.LogOutput == "-") &&
+		!parsed.PostFileSet && !parsed.BodyFileSet && !parsed.noClobber
+}
+
+func staticWgetProgramIdentity(command CommandFact) bool {
+	switch command.Dialect {
+	case DialectPOSIX, DialectArgv:
+		return exactCaseSensitivePOSIXProgram(&command, "wget")
+	case DialectCMD:
+		return command.Executable == "wget" || command.Executable == "wget.exe"
+	case DialectPowerShell:
+		// Unqualified wget is a PowerShell alias for Invoke-WebRequest. Only
+		// the explicit native executable can inherit GNU Wget's wire grammar.
+		return command.Executable == "wget.exe"
+	default:
+		return false
+	}
+}
+
+func staticWgetArgvIdentity(command CommandFact) bool {
+	if len(command.Argv) == 0 {
+		return false
+	}
+	if command.Executable == command.Argv[0] {
+		return true
+	}
+	return (command.Dialect == DialectCMD || command.Dialect == DialectPowerShell) &&
+		windowsExactNativeExecutableIdentity(command.Argv[0], command.Executable)
+}
+
+func staticWgetMetadataParseValid(
+	command CommandFact,
+	parsed wgetArgvParse,
+) bool {
+	if !parsed.Complete || !parsed.RequestBodyValid || parsed.Preview ||
+		parsed.Background || parsed.ConfigIndirect || parsed.InputFileSet ||
+		len(parsed.Targets) == 0 ||
+		len(parsed.TargetValues) != len(parsed.Targets) {
+		return false
+	}
+	for _, target := range parsed.TargetValues {
+		if !webMetadataTargetSchemeSupported(target.Value) ||
+			!validLiteralRequestTarget(target.Value) ||
+			!staticCommandArgumentAt(command, target.ArgvIndex) ||
+			wgetTargetHasInvalidUserinfo(target.Value) {
+			return false
+		}
+	}
+	return true
+}
+
 func wgetUserAgentBytesPreserved(value string) bool {
 	return value != "" && validWgetUserAgent(value)
 }
@@ -6071,12 +6757,13 @@ func curlHeaderOverridesHTTPField(value string, field string) bool {
 // origin credentials are returned only when the closed argv state proves
 // their effective values.
 type WgetTransmittedMetadata struct {
-	HTTPHeaders                    []string
-	HTTPOriginCredentials          []string
-	FTPOriginCredentials           []string
-	HTTPRequestComponents          []TransmittedRequestComponent
-	HTTPOriginCredentialComponents []TransmittedRequestComponent
-	FTPOriginCredentialComponents  []TransmittedRequestComponent
+	HTTPHeaders                       []string
+	HTTPOriginCredentials             []string
+	FTPOriginCredentials              []string
+	HTTPRequestComponents             []TransmittedRequestComponent
+	HTTPDestinationHostnameComponents []TransmittedRequestComponent
+	HTTPOriginCredentialComponents    []TransmittedRequestComponent
+	FTPOriginCredentialComponents     []TransmittedRequestComponent
 }
 
 // StaticWgetTransmittedMetadata returns effective literal custom headers,
@@ -6087,29 +6774,22 @@ type WgetTransmittedMetadata struct {
 // effective request bytes.
 func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata {
 	if !command.ArgvComplete || !isWgetProgram(command.Program) ||
-		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		len(command.Argv) == 0 || !staticWgetArgvIdentity(command) ||
 		len(command.Arguments) != len(command.Argv) {
 		return WgetTransmittedMetadata{}
 	}
 	parsed := parseWgetArgv(command.Argv)
-	if !parsed.Complete || !parsed.RequestBodyValid ||
-		parsed.Preview || parsed.Background ||
-		parsed.ConfigIndirect || parsed.InputFileSet ||
-		len(parsed.Targets) == 0 {
+	if !staticWgetMetadataParseValid(command, parsed) {
 		return WgetTransmittedMetadata{}
 	}
-	if len(parsed.TargetValues) != len(parsed.Targets) {
+	firstWireSetupValid := staticWgetHostnameFirstWireSetupValid(command, parsed)
+	if (command.Dialect == DialectCMD || command.Dialect == DialectPowerShell) &&
+		!firstWireSetupValid {
+		// Native Wget argv was not an exact Windows route before this parser
+		// integration. Keep every newly reachable metadata lane behind the
+		// same local-setup boundary as the destination authority projection.
 		return WgetTransmittedMetadata{}
 	}
-	for _, target := range parsed.TargetValues {
-		if !webMetadataTargetSchemeSupported(target.Value) ||
-			!validLiteralRequestTarget(target.Value) ||
-			!staticCommandArgumentAt(command, target.ArgvIndex) ||
-			wgetTargetHasInvalidUserinfo(target.Value) {
-			return WgetTransmittedMetadata{}
-		}
-	}
-
 	lastHeaders := make(map[string]int)
 	lastUser := -1
 	lastPassword := -1
@@ -6185,6 +6865,8 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 	}
 	_, httpUserAgentOverridden := lastHeaders["user-agent"]
 	_, httpRefererOverridden := lastHeaders["referer"]
+	_, httpHostOverridden := lastHeaders["host"]
+	hostnameSetupValid := parsed.ConfigDisabled && firstWireSetupValid
 	finalUserAgent := ""
 	finalReferer := ""
 	finalMethod := ""
@@ -6302,6 +6984,24 @@ func StaticWgetTransmittedMetadata(command CommandFact) WgetTransmittedMetadata 
 		}
 		if network.Scheme != "http" && network.Scheme != "https" {
 			continue
+		}
+		if hostnameSetupValid {
+			hostname, hostnameValid := staticWgetHTTPDestinationHostnameComponent(
+				target.Value,
+				network,
+			)
+			if httpHostOverridden {
+				hostname, hostnameValid = staticHTTPSDestinationSNIComponent(
+					target.Value,
+					network,
+				)
+			}
+			if hostnameValid {
+				metadata.HTTPDestinationHostnameComponents = append(
+					metadata.HTTPDestinationHostnameComponents,
+					hostname,
+				)
+			}
 		}
 		if proxyAuthorizationHeader != "" {
 			metadata.HTTPRequestComponents = append(
@@ -6569,7 +7269,8 @@ func wgetTargetHasInvalidUserinfo(value string) bool {
 // the argv value itself.
 func StaticWgetUploadPayloads(command CommandFact) []string {
 	if !command.ArgvComplete || !isWgetProgram(command.Program) ||
-		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		len(command.Argv) == 0 || !staticWgetArgvIdentity(command) ||
+		!staticWgetProgramIdentity(command) ||
 		len(command.Arguments) != len(command.Argv) {
 		return nil
 	}
@@ -6577,6 +7278,10 @@ func StaticWgetUploadPayloads(command CommandFact) []string {
 	if !parsed.Complete || !parsed.RequestBodyValid || parsed.Preview ||
 		parsed.Background || parsed.ConfigIndirect || parsed.InputFileSet ||
 		len(parsed.Targets) == 0 {
+		return nil
+	}
+	if (command.Dialect == DialectCMD || command.Dialect == DialectPowerShell) &&
+		!staticWgetHostnameFirstWireSetupValid(command, parsed) {
 		return nil
 	}
 	hasHTTPTarget := false

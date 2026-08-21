@@ -190,11 +190,16 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 				"' --continue-at 1 http://origin.example",
 		},
 		{
-			name: "parser owned inert flags preserve proxy proof",
-			command: "curl -s --disable --insecure --compressed --head " +
+			name: "parser owned portable flags preserve proxy proof",
+			command: "curl -s --disable --insecure --no-compressed --head " +
 				"--proxy https://proxy.example " +
 				"--proxy-user proxy:" + token + " https://origin.example",
 			wantEnforce: true,
+		},
+		{
+			name: "positive compression support is capability dependent",
+			command: "curl --compressed --proxy https://proxy.example " +
+				"--proxy-user proxy:" + token + " https://origin.example",
 		},
 		{
 			name: "individual fail flag preserves proxy proof",

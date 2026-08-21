@@ -287,14 +287,20 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
-			name: "parser owned inert flags preserve proxy proof", argv: []string{
-				"curl", "-s", "--disable", "--insecure", "--compressed", "--head",
+			name: "parser owned portable flags preserve proxy proof", argv: []string{
+				"curl", "-s", "--disable", "--insecure", "--no-compressed", "--head",
 				"--proxy",
 				"https://proxy.example", "--proxy-user", "proxy:" + token,
 				"https://origin.example",
 			},
 			want:              components("https", "proxy.example", 443, "proxy:"+token),
 			wantAuthoritative: true,
+		},
+		{
+			name: "positive compression support is capability dependent", argv: []string{
+				"curl", "--compressed", "--proxy", "https://proxy.example",
+				"--proxy-user", "proxy:" + token, "https://origin.example",
+			},
 		},
 		{
 			name: "individual fail flag preserves proxy proof", argv: []string{
@@ -899,6 +905,35 @@ func TestStaticCurlProxyDestinationInlinePayloadBoundary(t *testing.T) {
 				"http://origin.example",
 			},
 			expandIndex: 4,
+		},
+		{
+			name: "noproxy HTTP body cannot cross-bind to proxied HTTPS",
+			argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--noproxy",
+				"direct.local", "--data-raw", token,
+				"http://direct.local/upload", "https://proxied.example/upload",
+			},
+			want: true,
+		},
+		{
+			name: "noproxy HTTP path cannot cross-bind to proxied HTTP",
+			argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--noproxy",
+				"direct.local", "http://direct.local/" + token,
+				"http://proxied.example/",
+			},
+			want: true,
+		},
+		{
+			name: "noproxy ordinary header cannot cross-bind through separate proxy headers",
+			argv: []string{
+				"curl", "--proxy", "http://proxy.example", "--noproxy",
+				"direct.local", "--header", "X-Key: " + token,
+				"--proxy-header", "X-Proxy: safe", "http://direct.local/upload",
+				"https://proxied.example/upload",
+			},
+			want:         true,
+			wantMetadata: []string{"X-Proxy: safe"},
 		},
 		{
 			name: "encoded multipart body is outside exact projection",
