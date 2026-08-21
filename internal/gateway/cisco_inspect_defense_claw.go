@@ -107,6 +107,10 @@ func (c *CiscoDefenseClawInspectClient) SetTelemetry(p *telemetry.Provider) {
 // to local-only scanning — same fail-open contract as the API-key path.
 func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 	if c == nil {
+		// Programming-error defensive path. Cannot rate-limit through
+		// receiver state; call the package-level logger directly so
+		// the condition still surfaces to operators.
+		logManagedAIDSkip("aid-client-nil", "CiscoDefenseClawInspectClient receiver is nil")
 		return nil
 	}
 	// Refresh the token per call — cheap in-memory cache read after
@@ -122,6 +126,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVer
 		// operator must see in gateway.err.log.
 		EmitCiscoError(tokenCtx, c.tel, gatewaylog.ErrCodeAuthMissingToken,
 			"managed inspect client has no CMID provider — remote inspection disabled")
+		logManagedAIDSkip("aid-provider-nil", "credential provider is nil on the AID inspect client")
 		return nil
 	}
 	tok, err := c.provider.Token(tokenCtx)
@@ -132,6 +137,11 @@ func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVer
 		// let an expired / revoked CMID enrollment ship undetected.
 		EmitCiscoError(tokenCtx, c.tel, gatewaylog.ErrCodeAuthMissingToken,
 			"managed inspect: CMID token mint failed: "+err.Error())
+		// Rate-limited operator warning: every request that hits this
+		// branch is a fail-open decision. EmitCiscoError above lands
+		// in the structured events pipeline; this line is for humans
+		// tailing gateway.err.log live during triage.
+		logManagedAIDSkip("cloud-token-unavailable", err.Error())
 		return nil
 	}
 
@@ -163,7 +173,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVer
 	// Provider from inside doInspectHTTP.
 	currentToken := tok
 
-	return doInspectHTTP(inspectCall{
+	verdict := doInspectHTTP(inspectCall{
 		client:   c.client,
 		endpoint: c.endpoint,
 		tel:      c.tel,
@@ -199,4 +209,16 @@ func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVer
 			return true
 		},
 	})
+	if verdict == nil {
+		// Any nil verdict from doInspectHTTP means the AID call did
+		// not produce an enforceable decision (marshal error, request
+		// build error, transport error, non-2xx, body read error, or
+		// JSON parse error). doInspectHTTP already emits an internal
+		// [cisco-ai-defense] line for the network / HTTP-code cases;
+		// this consolidated skip warning ensures the fail-open
+		// contract itself is visible even when the underlying cause
+		// is captured only in the structured event stream.
+		logManagedAIDSkip("aid-http-no-verdict", "doInspectHTTP returned no verdict — see prior [cisco-ai-defense] error / structured event for cause")
+	}
+	return verdict
 }

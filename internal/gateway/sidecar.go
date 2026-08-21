@@ -131,11 +131,14 @@ type Sidecar struct {
 	// audit_events / activity_events on its own file.
 	judgeBodyStore *audit.JudgeBodyStore
 
-	// cmidProviderMu guards cmidProviderInst. The provider is lazily
-	// constructed on first request via ensureCMIDProvider and reused
-	// for the sidecar's lifetime. Managed-mode wiring only.
-	cmidProviderMu   sync.Mutex
-	cmidProviderInst cloudreg.Provider
+	// cmidProviderMu guards cmidProviderInst, cmidBuildLastLog, and
+	// cmidBuildLastKind. The provider is lazily constructed on first
+	// request via ensureCMIDProvider and reused for the sidecar's
+	// lifetime. Managed-mode wiring only.
+	cmidProviderMu    sync.Mutex
+	cmidProviderInst  cloudreg.Provider
+	cmidBuildLastLog  time.Time
+	cmidBuildLastKind string
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -1632,25 +1635,96 @@ func (s *Sidecar) pickInspector(ctx context.Context, tel *telemetry.Provider) In
 func (s *Sidecar) newManagedInspector(ctx context.Context, tel *telemetry.Provider, siteLabel string) Inspector {
 	cfg := s.currentConfig()
 	prov, err := s.ensureCMIDProvider(ctx)
-	if err != nil {
+	// Hard-failure gate: only bail when we truly have no provider to
+	// hand to the inspector. A non-nil provider with err != nil means
+	// the underlying library is currently unloadable (e.g. AVC hasn't
+	// dropped libcmidapi.dylib / cmidapi.dll yet) but the inspector
+	// should still be constructed — every Inspect() call re-attempts
+	// Token()/Refresh(), and the CMID module retries dlopen internally
+	// on each attempt, so the lane self-heals once the library becomes
+	// loadable without a daemon restart.
+	if prov == nil {
+		detail := "managed cloud auth provider unavailable"
+		if err != nil {
+			detail = err.Error()
+		}
 		EmitCiscoError(ctx, tel, gatewaylog.ErrCodeUpstreamError,
-			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+err.Error())
+			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+detail)
 		return nil
+	}
+	if err != nil {
+		// Provider exists but its first Refresh failed. Log once at
+		// construction so operators tailing gateway.err.log see the
+		// starting state; per-inspect warnings from
+		// CiscoDefenseClawInspectClient.Inspect() and logManagedAIDSkip
+		// will follow if the condition persists.
+		fmt.Fprintf(os.Stderr,
+			"[managed-cloud] CMID provider constructed but not yet ready (%s): %v — "+
+				"inspector will retry per-inspect; enforcement is fail-open until "+
+				"the CMID library becomes loadable\n",
+			siteLabel, err)
 	}
 	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
 	if m == nil {
+		EmitCiscoError(ctx, tel, gatewaylog.ErrCodeInvalidResponse,
+			"managed_enterprise inspector unavailable — "+siteLabel)
 		return nil
 	}
 	m.SetTelemetry(tel)
 	return m
 }
 
+// cmidBuildLogCooldown throttles the "CMID provider build failed"
+// stderr line emitted by logCMIDBuildError. Without a cooldown, every
+// call to ensureCMIDProvider that hit a hard failure would repeat the
+// same line on every inspect. The first failure after each cooldown
+// window is emitted; the rest are suppressed until the window elapses
+// OR the stage changes (a different failure reason immediately re-arms
+// so operators see the new signal without waiting out the cooldown).
+const cmidBuildLogCooldown = 30 * time.Second
+
+// logCMIDBuildError emits a rate-limited operator-visible stderr line
+// describing why a CMID provider build or Refresh failed. Called from
+// every error branch in ensureCMIDProvider so no failure mode is
+// silent. stage is a short label naming which construction step
+// tripped ("cloudreg-new", "refresh-at-boot") so operators reading the
+// log can tell a fresh construction failure apart from a live provider
+// whose Refresh started failing. Caller must hold s.cmidProviderMu.
+func (s *Sidecar) logCMIDBuildError(stage string, err error) {
+	if err == nil {
+		return
+	}
+	now := time.Now()
+	if stage == s.cmidBuildLastKind && now.Sub(s.cmidBuildLastLog) < cmidBuildLogCooldown {
+		return
+	}
+	s.cmidBuildLastLog = now
+	s.cmidBuildLastKind = stage
+	fmt.Fprintf(os.Stderr,
+		"[managed-cloud] CMID provider build failed at %s: %v\n",
+		stage, err)
+}
+
 // ensureCMIDProvider lazily constructs the managed cloud auth provider
 // on first use and caches it for the sidecar's lifetime.
-// Managed_enterprise only. Returns an error when the underlying
-// provider cannot Refresh (unsupported OS, no provider registered,
-// agent unavailable after the retry ladder). The error is surfaced so
-// the caller can take the fail-closed path.
+// Managed_enterprise only.
+//
+// Tolerance contract (added for the fresh-install ordering race):
+// when cloudreg.New succeeds but the eager Refresh fails (typically
+// because AVC has not yet placed libcmidapi.dylib / cmidapi.dll on
+// disk when the DefenseClaw daemon boots), ensureCMIDProvider caches
+// the provider anyway and returns (prov, err). Callers gate on the
+// PROVIDER (nil vs non-nil), not the error — a non-nil provider with
+// an error means "keep going, the CMID module will retry dlopen on
+// each Token() call". This eliminates the silent-allow that used to
+// happen on every install where CMID arrived after DefenseClaw booted
+// (previously the provider was discarded, newManagedInspector returned
+// a nil Inspector, and the guardrail ran with no managed inspection
+// for the process lifetime until a manual restart).
+//
+// Every failure branch calls logCMIDBuildError so no build/refresh
+// failure is silent on stderr — the operator-visible "no silent skip"
+// mandate for managed_enterprise.
 func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
 	s.cmidProviderMu.Lock()
 	defer s.cmidProviderMu.Unlock()
@@ -1668,10 +1742,23 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 	cfg := s.currentConfig()
 	prov, err := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath})
 	if err != nil {
+		// Hard failure: no factory registered (OSS build) or unsupported
+		// OS. Nothing to retry — return nil so caller fails closed.
+		s.logCMIDBuildError("cloudreg-new", err)
 		return nil, err
 	}
 	if err := prov.Refresh(ctx); err != nil {
-		return nil, err
+		// Warm-up Refresh failed. NOT fatal: on a fresh box the CMID
+		// library may not have been placed on disk yet. Cache the
+		// provider so subsequent Token() calls retry dlopen from the
+		// CMID module's own acquire() loop, and the managed inspection
+		// lane self-heals the moment the library becomes loadable —
+		// no daemon restart required. Previously we discarded the
+		// provider here, which produced a nil Inspector for the whole
+		// process lifetime.
+		s.logCMIDBuildError("refresh-at-boot", err)
+		s.cmidProviderInst = prov
+		return prov, err
 	}
 	s.cmidProviderInst = prov
 	return prov, nil

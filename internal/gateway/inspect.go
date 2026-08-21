@@ -204,6 +204,15 @@ func (a *APIServer) managedAIDOnly() bool {
 func (a *APIServer) inspectManagedAIDOnly(toolName, content string) *ToolInspectVerdict {
 	aid := a.hookAIDInspect(toolName, content)
 	if aid == nil {
+		// Fail-open surface: managed_enterprise's local detectors are
+		// demoted, so a nil AID verdict means this inspection ends
+		// with no enforceable decision. Every occurrence must be
+		// operator-visible per the "no silent skip" contract — the
+		// stderr line is what a human tailing gateway.err.log during
+		// triage will actually see (EmitCiscoError from inside
+		// hookAIDInspect only lands in the structured events pipeline).
+		// Rate-limited to once per minute per reason.
+		logManagedAIDSkip("hook-aid-no-verdict", "hookAIDInspect returned no verdict — see prior [cisco-ai-defense] error / structured event for cause")
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 	return mergeWithAIDVerdict(nil, aid)
