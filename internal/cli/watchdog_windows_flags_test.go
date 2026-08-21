@@ -19,10 +19,21 @@
 package cli
 
 import (
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestManagedWatchdogWorkingDirectoryDoesNotInheritDataRoot(t *testing.T) {
+	executable := filepath.Join(`C:\Program Files`, "DefenseClaw", "bin", "defenseclaw-gateway.exe")
+	dataRoot := filepath.Join(`C:\Users`, "operator", ".defenseclaw")
+	if got, want := watchdogStartDir(executable), filepath.Dir(filepath.Clean(executable)); got != want {
+		t.Fatalf("watchdog working directory = %q, want trusted executable directory %q", got, want)
+	} else if got == dataRoot {
+		t.Fatalf("watchdog working directory pins protected data root %q", dataRoot)
+	}
+}
 
 func TestManagedWatchdogCreationFlagsHonorJobBreakawayPolicy(t *testing.T) {
 	base := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)

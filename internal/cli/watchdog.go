@@ -598,7 +598,7 @@ func (c *execCommand) start() error {
 		return fmt.Errorf("open %s: %w", os.DevNull, err)
 	}
 	proc, err := os.StartProcess(c.path, append([]string{c.path}, c.args...), &os.ProcAttr{
-		Dir:   watchdogStartDir(),
+		Dir:   watchdogStartDir(c.path),
 		Files: []*os.File{devNull, c.logFile, c.logFile},
 		Sys:   watchdogSysProcAttr(),
 	})

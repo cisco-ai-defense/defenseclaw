@@ -10,8 +10,10 @@ fails, is cancelled, or is skipped.
 
 The merge gate covers:
 
-- native Go tests, including current-user Windows DACL regressions, followed by
-  `go vet` and gateway/hook builds;
+- native Go tests, including current-user Windows DACL regressions, exact
+  CMD/PowerShell quote and executable identity, destination-bound curl
+  metadata/body/file projection, and typed Windows sensitive-path
+  block/advisory/quiet outcomes, followed by `go vet` and gateway/hook builds;
 - the Python suite and headless TUI checks;
 - PowerShell parsing, timeout, redaction, and process-tree cleanup contracts;
 - a release-shaped Windows amd64 gateway archive and Python wheel;
@@ -19,13 +21,16 @@ The merge gate covers:
 - the public `install.ps1` authentication and native handoff path under a
   token-bound disposable Windows profile;
 - installed CLI, gateway lifecycle, doctor, scanner, and dependency checks;
+- live-gateway Doctor custody checks for the audit database and HMAC-bound
+  device identity, proving the detached gateway and watchdog do not pin the
+  protected data directory;
 - Setup build and native install/repair/uninstall acceptance; and
 - required PowerShell contract cells for Codex, Claude Code, and Amp covering
-  setup, observe/action allow/block behavior, audit correlation,
-  gateway-generated connector telemetry, bounded timeout handling, teardown,
-  and cleanup. Amp additionally proves all five documented plugin callbacks,
-  the Task/subagent boundary, a private managed plugin, self-heal, and
-  tamper-recovery behavior.
+  setup; exact action-mode blocks; detection-only shadow or advisory outcomes;
+  quiet controls; request, action, and audit correlation; gateway-generated
+  connector telemetry; bounded timeout handling; teardown; and cleanup. Amp
+  additionally proves all five documented plugin callbacks, the Task/subagent
+  boundary, a private managed plugin, self-heal, and tamper-recovery behavior.
 
 The packaged test artifact is built once and reused by the disposable lifecycle
 jobs. The public-bootstrap shard uses the authenticated `0.8.7` release—the

@@ -249,7 +249,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		cfg.Gateway.NoTLS = true
 	}
 
-	client, err := NewClient(&cfg.Gateway)
+	client, err := NewClient(&cfg.Gateway, cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: create client: %w", err)
 	}

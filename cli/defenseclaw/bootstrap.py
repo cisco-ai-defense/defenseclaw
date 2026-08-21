@@ -1770,6 +1770,6 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
 
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
-    _ensure_device_key(cfg.gateway.device_key_file)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
 
     return token_configured

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // DefenseClaw's Windows logon launcher is built with the windowsgui subsystem.
-// It pins the installed data directory and invokes the adjacent gateway without
+// It pins the installed state and invokes the adjacent gateway without
 // allocating a console window.
 package main
 
@@ -63,7 +63,7 @@ func runStartup() error {
 	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)
 	defer cancel()
 	cmd := processutil.CommandContext(ctx, gatewayPath, "start")
-	cmd.Dir = dataRoot
+	cmd.Dir = startupWorkingDirectory(gatewayPath)
 	if packaged {
 		cmd.Env = state.Environment(os.Environ())
 	} else {
@@ -73,6 +73,10 @@ func runStartup() error {
 		return fmt.Errorf("start DefenseClaw gateway: %w", err)
 	}
 	return nil
+}
+
+func startupWorkingDirectory(gatewayPath string) string {
+	return filepath.Dir(filepath.Clean(gatewayPath))
 }
 
 func startupPaths(executable, home string) (gatewayPath, dataRoot string, err error) {

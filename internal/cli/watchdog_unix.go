@@ -33,7 +33,7 @@ func watchdogShutdownSignals() []os.Signal {
 }
 
 // watchdogStartDir returns the detached watchdog working directory.
-func watchdogStartDir() string {
+func watchdogStartDir(_ string) string {
 	return "/"
 }
 

@@ -4628,13 +4628,37 @@ function Assert-WindowsReleasePreservedFile(
 function Assert-WindowsReleaseDoctorRows(
     [string]$Launcher,
     [string]$Logs,
-    [string]$AmpPluginPath
+    [string]$AmpPluginPath,
+    [string]$DataRoot,
+    [string]$GatewayPath
 ) {
+    $gatewayBefore = Get-GatewayIdentity $DataRoot
+    $watchdogBefore = Get-WatchdogIdentity $DataRoot
+    Assert-OwnedManagedProcess $gatewayBefore $GatewayPath 'pre-Doctor gateway'
+    Assert-OwnedManagedProcess $watchdogBefore $GatewayPath 'pre-Doctor watchdog'
+    if ($gatewayBefore.ProcessId -eq $watchdogBefore.ProcessId) {
+        throw 'pre-Doctor gateway and watchdog unexpectedly share one process identity'
+    }
+    Assert-OnlyInstalledGatewayProcesses $GatewayPath @(
+        $gatewayBefore.ProcessId,
+        $watchdogBefore.ProcessId
+    )
+
     $doctor = Invoke-WindowsNativeProcess $Launcher @('doctor', '--json-output') `
         -TimeoutSeconds 300 -LogPath (Join-Path $Logs 'release-doctor-after-maintenance.json')
     try { $report = $doctor.StdOut | ConvertFrom-Json -ErrorAction Stop }
     catch { throw "installed Doctor returned invalid JSON after repair/upgrade: $($_.Exception.Message)" }
     foreach ($expectation in @(
+        [pscustomobject]@{
+            Label = 'Audit database'
+            Detail = 'SQLite quick_check=ok; required schema present'
+            Target = ''
+        },
+        [pscustomobject]@{
+            Label = 'Device identity'
+            Detail = 'HMAC-bound provenance are valid'
+            Target = ''
+        },
         [pscustomobject]@{
             Label = 'Codex hooks'
             Detail = 'healthy Windows-native executable registration'
@@ -4665,6 +4689,19 @@ function Assert-WindowsReleaseDoctorRows(
             throw "Doctor verified an unexpected $label target after exact-installer repair/upgrade"
         }
     }
+
+    $gatewayAfter = Get-GatewayIdentity $DataRoot
+    $watchdogAfter = Get-WatchdogIdentity $DataRoot
+    Assert-OwnedManagedProcess $gatewayAfter $GatewayPath 'post-Doctor gateway'
+    Assert-OwnedManagedProcess $watchdogAfter $GatewayPath 'post-Doctor watchdog'
+    if ((Test-GatewayIdentityChanged $gatewayBefore $gatewayAfter) -or
+        (Test-GatewayIdentityChanged $watchdogBefore $watchdogAfter)) {
+        throw 'Doctor did not preserve the exact live gateway/watchdog process identities'
+    }
+    Assert-OnlyInstalledGatewayProcesses $GatewayPath @(
+        $gatewayAfter.ProcessId,
+        $watchdogAfter.ProcessId
+    )
 }
 
 function Assert-WindowsReleaseCleanUninstall(
@@ -4983,7 +5020,8 @@ function Invoke-WindowsReleaseCertification {
         Assert-WindowsReleasePreservedFile `
             $ampSettingsPath $unrelatedAmpSettings 'Amp settings'
         Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
-        Assert-WindowsReleaseDoctorRows $launcher $logs $ampPluginPath
+        Assert-WindowsReleaseDoctorRows `
+            $launcher $logs $ampPluginPath $dataRoot $gateway
 
         # Uninstall must tear down all three active connectors itself. A pre-teardown
         # here would hide the release defect this certification is meant to catch.

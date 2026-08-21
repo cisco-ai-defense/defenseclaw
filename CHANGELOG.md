@@ -106,6 +106,16 @@ boundary.
   `traceparent`, `session.end`, or dedicated subagent lifecycle callback, so
   DefenseClaw correlates only source-backed thread events and governs delegation
   tools at their `tool.call` boundary.
+- **Windows runtime custody remains verifiable while services are live**:
+  detached gateway, watchdog, startup, and hook-recovery processes no longer
+  use the protected data directory as their current working directory, so
+  Doctor can hold its exact anti-replacement lease without weakening Windows
+  sharing or ACL checks. Fresh device identities now publish an owner-private
+  random provenance secret, an HMAC bound to the exact Ed25519 key bytes, and
+  finally the key itself with create-new semantics. Existing unprovenanced keys
+  are never blessed after the fact; they remain usable but Doctor reports them
+  for continuity review. Native Windows CI now requires both live audit-database
+  custody and HMAC-bound device identity checks to pass.
 - **`make all` is again the explicit same-checkout developer reinstall**:
   markerless or older source-owned state may advance with the checkout for
   local development. Foreign, newer, release-managed, and different-checkout

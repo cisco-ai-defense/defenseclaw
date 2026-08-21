@@ -34,6 +34,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -182,7 +183,7 @@ func clientForServer(t *testing.T, srv *httptest.Server) *Client {
 	cfg := &config.GatewayConfig{
 		Host:          host,
 		Port:          port,
-		DeviceKeyFile: filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile: filepath.Join(testenv.PrivateTempDir(t), "device.key"),
 	}
 	client, err := NewClient(cfg)
 	if err != nil {

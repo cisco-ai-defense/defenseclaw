@@ -16,6 +16,8 @@
 
 """Tests for 'defenseclaw init' command."""
 
+import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -25,6 +27,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+import click
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -51,7 +54,7 @@ def _trusted_prefixes_from_config(data_dir: str) -> list[str]:
 
 class TestInitCommand(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-test-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-test-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -734,7 +737,7 @@ class TestInitVersionDisplay(unittest.TestCase):
     """Tests for version info in init Environment section."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-ver-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-ver-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -789,7 +792,7 @@ class TestInitPreservesExistingConfig(unittest.TestCase):
     """Regression tests for P5 fix: init must not overwrite existing config."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-preserve-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-preserve-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -859,7 +862,7 @@ class TestInitDoesNotCreateExternalDirs(unittest.TestCase):
     """Regression tests for P3 fix: init must not create dirs outside data_dir."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-scope-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-scope-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -912,7 +915,7 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
     """Verify that init displays scanner defaults to the user."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-scandef-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-scandef-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -1000,7 +1003,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     """Verify that init displays gateway defaults."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-gwdef-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-gwdef-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -1263,6 +1266,362 @@ class TestValidateGatewayToken(unittest.TestCase):
         self.assertNotEqual(os.environ.get("OPENCLAW_GATEWAY_TOKEN"), malicious_token)
 
 
+class TestDeviceIdentityInitialization(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="dclaw-device-identity-")
+        self.addCleanup(self._tmp.cleanup)
+        # macOS exposes /var through /private/var. Custody intentionally rejects
+        # indirect production paths, so make only this test fixture canonical.
+        self.data_dir = os.path.realpath(self._tmp.name)
+        from defenseclaw.file_permissions import make_private_directory
+
+        make_private_directory(self.data_dir)
+        self.key_path = os.path.join(self.data_dir, "device.key")
+
+    def test_fresh_init_creates_bound_triplet_and_restart_preserves_bytes(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import (
+            DeviceKeyHealthStatus,
+            inspect_device_key,
+        )
+
+        _ensure_device_key(self.key_path, data_dir=self.data_dir)
+        paths = (
+            self.key_path,
+            os.path.join(self.data_dir, "device.provenance.secret"),
+            self.key_path + ".provenance",
+        )
+        before = tuple(Path(path).read_bytes() for path in paths)
+        key_data, secret, provenance = before
+        self.assertEqual(len(secret), 32)
+        expected = (
+            b"defenseclaw-device-provenance-v1:"
+            + hmac.new(secret, key_data, hashlib.sha256).hexdigest().encode("ascii")
+            + b"\n"
+        )
+        self.assertEqual(provenance, expected)
+        health = inspect_device_key(self.key_path, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.VALID)
+
+        _ensure_device_key(self.key_path, data_dir=self.data_dir)
+        after = tuple(Path(path).read_bytes() for path in paths)
+        self.assertEqual(after, before)
+
+    def test_existing_unprovenanced_key_remains_legacy(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import (
+            DeviceKeyHealthStatus,
+            _new_device_key_pem,
+            inspect_device_key,
+        )
+        from defenseclaw.file_permissions import protect_private_file
+
+        Path(self.key_path).write_bytes(_new_device_key_pem())
+        protect_private_file(self.key_path)
+
+        _ensure_device_key(self.key_path, data_dir=self.data_dir)
+
+        self.assertFalse(os.path.lexists(self.key_path + ".provenance"))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+        health = inspect_device_key(self.key_path, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.LEGACY_UNPROVENANCED)
+        self.assertEqual(health.reason_code, "device-key-provenance-absent")
+
+    def test_missing_key_outside_data_dir_is_refused_without_parent_mutation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        outside = tempfile.TemporaryDirectory(prefix="dclaw-device-outside-")
+        self.addCleanup(outside.cleanup)
+        target_parent = os.path.join(os.path.realpath(outside.name), "operator-selected")
+        target = os.path.join(target_parent, "device.key")
+
+        with self.assertRaises(click.ClickException) as ctx:
+            _ensure_device_key(target, data_dir=self.data_dir)
+
+        self.assertIn("target-outside-data-dir", str(ctx.exception))
+        self.assertFalse(os.path.lexists(target_parent))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+
+    def test_nested_private_parent_is_created_one_component_at_a_time(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
+
+        nested_key = os.path.join(self.data_dir, "identity", "nested", "device.key")
+        _ensure_device_key(nested_key, data_dir=self.data_dir)
+
+        self.assertTrue(os.path.isfile(nested_key))
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+        self.assertFalse(
+            os.path.lexists(
+                os.path.join(
+                    os.path.dirname(nested_key),
+                    "device.provenance.secret",
+                )
+            )
+        )
+        health = inspect_device_key(nested_key, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.VALID)
+
+    def test_nested_symlink_is_refused_without_outside_mutation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        outside = tempfile.TemporaryDirectory(prefix="dclaw-device-symlink-outside-")
+        self.addCleanup(outside.cleanup)
+        outside_root = os.path.realpath(outside.name)
+        jump = os.path.join(self.data_dir, "jump")
+        try:
+            os.symlink(outside_root, jump, target_is_directory=True)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"directory symlink unavailable: {exc}")
+        target = os.path.join(jump, "deeper", "device.key")
+
+        with self.assertRaises(click.ClickException):
+            _ensure_device_key(target, data_dir=self.data_dir)
+
+        self.assertFalse(os.path.lexists(os.path.join(outside_root, "deeper")))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX canonical-path regression")
+    def test_indirect_data_dir_is_refused_without_outside_mutation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.file_permissions import make_private_directory
+
+        alias_root = tempfile.TemporaryDirectory(prefix="dclaw-device-alias-root-")
+        outside = tempfile.TemporaryDirectory(prefix="dclaw-device-real-root-")
+        self.addCleanup(alias_root.cleanup)
+        self.addCleanup(outside.cleanup)
+        alias_root_path = os.path.realpath(alias_root.name)
+        outside_path = os.path.realpath(outside.name)
+        make_private_directory(alias_root_path)
+        managed = os.path.join(outside_path, "outer", "managed")
+        make_private_directory(managed)
+        jump = os.path.join(alias_root_path, "jump")
+        try:
+            os.symlink(outside_path, jump, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlink unavailable: {exc}")
+        indirect_data_dir = os.path.join(jump, "outer", "managed")
+        target = os.path.join(indirect_data_dir, "deeper", "device.key")
+
+        with self.assertRaises(click.ClickException) as ctx:
+            _ensure_device_key(target, data_dir=indirect_data_dir)
+
+        self.assertIn("data-dir-path-is-indirect", str(ctx.exception))
+        self.assertFalse(os.path.lexists(os.path.join(managed, "deeper")))
+        self.assertFalse(
+            os.path.lexists(os.path.join(managed, "device.provenance.secret"))
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX canonical-path regression")
+    def test_existing_indirect_key_remains_load_only_and_unblessed(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import _new_device_key_pem
+        from defenseclaw.file_permissions import make_private_directory, protect_private_file
+
+        alias_root = tempfile.TemporaryDirectory(prefix="dclaw-device-existing-alias-")
+        outside = tempfile.TemporaryDirectory(prefix="dclaw-device-existing-real-")
+        self.addCleanup(alias_root.cleanup)
+        self.addCleanup(outside.cleanup)
+        alias_root_path = os.path.realpath(alias_root.name)
+        outside_path = os.path.realpath(outside.name)
+        make_private_directory(alias_root_path)
+        managed = os.path.join(outside_path, "outer", "managed")
+        make_private_directory(managed)
+        jump = os.path.join(alias_root_path, "jump")
+        try:
+            os.symlink(outside_path, jump, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlink unavailable: {exc}")
+        real_key = os.path.join(managed, "device.key")
+        Path(real_key).write_bytes(_new_device_key_pem())
+        protect_private_file(real_key)
+        indirect_data_dir = os.path.join(jump, "outer", "managed")
+        indirect_key = os.path.join(indirect_data_dir, "device.key")
+
+        _ensure_device_key(indirect_key, data_dir=indirect_data_dir)
+
+        self.assertFalse(os.path.lexists(real_key + ".provenance"))
+        self.assertFalse(
+            os.path.lexists(os.path.join(managed, "device.provenance.secret"))
+        )
+
+    def test_nested_non_directory_is_refused(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        blocked = os.path.join(self.data_dir, "blocked")
+        Path(blocked).write_bytes(b"not-a-directory")
+        target = os.path.join(blocked, "deeper", "device.key")
+
+        with self.assertRaises(click.ClickException):
+            _ensure_device_key(target, data_dir=self.data_dir)
+
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+
+    def test_relative_key_is_rejected_before_existing_path_shortcut(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        with patch(
+            "defenseclaw.commands.cmd_init.os.path.lexists",
+            return_value=True,
+        ) as lexists:
+            with self.assertRaises(click.ClickException) as ctx:
+                _ensure_device_key("relative/device.key", data_dir=self.data_dir)
+
+        self.assertIn("device-key-path-not-absolute", str(ctx.exception))
+        lexists.assert_not_called()
+
+    def test_relative_data_dir_is_rejected_before_existing_path_shortcut(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        with patch(
+            "defenseclaw.commands.cmd_init.os.path.lexists",
+            return_value=True,
+        ) as lexists:
+            with self.assertRaises(click.ClickException) as ctx:
+                _ensure_device_key(self.key_path, data_dir="relative-data-dir")
+
+        self.assertIn("data-dir-path-not-absolute", str(ctx.exception))
+        lexists.assert_not_called()
+
+    def test_filesystem_root_data_dir_is_rejected_before_mutation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        filesystem_root = os.path.abspath(os.sep)
+        target = os.path.join(filesystem_root, "defenseclaw-root-device.key")
+        with patch("defenseclaw.file_permissions.make_private_directory") as mkdir:
+            with self.assertRaises(click.ClickException) as ctx:
+                _ensure_device_key(target, data_dir=filesystem_root)
+
+        self.assertIn("data-dir-too-broad", str(ctx.exception))
+        mkdir.assert_not_called()
+
+    def test_reserved_artifact_paths_are_rejected_before_data_dir_creation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        root = tempfile.TemporaryDirectory(prefix="dclaw-device-alias-")
+        self.addCleanup(root.cleanup)
+        variants = [
+            "device.provenance.secret",
+            os.path.join("device.provenance.secret", "nested", "device.key"),
+            "DEVICE.PROVENANCE.SECRET",
+            os.path.join("DEVICE.PROVENANCE.SECRET", "nested", "device.key"),
+        ]
+        for index, relative_key in enumerate(variants):
+            with self.subTest(relative_key=relative_key):
+                data_dir = os.path.join(os.path.realpath(root.name), f"missing-{index}")
+                target = os.path.join(data_dir, relative_key)
+                with self.assertRaises(click.ClickException):
+                    _ensure_device_key(target, data_dir=data_dir)
+                self.assertFalse(os.path.lexists(data_dir))
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode-preservation regression")
+    def test_broad_existing_data_dir_is_refused_without_chmod(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        os.chmod(self.data_dir, 0o755)
+        try:
+            with self.assertRaises(click.ClickException):
+                _ensure_device_key(self.key_path, data_dir=self.data_dir)
+            self.assertEqual(os.stat(self.data_dir).st_mode & 0o777, 0o755)
+        finally:
+            os.chmod(self.data_dir, 0o700)
+
+    def test_missing_data_dir_is_refused_without_creation(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        root = tempfile.TemporaryDirectory(prefix="dclaw-device-missing-root-")
+        self.addCleanup(root.cleanup)
+        data_dir = os.path.join(os.path.realpath(root.name), "missing-data")
+        target = os.path.join(data_dir, "device.key")
+
+        with self.assertRaises(click.ClickException):
+            _ensure_device_key(target, data_dir=data_dir)
+
+        self.assertFalse(os.path.lexists(data_dir))
+
+    def test_windows_ads_classifier_preserves_volume_prefixes(self):
+        from defenseclaw.commands.cmd_init import (
+            _windows_path_has_alternate_data_stream,
+        )
+
+        allowed = (
+            r"C:\DefenseClaw\device.key",
+            r"\\server\share\DefenseClaw\device.key",
+            r"\\?\C:\DefenseClaw\device.key",
+            r"\\?\UNC\server\share\DefenseClaw\device.key",
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\DefenseClaw\device.key",
+        )
+        rejected = (
+            r"C:\DefenseClaw\device.key:stream",
+            r"C:\DefenseClaw:identity\device.key",
+            r"C:\DefenseClaw\device.provenance.secret:KEY",
+            r"\\server\share\DefenseClaw\device.key:stream",
+            r"\\?\C:\DefenseClaw\DEVICE.PROVENANCE.SECRET:key",
+        )
+        for path in allowed:
+            with self.subTest(path=path):
+                self.assertFalse(_windows_path_has_alternate_data_stream(path))
+        for path in rejected:
+            with self.subTest(path=path):
+                self.assertTrue(_windows_path_has_alternate_data_stream(path))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ADS regression")
+    def test_windows_ads_paths_are_refused_without_publication(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        variants = (
+            "device.key:stream",
+            "device.provenance.secret:key",
+            "DEVICE.PROVENANCE.SECRET:KEY",
+            os.path.join("missing", "nested", "device.key:stream"),
+        )
+        for relative_target in variants:
+            with self.subTest(relative_target=relative_target):
+                target = os.path.join(self.data_dir, relative_target)
+                with self.assertRaises(click.ClickException) as ctx:
+                    _ensure_device_key(target, data_dir=self.data_dir)
+                self.assertIn("windows-alternate-data-stream-path", str(ctx.exception))
+                for path in (
+                    os.path.join(self.data_dir, "device.key"),
+                    os.path.join(self.data_dir, "device.provenance.secret"),
+                    os.path.join(self.data_dir, "device.key.provenance"),
+                    os.path.join(self.data_dir, "missing"),
+                ):
+                    self.assertFalse(os.path.lexists(path))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ADS regression")
+    def test_windows_ads_data_dir_and_existing_identity_are_refused(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+
+        stream_data_dir = self.data_dir + ":identity"
+        with self.assertRaises(click.ClickException) as ctx:
+            _ensure_device_key(
+                os.path.join(stream_data_dir, "device.key"),
+                data_dir=stream_data_dir,
+            )
+        self.assertIn("windows-alternate-data-stream-path", str(ctx.exception))
+
+        base = os.path.join(self.data_dir, "existing-holder")
+        Path(base).write_bytes(b"base-preserved")
+        stream = base + ":device-key"
+        Path(stream).write_bytes(b"existing-stream")
+        with self.assertRaises(click.ClickException) as ctx:
+            _ensure_device_key(stream, data_dir=self.data_dir)
+        self.assertIn("windows-alternate-data-stream-path", str(ctx.exception))
+        self.assertEqual(Path(base).read_bytes(), b"base-preserved")
+        self.assertFalse(os.path.lexists(stream + ".provenance"))
+
+
 class TestResolveSplunkBridgeBundle(unittest.TestCase):
     def test_prefers_maintained_bundle_in_source_checkout(self):
         from defenseclaw.commands.cmd_init import _resolve_splunk_bridge_bundle
@@ -1279,7 +1638,7 @@ class TestResolveSplunkBridgeBundle(unittest.TestCase):
 
 class TestInitSeedsSplunkBridge(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-splunk-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-splunk-"))
         self.bundle_dir = tempfile.mkdtemp(prefix="dclaw-bundle-splunk-")
         self.runner = CliRunner()
 
@@ -1528,7 +1887,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     """Tests for the --enable-guardrail flag during init."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-guardrail-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-guardrail-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -1648,7 +2007,7 @@ class TestInitStartsGateway(unittest.TestCase):
     """Tests for the sidecar start during init."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-sidecar-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-sidecar-"))
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -2866,7 +3225,7 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-observe-all-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-observe-all-"))
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
         self.runner = CliRunner()
         self.selection_patcher = patch(

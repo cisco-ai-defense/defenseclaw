@@ -50,6 +50,7 @@ import (
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func testStoreAndLogger(t *testing.T) (*audit.Store, *audit.Logger) {
@@ -1776,7 +1777,7 @@ func TestRawFrameTypeParsing(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoadOrCreateIdentityCreatesNew(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "device.key")
+	keyFile := filepath.Join(testenv.PrivateTempDir(t), "device.key")
 
 	identity, err := LoadOrCreateIdentity(keyFile)
 	if err != nil {
@@ -1799,7 +1800,7 @@ func TestLoadOrCreateIdentityCreatesNew(t *testing.T) {
 }
 
 func TestLoadOrCreateIdentityLoadsExisting(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "device.key")
+	keyFile := filepath.Join(testenv.PrivateTempDir(t), "device.key")
 
 	id1, err := LoadOrCreateIdentity(keyFile)
 	if err != nil {
@@ -1820,9 +1821,10 @@ func TestLoadOrCreateIdentityLoadsExisting(t *testing.T) {
 }
 
 func TestLoadOrCreateIdentityCreatesParentDir(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "sub", "dir", "device.key")
+	dataDir := testenv.PrivateTempDir(t)
+	keyFile := filepath.Join(dataDir, "sub", "dir", "device.key")
 
-	_, err := LoadOrCreateIdentity(keyFile)
+	_, err := LoadOrCreateIdentity(keyFile, dataDir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateIdentity with nested dir: %v", err)
 	}
@@ -2494,10 +2496,11 @@ func TestClientCloseWithoutConnection(t *testing.T) {
 }
 
 func TestNewClientCreatesIdentity(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
 	cfg := &config.GatewayConfig{
 		Host:          "127.0.0.1",
 		Port:          18789,
-		DeviceKeyFile: filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
 	}
 
 	client, err := NewClient(cfg)
@@ -2519,7 +2522,7 @@ func TestNewClientCreatesIdentity(t *testing.T) {
 }
 
 func TestNewClientReusesExistingKey(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "device.key")
+	keyFile := filepath.Join(testenv.PrivateTempDir(t), "device.key")
 	cfg := &config.GatewayConfig{
 		Host:          "127.0.0.1",
 		Port:          18789,
@@ -2535,10 +2538,11 @@ func TestNewClientReusesExistingKey(t *testing.T) {
 }
 
 func TestClientConnectWithRetryCancelledContext(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
 	cfg := &config.GatewayConfig{
 		Host:           "127.0.0.1",
 		Port:           19999,
-		DeviceKeyFile:  filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile:  filepath.Join(dataDir, "device.key"),
 		ReconnectMs:    100,
 		MaxReconnectMs: 200,
 	}
@@ -3842,10 +3846,11 @@ func TestConfigPatchAuditDoesNotLeakRawValue(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewClientDebugFlagOffByDefault(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
 	cfg := &config.GatewayConfig{
 		Host:          "127.0.0.1",
 		Port:          18789,
-		DeviceKeyFile: filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
 	}
 
 	t.Setenv("DEFENSECLAW_DEBUG", "")
@@ -3859,10 +3864,11 @@ func TestNewClientDebugFlagOffByDefault(t *testing.T) {
 }
 
 func TestNewClientDebugFlagEnabled(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
 	cfg := &config.GatewayConfig{
 		Host:          "127.0.0.1",
 		Port:          18789,
-		DeviceKeyFile: filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
 	}
 
 	t.Setenv("DEFENSECLAW_DEBUG", "1")
