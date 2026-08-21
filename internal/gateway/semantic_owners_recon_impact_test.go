@@ -67,6 +67,20 @@ func TestGeneratedDefaultSemanticRulesUseRegisteredOwners(t *testing.T) {
 	for _, candidate := range generation.semanticRules {
 		compiled[candidate.rule.ID] = candidate
 	}
+	for _, ruleID := range []string{"CMD-MKFS", "CMD-DEVICE-WIPE"} {
+		candidate, ok := compiled[ruleID]
+		if !ok {
+			t.Fatalf("default semantic rule %q is missing", ruleID)
+		}
+		if want := reconImpactExpressionsForTest[ruleID]; candidate.rule.Expression != want {
+			t.Fatalf(
+				"default semantic rule %q expression drifted\n got: %s\nwant: %s",
+				ruleID,
+				candidate.rule.Expression,
+				want,
+			)
+		}
+	}
 	for _, owners := range []map[string]semanticOwner{
 		semanticReconImpactOwners,
 		semanticIntegrityPersistenceOwners,

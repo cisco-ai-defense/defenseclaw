@@ -1550,7 +1550,7 @@ class TestDeviceIdentityInitialization(unittest.TestCase):
         self.assertFalse(os.path.lexists(data_dir))
 
     def test_windows_ads_classifier_preserves_volume_prefixes(self):
-        from defenseclaw.commands.cmd_init import (
+        from defenseclaw.doctor_recovery import (
             _windows_path_has_alternate_data_stream,
         )
 

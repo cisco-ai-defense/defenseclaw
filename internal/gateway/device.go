@@ -182,7 +182,12 @@ func writeFreshDeviceIdentity(keyFile, dataDir string, keyData []byte) error {
 	}
 	for _, path := range []string{keyFile, secretPath, provenancePath} {
 		if _, err := os.Lstat(path); err == nil {
-			return fmt.Errorf("gateway: device identity continuity artifact already exists: %s", path)
+			return fmt.Errorf(
+				"gateway: device identity continuity artifact already exists: %s"+
+					" (a previous identity creation did not complete; run explicit"+
+					" continuity-aware recovery before creating a new identity)",
+				path,
+			)
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("gateway: inspect device identity continuity artifact %s: %w", path, err)
 		}
@@ -315,6 +320,9 @@ func writeNewPrivateFile(path string, data []byte) error {
 		return err
 	}
 	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := syncFreshIdentityDirectory(filepath.Dir(path)); err != nil {
 		return err
 	}
 	if err := safefile.ValidatePrivateFile(path); err != nil {

@@ -649,11 +649,18 @@ func TestStaticCurlSOCKSProxyCredentialComponentsRejectsShellSetup(t *testing.T)
 			"proxy:AKIA7Q2M9X4B6C8D3F5H https://origin.example",
 	} {
 		facts := Analyze(Input{Tool: "exec", Command: commandText})
+		seen := false
 		for _, command := range facts.Commands {
-			if command.Program == "curl" &&
-				StaticCurlSOCKSProxyCredentialComponents(command) != nil {
+			if command.Program != "curl" {
+				continue
+			}
+			seen = true
+			if StaticCurlSOCKSProxyCredentialComponents(command) != nil {
 				t.Fatalf("shell-setup components = %#v; facts = %#v", command, facts)
 			}
+		}
+		if !seen {
+			t.Fatalf("no curl command parsed; facts = %#v", facts)
 		}
 	}
 }
@@ -663,32 +670,38 @@ func TestStaticCurlSOCKSProxyCredentialComponentsForFactsIsolation(t *testing.T)
 
 	const token = "AKIA7Q2M9X4B6C8D3F5H"
 	for _, test := range []struct {
-		name    string
-		command string
-		want    bool
+		name     string
+		command  string
+		want     bool
+		wantSeen bool
 	}{
-		{name: "env", command: "env curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true},
-		{name: "command", command: "command curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true},
-		{name: "exec", command: "exec curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true},
-		{name: "nested wrappers", command: "env command exec curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true},
-		{name: "POSIX null netrc file", command: "curl --netrc-file /dev/null --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true},
-		{name: "active arbitrary netrc file", command: "curl --netrc-file /dev/stdin --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example"},
-		{name: "sudo is not transparent", command: "sudo -n curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example"},
+		{name: "env", command: "env curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true, wantSeen: true},
+		{name: "command", command: "command curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true, wantSeen: true},
+		{name: "exec", command: "exec curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true, wantSeen: true},
+		{name: "nested wrappers", command: "env command exec curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true, wantSeen: true},
+		{name: "POSIX null netrc file", command: "curl --netrc-file /dev/null --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", want: true, wantSeen: true},
+		{name: "active arbitrary netrc file", command: "curl --netrc-file /dev/stdin --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", wantSeen: true},
+		{name: "sudo is not transparent", command: "sudo -n curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", wantSeen: true},
 		{name: "environment assignment is not transparent", command: "env ALL_PROXY=http://other.example curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example"},
-		{name: "parent redirect can fail", command: "env curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example > /missing/out"},
-		{name: "pipeline is not isolated", command: "printf safe | env curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example"},
+		{name: "parent redirect can fail", command: "env curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example > /missing/out", wantSeen: true},
+		{name: "pipeline is not isolated", command: "printf safe | env curl --socks5-hostname proxy.example --proxy-user proxy:" + token + " https://origin.example", wantSeen: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			facts := Analyze(Input{Tool: "exec", Command: test.command})
 			var got []TransmittedRequestComponent
+			seen := false
 			for _, command := range facts.Commands {
 				if command.Program == "curl" {
+					seen = true
 					got = StaticCurlSOCKSProxyCredentialComponentsForFacts(
 						facts,
 						command.ID,
 					)
 				}
+			}
+			if seen != test.wantSeen {
+				t.Fatalf("curl command seen = %t, want %t; facts = %#v", seen, test.wantSeen, facts)
 			}
 			if test.want {
 				if !facts.Authoritative() || len(got) != 2 ||

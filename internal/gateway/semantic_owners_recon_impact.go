@@ -29,14 +29,26 @@ const (
 	semanticSudoDiscoveryElevationExpression = `f.commands.exists(c, c.argv_complete && ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) || (c.program == 'find' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations) || (c.program == 'getcap' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))`
 	semanticAccessControlExpression          = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))`
 	semanticDDDiskWriteExpression            = `f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
-	semanticFilesystemWipeExpression         = `f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
-	semanticDeviceWipeExpression             = `f.commands.exists(c, c.argv_complete && c.program != 'dd' && !(c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs']) && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
 	semanticNetworkSweepExpression           = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))`
 	semanticContainerHostEscapeExpression    = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))`
 	semanticCryptominingExpression           = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)`
 	semanticMassProcessTerminationExpression = `f.commands.exists(c, c.argv_complete && c.program in ['kill', 'stop-process', 'taskkill'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PROCESS_KILL in c.operations)`
 	semanticPrivilegedAccountExpression      = `f.commands.exists(c, c.argv_complete && c.program in ['useradd', 'usermod', 'gpasswd', 'groupmems', 'adduser', 'dseditgroup', 'dscl', 'net', 'net1', 'add-localgroupmember', 'add-adgroupmember'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations)`
 )
+
+var (
+	semanticFilesystemFormatterPrograms = celProgramList(actionfacts.FilesystemFormatterPrograms())
+	semanticFilesystemWipeExpression    = `f.commands.exists(c, c.argv_complete && c.program in ` + semanticFilesystemFormatterPrograms + ` && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+	semanticDeviceWipeExpression        = `f.commands.exists(c, c.argv_complete && c.program != 'dd' && !(c.program in ` + semanticFilesystemFormatterPrograms + `) && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+)
+
+func celProgramList(programs []string) string {
+	quoted := make([]string, 0, len(programs))
+	for _, program := range programs {
+		quoted = append(quoted, "'"+program+"'")
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
 
 var semanticReconImpactOwners = map[string]semanticOwner{
 	"CMD-RM-RF": {
@@ -800,7 +812,7 @@ func filesystemWipePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDiskWrite) ||
-			!filesystemFormatterProgram(command.Program) {
+			!actionfacts.FilesystemFormatterProgram(command.Program) {
 			continue
 		}
 		if commandOwnsDeviceMutation(facts, command.ID) {
@@ -810,24 +822,12 @@ func filesystemWipePrerequisite(facts actionfacts.Facts) bool {
 	return false
 }
 
-func filesystemFormatterProgram(program string) bool {
-	switch strings.ToLower(program) {
-	case "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
-		"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
-		"mkfs.ntfs", "mkntfs", "mkfs.minix", "mkswap", "mkfs.exfat",
-		"mkexfatfs":
-		return true
-	default:
-		return false
-	}
-}
-
 func destructiveDeviceWritePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDiskWrite) ||
 			oneOfFold(command.Program, "dd") ||
-			filesystemFormatterProgram(command.Program) {
+			actionfacts.FilesystemFormatterProgram(command.Program) {
 			continue
 		}
 		if commandOwnsDeviceMutation(facts, command.ID) {

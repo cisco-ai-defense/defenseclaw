@@ -26,6 +26,34 @@ import (
 	"strings"
 )
 
+var filesystemFormatterPrograms = []string{
+	"mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
+	"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
+	"mkfs.ntfs", "mkntfs", "mkfs.minix", "mkswap", "mkfs.exfat",
+	"mkexfatfs",
+}
+
+var filesystemFormatterProgramSet = func() map[string]struct{} {
+	programs := make(map[string]struct{}, len(filesystemFormatterPrograms))
+	for _, program := range filesystemFormatterPrograms {
+		programs[program] = struct{}{}
+	}
+	return programs
+}()
+
+// FilesystemFormatterPrograms returns the one ordered formatter inventory used
+// by argv classification and the semantic destructive-command owners.
+func FilesystemFormatterPrograms() []string {
+	return append([]string(nil), filesystemFormatterPrograms...)
+}
+
+// FilesystemFormatterProgram reports whether program uses the closed formatter
+// grammar owned by classifyPOSIXFilesystemFormat.
+func FilesystemFormatterProgram(program string) bool {
+	_, ok := filesystemFormatterProgramSet[strings.ToLower(program)]
+	return ok
+}
+
 func classifyOutput(out *parseOutput) {
 	if out == nil {
 		return
@@ -265,6 +293,11 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyRedirects(out, command)
 		return
 	}
+	if FilesystemFormatterProgram(program) {
+		classifyPOSIXFilesystemFormat(out, command, program)
+		classifyRedirects(out, command)
+		return
+	}
 
 	switch program {
 	case "cat":
@@ -485,11 +518,6 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyNaabu(out, command)
 	case "dd":
 		classifyDD(out, command)
-	case "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
-		"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
-		"mkfs.ntfs", "mkntfs", "mkfs.minix", "mkswap", "mkfs.exfat",
-		"mkexfatfs":
-		classifyPOSIXFilesystemFormat(out, command, program)
 	case "wipefs":
 		classifyWipeFS(out, command)
 	case "sgdisk":

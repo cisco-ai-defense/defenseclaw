@@ -27,3 +27,7 @@ func validateDeviceIdentityPathSyntax(target, dataDir string) error {
 func validateFreshIdentityDirectoryPlatform(_ string, _ os.FileInfo) error { return nil }
 
 func validateFreshIdentityFilePlatform(string) error { return nil }
+
+// Windows does not support fsync on an opened directory handle. The file
+// handle itself is flushed before this hook is reached.
+func syncFreshIdentityDirectory(string) error { return nil }

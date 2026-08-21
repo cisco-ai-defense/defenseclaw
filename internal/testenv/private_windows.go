@@ -7,6 +7,7 @@ package testenv
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"unsafe"
 
@@ -34,6 +35,12 @@ func PrivateTempDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("canonicalize private temp dir %s: %v", dir, err)
+	}
+	dir = canonical
 	t.Cleanup(func() {
 		if err := os.RemoveAll(dir); err != nil {
 			t.Errorf("remove private temp dir %s: %v", dir, err)

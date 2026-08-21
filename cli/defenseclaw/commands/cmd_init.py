@@ -22,7 +22,6 @@ Mirrors internal/cli/init.go.
 from __future__ import annotations
 
 import json
-import ntpath
 import os
 import shutil
 import subprocess
@@ -2052,20 +2051,11 @@ def _show_scanner_defaults(cfg) -> None:
     click.echo("  Run 'defenseclaw setup' to customize scanner settings.")
 
 
-def _device_identity_path_within(path: str, root: str) -> bool:
-    normalized_path = os.path.normpath(path).casefold()
-    normalized_root = os.path.normpath(root).casefold()
-    return normalized_path == normalized_root or normalized_path.startswith(
-        normalized_root + os.sep
+def _validate_device_identity_windows_path_syntax(*paths: str) -> None:
+    from defenseclaw.doctor_recovery import (
+        _windows_path_has_alternate_data_stream,
     )
 
-
-def _windows_path_has_alternate_data_stream(path: str) -> bool:
-    _volume, remainder = ntpath.splitdrive(os.fspath(path))
-    return ":" in remainder
-
-
-def _validate_device_identity_windows_path_syntax(*paths: str) -> None:
     if os.name != "nt":
         return
     if any(_windows_path_has_alternate_data_stream(path) for path in paths):
@@ -2076,23 +2066,18 @@ def _validate_device_identity_windows_path_syntax(*paths: str) -> None:
 
 
 def _validate_device_identity_artifact_layout(target: str, identity_root: str) -> None:
+    from defenseclaw.doctor_recovery import (
+        _device_identity_artifact_alias_reason,
+    )
+
     if os.path.dirname(identity_root) == identity_root:
         raise click.ClickException(
             "cannot safely create device identity (data-dir-too-broad)"
         )
-    secret_target = os.path.join(identity_root, "device.provenance.secret")
-    provenance_target = target + ".provenance"
-    normalized = tuple(
-        os.path.normpath(candidate).casefold()
-        for candidate in (target, secret_target, provenance_target)
-    )
-    if len(set(normalized)) != len(normalized):
+    reason = _device_identity_artifact_alias_reason(target, identity_root)
+    if reason is not None:
         raise click.ClickException(
-            "cannot safely create device identity (identity-artifact-alias)"
-        )
-    if _device_identity_path_within(target, secret_target):
-        raise click.ClickException(
-            "cannot safely create device identity (reserved-provenance-secret-path)"
+            f"cannot safely create device identity ({reason})"
         )
 
 
@@ -2233,6 +2218,7 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
         RecoveryApplyStatus,
         RecoveryDisposition,
         RecoveryRefusedError,
+        _device_identity_paths_equal,
         apply_device_key_recovery,
         plan_missing_device_key,
     )
@@ -2243,8 +2229,8 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
             "cannot safely create device identity (target-outside-data-dir)"
         ) from exc
     if (
-        os.path.normcase(common) != os.path.normcase(identity_root)
-        or os.path.normcase(target) == os.path.normcase(identity_root)
+        not _device_identity_paths_equal(common, identity_root)
+        or _device_identity_paths_equal(target, identity_root)
     ):
         raise click.ClickException(
             "cannot safely create device identity (target-outside-data-dir)"
