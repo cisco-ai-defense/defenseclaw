@@ -487,7 +487,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyDD(out, command)
 	case "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
 		"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
-		"mkfs.ntfs", "mkntfs", "mkswap", "mkfs.exfat", "mkexfatfs":
+		"mkfs.ntfs", "mkntfs", "mkfs.minix", "mkswap", "mkfs.exfat",
+		"mkexfatfs":
 		classifyPOSIXFilesystemFormat(out, command, program)
 	case "wipefs":
 		classifyWipeFS(out, command)
@@ -7525,11 +7526,16 @@ func classifyPOSIXFilesystemFormat(
 	case "mkfs.ntfs", "mkntfs":
 		flags = exactOptionSet("-F")
 	}
+	previewOptions := exactOptionSet("--help", "--version")
+	if program == "mkfs.minix" {
+		previewOptions["-h"] = struct{}{}
+		previewOptions["-V"] = struct{}{}
+	}
 	parsed := parseOwnedPOSIXOptions(
 		command.Argv,
 		nil,
 		flags,
-		exactOptionSet("--help", "--version"),
+		previewOptions,
 	)
 	if parsed.preview {
 		command.Effect = EffectPreview
@@ -7541,7 +7547,18 @@ func classifyPOSIXFilesystemFormat(
 	if !parsed.complete {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
-	if len(parsed.positionals) != 1 || parsed.positionals[0] == "-" {
+	target := ""
+	switch {
+	case len(parsed.positionals) == 1:
+		target = parsed.positionals[0]
+	case program == "mkfs.minix" && len(parsed.positionals) == 2 &&
+		validMinixBlockCount(parsed.positionals[1]):
+		target = parsed.positionals[0]
+	default:
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if target == "-" {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
@@ -7551,10 +7568,15 @@ func classifyPOSIXFilesystemFormat(
 		}
 	}
 	addOperation(command, OperationWrite)
-	if isRawBlockDeviceTarget(parsed.positionals[0]) {
+	if isRawBlockDeviceTarget(target) {
 		addOperation(command, OperationDiskWrite)
 	}
-	appendCommandPath(out, command, PathAccessWrite, parsed.positionals[0])
+	appendCommandPath(out, command, PathAccessWrite, target)
+}
+
+func validMinixBlockCount(value string) bool {
+	blocks, err := strconv.ParseUint(value, 10, 64)
+	return err == nil && blocks > 10 && blocks < 65536
 }
 
 func classifyWipeFS(out *parseOutput, command *CommandFact) {

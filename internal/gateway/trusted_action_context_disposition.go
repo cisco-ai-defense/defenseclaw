@@ -490,7 +490,8 @@ func trustedActionStaticContentPipesToExternalEgress(
 	rule PatternRule,
 	source actionfacts.CommandFact,
 ) bool {
-	if !trustedActionStaticPrintfEmitsRuleMatch(rule, source) {
+	if !trustedActionStaticPrintfEmitsRuleMatch(rule, source) &&
+		!trustedActionStaticEchoEmitsRuleMatch(rule, source) {
 		return false
 	}
 	return trustedActionCommandFeedsExternalUpload(facts, source.ID)
@@ -641,6 +642,18 @@ func trustedActionStaticPrintfEmitsRuleMatch(
 	}
 	return len(command.Redirects) == 0 &&
 		trustedActionStaticPrintfArgumentMatchesRule(rule, command)
+}
+
+func trustedActionStaticEchoEmitsRuleMatch(
+	rule PatternRule,
+	command actionfacts.CommandFact,
+) bool {
+	for _, segment := range actionfacts.StaticPOSIXEchoStdoutSegments(command) {
+		if trustedActionRuleMatchesStaticOutputSegment(rule, segment) {
+			return true
+		}
+	}
+	return false
 }
 
 func trustedActionRuleMatchesStaticOutputSegment(

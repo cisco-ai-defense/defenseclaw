@@ -1045,8 +1045,8 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-MKFS",
-        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
-        "pattern": "(?i)\\b(?:mkfs(?:\\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\\b",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+        "pattern": "(?i)\\b(?:mkfs(?:\\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat|minix))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\\b",
         "title": "Filesystem format command",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -1068,7 +1068,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-DEVICE-WIPE",
-        "expression": "f.commands.exists(c, c.argv_complete && c.program != 'dd' && !(c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs']) && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program != 'dd' && !(c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs']) && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
         "pattern": "a^",
         "title": "Destructive write to a disk device",
         "severity": "CRITICAL",
