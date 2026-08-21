@@ -2016,6 +2016,26 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         # simply lands with no rows for now.
         return $sb.ToString()
     }
+    # Windows managed_enterprise's manifest validator refuses any
+    # `enabled: true` target without an `agent_version` that also meets
+    # the connector's Windows minimum — see
+    # requireWindowsEnterpriseManagedAgentVersion in
+    # internal/enterprisehooks/install_windows.go (codex >= 0.131.0,
+    # claudecode >= 2.1.152). When install-time discovery fails
+    # (agent not yet installed under the target user's profile —
+    # the common state on managed_enterprise rollouts where AVC
+    # pushes DefenseClaw first), fall back to the exact minimum so
+    # the row is valid. The runtime hook-enumerator (spec 005 D1)
+    # re-renders targets.yaml on its 5-min tick and overwrites this
+    # placeholder with the real installed version the moment the
+    # agent binary shows up in the target user's home. If the
+    # operator ever installs an agent below the minimum, the
+    # enumerator's real version renders lower and the guardian
+    # refuses to enroll — same fail-closed contract as before.
+    $script:DefenseClawWindowsAgentVersionMinimum = @{
+        'codex'      = '0.131.0'
+        'claudecode' = '2.1.152'
+    }
     foreach ($u in $users) {
         foreach ($c in $Connectors) {
             $version = ''
@@ -2025,32 +2045,20 @@ function Get-DefenseClawRenderedEnterpriseTargets {
             }
             catch {
                 # Discovery is best-effort. Unreadable or concurrently changed
-                # user metadata produces a version-less row; the guardian's
-                # enumerator re-renders on its 5-min tick and picks up the
-                # agent's real version when it becomes readable.
+                # user metadata falls through to the connector's Windows
+                # minimum below.
                 $version = ''
             }
             $version = ConvertTo-DefenseClawConnectorMetadataVersion `
                 -Value $version
+            if ([string]::IsNullOrWhiteSpace($version)) {
+                $version = $script:DefenseClawWindowsAgentVersionMinimum[$c]
+            }
             [void]$sb.AppendLine("  - user: `"$($u.UserName -replace '"','\"')`"")
             [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
             [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
             [void]$sb.AppendLine("    connector: `"$c`"")
-            if (-not [string]::IsNullOrWhiteSpace($version)) {
-                [void]$sb.AppendLine("    agent_version: `"$version`"")
-            }
-            # `enabled: true` is the install-time default. The runtime
-            # hook-enumerator service (spec 005 D1) is the authority on
-            # per-target reachability — it re-renders targets.yaml on its
-            # 5-min tick and flips this to `enabled: false` when the agent
-            # binary isn't reachable in the target user's profile. Gating
-            # install-time enablement on agent-present-on-disk (as an
-            # earlier revision did) defeats the enumerator's purpose and
-            # trips the attestation validator's "requires at least one
-            # enabled <connector> target" pre-check on any endpoint where
-            # the agent client hasn't been installed yet — a common state
-            # on managed_enterprise rollouts where AVC pushes DefenseClaw
-            # before the operator installs Claude / Codex / Cursor.
+            [void]$sb.AppendLine("    agent_version: `"$version`"")
             [void]$sb.AppendLine('    enabled: true')
         }
     }
