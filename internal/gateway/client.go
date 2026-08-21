@@ -77,14 +77,20 @@ const (
 // NewClient creates a gateway client. The device identity is loaded or created
 // automatically from the configured key file path.
 func NewClient(cfg *config.GatewayConfig, dataDirs ...string) (*Client, error) {
-	device, err := LoadOrCreateIdentity(cfg.DeviceKeyFile, dataDirs...)
+	if len(dataDirs) > 1 {
+		return nil, fmt.Errorf("gateway: device identity accepts at most one data directory")
+	}
+	target, dataDir, err := normalizeDeviceIdentityPaths(cfg.DeviceKeyFile, dataDirs)
 	if err != nil {
 		return nil, err
 	}
-	dataDir := filepath.Dir(cfg.DeviceKeyFile)
-	if len(dataDirs) == 1 {
-		dataDir = filepath.Clean(dataDirs[0])
+	device, err := loadOrCreateIdentityAt(target, dataDir)
+	if err != nil {
+		return nil, err
 	}
+	// Keep every downstream consumer, including the telemetry resource
+	// fingerprint, on the same canonical path used for identity custody.
+	cfg.DeviceKeyFile = target
 
 	return &Client{
 		cfg:     cfg,

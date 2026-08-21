@@ -296,20 +296,56 @@ def test_device_key_plan_blocks_reserved_artifact_paths_without_mutation(
     assert not target.exists()
 
 
-def test_device_key_plan_blocks_relative_and_root_data_dirs_without_mutation(
+def test_device_key_plan_resolves_local_relative_target_and_blocks_root_data_dir(
     tmp_path: Path,
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    tilde_parent = data_dir / "~"
+    tilde_parent.mkdir(mode=0o700)
+    from defenseclaw.file_permissions import make_private_directory
+
+    make_private_directory(tilde_parent)
+    before = tuple(data_dir.iterdir())
+
+    relative = plan_missing_device_key("device.key", data_dir=data_dir)
+    tilde_relative = plan_missing_device_key("~/device.key", data_dir=data_dir)
+    traversal = plan_missing_device_key("../outside.key", data_dir=data_dir)
+    root = Path(tmp_path.anchor)
+    broad = plan_missing_device_key(root / "device.key", data_dir=root)
+
+    assert relative.disposition is RecoveryDisposition.READY
+    assert relative.target == os.fspath(data_dir / "device.key")
+    assert tilde_relative.disposition is RecoveryDisposition.READY
+    assert tilde_relative.target == os.fspath(data_dir / "~" / "device.key")
+    assert traversal.disposition is RecoveryDisposition.BLOCKED
+    assert traversal.reason_code == "invalid-recovery-path"
+    assert broad.disposition is RecoveryDisposition.BLOCKED
+    assert broad.reason_code == "data-dir-too-broad"
+    assert tuple(data_dir.iterdir()) == before
+
+
+def test_device_key_plan_rejects_tilde_data_dir_without_expansion() -> None:
+    plan = plan_missing_device_key("device.key", data_dir="~/.defenseclaw")
+
+    assert plan.disposition is RecoveryDisposition.BLOCKED
+    assert plan.reason_code == "invalid-recovery-path"
+
+
+@pytest.mark.parametrize(
+    "target",
+    ("../outside.key", r"C:device.key", r"\device.key", "device.key:stream"),
+)
+def test_device_key_plan_rejects_nonlocal_relative_spellings(
+    tmp_path: Path,
+    target: str,
 ) -> None:
     data_dir = _private_data_dir(tmp_path)
     before = tuple(data_dir.iterdir())
 
-    relative = plan_missing_device_key("device.key", data_dir=data_dir)
-    root = Path(tmp_path.anchor)
-    broad = plan_missing_device_key(root / "device.key", data_dir=root)
+    plan = plan_missing_device_key(target, data_dir=data_dir)
 
-    assert relative.disposition is RecoveryDisposition.BLOCKED
-    assert relative.reason_code == "invalid-recovery-path"
-    assert broad.disposition is RecoveryDisposition.BLOCKED
-    assert broad.reason_code == "data-dir-too-broad"
+    assert plan.disposition is RecoveryDisposition.BLOCKED
+    assert plan.reason_code == "invalid-recovery-path"
     assert tuple(data_dir.iterdir()) == before
 
 

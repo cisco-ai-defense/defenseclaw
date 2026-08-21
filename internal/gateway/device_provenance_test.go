@@ -24,13 +24,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -120,16 +123,22 @@ func TestLoadOrCreateIdentityNestedKeyUsesDataRootSecret(t *testing.T) {
 	}
 }
 
-func TestNewClientNestedKeyRetainsConfiguredDataDir(t *testing.T) {
+func TestNewClientRelativeNestedKeyRetainsConfiguredDataDir(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
-	keyFile := filepath.Join(dataDir, "identity", "nested", "device.key")
-	client, err := NewClient(&config.GatewayConfig{DeviceKeyFile: keyFile}, dataDir)
+	relativeKey := filepath.Join("identity", "nested", "device.key")
+	keyFile := filepath.Join(dataDir, relativeKey)
+	cfg := &config.GatewayConfig{DeviceKeyFile: relativeKey}
+	client, err := NewClient(cfg, dataDir)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
 	if client.dataDir != dataDir {
 		t.Fatalf("client dataDir = %q, want %q", client.dataDir, dataDir)
 	}
+	if cfg.DeviceKeyFile != keyFile {
+		t.Fatalf("canonical device key = %q, want %q", cfg.DeviceKeyFile, keyFile)
+	}
+	assertBoundDeviceProvenance(t, keyFile, dataDir)
 }
 
 func TestLoadOrCreateIdentityRefusesMissingKeyOutsideDataDirWithoutMutation(t *testing.T) {
@@ -169,20 +178,51 @@ func TestLoadOrCreateIdentityLoadsExistingOutsideDataDirWithoutBlessing(t *testi
 	}
 }
 
-func TestLoadOrCreateIdentityRefusesRelativeMissingKeyWithoutMutation(t *testing.T) {
+func TestLoadOrCreateIdentityResolvesRelativeMissingKeyUnderDataDir(t *testing.T) {
 	workingDir := t.TempDir()
 	t.Chdir(workingDir)
-	dataDir := t.TempDir()
-	targetParent := filepath.Join(workingDir, "relative-parent")
+	dataDir := testenv.PrivateTempDir(t)
+	relativeKey := filepath.Join("identity", "nested", "device.key")
+	keyFile := filepath.Join(dataDir, relativeKey)
 
-	if _, err := LoadOrCreateIdentity(filepath.Join("relative-parent", "device.key"), dataDir); err == nil {
-		t.Fatal("LoadOrCreateIdentity created a relative missing key")
+	if _, err := LoadOrCreateIdentity(relativeKey, dataDir); err != nil {
+		t.Fatalf("LoadOrCreateIdentity: %v", err)
 	}
-	if _, err := os.Lstat(targetParent); !os.IsNotExist(err) {
-		t.Fatalf("relative parent was mutated: %v", err)
+	assertBoundDeviceProvenance(t, keyFile, dataDir)
+	if _, err := os.Lstat(filepath.Join(workingDir, "identity")); !os.IsNotExist(err) {
+		t.Fatalf("relative key path mutated the process working directory: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(dataDir, deviceProvenanceSecretName)); !os.IsNotExist(err) {
-		t.Fatalf("provenance secret was created after relative-path refusal: %v", err)
+}
+
+func TestLoadOrCreateIdentityLoadsRelativeExistingKeyWithoutBlessing(t *testing.T) {
+	workingDir := t.TempDir()
+	t.Chdir(workingDir)
+	dataDir := testenv.PrivateTempDir(t)
+	relativeKey := filepath.Join("identity", "device.key")
+	keyFile := filepath.Join(dataDir, relativeKey)
+	if err := safefile.ProtectDirectory(filepath.Dir(keyFile)); err != nil {
+		t.Fatalf("ProtectDirectory: %v", err)
+	}
+	writeLegacyDeviceKey(t, keyFile)
+	want, err := LoadOrCreateIdentity(keyFile, dataDir)
+	if err != nil {
+		t.Fatalf("load absolute key: %v", err)
+	}
+
+	got, err := LoadOrCreateIdentity(relativeKey, dataDir)
+	if err != nil {
+		t.Fatalf("load relative key: %v", err)
+	}
+	if got.DeviceID != want.DeviceID {
+		t.Fatalf("relative key device ID = %q, want %q", got.DeviceID, want.DeviceID)
+	}
+	for _, path := range []string{
+		filepath.Join(dataDir, deviceProvenanceSecretName),
+		keyFile + ".provenance",
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("relative legacy key was blessed with %s: %v", path, err)
+		}
 	}
 }
 
@@ -213,6 +253,114 @@ func TestLoadOrCreateIdentityRefusesRelativeDataDirBeforeExistingRead(t *testing
 	}
 	if _, err := os.Lstat(keyFile + ".provenance"); !os.IsNotExist(err) {
 		t.Fatalf("key was blessed through a relative data directory: %v", err)
+	}
+}
+
+func TestLoadOrCreateIdentityRefusesRelativeTraversalBeforeRead(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	outsideKey := filepath.Join(filepath.Dir(dataDir), "outside-device.key")
+	writeLegacyDeviceKey(t, outsideKey)
+
+	if _, err := LoadOrCreateIdentity(filepath.Join("..", filepath.Base(outsideKey)), dataDir); err == nil {
+		t.Fatal("LoadOrCreateIdentity read a relative key outside data_dir")
+	}
+	if _, err := os.Lstat(outsideKey + ".provenance"); !os.IsNotExist(err) {
+		t.Fatalf("outside key was blessed through relative traversal: %v", err)
+	}
+}
+
+func TestPrepareFreshIdentityDirectoriesSyncsEachCreatedParent(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	parent := filepath.Join(dataDir, "identity", "nested")
+	var synced []string
+
+	err := prepareFreshIdentityDirectoriesWith(
+		dataDir,
+		parent,
+		safefile.ProtectDirectory,
+		func(path string) error {
+			synced = append(synced, path)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("prepareFreshIdentityDirectoriesWith: %v", err)
+	}
+	want := []string{dataDir, filepath.Join(dataDir, "identity")}
+	if !slices.Equal(synced, want) {
+		t.Fatalf("synced parents = %#v, want %#v", synced, want)
+	}
+}
+
+func TestPrepareFreshIdentityDirectoriesStopsAfterParentSyncFailure(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	first := filepath.Join(dataDir, "identity")
+	second := filepath.Join(first, "nested")
+	syncFailure := errors.New("injected directory sync failure")
+
+	err := prepareFreshIdentityDirectoriesWith(
+		dataDir,
+		second,
+		safefile.ProtectDirectory,
+		func(string) error { return syncFailure },
+	)
+	if !errors.Is(err, syncFailure) {
+		t.Fatalf("prepareFreshIdentityDirectoriesWith error = %v, want %v", err, syncFailure)
+	}
+	if info, statErr := os.Lstat(first); statErr != nil || !info.IsDir() {
+		t.Fatalf("first validated directory was not retained: info=%v err=%v", info, statErr)
+	}
+	if _, statErr := os.Lstat(second); !os.IsNotExist(statErr) {
+		t.Fatalf("deeper directory was created after sync failure: %v", statErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dataDir, deviceProvenanceSecretName)); !os.IsNotExist(statErr) {
+		t.Fatalf("identity artifact was created after sync failure: %v", statErr)
+	}
+}
+
+func TestPrepareFreshIdentityDirectoriesRetryResyncsExistingEntries(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	first := filepath.Join(dataDir, "identity")
+	second := filepath.Join(first, "nested")
+	syncFailure := errors.New("injected intermediate sync failure")
+	syncCalls := 0
+
+	err := prepareFreshIdentityDirectoriesWith(
+		dataDir,
+		second,
+		safefile.ProtectDirectory,
+		func(string) error {
+			syncCalls++
+			if syncCalls == 2 {
+				return syncFailure
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, syncFailure) {
+		t.Fatalf("first preparation error = %v, want %v", err, syncFailure)
+	}
+	for _, path := range []string{first, second} {
+		if info, statErr := os.Lstat(path); statErr != nil || !info.IsDir() {
+			t.Fatalf("interrupted directory %s missing: info=%v err=%v", path, info, statErr)
+		}
+	}
+
+	var retried []string
+	if err := prepareFreshIdentityDirectoriesWith(
+		dataDir,
+		second,
+		safefile.ProtectDirectory,
+		func(path string) error {
+			retried = append(retried, path)
+			return nil
+		},
+	); err != nil {
+		t.Fatalf("retry preparation: %v", err)
+	}
+	want := []string{dataDir, first}
+	if !slices.Equal(retried, want) {
+		t.Fatalf("retry synced parents = %#v, want %#v", retried, want)
 	}
 }
 

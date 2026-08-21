@@ -2130,10 +2130,29 @@ def _validate_private_identity_directory(path: str) -> None:
         )
 
 
-def _prepare_device_identity_directories(identity_root: str, target_parent: str) -> None:
+def _sync_new_device_identity_directory_parent(path: str) -> None:
+    if os.name == "nt":
+        # Windows has no supported directory-handle fsync. Each identity file
+        # handle is still flushed before publication completes.
+        return
+    from defenseclaw.doctor_recovery import _fsync_directory
+
+    _fsync_directory(path)
+
+
+def _prepare_device_identity_directories(
+    identity_root: str,
+    target_parent: str,
+    *,
+    protect_directory=None,
+    sync_directory=None,
+) -> None:
     import stat
 
     from defenseclaw.file_permissions import make_private_directory
+
+    protect_directory = protect_directory or make_private_directory
+    sync_directory = sync_directory or _sync_new_device_identity_directory_parent
 
     _validate_private_identity_directory(identity_root)
     try:
@@ -2164,7 +2183,7 @@ def _prepare_device_identity_directories(identity_root: str, target_parent: str)
                 # The validated current directory is owner-private. Create
                 # exactly one child so a nested link can never redirect a
                 # recursive mkdir into an outside tree.
-                make_private_directory(child)
+                protect_directory(child)
             except OSError as exc:
                 raise click.ClickException(
                     "cannot safely create device identity (directory-create-failed)"
@@ -2179,6 +2198,15 @@ def _prepare_device_identity_directories(identity_root: str, target_parent: str)
                     "cannot safely create device identity (directory-chain-is-not-regular)"
                 )
         _validate_private_identity_directory(child)
+        # Re-sync existing entries too: a prior interrupted attempt may have
+        # created the child but failed before its containing directory became
+        # durable.
+        try:
+            sync_directory(current)
+        except OSError as exc:
+            raise click.ClickException(
+                "cannot safely create device identity (directory-sync-failed)"
+            ) from exc
         current = child
 
 
@@ -2190,10 +2218,6 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
     being blessed after the fact.
     """
     raw_path = os.fspath(path)
-    if not os.path.isabs(raw_path):
-        raise click.ClickException(
-            "cannot safely create device identity (device-key-path-not-absolute)"
-        )
     raw_data_dir = os.fspath(data_dir) if data_dir is not None else None
     if raw_data_dir is not None and not os.path.isabs(raw_data_dir):
         raise click.ClickException(
@@ -2204,10 +2228,25 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
         *((raw_data_dir,) if raw_data_dir is not None else ()),
     )
 
-    target = os.path.normpath(os.path.abspath(raw_path))
-    identity_root = os.path.normpath(
-        os.path.abspath(raw_data_dir or os.path.dirname(target))
-    )
+    if raw_data_dir is None:
+        if not os.path.isabs(raw_path):
+            raise click.ClickException(
+                "cannot safely create device identity (device-key-path-not-absolute)"
+            )
+        target = os.path.normpath(os.path.abspath(raw_path))
+        identity_root = os.path.dirname(target)
+    else:
+        from defenseclaw.doctor_recovery import _normalize_device_identity_disk_paths
+
+        target, identity_root = _normalize_device_identity_disk_paths(
+            raw_path,
+            raw_data_dir,
+        )
+        if not target:
+            raise click.ClickException(
+                "cannot safely create device identity "
+                "(device-key-path-not-local-to-data-dir)"
+            )
     target_parent = os.path.dirname(target)
     _validate_device_identity_windows_path_syntax(target, identity_root)
     _validate_device_identity_artifact_layout(target, identity_root)

@@ -2266,10 +2266,11 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 	}, nil
 }
 
-// ApplyRuntimeV8DataDirDefaultsFromBytes re-bases only omitted path fields on
-// the canonical compiler-selected data directory. It is used after compilation
-// when data_dir was defaulted externally (for example by a reload transaction).
-// Explicit operator paths are preserved.
+// ApplyRuntimeV8DataDirDefaultsFromBytes re-bases omitted path fields and an
+// explicit relative device-key spelling on the canonical compiler-selected
+// data directory. It is used after compilation when data_dir was defaulted
+// externally (for example by a reload transaction). Explicit absolute paths
+// are preserved.
 func ApplyRuntimeV8DataDirDefaultsFromBytes(candidate *Config, source string, raw []byte, dataDir string) error {
 	document, err := ParseV8YAML(source, raw)
 	if err != nil {
@@ -2320,6 +2321,12 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("gateway", "device_key_file") {
 		candidate.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
+	} else if gateway := v8YAMLMapValue(root, "gateway"); gateway != nil {
+		if keyFile := v8YAMLMapValue(gateway, "device_key_file"); keyFile != nil {
+			if resolved, ok := ResolveRelativeGatewayDeviceKeyFile(keyFile.Value, dataDir); ok {
+				candidate.Gateway.DeviceKeyFile = resolved
+			}
+		}
 	}
 }
 
@@ -2468,6 +2475,9 @@ func loadConfigSource(
 	}
 
 	migrateConfig(&cfg)
+	if !runtimeV8 {
+		normalizeRelativeGatewayDeviceKeyFile(&cfg)
+	}
 	if runtimeV8 {
 		if cfg.ConfigVersion != ObservabilityV8ConfigVersion {
 			return nil, fmt.Errorf("config: schema v8 is required; run defenseclaw upgrade first")

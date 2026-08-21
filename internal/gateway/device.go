@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -57,6 +58,10 @@ func LoadOrCreateIdentity(keyFile string, dataDirs ...string) (*DeviceIdentity, 
 	if err != nil {
 		return nil, err
 	}
+	return loadOrCreateIdentityAt(target, dataDir)
+}
+
+func loadOrCreateIdentityAt(target, dataDir string) (*DeviceIdentity, error) {
 	if err := validateDeviceIdentityPathSyntax(target, dataDir); err != nil {
 		return nil, err
 	}
@@ -99,15 +104,8 @@ func LoadOrCreateIdentity(keyFile string, dataDirs ...string) (*DeviceIdentity, 
 }
 
 func normalizeDeviceIdentityPaths(keyFile string, dataDirs []string) (string, string, error) {
-	if !filepath.IsAbs(keyFile) {
-		return "", "", fmt.Errorf("gateway: device key path must be absolute")
-	}
-	target, err := filepath.Abs(filepath.Clean(keyFile))
-	if err != nil {
-		return "", "", fmt.Errorf("gateway: normalize device key path: %w", err)
-	}
-
-	dataDir := filepath.Dir(target)
+	dataDir := ""
+	var err error
 	if len(dataDirs) == 1 {
 		if !filepath.IsAbs(dataDirs[0]) {
 			return "", "", fmt.Errorf("gateway: device identity data directory must be absolute")
@@ -116,6 +114,25 @@ func normalizeDeviceIdentityPaths(keyFile string, dataDirs []string) (string, st
 		if err != nil {
 			return "", "", fmt.Errorf("gateway: normalize device identity data directory: %w", err)
 		}
+	}
+
+	if !filepath.IsAbs(keyFile) {
+		if len(dataDirs) != 1 {
+			return "", "", fmt.Errorf("gateway: relative device key path requires an explicit absolute data directory")
+		}
+		resolved, ok := config.ResolveRelativeGatewayDeviceKeyFile(keyFile, dataDir)
+		if !ok {
+			return "", "", fmt.Errorf("gateway: relative device key path must stay strictly inside the data directory and use no volume")
+		}
+		return resolved, dataDir, nil
+	}
+
+	target, err := filepath.Abs(filepath.Clean(keyFile))
+	if err != nil {
+		return "", "", fmt.Errorf("gateway: normalize device key path: %w", err)
+	}
+	if dataDir == "" {
+		dataDir = filepath.Dir(target)
 	}
 	return target, dataDir, nil
 }
@@ -222,6 +239,19 @@ func writeFreshDeviceIdentity(keyFile, dataDir string, keyData []byte) error {
 }
 
 func prepareFreshIdentityDirectories(dataDir, parent string) error {
+	return prepareFreshIdentityDirectoriesWith(
+		dataDir,
+		parent,
+		safefile.ProtectDirectory,
+		syncFreshIdentityDirectory,
+	)
+}
+
+func prepareFreshIdentityDirectoriesWith(
+	dataDir, parent string,
+	protectDirectory func(string) error,
+	syncDirectory func(string) error,
+) error {
 	if err := validateFreshIdentityDirectory(dataDir); err != nil {
 		return fmt.Errorf("gateway: device identity data directory must already be private: %w", err)
 	}
@@ -253,7 +283,7 @@ func prepareFreshIdentityDirectories(dataDir, parent string) error {
 			// current directory. Let the platform helper create it privately in
 			// the first place; on Windows this avoids a brief inherited-DACL
 			// window before protection is applied.
-			if err := safefile.ProtectDirectory(next); err != nil {
+			if err := protectDirectory(next); err != nil {
 				return fmt.Errorf("gateway: create private device key directory component %s: %w", next, err)
 			}
 		} else {
@@ -261,6 +291,13 @@ func prepareFreshIdentityDirectories(dataDir, parent string) error {
 		}
 		if err := validateFreshIdentityDirectory(next); err != nil {
 			return err
+		}
+		// Persist, or re-assert after an interrupted prior attempt, each validated
+		// directory name before a deeper component or identity artifact can be
+		// created. Windows' helper is intentionally a no-op because directory
+		// handles cannot be fsynced.
+		if err := syncDirectory(current); err != nil {
+			return fmt.Errorf("gateway: sync device key directory parent %s: %w", current, err)
 		}
 		current = next
 	}

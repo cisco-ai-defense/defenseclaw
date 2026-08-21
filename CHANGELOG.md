@@ -143,11 +143,15 @@ boundary.
   Doctor can hold its exact anti-replacement lease without weakening Windows
   sharing or ACL checks. Fresh device identities now publish an owner-private
   random provenance secret, an HMAC bound to the exact Ed25519 key bytes, and
-  finally the key itself with create-new semantics; on POSIX, each containing
-  directory entry is synced before the next artifact can be published. Existing
-  unprovenanced keys are never blessed after the fact; they remain usable but
-  Doctor reports them for continuity review. Native Windows CI now requires
-  both live audit-database custody and HMAC-bound device identity checks to pass.
+  finally the key itself with create-new semantics. A portable relative
+  `gateway.device_key_file` remains compatible by resolving strictly beneath
+  the canonical absolute `data_dir`; rooted, drive-relative, ADS, traversal,
+  and outside-root spellings still fail closed before read or mutation. On
+  POSIX, every validated nested-directory entry is synced before deeper work
+  and re-synced on retry after an interrupted attempt. Existing unprovenanced
+  keys are never blessed after the fact; they remain usable but Doctor reports
+  them for continuity review. Native Windows CI now requires both live
+  audit-database custody and HMAC-bound device identity checks to pass.
 - **`make all` is again the explicit same-checkout developer reinstall**:
   markerless or older source-owned state may advance with the checkout for
   local development. Foreign, newer, release-managed, and different-checkout

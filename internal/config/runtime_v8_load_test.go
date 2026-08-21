@@ -175,6 +175,101 @@ observability: {}
 	}
 }
 
+func TestLoadRuntimeV8FileResolvesRelativeDeviceKeyUnderExplicitDataDir(t *testing.T) {
+	dir := t.TempDir()
+	configuredDataDir := filepath.Join(dir, "state")
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("config_version: 8\ndata_dir: " + configuredDataDir + `
+gateway:
+  device_key_file: identity/device.key
+observability: {}
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(configuredDataDir, "identity", "device.key")
+	if cfg.Gateway.DeviceKeyFile != want {
+		t.Fatalf("gateway.device_key_file = %q, want %q", cfg.Gateway.DeviceKeyFile, want)
+	}
+}
+
+func TestLoadRuntimeV8FileResolvesRelativeDeviceKeyAfterDefaultDataDirCompilation(t *testing.T) {
+	defaultDataDir := filepath.Join(t.TempDir(), "effective-state")
+	t.Setenv("DEFENSECLAW_HOME", defaultDataDir)
+	configDir := t.TempDir()
+	path := filepath.Join(configDir, "config.yaml")
+	raw := []byte(`config_version: 8
+gateway:
+  device_key_file: identity/device.key
+observability: {}
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(defaultDataDir, "identity", "device.key")
+	if cfg.Gateway.DeviceKeyFile != want {
+		t.Fatalf("gateway.device_key_file = %q, want %q", cfg.Gateway.DeviceKeyFile, want)
+	}
+}
+
+func TestApplyRuntimeV8DataDirDefaultsRebasesExplicitRelativeDeviceKey(t *testing.T) {
+	provisionalDataDir := filepath.Join(t.TempDir(), "provisional-state")
+	t.Setenv("DEFENSECLAW_HOME", provisionalDataDir)
+	source := filepath.Join(provisionalDataDir, "config.yaml")
+	raw := []byte(`config_version: 8
+gateway:
+  device_key_file: identity/device.key
+observability: {}
+`)
+	cfg, err := LoadRuntimeV8CandidateFromBytes(source, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisionalKey := filepath.Join(provisionalDataDir, "identity", "device.key")
+	if cfg.Gateway.DeviceKeyFile != provisionalKey {
+		t.Fatalf("provisional gateway.device_key_file = %q, want %q", cfg.Gateway.DeviceKeyFile, provisionalKey)
+	}
+	finalDataDir := filepath.Join(t.TempDir(), "compiled-state")
+	cfg.DataDir = finalDataDir
+	if err := ApplyRuntimeV8DataDirDefaultsFromBytes(cfg, source, raw, finalDataDir); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(finalDataDir, "identity", "device.key")
+	if cfg.Gateway.DeviceKeyFile != want {
+		t.Fatalf("gateway.device_key_file = %q, want %q", cfg.Gateway.DeviceKeyFile, want)
+	}
+}
+
+func TestResolveRelativeGatewayDeviceKeyFileRejectsNonLocalSpellings(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "state")
+	if resolved, ok := ResolveRelativeGatewayDeviceKeyFile(filepath.Join("~", "device.key"), dataDir); !ok || resolved != filepath.Join(dataDir, "~", "device.key") {
+		t.Fatalf("literal tilde component resolved to %q, %t", resolved, ok)
+	}
+	for _, keyFile := range []string{
+		"../outside/device.key",
+		`C:device.key`,
+		`\device.key`,
+		"device.key:stream",
+	} {
+		t.Run(keyFile, func(t *testing.T) {
+			if resolved, ok := ResolveRelativeGatewayDeviceKeyFile(keyFile, dataDir); ok {
+				t.Fatalf("ResolveRelativeGatewayDeviceKeyFile(%q) = %q, true", keyFile, resolved)
+			}
+		})
+	}
+	if resolved, ok := ResolveRelativeGatewayDeviceKeyFile("device.key", "relative-data"); ok {
+		t.Fatalf("relative data directory resolved to %q", resolved)
+	}
+}
+
 func TestLoadRuntimeV8FromBytesRejectsV7BeforeCompatibilityDecode(t *testing.T) {
 	_, err := LoadRuntimeV8FromBytes("config.yaml", []byte("config_version: 7\notel:\n  enabled: true\n"))
 	if err == nil {

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import ntpath
 import os
 import platform
 import stat
@@ -83,6 +84,33 @@ _untrusted_managed_config_warned_paths: set[str] = set()
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
 CONFIG_FILE_NAME = "config.yaml"
+
+
+def _resolve_relative_gateway_device_key_file(key_file: str, data_dir: str) -> str | None:
+    """Resolve one portable relative device-key path beneath an absolute data root."""
+
+    if (
+        not isinstance(key_file, str)
+        or not key_file
+        or "\x00" in key_file
+        or not os.path.isabs(data_dir)
+        or os.path.isabs(key_file)
+        or key_file.startswith(("/", "\\"))
+        or ntpath.splitdrive(key_file)[0]
+        or ":" in key_file
+    ):
+        return None
+    root = os.path.normpath(os.path.abspath(data_dir))
+    target = os.path.normpath(os.path.abspath(os.path.join(root, key_file)))
+    try:
+        common = os.path.commonpath((target, root))
+    except ValueError:
+        return None
+    if common.casefold() != root.casefold() or target.casefold() == root.casefold():
+        return None
+    return target
+
+
 CONFIG_PATH_ENV = "DEFENSECLAW_CONFIG"
 DEPLOYMENT_MODE_ENV = "DEFENSECLAW_DEPLOYMENT_MODE"
 VALID_DEPLOYMENT_MODES = {
@@ -4636,6 +4664,13 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
     )
+    if not os.path.isabs(cfg.gateway.device_key_file):
+        resolved_device_key = _resolve_relative_gateway_device_key_file(
+            cfg.gateway.device_key_file,
+            cfg.data_dir,
+        )
+        if resolved_device_key is not None:
+            cfg.gateway.device_key_file = resolved_device_key
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
     cfg._source_config_version = source_config_version

@@ -1329,6 +1329,40 @@ class TestDeviceIdentityInitialization(unittest.TestCase):
         self.assertIs(health.status, DeviceKeyHealthStatus.LEGACY_UNPROVENANCED)
         self.assertEqual(health.reason_code, "device-key-provenance-absent")
 
+    def test_existing_relative_unprovenanced_key_loads_without_blessing(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import (
+            DeviceKeyHealthStatus,
+            _new_device_key_pem,
+            inspect_device_key,
+        )
+        from defenseclaw.file_permissions import (
+            make_private_directory,
+            protect_private_file,
+        )
+
+        relative_key = os.path.join("~", "device.key")
+        absolute_key = os.path.join(self.data_dir, relative_key)
+        make_private_directory(os.path.dirname(absolute_key))
+        Path(absolute_key).write_bytes(_new_device_key_pem())
+        protect_private_file(absolute_key)
+        working_dir = tempfile.TemporaryDirectory(prefix="dclaw-relative-cwd-")
+        self.addCleanup(working_dir.cleanup)
+        prior_cwd = os.getcwd()
+        self.addCleanup(os.chdir, prior_cwd)
+        os.chdir(working_dir.name)
+
+        _ensure_device_key(relative_key, data_dir=self.data_dir)
+
+        self.assertFalse(os.path.lexists(absolute_key + ".provenance"))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+        health = inspect_device_key(relative_key, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.LEGACY_UNPROVENANCED)
+        self.assertEqual(health.reason_code, "device-key-provenance-absent")
+        self.assertFalse(os.path.lexists(os.path.join(working_dir.name, "~")))
+
     def test_missing_key_outside_data_dir_is_refused_without_parent_mutation(self):
         from defenseclaw.commands.cmd_init import _ensure_device_key
 
@@ -1367,6 +1401,79 @@ class TestDeviceIdentityInitialization(unittest.TestCase):
         )
         health = inspect_device_key(nested_key, data_dir=self.data_dir)
         self.assertIs(health.status, DeviceKeyHealthStatus.VALID)
+
+    def test_nested_private_parent_syncs_each_new_directory_entry(self):
+        from defenseclaw.commands.cmd_init import _prepare_device_identity_directories
+        from defenseclaw.file_permissions import make_private_directory
+
+        target_parent = os.path.join(self.data_dir, "identity", "nested")
+        synced = []
+        _prepare_device_identity_directories(
+            self.data_dir,
+            target_parent,
+            protect_directory=make_private_directory,
+            sync_directory=synced.append,
+        )
+
+        self.assertEqual(
+            synced,
+            [self.data_dir, os.path.join(self.data_dir, "identity")],
+        )
+
+    def test_nested_private_parent_sync_failure_stops_before_deeper_creation(self):
+        from defenseclaw.commands.cmd_init import _prepare_device_identity_directories
+        from defenseclaw.file_permissions import make_private_directory
+
+        first = os.path.join(self.data_dir, "identity")
+        second = os.path.join(first, "nested")
+
+        def fail_sync(_path):
+            raise OSError("injected directory sync failure")
+
+        with self.assertRaises(click.ClickException) as ctx:
+            _prepare_device_identity_directories(
+                self.data_dir,
+                second,
+                protect_directory=make_private_directory,
+                sync_directory=fail_sync,
+            )
+
+        self.assertIn("directory-sync-failed", str(ctx.exception))
+        self.assertTrue(os.path.isdir(first))
+        self.assertFalse(os.path.lexists(second))
+        self.assertFalse(
+            os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
+        )
+
+    def test_nested_private_parent_retry_resyncs_existing_entries(self):
+        from defenseclaw.commands.cmd_init import _prepare_device_identity_directories
+        from defenseclaw.file_permissions import make_private_directory
+
+        first = os.path.join(self.data_dir, "identity")
+        second = os.path.join(first, "nested")
+        sync_calls = []
+
+        def fail_intermediate_sync(path):
+            sync_calls.append(path)
+            if len(sync_calls) == 2:
+                raise OSError("injected intermediate sync failure")
+
+        with self.assertRaises(click.ClickException):
+            _prepare_device_identity_directories(
+                self.data_dir,
+                second,
+                protect_directory=make_private_directory,
+                sync_directory=fail_intermediate_sync,
+            )
+
+        retried = []
+        _prepare_device_identity_directories(
+            self.data_dir,
+            second,
+            protect_directory=make_private_directory,
+            sync_directory=retried.append,
+        )
+        self.assertEqual(retried, [self.data_dir, first])
 
     def test_nested_symlink_is_refused_without_outside_mutation(self):
         from defenseclaw.commands.cmd_init import _ensure_device_key
@@ -1467,7 +1574,26 @@ class TestDeviceIdentityInitialization(unittest.TestCase):
             os.path.lexists(os.path.join(self.data_dir, "device.provenance.secret"))
         )
 
-    def test_relative_key_is_rejected_before_existing_path_shortcut(self):
+    def test_relative_key_is_resolved_under_data_dir_before_existing_shortcut(self):
+        from defenseclaw.commands.cmd_init import _ensure_device_key
+        from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
+
+        working_dir = tempfile.TemporaryDirectory(prefix="dclaw-relative-cwd-")
+        self.addCleanup(working_dir.cleanup)
+        prior_cwd = os.getcwd()
+        self.addCleanup(os.chdir, prior_cwd)
+        os.chdir(working_dir.name)
+        relative_key = os.path.join("relative", "device.key")
+        target = os.path.join(self.data_dir, relative_key)
+
+        _ensure_device_key(relative_key, data_dir=self.data_dir)
+
+        self.assertTrue(os.path.isfile(target))
+        self.assertFalse(os.path.lexists(os.path.join(working_dir.name, "relative")))
+        health = inspect_device_key(relative_key, data_dir=self.data_dir)
+        self.assertIs(health.status, DeviceKeyHealthStatus.VALID)
+
+    def test_relative_key_escape_is_rejected_before_existing_path_shortcut(self):
         from defenseclaw.commands.cmd_init import _ensure_device_key
 
         with patch(
@@ -1475,9 +1601,9 @@ class TestDeviceIdentityInitialization(unittest.TestCase):
             return_value=True,
         ) as lexists:
             with self.assertRaises(click.ClickException) as ctx:
-                _ensure_device_key("relative/device.key", data_dir=self.data_dir)
+                _ensure_device_key("../outside.key", data_dir=self.data_dir)
 
-        self.assertIn("device-key-path-not-absolute", str(ctx.exception))
+        self.assertIn("device-key-path-not-local-to-data-dir", str(ctx.exception))
         lexists.assert_not_called()
 
     def test_relative_data_dir_is_rejected_before_existing_path_shortcut(self):

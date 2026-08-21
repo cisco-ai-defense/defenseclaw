@@ -304,8 +304,10 @@ def plan_missing_device_key(
     credentials.
     """
 
-    normalized_target = _normalize_disk_path(target)
-    normalized_data = _normalize_disk_path(data_dir)
+    normalized_target, normalized_data = _normalize_device_identity_disk_paths(
+        target,
+        data_dir,
+    )
     if normalized_target and normalized_data:
         alias_reason = _device_identity_artifact_alias_reason(
             normalized_target,
@@ -695,6 +697,42 @@ def _normalize_disk_path(value: str | os.PathLike[str]) -> str:
     if not os.path.isabs(expanded):
         return ""
     return os.path.normpath(os.path.abspath(expanded))
+
+
+def _normalize_device_identity_disk_paths(
+    target: str | os.PathLike[str],
+    data_dir: str | os.PathLike[str],
+) -> tuple[str, str]:
+    """Resolve one portable relative key beneath an explicit absolute data root."""
+
+    try:
+        raw_target = os.fspath(target)
+        raw_data = os.fspath(data_dir)
+    except TypeError:
+        return "", ""
+    normalized_data = (
+        _normalize_disk_path(raw_data)
+        if isinstance(raw_data, str) and os.path.isabs(raw_data)
+        else ""
+    )
+    if not isinstance(raw_target, str) or not raw_target or "\x00" in raw_target:
+        return "", normalized_data
+
+    if os.path.isabs(raw_target):
+        normalized_target = _normalize_disk_path(raw_target)
+        target_volume = ntpath.splitdrive(raw_target)[0]
+        if (
+            os.name == "nt"
+            and raw_target.startswith(("/", "\\"))
+            and not target_volume
+        ):
+            return "", normalized_data
+        return normalized_target, normalized_data
+
+    from defenseclaw.config import _resolve_relative_gateway_device_key_file
+
+    resolved = _resolve_relative_gateway_device_key_file(raw_target, normalized_data)
+    return (resolved or ""), normalized_data
 
 
 def _platform_name() -> str:
