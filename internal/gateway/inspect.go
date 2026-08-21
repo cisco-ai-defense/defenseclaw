@@ -226,6 +226,14 @@ func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content
 	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
 	if aid == nil {
+		// Fail-open surface: managed_enterprise's local detectors are
+		// demoted, so a nil AID verdict means this inspection ends
+		// with no enforceable decision. Every occurrence must be
+		// operator-visible per the "no silent skip" contract — the
+		// metric-only accounting below is retained for /health and
+		// long-term dashboards, but the stderr line is what a human
+		// tailing gateway.err.log during triage will actually see.
+		logManagedAIDSkip(string(failOpenReason), "hookAIDInspect returned no verdict — see prior [cisco-ai-defense] error / structured event for cause")
 		verdict := &ToolInspectVerdict{
 			Action:                   "allow",
 			Severity:                 "NONE",

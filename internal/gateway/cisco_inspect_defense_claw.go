@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -22,6 +23,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
+
+// tokenUnavailableWarnCooldown throttles the operator-visible stderr
+// warning that warnTokenUnavailable emits when the managed cloud
+// token cannot be minted. Without a cooldown, every hook inspection
+// on a box with a broken CMID library would repeat the same warning
+// (potentially thousands of times per hour). Once per minute is
+// enough to make the fail-open condition visible in `tail -f
+// gateway.err.log` without flooding the log.
+const tokenUnavailableWarnCooldown = 60 * time.Second
 
 // CiscoDefenseClawInspectClient calls the Cisco AI Defense DefenseClaw
 // Inspection API at POST /api/v1/inspect/defense_claw, authenticating
@@ -52,6 +62,12 @@ type CiscoDefenseClawInspectClient struct {
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   hookLifecycleMetricV8Runtime
+
+	// tokenWarnMu guards tokenLastWarn, the rate-limit clock for
+	// warnTokenUnavailable's stderr emission. See the cooldown
+	// constant tokenUnavailableWarnCooldown for the rationale.
+	tokenWarnMu   sync.Mutex
+	tokenLastWarn time.Time
 }
 
 // Compile-time assertion: the managed client satisfies Inspector.
@@ -118,11 +134,72 @@ func (c *CiscoDefenseClawInspectClient) observabilityV8Runtime() hookLifecycleMe
 	return c.observabilityV8
 }
 
+// warnTokenUnavailable emits a rate-limited operator-visible stderr
+// warning when the managed cloud lane cannot mint a bearer token at
+// inspect time. Meant to make the fail-open condition visible to
+// anyone tailing gateway.err.log — EmitCiscoError alone lands in the
+// structured events pipeline, which is not what operators watch
+// during live triage.
+//
+// Every call to Inspect that reaches this branch means the current
+// prompt / tool call was allowed through WITHOUT AI Defense
+// adjudication (managed_enterprise's local detectors are demoted at
+// sidecar.go:runGuardrail, so the cloud lane is the sole enforcement
+// path; a missing token collapses that path to fail-open). Flagging
+// this in the log is the difference between "silent-allow" showing
+// up in a support ticket and 24h of live-fire bypass no one noticed.
+//
+// Rate-limited to once per tokenUnavailableWarnCooldown per client
+// instance so that a persistently unavailable CMID library does not
+// produce thousands of duplicate log lines per hour. The first
+// warning after each cooldown window is emitted; the rest are
+// suppressed until the window elapses.
+func (c *CiscoDefenseClawInspectClient) warnTokenUnavailable(err error) {
+	if c == nil {
+		return
+	}
+	now := time.Now()
+	c.tokenWarnMu.Lock()
+	emit := now.Sub(c.tokenLastWarn) >= tokenUnavailableWarnCooldown
+	if emit {
+		c.tokenLastWarn = now
+	}
+	c.tokenWarnMu.Unlock()
+	if !emit {
+		return
+	}
+	detail := "unknown"
+	if err != nil {
+		detail = err.Error()
+	}
+	fmt.Fprintf(defaultLogWriter,
+		"  [cisco-ai-defense] WARNING: managed cloud token unavailable — AID inspection SKIPPED for this call (fail-open).\n"+
+			"  [cisco-ai-defense]          Cause: %s\n"+
+			"  [cisco-ai-defense]          Enforcement is currently NOT running end-to-end for managed_enterprise.\n"+
+			"  [cisco-ai-defense]          Confirm the Cisco Cloud Management identity library (libcmidapi.dylib on\n"+
+			"  [cisco-ai-defense]          macOS, cmidapi.dll on Windows) is installed and readable by this daemon.\n"+
+			"  [cisco-ai-defense]          The lane self-heals on the next inspect once the library becomes loadable;\n"+
+			"  [cisco-ai-defense]          no daemon restart required.\n",
+		detail)
+}
+
 // Inspect sends messages to the DefenseClaw AID endpoint and returns a
 // normalized verdict. Returns nil on any error so the caller falls back
 // to local-only scanning — same fail-open contract as the API-key path.
 func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []ChatMessage) *ScanVerdict {
-	if c == nil || c.provider == nil {
+	if c == nil {
+		// Programming-error defensive path. Cannot rate-limit through
+		// receiver state; call the package-level logger directly so
+		// the condition still surfaces to operators.
+		logManagedAIDSkip("aid-client-nil", "CiscoDefenseClawInspectClient receiver is nil")
+		return nil
+	}
+	if c.provider == nil {
+		// Constructor guards this at NewCiscoDefenseClawInspectClient
+		// so we should never reach here in practice, but a defensive
+		// log keeps the "no silent skip" invariant intact even under
+		// future refactors that could leave provider nil.
+		logManagedAIDSkip("aid-provider-nil", "credential provider is nil on the AID inspect client")
 		return nil
 	}
 	if ctx == nil {
@@ -143,6 +220,13 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		}
 		EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError, detail)
 		recordCiscoInspectV8(ctx, runtime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeUpstreamError)
+		// Rate-limited operator warning: every request that hits
+		// this branch is a fail-open decision. Making it visible in
+		// gateway.err.log is what distinguishes "enforcement is off"
+		// from "enforcement allowed this prompt". EmitCiscoError
+		// above lands in the structured events pipeline; this line
+		// is for humans reading the log live.
+		c.warnTokenUnavailable(err)
 		return nil
 	}
 
@@ -174,7 +258,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	// Provider from inside doInspectHTTP.
 	currentToken := tok
 
-	return doInspectHTTP(ctx, runtime, inspectCall{
+	verdict := doInspectHTTP(ctx, runtime, inspectCall{
 		client:   c.client,
 		endpoint: c.endpoint,
 		urlPath:  "/api/v1/inspect/defense_claw",
@@ -195,4 +279,16 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 			return true
 		},
 	})
+	if verdict == nil {
+		// Any nil verdict from doInspectHTTP means the AID call did
+		// not produce an enforceable decision (marshal error, request
+		// build error, transport error, non-2xx, body read error, or
+		// JSON parse error — each of these already emit their own
+		// [cisco-ai-defense] line inside doInspectHTTP, but this
+		// consolidated skip warning ensures the fail-open contract
+		// itself is visible even when the underlying cause is only
+		// captured in the structured event stream).
+		logManagedAIDSkip("aid-http-no-verdict", "doInspectHTTP returned no verdict — see prior [cisco-ai-defense] error / structured event for cause")
+	}
+	return verdict
 }
