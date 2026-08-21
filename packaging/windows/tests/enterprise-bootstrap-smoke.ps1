@@ -722,8 +722,6 @@ try {
             '-AllowUnsigned',
             '-AttestAgentApplicationControl',
             '-AttestClaudeEffectivePolicy',
-            '-AttestCodexTrustedHookLauncher',
-            '-CodexTrustedHookLauncherBinary', 'C:\approved\codex-fixed.exe',
             '-Json'
         )
     Invoke-RejectedBootstrap `

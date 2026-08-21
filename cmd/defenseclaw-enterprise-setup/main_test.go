@@ -42,7 +42,6 @@ func TestParseEnterpriseSetupRejectsUnsafeScopeCombinations(t *testing.T) {
 		{"/status", "--no-start"},
 		{"/repair", "--purge"},
 		{"/install", "--config", "config.yaml", "--manifest", "targets.yaml", "--allow-unsigned"},
-		{"/repair", "--attest-codex-trusted-hook-launcher"},
 		{"/verify", "--timeout-seconds", "59"},
 	}
 	for _, arguments := range tests {

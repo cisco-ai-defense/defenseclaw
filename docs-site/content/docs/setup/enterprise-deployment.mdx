@@ -323,7 +323,7 @@ The default managed layout is:
 | Shared Codex machine-policy parent | `C:\ProgramData\OpenAI\Codex` | Explicit install/upgrade/repair creates missing `OpenAI` and `Codex` directories atomically with Administrators/System full control and Users read/traverse only. Existing directories are validation-only and are never taken over. |
 | Codex managed requirements | `C:\ProgramData\OpenAI\Codex\requirements.toml`, `.defenseclaw-managed-hooks.state`, and `.defenseclaw-managed-hooks.lock` | DefenseClaw-owned canonical ten-event policy, enrollment state, and protected bounded transaction lock; users can read policy but cannot write it. Ownership and ACL-preimage records are private under the install-state directory. |
 | Claude managed hook policy | `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` and adjacent ownership state | Administrators/LocalSystem write; registered users read and invoke; unrelated Claude settings remain outside DefenseClaw ownership. |
-| Agent-control evidence | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\agent-application-control-attestation.json` | Protected schema-v2 application-control and Claude-precedence evidence, plus a separate Codex trusted-launcher result. |
+| Agent-control evidence | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\agent-application-control-attestation.json` | Protected schema-v2 application-control and Claude-precedence evidence. |
 | Service definitions | SCM registry and security descriptors | Administrators/LocalSystem only. |
 
 The installer rejects install/state roots outside exact mount-manager drive
@@ -457,9 +457,7 @@ $Installer = Join-Path $Stage 'install-enterprise.ps1'
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
   -Config (Join-Path $Stage 'config.yaml') `
   -Manifest (Join-Path $Stage 'targets.yaml') `
-  -AttestAgentApplicationControl `
-  -AttestCodexTrustedHookLauncher `
-  -CodexTrustedHookLauncherBinary (Join-Path $Stage 'codex-defenseclaw-launcher.exe')
+  -AttestAgentApplicationControl
 ```
 
 For an interactive administrator, use the signed CLI. It exposes the same
@@ -475,30 +473,19 @@ $DefenseClaw = Join-Path $Stage 'defenseclaw.exe'
   --cli-binary $DefenseClaw `
   --config (Join-Path $Stage 'config.yaml') `
   --manifest (Join-Path $Stage 'targets.yaml') `
-  --attest-agent-application-control `
-  --attest-codex-trusted-hook-launcher `
-  --codex-trusted-hook-launcher-binary (Join-Path $Stage 'codex-defenseclaw-launcher.exe') `
   --json
 ```
 
-The two attestations are independent. Pass
-`-AttestAgentApplicationControl` only after WDAC or AppLocker allows approved
-signed clients and blocks explicitly tested old and unsigned clients. The
-current minimum Claude version is 2.1.152. Pass
-`-AttestCodexTrustedHookLauncher` only after deploying and independently
-verifying an approved fail-closed fixed hook launcher, and supply that exact
-signed artifact with `-CodexTrustedHookLauncherBinary`. The installer records
-its SHA-256 and Authenticode signer, rejects a launcher that is byte-identical
-to stock Codex, protects it under the install root, and verifies the staged
-identity. Blocking a user-path
-PowerShell binary is not equivalent: stock signed Codex 0.144.3 has been
-observed to continue to its provider with exit zero when that hook spawn fails.
-An enabled Codex target is not `security_complete` unless both attestations are
-present and the end-to-end client test observes managed hook contact or a
-blocked Codex operation.
+WDAC or AppLocker is an optional defense-in-depth layer. Pass
+`-AttestAgentApplicationControl` (or
+`--attest-agent-application-control`) only after it allows approved signed
+clients and blocks explicitly tested old and unsigned clients. Omitting the
+attestation does not block either connector's managed hooks. The current
+minimum Claude version is 2.1.152. An enabled Codex target is complete when its
+protected managed hook policy is installed and verified.
 
 Install is intentionally only phase one. Even when the protected services,
-files, ACLs, application-control evidence, and launcher are structurally
+files, ACLs, and any optional application-control evidence are structurally
 healthy, the initial result must keep
 `claude_effective_policy_verified=false` and `security_complete=false`.
 Exercise the real approved Claude client with hostile user and project
@@ -513,9 +500,6 @@ or a causal client block may the administrator run:
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
   -Config (Join-Path $Stage 'config.yaml') `
   -Manifest (Join-Path $Stage 'targets.yaml') `
-  -AttestAgentApplicationControl `
-  -AttestCodexTrustedHookLauncher `
-  -CodexTrustedHookLauncherBinary (Join-Path $Stage 'codex-defenseclaw-launcher.exe') `
   -AttestClaudeEffectivePolicy
 ```
 
@@ -530,8 +514,6 @@ The equivalent post-proof CLI transaction is:
   --config (Join-Path $Stage 'config.yaml') `
   --manifest (Join-Path $Stage 'targets.yaml') `
   --attest-agent-application-control `
-  --attest-codex-trusted-hook-launcher `
-  --codex-trusted-hook-launcher-binary (Join-Path $Stage 'codex-defenseclaw-launcher.exe') `
   --attest-claude-effective-policy `
   --json
 
@@ -539,7 +521,7 @@ The equivalent post-proof CLI transaction is:
 & $DefenseClaw enterprise windows verify --installer $Installer --json
 ```
 
-That Repair revalidates the structural attestations and launcher artifact, then
+That Repair revalidates the structural attestations, then
 binds the live Claude proof to the protected manifest hash. A manifest change
 invalidates it. Application-control evidence, a healthy Program Files policy,
 or a prior run against another manifest is never substituted for this gate.
@@ -567,7 +549,7 @@ WTS-active profile and, after creation by that medium token, be owned by the
 manifest SID. Every unsigned certification lifecycle receives the switch as
 the exact non-production scope marker, including both the full and
 `-ClaudeOnly` profiles. The `-ClaudeOnly` profile still forbids
-application-control and launcher attestations. Only the disposable actual-Codex
+application-control attestation. Only the disposable actual-Codex
 child may additionally receive the path as `CODEX_HOME`; it is never written
 to the machine environment or either service. Signed production lifecycle
 calls omit it. Production and certification service environments both omit
@@ -598,9 +580,8 @@ Before SCM starts the services, the installer:
   `DEFENSECLAW_CONFIG`, `DEFENSECLAW_HOME`,
   `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`, and the service role in the
   administrator-owned service environment;
-- pins approved-client/Claude-policy evidence and, when Codex is enabled, the
-  separate trusted-hook-launcher evidence; it never emits the removed
-  trusted-shell pin or `CODEX_HOME`;
+- pins optional approved-client evidence and required Claude-policy evidence
+  when those claims have been established; it never emits `CODEX_HOME`;
 - configures automatic start and gateway recovery without granting standard
   users service stop, change-config, or delete rights;
 - launches elevated gateway validation children with an explicit environment
@@ -793,13 +774,11 @@ only on a disposable Windows validation endpoint:
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
   -CodexBinary C:\cert\codex-0.144.3.exe `
-  -CodexTrustedHookLauncherBinary C:\cert\codex-defenseclaw-launcher.exe `
   -ClaudeBinary C:\cert\claude-2.1.207.exe `
   -RejectedCodexBinary C:\cert\codex-0.130.0.exe `
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `
-  -AttestCodexTrustedHookLauncher `
   -Execute `
   -DisposableHost
 ```
@@ -865,10 +844,12 @@ certification flags when certifying signed release artifacts.
 Never aim the harness at the default production service names or roots, and
 never enable unsigned binaries for a production deployment.
 
-When external application control and the separately signed Codex launcher are
-not yet available, `-ClaudeOnly -AllowUnsigned` runs the implementation/core
-suite without either external attestation. It still performs the real hostile
-Claude invocation, but it deliberately leaves
+The full certification profile can exercise both connectors through the shared
+`defenseclaw-hook.exe` without application control. Use
+`-AttestAgentApplicationControl` only when the enterprise has separately
+deployed and tested WDAC or AppLocker. For an intentionally Claude-only core
+run, `-ClaudeOnly -AllowUnsigned` still performs the real hostile Claude
+invocation, but deliberately leaves
 `claude_effective_policy_verified=false`, `security_complete=false`, and
 `production_certified=false`; its evidence cannot be promoted into a fleet
 attestation.
@@ -1040,14 +1021,9 @@ binary or use these hidden commands as a substitute for the public lifecycle.
 The exact installed path, managed mode, protected metadata, administrator
 identity, and service environment are all revalidated.
 
-Client application control and hook execution are separate gates. Approved
-Codex must be at least 0.133.0, but stock signed Codex 0.144.3 is intentionally
-not accepted as complete enterprise enforcement: when a hostile hook shell is
-OS-blocked it can continue to the provider with exit zero and no hook contact.
-AppLocker/WDAC shell rules alone therefore do not satisfy the trusted-launcher
-claim. An enabled Codex target needs a separately verified fail-closed fixed
-hook launcher, and end-to-end acceptance passes only when a managed hook is
-observed or the Codex operation is blocked.
+Approved Codex must be at least 0.133.0. Application control restricts which
+client executable may run, while the protected machine policy points Codex to
+the shared `defenseclaw-hook.exe` and is verified by the guardian.
 
 The guardian verifies and repairs exact policy bytes, event coverage,
 ownership, DACL, enrollment state, and preimage records. A missing event,

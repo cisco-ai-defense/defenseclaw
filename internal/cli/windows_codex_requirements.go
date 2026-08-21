@@ -123,13 +123,11 @@ func writeWindowsCodexRequirementsFailure(
 ) error {
 	if jsonOutput {
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(connector.WindowsCodexMachineRequirementsReport{
-			SchemaVersion:                        connector.WindowsCodexMachineRequirementsSchemaVersion,
-			Action:                               action,
-			OK:                                   false,
-			AgentApplicationControlPrerequisite:  "wdac_or_applocker_approved_agent_client_rules",
-			CodexTrustedHookLauncherPrerequisite: "approved_fail_closed_fixed_hook_launcher",
-			StockCodexSupported:                  false,
-			Error:                                cause.Error(),
+			SchemaVersion:                       connector.WindowsCodexMachineRequirementsSchemaVersion,
+			Action:                              action,
+			OK:                                  false,
+			AgentApplicationControlPrerequisite: "wdac_or_applocker_approved_agent_client_rules",
+			Error:                               cause.Error(),
 		})
 		return fmt.Errorf("Codex requirements %s failed", action)
 	}
@@ -202,12 +200,6 @@ func resolveWindowsCodexRequirementsLayout(
 	if err != nil {
 		return opts, err
 	}
-	codexTrustedLauncher, err := exactWindowsCodexAttestationEnv(
-		connector.WindowsCodexTrustedHookLauncherVerifiedEnv,
-	)
-	if err != nil {
-		return opts, err
-	}
 	gatewayServiceName := os.Getenv(connector.WindowsGatewayServiceNameEnv)
 	if err := connector.ValidateWindowsManagedGatewayServiceName(gatewayServiceName); err != nil {
 		return opts, err
@@ -234,19 +226,18 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, err
 	}
 	opts = connector.WindowsCodexMachineRequirementsOptions{
-		RequirementsPath:                 filepath.Clean(requirementsPath),
-		ManagedDir:                       filepath.Join(installRoot, "bin"),
-		HookBinary:                       filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
-		OwnershipPath:                    filepath.Join(stateRoot, "install", "codex-requirements-ownership.json"),
-		ManagedStatePath:                 filepath.Join(filepath.Dir(requirementsPath), ".defenseclaw-managed-hooks.state"),
-		GatewayAddr:                      gatewayAddr,
-		GatewayServiceName:               gatewayServiceName,
-		AgentApplicationControlEnforced:  applicationControl,
-		EnterpriseTargetEnabled:          enterpriseTargetEnabled,
-		ClaudeTargetEnabled:              claudeTargetEnabled,
-		ClaudeEffectivePolicyVerified:    claudeEffectivePolicy,
-		CodexTargetEnabled:               codexTargetEnabled,
-		CodexTrustedHookLauncherVerified: codexTrustedLauncher,
+		RequirementsPath:                filepath.Clean(requirementsPath),
+		ManagedDir:                      filepath.Join(installRoot, "bin"),
+		HookBinary:                      filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
+		OwnershipPath:                   filepath.Join(stateRoot, "install", "codex-requirements-ownership.json"),
+		ManagedStatePath:                filepath.Join(filepath.Dir(requirementsPath), ".defenseclaw-managed-hooks.state"),
+		GatewayAddr:                     gatewayAddr,
+		GatewayServiceName:              gatewayServiceName,
+		AgentApplicationControlEnforced: applicationControl,
+		EnterpriseTargetEnabled:         enterpriseTargetEnabled,
+		ClaudeTargetEnabled:             claudeTargetEnabled,
+		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
+		CodexTargetEnabled:              codexTargetEnabled,
 	}
 
 	metadataPath := filepath.Join(stateRoot, "install", "deployment.json")

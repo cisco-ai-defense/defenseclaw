@@ -129,7 +129,6 @@ $script:ServiceFailureRestartQuiescenceSeconds = 65
 $script:SchemaVersion = 1
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
-$script:CodexTrustedHookLauncherPrerequisite = 'approved_fail_closed_fixed_hook_launcher'
 $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
 $script:ProgramFiles = [string]$trustedMachineRoots.ProgramFiles
 $script:ProgramData = [string]$trustedMachineRoots.ProgramData
@@ -2663,8 +2662,7 @@ function Get-DefenseClawServiceEnvironmentValues {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$LogPath,
         [switch]$AgentApplicationControlAttested,
-        [switch]$ClaudeEffectivePolicyVerified,
-        [switch]$CodexTrustedHookLauncherVerified
+        [switch]$ClaudeEffectivePolicyVerified
     )
     $values = [Collections.Generic.List[string]]::new()
     foreach ($value in @(
@@ -2686,9 +2684,6 @@ function Get-DefenseClawServiceEnvironmentValues {
     if ($ClaudeEffectivePolicyVerified) {
         $values.Add('DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1')
     }
-    if ($CodexTrustedHookLauncherVerified) {
-        $values.Add('DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1')
-    }
     return [string[]]$values.ToArray()
 }
 
@@ -2701,8 +2696,7 @@ function Set-DefenseClawServiceEnvironment {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$LogPath,
         [switch]$AgentApplicationControlAttested,
-        [switch]$ClaudeEffectivePolicyVerified,
-        [switch]$CodexTrustedHookLauncherVerified
+        [switch]$ClaudeEffectivePolicyVerified
     )
     $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $serviceKey)) {
@@ -2716,8 +2710,7 @@ function Set-DefenseClawServiceEnvironment {
         -GatewayServiceName $GatewayServiceName `
         -LogPath $LogPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
-        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified `
-        -CodexTrustedHookLauncherVerified:$CodexTrustedHookLauncherVerified)
+        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified)
     [void](Microsoft.PowerShell.Management\New-ItemProperty -LiteralPath $serviceKey -Name Environment -PropertyType MultiString -Value $values -Force)
 }
 
@@ -3038,7 +3031,6 @@ function Set-DefenseClawManagedServices {
         [Parameter(Mandatory)][string]$GuardianLogPath,
         [switch]$AgentApplicationControlAttested,
         [switch]$ClaudeEffectivePolicyVerified,
-        [switch]$CodexTrustedHookLauncherVerified,
         [switch]$DeferAutomaticStart
     )
     Assert-DefenseClawServiceName -Name $GatewayServiceName
@@ -3197,8 +3189,7 @@ function Set-DefenseClawManagedServices {
         -GatewayServiceName $GatewayServiceName `
         -LogPath $GatewayLogPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
-        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified `
-        -CodexTrustedHookLauncherVerified:$CodexTrustedHookLauncherVerified
+        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified
     Set-DefenseClawServiceEnvironment `
         -Name $GuardianServiceName `
         -RuntimeDirectory $RuntimeDirectory `
@@ -3207,8 +3198,7 @@ function Set-DefenseClawManagedServices {
         -GatewayServiceName $GatewayServiceName `
         -LogPath $GuardianLogPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
-        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified `
-        -CodexTrustedHookLauncherVerified:$CodexTrustedHookLauncherVerified
+        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified
     # Spec 005 D1: the enumerator shares the guardian's log directory
     # via GuardianLogPath — one hook-guardian log surface holds every
     # guardian + enumerator line, matching macOS's shared
@@ -3222,8 +3212,7 @@ function Set-DefenseClawManagedServices {
         -GatewayServiceName $GatewayServiceName `
         -LogPath $GuardianLogPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
-        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified `
-        -CodexTrustedHookLauncherVerified:$CodexTrustedHookLauncherVerified
+        -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified
 }
 
 function Get-DefenseClawServiceStartMode {
@@ -3566,7 +3555,6 @@ function Set-DefenseClawManagedAcls {
     $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
     Set-DefenseClawPathAcl -Path $Layout.InstallRoot -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.BinDirectory -Kind ServiceInstallDirectory -GatewayServiceSID $gatewaySID
-    Set-DefenseClawPathAcl -Path $Layout.AgentDirectory -Kind InstallDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.LibexecDirectory -Kind InstallDirectory -GatewayServiceSID $gatewaySID
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
@@ -3579,15 +3567,6 @@ function Set-DefenseClawManagedAcls {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CLIPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.CLIPath -Kind InstallFile -GatewayServiceSID $gatewaySID
     }
-    if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.CodexTrustedHookLauncherPath `
-        -PathType Leaf) {
-        Set-DefenseClawPathAcl `
-            -Path $Layout.CodexTrustedHookLauncherPath `
-            -Kind InstallFile `
-            -GatewayServiceSID $gatewaySID
-    }
-
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID
     }
@@ -3626,9 +3605,9 @@ function Set-DefenseClawManagedAcls {
             -Kind AdminFile `
             -GatewayServiceSID $gatewaySID
     }
-    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.CodexTrustedShellAttestationPath -PathType Leaf) {
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.AgentApplicationControlAttestationPath -PathType Leaf) {
         Set-DefenseClawPathAcl `
-            -Path $Layout.CodexTrustedShellAttestationPath `
+            -Path $Layout.AgentApplicationControlAttestationPath `
             -Kind AdminFile `
             -GatewayServiceSID $gatewaySID
     }
@@ -3689,7 +3668,6 @@ function Set-DefenseClawManagedServicesForTransaction {
         -GuardianLogPath $Layout.GuardianLogPath `
         -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-        -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified `
         -DeferAutomaticStart
     Set-DefenseClawManagedCoreAcls `
         -Layout $Layout `
@@ -3704,8 +3682,7 @@ function Get-DefenseClawLayout {
         [string]$GuardianServiceName = 'DefenseClawHookGuardian',
         [string]$CertificationCodexHome,
         [switch]$CoreHardeningCertification,
-        [switch]$AgentApplicationControlAttested,
-        [switch]$CodexTrustedHookLauncherVerified
+        [switch]$AgentApplicationControlAttested
     )
     $fullInstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
     $fullStateRoot = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
@@ -3791,7 +3768,6 @@ function Get-DefenseClawLayout {
         }
     }
     $bin = Microsoft.PowerShell.Management\Join-Path $InstallRoot 'bin'
-    $agentDirectory = Microsoft.PowerShell.Management\Join-Path $InstallRoot 'agents'
     $libexec = Microsoft.PowerShell.Management\Join-Path $InstallRoot 'libexec'
     $configDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'etc'
     $guardianDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian'
@@ -3849,7 +3825,6 @@ function Get-DefenseClawLayout {
             -Root $fullStateRoot `
             -RequiredBase $script:ProgramData)
         BinDirectory = $bin
-        AgentDirectory = $agentDirectory
         LibexecDirectory = $libexec
         ConfigDirectory = $configDirectory
         RuntimeDirectory = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'runtime')
@@ -3865,7 +3840,6 @@ function Get-DefenseClawLayout {
         GatewayPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-gateway.exe')
         HookPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe')
         CLIPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw.exe')
-        CodexTrustedHookLauncherPath = (Microsoft.PowerShell.Management\Join-Path $agentDirectory 'codex.exe')
         ConfigPath = (Microsoft.PowerShell.Management\Join-Path $configDirectory 'config.yaml')
         ManifestPath = (Microsoft.PowerShell.Management\Join-Path $guardianDirectory 'targets.yaml')
         InstallerPath = (Microsoft.PowerShell.Management\Join-Path $libexec 'install-enterprise.ps1')
@@ -3899,14 +3873,13 @@ function Get-DefenseClawLayout {
         )
         CodexRequirementsOwnershipPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-ownership.json')
         CodexRequirementsAclBackupPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-acl-backup.json')
-        CodexTrustedShellAttestationPath = (Microsoft.PowerShell.Management\Join-Path $installState 'agent-application-control-attestation.json')
+        AgentApplicationControlAttestationPath = (Microsoft.PowerShell.Management\Join-Path $installState 'agent-application-control-attestation.json')
         ManagedHooksTeardownJournalPath = (Microsoft.PowerShell.Management\Join-Path $installState 'managed-hooks-teardown-journal.json')
         ManagedHooksLifecycleJournalPath = (Microsoft.PowerShell.Management\Join-Path $installState 'managed-hooks-lifecycle-journal.json')
         CoreHardeningCertification = [bool]$CoreHardeningCertification
         AgentApplicationControlAttested = [bool]$AgentApplicationControlAttested
         ClaudeEffectivePolicyVerified = $false
         ClaudeTargetEnabled = $false
-        CodexTrustedHookLauncherVerified = [bool]$CodexTrustedHookLauncherVerified
         CodexTargetEnabled = $false
         CertificationCodexHome = [string]$CertificationCodexHome
     }
@@ -3962,7 +3935,6 @@ function New-DefenseClawLayoutDirectories {
     foreach ($path in @(
         $Layout.InstallRoot,
         $Layout.BinDirectory,
-        $Layout.AgentDirectory,
         $Layout.LibexecDirectory,
         $Layout.StateRoot,
         $Layout.ConfigDirectory,
@@ -4015,7 +3987,7 @@ function Get-DefenseClawDeploymentMetadata {
         @('codex_managed_hooks_state_path', $Layout.CodexManagedHooksStatePath),
         @('codex_requirements_ownership_path', $Layout.CodexRequirementsOwnershipPath),
         @('codex_requirements_acl_backup_path', $Layout.CodexRequirementsAclBackupPath),
-        @('agent_application_control_attestation_path', $Layout.CodexTrustedShellAttestationPath),
+        @('agent_application_control_attestation_path', $Layout.AgentApplicationControlAttestationPath),
         @('managed_hooks_teardown_journal_path', $Layout.ManagedHooksTeardownJournalPath)
     )) {
         $property = $metadata.PSObject.Properties[[string]$pair[0]]
@@ -4120,7 +4092,6 @@ function New-DefenseClawDeploymentMetadata {
         @('gateway', $Layout.GatewayPath),
         @('hook', $Layout.HookPath),
         @('cli', $Layout.CLIPath),
-        @('codex_launcher', $Layout.CodexTrustedHookLauncherPath),
         @('installer', $Layout.InstallerPath),
         @('module', $Layout.ModulePath)
     )) {
@@ -4130,23 +4101,8 @@ function New-DefenseClawDeploymentMetadata {
     }
     $uninstalledAt = if ($Installed) { $null } else { [DateTime]::UtcNow.ToString('o') }
     $codexMachinePolicySha256 = ''
-    $codexTrustedShellAttestationSha256 = ''
-    $codexLauncherIdentity = [ordered]@{
-        path = ''
-        sha256 = ''
-        signer_thumbprint = ''
-        signer_subject = ''
-        file_version = ''
-    }
+    $agentApplicationControlAttestationSha256 = ''
     if ($Installed) {
-        if (-not [bool]$Layout.AgentApplicationControlAttested -and
-            -not [bool]$Layout.CoreHardeningCertification) {
-            throw 'cannot record installed enterprise metadata without agent application-control attestation'
-        }
-        if ([bool]$Layout.CodexTargetEnabled -and
-            -not [bool]$Layout.CodexTrustedHookLauncherVerified) {
-            throw 'cannot record installed enterprise metadata for an enabled Codex target without a verified fail-closed fixed hook launcher'
-        }
         if ([bool]$Layout.CodexTargetEnabled) {
             foreach ($entry in @(
                 @($Layout.CodexMachinePolicyPath, 'policy'),
@@ -4164,21 +4120,17 @@ function New-DefenseClawDeploymentMetadata {
                     -Algorithm SHA256
             ).Hash.ToLowerInvariant()
         }
-        if ([bool]$Layout.CodexTrustedHookLauncherVerified) {
-            $codexLauncherIdentity =
-                Get-DefenseClawCodexTrustedHookLauncherIdentity -Layout $Layout
-        }
         if ([bool]$Layout.CoreHardeningCertification) {
             if (Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $Layout.CodexTrustedShellAttestationPath) {
+                -LiteralPath $Layout.AgentApplicationControlAttestationPath) {
                 throw 'core-hardening certification cannot retain external application-control attestation evidence'
             }
         }
         else {
-            [void](Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout)
-            $codexTrustedShellAttestationSha256 = (
+            [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
+            $agentApplicationControlAttestationSha256 = (
                 Microsoft.PowerShell.Utility\Get-FileHash `
-                    -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                    -LiteralPath $Layout.AgentApplicationControlAttestationPath `
                     -Algorithm SHA256
             ).Hash.ToLowerInvariant()
         }
@@ -4201,10 +4153,10 @@ function New-DefenseClawDeploymentMetadata {
         codex_managed_hooks_state_path = $Layout.CodexManagedHooksStatePath
         codex_requirements_ownership_path = $Layout.CodexRequirementsOwnershipPath
         codex_requirements_acl_backup_path = $Layout.CodexRequirementsAclBackupPath
-        agent_application_control_attestation_path = $Layout.CodexTrustedShellAttestationPath
+        agent_application_control_attestation_path = $Layout.AgentApplicationControlAttestationPath
         managed_hooks_teardown_journal_path = $Layout.ManagedHooksTeardownJournalPath
         codex_machine_policy_sha256 = $codexMachinePolicySha256
-        agent_application_control_attestation_sha256 = $codexTrustedShellAttestationSha256
+        agent_application_control_attestation_sha256 = $agentApplicationControlAttestationSha256
         codex_machine_policy_managed = [bool](
             $Installed -and $Layout.CodexTargetEnabled
         )
@@ -4214,29 +4166,6 @@ function New-DefenseClawDeploymentMetadata {
         codex_target_enabled = [bool](
             $Installed -and $Layout.CodexTargetEnabled
         )
-        codex_trusted_hook_launcher_required = [bool](
-            $Installed -and $Layout.CodexTargetEnabled
-        )
-        codex_trusted_hook_launcher_verified = [bool](
-            $Installed -and $Layout.CodexTrustedHookLauncherVerified
-        )
-        codex_trusted_hook_launcher_path = [string]$codexLauncherIdentity.path
-        codex_trusted_hook_launcher_sha256 = [string]$codexLauncherIdentity.sha256
-        codex_trusted_hook_launcher_signer_thumbprint = [string]$codexLauncherIdentity.signer_thumbprint
-        codex_trusted_hook_launcher_signer_subject = [string]$codexLauncherIdentity.signer_subject
-        codex_trusted_hook_launcher_file_version = [string]$codexLauncherIdentity.file_version
-        codex_launcher_application_control_bound = [bool](
-            $Installed -and
-            $Layout.AgentApplicationControlAttested -and
-            $Layout.CodexTrustedHookLauncherVerified
-        )
-        stock_codex_client_paths_blocked = [bool](
-            $Installed -and
-            $Layout.AgentApplicationControlAttested -and
-            $Layout.CodexTrustedHookLauncherVerified
-        )
-        codex_trusted_hook_launcher_prerequisite = $script:CodexTrustedHookLauncherPrerequisite
-        stock_codex_supported = $false
         claude_target_enabled = [bool](
             $Installed -and $Layout.ClaudeTargetEnabled
         )
@@ -4258,21 +4187,15 @@ function New-DefenseClawDeploymentMetadata {
             $Installed -and
             ($Layout.ClaudeTargetEnabled -or
                 $Layout.CodexTargetEnabled) -and
-            $Layout.AgentApplicationControlAttested -and
             (-not $Layout.ClaudeTargetEnabled -or
-                $Layout.ClaudeEffectivePolicyVerified) -and
-            (-not $Layout.CodexTargetEnabled -or
-                $Layout.CodexTrustedHookLauncherVerified)
+                $Layout.ClaudeEffectivePolicyVerified)
         )
         security_complete = [bool](
             $Installed -and
             ($Layout.ClaudeTargetEnabled -or
                 $Layout.CodexTargetEnabled) -and
-            $Layout.AgentApplicationControlAttested -and
             (-not $Layout.ClaudeTargetEnabled -or
-                $Layout.ClaudeEffectivePolicyVerified) -and
-            (-not $Layout.CodexTargetEnabled -or
-                $Layout.CodexTrustedHookLauncherVerified)
+                $Layout.ClaudeEffectivePolicyVerified)
         )
         updated_at = [DateTime]::UtcNow.ToString('o')
         uninstalled_at = $uninstalledAt
@@ -4513,13 +4436,12 @@ function New-DefenseClawTransaction {
         $Layout.GatewayPath,
         $Layout.HookPath,
         $Layout.CLIPath,
-        $Layout.CodexTrustedHookLauncherPath,
         $Layout.ConfigPath,
         $Layout.ManifestPath,
         $Layout.InstallerPath,
         $Layout.ModulePath,
         $Layout.MetadataPath,
-        $Layout.CodexTrustedShellAttestationPath
+        $Layout.AgentApplicationControlAttestationPath
     )) {
         $destinations.Add([string]$destination)
     }
@@ -4584,22 +4506,18 @@ function New-DefenseClawTransaction {
         $index++
     }
     $priorAttestationExists = Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+        -LiteralPath $Layout.AgentApplicationControlAttestationPath `
         -PathType Leaf
     $priorApplicationControlAttested = $false
     $priorClaudeEffectivePolicyVerified = $false
-    $priorCodexTrustedHookLauncherVerified = $false
     if ($priorAttestationExists) {
-        $priorAttestation = Get-DefenseClawCodexTrustedShellAttestation `
+        $priorAttestation = Get-DefenseClawAgentApplicationControlAttestation `
             -Layout $Layout
         $priorApplicationControlAttested = [bool](
             $priorAttestation.agent_application_control_enforced
         )
         $priorClaudeEffectivePolicyVerified = [bool](
             $priorAttestation.claude_effective_policy_verified
-        )
-        $priorCodexTrustedHookLauncherVerified = [bool](
-            $priorAttestation.codex_trusted_hook_launcher_verified
         )
     }
     $teardownJournalPreimageExisted = $false
@@ -4631,7 +4549,6 @@ function New-DefenseClawTransaction {
         core_hardening_certification = [bool]$Layout.CoreHardeningCertification
         agent_application_control_attested = [bool]$priorApplicationControlAttested
         claude_effective_policy_verified = [bool]$priorClaudeEffectivePolicyVerified
-        codex_trusted_hook_launcher_verified = [bool]$priorCodexTrustedHookLauncherVerified
         codex_machine_state_included = [bool]$IncludeCodexMachineState
         managed_hooks_teardown_prepared = [bool]$ManagedHooksTeardownPrepared
         managed_hooks_teardown_journal_preserved = [bool](
@@ -5276,44 +5193,10 @@ function Initialize-DefenseClawCodexRequirementsAclBackup {
     [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
 }
 
-function Get-DefenseClawCodexTrustedHookLauncherIdentity {
-    param([Parameter(Mandatory)][hashtable]$Layout)
-    $path = Resolve-DefenseClawFullPath `
-        -Path $Layout.CodexTrustedHookLauncherPath `
-        -MustExist `
-        -Leaf
-    Assert-DefenseClawNoReparsePath -Path $path
-    $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
-        -LiteralPath $path
-    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
-        $null -eq $signature.SignerCertificate -or
-        [string]::IsNullOrWhiteSpace(
-            [string]$signature.SignerCertificate.Thumbprint
-        )) {
-        throw "protected Codex trusted launcher has no valid Authenticode signer: $path"
-    }
-    $item = Microsoft.PowerShell.Management\Get-Item `
-        -LiteralPath $path `
-        -Force
-    return [ordered]@{
-        path = $path
-        sha256 = (
-            Microsoft.PowerShell.Utility\Get-FileHash `
-                -LiteralPath $path `
-                -Algorithm SHA256
-        ).Hash.ToLowerInvariant()
-        signer_thumbprint = (
-            [string]$signature.SignerCertificate.Thumbprint
-        ).ToLowerInvariant()
-        signer_subject = [string]$signature.SignerCertificate.Subject
-        file_version = [string]$item.VersionInfo.FileVersion
-    }
-}
-
-function Get-DefenseClawCodexTrustedShellAttestation {
+function Get-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = [IO.Path]::GetFullPath(
-        $Layout.CodexTrustedShellAttestationPath
+        $Layout.AgentApplicationControlAttestationPath
     ).TrimEnd('\')
     $expected = [IO.Path]::GetFullPath(
         (Microsoft.PowerShell.Management\Join-Path `
@@ -5367,10 +5250,8 @@ function Get-DefenseClawCodexTrustedShellAttestation {
         'agent_application_control_enforced'
     ]
     if ($null -eq $enforced -or
-        $enforced.Value -isnot [bool] -or
-        (-not [bool]$enforced.Value -and
-            -not [bool]$Layout.CoreHardeningCertification)) {
-        throw 'agent application-control evidence does not assert enforcement outside exact core-hardening certification scope'
+        $enforced.Value -isnot [bool]) {
+        throw 'agent application-control evidence has an invalid enforcement result'
     }
     if ([string]$attestation.prerequisite -cne
         $script:AgentApplicationControlPrerequisite) {
@@ -5416,108 +5297,6 @@ function Get-DefenseClawCodexTrustedShellAttestation {
         -not [string]::IsNullOrEmpty([string]$claudeManifestHash.Value)) {
         throw 'unverified Claude effective-policy evidence unexpectedly records a manifest binding'
     }
-    if ([string]$attestation.codex_trusted_hook_launcher_prerequisite -cne
-        $script:CodexTrustedHookLauncherPrerequisite) {
-        throw 'agent application-control attestation records an unknown Codex trusted-hook-launcher prerequisite'
-    }
-    $launcherVerified = $attestation.PSObject.Properties[
-        'codex_trusted_hook_launcher_verified'
-    ]
-    if ($null -eq $launcherVerified -or
-        $launcherVerified.Value -isnot [bool]) {
-        throw 'agent application-control attestation is missing the Codex trusted-hook-launcher verification result'
-    }
-    $launcherPath = $attestation.PSObject.Properties[
-        'codex_trusted_hook_launcher_path'
-    ]
-    $launcherHash = $attestation.PSObject.Properties[
-        'codex_trusted_hook_launcher_sha256'
-    ]
-    $launcherSigner = $attestation.PSObject.Properties[
-        'codex_trusted_hook_launcher_signer_thumbprint'
-    ]
-    $launcherVersion = $attestation.PSObject.Properties[
-        'codex_trusted_hook_launcher_file_version'
-    ]
-    if ([bool]$launcherVerified.Value) {
-        $launcherAppControl = $attestation.PSObject.Properties[
-            'codex_launcher_application_control_bound'
-        ]
-        $stockPathsBlocked = $attestation.PSObject.Properties[
-            'stock_codex_client_paths_blocked'
-        ]
-        if (-not [bool]$enforced.Value -or
-            $null -eq $launcherAppControl -or
-            $launcherAppControl.Value -isnot [bool] -or
-            -not [bool]$launcherAppControl.Value -or
-            $null -eq $stockPathsBlocked -or
-            $stockPathsBlocked.Value -isnot [bool] -or
-            -not [bool]$stockPathsBlocked.Value) {
-            throw 'Codex launcher evidence is not bound to application control that blocks stock client paths'
-        }
-        if ($null -eq $launcherPath -or
-            $null -eq $launcherHash -or
-            $null -eq $launcherSigner -or
-            $null -eq $launcherVersion -or
-            [string]$launcherHash.Value -cnotmatch '^[0-9a-f]{64}$' -or
-            [string]$launcherSigner.Value -cnotmatch '^[0-9a-f]{40,128}$') {
-            throw 'Codex trusted-hook-launcher evidence has an invalid protected artifact identity'
-        }
-        $recordedLauncherPath = [IO.Path]::GetFullPath(
-            [string]$launcherPath.Value
-        ).TrimEnd('\')
-        if (-not [string]::Equals(
-            $recordedLauncherPath,
-            [IO.Path]::GetFullPath(
-                $Layout.CodexTrustedHookLauncherPath
-            ).TrimEnd('\'),
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
-            throw 'Codex trusted-hook-launcher evidence points outside the exact protected install path'
-        }
-        $actualLauncher = Get-DefenseClawCodexTrustedHookLauncherIdentity `
-            -Layout $Layout
-        if ([string]$actualLauncher.sha256 -cne
-                [string]$launcherHash.Value -or
-            [string]$actualLauncher.signer_thumbprint -cne
-                [string]$launcherSigner.Value -or
-            [string]$actualLauncher.file_version -cne
-                [string]$launcherVersion.Value) {
-            throw 'protected Codex trusted-hook-launcher artifact identity drift'
-        }
-    }
-    else {
-        foreach ($property in @(
-            $launcherPath,
-            $launcherHash,
-            $launcherSigner,
-            $launcherVersion
-        )) {
-            if ($null -ne $property -and
-                -not [string]::IsNullOrEmpty([string]$property.Value)) {
-                throw 'unverified Codex launcher evidence unexpectedly records a protected artifact identity'
-            }
-        }
-        foreach ($booleanName in @(
-            'codex_launcher_application_control_bound',
-            'stock_codex_client_paths_blocked'
-        )) {
-            $property = $attestation.PSObject.Properties[$booleanName]
-            if ($null -ne $property -and
-                ($property.Value -isnot [bool] -or
-                    [bool]$property.Value)) {
-                throw "unverified Codex launcher evidence has invalid $booleanName"
-            }
-        }
-    }
-    $stockCodexSupported = $attestation.PSObject.Properties[
-        'stock_codex_supported'
-    ]
-    if ($null -eq $stockCodexSupported -or
-        $stockCodexSupported.Value -isnot [bool] -or
-        [bool]$stockCodexSupported.Value) {
-        throw 'agent application-control attestation must reject stock Codex clients whose hook-launch failures are non-blocking'
-    }
     if ([string]$attestation.attested_by_sid -notmatch '^S-\d-\d+(?:-\d+)+$') {
         throw 'agent application-control attestation contains an invalid administrator SID'
     }
@@ -5545,13 +5324,10 @@ function Get-DefenseClawCodexTrustedShellAttestation {
     return $attestation
 }
 
-function Write-DefenseClawCodexTrustedShellAttestation {
+function Write-DefenseClawAgentApplicationControlAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
     if ([bool]$Layout.CoreHardeningCertification) {
         throw 'core-hardening certification must not publish external application-control attestation evidence'
-    }
-    if (-not [bool]$Layout.AgentApplicationControlAttested) {
-        throw 'managed-enterprise mode requires explicit agent application-control attestation'
     }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $claudeManifestHash = ''
@@ -5567,17 +5343,6 @@ function Write-DefenseClawCodexTrustedShellAttestation {
                 -Algorithm SHA256
         ).Hash.ToLowerInvariant()
     }
-    $launcherIdentity = [ordered]@{
-        path = ''
-        sha256 = ''
-        signer_thumbprint = ''
-        signer_subject = ''
-        file_version = ''
-    }
-    if ([bool]$Layout.CodexTrustedHookLauncherVerified) {
-        $launcherIdentity = Get-DefenseClawCodexTrustedHookLauncherIdentity `
-            -Layout $Layout
-    }
     Write-DefenseClawJsonAtomic -Value ([ordered]@{
         schema_version = $script:AgentApplicationControlAttestationSchemaVersion
         agent_application_control_enforced = [bool]$Layout.AgentApplicationControlAttested
@@ -5586,27 +5351,11 @@ function Write-DefenseClawCodexTrustedShellAttestation {
         minimum_claude_version = '2.1.152'
         claude_effective_policy_verified = [bool]$Layout.ClaudeEffectivePolicyVerified
         claude_effective_policy_manifest_sha256 = $claudeManifestHash
-        codex_trusted_hook_launcher_prerequisite = $script:CodexTrustedHookLauncherPrerequisite
-        codex_trusted_hook_launcher_verified = [bool]$Layout.CodexTrustedHookLauncherVerified
-        codex_trusted_hook_launcher_path = [string]$launcherIdentity.path
-        codex_trusted_hook_launcher_sha256 = [string]$launcherIdentity.sha256
-        codex_trusted_hook_launcher_signer_thumbprint = [string]$launcherIdentity.signer_thumbprint
-        codex_trusted_hook_launcher_signer_subject = [string]$launcherIdentity.signer_subject
-        codex_trusted_hook_launcher_file_version = [string]$launcherIdentity.file_version
-        codex_launcher_application_control_bound = [bool](
-            $Layout.AgentApplicationControlAttested -and
-            $Layout.CodexTrustedHookLauncherVerified
-        )
-        stock_codex_client_paths_blocked = [bool](
-            $Layout.AgentApplicationControlAttested -and
-            $Layout.CodexTrustedHookLauncherVerified
-        )
-        stock_codex_supported = $false
         attested_by_sid = [string]$identity.User.Value
         attested_at = [DateTime]::UtcNow.ToString('o')
         certification_required = $true
-    }) -Path $Layout.CodexTrustedShellAttestationPath
-    [void](Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout)
+    }) -Path $Layout.AgentApplicationControlAttestationPath
+    [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
 }
 
 function Initialize-DefenseClawCodexMachinePolicyParent {
@@ -5927,16 +5676,11 @@ function Restore-DefenseClawTransaction {
     $snapshotClaudeEffective = $snapshot.PSObject.Properties[
         'claude_effective_policy_verified'
     ]
-    $snapshotLauncherVerified = $snapshot.PSObject.Properties[
-        'codex_trusted_hook_launcher_verified'
-    ]
     if ($null -eq $snapshotApplicationControl -or
         $snapshotApplicationControl.Value -isnot [bool] -or
         $null -eq $snapshotClaudeEffective -or
-        $snapshotClaudeEffective.Value -isnot [bool] -or
-        $null -eq $snapshotLauncherVerified -or
-        $snapshotLauncherVerified.Value -isnot [bool]) {
-        throw 'pending transaction has invalid application-control, Claude-policy, or trusted-hook-launcher evidence state'
+        $snapshotClaudeEffective.Value -isnot [bool]) {
+        throw 'pending transaction has invalid application-control or Claude-policy evidence state'
     }
     $Layout.AgentApplicationControlAttested = [bool](
         $snapshotApplicationControl.Value
@@ -5944,21 +5688,14 @@ function Restore-DefenseClawTransaction {
     $Layout.ClaudeEffectivePolicyVerified = [bool](
         $snapshotClaudeEffective.Value
     )
-    $Layout.CodexTrustedHookLauncherVerified = [bool](
-        $snapshotLauncherVerified.Value
-    )
     if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+        -LiteralPath $Layout.AgentApplicationControlAttestationPath `
         -PathType Leaf) {
-        $restoredAttestation = Get-DefenseClawCodexTrustedShellAttestation `
+        $restoredAttestation = Get-DefenseClawAgentApplicationControlAttestation `
             -Layout $Layout
         if ([bool]$restoredAttestation.agent_application_control_enforced -ne
             [bool]$Layout.AgentApplicationControlAttested) {
             throw 'restored application-control evidence does not match the transaction snapshot'
-        }
-        if ([bool]$restoredAttestation.codex_trusted_hook_launcher_verified -ne
-            [bool]$Layout.CodexTrustedHookLauncherVerified) {
-            throw 'restored trusted-hook-launcher evidence does not match the transaction snapshot'
         }
         if ([bool]$restoredAttestation.claude_effective_policy_verified -ne
             [bool]$Layout.ClaudeEffectivePolicyVerified) {
@@ -5979,7 +5716,6 @@ function Restore-DefenseClawTransaction {
             -GuardianLogPath $Layout.GuardianLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-            -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified `
             -DeferAutomaticStart
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName ([string]$snapshot.gateway_service)
     }
@@ -6701,7 +6437,6 @@ function Invoke-DefenseClawGatewayCommand {
         'DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED',
         'DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED',
         'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED',
-        'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED',
         'CODEX_HOME'
     )
     $previous = @{}
@@ -6731,11 +6466,6 @@ function Invoke-DefenseClawGatewayCommand {
         [Environment]::SetEnvironmentVariable(
             'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED',
             $(if ([bool]$Layout.ClaudeEffectivePolicyVerified) { '1' } else { $null }),
-            'Process'
-        )
-        [Environment]::SetEnvironmentVariable(
-            'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED',
-            $(if ([bool]$Layout.CodexTrustedHookLauncherVerified) { '1' } else { $null }),
             'Process'
         )
         # The gateway service and every lifecycle helper are deliberately
@@ -6867,10 +6597,6 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             $script:AgentApplicationControlPrerequisite) {
             throw "Codex requirements $Action reported an unknown agent application-control prerequisite"
         }
-        if ([string]$report.codex_trusted_hook_launcher_prerequisite -cne
-            $script:CodexTrustedHookLauncherPrerequisite) {
-            throw "Codex requirements $Action reported an unknown trusted-hook-launcher prerequisite"
-        }
         foreach ($booleanName in @(
             'agent_application_control_enforced',
             'approved_client_enforced',
@@ -6878,9 +6604,6 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             'claude_target_enabled',
             'claude_effective_policy_verified',
             'codex_target_enabled',
-            'codex_trusted_hook_launcher_required',
-            'codex_trusted_hook_launcher_verified',
-            'stock_codex_supported',
             'security_complete'
         )) {
             $property = $report.PSObject.Properties[$booleanName]
@@ -6894,21 +6617,8 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             [bool]$report.approved_client_enforced -ne
                 [bool]$Layout.AgentApplicationControlAttested -or
             [bool]$report.approved_agent_clients_enforced -ne
-                [bool]$Layout.AgentApplicationControlAttested -or
-            (-not [bool]$report.agent_application_control_enforced -and
-                -not [bool]$Layout.CoreHardeningCertification)) {
+                [bool]$Layout.AgentApplicationControlAttested) {
             throw "Codex requirements $Action approved-agent application-control result disagrees with protected deployment evidence"
-        }
-        if ([bool]$report.stock_codex_supported) {
-            throw "Codex requirements $Action incorrectly certifies a stock Codex client with non-blocking hook-launch failures"
-        }
-        if ([bool]$report.codex_trusted_hook_launcher_required -ne
-            [bool]$report.codex_target_enabled) {
-            throw "Codex requirements $Action trusted-hook-launcher requirement does not match manifest target enablement"
-        }
-        if ([bool]$report.codex_trusted_hook_launcher_verified -ne
-            [bool]$Layout.CodexTrustedHookLauncherVerified) {
-            throw "Codex requirements $Action trusted-hook-launcher evidence does not match the protected deployment attestation"
         }
         if ([bool]$report.claude_effective_policy_verified -ne
             [bool]$Layout.ClaudeEffectivePolicyVerified) {
@@ -6917,11 +6627,8 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         $expectedSecurityComplete = [bool](
             ([bool]$report.claude_target_enabled -or
                 [bool]$report.codex_target_enabled) -and
-            $Layout.AgentApplicationControlAttested -and
             (-not [bool]$report.claude_target_enabled -or
-                [bool]$Layout.ClaudeEffectivePolicyVerified) -and
-            (-not [bool]$report.codex_target_enabled -or
-                [bool]$Layout.CodexTrustedHookLauncherVerified)
+                [bool]$Layout.ClaudeEffectivePolicyVerified)
         )
         if ([bool]$report.security_complete -ne $expectedSecurityComplete) {
             throw "Codex requirements $Action aggregate security result disagrees with protected evidence"
@@ -7602,8 +7309,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GatewayLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
-            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-            -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified
+            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
     )
     $guardianEnvironment = [string[]]@(
         Get-DefenseClawServiceEnvironmentValues `
@@ -7614,8 +7320,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GuardianLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
-            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-            -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified
+            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
     )
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
@@ -7659,8 +7364,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GuardianLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
-            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-            -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified
+            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
     )
     Assert-DefenseClawServiceConfiguration `
         -Name $enumeratorServiceName `
@@ -7769,7 +7473,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         @('codex_managed_hooks_state_path', $Layout.CodexManagedHooksStatePath),
         @('codex_requirements_ownership_path', $Layout.CodexRequirementsOwnershipPath),
         @('codex_requirements_acl_backup_path', $Layout.CodexRequirementsAclBackupPath),
-        @('agent_application_control_attestation_path', $Layout.CodexTrustedShellAttestationPath)
+        @('agent_application_control_attestation_path', $Layout.AgentApplicationControlAttestationPath)
     )) {
         $property = $metadata.PSObject.Properties[[string]$pair[0]]
         if ($null -eq $property -or
@@ -7823,8 +7527,6 @@ function Assert-DefenseClawEnterpriseDeployment {
         $coreCertificationProperty.Value -isnot [bool] -or
         [bool]$coreCertificationProperty.Value -ne
             [bool]$Layout.CoreHardeningCertification -or
-        (-not [bool]$applicationControlProperty.Value -and
-            -not [bool]$Layout.CoreHardeningCertification) -or
         [string]$metadata.agent_application_control_prerequisite -cne
             $script:AgentApplicationControlPrerequisite) {
         throw 'deployment metadata does not attest the approved-agent application-control prerequisite'
@@ -7837,92 +7539,6 @@ function Assert-DefenseClawEnterpriseDeployment {
         [bool]$approvedClientProperty.Value -ne
             [bool]$applicationControlProperty.Value) {
         throw 'deployment metadata does not attest approved Codex client application control'
-    }
-    foreach ($booleanName in @(
-        'codex_trusted_hook_launcher_verified',
-        'stock_codex_supported'
-    )) {
-        $property = $metadata.PSObject.Properties[$booleanName]
-        if ($null -eq $property -or $property.Value -isnot [bool]) {
-            throw "deployment metadata is missing boolean $booleanName"
-        }
-    }
-    $launcherRequired = $metadata.PSObject.Properties[
-        'codex_trusted_hook_launcher_required'
-    ]
-    if ($null -eq $launcherRequired -or
-        $launcherRequired.Value -isnot [bool] -or
-        [bool]$launcherRequired.Value -ne $codexTargetEnabled -or
-        [string]$metadata.codex_trusted_hook_launcher_prerequisite -cne
-            $script:CodexTrustedHookLauncherPrerequisite -or
-        [bool]$metadata.stock_codex_supported) {
-        throw 'deployment metadata Codex trusted-hook-launcher requirement does not match target enablement'
-    }
-    if ($codexTargetEnabled -and
-        -not [bool]$metadata.codex_trusted_hook_launcher_verified) {
-        throw 'deployment metadata enables Codex without verified fail-closed fixed hook-launcher evidence'
-    }
-    if ($codexTargetEnabled) {
-        $launcherIdentity = Get-DefenseClawCodexTrustedHookLauncherIdentity `
-            -Layout $Layout
-        $recordedLauncherPath = [IO.Path]::GetFullPath(
-            [string]$metadata.codex_trusted_hook_launcher_path
-        ).TrimEnd('\')
-        if (-not [string]::Equals(
-                $recordedLauncherPath,
-                [string]$launcherIdentity.path,
-                [StringComparison]::OrdinalIgnoreCase
-            ) -or
-            [string]$metadata.codex_trusted_hook_launcher_sha256 -cne
-                [string]$launcherIdentity.sha256 -or
-            [string]$metadata.codex_trusted_hook_launcher_signer_thumbprint -cne
-                [string]$launcherIdentity.signer_thumbprint -or
-            [string]$metadata.codex_trusted_hook_launcher_file_version -cne
-                [string]$launcherIdentity.file_version -or
-            $metadata.PSObject.Properties[
-                'codex_launcher_application_control_bound'
-            ].Value -isnot [bool] -or
-            -not [bool]$metadata.codex_launcher_application_control_bound -or
-            $metadata.PSObject.Properties[
-                'stock_codex_client_paths_blocked'
-            ].Value -isnot [bool] -or
-            -not [bool]$metadata.stock_codex_client_paths_blocked -or
-            $null -eq $metadata.hashes.PSObject.Properties[
-                'codex_launcher'
-            ] -or
-            [string]$metadata.hashes.codex_launcher -cne
-                [string]$launcherIdentity.sha256) {
-            throw 'deployment metadata does not authenticate the exact protected Codex launcher artifact'
-        }
-    }
-    else {
-        foreach ($propertyName in @(
-            'codex_trusted_hook_launcher_path',
-            'codex_trusted_hook_launcher_sha256',
-            'codex_trusted_hook_launcher_signer_thumbprint',
-            'codex_trusted_hook_launcher_file_version'
-        )) {
-            if (-not [string]::IsNullOrEmpty(
-                [string]$metadata.$propertyName
-            )) {
-                throw 'Codex-disabled deployment metadata unexpectedly authenticates a launcher artifact'
-            }
-        }
-        foreach ($propertyName in @(
-            'codex_launcher_application_control_bound',
-            'stock_codex_client_paths_blocked'
-        )) {
-            $property = $metadata.PSObject.Properties[$propertyName]
-            if ($null -eq $property -or
-                $property.Value -isnot [bool] -or
-                [bool]$property.Value) {
-                throw "Codex-disabled deployment metadata has invalid $propertyName"
-            }
-        }
-        if (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.CodexTrustedHookLauncherPath) {
-            throw 'Codex-disabled deployment retains a protected launcher artifact'
-        }
     }
     $approvedAgentsProperty = $metadata.PSObject.Properties[
         'approved_agent_clients_enforced'
@@ -7955,11 +7571,8 @@ function Assert-DefenseClawEnterpriseDeployment {
     $expectedSecurityComplete = [bool](
         ([bool]$claudeTargetProperty.Value -or
             $codexTargetEnabled) -and
-        [bool]$applicationControlProperty.Value -and
         (-not [bool]$claudeTargetProperty.Value -or
-            [bool]$claudeEffectiveProperty.Value) -and
-        (-not $codexTargetEnabled -or
-            [bool]$metadata.codex_trusted_hook_launcher_verified)
+            [bool]$claudeEffectiveProperty.Value)
     )
     if ($null -eq $securityCompleteProperty -or
         $securityCompleteProperty.Value -isnot [bool] -or
@@ -7980,24 +7593,19 @@ function Assert-DefenseClawEnterpriseDeployment {
     $recordedAttestationHash = [string]$metadata.agent_application_control_attestation_sha256
     if ([bool]$Layout.CoreHardeningCertification) {
         if ((Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $Layout.CodexTrustedShellAttestationPath) -or
+                -LiteralPath $Layout.AgentApplicationControlAttestationPath) -or
             -not [string]::IsNullOrEmpty($recordedAttestationHash)) {
             throw 'core-hardening deployment retains false external application-control evidence'
         }
         $Layout.ClaudeEffectivePolicyVerified = [bool](
             $metadata.claude_effective_policy_verified
         )
-        $Layout.CodexTrustedHookLauncherVerified = $false
     }
     else {
-        $attestation = Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout
+        $attestation = Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
         if ([bool]$attestation.agent_application_control_enforced -ne
             [bool]$metadata.agent_application_control_enforced) {
             throw 'protected application-control evidence disagrees with deployment metadata'
-        }
-        if ([bool]$attestation.codex_trusted_hook_launcher_verified -ne
-            [bool]$metadata.codex_trusted_hook_launcher_verified) {
-            throw 'protected Codex trusted-hook-launcher evidence disagrees with deployment metadata'
         }
         if ([bool]$attestation.claude_effective_policy_verified -ne
             [bool]$metadata.claude_effective_policy_verified) {
@@ -8006,15 +7614,12 @@ function Assert-DefenseClawEnterpriseDeployment {
         $Layout.ClaudeEffectivePolicyVerified = [bool](
             $attestation.claude_effective_policy_verified
         )
-        $Layout.CodexTrustedHookLauncherVerified = [bool](
-            $attestation.codex_trusted_hook_launcher_verified
-        )
         if ($recordedAttestationHash -cnotmatch '^[0-9a-f]{64}$') {
             throw 'deployment metadata contains an invalid agent application-control attestation SHA-256'
         }
         $actualAttestationHash = (
             Microsoft.PowerShell.Utility\Get-FileHash `
-                -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                -LiteralPath $Layout.AgentApplicationControlAttestationPath `
                 -Algorithm SHA256
         ).Hash.ToLowerInvariant()
         if ($actualAttestationHash -cne $recordedAttestationHash) {
@@ -8077,11 +7682,6 @@ function Assert-DefenseClawEnterpriseDeployment {
         -RequiredRights $installRights `
         -AllowUsersRead
     Assert-DefenseClawPathAcl `
-        -Path $Layout.AgentDirectory `
-        -AllowedWriterSIDs $adminWriters `
-        -RequiredRights $installRights `
-        -AllowUsersRead
-    Assert-DefenseClawPathAcl `
         -Path $Layout.GatewayPath `
         -AllowedWriterSIDs $adminWriters `
         -RequiredRights $serviceInstallRights `
@@ -8100,13 +7700,6 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $installRights `
             -AllowUsersRead
     }
-    if ($codexTargetEnabled) {
-        Assert-DefenseClawPathAcl `
-            -Path $Layout.CodexTrustedHookLauncherPath `
-            -AllowedWriterSIDs $adminWriters `
-            -RequiredRights $installRights `
-            -AllowUsersRead
-    }
     $adminOnlyPaths = [Collections.Generic.List[string]]::new()
     foreach ($path in @(
         $Layout.GuardianDirectory,
@@ -8119,10 +7712,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         $adminOnlyPaths.Add([string]$path)
     }
     if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+        -LiteralPath $Layout.AgentApplicationControlAttestationPath `
         -PathType Leaf) {
         $adminOnlyPaths.Add(
-            [string]$Layout.CodexTrustedShellAttestationPath
+            [string]$Layout.AgentApplicationControlAttestationPath
         )
     }
     if ($codexTargetEnabled) {
@@ -8229,7 +7822,6 @@ function Assert-DefenseClawEnterpriseDeployment {
             'gateway' { $Layout.GatewayPath }
             'hook' { $Layout.HookPath }
             'cli' { $Layout.CLIPath }
-            'codex_launcher' { $Layout.CodexTrustedHookLauncherPath }
             'installer' { $Layout.InstallerPath }
             'module' { $Layout.ModulePath }
             default { $null }
@@ -8287,16 +7879,6 @@ function Assert-DefenseClawEnterpriseDeployment {
                 'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1'
         )
     }
-    if ([bool]$Layout.CodexTrustedHookLauncherVerified) {
-        $gatewayEnvironment = [string[]]@(
-            $gatewayEnvironment +
-                'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1'
-        )
-        $guardianEnvironment = [string[]]@(
-            $guardianEnvironment +
-                'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1'
-        )
-    }
     # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): the enumerator is a
     # third managed SCM service. Its expected env vars mirror the
     # guardian's (DEFENSECLAW_WINDOWS_SERVICE_NAME differs; everything
@@ -8327,12 +7909,6 @@ function Assert-DefenseClawEnterpriseDeployment {
         $enumeratorEnvironment = [string[]]@(
             $enumeratorEnvironment +
                 'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1'
-        )
-    }
-    if ([bool]$Layout.CodexTrustedHookLauncherVerified) {
-        $enumeratorEnvironment = [string[]]@(
-            $enumeratorEnvironment +
-                'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1'
         )
     }
     Assert-DefenseClawServiceConfiguration `
@@ -8421,7 +7997,6 @@ function Get-DefenseClawArtifactPath {
         'gateway' { $Layout.GatewayPath }
         'hook' { $Layout.HookPath }
         'cli' { $Layout.CLIPath }
-        'codex_launcher' { $Layout.CodexTrustedHookLauncherPath }
         'installer' { $Layout.InstallerPath }
         'module' { $Layout.ModulePath }
         'config' { $Layout.ConfigPath }
@@ -8481,7 +8056,6 @@ function Get-DefenseClawLifecycleSources {
         [string]$GatewayBinary,
         [string]$HookBinary,
         [string]$CLIBinary,
-        [string]$CodexTrustedHookLauncherBinary,
         [string]$Config,
         [string]$Manifest,
         [string]$InstallerSource,
@@ -8547,15 +8121,6 @@ function Get-DefenseClawLifecycleSources {
             -Label ([string]$entry[2]) `
             -Authenticode:([bool]$entry[3]) `
             -AllowUnsigned:$AllowUnsigned
-    }
-    if (-not [string]::IsNullOrWhiteSpace($CodexTrustedHookLauncherBinary)) {
-        # The launcher is an upstream agent trust boundary, not a
-        # DefenseClaw test build. Certification-mode signature relaxation must
-        # never apply to it.
-        $sources['codex_launcher'] = Get-DefenseClawSourceDescriptor `
-            -Path $CodexTrustedHookLauncherBinary `
-            -Label 'approved fail-closed Codex launcher executable' `
-            -Authenticode
     }
     return $sources
 }
@@ -8673,9 +8238,6 @@ function Get-DefenseClawLifecycleStatus {
     $claudeEffectivePolicyVerified = [bool](
         $Layout.ClaudeEffectivePolicyVerified
     )
-    $codexTrustedHookLauncherVerified = [bool](
-        $Layout.CodexTrustedHookLauncherVerified
-    )
     $generation = $null
     if ($installed -and -not $pending) {
         try {
@@ -8726,9 +8288,6 @@ function Get-DefenseClawLifecycleStatus {
                 $claudeEffectivePolicyVerified = [bool](
                     $codexReport.claude_effective_policy_verified
                 )
-                $codexTrustedHookLauncherVerified = [bool](
-                    $codexReport.codex_trusted_hook_launcher_verified
-                )
             }
             catch {
                 $errors.Add($_.Exception.Message)
@@ -8758,11 +8317,8 @@ function Get-DefenseClawLifecycleStatus {
     $externalSecuritySatisfied = [bool](
         $installed -and
         ($claudeTargetEnabled -or $codexTargetEnabled) -and
-        $Layout.AgentApplicationControlAttested -and
         (-not $claudeTargetEnabled -or
-            $claudeEffectivePolicyVerified) -and
-        (-not $codexTargetEnabled -or
-            $codexTrustedHookLauncherVerified)
+            $claudeEffectivePolicyVerified)
     )
     return [pscustomobject][ordered]@{
         schema_version = 1
@@ -8789,11 +8345,6 @@ function Get-DefenseClawLifecycleStatus {
         agent_application_control_prerequisite = $script:AgentApplicationControlPrerequisite
         codex_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
         codex_target_enabled = [bool]$codexTargetEnabled
-        codex_trusted_hook_launcher_required = [bool]$codexTargetEnabled
-        codex_trusted_hook_launcher_verified = [bool]$codexTrustedHookLauncherVerified
-        codex_trusted_hook_launcher_prerequisite = $script:CodexTrustedHookLauncherPrerequisite
-        codex_trusted_hook_launcher_path = $Layout.CodexTrustedHookLauncherPath
-        stock_codex_supported = $false
         claude_target_enabled = [bool]$claudeTargetEnabled
         claude_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
         claude_minimum_client_version = '2.1.152'
@@ -8890,14 +8441,12 @@ function Assert-DefenseClawManagedInstallTree {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $allowedDirectories = @(
         $Layout.BinDirectory,
-        $Layout.AgentDirectory,
         $Layout.LibexecDirectory
     )
     $allowedFiles = @(
         $Layout.GatewayPath,
         $Layout.HookPath,
         $Layout.CLIPath,
-        $Layout.CodexTrustedHookLauncherPath,
         $Layout.InstallerPath,
         $Layout.ModulePath
     )
@@ -10883,7 +10432,6 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
     Assert-DefenseClawManagedTreeNoReparse -Root $Layout.InstallRoot
     $allowed = @(
         [IO.Path]::GetFullPath($Layout.BinDirectory).TrimEnd('\'),
-        [IO.Path]::GetFullPath($Layout.AgentDirectory).TrimEnd('\'),
         [IO.Path]::GetFullPath($Layout.LibexecDirectory).TrimEnd('\')
     )
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem `
@@ -11221,7 +10769,6 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$RefreshApplicationControlAttestation,
         [switch]$RefreshClaudeEffectivePolicyAttestation,
-        [switch]$RefreshCodexTrustedHookLauncherAttestation,
         [switch]$NoStart
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
@@ -11264,7 +10811,6 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 'gateway',
                 'hook',
                 'cli',
-                'codex_launcher',
                 'installer',
                 'module'
             )
@@ -11416,21 +10962,21 @@ function Invoke-DefenseClawInstallLikeLifecycle {
 
         $attestationNeedsRefresh = [bool]$RefreshApplicationControlAttestation
         $attestationExists = Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+            -LiteralPath $Layout.AgentApplicationControlAttestationPath `
             -PathType Leaf
         if ([bool]$Layout.CoreHardeningCertification -and $attestationExists) {
             $staleAttestation =
-                Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout
+                Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
             if ([bool]$staleAttestation.agent_application_control_enforced) {
                 throw 'core-hardening migration refuses to discard genuine application-control attestation evidence'
             }
             Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                -LiteralPath $Layout.AgentApplicationControlAttestationPath `
                 -Force
             $attestationExists = $false
         }
         elseif (-not $attestationNeedsRefresh -and $attestationExists) {
-            [void](Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout)
+            [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
         }
         if ($Action -ne 'Install') {
             # Upgrade/Repair deliberately capture the previous hook identity
@@ -11473,28 +11019,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             $Layout.ClaudeEffectivePolicyVerified = $false
             $attestationNeedsRefresh = $true
         }
-        if ($RefreshCodexTrustedHookLauncherAttestation -and
-            -not [bool]$Layout.CodexTargetEnabled) {
-            throw '-AttestCodexTrustedHookLauncher requires at least one enabled Codex target in the protected manifest'
-        }
-        if (-not [bool]$Layout.CodexTargetEnabled) {
-            if ([bool]$Layout.CodexTrustedHookLauncherVerified) {
-                $Layout.CodexTrustedHookLauncherVerified = $false
-                $attestationNeedsRefresh = $true
-            }
-            if (Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $Layout.CodexTrustedHookLauncherPath `
-                -PathType Leaf) {
-                Assert-DefenseClawNoReparsePath `
-                    -Path $Layout.CodexTrustedHookLauncherPath
-                Microsoft.PowerShell.Management\Remove-Item `
-                    -LiteralPath $Layout.CodexTrustedHookLauncherPath `
-                    -Force
-            }
-        }
         if (-not [bool]$Layout.CoreHardeningCertification -and
             ($attestationNeedsRefresh -or -not $attestationExists)) {
-            Write-DefenseClawCodexTrustedShellAttestation -Layout $Layout
+            Write-DefenseClawAgentApplicationControlAttestation -Layout $Layout
             Set-DefenseClawManagedCoreAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
@@ -11507,8 +11034,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GatewayLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
-            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-            -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified
+            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
         Set-DefenseClawServiceEnvironment `
             -Name $GuardianServiceName `
             -RuntimeDirectory $Layout.RuntimeDirectory `
@@ -11517,15 +11043,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GuardianLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
-            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-            -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified
+            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
         if ([bool]$Layout.CodexTargetEnabled) {
-            if (-not [bool]$Layout.AgentApplicationControlAttested) {
-                throw 'an enabled Codex target is forbidden in unattested core-hardening certification mode'
-            }
-            if (-not [bool]$Layout.CodexTrustedHookLauncherVerified) {
-                throw 'an enabled Codex target requires a verified protected fail-closed launcher artifact before any Codex machine state is touched'
-            }
             if (-not $priorCodexTargetEnabled) {
                 Add-DefenseClawCodexTransactionSnapshot `
                     -SnapshotPath $snapshot `
@@ -11837,10 +11356,10 @@ function Invoke-DefenseClawUninstallLifecycle {
                 -Report $codexRemoval
         }
         if (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+            -LiteralPath $Layout.AgentApplicationControlAttestationPath `
             -PathType Leaf) {
             Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                -LiteralPath $Layout.AgentApplicationControlAttestationPath `
                 -Force
         }
         # Re-authenticate every service field and both ACL surfaces at the
@@ -12158,7 +11677,6 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$GatewayBinary,
         [string]$HookBinary,
         [string]$CLIBinary,
-        [string]$CodexTrustedHookLauncherBinary,
         [string]$Config,
         [string]$Manifest,
         [string]$InstallRoot = (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
@@ -12172,7 +11690,6 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [switch]$AllowUnsigned,
         [switch]$AttestAgentApplicationControl,
         [switch]$AttestClaudeEffectivePolicy,
-        [switch]$AttestCodexTrustedHookLauncher,
         [string]$InstallerSource,
         [string]$ModuleSource,
         [int]$SelfUninstallCallerPID,
@@ -12248,26 +11765,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         $Action -notin @('Install', 'Upgrade', 'Repair')) {
         throw '-AttestClaudeEffectivePolicy is valid only with Install, Upgrade, or Repair'
     }
-    if ($AttestCodexTrustedHookLauncher -and
-        $Action -notin @('Install', 'Upgrade', 'Repair')) {
-        throw '-AttestCodexTrustedHookLauncher is valid only with Install, Upgrade, or Repair'
-    }
-    $codexLauncherBinaryProvided = -not [string]::IsNullOrWhiteSpace(
-        $CodexTrustedHookLauncherBinary
-    )
-    if ($Action -in @('Install', 'Upgrade', 'Repair') -and
-        [bool]$AttestCodexTrustedHookLauncher -ne
-            [bool]$codexLauncherBinaryProvided) {
-        throw '-AttestCodexTrustedHookLauncher and -CodexTrustedHookLauncherBinary must be supplied together'
-    }
     if ($CoreHardeningCertification -and
         ($AttestAgentApplicationControl -or
-            $AttestClaudeEffectivePolicy -or
-            $AttestCodexTrustedHookLauncher -or
-            $codexLauncherBinaryProvided)) {
+            $AttestClaudeEffectivePolicy)) {
         throw (
             '-CoreHardeningCertification cannot be combined with production ' +
-            'application-control, Claude-policy, or trusted-launcher attestations'
+            'application-control or Claude-policy attestations'
         )
     }
     if ($Action -ne 'Status') {
@@ -12301,8 +11804,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -GuardianServiceName $GuardianServiceName `
         -CertificationCodexHome $resolvedCertificationCodexHome `
         -CoreHardeningCertification:$CoreHardeningCertification `
-        -AgentApplicationControlAttested:$AttestAgentApplicationControl `
-        -CodexTrustedHookLauncherVerified:$AttestCodexTrustedHookLauncher
+        -AgentApplicationControlAttested:$AttestAgentApplicationControl
 
     # Keep the authoritative current/global/GUID drive identity adjacent to
     # the first managed metadata read, not only to caller argument parsing.
@@ -12320,21 +11822,18 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # deployment.
         [void](Get-DefenseClawDeploymentMetadata -Layout $layout)
     }
-    $trustedShellAttestationExists = Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $layout.CodexTrustedShellAttestationPath `
+    $applicationControlAttestationExists = Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $layout.AgentApplicationControlAttestationPath `
         -PathType Leaf
-    if ($trustedShellAttestationExists -and
+    if ($applicationControlAttestationExists -and
         ($Action -ne 'Status' -or (Test-DefenseClawAdministrator))) {
         $existingApplicationControlAttestation =
-            Get-DefenseClawCodexTrustedShellAttestation -Layout $layout
+            Get-DefenseClawAgentApplicationControlAttestation -Layout $layout
         $layout.AgentApplicationControlAttested = [bool](
             $existingApplicationControlAttestation.agent_application_control_enforced
         )
         $layout.ClaudeEffectivePolicyVerified = [bool](
             $existingApplicationControlAttestation.claude_effective_policy_verified
-        )
-        $layout.CodexTrustedHookLauncherVerified = [bool](
-            $existingApplicationControlAttestation.codex_trusted_hook_launcher_verified
         )
     }
     if ($AttestAgentApplicationControl) {
@@ -12349,24 +11848,6 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         }
         $layout.ClaudeEffectivePolicyVerified = $true
     }
-    if ($AttestCodexTrustedHookLauncher) {
-        if ([bool]$layout.CoreHardeningCertification) {
-            throw '-AttestCodexTrustedHookLauncher is forbidden in core-hardening certification mode'
-        }
-        $layout.CodexTrustedHookLauncherVerified = $true
-    }
-    if ($Action -eq 'Install' -and
-        -not $AttestAgentApplicationControl -and
-        -not [bool]$layout.CoreHardeningCertification) {
-        throw 'Install requires -AttestAgentApplicationControl after WDAC or AppLocker rules block unapproved agent runtimes; this does not certify Codex hook execution'
-    }
-    if ($Action -in @('Upgrade', 'Repair') -and
-        -not $trustedShellAttestationExists -and
-        -not $AttestAgentApplicationControl -and
-        -not [bool]$layout.CoreHardeningCertification) {
-        throw "$Action requires -AttestAgentApplicationControl to migrate this deployment"
-    }
-
     if ($Action -eq 'Status') {
         Assert-DefenseClawLayoutVolumeIdentity `
             -Layout $layout `
@@ -12413,7 +11894,6 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -GatewayBinary $GatewayBinary `
         -HookBinary $HookBinary `
         -CLIBinary $CLIBinary `
-        -CodexTrustedHookLauncherBinary $CodexTrustedHookLauncherBinary `
         -Config $Config `
         -Manifest $Manifest `
         -InstallerSource $InstallerSource `
@@ -12516,11 +11996,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -RefreshApplicationControlAttestation:(
                 $AttestAgentApplicationControl -or
-                $AttestClaudeEffectivePolicy -or
-                $AttestCodexTrustedHookLauncher
+                $AttestClaudeEffectivePolicy
             ) `
             -RefreshClaudeEffectivePolicyAttestation:$AttestClaudeEffectivePolicy `
-            -RefreshCodexTrustedHookLauncherAttestation:$AttestCodexTrustedHookLauncher `
             -NoStart:($NoStart -or $DeferredConfig)
     }
     finally {

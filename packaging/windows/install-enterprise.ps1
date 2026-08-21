@@ -55,8 +55,6 @@ param(
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
-    [switch]$AttestCodexTrustedHookLauncher,
-    [string]$CodexTrustedHookLauncherBinary,
     # Spec 003 (docs/specs/003-windows-deferred-config/): opt in to
     # the UCB-friendly late-config install. When set, -Config and
     # -Manifest may be omitted; the module's Get-DefenseClawLifecycleSources
@@ -2075,17 +2073,12 @@ try {
             [string]::IsNullOrWhiteSpace($CertificationCodexHome))) {
         throw '-CoreHardeningCertification requires -AllowUnsigned and -CertificationCodexHome'
     }
-    $codexLauncherBinaryProvided = -not [string]::IsNullOrWhiteSpace(
-        $CodexTrustedHookLauncherBinary
-    )
     if ($CoreHardeningCertification -and
         ($AttestAgentApplicationControl -or
-            $AttestClaudeEffectivePolicy -or
-            $AttestCodexTrustedHookLauncher -or
-            $codexLauncherBinaryProvided)) {
+            $AttestClaudeEffectivePolicy)) {
         throw (
             '-CoreHardeningCertification cannot be combined with production ' +
-            'application-control, Claude-policy, or trusted-launcher attestations'
+            'application-control or Claude-policy attestations'
         )
     }
     # -Mode / -Connector shorthand handling. Validated + rendered BEFORE
@@ -2166,8 +2159,6 @@ try {
         Purge = [bool]$Purge
         AttestAgentApplicationControl = [bool]$AttestAgentApplicationControl
         AttestClaudeEffectivePolicy = [bool]$AttestClaudeEffectivePolicy
-        AttestCodexTrustedHookLauncher = [bool]$AttestCodexTrustedHookLauncher
-        CodexTrustedHookLauncherBinary = $CodexTrustedHookLauncherBinary
         SelfUninstallCallerPID = $SelfUninstallCallerPID
         # The exact service/root/CODEX_HOME grammar scopes this relaxation for
         # every certification lifecycle action, including pre-install Status.

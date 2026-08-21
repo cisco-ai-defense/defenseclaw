@@ -25,23 +25,21 @@ import (
 
 func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 	opts := &windowsEnterpriseLifecycleOptions{
-		gatewayBinary:                  `C:\stage\defenseclaw-gateway.exe`,
-		hookBinary:                     `C:\stage\defenseclaw-hook.exe`,
-		cliBinary:                      `C:\stage\defenseclaw.exe`,
-		configPath:                     `C:\stage\config.yaml`,
-		manifestPath:                   `C:\stage\targets.yaml`,
-		installRoot:                    `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw`,
-		stateRoot:                      `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`,
-		gatewayServiceName:             "DefenseClawGateway",
-		guardianServiceName:            "DefenseClawHookGuardian",
-		certificationCodexHome:         `C:\certification\codex-home`,
-		codexTrustedHookLauncherBinary: `C:\stage\codex-fixed.exe`,
-		attestAgentApplicationControl:  true,
-		attestClaudeEffectivePolicy:    true,
-		attestCodexTrustedHookLauncher: true,
-		noStart:                        true,
-		allowUnsigned:                  true,
-		jsonOutput:                     true,
+		gatewayBinary:                 `C:\stage\defenseclaw-gateway.exe`,
+		hookBinary:                    `C:\stage\defenseclaw-hook.exe`,
+		cliBinary:                     `C:\stage\defenseclaw.exe`,
+		configPath:                    `C:\stage\config.yaml`,
+		manifestPath:                  `C:\stage\targets.yaml`,
+		installRoot:                   `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw`,
+		stateRoot:                     `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`,
+		gatewayServiceName:            "DefenseClawGateway",
+		guardianServiceName:           "DefenseClawHookGuardian",
+		certificationCodexHome:        `C:\certification\codex-home`,
+		attestAgentApplicationControl: true,
+		attestClaudeEffectivePolicy:   true,
+		noStart:                       true,
+		allowUnsigned:                 true,
+		jsonOutput:                    true,
 	}
 	got := windowsEnterprisePowerShellArgs("upgrade", opts)
 	want := []string{
@@ -58,8 +56,6 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 		"-CertificationCodexHome", opts.certificationCodexHome,
 		"-AttestAgentApplicationControl",
 		"-AttestClaudeEffectivePolicy",
-		"-AttestCodexTrustedHookLauncher",
-		"-CodexTrustedHookLauncherBinary", opts.codexTrustedHookLauncherBinary,
 		"-NoStart",
 		"-AllowUnsigned",
 		"-Json",
@@ -82,28 +78,13 @@ func TestWindowsEnterpriseLifecycleSecurityOptionsAreActionScoped(t *testing.T) 
 	for _, action := range []string{"install", "upgrade", "repair"} {
 		t.Run(action, func(t *testing.T) {
 			opts := &windowsEnterpriseLifecycleOptions{
-				attestAgentApplicationControl:  true,
-				attestClaudeEffectivePolicy:    true,
-				attestCodexTrustedHookLauncher: true,
-				codexTrustedHookLauncherBinary: `C:\approved\codex-fixed.exe`,
+				attestAgentApplicationControl: true,
+				attestClaudeEffectivePolicy:   true,
 			}
 			if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, action, opts); err != nil {
 				t.Fatalf("validation error = %v", err)
 			}
 		})
-	}
-}
-
-func TestWindowsEnterpriseLifecycleCodexLauncherAttestationIsPaired(t *testing.T) {
-	tests := []windowsEnterpriseLifecycleOptions{
-		{attestCodexTrustedHookLauncher: true},
-		{codexTrustedHookLauncherBinary: `C:\approved\codex-fixed.exe`},
-	}
-	for _, opts := range tests {
-		if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "repair", &opts); err == nil ||
-			!strings.Contains(err.Error(), "must be supplied together") {
-			t.Fatalf("validation error = %v", err)
-		}
 	}
 }
 
@@ -120,20 +101,16 @@ func TestWindowsEnterpriseLifecycleCertificationModeMatrix(t *testing.T) {
 			name:   "signed production",
 			action: "install",
 			opts: windowsEnterpriseLifecycleOptions{
-				attestAgentApplicationControl:  true,
-				attestCodexTrustedHookLauncher: true,
-				codexTrustedHookLauncherBinary: `C:\approved\codex-fixed.exe`,
+				attestAgentApplicationControl: true,
 			},
 		},
 		{
 			name:   "full unsigned certification",
 			action: "install",
 			opts: windowsEnterpriseLifecycleOptions{
-				allowUnsigned:                  true,
-				certificationCodexHome:         certificationHome,
-				attestAgentApplicationControl:  true,
-				attestCodexTrustedHookLauncher: true,
-				codexTrustedHookLauncherBinary: `C:\approved\codex-fixed.exe`,
+				allowUnsigned:                 true,
+				certificationCodexHome:        certificationHome,
+				attestAgentApplicationControl: true,
 			},
 		},
 		{

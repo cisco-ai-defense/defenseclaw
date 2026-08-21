@@ -140,7 +140,7 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "shorthand config did not explicitly select embedded rule-pack defaults" in smoke
 
 
-def test_unsigned_windows_bundle_instructions_are_claude_only() -> None:
+def test_unsigned_windows_bundle_instructions_describe_optional_hardening() -> None:
     builder = read(WINDOWS_MANAGED_BUNDLE_BUILDER)
     unsigned_instructions = builder[
         builder.index("Local unsigned build ready") :
@@ -149,8 +149,8 @@ def test_unsigned_windows_bundle_instructions_are_claude_only() -> None:
 
     assert "--core-hardening-certification --mode action" in unsigned_instructions
     assert "--connector claudecode" in unsigned_instructions
-    assert "The full profile requires real" in unsigned_instructions
-    assert "WDAC/AppLocker" in unsigned_instructions
+    assert "A full profile uses the shared" in unsigned_instructions
+    assert "WDAC/AppLocker is optional defense in depth" in unsigned_instructions
 
 
 def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
@@ -310,8 +310,6 @@ def test_public_installer_exposes_complete_truthful_lifecycle() -> None:
     assert "[switch]$AllowUnsigned" in installer
     assert "[switch]$AttestAgentApplicationControl" in installer
     assert "[switch]$AttestClaudeEffectivePolicy" in installer
-    assert "[switch]$AttestCodexTrustedHookLauncher" in installer
-    assert "[string]$CodexTrustedHookLauncherBinary" in installer
     assert "[switch]$CoreHardeningCertification" in installer
     assert "[switch]$Json" in installer
     assert "$exitCode = 1" in installer
@@ -328,8 +326,6 @@ def test_public_windows_lifecycle_cli_preserves_every_security_option() -> None:
     expected_mappings = {
         "attest-agent-application-control": "-AttestAgentApplicationControl",
         "attest-claude-effective-policy": "-AttestClaudeEffectivePolicy",
-        "attest-codex-trusted-hook-launcher": "-AttestCodexTrustedHookLauncher",
-        "codex-trusted-hook-launcher-binary": "-CodexTrustedHookLauncherBinary",
         "certification-codex-home": "-CertificationCodexHome",
         "core-hardening-certification": "-CoreHardeningCertification",
     }
@@ -339,9 +335,7 @@ def test_public_windows_lifecycle_cli_preserves_every_security_option() -> None:
 
     assert "validateWindowsEnterpriseLifecycleSecurityOptions" in source
     assert "valid only with install, upgrade, or repair" in source
-    assert (
-        "--attest-codex-trusted-hook-launcher and --codex-trusted-hook-launcher-binary must be supplied together"
-    ) in source
+    assert "codex-trusted-hook-launcher" not in source
     assert "They do not affect the existing per-user Windows" in source
     assert "unless an administrator explicitly invokes a lifecycle action" in source
     assert "--allow-unsigned requires --certification-codex-home" in source
@@ -425,7 +419,7 @@ def test_packaging_defaults_to_protected_scm_identities_and_roots() -> None:
     )
     assert (
         "Microsoft.PowerShell.Management\\Test-Path `\n"
-        "        -LiteralPath $Layout.CodexTrustedShellAttestationPath `\n"
+        "        -LiteralPath $Layout.AgentApplicationControlAttestationPath `\n"
         "        -PathType Leaf" in module
     )
     assert "core-hardening certification must not publish external application-control attestation evidence" in module
@@ -436,23 +430,18 @@ def test_packaging_defaults_to_protected_scm_identities_and_roots() -> None:
     assert ".defenseclaw-managed-hooks.state" in module
     assert "agent-application-control-attestation.json" in module
     assert "[switch]$AttestAgentApplicationControl" in installer
-    assert "[switch]$AttestCodexTrustedHookLauncher" in installer
     assert "AttestCodexTrustedShellEnforcement" not in installer
     assert "AttestCodexApplicationControl" not in installer
     assert "$script:AgentApplicationControlAttestationSchemaVersion = 2" in module
     assert "agent_application_control_enforced = [bool]$Layout.AgentApplicationControlAttested" in module
-    assert "codex_trusted_hook_launcher_prerequisite" in module
-    assert "codex_trusted_hook_launcher_verified" in module
-    assert "stock_codex_supported = $false" in module
     attestation_writer = module[
-        module.index("function Write-DefenseClawCodexTrustedShellAttestation") : module.index(
+        module.index("function Write-DefenseClawAgentApplicationControlAttestation") : module.index(
             "function Initialize-DefenseClawCodexMachinePolicyParent"
         )
     ]
     assert "trusted_shell_enforced" not in attestation_writer
     assert "minimum_codex_version" not in attestation_writer
     assert "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_SHELL_ENFORCED" not in module
-    assert "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1" in module
     assert "DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED=1" in module
     assert "DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED=1" in module
     assert "DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1" in module
@@ -656,7 +645,6 @@ def test_poisoned_program_root_environment_cannot_redirect_defaults(
                 f"-HookBinary '{payload_binary_ps}' "
                 f"-CLIBinary '{payload_binary_ps}' "
                 f"-CodexBinary '{payload_binary_ps}' "
-                f"-CodexTrustedHookLauncherBinary '{payload_binary_ps}' "
                 f"-ClaudeBinary '{payload_binary_ps}' "
                 f"-RejectedCodexBinary '{payload_binary_ps}' "
                 f"-RejectedClaudeBinary '{payload_binary_ps}' "
@@ -3642,23 +3630,6 @@ def test_certification_separates_core_health_from_production_security() -> None:
     assert "core_hardening_complete" in module
     assert "security_complete" in module
     assert "manifest_sha256" in module
-
-
-def test_certification_requires_a_real_distinct_trusted_codex_launcher() -> None:
-    harness = read(HARNESS)
-
-    assert "[string]$CodexTrustedHookLauncherBinary" in harness
-    assert "Get-CodexTrustedHookLauncherIdentity" in harness
-    assert "a separately signed fail-closed drop-in launcher" in harness
-    assert "must have bytes distinct from both" in harness
-    assert "codex-trusted-hook-launcher.exe" in harness
-    assert "full Codex lifecycle attestation requires the protected" in harness
-    assert "$arguments.Add('-CodexTrustedHookLauncherBinary')" in harness
-    assert "$arguments.Add($script:CodexTrustedHookLauncherRuntimeBinary)" in harness
-    assert "[ValidateSet('stock', 'trusted_launcher')]" in harness
-    assert "stock-codex-0.144.3-blocked-shell-fail-open-negative" in harness
-    assert "stock_codex_supported = $false" in harness
-    assert "trusted_codex_launcher_identity" in harness
 
 
 def test_certification_covers_effective_policy_revocation_and_lock_squatting() -> None:

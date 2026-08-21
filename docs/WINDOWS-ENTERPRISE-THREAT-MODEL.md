@@ -52,9 +52,7 @@ and macOS managed-enterprise deployments, expressed in Windows-native terms:
    not `managed_enterprise`, existing per-user setup and auto-heal behavior is
    unchanged and no machine service is created implicitly.
 9. Every enabled Windows agent is constrained to an approved, signed minimum
-   client version. Codex additionally requires a separately verified
-   fail-closed fixed hook launcher; application-control attestation by itself
-   is not proof that Codex hooks execute.
+   client version and a protected managed-hook configuration.
 10. A hook verdict is accepted only from the exact live SCM gateway process.
     A same-user listener that wins the configured loopback port cannot return a
     forged allow verdict.
@@ -130,7 +128,7 @@ not an administrator authority even though it is a machine service.
 | Per-user hook footprint | Confined to the manifest SID's canonical profile; exact protected OWNER RIGHTS DACL; regular files have one NTFS link; repairable after target-user tamper |
 | Codex machine requirements | Exact `%ProgramData%\OpenAI\Codex\requirements.toml`, ten managed hook groups, protected ownership/ACL preimage records, and guardian-repaired enrollment state |
 | Claude Code managed policy | DefenseClaw-owned protected drop-in and ownership state; effective precedence verified with the real approved Claude client |
-| Agent application-control attestation | Protected schema-v2 evidence for approved-client rules and Claude policy; separate boolean evidence for a verified Codex fail-closed fixed hook launcher |
+| Agent application-control attestation | Protected schema-v2 evidence for approved-client rules and Claude effective-policy verification |
 | Gateway and guardian logs | Separate ACL domains so the less-trusted gateway cannot alter guardian evidence |
 
 ## Threat actors and assumptions
@@ -263,8 +261,8 @@ not an administrator authority even though it is a machine service.
 | W-23 | Authorization remains green with an extra removed/disabled target | Healthy status and verify require exact target-set equality, strict schema/counts, no duplicates, same reconcile identity, and freshness | Extra/stale/removed target tests for status, verify, and gateway readiness |
 | W-24 | A caller uses `-AllowUnsigned` with production names/roots, a near-miss certification scope, a non-install action, or implicit core-only semantics to import or deploy untrusted code | Before module import, accept unsigned artifacts only for `Install`/`Upgrade`/`Repair` with exact case-sensitive same-id certification service names, exact same-id Program Files/ProgramData certification roots, and a required same-id certification CODEX_HOME basename. Select core-only behavior through a separate explicit flag that requires the same scope, rejects production attestations and Codex targets, and is bound into transaction recovery; retain all fixed-NTFS, no-reparse, owner, and DACL source checks | Bootstrap, module, public-CLI, recovery, and live-harness matrix tests: full unsigned uses home/no-core, Claude-only uses home/core, signed production and read-only use neither; negative production, mismatched-id, case-near-miss, nested-root, CODEX_HOME-near-miss, and flag-combination assertions |
 | W-25 | A standard-user fake listener wins the exact API port and returns a valid allow response while the gateway is stopped or restarting | Bind hook trust to both the connector token and the connected server PID; the PID must equal the exact current SCM gateway PID, not merely any process listening on loopback | Stop/crash the gateway, bind the exact port as a non-admin, return valid allow JSON, and race service restart; the hook must deny/fail closed and the fake listener must observe zero authenticated requests |
-| W-26 | Codex launches managed hooks through a user-controlled shell, or treats an OS-blocked shell as a nonblocking hook failure and continues upstream | Require a separately attested fail-closed fixed hook launcher and end-to-end client evidence. Shell AppLocker/WDAC rules alone are insufficient | With signed Codex 0.144.3, inject hostile `PATH`/`COMSPEC` shell binaries and also OS-block them. Pass only if managed hook contact occurs or the Codex operation is blocked. The observed stock 0.144.3 behavior—exit 0/provider contact/no hook contact—is an intentional certification rejection |
-| W-27 | An old officially signed or custom unsigned agent avoids a newer managed-hook contract | Application control allows only approved signed clients at or above the minimum versions. **The source of truth is `cli/defenseclaw/inventory/hook_contracts.json` for the tested build** — the certification harness reads the floors from there, and any contract update automatically retunes the check without a threat-model edit. As of this document snapshot, the floors are Codex 0.133.0 and Claude 2.1.152 (fixture values, not authoritative — consult the contract). The separate Codex launcher gate is still required | Approved clients start; mandatory explicitly supplied old signed Codex/Claude and custom unsigned lookalikes fail process creation with an application-control denial |
+| W-26 | Codex managed-hook configuration is removed, redirected, or bypassed | Protect the machine requirements and enrollment state with administrator-owned ACLs, verify the exact ten-event policy, and require end-to-end managed-hook contact or a blocked operation in certification | Invoke the approved Codex client against a bounded local provider and require SessionStart/UserPromptSubmit audit evidence or a causal block |
+| W-27 | An old officially signed or custom unsigned agent avoids a newer managed-hook contract | When an enterprise opts into application control, allow only approved signed clients at or above the minimum versions. **The source of truth is `cli/defenseclaw/inventory/hook_contracts.json` for the tested build** — the certification harness reads the floors from there, and any contract update automatically retunes the check without a threat-model edit. As of this document snapshot, the floors are Codex 0.133.0 and Claude 2.1.152 (fixture values, not authoritative — consult the contract) | In the optional application-control profile, approved clients start and explicitly supplied old signed Codex/Claude and custom unsigned lookalikes fail process creation with an application-control denial |
 | W-28 | An unregistered interactive SID invokes the installed managed hook or reuses another target's state | Exact SID membership in protected connector enrollment state is checked before token use; absence is fail-closed and diagnostic | Run the installed managed hook under a temporary non-admin SID absent from the manifest; require non-zero, causal enrollment text, and byte/security-exact user trees |
 | W-29 | A user removes or weakens Codex machine requirements/enrollment state | Administrator-owned protected DACLs, private ownership/ACL-preimage records, hidden read-only verify, and guardian reconciliation of the exact ten-event canonical document | Standard-user write/delete/DACL attempts fail; administrator-injected deletion, DACL drift, event removal, and state removal are unhealthy until exact auto-heal |
 | W-30 | Uninstall removes a shared vendor tree, another administrator's setting, or a value that changed after install | Record exact ownership and preimages; remove/restore only a current value still equal to the DefenseClaw-owned postimage; preserve shared parents and unrelated content | Install over absent and preexisting shared parents, mutate unrelated values, uninstall and purge, then compare preserved parents/preimages and require only owned Codex/Claude wiring to be absent |
@@ -316,17 +314,17 @@ not an administrator authority even though it is a machine service.
 - Non-managed modes retain the existing auto-heal owner and behavior.
 - Loopback is transport locality, not server identity. Managed hooks require
   both scoped authentication and an exact SCM-gateway peer-PID match.
-- Application-control attestation and Codex hook-launcher verification are
-  separate gates. `security_complete` is false for an enabled Codex target
-  unless both are true.
+- Application-control attestation is an optional posture signal, independent
+  of managed-hook installation and reconciliation. Its absence does not make
+  an otherwise healthy Codex target incomplete.
 - Application control, structural Claude policy health, and live Claude
   effective-policy evidence are three distinct facts. Initial install cannot
   infer the third from either of the first two.
 - A core-only certification run may prove `core_hardening_complete`, but it
   cannot persist production Claude evidence or claim `security_complete`.
-- Stock signed Codex 0.144.3 is not accepted for managed-enterprise
-  enforcement: a blocked hook shell is nonblocking and the agent can continue
-  without managed hook contact.
+- Supported Codex clients use the protected machine policy to invoke the shared
+  `defenseclaw-hook.exe`. An enterprise may additionally use application
+  control to restrict which client versions or binaries can start.
 - Machine and service environments never carry `CODEX_HOME`; the disposable
   certification home is process-local to the actual Codex child.
 - Uninstall is surgical. It removes DefenseClaw-owned leaves or restores
@@ -355,9 +353,11 @@ not an administrator authority even though it is a machine service.
    vendor supports machine-managed hooks.
 2. A target without an active, safe WTS token cannot be repaired. The guardian
    records failure and retries rather than writing the profile as LocalSystem.
-3. Application control and vendor MDM/GPO policy are deployment prerequisites,
-   not features DefenseClaw can synthesize. Missing or unverifiable controls
-   leave readiness false.
+3. Application control and vendor MDM/GPO policy are optional defense-in-depth
+   controls, not features DefenseClaw can synthesize. Their absence does not
+   block managed-hook readiness, but leaves the user-owned hook race described
+   above as a residual risk. If an enterprise claims these controls, it must
+   certify them independently.
 4. Local port squatting cannot forge an allow verdict because the connected
    peer PID must be the exact SCM gateway PID, but it can still deny
    availability. Target-owned file reads and comparisons are bounded, and an

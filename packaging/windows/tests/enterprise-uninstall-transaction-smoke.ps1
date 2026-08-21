@@ -195,9 +195,6 @@ try {
                 GuardianLogPath = (
                     Microsoft.PowerShell.Management\Join-Path $stateRoot 'guardian.log'
                 )
-                CodexTrustedHookLauncherPath = (
-                    Microsoft.PowerShell.Management\Join-Path $agentDirectory 'codex.exe'
-                )
                 MetadataPath = (
                     Microsoft.PowerShell.Management\Join-Path $installState 'deployment.json'
                 )
@@ -242,7 +239,7 @@ try {
                         $installState `
                         'managed-hooks-lifecycle-journal.json'
                 )
-                CodexTrustedShellAttestationPath = (
+                AgentApplicationControlAttestationPath = (
                     Microsoft.PowerShell.Management\Join-Path `
                         $installState `
                         'agent-application-control.json'
@@ -258,7 +255,6 @@ try {
                 ClaudeTargetEnabled = $true
                 AgentApplicationControlAttested = $true
                 ClaudeEffectivePolicyVerified = $true
-                CodexTrustedHookLauncherVerified = $false
                 CoreHardeningCertification = $false
                 CertificationCodexHome = ''
             }
@@ -1249,10 +1245,10 @@ try {
                 'DefenseClawHookGuardian'
             ] = 4
             if (-not (Microsoft.PowerShell.Management\Test-Path `
-                -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                -LiteralPath $Layout.AgentApplicationControlAttestationPath `
                 -PathType Leaf)) {
                 [IO.File]::WriteAllText(
-                    $Layout.CodexTrustedShellAttestationPath,
+                    $Layout.AgentApplicationControlAttestationPath,
                     '{}',
                     [Text.UTF8Encoding]::new($false)
                 )
@@ -1401,12 +1397,11 @@ try {
             }
             $script:HarnessState.services_running = $true
         }
-        function script:Get-DefenseClawCodexTrustedShellAttestation {
+        function script:Get-DefenseClawAgentApplicationControlAttestation {
             param([Parameter(Mandatory)][hashtable]$Layout)
             return [pscustomobject]@{
                 agent_application_control_enforced = $true
                 claude_effective_policy_verified = $true
-                codex_trusted_hook_launcher_verified = $false
             }
         }
         function script:Set-DefenseClawManagedServices {
@@ -1422,7 +1417,6 @@ try {
                 [Parameter(Mandatory)][string]$GuardianLogPath,
                 [switch]$AgentApplicationControlAttested,
                 [switch]$ClaudeEffectivePolicyVerified,
-                [switch]$CodexTrustedHookLauncherVerified,
                 [switch]$DeferAutomaticStart
             )
             $script:HarnessState.events.Add('managed-services')
@@ -1461,10 +1455,10 @@ try {
                 codex_target_enabled = $false
             }
         }
-        function script:Write-DefenseClawCodexTrustedShellAttestation {
+        function script:Write-DefenseClawAgentApplicationControlAttestation {
             param([Parameter(Mandatory)][hashtable]$Layout)
             [IO.File]::WriteAllText(
-                $Layout.CodexTrustedShellAttestationPath,
+                $Layout.AgentApplicationControlAttestationPath,
                 '{}',
                 [Text.UTF8Encoding]::new($false)
             )
@@ -1478,8 +1472,7 @@ try {
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$LogPath,
                 [switch]$AgentApplicationControlAttested,
-                [switch]$ClaudeEffectivePolicyVerified,
-                [switch]$CodexTrustedHookLauncherVerified
+                [switch]$ClaudeEffectivePolicyVerified
             )
         }
         function script:Assert-DefenseClawInstalledConfig {
@@ -1770,7 +1763,7 @@ try {
                 -Label ('uninstall-' + $Name)
             $layout = New-HarnessLayout -Root $root
             [IO.File]::WriteAllText(
-                $layout.CodexTrustedShellAttestationPath,
+                $layout.AgentApplicationControlAttestationPath,
                 '{}',
                 [Text.UTF8Encoding]::new($false)
             )

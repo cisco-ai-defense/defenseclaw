@@ -725,13 +725,9 @@ namespace DefenseClaw.Windows.Tests
     $attestedEnvironment = @(
         Get-DefenseClawServiceEnvironmentValues `
             @environmentArguments `
-            -AgentApplicationControlAttested `
-            -CodexTrustedHookLauncherVerified
+            -AgentApplicationControlAttested
     )
     if (@($attestedEnvironment | Where-Object {
-        [string]$_ -ceq 'DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1'
-    }).Count -ne 1 -or
-        @($attestedEnvironment | Where-Object {
             [string]$_ -ceq 'DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED=1'
         }).Count -ne 1 -or
         @($attestedEnvironment | Where-Object {
@@ -746,14 +742,13 @@ namespace DefenseClaw.Windows.Tests
                 [StringComparison]::OrdinalIgnoreCase
             )
         }).Count -ne 0) {
-        throw 'split application-control/launcher environment evidence is missing or leaked CODEX_HOME'
+        throw 'application-control environment evidence is missing or leaked CODEX_HOME'
     }
     $fullyAttestedEnvironment = @(
         Get-DefenseClawServiceEnvironmentValues `
             @environmentArguments `
             -AgentApplicationControlAttested `
-            -ClaudeEffectivePolicyVerified `
-            -CodexTrustedHookLauncherVerified
+            -ClaudeEffectivePolicyVerified
     )
     if (@($fullyAttestedEnvironment | Where-Object {
         [string]$_ -ceq 'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1'

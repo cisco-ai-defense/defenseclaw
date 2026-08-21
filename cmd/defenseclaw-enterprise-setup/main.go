@@ -51,23 +51,21 @@ var requiredPayloadFiles = []string{
 }
 
 type enterpriseSetupOptions struct {
-	Action                         string
-	Config                         string
-	Manifest                       string
-	InstallRoot                    string
-	StateRoot                      string
-	GatewayServiceName             string
-	GuardianServiceName            string
-	CertificationCodexHome         string
-	CodexTrustedHookLauncherBinary string
-	NoStart                        bool
-	Purge                          bool
-	JSON                           bool
-	AllowUnsigned                  bool
-	CoreHardeningCertification     bool
-	AttestAgentApplicationControl  bool
-	AttestClaudeEffectivePolicy    bool
-	AttestCodexTrustedHookLauncher bool
+	Action                        string
+	Config                        string
+	Manifest                      string
+	InstallRoot                   string
+	StateRoot                     string
+	GatewayServiceName            string
+	GuardianServiceName           string
+	CertificationCodexHome        string
+	NoStart                       bool
+	Purge                         bool
+	JSON                          bool
+	AllowUnsigned                 bool
+	CoreHardeningCertification    bool
+	AttestAgentApplicationControl bool
+	AttestClaudeEffectivePolicy   bool
 	// DeferredConfig turns on the UCB-friendly late-config install
 	// path from spec 003 (docs/specs/003-windows-deferred-config/):
 	// --config and --manifest become optional at install time; the
@@ -158,7 +156,6 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	flags.StringVar(&opts.GatewayServiceName, "gateway-service-name", "", "certification-only gateway service name")
 	flags.StringVar(&opts.GuardianServiceName, "guardian-service-name", "", "certification-only guardian service name")
 	flags.StringVar(&opts.CertificationCodexHome, "certification-codex-home", "", "certification-only CODEX_HOME")
-	flags.StringVar(&opts.CodexTrustedHookLauncherBinary, "codex-trusted-hook-launcher-binary", "", "approved fail-closed Codex launcher")
 	flags.BoolVar(&opts.NoStart, "no-start", false, "install services disabled and stopped")
 	flags.BoolVar(&opts.Purge, "purge", false, "remove managed state during uninstall")
 	flags.BoolVar(&opts.JSON, "json", false, "emit machine-readable lifecycle output")
@@ -166,7 +163,6 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	flags.BoolVar(&opts.CoreHardeningCertification, "core-hardening-certification", false, "run the unsigned core-only certification profile")
 	flags.BoolVar(&opts.AttestAgentApplicationControl, "attest-agent-application-control", false, "attest live WDAC or AppLocker enforcement")
 	flags.BoolVar(&opts.AttestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "attest Claude managed-policy precedence")
-	flags.BoolVar(&opts.AttestCodexTrustedHookLauncher, "attest-codex-trusted-hook-launcher", false, "attest the supplied fail-closed Codex launcher")
 	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "spec 003 UCB-friendly install: --config and --manifest optional; services registered stopped")
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
 	flags.IntVar(&timeoutSeconds, "timeout-seconds", timeoutSeconds, "bounded lifecycle timeout")
@@ -239,10 +235,6 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	if opts.CoreHardeningCertification && !opts.AllowUnsigned {
 		return opts, false, errors.New("--core-hardening-certification requires --allow-unsigned")
 	}
-	if opts.AttestCodexTrustedHookLauncher !=
-		(strings.TrimSpace(opts.CodexTrustedHookLauncherBinary) != "") {
-		return opts, false, errors.New("--attest-codex-trusted-hook-launcher and --codex-trusted-hook-launcher-binary must be supplied together")
-	}
 	// Bound the raw integer BEFORE multiplying by time.Second. A very large
 	// timeoutSeconds value would otherwise overflow int64 during the
 	// multiplication, wrap to a small or negative time.Duration, and slip
@@ -263,16 +255,14 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 		"mode": "mode", "connector": "connector",
 		"installroot": "install-root", "stateroot": "state-root",
 		"gatewayservicename": "gateway-service-name", "guardianservicename": "guardian-service-name",
-		"certificationcodexhome":         "certification-codex-home",
-		"codextrustedhooklauncherbinary": "codex-trusted-hook-launcher-binary",
-		"timeoutseconds":                 "timeout-seconds",
+		"certificationcodexhome": "certification-codex-home",
+		"timeoutseconds":         "timeout-seconds",
 	}
 	boolNames := map[string]string{
 		"nostart": "no-start", "purge": "purge", "json": "json",
 		"allowunsigned": "allow-unsigned", "corehardeningcertification": "core-hardening-certification",
-		"attestagentapplicationcontrol":  "attest-agent-application-control",
-		"attestclaudeeffectivepolicy":    "attest-claude-effective-policy",
-		"attestcodextrustedhooklauncher": "attest-codex-trusted-hook-launcher",
+		"attestagentapplicationcontrol": "attest-agent-application-control",
+		"attestclaudeeffectivepolicy":   "attest-claude-effective-policy",
 	}
 	actions := map[string]string{
 		"/install": "install", "/upgrade": "upgrade", "/repair": "repair",

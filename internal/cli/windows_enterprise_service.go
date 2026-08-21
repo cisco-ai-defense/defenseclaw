@@ -46,25 +46,23 @@ const (
 )
 
 type windowsEnterpriseLifecycleOptions struct {
-	gatewayBinary                  string
-	hookBinary                     string
-	cliBinary                      string
-	configPath                     string
-	manifestPath                   string
-	installerPath                  string
-	installRoot                    string
-	stateRoot                      string
-	gatewayServiceName             string
-	guardianServiceName            string
-	certificationCodexHome         string
-	coreHardeningCertification     bool
-	codexTrustedHookLauncherBinary string
-	attestAgentApplicationControl  bool
-	attestClaudeEffectivePolicy    bool
-	attestCodexTrustedHookLauncher bool
-	noStart                        bool
-	purge                          bool
-	allowUnsigned                  bool
+	gatewayBinary                 string
+	hookBinary                    string
+	cliBinary                     string
+	configPath                    string
+	manifestPath                  string
+	installerPath                 string
+	installRoot                   string
+	stateRoot                     string
+	gatewayServiceName            string
+	guardianServiceName           string
+	certificationCodexHome        string
+	coreHardeningCertification    bool
+	attestAgentApplicationControl bool
+	attestClaudeEffectivePolicy   bool
+	noStart                       bool
+	purge                         bool
+	allowUnsigned                 bool
 	// deferredConfig requests the UCB-friendly install path (spec 003
 	// / Workstream B). When true: --config and --manifest are
 	// optional at install time; the installer provisions the
@@ -211,8 +209,6 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.coreHardeningCertification, "core-hardening-certification", false, "run the unsigned core-only certification profile without production attestations")
 	flags.BoolVar(&opts.attestAgentApplicationControl, "attest-agent-application-control", false, "attest that approved-client WDAC or AppLocker rules are live")
 	flags.BoolVar(&opts.attestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "refresh live proof that DefenseClaw is Claude's effective managed-policy source")
-	flags.BoolVar(&opts.attestCodexTrustedHookLauncher, "attest-codex-trusted-hook-launcher", false, "attest a fixed fail-closed Codex hook launcher")
-	flags.StringVar(&opts.codexTrustedHookLauncherBinary, "codex-trusted-hook-launcher-binary", "", "approved fixed fail-closed Codex launcher binary paired with its attestation")
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
 	flags.BoolVar(&opts.purge, "purge", false, "remove managed state as well as services and binaries")
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
@@ -523,10 +519,6 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	if opts.attestClaudeEffectivePolicy {
 		args = append(args, "-AttestClaudeEffectivePolicy")
 	}
-	if opts.attestCodexTrustedHookLauncher {
-		args = append(args, "-AttestCodexTrustedHookLauncher")
-	}
-	appendValue("-CodexTrustedHookLauncherBinary", opts.codexTrustedHookLauncherBinary)
 	if opts.noStart {
 		args = append(args, "-NoStart")
 	}
@@ -556,14 +548,10 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 	mutationAction := action == "install" || action == "upgrade" || action == "repair"
 	mutationSecurityOptionUsed := opts.attestAgentApplicationControl ||
 		opts.attestClaudeEffectivePolicy ||
-		opts.attestCodexTrustedHookLauncher ||
-		opts.coreHardeningCertification ||
-		strings.TrimSpace(opts.codexTrustedHookLauncherBinary) != ""
+		opts.coreHardeningCertification
 	for _, name := range []string{
 		"attest-agent-application-control",
 		"attest-claude-effective-policy",
-		"attest-codex-trusted-hook-launcher",
-		"codex-trusted-hook-launcher-binary",
 		"core-hardening-certification",
 	} {
 		if cmd != nil && cmd.Flags().Changed(name) {
@@ -573,16 +561,6 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 	if mutationSecurityOptionUsed && !mutationAction {
 		return errors.New(
 			"Windows enterprise security attestations and core certification are valid only with install, upgrade, or repair",
-		)
-	}
-	if opts.codexTrustedHookLauncherBinary != "" &&
-		strings.TrimSpace(opts.codexTrustedHookLauncherBinary) == "" {
-		return errors.New("--codex-trusted-hook-launcher-binary cannot be blank")
-	}
-	hasLauncherBinary := strings.TrimSpace(opts.codexTrustedHookLauncherBinary) != ""
-	if opts.attestCodexTrustedHookLauncher != hasLauncherBinary {
-		return errors.New(
-			"--attest-codex-trusted-hook-launcher and --codex-trusted-hook-launcher-binary must be supplied together",
 		)
 	}
 	hasCertificationHome := strings.TrimSpace(opts.certificationCodexHome) != ""
@@ -603,11 +581,9 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			)
 		}
 		if opts.attestAgentApplicationControl ||
-			opts.attestClaudeEffectivePolicy ||
-			opts.attestCodexTrustedHookLauncher ||
-			hasLauncherBinary {
+			opts.attestClaudeEffectivePolicy {
 			return errors.New(
-				"--core-hardening-certification cannot be combined with production application-control, Claude-policy, or trusted-launcher attestations",
+				"--core-hardening-certification cannot be combined with production application-control or Claude-policy attestations",
 			)
 		}
 	}

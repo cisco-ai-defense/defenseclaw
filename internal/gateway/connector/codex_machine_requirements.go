@@ -31,25 +31,13 @@ const (
 )
 
 const (
-	// WindowsAgentApplicationControlUnverifiedReason is returned when the
-	// deployment has not authenticated an application-control policy that
-	// restricts enterprise agent clients to approved binaries.
-	WindowsAgentApplicationControlUnverifiedReason = "approved_agent_application_control_unverified"
 	// WindowsClaudeEffectivePolicyUnverifiedReason is returned because
 	// Claude's managed tier is first-source-wins and protected local file
 	// bytes alone do not prove that DefenseClaw is the effective source.
 	WindowsClaudeEffectivePolicyUnverifiedReason = "claude_effective_policy_unverified"
-	// WindowsCodexTrustedHookLauncherUnverifiedReason distinguishes the
-	// upstream Codex hook-launch boundary from ordinary requirements drift.
-	// Stock Codex 0.144.3 is live-confirmed to continue when its Windows hook
-	// shell cannot be launched, so generic WDAC/AppLocker attestation alone is
-	// not sufficient.
-	WindowsCodexTrustedHookLauncherUnverifiedReason = "codex_trusted_hook_launcher_unverified"
-
-	WindowsApprovedAgentClientsEnforcedEnv     = "DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED"
-	WindowsClaudeEffectivePolicyVerifiedEnv    = "DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED"
-	WindowsCodexTrustedHookLauncherVerifiedEnv = "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED"
-	WindowsGatewayServiceNameEnv               = "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME"
+	WindowsApprovedAgentClientsEnforcedEnv       = "DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED"
+	WindowsClaudeEffectivePolicyVerifiedEnv      = "DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED"
+	WindowsGatewayServiceNameEnv                 = "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME"
 )
 
 // WindowsCodexMachineRequirementsOptions identifies the exact protected
@@ -66,8 +54,7 @@ type WindowsCodexMachineRequirementsOptions struct {
 	GatewayServiceName string
 	// AgentApplicationControlEnforced is authenticated installer evidence
 	// that WDAC/AppLocker restricts every enabled enterprise agent to approved
-	// binaries. It is necessary but not sufficient for stock Codex because
-	// Codex currently treats a blocked/missing hook launcher as non-fatal.
+	// binaries.
 	AgentApplicationControlEnforced bool
 	EnterpriseTargetEnabled         bool
 	// ClaudeEffectivePolicyVerified records authenticated certification of
@@ -76,11 +63,7 @@ type WindowsCodexMachineRequirementsOptions struct {
 	// does not independently decide whether Claude is enabled.
 	ClaudeEffectivePolicyVerified bool
 	ClaudeTargetEnabled           bool
-	// CodexTrustedHookLauncherVerified is authenticated evidence that the
-	// approved Codex distribution has a fixed, fail-closed trusted hook
-	// launcher. Stock Codex 0.144.3 must leave this false.
-	CodexTrustedHookLauncherVerified bool
-	CodexTargetEnabled               bool
+	CodexTargetEnabled            bool
 }
 
 // WindowsCodexManagedRuntimeTarget is the non-secret mapping a standard-user
@@ -126,21 +109,17 @@ type WindowsCodexMachineRequirementsReport struct {
 	AgentApplicationControlEnforced     bool   `json:"agent_application_control_enforced"`
 	// ApprovedClientEnforced is retained as an explicit schema-v2 alias for
 	// installer/certification consumers that predate the all-agent name.
-	ApprovedClientEnforced               bool     `json:"approved_client_enforced"`
-	ApprovedAgentClientsEnforced         bool     `json:"approved_agent_clients_enforced"`
-	ClaudeTargetEnabled                  bool     `json:"claude_target_enabled"`
-	ClaudeEffectivePolicyVerified        bool     `json:"claude_effective_policy_verified"`
-	CodexTargetEnabled                   bool     `json:"codex_target_enabled"`
-	CodexTrustedHookLauncherRequired     bool     `json:"codex_trusted_hook_launcher_required"`
-	CodexTrustedHookLauncherPrerequisite string   `json:"codex_trusted_hook_launcher_prerequisite"`
-	CodexTrustedHookLauncherVerified     bool     `json:"codex_trusted_hook_launcher_verified"`
-	StockCodexSupported                  bool     `json:"stock_codex_supported"`
-	SecurityComplete                     bool     `json:"security_complete"`
-	PreimageSHA256                       string   `json:"preimage_sha256,omitempty"`
-	PostimageSHA256                      string   `json:"postimage_sha256,omitempty"`
-	ManagedEvents                        []string `json:"managed_events"`
-	Details                              []string `json:"details,omitempty"`
-	Error                                string   `json:"error,omitempty"`
+	ApprovedClientEnforced        bool     `json:"approved_client_enforced"`
+	ApprovedAgentClientsEnforced  bool     `json:"approved_agent_clients_enforced"`
+	ClaudeTargetEnabled           bool     `json:"claude_target_enabled"`
+	ClaudeEffectivePolicyVerified bool     `json:"claude_effective_policy_verified"`
+	CodexTargetEnabled            bool     `json:"codex_target_enabled"`
+	SecurityComplete              bool     `json:"security_complete"`
+	PreimageSHA256                string   `json:"preimage_sha256,omitempty"`
+	PostimageSHA256               string   `json:"postimage_sha256,omitempty"`
+	ManagedEvents                 []string `json:"managed_events"`
+	Details                       []string `json:"details,omitempty"`
+	Error                         string   `json:"error,omitempty"`
 }
 
 type windowsCodexMachineOwnership struct {
@@ -172,27 +151,23 @@ func windowsCodexMachineReport(action string, opts WindowsCodexMachineRequiremen
 	}
 	sort.Strings(events)
 	return WindowsCodexMachineRequirementsReport{
-		SchemaVersion:                        windowsCodexMachineRequirementsSchema,
-		Action:                               action,
-		RequirementsPath:                     opts.RequirementsPath,
-		OwnershipPath:                        opts.OwnershipPath,
-		ManagedStatePath:                     opts.ManagedStatePath,
-		ManagedDir:                           opts.ManagedDir,
-		HookBinary:                           opts.HookBinary,
-		GatewayAddr:                          opts.GatewayAddr,
-		GatewayServiceName:                   opts.GatewayServiceName,
-		ManagedEvents:                        events,
-		AgentApplicationControlPrerequisite:  "wdac_or_applocker_approved_agent_client_rules",
-		AgentApplicationControlEnforced:      opts.AgentApplicationControlEnforced,
-		ApprovedClientEnforced:               opts.AgentApplicationControlEnforced,
-		ApprovedAgentClientsEnforced:         opts.AgentApplicationControlEnforced,
-		ClaudeTargetEnabled:                  opts.ClaudeTargetEnabled,
-		ClaudeEffectivePolicyVerified:        opts.ClaudeEffectivePolicyVerified,
-		CodexTargetEnabled:                   opts.CodexTargetEnabled,
-		CodexTrustedHookLauncherRequired:     opts.CodexTargetEnabled,
-		CodexTrustedHookLauncherPrerequisite: "approved_fail_closed_fixed_hook_launcher",
-		CodexTrustedHookLauncherVerified:     opts.CodexTrustedHookLauncherVerified,
-		StockCodexSupported:                  false,
+		SchemaVersion:                       windowsCodexMachineRequirementsSchema,
+		Action:                              action,
+		RequirementsPath:                    opts.RequirementsPath,
+		OwnershipPath:                       opts.OwnershipPath,
+		ManagedStatePath:                    opts.ManagedStatePath,
+		ManagedDir:                          opts.ManagedDir,
+		HookBinary:                          opts.HookBinary,
+		GatewayAddr:                         opts.GatewayAddr,
+		GatewayServiceName:                  opts.GatewayServiceName,
+		ManagedEvents:                       events,
+		AgentApplicationControlPrerequisite: "wdac_or_applocker_approved_agent_client_rules",
+		AgentApplicationControlEnforced:     opts.AgentApplicationControlEnforced,
+		ApprovedClientEnforced:              opts.AgentApplicationControlEnforced,
+		ApprovedAgentClientsEnforced:        opts.AgentApplicationControlEnforced,
+		ClaudeTargetEnabled:                 opts.ClaudeTargetEnabled,
+		ClaudeEffectivePolicyVerified:       opts.ClaudeEffectivePolicyVerified,
+		CodexTargetEnabled:                  opts.CodexTargetEnabled,
 	}
 }
 
@@ -690,29 +665,14 @@ func windowsCodexCountOwnedPathReferences(value interface{}, needles []string) i
 
 func windowsCodexMachineSecurityComplete(opts WindowsCodexMachineRequirementsOptions) bool {
 	return opts.EnterpriseTargetEnabled &&
-		opts.AgentApplicationControlEnforced &&
-		(!opts.ClaudeTargetEnabled || opts.ClaudeEffectivePolicyVerified) &&
-		(!opts.CodexTargetEnabled || opts.CodexTrustedHookLauncherVerified)
+		(!opts.ClaudeTargetEnabled || opts.ClaudeEffectivePolicyVerified)
 }
 
-// validateWindowsCodexMachinePrerequisites gates mutations owned by the Codex
-// requirements lifecycle. Claude's effective-policy proof remains part of the
-// aggregate Windows SecurityComplete result, but it must not create a
-// circular dependency that prevents Codex policy publication while Claude is
-// still being reconciled in the same two-phase enterprise transaction.
+// validateWindowsCodexMachinePrerequisites is the centralized compatibility
+// hook for lifecycle preconditions. Application control is optional posture,
+// and Claude's effective-policy proof is established after initial policy
+// publication, so neither blocks a Codex policy mutation here.
 func validateWindowsCodexMachinePrerequisites(opts WindowsCodexMachineRequirementsOptions) error {
-	if opts.EnterpriseTargetEnabled && !opts.AgentApplicationControlEnforced {
-		return fmt.Errorf(
-			"%s: require authenticated WDAC/AppLocker rules that restrict every enabled enterprise agent to approved binaries",
-			WindowsAgentApplicationControlUnverifiedReason,
-		)
-	}
-	if opts.CodexTargetEnabled && !opts.CodexTrustedHookLauncherVerified {
-		return fmt.Errorf(
-			"%s: stock Codex 0.144.3 treats Windows hook-launch failure as non-blocking; require an authenticated approved fixed fail-closed hook launcher",
-			WindowsCodexTrustedHookLauncherUnverifiedReason,
-		)
-	}
 	return nil
 }
 

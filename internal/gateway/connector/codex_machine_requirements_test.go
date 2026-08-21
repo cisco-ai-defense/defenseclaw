@@ -4,7 +4,6 @@
 package connector
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -17,7 +16,6 @@ func TestWindowsCodexMachinePrerequisitesDecoupleClaudeEffectivePolicy(t *testin
 	opts.ClaudeTargetEnabled = true
 	opts.ClaudeEffectivePolicyVerified = false
 	opts.CodexTargetEnabled = true
-	opts.CodexTrustedHookLauncherVerified = true
 
 	if err := validateWindowsCodexMachinePrerequisites(opts); err != nil {
 		t.Fatalf("mixed two-phase prerequisites unexpectedly failed: %v", err)
@@ -27,15 +25,8 @@ func TestWindowsCodexMachinePrerequisitesDecoupleClaudeEffectivePolicy(t *testin
 	}
 
 	opts.AgentApplicationControlEnforced = false
-	if err := validateWindowsCodexMachinePrerequisites(opts); err == nil ||
-		!strings.Contains(err.Error(), WindowsAgentApplicationControlUnverifiedReason) {
-		t.Fatalf("missing application-control evidence error = %v", err)
-	}
-	opts.AgentApplicationControlEnforced = true
-	opts.CodexTrustedHookLauncherVerified = false
-	if err := validateWindowsCodexMachinePrerequisites(opts); err == nil ||
-		!strings.Contains(err.Error(), WindowsCodexTrustedHookLauncherUnverifiedReason) {
-		t.Fatalf("missing Codex launcher evidence error = %v", err)
+	if err := validateWindowsCodexMachinePrerequisites(opts); err != nil {
+		t.Fatalf("optional application-control posture unexpectedly failed: %v", err)
 	}
 }
 
@@ -56,9 +47,9 @@ func TestWindowsCodexMachineSecurityCompleteRequiresEnabledTarget(t *testing.T) 
 	opts.ClaudeTargetEnabled = false
 	opts.ClaudeEffectivePolicyVerified = false
 	opts.CodexTargetEnabled = true
-	opts.CodexTrustedHookLauncherVerified = true
+	opts.AgentApplicationControlEnforced = false
 	if !windowsCodexMachineSecurityComplete(opts) {
-		t.Fatal("verified Codex-only target should be security-complete")
+		t.Fatal("Codex-only target should be security-complete without optional application control")
 	}
 
 	opts.EnterpriseTargetEnabled = false

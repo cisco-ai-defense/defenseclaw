@@ -562,7 +562,7 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 		"$Layout.CodexManagedHooksStatePath",
 		"$Layout.CodexRequirementsOwnershipPath",
 		"$Layout.CodexRequirementsAclBackupPath",
-		"$Layout.CodexTrustedShellAttestationPath",
+		"$Layout.AgentApplicationControlAttestationPath",
 	} {
 		if !strings.Contains(transaction, path) {
 			t.Fatalf("lifecycle transaction omits %s", path)
@@ -642,19 +642,17 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 	}
 
 	if !strings.Contains(installer, "[switch]$AttestAgentApplicationControl") ||
-		!strings.Contains(installer, "[switch]$AttestCodexTrustedHookLauncher") ||
 		strings.Contains(installer, "AttestCodexTrustedShellEnforcement") ||
 		strings.Contains(installer, "AttestCodexApplicationControl") {
-		t.Fatal("public installer does not expose the split application-control and Codex launcher attestations")
+		t.Fatal("public installer does not expose the application-control attestation")
 	}
 }
 
-func TestWindowsServicesNeverReceiveCodexHomeAndRequireBothAppControlPins(t *testing.T) {
+func TestWindowsServicesNeverReceiveCodexHomeAndRequireApplicationControlPins(t *testing.T) {
 	module := strings.ReplaceAll(string(readWindowsEnterpriseModule(t)), "\r\n", "\n")
 	environment := windowsPowerShellFunction(t, module, "Get-DefenseClawServiceEnvironmentValues")
 	if strings.Contains(environment, "CODEX_HOME") ||
 		strings.Contains(environment, "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_SHELL_ENFORCED") ||
-		!strings.Contains(environment, "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1") ||
 		!strings.Contains(environment, "DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED=1") ||
 		!strings.Contains(environment, "DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED=1") ||
 		!strings.Contains(environment, "DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1") {
@@ -668,9 +666,9 @@ func TestWindowsServicesNeverReceiveCodexHomeAndRequireBothAppControlPins(t *tes
 		t.Fatal("elevated lifecycle helpers do not explicitly remove inherited CODEX_HOME")
 	}
 	lifecycle := windowsPowerShellFunction(t, module, "Invoke-DefenseClawEnterpriseLifecycle")
-	if !strings.Contains(lifecycle, "Install requires -AttestAgentApplicationControl") ||
-		!strings.Contains(lifecycle, "unapproved agent runtimes") {
-		t.Fatal("managed install does not fail closed without broad application-control attestation")
+	if strings.Contains(lifecycle, "Install requires -AttestAgentApplicationControl") ||
+		strings.Contains(lifecycle, "requires -AttestAgentApplicationControl to migrate") {
+		t.Fatal("optional application-control posture still blocks managed installation")
 	}
 }
 

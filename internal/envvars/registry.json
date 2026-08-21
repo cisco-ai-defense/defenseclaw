@@ -1034,17 +1034,17 @@
     {
       "name": "DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED",
       "category": "hook_internal",
-      "purpose": "Carry protected installer evidence that application control restricts every enabled enterprise agent client to approved binaries.",
-      "default": "unset (application-control prerequisite is unverified)",
+      "purpose": "Carry protected installer evidence that optional application control restricts every enabled enterprise agent client to approved binaries.",
+      "default": "unset (optional application-control posture is not attested)",
       "accepted_values": ["1", "unset"],
       "security_impact": "high",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/cli/windows_codex_requirements.go", "description": "Gates protected Codex requirements reconciliation on approved-agent application-control evidence"},
-        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins the authenticated attestation in each protected service environment"}
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Reports optional approved-agent application-control evidence"},
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins the authenticated attestation in each protected service environment when supplied"}
       ],
       "since": "0.8.0",
-      "security_note": "Authenticated service evidence — only the signed installer may publish this marker after live WDAC or AppLocker certification."
+      "security_note": "Authenticated service evidence — only the signed installer may publish this marker after live WDAC or AppLocker certification. Its absence does not block managed-hook installation or reconciliation."
     },
     {
       "name": "DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED",
@@ -1074,21 +1074,6 @@
       ],
       "since": "0.8.0",
       "security_note": "Authenticated service evidence — protected local policy bytes alone do not establish which Claude managed-policy source is effective."
-    },
-    {
-      "name": "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED",
-      "category": "hook_internal",
-      "purpose": "Carry protected installer evidence that the approved Codex distribution has a fixed fail-closed trusted Windows hook launcher.",
-      "default": "unset (trusted hook launcher is unverified)",
-      "accepted_values": ["1", "unset"],
-      "security_impact": "high",
-      "surface_in_doctor": false,
-      "consumers": [
-        {"location": "internal/cli/windows_codex_requirements.go", "description": "Fails closed before Codex requirements mutation when trusted-launcher evidence is absent"},
-        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins the authenticated launcher attestation in each protected service environment"}
-      ],
-      "since": "0.8.0",
-      "security_note": "Authenticated service evidence — stock Codex releases that continue after hook-launch failure must leave this unset."
     },
     {
       "name": "DEFENSECLAW_IPC_SOCKET",

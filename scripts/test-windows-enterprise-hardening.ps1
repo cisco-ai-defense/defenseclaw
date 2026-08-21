@@ -71,8 +71,6 @@ param(
     [Parameter(Mandatory)]
     [string]$RejectedClaudeBinary,
 
-    [string]$CodexTrustedHookLauncherBinary = '',
-
     [string]$InstallerPath = '',
 
     [string]$UpgradeGatewayBinary = '',
@@ -94,8 +92,6 @@ param(
     [switch]$AllowUnsigned,
 
     [switch]$AttestAgentApplicationControl,
-
-    [switch]$AttestCodexTrustedHookLauncher,
 
     [switch]$ClaudeOnly,
 
@@ -141,8 +137,6 @@ $script:CoordinatorCodexHomeSnapshot = [pscustomobject]@{
 $script:CertificationCodexHomeValidation = $null
 $script:CodexRuntimeRoot = ''
 $script:CodexRuntimeBinary = ''
-$script:CodexTrustedHookLauncherRuntimeBinary = ''
-$script:CodexTrustedHookLauncherIdentity = $null
 $script:ClaudeRuntimeBinary = ''
 $script:RejectedCodexRuntimeBinary = ''
 $script:RejectedClaudeRuntimeBinary = ''
@@ -4680,36 +4674,6 @@ function Get-AgentBinaryTrustIdentity(
     }
 }
 
-function Get-CodexTrustedHookLauncherIdentity([string]$Path) {
-    $resolved = Assert-SourcePathHasNoReparse `
-        $Path `
-        'Codex trusted hook launcher'
-    $signature = Get-AuthenticodeSignature -LiteralPath $resolved
-    if ($signature.Status -ne
-            [Management.Automation.SignatureStatus]::Valid -or
-        $null -eq $signature.SignerCertificate) {
-        throw (
-            'Codex trusted hook launcher requires a valid Authenticode ' +
-            "signature; status=$($signature.Status)"
-        )
-    }
-    $digest = Get-FileDigest $resolved
-    if ($digest -ceq [string]$script:SourceDigests['codex'] -or
-        $digest -ceq [string]$script:SourceDigests['rejected_codex']) {
-        throw (
-            'Codex trusted hook launcher must have bytes distinct from both ' +
-            'the stock and rejected Codex artifacts'
-        )
-    }
-    return [pscustomobject]@{
-        path = $resolved
-        sha256 = $digest
-        signer_subject = [string]$signature.SignerCertificate.Subject
-        signer_thumbprint = [string]$signature.SignerCertificate.Thumbprint
-        signature_status = [string]$signature.Status
-    }
-}
-
 $script:ApprovedCodexVersion = $null
 
 # Every later phase records or compares the approved Codex version, and all of
@@ -4828,12 +4792,6 @@ function Initialize-ProtectedCodexRuntime {
     $rejectedClaudeIdentity = Get-AgentBinaryTrustIdentity `
         $script:OriginalRejectedClaudeSource `
         'claude'
-    $trustedLauncherIdentity = if ($ClaudeOnly) {
-        $null
-    } else {
-        Get-CodexTrustedHookLauncherIdentity `
-            $script:OriginalCodexTrustedHookLauncherSource
-    }
     foreach ($identityCheck in @(
         [pscustomobject]@{
             identity = $approvedClaudeIdentity
@@ -4911,15 +4869,6 @@ function Initialize-ProtectedCodexRuntime {
             [string]$rejectedClaudeIdentity.sha256) {
         throw 'approved and rejected application-control artifacts must have distinct bytes'
     }
-    if ($null -ne $trustedLauncherIdentity -and
-        [string]$trustedLauncherIdentity.sha256 -cne
-            [string]$script:SourceDigests['codex_trusted_hook_launcher']) {
-        throw (
-            'Codex trusted hook launcher changed between preflight and ' +
-            'protected runtime staging'
-        )
-    }
-
     $script:CodexRuntimeRoot = Assert-PathBelow `
         (Join-Path $script:WorkRoot 'codex-runtime') `
         $script:WorkRoot `
@@ -4956,28 +4905,6 @@ function Initialize-ProtectedCodexRuntime {
             [StringComparison]::Ordinal
         )) {
         throw 'protected Codex runtime lost its valid OpenAI Authenticode signature'
-    }
-    if ($null -ne $trustedLauncherIdentity) {
-        $script:CodexTrustedHookLauncherRuntimeBinary = Assert-PathBelow `
-            (Join-Path $script:CodexRuntimeRoot 'codex-trusted-hook-launcher.exe') `
-            $script:CodexRuntimeRoot `
-            'protected Codex trusted hook launcher'
-        [IO.File]::Copy(
-            [string]$trustedLauncherIdentity.path,
-            $script:CodexTrustedHookLauncherRuntimeBinary,
-            $false
-        )
-        if ((Get-FileDigest $script:CodexTrustedHookLauncherRuntimeBinary) -cne
-            [string]$trustedLauncherIdentity.sha256) {
-            throw 'protected Codex trusted hook launcher staging changed bytes'
-        }
-        $stagedLauncherIdentity = Get-CodexTrustedHookLauncherIdentity `
-            $script:CodexTrustedHookLauncherRuntimeBinary
-        if ([string]$stagedLauncherIdentity.signer_thumbprint -cne
-            [string]$trustedLauncherIdentity.signer_thumbprint) {
-            throw 'protected Codex trusted hook launcher signer changed while staging'
-        }
-        $script:CodexTrustedHookLauncherIdentity = $stagedLauncherIdentity
     }
     $script:ClaudeRuntimeBinary = Assert-PathBelow `
         (Join-Path $script:CodexRuntimeRoot 'claude.exe') `
@@ -5120,42 +5047,6 @@ if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
             "token: version=$($version.version) sid=$($version.sid)"
         )
     }
-    $trustedLauncherVersion = $null
-    if (-not $ClaudeOnly) {
-        $launcherVersionInput = [Convert]::ToBase64String(
-            [Text.Encoding]::UTF8.GetBytes(
-                $script:CodexTrustedHookLauncherRuntimeBinary
-            )
-        )
-        $launcherVersionProbe = Invoke-ActiveUserPowerShell `
-            -Label 'codex-trusted-hook-launcher-active-user-version' `
-            -Script @"
-`$ErrorActionPreference = 'Stop'
-`$binary = [Text.Encoding]::UTF8.GetString(
-    [Convert]::FromBase64String('$launcherVersionInput')
-)
-`$version = (& `$binary --version 2>&1 | Out-String).Trim()
-if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
-[pscustomobject]@{
-    version = `$version
-    sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-} | ConvertTo-Json -Compress
-"@
-        $trustedLauncherVersion = ConvertFrom-SingleJSONDocument `
-            $launcherVersionProbe.StdOut `
-            'Codex trusted hook launcher active-user version'
-        if ([string]$trustedLauncherVersion.version -cne
-                [string]$script:ApprovedCodexVersion.text -or
-            [string]$trustedLauncherVersion.sid -ne $script:PrimarySID) {
-            throw (
-                'trusted hook launcher is not a drop-in Codex ' +
-                "$($script:ApprovedCodexVersion.text) CLI " +
-                "under the target medium token: version=" +
-                "$($trustedLauncherVersion.version) sid=" +
-                "$($trustedLauncherVersion.sid)"
-            )
-        }
-    }
     $claudeVersionInput = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes($script:ClaudeRuntimeBinary)
     )
@@ -5198,26 +5089,6 @@ if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
         codex_version_source = 'agent_version_probe_and_protected_active_user_runtime_probe'
         codex_hook_contract = [string]$codexContract.contract_id
         codex_signer_subject = [string]$stagedSignature.SignerCertificate.Subject
-        codex_trusted_hook_launcher_path =
-            $script:CodexTrustedHookLauncherRuntimeBinary
-        codex_trusted_hook_launcher_sha256 = if ($null -eq
-            $script:CodexTrustedHookLauncherIdentity) {
-            ''
-        } else {
-            [string]$script:CodexTrustedHookLauncherIdentity.sha256
-        }
-        codex_trusted_hook_launcher_signer_subject = if ($null -eq
-            $script:CodexTrustedHookLauncherIdentity) {
-            ''
-        } else {
-            [string]$script:CodexTrustedHookLauncherIdentity.signer_subject
-        }
-        codex_trusted_hook_launcher_version = if ($null -eq
-            $trustedLauncherVersion) {
-            ''
-        } else {
-            [string]$trustedLauncherVersion.version
-        }
         claude_path = $script:ClaudeRuntimeBinary
         claude_sha256 = [string]$approvedClaudeIdentity.sha256
         claude_version = [string]$claudeVersion.version
@@ -8290,21 +8161,23 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
         'wdac_or_applocker_approved_agent_client_rules') {
         throw "$Label machine requirements reported the wrong application-control prerequisite"
     }
-    if ([string]$report.codex_trusted_hook_launcher_prerequisite -cne
-        'approved_fail_closed_fixed_hook_launcher') {
-        throw "$Label machine requirements reported the wrong Codex launcher prerequisite"
+    foreach ($booleanName in @('codex_target_enabled')) {
+        $property = $report.PSObject.Properties[$booleanName]
+        if ($null -eq $property -or -not [bool]$property.Value) {
+            throw "$Label machine requirements did not attest $booleanName=true"
+        }
     }
     foreach ($booleanName in @(
         'agent_application_control_enforced',
         'approved_client_enforced',
-        'approved_agent_clients_enforced',
-        'codex_trusted_hook_launcher_required',
-        'codex_target_enabled',
-        'codex_trusted_hook_launcher_verified'
+        'approved_agent_clients_enforced'
     )) {
         $property = $report.PSObject.Properties[$booleanName]
-        if ($null -eq $property -or -not [bool]$property.Value) {
-            throw "$Label machine requirements did not attest $booleanName=true"
+        if ($null -eq $property -or
+            $property.Value -isnot [bool] -or
+            [bool]$property.Value -ne
+                [bool]$AttestAgentApplicationControl) {
+            throw "$Label machine requirements reported the wrong optional $booleanName posture"
         }
     }
     if ([bool]$report.claude_effective_policy_verified -ne
@@ -8315,12 +8188,6 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
             "expected=$expectedClaudeAttestation"
         )
     }
-    $stockCodex = $report.PSObject.Properties['stock_codex_supported']
-    if ($null -eq $stockCodex -or
-        $stockCodex.Value -isnot [bool] -or
-        [bool]$stockCodex.Value) {
-        throw "$Label machine requirements must explicitly reject stock Codex"
-    }
     $attestation = Get-Content `
         -LiteralPath $script:AgentApplicationControlAttestationPath `
         -Raw |
@@ -8328,15 +8195,13 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
     if ([int]$attestation.schema_version -ne 2 -or
         [string]$attestation.prerequisite -cne
             'wdac_or_applocker_approved_agent_client_rules' -or
-        -not [bool]$attestation.agent_application_control_enforced -or
-        -not [bool]$attestation.approved_agent_clients_enforced -or
+        [bool]$attestation.agent_application_control_enforced -ne
+            [bool]$AttestAgentApplicationControl -or
+        [bool]$attestation.approved_agent_clients_enforced -ne
+            [bool]$AttestAgentApplicationControl -or
         [string]$attestation.minimum_claude_version -cne '2.1.152' -or
         [bool]$attestation.claude_effective_policy_verified -ne
             $expectedClaudeAttestation -or
-        [string]$attestation.codex_trusted_hook_launcher_prerequisite -cne
-            'approved_fail_closed_fixed_hook_launcher' -or
-        -not [bool]$attestation.codex_trusted_hook_launcher_verified -or
-        [bool]$attestation.stock_codex_supported -or
         -not [bool]$attestation.certification_required -or
         [string]$attestation.attested_by_sid -notmatch '^S-1-5-' -or
         [string]::IsNullOrWhiteSpace([string]$attestation.attested_at)) {
@@ -8453,10 +8318,7 @@ function Assert-ClaudeOnlyWindowsSecurityContract([string]$Label) {
         [bool]$report.approved_agent_clients_enforced -or
         -not [bool]$report.claude_target_enabled -or
         [bool]$report.claude_effective_policy_verified -or
-        [bool]$report.codex_target_enabled -or
-        [bool]$report.codex_trusted_hook_launcher_required -or
-        [bool]$report.codex_trusted_hook_launcher_verified -or
-        [bool]$report.stock_codex_supported) {
+        [bool]$report.codex_target_enabled) {
         throw (
             "$Label Claude-only Windows security report is not exact: " +
             (Protect-SensitiveDisplayText (
@@ -11382,23 +11244,6 @@ function Get-InstallerArguments(
         $Action -in @('Install', 'Upgrade', 'Repair')) {
         $arguments.Add('-AttestAgentApplicationControl')
     }
-    if ($AttestCodexTrustedHookLauncher -and
-        $Action -in @('Install', 'Upgrade', 'Repair')) {
-        if ([string]::IsNullOrWhiteSpace(
-                $script:CodexTrustedHookLauncherRuntimeBinary
-            ) -or
-            -not (Test-Path `
-                -LiteralPath $script:CodexTrustedHookLauncherRuntimeBinary `
-                -PathType Leaf)) {
-            throw (
-                'full Codex lifecycle attestation requires the protected ' +
-                'staged trusted hook launcher artifact'
-            )
-        }
-        $arguments.Add('-AttestCodexTrustedHookLauncher')
-        $arguments.Add('-CodexTrustedHookLauncherBinary')
-        $arguments.Add($script:CodexTrustedHookLauncherRuntimeBinary)
-    }
     if ($script:ClaudeEffectivePolicyAttested -and
         $Action -eq 'Repair') {
         if ($ClaudeOnly) {
@@ -11505,19 +11350,6 @@ function Get-EnterpriseLifecycleCLIArguments(
     if ($AttestAgentApplicationControl -and $mutation) {
         $arguments.Add('--attest-agent-application-control')
     }
-    if ($AttestCodexTrustedHookLauncher -and $mutation) {
-        if ([string]::IsNullOrWhiteSpace(
-                $script:CodexTrustedHookLauncherRuntimeBinary
-            )) {
-            throw (
-                "public $Action requires the protected trusted Codex " +
-                'hook-launcher artifact'
-            )
-        }
-        $arguments.Add('--attest-codex-trusted-hook-launcher')
-        $arguments.Add('--codex-trusted-hook-launcher-binary')
-        $arguments.Add($script:CodexTrustedHookLauncherRuntimeBinary)
-    }
     if ($script:ClaudeEffectivePolicyAttested -and $Action -eq 'Repair') {
         if ($ClaudeOnly) {
             throw (
@@ -11565,22 +11397,6 @@ function Test-AllowUnsignedHarnessContract {
         $verifyArguments |
             Where-Object { $_ -ceq '-AttestAgentApplicationControl' }
     ).Count
-    $installLauncherAttestationCount = @(
-        $installArguments |
-            Where-Object { $_ -ceq '-AttestCodexTrustedHookLauncher' }
-    ).Count
-    $verifyLauncherAttestationCount = @(
-        $verifyArguments |
-            Where-Object { $_ -ceq '-AttestCodexTrustedHookLauncher' }
-    ).Count
-    $installLauncherBinaryCount = @(
-        $installArguments |
-            Where-Object { $_ -ceq '-CodexTrustedHookLauncherBinary' }
-    ).Count
-    $verifyLauncherBinaryCount = @(
-        $verifyArguments |
-            Where-Object { $_ -ceq '-CodexTrustedHookLauncherBinary' }
-    ).Count
     $installCertificationHomeCount = @(
         $installArguments |
             Where-Object { $_ -ceq '-CertificationCodexHome' }
@@ -11624,30 +11440,6 @@ function Test-AllowUnsignedHarnessContract {
             'harness application-control attestation argument contract is unsafe: ' +
             "install=$installAttestationCount verify=$verifyAttestationCount " +
             "requested=$([bool]$AttestAgentApplicationControl)"
-        )
-    }
-    $expectedLauncherAttestation = if (
-        $AttestCodexTrustedHookLauncher
-    ) { 1 } else { 0 }
-    if ($installLauncherAttestationCount -ne
-            $expectedLauncherAttestation -or
-        $verifyLauncherAttestationCount -ne 0) {
-        throw (
-            'harness Codex trusted-hook-launcher attestation argument ' +
-            "contract is unsafe: install=$installLauncherAttestationCount " +
-            "verify=$verifyLauncherAttestationCount " +
-            "requested=$([bool]$AttestCodexTrustedHookLauncher)"
-        )
-    }
-    if ($installLauncherBinaryCount -ne
-            $expectedLauncherAttestation -or
-        $verifyLauncherBinaryCount -ne 0) {
-        throw (
-            'harness did not pair the protected Codex launcher artifact only ' +
-            'with mutating full-certification actions: ' +
-            "install=$installLauncherBinaryCount " +
-            "verify=$verifyLauncherBinaryCount " +
-            "requested=$([bool]$AttestCodexTrustedHookLauncher)"
         )
     }
     $expectedCertificationHomeCount = if ($AllowUnsigned) { 1 } else { 0 }
@@ -11866,16 +11658,6 @@ function Test-AllowUnsignedHarnessContract {
         application_control_attestation_requested = [bool]$AttestAgentApplicationControl
         install_application_control_attestation_count = $installAttestationCount
         non_mutating_application_control_attestation_count = $verifyAttestationCount
-        codex_trusted_hook_launcher_attestation_requested =
-            [bool]$AttestCodexTrustedHookLauncher
-        install_codex_trusted_hook_launcher_attestation_count =
-            $installLauncherAttestationCount
-        non_mutating_codex_trusted_hook_launcher_attestation_count =
-            $verifyLauncherAttestationCount
-        install_codex_trusted_hook_launcher_binary_count =
-            $installLauncherBinaryCount
-        non_mutating_codex_trusted_hook_launcher_binary_count =
-            $verifyLauncherBinaryCount
         install_certification_codex_home_count =
             $installCertificationHomeCount
         non_mutating_certification_codex_home_count =
@@ -12119,7 +11901,7 @@ function Invoke-ActualCodexCertificationRun {
         [Parameter(Mandatory)][string]$BinaryPath,
         [Parameter(Mandatory)][string]$ExpectedSHA256,
         [Parameter(Mandatory)]
-        [ValidateSet('stock', 'trusted_launcher')]
+        [ValidateSet('approved')]
         [string]$BinaryRole,
         [switch]$DeleteUserConfig,
         [switch]$BypassHookTrust,
@@ -12130,13 +11912,13 @@ function Invoke-ActualCodexCertificationRun {
         throw "$Label requires the disposable alternate CODEX_HOME"
     }
     if ($ExpectFreshUnmanagedClient -and (
-        $BinaryRole -ne 'stock' -or
+        $BinaryRole -ne 'approved' -or
         $DeleteUserConfig -or
         $BypassHookTrust -or
         $HostileShell
     )) {
         throw (
-            "$Label fresh post-uninstall Codex must use the stock runtime " +
+            "$Label fresh post-uninstall Codex must use the approved runtime " +
             'without enterprise-test bypass, deletion, or hostile-shell flags'
         )
     }
@@ -12149,11 +11931,7 @@ function Invoke-ActualCodexCertificationRun {
     if ((Get-FileDigest $resolvedBinary) -cne $ExpectedSHA256) {
         throw "$Label Codex executable does not match its preflight digest"
     }
-    $expectedRuntime = if ($BinaryRole -eq 'stock') {
-        $script:CodexRuntimeBinary
-    } else {
-        $script:CodexTrustedHookLauncherRuntimeBinary
-    }
+    $expectedRuntime = $script:CodexRuntimeBinary
     if ([string]::IsNullOrWhiteSpace($expectedRuntime) -or
         -not $resolvedBinary.Equals(
             (ConvertTo-CanonicalPath $expectedRuntime),
@@ -12481,8 +12259,7 @@ try {
             $audit = Wait-ForNewCodexHookAudit `
                 -BeforeIDs $beforeIDs `
                 -Label $Label `
-                -TimeoutSeconds $(if ($BinaryRole -eq 'stock' -or
-                    -not [bool]$result.provider_reached) {
+                -TimeoutSeconds $(if (-not [bool]$result.provider_reached) {
                     20
                 } else {
                     $RepairTimeoutSeconds
@@ -12496,16 +12273,6 @@ try {
     }
     if ($DeleteUserConfig -and [bool]$result.base_config_exists) {
         throw "$Label recreated the deleted alternate user config"
-    }
-    if ($BinaryRole -eq 'trusted_launcher' -and
-        $HostileShell -and
-        [bool]$result.hostile_shell_marker_exists) {
-        throw (
-            "$Label selected a user-controlled shell despite the mandatory " +
-            'WDAC/AppLocker/trusted-launcher prerequisite; managed hook ' +
-            "interception is bypassable. argv=$(Protect-SensitiveDisplayText " +
-            "([string]$result.hostile_shell_marker))"
-        )
     }
     $providerRequestValid = (
         [string]$result.request_line -match
@@ -12550,66 +12317,23 @@ try {
             secret_material_recorded = $false
         }
     }
-    if ($BinaryRole -eq 'stock') {
-        if (-not $HostileShell) {
-            throw "$Label stock Codex negative must inject the blocked hostile shell"
-        }
-        $expectedHostileShellSelected = [bool]$ClaudeOnly
-        if (-not [bool]$result.provider_reached -or
-            -not $providerRequestValid -or
-            [int]$result.exit_code -ne 0 -or
-            $null -ne $audit -or
-            [bool]$result.hostile_shell_marker_exists -ne
-                $expectedHostileShellSelected) {
-            throw (
-                "$Label did not reproduce the mandatory stock Codex fail-open " +
-                "negative: provider=$($result.provider_reached) " +
-                "request=$providerRequestValid exit=$($result.exit_code) " +
-                "managed_hook_contact=$($null -ne $audit) " +
-                "fake_shell=$($result.hostile_shell_marker_exists) " +
-                "expected_fake_shell=$expectedHostileShellSelected"
-            )
-        }
-        return [pscustomobject]@{
-            label = $Label
-            binary_role = $BinaryRole
-            codex_version = Get-ApprovedCodexVersionText
-            codex_sha256 = $ExpectedSHA256
-            codex_exit_code = [int]$result.exit_code
-            provider_reached = $true
-            request_line = [string]$result.request_line
-            hostile_shell_injected = $true
-            hostile_shell_selected =
-                [bool]$result.hostile_shell_marker_exists
-            prohibited_user_hook_fired = $false
-            managed_hook_contact = $false
-            enforcement_outcome = if ($ClaudeOnly) {
-                'rejected_stock_user_shell_bypass'
-            } else {
-                'rejected_stock_blocked_shell_fail_open'
-            }
-            upstream_fail_open_confirmed = $true
-            accepted_for_enterprise = $false
-        }
-    }
-
     if ([bool]$result.provider_reached) {
         if (-not $providerRequestValid -or [int]$result.exit_code -ne 0) {
             throw (
-                "$Label trusted launcher reached the provider but did not " +
+                "$Label approved Codex reached the provider but did not " +
                 "preserve Codex exec semantics: exit=$($result.exit_code) " +
                 "request=$(Protect-SensitiveDisplayText ([string]$result.request_line))"
             )
         }
         if ($null -eq $audit) {
             throw (
-                "$Label trusted launcher allowed the operation without " +
+                "$Label approved Codex allowed the operation without " +
                 'SessionStart/UserPromptSubmit managed hook contact'
             )
         }
     } elseif ([int]$result.exit_code -eq 0) {
         throw (
-            "$Label trusted launcher neither contacted managed hooks/the " +
+            "$Label approved Codex neither contacted managed hooks/the " +
             'provider nor blocked the operation'
         )
     }
@@ -13536,8 +13260,6 @@ function Invoke-CertificationActivationRepairAfterIsolationProof {
             [bool]$ClaudeOnly -or
         [bool]$repair.agent_application_control_enforced -ne
             [bool]$AttestAgentApplicationControl -or
-        [bool]$repair.codex_trusted_hook_launcher_verified -ne
-            [bool]$AttestCodexTrustedHookLauncher -or
         [bool]$repair.codex_target_enabled -ne (-not [bool]$ClaudeOnly) -or
         -not [bool]$repair.claude_target_enabled -or
         [bool]$repair.claude_effective_policy_verified -or
@@ -15594,21 +15316,23 @@ function Get-ManagedCodexArtifactSet([object]$GuardianJSON) {
         'wdac_or_applocker_approved_agent_client_rules') {
         throw 'guardian Codex result has the wrong application-control prerequisite'
     }
-    if ([string]$result.codex_trusted_hook_launcher_prerequisite -cne
-        'approved_fail_closed_fixed_hook_launcher') {
-        throw 'guardian Codex result has the wrong trusted launcher prerequisite'
+    foreach ($field in @('codex_target_enabled')) {
+        $property = $result.PSObject.Properties[$field]
+        if ($null -eq $property -or -not [bool]$property.Value) {
+            throw "guardian Codex result does not prove $field=true"
+        }
     }
     foreach ($field in @(
         'agent_application_control_enforced',
         'approved_client_enforced',
-        'approved_agent_clients_enforced',
-        'codex_trusted_hook_launcher_required',
-        'codex_target_enabled',
-        'codex_trusted_hook_launcher_verified'
+        'approved_agent_clients_enforced'
     )) {
         $property = $result.PSObject.Properties[$field]
-        if ($null -eq $property -or -not [bool]$property.Value) {
-            throw "guardian Codex result does not prove $field=true"
+        if ($null -eq $property -or
+            $property.Value -isnot [bool] -or
+            [bool]$property.Value -ne
+                [bool]$AttestAgentApplicationControl) {
+            throw "guardian Codex result reported the wrong optional $field posture"
         }
     }
     $expectedClaudeAttestation =
@@ -15630,12 +15354,6 @@ function Get-ManagedCodexArtifactSet([object]$GuardianJSON) {
                 "got=$observed expected=$expectedClaudeAttestation"
             )
         }
-    }
-    $stockCodex = $result.PSObject.Properties['stock_codex_supported']
-    if ($null -eq $stockCodex -or
-        $stockCodex.Value -isnot [bool] -or
-        [bool]$stockCodex.Value) {
-        throw 'guardian Codex result did not explicitly reject stock Codex'
     }
     $dataDir = ConvertTo-CanonicalPath ([string]$result.data_dir)
     if (-not $dataDir.Equals(
@@ -15743,13 +15461,10 @@ function Get-ManagedCodexArtifactSet([object]$GuardianJSON) {
         live_codex_mutated = $false
         agent_application_control_prerequisite =
             'wdac_or_applocker_approved_agent_client_rules'
-        codex_trusted_hook_launcher_prerequisite =
-            'approved_fail_closed_fixed_hook_launcher'
-        agent_application_control_enforced = $true
-        codex_trusted_hook_launcher_required = $true
-        codex_trusted_hook_launcher_verified = $true
-        stock_codex_supported = $false
-        approved_agent_clients_enforced = $true
+        agent_application_control_enforced =
+            [bool]$AttestAgentApplicationControl
+        approved_agent_clients_enforced =
+            [bool]$AttestAgentApplicationControl
         claude_effective_policy_verified =
             $expectedClaudeAttestation
         security_complete = $expectedClaudeAttestation
@@ -19369,10 +19084,6 @@ function Copy-WorkEvidence {
         [pscustomobject]@{
             name = 'claude'
             path = $script:ClaudeRuntimeBinary
-        },
-        [pscustomobject]@{
-            name = 'codex_trusted_hook_launcher'
-            path = $script:CodexTrustedHookLauncherRuntimeBinary
         }
     )) {
         if ([string]::IsNullOrWhiteSpace([string]$binary.path) -or
@@ -19888,12 +19599,9 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
     $productionCertified = (
         $passed -and
         -not [bool]$ClaudeOnly -and
-        [bool]$AttestAgentApplicationControl -and
-        [bool]$AttestCodexTrustedHookLauncher -and
         [bool]$script:ClaudeEffectivePolicyAttested -and
         $null -ne $script:ClaudeLiveProcessProof -and
-        $null -ne $script:CodexLiveProcessProof -and
-        $null -ne $script:CodexTrustedHookLauncherIdentity
+        $null -ne $script:CodexLiveProcessProof
     )
     $payload = [ordered]@{
         schema_version = $script:HarnessSchemaVersion
@@ -19913,8 +19621,6 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
             module_sha256 = [string]$script:SourceDigests['module']
             codex_sha256 = [string]$script:SourceDigests['codex']
             claude_sha256 = [string]$script:SourceDigests['claude']
-            codex_trusted_hook_launcher_sha256 =
-                [string]$script:SourceDigests['codex_trusted_hook_launcher']
             rejected_codex_sha256 = [string]$script:SourceDigests['rejected_codex']
             rejected_claude_sha256 = [string]$script:SourceDigests['rejected_claude']
             upgrade_gateway_sha256 = [string]$script:SourceDigests['upgrade_gateway']
@@ -19952,18 +19658,13 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
             core_hardening_complete = $coreHardeningComplete
             external_agent_application_control_attested =
                 [bool]$AttestAgentApplicationControl
-            codex_trusted_hook_launcher_attested =
-                [bool]$AttestCodexTrustedHookLauncher
             claude_live_hostile_precedence_proof =
                 $script:ClaudeLiveProcessProof
             claude_effective_policy_persisted =
                 [bool]$script:ClaudeEffectivePolicyAttested
             codex_target_enabled = -not [bool]$ClaudeOnly
-            stock_codex_supported = $false
-            stock_codex_mandatory_negative_and_trusted_launcher_positive =
+            codex_live_hook_enforcement =
                 $script:CodexLiveProcessProof
-            trusted_codex_launcher_identity =
-                $script:CodexTrustedHookLauncherIdentity
             security_complete = $productionCertified
             production_certified = $productionCertified
         }
@@ -20054,23 +19755,11 @@ $script:OriginalCodexSource = ConvertTo-CanonicalPath $CodexBinary
 $script:OriginalClaudeSource = ConvertTo-CanonicalPath $ClaudeBinary
 $script:OriginalRejectedCodexSource = ConvertTo-CanonicalPath $RejectedCodexBinary
 $script:OriginalRejectedClaudeSource = ConvertTo-CanonicalPath $RejectedClaudeBinary
-$script:OriginalCodexTrustedHookLauncherSource = if (
-    [string]::IsNullOrWhiteSpace($CodexTrustedHookLauncherBinary)
-) {
-    ''
-} else {
-    ConvertTo-CanonicalPath $CodexTrustedHookLauncherBinary
-}
 if ($ClaudeOnly) {
-    if ($AttestAgentApplicationControl -or
-        $AttestCodexTrustedHookLauncher -or
-        -not [string]::IsNullOrWhiteSpace(
-            $script:OriginalCodexTrustedHookLauncherSource
-        )) {
+    if ($AttestAgentApplicationControl) {
         throw (
             '-ClaudeOnly is a truthful core-hardening run and must not claim ' +
-            'external application control or a Codex launcher; omit both ' +
-            'attestation switches and -CodexTrustedHookLauncherBinary'
+            'external application control; omit the attestation switch'
         )
     }
     if (-not $AllowUnsigned) {
@@ -20080,14 +19769,6 @@ if ($ClaudeOnly) {
             'never enables an unattested production install'
         )
     }
-} elseif ([string]::IsNullOrWhiteSpace(
-    $script:OriginalCodexTrustedHookLauncherSource
-)) {
-    throw (
-        'Codex certification requires -CodexTrustedHookLauncherBinary with ' +
-        'a separately signed fail-closed drop-in launcher; an attestation ' +
-        'switch without the artifact is never sufficient'
-    )
 }
 $script:OriginalModuleSource = ConvertTo-CanonicalPath (
     Join-Path (Split-Path -Parent $script:Installer) 'DefenseClawEnterprise.psm1'
@@ -20132,13 +19813,6 @@ foreach ($required in @(
         throw "$($required.Label) is missing: $($required.Path)"
     }
 }
-if (-not $ClaudeOnly -and
-    -not (Test-Path -LiteralPath $script:OriginalCodexTrustedHookLauncherSource -PathType Leaf)) {
-    throw (
-        'Codex trusted hook launcher is missing: ' +
-        $script:OriginalCodexTrustedHookLauncherSource
-    )
-}
 $script:SourceDigests = [ordered]@{
     gateway = Get-FileDigest $script:OriginalGatewaySource
     hook = Get-FileDigest $script:OriginalHookSource
@@ -20165,11 +19839,6 @@ $script:SourceDigests = [ordered]@{
     claude = Get-FileDigest $script:OriginalClaudeSource
     rejected_codex = Get-FileDigest $script:OriginalRejectedCodexSource
     rejected_claude = Get-FileDigest $script:OriginalRejectedClaudeSource
-    codex_trusted_hook_launcher = if ($ClaudeOnly) {
-        ''
-    } else {
-        Get-FileDigest $script:OriginalCodexTrustedHookLauncherSource
-    }
     upgrade_gateway = if ([string]::IsNullOrWhiteSpace($UpgradeGatewayBinary)) {
         ''
     } else {
@@ -20343,8 +20012,6 @@ $plan = [ordered]@{
     normal_mode_cli_launcher_source = $script:NormalModeCLILauncherSource
     normal_mode_cli_wheel_source = $script:NormalModeCLIWheelSource
     codex_source = $script:OriginalCodexSource
-    codex_trusted_hook_launcher_source =
-        $script:OriginalCodexTrustedHookLauncherSource
     claude_source = $script:OriginalClaudeSource
     rejected_codex_source = $script:OriginalRejectedCodexSource
     rejected_claude_source = $script:OriginalRejectedClaudeSource
@@ -20372,8 +20039,6 @@ $plan = [ordered]@{
     evidence_directory = $script:EvidenceDirectory
     allow_unsigned_fixture_binaries = [bool]$AllowUnsigned
     agent_application_control_attested = [bool]$AttestAgentApplicationControl
-    codex_trusted_hook_launcher_attested =
-        [bool]$AttestCodexTrustedHookLauncher
     codex_target_enabled = -not [bool]$ClaudeOnly
     claude_target_enabled = $true
     claude_effective_policy_initially_attested = $false
@@ -20437,21 +20102,6 @@ if ([string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
         'full execution requires -UpgradeGatewayBinary, ' +
         '-UpgradeHookBinary, and -UpgradeCLIBinary from a separately ' +
         'version-stamped build'
-    )
-}
-if (-not $ClaudeOnly -and -not $AttestAgentApplicationControl) {
-    throw (
-        'Windows managed enterprise requires explicit ' +
-        '-AttestAgentApplicationControl after WDAC/AppLocker policy blocks ' +
-        'unapproved and old agent clients'
-    )
-}
-if (-not $ClaudeOnly -and -not $AttestCodexTrustedHookLauncher) {
-    throw (
-        'this certification enables Codex and therefore requires explicit ' +
-        '-AttestCodexTrustedHookLauncher after a separately verified, ' +
-        'fail-closed fixed hook launcher is deployed; stock Codex 0.144.3 ' +
-        'is not sufficient because hook-launch failures are non-blocking'
     )
 }
 if (-not (Test-IsElevatedAdministrator)) {
@@ -20574,18 +20224,10 @@ try {
     }
     Invoke-Check 'protected-approved-agent-runtimes' {
         $runtime = Initialize-ProtectedCodexRuntime
-        $launcherDetail = if ($ClaudeOnly) {
-            'Codex launcher intentionally omitted for Claude-only/core mode'
-        } else {
-            (
-                'separately signed stock-distinct launcher ' +
-                "$($runtime.codex_trusted_hook_launcher_sha256)"
-            )
-        }
         return (
             "staged OpenAI-signed $($runtime.codex_version) " +
             "($($runtime.codex_version_source)), " +
-            "Anthropic-signed $($runtime.claude_version), and $launcherDetail; " +
+            "and Anthropic-signed $($runtime.claude_version); " +
             'the enrolled standard user can execute approved clients but ' +
             'cannot modify them'
         )
@@ -21303,15 +20945,13 @@ targets:
         Assert-ServiceContract | Out-Null
         Assert-HealthyGuardianJSON 'final'
     }
-    if ($ClaudeOnly) {
+    if (-not $AttestAgentApplicationControl) {
         Add-Result `
             'live-approved-and-rejected-agent-application-control' `
-            'external_gate_not_run' `
-            'Claude-only/core mode deliberately supplied no WDAC/AppLocker attestation; application-control enforcement and aggregate security_complete remain false' `
+            'optional_layer_not_requested' `
+            'this run did not request the optional WDAC/AppLocker defense-in-depth layer; managed hook installation and verification remain active' `
             @{
                 attested = $false
-                security_complete = $false
-                production_certified = $false
             }
     } else {
         Invoke-Check 'live-approved-and-rejected-agent-application-control' {
@@ -21401,71 +21041,36 @@ targets:
             throw
         }
     }
-    try {
-        $stockNegative = Invoke-ActualCodexCertificationRun `
-            -Label 'stock-codex-0.144.3-blocked-shell-fail-open-negative' `
-            -BinaryPath $script:CodexRuntimeBinary `
-            -ExpectedSHA256 ([string]$script:SourceDigests['codex']) `
-            -BinaryRole stock `
-            -DeleteUserConfig `
-            -HostileShell
-        Add-Result `
-            'stock-codex-0.144.3-rejected-for-enterprise' `
-            'passed' `
-            $(if ($ClaudeOnly) {
-                'mandatory negative reproduced without external app control: stock signed Codex selected the user-writable fake shell, then reached the provider and exited zero with no managed hook contact; stock_codex_supported remains false'
-            } else {
-                'mandatory negative reproduced: stock signed Codex reached the provider and exited zero after its hook shell was OS-blocked, with no managed hook contact; stock_codex_supported remains false'
-            }) `
-            @{ run = $stockNegative }
-    } catch {
-        Add-Result `
-            'stock-codex-0.144.3-rejected-for-enterprise' `
-            'failed' `
-            $_.Exception.Message
-        throw
-    }
     if ($ClaudeOnly) {
         Add-Result `
-            'codex-trusted-hook-launcher-certification' `
+            'codex-live-hook-certification' `
             'not_applicable' `
-            'Claude-only/core certification intentionally omitted the Codex target and launcher attestation; stock Codex remains explicitly uncertified' `
+            'Claude-only/core certification intentionally omitted the Codex target' `
             @{
                 codex_target_enabled = $false
-                codex_trusted_hook_launcher_verified = $false
-                stock_codex_supported = $false
             }
     } else {
         try {
             $codexRuns = [Collections.Generic.List[object]]::new()
             foreach ($run in @(
                 [pscustomobject]@{
-                    label = 'actual-trusted-codex-launcher-hostile-user-config'
+                    label = 'actual-approved-codex-hostile-user-config'
                     delete = $false
                     bypass = $true
                     hostile_shell = $false
                 },
                 [pscustomobject]@{
-                    label = 'actual-trusted-codex-launcher-deleted-user-config'
+                    label = 'actual-approved-codex-deleted-user-config'
                     delete = $true
                     bypass = $false
                     hostile_shell = $false
-                },
-                [pscustomobject]@{
-                    label = 'actual-trusted-codex-launcher-hostile-shell-path'
-                    delete = $true
-                    bypass = $false
-                    hostile_shell = $true
                 }
             )) {
                 $arguments = @{
                     Label = [string]$run.label
-                    BinaryPath =
-                        $script:CodexTrustedHookLauncherRuntimeBinary
-                    ExpectedSHA256 = [string](
-                        $script:CodexTrustedHookLauncherIdentity.sha256
-                    )
-                    BinaryRole = 'trusted_launcher'
+                    BinaryPath = $script:CodexRuntimeBinary
+                    ExpectedSHA256 = [string]$script:SourceDigests['codex']
+                    BinaryRole = 'approved'
                     DeleteUserConfig = [bool]$run.delete
                     BypassHookTrust = [bool]$run.bypass
                     HostileShell = [bool]$run.hostile_shell
@@ -21481,22 +21086,21 @@ targets:
                     -not [bool]$_.accepted_for_enterprise
                 }).Count -ne 0) {
                 throw (
-                    'trusted Codex launcher never completed a real managed-hook ' +
+                    'approved Codex never completed a real managed-hook ' +
                     'contact or returned a non-accepted run'
                 )
             }
             $script:CodexLiveProcessProof = @($codexRuns.ToArray())
             Add-Result `
-                'actual-codex-trusted-hook-launcher-enforcement' `
+                'actual-codex-managed-hook-enforcement' `
                 'passed' `
-                'the separately signed, stock-distinct launcher was actually invoked with drop-in Codex exec argv; every hostile case either contacted both managed hooks or blocked the operation, and at least one completed through the loopback Responses provider' `
+                'the approved Codex executable was invoked directly; every case contacted both managed hooks or blocked the operation, and at least one completed through the loopback Responses provider' `
                 @{
-                    launcher = $script:CodexTrustedHookLauncherIdentity
                     runs = @($codexRuns.ToArray())
                 }
         } catch {
             Add-Result `
-                'actual-codex-trusted-hook-launcher-enforcement' `
+                'actual-codex-managed-hook-enforcement' `
                 'failed' `
                 $_.Exception.Message
             throw

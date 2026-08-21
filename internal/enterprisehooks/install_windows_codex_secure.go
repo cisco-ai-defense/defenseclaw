@@ -463,12 +463,6 @@ func defaultWindowsCodexRequirementsOptions(
 	if err != nil {
 		return opts, err
 	}
-	trustedLauncher, err := exactWindowsCodexManagedAttestation(
-		connector.WindowsCodexTrustedHookLauncherVerifiedEnv,
-	)
-	if err != nil {
-		return opts, err
-	}
 	gatewayAddr, err := connector.NormalizeWindowsManagedGatewayAddr(apiAddr)
 	if err != nil {
 		return opts, err
@@ -478,17 +472,16 @@ func defaultWindowsCodexRequirementsOptions(
 		return opts, err
 	}
 	opts = connector.WindowsCodexMachineRequirementsOptions{
-		RequirementsPath:                 requirementsPath,
-		ManagedDir:                       filepath.Dir(hookExecutable),
-		HookBinary:                       hookExecutable,
-		OwnershipPath:                    filepath.Join(stateRoot, "install", "codex-requirements-ownership.json"),
-		ManagedStatePath:                 filepath.Join(filepath.Dir(requirementsPath), ".defenseclaw-managed-hooks.state"),
-		GatewayAddr:                      gatewayAddr,
-		GatewayServiceName:               gatewayServiceName,
-		AgentApplicationControlEnforced:  applicationControl,
-		EnterpriseTargetEnabled:          true,
-		CodexTargetEnabled:               true,
-		CodexTrustedHookLauncherVerified: trustedLauncher,
+		RequirementsPath:                requirementsPath,
+		ManagedDir:                      filepath.Dir(hookExecutable),
+		HookBinary:                      hookExecutable,
+		OwnershipPath:                   filepath.Join(stateRoot, "install", "codex-requirements-ownership.json"),
+		ManagedStatePath:                filepath.Join(filepath.Dir(requirementsPath), ".defenseclaw-managed-hooks.state"),
+		GatewayAddr:                     gatewayAddr,
+		GatewayServiceName:              gatewayServiceName,
+		AgentApplicationControlEnforced: applicationControl,
+		EnterpriseTargetEnabled:         true,
+		CodexTargetEnabled:              true,
 	}
 	return opts, nil
 }

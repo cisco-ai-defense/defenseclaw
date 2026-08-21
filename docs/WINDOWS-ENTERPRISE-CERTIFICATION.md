@@ -29,8 +29,8 @@ evidence:
 | Shared Codex prerequisite | Explicit enterprise lifecycle securely creates missing `C:\ProgramData\OpenAI\Codex` parents with System/Administrators full control and Users read/traverse. Status and normal mode do not create them; unsafe preexisting owners/DACLs/reparse points fail without takeover; rollback removes only transaction-created empty directories; preexisting legitimate directories survive failure and purge. |
 | Codex machine policy | `%ProgramData%\OpenAI\Codex\requirements.toml` contains exactly ten managed hook groups and points only to the protected installed hook. Its protected enrollment state, ownership record, and ACL preimage are non-user-writable and guardian-repaired after deletion, event removal, or DACL drift. Managed enterprise never reads, writes, or patches `<profile>\.codex`. |
 | Codex policy serialization | `%ProgramData%\OpenAI\Codex\.defenseclaw-managed-hooks.lock` is Administrators-owned, protected, no-reparse, and single-link. Acquisition is bounded. The retired predictable Global mutex name is ignored even when a user pre-creates it; a user-held read lock may deny availability only until the bounded failure and later reconcile. |
-| Agent application control | Protected schema-v2 evidence attests approved signed clients and Claude effective policy. Approved clients start; explicitly supplied official old Codex/Claude and custom unsigned lookalikes are blocked. This is independent of Codex hook-launcher verification. |
-| Codex effective enforcement | An enabled Codex target requires `-AttestCodexTrustedHookLauncher` for a separately verified fail-closed fixed launcher. AppLocker/WDAC blocking of a hostile shell is not enough. Signed stock Codex 0.144.3 is rejected when it exits 0 and reaches the provider without managed hook contact after hook-shell launch fails. |
+| Agent application control | Protected schema-v2 evidence attests approved signed clients and Claude effective policy. Approved clients start; explicitly supplied official old Codex/Claude and custom unsigned lookalikes are blocked. |
+| Codex effective enforcement | The protected machine requirements point approved Codex directly to the shared `defenseclaw-hook.exe`; certification invokes the real client and requires managed hook contact or a blocked operation. |
 | Claude effective enforcement | The real approved Claude client must exercise the installed machine policy against a local no-auth Messages stub. Hostile user and project `disableAllHooks` settings cannot yield a green result unless a managed hook is observed or the client operation is blocked. A protected `90-defenseclaw.json` file alone is not acceptance evidence. |
 | Hook server identity | Scoped-token authentication is necessary but not sufficient. The connected loopback server PID must equal the exact live SCM gateway PID. A standard-user fake listener on the exact API port, including a gateway-restart bind race, cannot obtain an authenticated request or return a trusted allow verdict. |
 | SID enrollment | Every protected interactive SID is explicitly enrolled. The installed managed hook returns non-zero with a causal enrollment diagnostic for an unregistered non-admin SID and does not create or change that user's DefenseClaw state. |
@@ -121,7 +121,7 @@ retarget, take ownership of, or change the DACL on another hard-link name.
   endpoint-management startup context whose loader environment was protected
   before PowerShell started. Its internal protected bootstrap directory
   contains helper compilation; it does not convert an already-influenced
-  interactive PowerShell process into a trusted launcher.
+  interactive PowerShell process into a trusted bootstrap context.
 - Exactly one matching interactive user in WTS `Active` state. Keep that
   desktop logged on, close DefenseClaw and any process that writes
   `.defenseclaw`, and do not launch a new Codex process during the temporary
@@ -246,7 +246,6 @@ and prints JSON, but creates no user, service, directory, or policy:
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
   -CodexBinary C:\cert\codex-0.144.3.exe `
-  -CodexTrustedHookLauncherBinary C:\cert\codex-defenseclaw-launcher.exe `
   -ClaudeBinary C:\cert\claude-2.1.207.exe `
   -RejectedCodexBinary C:\cert\codex-0.130.0.exe `
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe
@@ -270,13 +269,11 @@ From an elevated 64-bit PowerShell 7 window:
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
   -CodexBinary C:\cert\codex-0.144.3.exe `
-  -CodexTrustedHookLauncherBinary C:\cert\codex-defenseclaw-launcher.exe `
   -ClaudeBinary C:\cert\claude-2.1.207.exe `
   -RejectedCodexBinary C:\cert\codex-0.130.0.exe `
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `
-  -AttestCodexTrustedHookLauncher `
   -Execute `
   -DisposableHost
 ```
@@ -292,14 +289,12 @@ supplying credentials:
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
   -CodexBinary C:\cert\codex-0.144.3.exe `
-  -CodexTrustedHookLauncherBinary C:\cert\codex-defenseclaw-launcher.exe `
   -ClaudeBinary C:\cert\claude-2.1.207.exe `
   -RejectedCodexBinary C:\cert\codex-0.130.0.exe `
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
   -ProtectedUserSID 'S-1-5-21-...' `
   -AllowUnsigned `
   -AttestAgentApplicationControl `
-  -AttestCodexTrustedHookLauncher `
   -Execute `
   -DisposableHost
 ```
@@ -328,20 +323,11 @@ root. Omit the switch for signed release
 artifacts. The public installer continues to reject unsigned production
 binaries by default, and `-AllowUnsigned` never bypasses source trust.
 
-`-AttestAgentApplicationControl` and
-`-AttestCodexTrustedHookLauncher` are independent claims. The first means
-endpoint application-control rules allow only approved agent clients and
-enforce at least Claude 2.1.152. The second means an approved fail-closed fixed
-Codex hook launcher has been deployed and separately verified. The harness
-requires the launcher artifact itself, verifies valid Authenticode, records its
-signer and SHA-256, rejects a launcher byte-identical to either supplied Codex
-binary, stages that exact artifact under the protected install root, and invokes
-it with the ordinary `codex exec ...` argument shape. Do not pass the second
-switch merely because AppLocker or WDAC blocks a user-path
-`pwsh.exe`: stock signed Codex 0.144.3 has been observed to continue with exit
-zero after that hook spawn fails. The harness reruns that exact hostile-shell
-case and intentionally fails certification if the provider is reached without
-managed hook contact.
+`-AttestAgentApplicationControl` means endpoint application-control rules allow
+only approved agent clients and enforce at least Claude 2.1.152. The harness
+invokes the approved Codex executable directly with the ordinary
+`codex exec ...` argument shape and requires managed-hook contact or a blocked
+operation.
 
 The full harness is deliberately two-phase. Initial `Install` may report
 `core_hardening_complete=true`, but it must report
@@ -355,12 +341,11 @@ aggregate `security_complete=true`.
 The public signed CLI maps one-to-one to those installer parameters. For the
 first transaction, use `defenseclaw enterprise windows install` with
 `--gateway-binary`, `--hook-binary`, `--cli-binary`, `--config`, `--manifest`,
-`--attest-agent-application-control`,
-`--attest-codex-trusted-hook-launcher`, and
-`--codex-trusted-hook-launcher-binary`. After the independent live Claude
-proof, use `defenseclaw enterprise windows repair` with the same protected
-release inputs, repeat both structural attestation switches and the exact
-`--codex-trusted-hook-launcher-binary`, and add
+and the normal signed release inputs. Add
+`--attest-agent-application-control` only when WDAC or AppLocker has been
+independently deployed and tested. After the independent live Claude proof,
+use `defenseclaw enterprise windows repair` with the same protected release
+inputs, repeat that optional application-control attestation if used, and add
 `--attest-claude-effective-policy`. Then require both
 `enterprise windows status --json` and `enterprise windows verify --json` to
 report the manifest-bound effective-policy field and aggregate security true.
@@ -389,11 +374,13 @@ installer, install-root, state-root, and certification-home paths in both
 Windows PowerShell 5.1 and PowerShell 7. The exact alias is removed and all
 trees are re-snapshotted before lifecycle testing continues.
 
-For a useful implementation-only run when WDAC/AppLocker and the separately
-signed Codex launcher are not yet available, add `-ClaudeOnly -AllowUnsigned`
-and omit both external-attestation switches and the launcher artifact. This
-profile still executes the real hostile-precedence Claude test and the Windows
-service, ACL, denial, repair, revocation, and cleanup suite, but it truthfully
+For a useful implementation-only run before optional WDAC/AppLocker policy is
+available, omit `-AttestAgentApplicationControl`; the full profile can still
+exercise both connectors through the shared `defenseclaw-hook.exe`. Add
+`-ClaudeOnly -AllowUnsigned` only for the intentionally Claude-only core
+profile. That profile still executes the real hostile-precedence Claude test
+and the Windows service, ACL, denial, repair, revocation, and cleanup suite, but
+it truthfully
 retains `claude_effective_policy_verified=false`,
 `security_complete=false`, and `production_certified=false`. Its live result is
 certification evidence only; it cannot be promoted or reused as a production
@@ -410,7 +397,6 @@ second build:
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
   -CodexBinary C:\cert\codex-0.144.3.exe `
-  -CodexTrustedHookLauncherBinary C:\cert\codex-defenseclaw-launcher.exe `
   -ClaudeBinary C:\cert\claude-2.1.207.exe `
   -RejectedCodexBinary C:\cert\codex-0.130.0.exe `
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
@@ -419,7 +405,6 @@ second build:
   -UpgradeCLIBinary .\v2\defenseclaw.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `
-  -AttestCodexTrustedHookLauncher `
   -Execute `
   -DisposableHost
 ```
@@ -733,9 +718,8 @@ service tokens must also deny read.
 
 Both service Environment values must omit `CODEX_HOME`, including in
 certification scope. They must independently pin approved-client application
-control and Claude policy evidence, and an enabled Codex deployment must also
-pin `DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED=1`. The removed
-legacy trusted-shell pin is not accepted. `sc.exe qprivs` and the live token
+control and Claude policy evidence. The removed legacy trusted-shell pin is
+not accepted. `sc.exe qprivs` and the live token
 record must show the guardian's exact
 Tcb/Impersonate/ChangeNotify/Backup/Restore set, with no TakeOwnership; the
 evidence must show Backup/Restore disabled again after DACL recovery.

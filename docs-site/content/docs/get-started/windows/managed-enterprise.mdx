@@ -64,9 +64,9 @@ Managed enterprise on native Windows is qualified only for `codex` and
 `claudecode` targets. Other connectors remain outside the Windows enterprise
 certification boundary.
 
-- **Codex:** version 0.133.0 or newer is required, but version alone is not
-  sufficient. Production enforcement also requires approved-client application
-  control and a separately verified, fail-closed fixed hook launcher.
+- **Codex:** version 0.133.0 or newer is required. Production enforcement uses
+  the shared managed hook policy. WDAC or AppLocker can optionally restrict
+  which client binaries may start, but is not required to install the hooks.
 - **Claude Code:** version 2.1.152 or newer is required. Production acceptance
   also requires proof from the real approved client that DefenseClaw's managed
   policy remains effective against hostile user and project settings.

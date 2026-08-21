@@ -68,7 +68,6 @@ func executeEnterpriseSetup(
 	}{
 		{label: "config", value: &opts.Config},
 		{label: "manifest", value: &opts.Manifest},
-		{label: "Codex trusted hook launcher", value: &opts.CodexTrustedHookLauncherBinary},
 	} {
 		if strings.TrimSpace(*input.value) == "" {
 			continue
@@ -346,7 +345,6 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	appendValue("--gateway-service-name", opts.GatewayServiceName)
 	appendValue("--guardian-service-name", opts.GuardianServiceName)
 	appendValue("--certification-codex-home", opts.CertificationCodexHome)
-	appendValue("--codex-trusted-hook-launcher-binary", opts.CodexTrustedHookLauncherBinary)
 	if opts.NoStart {
 		arguments = append(arguments, "--no-start")
 	}
@@ -367,9 +365,6 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	}
 	if opts.AttestClaudeEffectivePolicy {
 		arguments = append(arguments, "--attest-claude-effective-policy")
-	}
-	if opts.AttestCodexTrustedHookLauncher {
-		arguments = append(arguments, "--attest-codex-trusted-hook-launcher")
 	}
 	// Spec 003 --deferred-config forwards only for the initial
 	// install action. Upgrade/repair use the config/manifest already
