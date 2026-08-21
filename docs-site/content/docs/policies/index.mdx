@@ -78,8 +78,10 @@ The guided trace normalizes a connector event, matches a deterministic rule, che
 Structured tool calls first produce normalized operations, arguments, paths,
 endpoints, and data-flow facts for precise CEL rules. Plain local rules cover
 unstructured secrets and explicit prompt-injection patterns, while bounded
-regex remains the fail-closed fallback when a tool action cannot be modeled
-authoritatively. The optional judge handles ambiguous content cases.
+regex preserves fallback visibility when a tool action cannot be modeled
+authoritatively. At a trusted-action boundary, that raw fallback remains
+detection-only unless a separate complete, code-owned same-rule proof
+authorizes enforcement. The optional judge handles ambiguous content cases.
 Suppressions remove known noise before the verdict is aggregated. The legacy
 session correlator independently watches persisted findings for post-event
 patterns such as the lethal trifecta. Separately, fixed ordered tool-call

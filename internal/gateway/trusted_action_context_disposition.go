@@ -187,6 +187,39 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 		matcher: trustedActionPathValueMatcher(matchesGitCredentialFile),
 	},
 	{
+		ruleIDs: []string{"PATH-WIN-CREDENTIAL-MANAGER"},
+		matcher: trustedActionWindowsAppDataMatcher(
+			"microsoft/credentials",
+			true,
+		),
+	},
+	{
+		ruleIDs: []string{"PATH-WIN-DPAPI"},
+		matcher: trustedActionWindowsAppDataMatcher(
+			"microsoft/protect",
+			true,
+		),
+	},
+	{
+		ruleIDs: []string{"PATH-WIN-PS-HISTORY"},
+		matcher: trustedActionWindowsAppDataMatcher(
+			"microsoft/windows/powershell/psreadline/consolehost_history.txt",
+			false,
+		),
+	},
+	{
+		ruleIDs: []string{"PATH-WIN-SAM"},
+		matcher: trustedActionWindowsSystemHiveMatcher("sam"),
+	},
+	{
+		ruleIDs: []string{"PATH-WIN-SECURITY-HIVE"},
+		matcher: trustedActionWindowsSystemHiveMatcher("security"),
+	},
+	{
+		ruleIDs: []string{"PATH-WIN-SYSTEM-HIVE"},
+		matcher: trustedActionWindowsSystemHiveMatcher("system"),
+	},
+	{
 		ruleIDs: []string{"PATH-PROC-ENVIRON"},
 		matcher: trustedActionPathValueMatcher(matchesProcEnviron),
 	},
@@ -218,6 +251,48 @@ func trustedActionExactPathMatcher(
 	return func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
 		return strings.TrimRight(semanticPathValue(candidate), "/") == expected
 	}
+}
+
+func trustedActionWindowsAppDataMatcher(
+	relative string,
+	descendants bool,
+) trustedActionSensitivePathMatcher {
+	relative = strings.Trim(strings.ToLower(relative), "/")
+	return func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		parts := strings.Split(
+			strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/"),
+			"/",
+		)
+		if len(parts) < 7 || !trustedActionWindowsDrive(parts[0]) ||
+			parts[1] != "users" || parts[2] == "" ||
+			parts[3] != "appdata" ||
+			(parts[4] != "roaming" && parts[4] != "local") {
+			return false
+		}
+		value := strings.Join(parts[5:], "/")
+		return value == relative ||
+			descendants && strings.HasPrefix(value, relative+"/")
+	}
+}
+
+func trustedActionWindowsSystemHiveMatcher(
+	hive string,
+) trustedActionSensitivePathMatcher {
+	hive = strings.ToLower(strings.TrimSpace(hive))
+	return func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		parts := strings.Split(
+			strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/"),
+			"/",
+		)
+		return len(parts) == 5 && trustedActionWindowsDrive(parts[0]) &&
+			parts[1] == "windows" && parts[2] == "system32" &&
+			parts[3] == "config" && parts[4] == hive
+	}
+}
+
+func trustedActionWindowsDrive(value string) bool {
+	return len(value) == 2 && value[1] == ':' &&
+		value[0] >= 'a' && value[0] <= 'z'
 }
 
 func trustedActionSSHDirectoryMatcher(
@@ -272,9 +347,9 @@ func trustedActionClassifySensitivePathRisk(
 			if !trustedActionExecutingCommand(facts, candidate.CommandID) {
 				continue
 			}
-			if trustedActionCommandProvesExternalEgress(
+			if trustedActionSameCommandPathReadFeedsExternalEgress(
 				facts,
-				candidate.CommandID,
+				candidate,
 			) || trustedActionPathReadFeedsExternalUpload(
 				facts,
 				candidate,
@@ -507,6 +582,38 @@ func trustedActionPathReadFeedsExternalUpload(
 			continue
 		}
 		return trustedActionCommandFeedsExternalUpload(facts, source.ID)
+	}
+	return false
+}
+
+func trustedActionSameCommandPathReadFeedsExternalEgress(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	for _, command := range facts.Commands {
+		if command.ID != candidate.CommandID {
+			continue
+		}
+		if !oneOfFold(command.Program, "curl", "curl.exe") {
+			return trustedActionCommandProvesExternalEgress(facts, command.ID)
+		}
+		for _, source := range actionfacts.StaticCurlUploadFileSources(command) {
+			if source.Path != candidate.Value {
+				continue
+			}
+			for _, network := range facts.Network {
+				if network.CommandID == command.ID && isExternalNetwork(network) &&
+					networkActionIn(
+						network.Action,
+						actionfacts.NetworkDownload,
+						actionfacts.NetworkUpload,
+					) && strings.EqualFold(network.Scheme, source.Scheme) &&
+					network.Host == source.Host && network.Port == source.Port {
+					return true
+				}
+			}
+		}
+		return false
 	}
 	return false
 }

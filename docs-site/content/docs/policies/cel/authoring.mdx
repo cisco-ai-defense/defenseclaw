@@ -41,6 +41,15 @@ CEL returns only `true` or `false`; it does not return a verdict. A `true`
 result creates the YAML-defined finding. Connector mode, severity thresholds,
 HITL, and enforcement evidence determine the resulting action.
 
+<Callout type="warn" title="A pattern preserves detection, not authority">
+`pattern` and `tool_call_only` control where compatible regex detection runs;
+they do not authorize a trusted-action block. A custom CEL rule may enforce
+only when complete authoritative ActionFacts match its expression and the
+final code-owned proof is pinned to that same rule ID. Raw regex, partial or
+invalid projection, parser-shadow, and mismatched proof remain visible as
+detection-only evidence.
+</Callout>
+
 For fallback-pattern design and counterexamples, use the
 [RE2 regex cookbook](/docs/policies/regex-cookbook).
 

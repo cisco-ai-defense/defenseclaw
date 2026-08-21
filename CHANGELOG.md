@@ -83,7 +83,19 @@ boundary.
   retained, while recognized instruction paths with unprovable native identity
   fail closed only for proven canonical mutations. Parser uncertainty is
   counted separately by `defenseclaw.guardrail.parser_uncertainty`, so it does
-  not inflate guardrail evaluation or block-rate metrics.
+  not inflate guardrail evaluation or block-rate metrics. Newly exact egress
+  coverage includes curl FTP account/alternative operands and Telnet
+  negotiation metadata on POSIX or structured argv, cross-platform SOCKS proxy
+  credentials, and portable static `echo` or format-only `printf` output
+  flowing into one exact external curl stdin upload. Raw CMD/PowerShell curl
+  now gains exact ordinary HTTP(S) headers, origin credentials, inline/body and
+  file-upload projection, plus supported direct proxy/SOCKS credentials; its
+  FTP control, SMTP envelope, and Telnet metadata remain detection-only.
+  `mkfs.minix` now shares the formatter owner for raw-device targets;
+  image files, help/version calls, invalid grammar, near-miss executables, and
+  dynamic, config-driven, wrapped, local, or otherwise ambiguous egress forms
+  cannot mint action authority; they remain advisory where a compatible
+  detector still matches and otherwise stay quiet.
 - **Amp is now a first-class connector on macOS, Linux, and native Windows**:
   setup installs an owner-only authenticated system policy plugin for Amp's five
   documented callbacks; action mode gates `tool.call` before execution and can

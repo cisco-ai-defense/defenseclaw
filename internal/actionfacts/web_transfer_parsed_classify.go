@@ -118,7 +118,7 @@ func StaticCurlStdinUploadTargets(command CommandFact) []NetworkFact {
 // per-group network destination needed to prove which body reaches which peer.
 func StaticCurlUploadPayloads(command CommandFact) []string {
 	if !command.ArgvComplete || !isCurlProgram(command.Program) ||
-		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		len(command.Argv) == 0 || !staticCurlArgvIdentity(command) ||
 		len(command.Arguments) != len(command.Argv) {
 		return nil
 	}
@@ -504,6 +504,175 @@ type TransmittedRequestComponent struct {
 	Scheme string
 	Host   string
 	Port   int64
+}
+
+// TransmittedFileSource binds one exact parser-owned filesystem input to the
+// transfer target whose request can consume it. Path describes the source
+// identity, not a byte-for-byte payload guarantee: cookie files, for example,
+// contribute only the entries curl selects for that target.
+type TransmittedFileSource struct {
+	Path   string
+	Scheme string
+	Host   string
+	Port   int64
+}
+
+// StaticCurlUploadFileSources returns exact target-bound file inputs that curl
+// can transmit as a request body or request metadata. TLS/config/support files
+// and stdin pseudo-sources are deliberately excluded. Callers must pair each
+// result with an exact same-command network fact before granting authority.
+func StaticCurlUploadFileSources(command CommandFact) []TransmittedFileSource {
+	if command.Effect != EffectExecute || !command.ArgvComplete ||
+		!isCurlProgram(command.Program) || len(command.Argv) == 0 ||
+		!staticCurlArgvIdentity(command) ||
+		len(command.Arguments) != len(command.Argv) {
+		return nil
+	}
+	for index := range command.Argv {
+		if !staticCommandArgumentAt(command, index) {
+			return nil
+		}
+	}
+
+	parsed := parseCurlArgv(command.Argv)
+	if !parsed.Complete || parsed.ConfigOpaque || parsed.Preview ||
+		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
+		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
+		!curlRangeOptionsValid(parsed) || !curlStaticFormEagerSyntaxValid(parsed) {
+		return nil
+	}
+
+	grouped := make(map[int][]string)
+	for _, option := range parsed.Options {
+		if !option.ValuePresent {
+			continue
+		}
+		if !staticCurlOptionValue(command, option) {
+			return nil
+		}
+		path := ""
+		switch option.Canonical {
+		case "--data", "--data-ascii", "--data-binary", "--json":
+			var stdin, fileSource bool
+			path, stdin, fileSource = webDataFile(option.Value)
+			if !fileSource || stdin {
+				continue
+			}
+		case "--data-urlencode":
+			var stdin, fileSource, valid bool
+			path, stdin, fileSource, valid = curlDataURLEncodeFile(option.Value)
+			if !valid {
+				return nil
+			}
+			if !fileSource || stdin {
+				continue
+			}
+		case "--form":
+			if curlFormHasUnmodeledFileReference(option.Value) {
+				return nil
+			}
+			var stdin, fileSource bool
+			path, stdin, fileSource = webFormFile(option.Value)
+			if !fileSource || stdin {
+				continue
+			}
+		case "--header":
+			if !strings.HasPrefix(option.Value, "@") {
+				continue
+			}
+			path = strings.TrimPrefix(option.Value, "@")
+			if path == "" {
+				return nil
+			}
+			if path == "-" {
+				continue
+			}
+		case "--cookie":
+			if option.Value == "" || option.Value == "-" ||
+				containsCookieLiteral(option.Value) {
+				continue
+			}
+			path = option.Value
+		default:
+			continue
+		}
+		path, valid := curlStaticFileSourcePath(command, path)
+		if !valid {
+			return nil
+		}
+		grouped[option.Group] = append(grouped[option.Group], path)
+	}
+
+	seen := make(map[string]struct{})
+	var sources []TransmittedFileSource
+	appendSource := func(path string, network NetworkFact) {
+		key := path + "\x00" + strings.ToLower(network.Scheme) + "\x00" +
+			network.Host + "\x00" + strconv.FormatInt(network.Port, 10)
+		if _, duplicate := seen[key]; duplicate {
+			return
+		}
+		seen[key] = struct{}{}
+		sources = append(sources, TransmittedFileSource{
+			Path: path, Scheme: network.Scheme,
+			Host: network.Host, Port: network.Port,
+		})
+	}
+	for _, target := range parsed.Targets {
+		if !staticCommandArgumentAt(command, target.ArgvIndex) ||
+			!validLiteralRequestTarget(target.Value) ||
+			curlTargetHasInvalidUserinfo(target.Value) ||
+			curlHasUnmodeledGlob(target.Value) {
+			return nil
+		}
+		network, valid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkUpload,
+		)
+		if !valid {
+			network, valid = curlSMTPTargetFact(
+				command.ID,
+				target.Value,
+				NetworkUpload,
+			)
+		}
+		if !valid {
+			return nil
+		}
+		switch network.Scheme {
+		case "http", "https", "ftp", "ftps", "smtp", "smtps":
+		default:
+			continue
+		}
+		if target.UploadSet && target.UploadValue != "" &&
+			target.UploadValue != "-" && target.UploadValue != "." {
+			path, sourceValid := curlStaticFileSourcePath(
+				command,
+				target.UploadValue,
+			)
+			if !sourceValid {
+				return nil
+			}
+			appendSource(path, network)
+		}
+		if network.Scheme != "http" && network.Scheme != "https" {
+			continue
+		}
+		for _, source := range grouped[target.Group] {
+			appendSource(source, network)
+		}
+	}
+	return sources
+}
+
+func curlStaticFileSourcePath(command CommandFact, value string) (string, bool) {
+	if value == "" || value == "-" {
+		return "", false
+	}
+	if command.Dialect != DialectCMD && command.Dialect != DialectPowerShell {
+		return value, true
+	}
+	return windowsCanonicalPathFactValue(value)
 }
 
 // StaticCurlSMTPRequestComponents returns literal SMTP request operands that
@@ -2504,12 +2673,11 @@ func curlSOCKS5BasicAuthenticationEnabled(
 func staticCurlProxyDestination(
 	command CommandFact,
 ) (NetworkFact, curlArgvParse, bool) {
-	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
-		command.Effect != EffectExecute || !command.ArgvComplete ||
+	if command.Effect != EffectExecute || !command.ArgvComplete ||
 		command.ParentCommandID != 0 || len(command.Wrappers) != 0 ||
 		command.Program != "curl" || len(command.Argv) == 0 ||
-		command.Executable != command.Argv[0] ||
-		!exactCaseSensitivePOSIXProgram(&command, "curl") ||
+		!staticCurlArgvIdentity(command) ||
+		!staticCurlProgramIdentity(command) ||
 		len(command.Arguments) != len(command.Argv) {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
@@ -2728,6 +2896,32 @@ func staticCurlProxyDestination(
 		ok = false
 	}
 	return proxy, parsed, ok
+}
+
+func staticCurlProgramIdentity(command CommandFact) bool {
+	switch command.Dialect {
+	case DialectPOSIX, DialectArgv:
+		return exactCaseSensitivePOSIXProgram(&command, "curl")
+	case DialectCMD:
+		return command.Executable == "curl" || command.Executable == "curl.exe"
+	case DialectPowerShell:
+		// Unqualified curl is a PowerShell alias. Only the explicit native
+		// executable can inherit curl's option and proxy grammar.
+		return command.Executable == "curl.exe"
+	default:
+		return false
+	}
+}
+
+func staticCurlArgvIdentity(command CommandFact) bool {
+	if len(command.Argv) == 0 {
+		return false
+	}
+	if command.Executable == command.Argv[0] {
+		return true
+	}
+	return (command.Dialect == DialectCMD || command.Dialect == DialectPowerShell) &&
+		windowsExactNativeExecutableIdentity(command.Argv[0], command.Executable)
 }
 
 func curlProxyPeerMatchesIPVersion(
@@ -3247,7 +3441,7 @@ func curlProxyHeaderCandidateIsTransmitted(
 // assumption for ambient curl configuration.
 func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata {
 	if !command.ArgvComplete || !isCurlProgram(command.Program) ||
-		len(command.Argv) == 0 || command.Executable != command.Argv[0] ||
+		len(command.Argv) == 0 || !staticCurlArgvIdentity(command) ||
 		len(command.Arguments) != len(command.Argv) {
 		return CurlTransmittedMetadata{}
 	}

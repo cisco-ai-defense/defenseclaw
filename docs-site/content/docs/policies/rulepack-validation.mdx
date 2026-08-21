@@ -51,7 +51,9 @@ expression must still provide its required, bounded `pattern` fallback.
 
 `tool_call_only` does not bypass any of these checks or establish a trusted
 boundary. During validation it only controls the eventual eligibility of the
-rule's regex fallback outside tool-call inspection.
+rule's regex fallback outside tool-call inspection. A validated fallback
+pattern preserves detection; it does not by itself satisfy the final
+same-rule proof required for trusted-action enforcement.
 
 ## Partial packs and fallback
 

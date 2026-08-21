@@ -128,10 +128,28 @@ fallback without stopping unrelated rules.
 Every trusted-action candidate then crosses a final, code-owned proof gate. It
 can contribute to enforcement only when its proof is complete and pinned to
 the same rule ID: authoritative ActionFacts semantic evidence, an exact
-CodeGuard result, or a bounded exact fallback result. Raw regex matches,
-parser-shadow evidence, partial or invalid projections, and unpinned results
-remain visible as detection-only findings. The gate never removes a finding;
-it only prevents incomplete evidence from authorizing a block.
+code-owned built-in CodeGuard result from a complete scan, or a bounded exact
+fallback result. Raw regex matches, custom CodeGuard matches, parser-shadow
+evidence, partial or invalid projections, and unpinned results remain visible
+as detection-only findings. The gate never removes a finding; it only prevents
+incomplete evidence from authorizing a block.
+
+### Exact-boundary examples
+
+| Family | Enforcement-eligible example | Advisory or quiet control |
+| --- | --- | --- |
+| FTP control metadata | POSIX or structured-argv static curl FTP account or alternative bytes bound to one external FTP(S) origin or proven plaintext proxy observer | Dynamic/config-driven values, raw Windows shell input, a local-only destination, or an unproved route |
+| SOCKS authentication | Static SOCKS4 username or SOCKS5 username/password bound to the exact external proxy peer | Disabled/bypassed proxy, unsupported chain, ambiguous credentials, or pre-connect failure |
+| Telnet metadata | POSIX or structured-argv static `USER`, `TTYPE`, `XDISPLOC`, or `NEW_ENV` bytes bound to one direct external Telnet peer | Raw Windows shell input, capability-dependent, proxied, malformed, or local-only negotiation; invalid `WS`/`BINARY` settings |
+| Static stdin upload | Portable literal `echo` or format-only `printf` bytes flowing into one exact external curl stdin upload | Shell options/escapes, expansion, wrappers, intermediate transforms, or local upload |
+| Minix formatting | Exact `mkfs.minix` grammar targeting a raw device | Image target, help/version, invalid block count, near-miss executable, or untrusted path |
+
+Raw CMD/PowerShell curl gains exact ordinary HTTP(S) headers, origin
+credentials, inline/body and file-upload projection, plus supported direct
+proxy/SOCKS credentials. FTP account/alternative control fields, SMTP envelope
+fields, and Telnet `USER`/`TTYPE`/`XDISPLOC`/`NEW_ENV` remain detection-only on
+raw Windows shell input; their closed projectors still require POSIX or
+structured argv.
 
 Custom rules own their own rule ID. DefenseClaw may define internal alias,
 prerequisite, and safe-negative contracts for bundled owners, but those maps

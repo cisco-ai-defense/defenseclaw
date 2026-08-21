@@ -277,6 +277,12 @@ func dispatchTrustedAction(
 		request.Input.Tool,
 		options,
 	)
+	legacyFindings = appendTrustedWindowsPathFactFindings(
+		legacyFindings,
+		facts,
+		request.Input.Tool,
+		options,
+	)
 	legacyFindings = appendTrustedEmbeddedCommandFindings(
 		legacyFindings,
 		generation,
@@ -1017,6 +1023,12 @@ func dispatchTrustedFallback(
 	findings := scanRuleGeneration(
 		generation,
 		legacyText,
+		request.Input.Tool,
+		options,
+	)
+	findings = appendTrustedWindowsPathFactFindings(
+		findings,
+		facts,
 		request.Input.Tool,
 		options,
 	)
@@ -4055,6 +4067,60 @@ func appendTrustedEmbeddedCommandFindings(
 					continue
 				}
 				if _, exists := seen[finding.RuleID]; exists {
+					continue
+				}
+				seen[finding.RuleID] = struct{}{}
+				findings = append(findings, finding)
+			}
+		}
+	}
+	return findings
+}
+
+// appendTrustedWindowsPathFactFindings materializes Windows-only sensitive
+// path rules from typed filesystem facts. Keeping this bridge fact-driven lets
+// curl uploads and other exact readers reach the legacy rule catalog without
+// treating a path-shaped header, cookie, URL, or documentation operand as a
+// filesystem action.
+func appendTrustedWindowsPathFactFindings(
+	findings []RuleFinding,
+	facts actionfacts.Facts,
+	toolName string,
+	options ruleScanOptions,
+) []RuleFinding {
+	seen := make(map[string]struct{}, len(findings))
+	for _, finding := range findings {
+		seen[finding.RuleID] = struct{}{}
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.Flavor != actionfacts.PathFlavorWindows {
+			continue
+		}
+		switch candidate.Access {
+		case actionfacts.PathAccessRead,
+			actionfacts.PathAccessWrite,
+			actionfacts.PathAccessAppend,
+			actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		values := []string{candidate.Value, candidate.Normalized, candidate.Resolved}
+		seenValues := make(map[string]struct{}, len(values))
+		for _, value := range values {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			if _, duplicate := seenValues[value]; duplicate {
+				continue
+			}
+			seenValues[value] = struct{}{}
+			for _, finding := range windowsSensitivePathFindingsWithOptions(
+				value,
+				toolName,
+				true,
+				options,
+			) {
+				if _, duplicate := seen[finding.RuleID]; duplicate {
 					continue
 				}
 				seen[finding.RuleID] = struct{}{}

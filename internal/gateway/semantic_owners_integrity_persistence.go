@@ -68,10 +68,21 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		prerequisite:     historyTamperPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
-	"PATH-HISTORY": integrityMutationOwner(
-		matchesShellHistoryCandidate, matchesActiveShellHistory, nil,
-		"PATH-WIN-PS-HISTORY",
-	),
+	"PATH-HISTORY": {
+		// The generic owner handles mutations, but a read of the Windows
+		// PowerShell history file remains independently useful advisory evidence.
+		// Claim the Windows alias only after the mutation prerequisite matches so
+		// the trusted-action disposition can classify exact reads as advisory.
+		matchedOnlyAliases: []string{"PATH-WIN-PS-HISTORY"},
+		prerequisite: integrityMutationPrerequisite(
+			matchesActiveShellHistory,
+		),
+		suppressFallback: integrityMutationSafeNegative(
+			matchesShellHistoryCandidate,
+			matchesActiveShellHistory,
+			nil,
+		),
+	},
 	"PATH-ETC-SUDOERS": integrityMutationOwner(
 		matchesSudoersCandidate, matchesActiveSudoers, nil,
 	),

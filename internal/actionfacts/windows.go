@@ -479,18 +479,53 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 	runes := []rune(source)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
+		powerShellQuoteDelimiter := rune(0)
+		if dialect == windowsPowerShell {
+			powerShellQuoteDelimiter = windowsPowerShellQuoteDelimiter(r)
+		}
+		if dialect == windowsCMD && r == '"' &&
+			windowsCMDNativeQuoteUncertain(
+				runes,
+				i,
+				quote,
+				wordActive,
+				value.Len(),
+			) {
+			// cmd.exe and the native Windows argv decoder do not share one
+			// quote grammar. Backslashes immediately before a quote and quote
+			// adjacency can therefore change both token boundaries and literal
+			// bytes after cmd has launched the child. Preserve recovery facts,
+			// but never grant exact argv authority to that raw spelling.
+			wordExpands = true
+			out.markPartial(IssueUnsupportedConstruct)
+		}
 
 		if quote != 0 {
-			if dialect == windowsPowerShell && quote == '\'' && r == '\'' &&
-				i+1 < len(runes) && runes[i+1] == '\'' {
-				if !writeRune('\'') {
+			if dialect == windowsPowerShell &&
+				powerShellQuoteDelimiter == quote &&
+				i+1 < len(runes) &&
+				windowsPowerShellQuoteDelimiter(runes[i+1]) == quote {
+				// Within an active PowerShell string, two adjacent delimiters
+				// from the same quote family encode one literal copy of the second
+				// rune. This covers ASCII doubling and the U+2018..U+201D quote
+				// forms recognized by both Windows PowerShell and PowerShell 7.
+				literalQuote := runes[i+1]
+				if !writeRune(literalQuote) {
 					return lexemes, false
 				}
 				i++
 				continue
 			}
-			if r == quote {
+			if r == quote || powerShellQuoteDelimiter != 0 &&
+				powerShellQuoteDelimiter == quote {
+				quotedTokenBoundary := dialect == windowsPowerShell &&
+					wordQuotedOnly && i+1 < len(runes) &&
+					!unicode.IsSpace(runes[i+1]) &&
+					!strings.ContainsRune(";|&<>", runes[i+1])
 				quote = 0
+				if quotedTokenBoundary && !flush() {
+					return lexemes, false
+				}
 				continue
 			}
 			if dialect == windowsPowerShell && quote != '\'' && r == '`' {
@@ -547,7 +582,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			break
 		}
 		if dialect == windowsPowerShell &&
-			(r == '@' && i+1 < len(runes) && (runes[i+1] == '\'' || runes[i+1] == '"') ||
+			(r == '@' && i+1 < len(runes) &&
+				windowsPowerShellQuoteDelimiter(runes[i+1]) != 0 ||
 				(r == '$' || r == '@') && i+1 < len(runes) &&
 					(runes[i+1] == '(' || runes[i+1] == '{')) {
 			// Here-strings, subexpressions, arrays, and hashtables require a
@@ -576,22 +612,23 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			continue
 		}
 
-		if r == '\'' && dialect == windowsPowerShell {
+		if dialect == windowsPowerShell && powerShellQuoteDelimiter == '\'' {
 			if !wordActive {
 				wordQuotedOnly = true
 			}
 			wordActive = true
 			markQuote(QuoteSingle)
-			quote = r
+			quote = '\''
 			continue
 		}
-		if r == '"' {
+		if dialect == windowsPowerShell && powerShellQuoteDelimiter == '"' ||
+			dialect == windowsCMD && r == '"' {
 			if !wordActive {
 				wordQuotedOnly = true
 			}
 			wordActive = true
 			markQuote(QuoteDouble)
-			quote = r
+			quote = '"'
 			continue
 		}
 		if dialect == windowsPowerShell && r == '`' ||
@@ -661,7 +698,6 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			wordExpands = true
 			out.markPartial(IssueDynamicWord)
 		}
-
 		if r == '>' || r == '<' {
 			if dialect == windowsPowerShell && r == '<' {
 				// PowerShell does not implement the cmd-style input
@@ -810,6 +846,52 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 	return lexemes, true
 }
 
+func windowsCMDNativeQuoteUncertain(
+	runes []rune,
+	index int,
+	activeQuote rune,
+	wordActive bool,
+	valueLength int,
+) bool {
+	if index > 0 && runes[index-1] == '\\' {
+		// Both odd and even runs are significant to CommandLineToArgvW-style
+		// decoders, while the conservative cmd lexer otherwise preserves the
+		// backslashes and toggles quoting unconditionally.
+		return true
+	}
+	previousQuote := index > 0 && runes[index-1] == '"'
+	nextQuote := index+1 < len(runes) && runes[index+1] == '"'
+	if !previousQuote && !nextQuote {
+		return false
+	}
+	// Keep the ordinary standalone empty argument exact. Quote adjacency in
+	// any nonempty or concatenated word remains outside the closed subset.
+	if activeQuote == 0 && nextQuote && !wordActive &&
+		windowsCMDWordBoundary(runes, index+2) {
+		return false
+	}
+	return activeQuote != '"' || !previousQuote || valueLength != 0 ||
+		!windowsCMDWordBoundary(runes, index+1)
+}
+
+func windowsPowerShellQuoteDelimiter(r rune) rune {
+	switch r {
+	case '\'', '\u2018', '\u2019':
+		return '\''
+	case '"', '\u201c', '\u201d':
+		return '"'
+	default:
+		return 0
+	}
+}
+
+func windowsCMDWordBoundary(runes []rune, index int) bool {
+	if index >= len(runes) {
+		return true
+	}
+	return unicode.IsSpace(runes[index]) || strings.ContainsRune("&|<>", runes[index])
+}
+
 func windowsOnlyTrailingWhitespace(runes []rune) bool {
 	for _, r := range runes {
 		if !unicode.IsSpace(r) {
@@ -875,7 +957,29 @@ func windowsPowerShellQuotedCallTarget(runes []rune, start int) bool {
 		unicode.IsSpace(runes[start]) {
 		start++
 	}
-	return start < len(runes) && (runes[start] == '\'' || runes[start] == '"')
+	if start >= len(runes) {
+		return false
+	}
+	delimiter := windowsPowerShellQuoteDelimiter(runes[start])
+	if delimiter == 0 {
+		return false
+	}
+	for index := start + 1; index < len(runes); index++ {
+		if windowsPowerShellQuoteDelimiter(runes[index]) != delimiter {
+			continue
+		}
+		if index+1 < len(runes) &&
+			windowsPowerShellQuoteDelimiter(runes[index+1]) == delimiter {
+			index++
+			continue
+		}
+		if index+1 >= len(runes) {
+			return true
+		}
+		next := runes[index+1]
+		return unicode.IsSpace(next) || strings.ContainsRune(";|&<>", next)
+	}
+	return false
 }
 
 func windowsLooksLikeURLQuery(prefix string, r rune) bool {
@@ -4497,6 +4601,92 @@ func windowsClassifyWeb(
 }
 
 func windowsClassifyCurl(
+	command *CommandFact,
+	args []windowsWord,
+	builder *windowsFactBuilder,
+) {
+	if windowsCurlNativeArgvUncertain(command) {
+		// Windows PowerShell 5.1 reserializes native argv through a legacy
+		// quoting layer. Literal double quotes, standalone empty arguments,
+		// and unquoted expression delimiters can therefore change the argv
+		// curl.exe receives. Preserve recovery facts without exact authority.
+		builder.out.markPartial(IssueUnsupportedConstruct)
+		windowsClassifyCurlRecovery(command, args, builder)
+		return
+	}
+	if windowsExactCurlArgv(command, args) {
+		// The Windows lexer has already removed the surrounding PowerShell/cmd
+		// quotes while retaining expansion provenance in Arguments. Reuse the
+		// complete curl grammar only for a literal, internally consistent argv;
+		// the recovery classifier below continues to own partial shell input.
+		classifyParsedCurlTransfer(builder.out, command)
+		return
+	}
+	windowsClassifyCurlRecovery(command, args, builder)
+}
+
+func windowsCurlNativeArgvUncertain(command *CommandFact) bool {
+	if command == nil || command.Dialect != DialectPowerShell {
+		return false
+	}
+	for _, argument := range command.Arguments {
+		if strings.ContainsRune(argument.Value, '"') ||
+			argument.Value == "" && argument.Quote != QuoteNone ||
+			argument.Quote == QuoteNone && strings.ContainsAny(argument.Value, "(){}") {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsExactCurlArgv(command *CommandFact, args []windowsWord) bool {
+	if command == nil || !command.ArgvComplete || len(command.Argv) == 0 ||
+		len(command.Argv) != len(command.Arguments) ||
+		len(command.Argv) != len(args)+1 ||
+		!windowsExactNativeExecutableIdentity(command.Argv[0], command.Executable) {
+		return false
+	}
+	for index := range command.Arguments {
+		argument := command.Arguments[index]
+		if argument.Expands || argument.Quote == QuoteMixed ||
+			argument.Value != command.Argv[index] {
+			return false
+		}
+		if command.Dialect == DialectPowerShell &&
+			(strings.ContainsRune(argument.Value, '"') ||
+				argument.Value == "" && argument.Quote != QuoteNone) {
+			return false
+		}
+	}
+	return true
+}
+
+func windowsExactNativeExecutableIdentity(argv0, executable string) bool {
+	if strings.EqualFold(argv0, executable) {
+		return true
+	}
+	normalized, isPath := comparableWindowsExecutablePath(argv0)
+	if !isPath || !trustedExecutablePath(normalized) ||
+		!strings.EqualFold(windowsExecutable(argv0), executable) {
+		return false
+	}
+	lower := strings.ToLower(normalized)
+	if len(lower) < 4 || !isASCIILetter(lower[0]) || lower[1] != ':' ||
+		lower[2] != '/' {
+		return false
+	}
+	for _, prefix := range []string{
+		"/windows/system32/",
+		"/windows/syswow64/",
+	} {
+		if strings.HasPrefix(lower[2:], prefix) && len(lower[2:]) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsClassifyCurlRecovery(
 	command *CommandFact,
 	args []windowsWord,
 	builder *windowsFactBuilder,
