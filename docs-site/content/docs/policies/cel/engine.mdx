@@ -139,6 +139,7 @@ incomplete evidence from authorizing a block.
 | Family | Enforcement-eligible example | Advisory or quiet control |
 | --- | --- | --- |
 | HTTP destination hostname | Static ASCII DNS bytes from generated authority, HTTP CONNECT, remote-resolved SOCKS4a/5h destination fields, plaintext HTTP Host or canonical HTTPS SNI observed after a SOCKS handshake, or canonical HTTPS origin SNI; GNU Wget generated authority/origin SNI additionally requires `--no-config`, and every component is bound to the exact external origin or proxy | A local-only route or numeric hostname, non-ASCII IDN spelling, dynamic or config-derived value, wrapper/pipeline/shell redirection, promptable authentication, unresolved file/TLS setup, a modeled eagerly checked compression/TLS/authentication capability option or modeled final enabled capability toggle, conflicting pre-wire option, direct plaintext HTTP Host override with no remaining proxy-visible authority, target routed through an HTTPS proxy without authenticated feature facts, unsupported multi-hop proxy chain, or bare PowerShell `curl`/`wget` alias |
+| HAProxy client-IP preamble | None until [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770) supplies an authenticated fact for the exact curl executable's version and build support | Every `--haproxy-clientip` form remains LOW and detection-only, including direct HTTP(S), proxy/SOCKS/preproxy, `--noproxy`, multiple targets or `--next`, static/dynamic/oversized values, setup-preempted commands, aliases, and any executable-path spelling |
 | FTP control metadata | POSIX or structured-argv static curl FTP account or alternative bytes bound to one external FTP(S) origin or proven plaintext proxy observer | Dynamic/config-driven values, raw Windows shell input, a local-only destination, or an unproved route |
 | SOCKS authentication | Static SOCKS4 username or SOCKS5 username/password bound to the exact external proxy peer | Disabled/bypassed proxy, unsupported chain, ambiguous credentials, or pre-connect failure |
 | Telnet metadata | POSIX or structured-argv static `USER`, `TTYPE`, `XDISPLOC`, or `NEW_ENV` bytes bound to one direct external Telnet peer | Raw Windows shell input, capability-dependent, proxied, malformed, or local-only negotiation; invalid `WS`/`BINARY` settings |
@@ -153,6 +154,18 @@ validation failed, every transfer group ends with the modeled final-toggle
 capability disabled, and every other prerequisite is exact. Other optional
 features remain within the narrower authenticated-capability boundary tracked
 in the follow-up linked from this change.
+
+DefenseClaw has no current HAProxy client-IP enforcement lane. Curl 8.7.1
+primary-source and loopback-wire evidence shows that a capable direct build
+writes the PROXY preamble before the HTTP request and, for HTTPS, before TLS.
+That audit also supplies future-projector constraints: the existing
+no-ambient-defaults boundary, a maximum 1976-byte operand, exact receiver
+binding, and rejection of `--ipv4` with a literal IPv6 peer before any write.
+It does not prove the executable that will run. The option is absent before
+curl 8.2.0 and is compiled out with `CURL_DISABLE_PROXY`; native name, path,
+dialect, and operating system do not authenticate either property. [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770)
+owns the resolved executable identity, version/build capabilities, provenance,
+and invalidation rules required before any of these forms can enforce.
 
 Raw CMD/PowerShell curl gains exact ordinary HTTP(S) headers, origin
 credentials, inline/body and file-upload projection, plus supported direct

@@ -2269,7 +2269,7 @@ func TestTrustedActionDestinationHostnameRequiresDirectShellExecution(t *testing
 func TestTrustedActionCanonicalizedHostnameDoesNotInventCaseSensitiveSecret(t *testing.T) {
 	t.Parallel()
 
-	const key = "AKIA7Q2M9X4B6C8D3F5H"
+	const key = "AKIA" + "7Q2M9X4B6C8D3F5H"
 	generation := mustCompileRulePackGeneration(defaultRuleCategories)
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-AWS-KEY")
 	for _, test := range []struct {

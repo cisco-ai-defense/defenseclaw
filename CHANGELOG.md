@@ -102,6 +102,18 @@ boundary.
   PowerShell hostname projection additionally requires explicit `curl.exe` or
   `wget.exe`; its bare aliases and raw-Windows FTP control, SMTP envelope, and
   Telnet metadata remain detection-only.
+  Curl `--haproxy-clientip` remains LOW and detection-only on every surface,
+  including direct HTTP(S), explicit proxy/SOCKS or preproxy routes,
+  `--noproxy`, multiple targets or `--next`, static or dynamic values,
+  setup-preempted commands, aliases, and trusted or untrusted executable-path
+  spellings. A curl 8.7.1 source and loopback-wire audit confirms that a capable
+  direct build writes the PROXY preamble before the HTTP request or, for HTTPS,
+  before TLS. It also establishes a 1976-byte future-projector ceiling and the
+  pre-wire `--ipv4`/literal-IPv6 exclusion. Those facts are rationale, not
+  current authority: the option is absent before curl 8.2.0 and is compiled out
+  with `CURL_DISABLE_PROXY`, while executable spelling authenticates neither
+  version nor build. [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770)
+  owns the required executable-capability boundary.
   `mkfs.minix` now shares the formatter owner for raw-device targets;
   image files, help/version calls, invalid grammar, near-miss executables, and
   local-only routes or numeric destinations, non-ASCII IDN spellings,
