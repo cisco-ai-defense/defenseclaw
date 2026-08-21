@@ -3118,7 +3118,7 @@ func curlProxyNumericOptionWithinPortableBounds(option curlOptionToken) bool {
 	case "--retry-delay", "--retry-max-time":
 		value, valid := curlUnsignedLong(option.Value)
 		return valid && value <= curlPortableLongMaximum()/1000
-	case "--connect-timeout", "--max-time":
+	case "--connect-timeout", "--expect100-timeout", "--max-time":
 		_, valid := curlSecondsMilliseconds(option.Value)
 		return valid
 	default:

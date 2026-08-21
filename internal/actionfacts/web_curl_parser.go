@@ -684,7 +684,7 @@ func (parsed curlArgvParse) hasValidOptionValues() bool {
 			return false
 		}
 		switch option.Canonical {
-		case "--connect-timeout", "--max-time":
+		case "--connect-timeout", "--expect100-timeout", "--max-time":
 			if !validCurlDecimal(option.Value) {
 				return false
 			}
@@ -762,12 +762,19 @@ func curlSecondsMilliseconds(value string) (int64, bool) {
 	if value == "" {
 		return 0, false
 	}
-	normalized, valid := curlCLocaleFloatSyntax(value)
+	normalized, significandNonzero, valid := curlCLocaleFloatSyntax(value)
 	if !valid {
 		return 0, false
 	}
 	seconds, err := strconv.ParseFloat(normalized, 64)
+	// Curl rejects strtod ERANGE before converting seconds to milliseconds.
+	// CRTs can detect tininess before or after rounding, so a subnormal subject
+	// that rounds up to the minimum normal float is not portable. Exclude that
+	// boundary too; the parsed float alone cannot distinguish it from an exact
+	// minimum-normal subject.
+	portableRangeError := significandNonzero && math.Abs(seconds) <= 0x1p-1022
 	if err != nil || math.IsInf(seconds, 0) || math.IsNaN(seconds) ||
+		portableRangeError ||
 		seconds < 0 || seconds > float64(curlPortableLongMaximum())/1000 {
 		return 0, false
 	}
@@ -778,69 +785,78 @@ func curlSecondsMilliseconds(value string) (int64, bool) {
 // strtod recognizes in the C locale, excluding implementation-specific
 // infinity/NaN and locale spellings. strconv.ParseFloat then performs the
 // range conversion; this lexical gate notably rejects Go-only underscores.
-func curlCLocaleFloatSyntax(value string) (string, bool) {
+// The second result distinguishes exact zero significands from nonzero values
+// that ParseFloat rounds to zero, and from nonzero subnormals whose ERANGE
+// treatment varies between the C libraries used by supported curl builds.
+func curlCLocaleFloatSyntax(value string) (string, bool, bool) {
 	index := 0
 	if index < len(value) && (value[index] == '+' || value[index] == '-') {
 		index++
 	}
 	if index >= len(value) {
-		return "", false
+		return "", false, false
 	}
 	if index+2 <= len(value) && value[index] == '0' &&
 		(value[index+1] == 'x' || value[index+1] == 'X') {
 		index += 2
 		digits := 0
+		significandNonzero := false
 		for index < len(value) && curlHexDigit(value[index]) {
+			significandNonzero = significandNonzero || value[index] != '0'
 			index++
 			digits++
 		}
 		if index < len(value) && value[index] == '.' {
 			index++
 			for index < len(value) && curlHexDigit(value[index]) {
+				significandNonzero = significandNonzero || value[index] != '0'
 				index++
 				digits++
 			}
 		}
 		if digits == 0 {
-			return "", false
+			return "", false, false
 		}
 		if index == len(value) {
 			// C strtod accepts a hexadecimal significand without an explicit
 			// binary exponent, while Go's ParseFloat requires one.
-			return value + "p0", true
+			return value + "p0", significandNonzero, true
 		}
 		if value[index] != 'p' && value[index] != 'P' {
-			return "", false
+			return "", false, false
 		}
 		index++
 		if !curlDecimalExponentConsumesRemainder(value, index) {
-			return "", false
+			return "", false, false
 		}
-		return value, true
+		return value, significandNonzero, true
 	}
 	digits := 0
+	significandNonzero := false
 	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+		significandNonzero = significandNonzero || value[index] != '0'
 		index++
 		digits++
 	}
 	if index < len(value) && value[index] == '.' {
 		index++
 		for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+			significandNonzero = significandNonzero || value[index] != '0'
 			index++
 			digits++
 		}
 	}
 	if digits == 0 {
-		return "", false
+		return "", false, false
 	}
 	if index < len(value) && (value[index] == 'e' || value[index] == 'E') {
 		index++
 		if !curlDecimalExponentConsumesRemainder(value, index) {
-			return "", false
+			return "", false, false
 		}
-		return value, true
+		return value, significandNonzero, true
 	}
-	return value, index == len(value)
+	return value, significandNonzero, index == len(value)
 }
 
 func curlDecimalExponentConsumesRemainder(value string, index int) bool {

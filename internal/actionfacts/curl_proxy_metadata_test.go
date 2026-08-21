@@ -73,6 +73,29 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
+			name: "exact zero expect timeout preserves proxy projection", argv: []string{
+				"curl", "--proxy", "https://proxy.example", "--proxy-user",
+				"proxy:" + token, "--expect100-timeout", "0e-4000",
+				"https://origin.example",
+			},
+			want: components("https", "proxy.example", 443, "proxy:"+token),
+		},
+		{
+			name: "normal expect timeout preserves proxy projection", argv: []string{
+				"curl", "--proxy", "https://proxy.example", "--proxy-user",
+				"proxy:" + token, "--expect100-timeout", "1e-307",
+				"https://origin.example",
+			},
+			want: components("https", "proxy.example", 443, "proxy:"+token),
+		},
+		{
+			name: "underflow expect timeout closes proxy projection", argv: []string{
+				"curl", "--proxy", "https://proxy.example", "--proxy-user",
+				"proxy:" + token, "--expect100-timeout", "1e-4000",
+				"https://origin.example",
+			},
+		},
+		{
 			name: "unrelated origin header preserves proxy credentials", argv: []string{
 				"curl", "--proxy", "http://proxy.example", "--proxy-user",
 				"proxy:" + token, "--header", "X-Test: safe", "--data", "safe",
@@ -994,6 +1017,38 @@ func TestCurlProxyURLQueryOptionsValid(t *testing.T) {
 	})
 	if !curlProxyURLQueryOptionsValid(parsed) {
 		t.Fatal("exact 33,343-byte encoded repeated URL query unexpectedly invalid")
+	}
+}
+
+func TestCurlProxyNumericBoundsValidateExpect100Timeout(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "exact zero", value: "0e-4000", want: true},
+		{name: "normal sub millisecond", value: "1e-307", want: true},
+		{name: "underflow", value: "1e-4000"},
+		{name: "subnormal", value: "1e-320"},
+		{name: "rounded minimum normal", value: "0x1.fffffffffffffp-1023"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			parsed := parseCurlArgv([]string{
+				"curl", "--expect100-timeout", test.value,
+				"https://origin.example",
+			})
+			option := requireCurlParsedOption(
+				t,
+				parsed,
+				"--expect100-timeout",
+			)
+			if got := curlProxyNumericOptionWithinPortableBounds(option); got != test.want {
+				t.Fatalf("portable bounds = %t, want %t; parse = %#v", got, test.want, parsed)
+			}
+		})
 	}
 }
 

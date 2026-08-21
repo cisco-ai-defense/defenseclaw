@@ -85,6 +85,11 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 				"' --max-time 2147483.648 http://origin.example",
 		},
 		{
+			name: "expect timeout underflow remains detection only",
+			command: "curl --proxy http://proxy.example --data '" + token +
+				"' --expect100-timeout 1e-4000 http://origin.example",
+		},
+		{
 			name: "invalid raw URL query aborts before proxy",
 			command: "curl --proxy http://proxy.example --data '" + token +
 				"' --url-query '+bad space' http://origin.example",

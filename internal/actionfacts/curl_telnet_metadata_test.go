@@ -231,6 +231,16 @@ func TestStaticCurlTelnetOptionRequestComponents(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
+			name: "exact zero extreme timeout exponents are inert",
+			argv: []string{
+				"curl", "--connect-timeout", "-0e-4000", "--max-time",
+				"0x0p-999999", "-t", "TTYPE=" + token,
+				"telnet://sink.example/",
+			},
+			want:              components("sink.example", 0, token),
+			wantAuthoritative: true,
+		},
+		{
 			name: "protocol-only and compatibility values are inert",
 			argv: []string{
 				"curl", "--ftp-account", "safe", "--random-file", "/missing/random",
@@ -382,6 +392,62 @@ func TestStaticCurlTelnetOptionRequestComponents(t *testing.T) {
 			argv: []string{
 				"curl", "--max-time", "0x1p-9", "-t", "TTYPE=" + token,
 				"telnet://sink.example/",
+			},
+		},
+		{
+			name: "positive decimal timeout underflow is rejected",
+			argv: []string{
+				"curl", "--max-time", "1e-4000", "-t", "TTYPE=" + token,
+				"telnet://sink.example/",
+			},
+		},
+		{
+			name: "negative decimal timeout underflow is rejected",
+			argv: []string{
+				"curl", "--max-time", "-1e-4000", "-t", "TTYPE=" + token,
+				"telnet://sink.example/",
+			},
+		},
+		{
+			name: "positive hex timeout underflow is rejected",
+			argv: []string{
+				"curl", "--max-time", "0x1p-999999", "-t", "TTYPE=" + token,
+				"telnet://sink.example/",
+			},
+		},
+		{
+			name: "negative hex timeout underflow is rejected",
+			argv: []string{
+				"curl", "--max-time", "-0x1p-999999", "-t", "TTYPE=" + token,
+				"telnet://sink.example/",
+			},
+		},
+		{
+			name: "decimal subnormal timeout is rejected",
+			argv: []string{
+				"curl", "--max-time", "1e-320", "-t", "TTYPE=" + token,
+				"telnet://sink.example/",
+			},
+		},
+		{
+			name: "exact minimum normal timeout is outside the portable boundary",
+			argv: []string{
+				"curl", "--max-time", "0x1p-1022", "-t", "TTYPE=" + token,
+				"telnet://sink.example/",
+			},
+		},
+		{
+			name: "positive subnormal rounded to minimum normal timeout is rejected",
+			argv: []string{
+				"curl", "--max-time", "0x1.fffffffffffffp-1023", "-t",
+				"TTYPE=" + token, "telnet://sink.example/",
+			},
+		},
+		{
+			name: "negative subnormal rounded to minimum normal timeout is rejected",
+			argv: []string{
+				"curl", "--max-time", "-0x1.fffffffffffffp-1023", "-t",
+				"TTYPE=" + token, "telnet://sink.example/",
 			},
 		},
 		{
@@ -921,6 +987,50 @@ func TestStaticCurlTelnetConsolidatedOptionMatrix(t *testing.T) {
 				"+ids,-time", "--variable", "FIXTURE=literal@value",
 			},
 			want: true,
+		},
+		{
+			name: "expect timeout exact zero and normal sub millisecond preserve direct Telnet",
+			args: []string{
+				"--expect100-timeout", "-0x0p-999999",
+				"--expect100-timeout", "1e-307",
+			},
+			want: true,
+		},
+		{
+			name: "expect timeout positive decimal underflow is rejected",
+			args: []string{"--expect100-timeout", "1e-4000"},
+		},
+		{
+			name: "expect timeout negative decimal underflow is rejected",
+			args: []string{"--expect100-timeout", "-1e-4000"},
+		},
+		{
+			name: "expect timeout positive hex underflow is rejected",
+			args: []string{"--expect100-timeout", "0x1p-999999"},
+		},
+		{
+			name: "expect timeout negative hex underflow is rejected",
+			args: []string{"--expect100-timeout", "-0x1p-999999"},
+		},
+		{
+			name: "expect timeout decimal subnormal is rejected",
+			args: []string{"--expect100-timeout", "1e-320"},
+		},
+		{
+			name: "expect timeout hex subnormal is rejected",
+			args: []string{"--expect100-timeout", "0x1p-1074"},
+		},
+		{
+			name: "expect timeout minimum normal is outside the portable boundary",
+			args: []string{"--expect100-timeout", "0x1p-1022"},
+		},
+		{
+			name: "expect timeout positive rounded minimum normal is rejected",
+			args: []string{"--expect100-timeout", "0x1.fffffffffffffp-1023"},
+		},
+		{
+			name: "expect timeout negative rounded minimum normal is rejected",
+			args: []string{"--expect100-timeout", "-0x1.fffffffffffffp-1023"},
 		},
 		{
 			name: "positive off t grammar permits space tab and plus",
