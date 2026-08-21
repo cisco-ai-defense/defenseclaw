@@ -427,6 +427,298 @@ function Invoke-RenderedEnterpriseTargetsVersionProbe {
     return $true
 }
 
+function Invoke-ClaudeWinGetMetadataVersionProbe {
+    $fixtureRoot = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        "DefenseClaw-ClaudeWinGet-$([Guid]::NewGuid().ToString('N'))"
+    )
+    [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    $junctionPath = $null
+    try {
+        $validIdentity = Test-DefenseClawClaudeWinGetIdentity `
+            -SignatureStatus 'Valid' `
+            -SignerSimpleName 'Anthropic PBC' `
+            -ProductName 'Claude Code' `
+            -OriginalFilename 'claude.exe' `
+            -FileVersion '2.1.229.0'
+        if ($validIdentity -cne '2.1.229') {
+            throw "WinGet Claude version normalization returned '$validIdentity'"
+        }
+        foreach ($invalidIdentity in @(
+            [pscustomobject]@{
+                Status = 'NotSigned'; Signer = 'Anthropic PBC'
+                Product = 'Claude Code'; Original = 'claude.exe'
+                Version = '2.1.229.0'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'Attacker LLC'
+                Product = 'Claude Code'; Original = 'claude.exe'
+                Version = '2.1.229.0'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'Anthropic PBC'
+                Product = 'Claude Desktop'; Original = 'claude.exe'
+                Version = '2.1.229.0'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'Anthropic PBC'
+                Product = 'Claude Code'; Original = 'other.exe'
+                Version = '2.1.229.0'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'Anthropic PBC'
+                Product = 'Claude Code'; Original = 'claude.exe'
+                Version = ''
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'Anthropic PBC'
+                Product = 'Claude Code'; Original = 'claude.exe'
+                Version = 'not-a-version'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'Anthropic PBC'
+                Product = 'Claude Code'; Original = 'claude.exe'
+                Version = '2.1.229.1'
+            }
+        )) {
+            $rejected = Test-DefenseClawClaudeWinGetIdentity `
+                -SignatureStatus $invalidIdentity.Status `
+                -SignerSimpleName $invalidIdentity.Signer `
+                -ProductName $invalidIdentity.Product `
+                -OriginalFilename $invalidIdentity.Original `
+                -FileVersion $invalidIdentity.Version
+            if (-not [string]::IsNullOrEmpty($rejected)) {
+                throw "WinGet Claude identity validation accepted '$rejected'"
+            }
+        }
+
+        $officialLeaf =
+            'Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe'
+        $validUserHome = [IO.Path]::Combine($fixtureRoot, 'valid-user')
+        $validPackageRoot = [IO.Path]::Combine(
+            $validUserHome,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+        $validPackage = [IO.Path]::Combine(
+            $validPackageRoot,
+            $officialLeaf
+        )
+        [void][IO.Directory]::CreateDirectory($validPackage)
+        $validExecutable = [IO.Path]::Combine($validPackage, 'claude.exe')
+        [IO.File]::WriteAllBytes($validExecutable, [byte[]]@(0x4d, 0x5a))
+        $validReaderState = @{ Calls = 0 }
+        $validReader = {
+            param([string]$Root, [string]$Path)
+            $validReaderState.Calls++
+            if (-not [string]::Equals(
+                    [IO.Path]::GetFullPath($Root),
+                    [IO.Path]::GetFullPath($validPackageRoot),
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                -not [string]::Equals(
+                    [IO.Path]::GetFullPath($Path),
+                    [IO.Path]::GetFullPath($validExecutable),
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                return ''
+            }
+            return '2.1.229'
+        }.GetNewClosure()
+        $discovered = Get-DefenseClawClaudeWinGetMetadataVersion `
+            -UserHome $validUserHome `
+            -ExecutableVersionReader $validReader
+        if ($discovered -cne '2.1.229' -or
+            [int]$validReaderState.Calls -ne 1) {
+            throw 'official WinGet Claude package was not discovered exactly once'
+        }
+
+        $missingUserHome = [IO.Path]::Combine($fixtureRoot, 'missing-user')
+        [void][IO.Directory]::CreateDirectory([IO.Path]::Combine(
+            $missingUserHome,
+            'AppData\Local\Microsoft\WinGet\Packages',
+            $officialLeaf
+        ))
+        $missingReaderState = @{ Calls = 0 }
+        $missingReader = {
+            param([string]$Root, [string]$Path)
+            $missingReaderState.Calls++
+            return '9.9.9'
+        }.GetNewClosure()
+        if (-not [string]::IsNullOrEmpty(
+                (Get-DefenseClawClaudeWinGetMetadataVersion `
+                    -UserHome $missingUserHome `
+                    -ExecutableVersionReader $missingReader)
+            ) -or
+            [int]$missingReaderState.Calls -ne 0) {
+            throw 'WinGet Claude discovery accepted a missing executable'
+        }
+
+        $hostileUserHome = [IO.Path]::Combine($fixtureRoot, 'hostile-user')
+        $hostilePackage = [IO.Path]::Combine(
+            $hostileUserHome,
+            'AppData\Local\Microsoft\WinGet\Packages',
+            "${officialLeaf}_hostile"
+        )
+        [void][IO.Directory]::CreateDirectory($hostilePackage)
+        [IO.File]::WriteAllBytes(
+            [IO.Path]::Combine($hostilePackage, 'claude.exe'),
+            [byte[]]@(0x4d, 0x5a)
+        )
+        $hostileReaderState = @{ Calls = 0 }
+        $hostileReader = {
+            param([string]$Root, [string]$Path)
+            $hostileReaderState.Calls++
+            return '9.9.9'
+        }.GetNewClosure()
+        if (-not [string]::IsNullOrEmpty(
+                (Get-DefenseClawClaudeWinGetMetadataVersion `
+                    -UserHome $hostileUserHome `
+                    -ExecutableVersionReader $hostileReader)
+            ) -or
+            [int]$hostileReaderState.Calls -ne 0) {
+            throw 'WinGet Claude discovery accepted a similarly named package'
+        }
+
+        $multipleUserHome = [IO.Path]::Combine($fixtureRoot, 'multiple-user')
+        $multiplePackageRoot = [IO.Path]::Combine(
+            $multipleUserHome,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+        $multipleVersions = @{}
+        foreach ($candidate in @(
+            [pscustomobject]@{ Suffix = '8wekyb3d8bbwe'; Version = '2.1.228' },
+            [pscustomobject]@{ Suffix = 'SecondSource1'; Version = '2.1.229' }
+        )) {
+            $package = [IO.Path]::Combine(
+                $multiplePackageRoot,
+                "Anthropic.ClaudeCode_Microsoft.Winget.Source_$($candidate.Suffix)"
+            )
+            [void][IO.Directory]::CreateDirectory($package)
+            $executable = [IO.Path]::Combine($package, 'claude.exe')
+            [IO.File]::WriteAllBytes($executable, [byte[]]@(0x4d, 0x5a))
+            $multipleVersions[[IO.Path]::GetFullPath($executable)] =
+                [string]$candidate.Version
+        }
+        $multipleReader = {
+            param([string]$Root, [string]$Path)
+            return [string]$multipleVersions[[IO.Path]::GetFullPath($Path)]
+        }.GetNewClosure()
+        $highest = Get-DefenseClawClaudeWinGetMetadataVersion `
+            -UserHome $multipleUserHome `
+            -ExecutableVersionReader $multipleReader
+        if ($highest -cne '2.1.229') {
+            throw "multiple WinGet Claude packages selected '$highest'"
+        }
+
+        $escapeUserHome = [IO.Path]::Combine($fixtureRoot, 'escape-user')
+        $escapePackageRoot = [IO.Path]::Combine(
+            $escapeUserHome,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+        [void][IO.Directory]::CreateDirectory($escapePackageRoot)
+        $escapeTarget = [IO.Path]::Combine($fixtureRoot, 'escape-target')
+        [void][IO.Directory]::CreateDirectory($escapeTarget)
+        [IO.File]::WriteAllBytes(
+            [IO.Path]::Combine($escapeTarget, 'claude.exe'),
+            [byte[]]@(0x4d, 0x5a)
+        )
+        $junctionPath = [IO.Path]::Combine(
+            $escapePackageRoot,
+            'Anthropic.ClaudeCode_Microsoft.Winget.Source_EscapeSource1'
+        )
+        [void](New-Item `
+            -ItemType Junction `
+            -Path $junctionPath `
+            -Target $escapeTarget `
+            -ErrorAction Stop)
+        $escapeReaderState = @{ Calls = 0 }
+        $escapeReader = {
+            param([string]$Root, [string]$Path)
+            $escapeReaderState.Calls++
+            return '9.9.9'
+        }.GetNewClosure()
+        if (-not [string]::IsNullOrEmpty(
+                (Get-DefenseClawClaudeWinGetMetadataVersion `
+                    -UserHome $escapeUserHome `
+                    -ExecutableVersionReader $escapeReader)
+            ) -or
+            [int]$escapeReaderState.Calls -ne 0) {
+            throw 'WinGet Claude discovery followed a package reparse point'
+        }
+        [IO.Directory]::Delete($junctionPath, $false)
+        $junctionPath = $null
+
+        $precedenceUserHome = [IO.Path]::Combine(
+            $fixtureRoot,
+            'precedence-user'
+        )
+        $npmMetadata = [IO.Path]::Combine(
+            $precedenceUserHome,
+            'AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\package.json'
+        )
+        [void][IO.Directory]::CreateDirectory(
+            [IO.Path]::GetDirectoryName($npmMetadata)
+        )
+        [IO.File]::WriteAllText(
+            $npmMetadata,
+            '{"name":"@anthropic-ai/claude-code","version":"2.1.230"}',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $precedencePackage = [IO.Path]::Combine(
+            $precedenceUserHome,
+            'AppData\Local\Microsoft\WinGet\Packages',
+            $officialLeaf
+        )
+        [void][IO.Directory]::CreateDirectory($precedencePackage)
+        [IO.File]::WriteAllBytes(
+            [IO.Path]::Combine($precedencePackage, 'claude.exe'),
+            [byte[]]@(0x4d, 0x5a)
+        )
+        $precedence = Get-DefenseClawConnectorMetadataVersion `
+            -Connector 'claudecode' `
+            -UserHome $precedenceUserHome
+        if ($precedence -cne '2.1.230') {
+            throw "npm/WinGet precedence returned '$precedence'"
+        }
+
+        $rendered = Get-DefenseClawRenderedEnterpriseTargets `
+            -Connectors @('claudecode') `
+            -Profiles @([pscustomobject]@{
+                SID = 'S-1-5-21-2000-2000-2000-2001'
+                UserName = 'eligible-user'
+                UserHome = $precedenceUserHome
+            })
+        if ([regex]::Matches(
+                $rendered,
+                '(?m)^  - user: "eligible-user"\r?$'
+            ).Count -ne 1 -or
+            [regex]::Matches(
+                $rendered,
+                '(?m)^    connector: "claudecode"\r?$'
+            ).Count -ne 1 -or
+            [regex]::Matches(
+                $rendered,
+                '(?m)^    agent_version: "2\.1\.230"\r?$'
+            ).Count -ne 1 -or
+            [regex]::Matches(
+                $rendered,
+                '(?m)^    enabled: true\r?$'
+            ).Count -ne 1) {
+            throw 'eligible Claude user did not receive exactly one enabled target'
+        }
+    }
+    finally {
+        if ($null -ne $junctionPath -and
+            [IO.Directory]::Exists($junctionPath)) {
+            [IO.Directory]::Delete($junctionPath, $false)
+        }
+        if ([IO.Directory]::Exists($fixtureRoot)) {
+            [IO.Directory]::Delete($fixtureRoot, $true)
+        }
+    }
+    return $true
+}
+
 function Invoke-RenderedEnterpriseConfigRulePackProbe {
     $rendered = Get-DefenseClawRenderedEnterpriseConfig `
         -Mode 'action' `
@@ -654,6 +946,7 @@ if (-not [bool]$status.ok -or [bool]$status.installed -or
 $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
 $renderedTargetsVersionContract = Invoke-RenderedEnterpriseTargetsVersionProbe
+$claudeWinGetMetadataContract = Invoke-ClaudeWinGetMetadataVersionProbe
 $renderedConfigEmbeddedRulePack = Invoke-RenderedEnterpriseConfigRulePackProbe
 $raceRoot = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
@@ -785,6 +1078,8 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$collisionRejected
     rendered_targets_version_contract =
         [bool]$renderedTargetsVersionContract
+    claude_winget_metadata_contract =
+        [bool]$claudeWinGetMetadataContract
     rendered_config_embedded_rule_pack =
         [bool]$renderedConfigEmbeddedRulePack
     concurrent_workers = 6

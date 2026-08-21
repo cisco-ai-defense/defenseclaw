@@ -74,6 +74,9 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     config_renderer_start = installer.index(
         "function Get-DefenseClawRenderedEnterpriseConfig"
     )
+    winget_start = installer.index(
+        "function ConvertTo-DefenseClawClaudeWinGetVersion"
+    )
     discovery_start = installer.index(
         "function Get-DefenseClawConnectorMetadataVersion"
     )
@@ -82,6 +85,7 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     )
     execution_start = installer.index("$bootstrapEnvironment = $null")
     config_renderer = installer[config_renderer_start:discovery_start]
+    winget_discovery = installer[winget_start:discovery_start]
     discovery = installer[discovery_start:renderer_start]
     renderer = installer[renderer_start:execution_start]
 
@@ -92,6 +96,31 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "anthropic.claude-code-*" in discovery
     assert "$userHomeFull =" in discovery
     assert "$home =" not in discovery.casefold()
+    assert "Get-DefenseClawClaudeWinGetMetadataVersion" in discovery
+    assert discovery.index("$machinePackage") < discovery.index(
+        "Get-DefenseClawClaudeWinGetMetadataVersion"
+    )
+    assert discovery.index(
+        "Get-DefenseClawClaudeWinGetMetadataVersion"
+    ) < discovery.index("foreach ($relativeExtensionRoot")
+    assert "AppData\\Local\\Microsoft\\WinGet\\Packages" in winget_discovery
+    assert (
+        "Anthropic.ClaudeCode_Microsoft.Winget.Source_*"
+        in winget_discovery
+    )
+    assert "[IO.SearchOption]::TopDirectoryOnly" in winget_discovery
+    assert "[IO.SearchOption]::AllDirectories" not in winget_discovery
+    assert (
+        "Microsoft.PowerShell.Security\\Get-AuthenticodeSignature"
+        in winget_discovery
+    )
+    assert "[Diagnostics.FileVersionInfo]::GetVersionInfo" in winget_discovery
+    assert "@('Anthropic PBC', 'Anthropic, PBC')" in winget_discovery
+    assert "[string]$ProductName -cne 'Claude Code'" in winget_discovery
+    assert "[IO.FileShare]::Read" in winget_discovery
+    assert "$maximumBytes = 512MB" in winget_discovery
+    assert "$examined -gt 256" in winget_discovery
+    assert "$matched -gt 32" in winget_discovery
     assert "Get-DefenseClawConnectorMetadataVersion" in renderer
     assert "$users = @(" in renderer
     assert "agent_version:" in renderer
@@ -99,6 +128,15 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert renderer.index("agent_version:") < renderer.index("enabled: true")
     assert "@attacker/not-amp" in smoke
     assert "target renderer emitted an enabled/version contract mismatch" in smoke
+    assert (
+        "official WinGet Claude package was not discovered exactly once"
+        in smoke
+    )
+    assert "WinGet Claude discovery followed a package reparse point" in smoke
+    assert (
+        "eligible Claude user did not receive exactly one enabled target"
+        in smoke
+    )
     assert "shorthand config did not explicitly select embedded rule-pack defaults" in smoke
 
 
@@ -1216,6 +1254,7 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "hostile_fixture_cleanup_verified",
                 "existing_collision_rejected_without_acl_seizure",
                 "rendered_targets_version_contract",
+                "claude_winget_metadata_contract",
                 "rendered_config_embedded_rule_pack",
                 "concurrent_workers",
                 "concurrent_roots_unique",

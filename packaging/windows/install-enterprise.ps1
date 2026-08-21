@@ -1661,6 +1661,198 @@ function Get-DefenseClawConnectorJsonMetadataVersion {
     }
 }
 
+function ConvertTo-DefenseClawClaudeWinGetVersion {
+    param([AllowNull()][object]$Value)
+
+    if ($Value -isnot [string]) { return '' }
+    $version = ([string]$Value).Trim()
+    if ($version.Length -eq 0 -or $version.Length -gt 64 -or
+        $version -cnotmatch '^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.([0-9]+))?$') {
+        return ''
+    }
+    if ($Matches[4] -and $Matches[4] -cne '0') { return '' }
+    try {
+        $parsed = [Version]::new(
+            [int]$Matches[1],
+            [int]$Matches[2],
+            [int]$Matches[3]
+        )
+    }
+    catch {
+        return ''
+    }
+    return ConvertTo-DefenseClawConnectorMetadataVersion `
+        -Value $parsed.ToString(3)
+}
+
+function Test-DefenseClawClaudeWinGetIdentity {
+    param(
+        [AllowNull()][object]$SignatureStatus,
+        [AllowNull()][object]$SignerSimpleName,
+        [AllowNull()][object]$ProductName,
+        [AllowNull()][object]$OriginalFilename,
+        [AllowNull()][object]$FileVersion
+    )
+
+    if ([string]$SignatureStatus -cne 'Valid' -or
+        [string]$SignerSimpleName -cnotin @('Anthropic PBC', 'Anthropic, PBC') -or
+        [string]$ProductName -cne 'Claude Code') {
+        return ''
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$OriginalFilename) -and
+        [string]$OriginalFilename -cne 'claude.exe') {
+        return ''
+    }
+    return ConvertTo-DefenseClawClaudeWinGetVersion -Value $FileVersion
+}
+
+function Get-DefenseClawClaudeWinGetExecutableVersion {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    if ([IO.Path]::GetFileName($Path) -cne 'claude.exe' -or
+        -not (Test-DefenseClawConnectorMetadataPath `
+            -Root $Root -Path $Path)) {
+        return ''
+    }
+
+    # The WinGet package directory is user-owned and therefore only a hint.
+    # Hold the executable open without write/delete sharing while its path,
+    # Authenticode identity, PE identity, and version are inspected. Never run
+    # a user-owned executable from this elevated installer to obtain --version.
+    $stream = $null
+    try {
+        $full = [IO.Path]::GetFullPath($Path)
+        $stream = [IO.FileStream]::new(
+            $full,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        $maximumBytes = 512MB
+        if ($stream.Length -le 0 -or $stream.Length -gt $maximumBytes) {
+            return ''
+        }
+        if (-not (Test-DefenseClawConnectorMetadataPath `
+                -Root $Root -Path $full)) {
+            return ''
+        }
+
+        $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
+            -LiteralPath $full `
+            -ErrorAction Stop
+        if ($signature.Status -ne
+            [Management.Automation.SignatureStatus]::Valid -or
+            $null -eq $signature.SignerCertificate) {
+            return ''
+        }
+        $signer = $signature.SignerCertificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+        $identity = [Diagnostics.FileVersionInfo]::GetVersionInfo($full)
+        if ($null -eq $identity) { return '' }
+        $version = Test-DefenseClawClaudeWinGetIdentity `
+            -SignatureStatus $signature.Status `
+            -SignerSimpleName $signer `
+            -ProductName $identity.ProductName `
+            -OriginalFilename $identity.OriginalFilename `
+            -FileVersion $identity.FileVersion
+        if ([string]::IsNullOrWhiteSpace($version)) { return '' }
+
+        # Revalidate the complete ancestor chain while the no-delete-share
+        # handle is still held so a candidate cannot be replaced mid-probe.
+        if (-not (Test-DefenseClawConnectorMetadataPath `
+                -Root $Root -Path $full)) {
+            return ''
+        }
+        return $version
+    }
+    catch {
+        return ''
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Get-DefenseClawClaudeWinGetMetadataVersion {
+    param(
+        [Parameter(Mandatory)][string]$UserHome,
+        [scriptblock]$ExecutableVersionReader
+    )
+
+    try {
+        $userHomeFull = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
+        $packageRoot = [IO.Path]::Combine(
+            $userHomeFull,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+    }
+    catch {
+        return ''
+    }
+    if (-not (Test-DefenseClawConnectorMetadataPath `
+            -Root $userHomeFull -Path $packageRoot -Directory)) {
+        return ''
+    }
+
+    if ($null -eq $ExecutableVersionReader) {
+        $ExecutableVersionReader = {
+            param([string]$Root, [string]$Path)
+            Get-DefenseClawClaudeWinGetExecutableVersion `
+                -Root $Root -Path $Path
+        }
+    }
+
+    $versions = [Collections.Generic.List[Version]]::new()
+    $examined = 0
+    $matched = 0
+    try {
+        foreach ($directory in [IO.Directory]::EnumerateDirectories(
+                $packageRoot,
+                'Anthropic.ClaudeCode_Microsoft.Winget.Source_*',
+                [IO.SearchOption]::TopDirectoryOnly
+            )) {
+            $examined++
+            if ($examined -gt 256) { return '' }
+            $leaf = [IO.Path]::GetFileName($directory)
+            if ($leaf -cnotmatch
+                '^Anthropic\.ClaudeCode_Microsoft\.Winget\.Source_[0-9A-Za-z]{1,64}$') {
+                continue
+            }
+            $matched++
+            if ($matched -gt 32 -or
+                -not (Test-DefenseClawConnectorMetadataPath `
+                    -Root $packageRoot -Path $directory -Directory)) {
+                return ''
+            }
+            $executable = [IO.Path]::Combine($directory, 'claude.exe')
+            if (-not (Test-DefenseClawConnectorMetadataPath `
+                    -Root $packageRoot -Path $executable)) {
+                continue
+            }
+            $version = & $ExecutableVersionReader $packageRoot $executable
+            $normalized = ConvertTo-DefenseClawClaudeWinGetVersion `
+                -Value $version
+            if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+            try {
+                $versions.Add([Version]::Parse($normalized))
+            }
+            catch {
+                continue
+            }
+        }
+    }
+    catch {
+        return ''
+    }
+    if ($versions.Count -eq 0) { return '' }
+    return [string]($versions | Sort-Object -Descending | Select-Object -First 1)
+}
+
 function Get-DefenseClawConnectorMetadataVersion {
     param(
         [Parameter(Mandatory)][string]$Connector,
@@ -1745,6 +1937,12 @@ function Get-DefenseClawConnectorMetadataVersion {
     if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
 
     if ($Connector -eq 'claudecode') {
+        $version = Get-DefenseClawClaudeWinGetMetadataVersion `
+            -UserHome $userHomeFull
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+
         foreach ($relativeExtensionRoot in @(
             '.cursor\extensions',
             '.vscode\extensions'
