@@ -41,11 +41,12 @@ const (
 )
 
 type windowsWord struct {
-	value      string
-	quote      QuoteKind
-	expands    bool
-	wildcard   bool
-	quotedOnly bool
+	value               string
+	quote               QuoteKind
+	expands             bool
+	wildcard            bool
+	quotedOnly          bool
+	nativeArgvUncertain bool
 }
 
 type windowsLexeme struct {
@@ -297,7 +298,8 @@ func windowsExactWrapper(source string, dialect windowsDialect) (windowsWrapper,
 		return windowsWrapper{}, false
 	}
 	words := commands[0].words
-	if len(words) < 3 || words[0].expands {
+	if len(words) < 3 || words[0].expands ||
+		windowsNativeArgvUncertain(words[0], words[1:]) {
 		return windowsWrapper{}, false
 	}
 	executable := windowsExecutable(words[0].value)
@@ -407,6 +409,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 	wordExpands := false
 	wordWildcard := false
 	wordQuotedOnly := false
+	wordNativeArgvUncertain := false
 	tokenBytes := 0
 
 	markQuote := func(next QuoteKind) {
@@ -453,11 +456,12 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 		ok := appendLexeme(windowsLexeme{
 			kind: windowsWordLexeme,
 			word: windowsWord{
-				value:      value.String(),
-				quote:      quoteKind,
-				expands:    wordExpands,
-				wildcard:   wordWildcard,
-				quotedOnly: wordQuotedOnly,
+				value:               value.String(),
+				quote:               quoteKind,
+				expands:             wordExpands,
+				wildcard:            wordWildcard,
+				quotedOnly:          wordQuotedOnly,
+				nativeArgvUncertain: wordNativeArgvUncertain,
 			},
 		})
 		value.Reset()
@@ -466,6 +470,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 		wordExpands = false
 		wordWildcard = false
 		wordQuotedOnly = false
+		wordNativeArgvUncertain = false
 		tokenBytes = 0
 		return ok
 	}
@@ -494,10 +499,10 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			// cmd.exe and the native Windows argv decoder do not share one
 			// quote grammar. Backslashes immediately before a quote and quote
 			// adjacency can therefore change both token boundaries and literal
-			// bytes after cmd has launched the child. Preserve recovery facts,
-			// but never grant exact argv authority to that raw spelling.
-			wordExpands = true
-			out.markPartial(IssueUnsupportedConstruct)
+			// bytes after cmd has launched a native child. Retain that provenance
+			// separately from shell expansion: cmd built-ins consume the spelling
+			// directly, while native children lose exact argv authority below.
+			wordNativeArgvUncertain = true
 		}
 
 		if quote != 0 {
@@ -718,6 +723,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 					wordExpands = false
 					wordWildcard = false
 					wordQuotedOnly = false
+					wordNativeArgvUncertain = false
 					tokenBytes = 0
 				} else if !flush() {
 					return lexemes, false
@@ -737,6 +743,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				wordActive = false
 				wordExpands = false
 				wordWildcard = false
+				wordNativeArgvUncertain = false
 				tokenBytes = 0
 			}
 			if !appendOperator(windowsRedirectLexeme, operator) {
@@ -1375,6 +1382,37 @@ func windowsWordValues(words []windowsWord) []string {
 	return out
 }
 
+func windowsNativeArgvUncertain(
+	executable windowsWord,
+	args []windowsWord,
+) bool {
+	if executable.nativeArgvUncertain {
+		return true
+	}
+	for _, arg := range args {
+		if arg.nativeArgvUncertain {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsExactCMDBuiltin(executable windowsWord, program string) bool {
+	if executable.expands || executable.wildcard ||
+		executable.nativeArgvUncertain || executable.quote != QuoteNone ||
+		!strings.EqualFold(executable.value, program) ||
+		strings.ContainsAny(executable.value, `:/\`) {
+		return false
+	}
+	switch program {
+	case "echo", "ver", "rem", "type", "dir", "del", "erase", "rmdir", "rd",
+		"mkdir", "md", "copy", "move":
+		return true
+	default:
+		return false
+	}
+}
+
 func windowsAddOperation(command *CommandFact, operation OperationKind) {
 	for _, existing := range command.Operations {
 		if existing == operation {
@@ -1542,6 +1580,17 @@ func windowsClassifyCommand(
 	builder *windowsFactBuilder,
 ) {
 	windowsAddOperation(command, OperationExecute)
+	if dialect == windowsCMD &&
+		windowsNativeArgvUncertain(executableWord, args) &&
+		!windowsExactCMDBuiltin(executableWord, command.Program) {
+		// cmd built-ins consume cmd.exe's own tokenization directly. External
+		// commands cross a second, program-specific native argv decoder, so a
+		// backslash/quote differential cannot retain exact execution authority.
+		command.Effect = EffectUncertain
+		command.ArgvComplete = false
+		command.Argv = nil
+		builder.out.markPartial(IssueUnsupportedConstruct)
+	}
 	if command.Executable == "" {
 		builder.out.markPartial(IssueDynamicWord)
 		return
