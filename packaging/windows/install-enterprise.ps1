@@ -1390,7 +1390,20 @@ function Assert-DefenseClawBootstrapModuleTrust {
 # per-key drift regression during a QA install.
 # ---------------------------------------------------------------------------
 
+# Windows managed_enterprise lifecycle supports a subset of the
+# cross-platform connector registry. Codex and Claude Code each ship
+# real per-user reconcile + teardown-snapshot machinery on Windows
+# (specs 002 / 004 / 005). Cursor and Amp exist in the connector
+# registry but have no Windows managed-hook lifecycle plumbing —
+# reconcile/teardown/trusted-state checks all fail closed on cursor
+# today, and shipping them here would strand user data on uninstall.
+# Cursor is tracked as a follow-up spec
+# (docs/specs/006-windows-cursor-managed-lifecycle/); until that
+# lands, reject at arg validation with a targeted error rather than
+# failing deep in the transaction with "managed-hook teardown does
+# not support connector 'cursor'".
 $script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp')
+$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode')
 
 function ConvertTo-DefenseClawConnectorList {
     param([Parameter(Mandatory)][string]$Connector)
@@ -1400,7 +1413,10 @@ function ConvertTo-DefenseClawConnectorList {
         $trimmed = $entry.Trim().ToLowerInvariant()
         if ([string]::IsNullOrEmpty($trimmed)) { continue }
         if ($trimmed -notin $script:DefenseClawSupportedConnectors) {
-            throw "-Connector entry '$trimmed' is not supported; expected one or more of: $($script:DefenseClawSupportedConnectors -join ', ')"
+            throw "-Connector entry '$trimmed' is not a recognised connector; expected one or more of: $($script:DefenseClawSupportedConnectors -join ', ')"
+        }
+        if ($trimmed -notin $script:DefenseClawWindowsManagedEnterpriseSupportedConnectors) {
+            throw "-Connector entry '$trimmed' is not supported on Windows managed_enterprise; supported: $($script:DefenseClawWindowsManagedEnterpriseSupportedConnectors -join ', '). Follow-up: docs/specs/006-windows-cursor-managed-lifecycle."
         }
         if ($normalized -notcontains $trimmed) {
             $normalized.Add($trimmed) | Out-Null
@@ -2009,7 +2025,9 @@ function Get-DefenseClawRenderedEnterpriseTargets {
             }
             catch {
                 # Discovery is best-effort. Unreadable or concurrently changed
-                # user metadata must produce a disabled row, not abort Setup.
+                # user metadata produces a version-less row; the guardian's
+                # enumerator re-renders on its 5-min tick and picks up the
+                # agent's real version when it becomes readable.
                 $version = ''
             }
             $version = ConvertTo-DefenseClawConnectorMetadataVersion `
@@ -2018,15 +2036,22 @@ function Get-DefenseClawRenderedEnterpriseTargets {
             [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
             [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
             [void]$sb.AppendLine("    connector: `"$c`"")
-            if ([string]::IsNullOrWhiteSpace($version)) {
-                # Disabled rows remain valid and let the guardian preserve the
-                # discovered identity until an admin supplies a real version.
-                [void]$sb.AppendLine('    enabled: false')
-            }
-            else {
+            if (-not [string]::IsNullOrWhiteSpace($version)) {
                 [void]$sb.AppendLine("    agent_version: `"$version`"")
-                [void]$sb.AppendLine('    enabled: true')
             }
+            # `enabled: true` is the install-time default. The runtime
+            # hook-enumerator service (spec 005 D1) is the authority on
+            # per-target reachability — it re-renders targets.yaml on its
+            # 5-min tick and flips this to `enabled: false` when the agent
+            # binary isn't reachable in the target user's profile. Gating
+            # install-time enablement on agent-present-on-disk (as an
+            # earlier revision did) defeats the enumerator's purpose and
+            # trips the attestation validator's "requires at least one
+            # enabled <connector> target" pre-check on any endpoint where
+            # the agent client hasn't been installed yet — a common state
+            # on managed_enterprise rollouts where AVC pushes DefenseClaw
+            # before the operator installs Claude / Codex / Cursor.
+            [void]$sb.AppendLine('    enabled: true')
         }
     }
     return $sb.ToString()

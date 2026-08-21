@@ -69,14 +69,14 @@ func TestParseEnterpriseSetupShorthandAcceptsModeAndConnector(t *testing.T) {
 	opts, help, err := parseEnterpriseSetupOptions([]string{
 		"/install",
 		"MODE=action",
-		"CONNECTOR=codex,cursor,claudecode",
+		"CONNECTOR=codex,claudecode",
 		"JSON=1",
 	})
 	if err != nil || help {
 		t.Fatalf("shorthand install: help=%v err=%v", help, err)
 	}
 	if opts.Action != "install" || opts.Mode != "action" ||
-		opts.Connector != "codex,cursor,claudecode" || !opts.JSON {
+		opts.Connector != "codex,claudecode" || !opts.JSON {
 		t.Fatalf("parsed = %+v", opts)
 	}
 	if opts.Config != "" || opts.Manifest != "" {
@@ -94,6 +94,9 @@ func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
 		"mode + manifest":        {"/install", "MODE=action", "CONNECTOR=codex", "MANIFEST=x.yaml"},
 		"invalid mode":           {"/install", "MODE=paranoid", "CONNECTOR=codex"},
 		"shorthand on status":    {"/status", "MODE=action", "CONNECTOR=codex"},
+		"cursor on windows":      {"/install", "MODE=action", "CONNECTOR=cursor"},
+		"cursor mixed with claude": {"/install", "MODE=action", "CONNECTOR=cursor,claudecode"},
+		"amp on windows":          {"/install", "MODE=action", "CONNECTOR=amp"},
 	}
 	for name, arguments := range tests {
 		if _, _, err := parseEnterpriseSetupOptions(arguments); err == nil {
