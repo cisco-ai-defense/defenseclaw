@@ -1362,17 +1362,27 @@ export function createFetchInterceptor(
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
       const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
-      // Only re-route if the request shape would otherwise hit a
-      // local Ollama instance. For any other http.request path we
-      // pass through to the captured original to avoid breaking
-      // unrelated http traffic.
-      const ollamaCandidate = Boolean(
+      // Layer 0: known provider domain or registered local LLM port
+      // with a recognizable LLM path (original Ollama-only gate).
+      const knownCandidate = Boolean(
         urlStr &&
           isLLMUrl(urlStr, guardrailPort) &&
           hasLLMPathSuffix(urlStr) &&
           !isAlreadyProxied(urlStr, guardrailPort),
       );
-      if (!ollamaCandidate) {
+      // Layer 1: path-shape detection — catches local LLM proxies
+      // (e.g. http://127.0.0.1:18800/v1/chat/completions) that are
+      // not registered in ollama_ports but have a recognizable LLM
+      // path suffix. Only applies to non-safe domains so we don't
+      // accidentally intercept unrelated http traffic.
+      const shapedCandidate = Boolean(
+        urlStr &&
+          !knownCandidate &&
+          !isKnownSafeDomain(urlStr) &&
+          !isAlreadyProxied(urlStr, guardrailPort) &&
+          hasLLMPathSuffix(urlStr),
+      );
+      if (!knownCandidate && !shapedCandidate) {
         return originalHttpRequest!(
           urlOrOptions as string,
           optionsOrCallback as NodeRequestOptions,
