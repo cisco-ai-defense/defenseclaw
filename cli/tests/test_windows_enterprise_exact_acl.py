@@ -186,6 +186,44 @@ def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None
     assert "$index -lt $components.Count - 1" in ancestors
 
 
+def test_fixed_managed_ipc_path_is_provisioned_for_the_exact_gateway_sid() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    provisioner = _extract_function_body(
+        source,
+        "function Initialize-DefenseClawManagedIPCDirectory",
+        "function Set-DefenseClawManagedAcls",
+    )
+    assert "'Cisco Secure Client'" in provisioner
+    assert "'DefenseClaw'" in provisioner
+    assert "'ipc'" in provisioner
+    assert "Get-DefenseClawServiceSID" in provisioner
+    assert "Assert-DefenseClawCanonicalVolumePath" in provisioner
+    assert "Assert-DefenseClawNoReparsePath" in provisioner
+    assert "New-DefenseClawProtectedDirectory" in provisioner
+    assert "$script:AuthenticatedUsersSID" in provisioner
+    assert "-Kind ManagedIPCDirectory" in provisioner
+
+    transaction_services = _extract_function_body(
+        source,
+        "function Set-DefenseClawManagedServicesForTransaction",
+        "function Get-DefenseClawLayout",
+    )
+    provision_at = transaction_services.index(
+        "Initialize-DefenseClawManagedIPCDirectory",
+    )
+    acl_at = transaction_services.index("Set-DefenseClawManagedCoreAcls")
+    assert provision_at < acl_at
+
+    verifier = _extract_function_body(
+        source,
+        "function Assert-DefenseClawEnterpriseDeployment",
+        "function Get-DefenseClawLifecycleStatus",
+    )
+    assert "-Path $Layout.ManagedIPCDirectory" in verifier
+    assert "-Kind ManagedIPCDirectory" in verifier
+    assert "$script:AuthenticatedUsersSID" in verifier
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell smoke")
 @pytest.mark.parametrize("engine", _powershell_engines_or_fail())
 def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
@@ -221,14 +259,14 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
     assert payload == {
         "ok": True,
         "schema_version": 1,
-        "descriptors_checked": 16,
+        "descriptors_checked": 17,
         "stale_explicit_aces_retained": False,
         "object_type_mismatches_rejected": True,
         "auto_inherited_control_flag_accepted": True,
         "ace_mismatches_rejected": True,
         "native_raw_acl_query_checked": True,
         "split_explicit_aces_rejected": True,
-        "installer_verifier_pairings_checked": 16,
+        "installer_verifier_pairings_checked": 17,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
     }

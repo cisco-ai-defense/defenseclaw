@@ -122,6 +122,7 @@ foreach ($engineModuleName in @(
 $script:SystemSID = 'S-1-5-18'
 $script:AdministratorsSID = 'S-1-5-32-544'
 $script:UsersSID = 'S-1-5-32-545'
+$script:AuthenticatedUsersSID = 'S-1-5-11'
 $script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 $script:ServiceSDDL = 'D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)'
 $script:ServiceDescription = 'Administrator-managed DefenseClaw service; standard users have query-only SCM access.'
@@ -1795,7 +1796,7 @@ function New-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][bool]$IsDirectory,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -1809,7 +1810,8 @@ function New-DefenseClawCanonicalPathAcl {
         'RuntimeDirectory',
         'AuthorizationDirectory',
         'LogDirectory',
-        'GatewayLogDirectory'
+        'GatewayLogDirectory',
+        'ManagedIPCDirectory'
     )
     if ($IsDirectory -ne ($Kind -in $directoryKinds)) {
         throw "ACL kind $Kind does not match the managed path object type"
@@ -1928,9 +1930,25 @@ function New-DefenseClawCanonicalPathAcl {
                 rights = [Security.AccessControl.FileSystemRights]::Modify
             })
         }
+        'ManagedIPCDirectory' {
+            # Match the gateway's bind-time IPC baseline: only the exact
+            # service SID may create/remove the socket, while authenticated
+            # clients receive path traversal and child-name lookup only.
+            $entries.Add([pscustomobject]@{
+                sid = $GatewayServiceSID
+                rights = [Security.AccessControl.FileSystemRights]::FullControl
+            })
+            $entries.Add([pscustomobject]@{
+                sid = $script:AuthenticatedUsersSID
+                rights = (
+                    [Security.AccessControl.FileSystemRights]::ListDirectory -bor
+                    [Security.AccessControl.FileSystemRights]::Traverse
+                )
+            })
+        }
     }
 
-    $inheritanceFlags = if ($IsDirectory) {
+    $inheritanceFlags = if ($IsDirectory -and $Kind -ne 'ManagedIPCDirectory') {
         [Security.AccessControl.InheritanceFlags]::ObjectInherit -bor
             [Security.AccessControl.InheritanceFlags]::ContainerInherit
     }
@@ -2051,7 +2069,7 @@ function Set-DefenseClawPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -2442,6 +2460,11 @@ function Assert-DefenseClawPathAcl {
         [Parameter(Mandatory)][string[]]$AllowedWriterSIDs,
         [string[]]$AllowedReaderSIDs = @(),
         [hashtable]$RequiredRights = @{},
+        [string[]]$AllowedOwnerSIDs = @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ),
         [switch]$AllowUsersRead,
         [switch]$RejectUntrustedRead,
         [switch]$AllowInheritance
@@ -2456,7 +2479,7 @@ function Assert-DefenseClawPathAcl {
         throw "managed path has an absent or null DACL: $Path"
     }
     $ownerSID = ConvertTo-DefenseClawSID -Identity $acl.Owner
-    if ($ownerSID -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+    if ($ownerSID -notin $AllowedOwnerSIDs) {
         throw "untrusted owner $ownerSID on managed path: $Path"
     }
     if (-not $AllowInheritance -and -not $acl.AreAccessRulesProtected) {
@@ -3739,6 +3762,87 @@ function Restore-DefenseClawTransactionServiceStartModes {
     }
 }
 
+function Initialize-DefenseClawManagedIPCDirectory {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    $expectedIPCDirectory = [IO.Path]::Combine(
+        $script:ProgramData,
+        'Cisco',
+        'Cisco Secure Client',
+        'DefenseClaw',
+        'ipc'
+    ).TrimEnd('\')
+    $ipcDirectory = Assert-DefenseClawCanonicalVolumePath `
+        -Path ([IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')) `
+        -Label 'managed IPC directory'
+    if (-not [string]::Equals(
+            $ipcDirectory,
+            $expectedIPCDirectory,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "managed IPC directory must use the fixed AVC contract path: $expectedIPCDirectory"
+    }
+    Assert-DefenseClawNoReparsePath -Path $ipcDirectory -AllowMissingLeaf
+    $parent = [IO.Path]::GetDirectoryName($ipcDirectory)
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $parent `
+            -PathType Container)) {
+        Initialize-DefenseClawManagedRoot `
+            -Path $parent `
+            -Label 'managed IPC parent' `
+            -RequiredBase $script:ProgramData
+    }
+    else {
+        Assert-DefenseClawTrustedAncestors `
+            -Path $parent `
+            -RequiredBase $script:ProgramData
+    }
+
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ipcDirectory) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $ipcDirectory `
+                -PathType Container)) {
+            throw "managed IPC path is occupied by a non-directory: $ipcDirectory"
+        }
+        # The fixed AVC path is a single-listener contract. Validate before
+        # replacement so a certification service cannot seize a directory
+        # owned by another live gateway SID. The current service is accepted
+        # as owner for migration from a directory it created itself.
+        Assert-DefenseClawPathAcl `
+            -Path $ipcDirectory `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID,
+                $gatewaySID
+            ) `
+            -AllowedReaderSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID,
+                $gatewaySID,
+                $script:AuthenticatedUsersSID
+            ) `
+            -AllowedOwnerSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID,
+                $gatewaySID
+            ) `
+            -RejectUntrustedRead
+    }
+    else {
+        [void](New-DefenseClawProtectedDirectory -Path $ipcDirectory)
+    }
+    Set-DefenseClawPathAcl `
+        -Path $ipcDirectory `
+        -Kind ManagedIPCDirectory `
+        -GatewayServiceSID $gatewaySID
+}
+
 function Set-DefenseClawManagedAcls {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -3762,6 +3866,18 @@ function Set-DefenseClawManagedAcls {
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID
+    }
+    if (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManagedIPCDirectory `
+            -PathType Container) {
+        Set-DefenseClawPathAcl `
+            -Path $Layout.ManagedIPCDirectory `
+            -Kind ManagedIPCDirectory `
+            -GatewayServiceSID $gatewaySID
+    }
+    elseif (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManagedIPCDirectory) {
+        throw "managed IPC path is occupied by a non-directory: $($Layout.ManagedIPCDirectory)"
     }
     Set-DefenseClawPathAcl -Path $Layout.StateRoot -Kind StateDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $gatewaySID
@@ -3873,6 +3989,9 @@ function Set-DefenseClawManagedServicesForTransaction {
         -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
         -DeferAutomaticStart
+    Initialize-DefenseClawManagedIPCDirectory `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
     Set-DefenseClawManagedCoreAcls `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
@@ -3981,6 +4100,13 @@ function Get-DefenseClawLayout {
     $gatewayLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'gateway'
     $brokerLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'cmid-broker'
     $guardianLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'guardian'
+    $managedIPCDirectory = [IO.Path]::Combine(
+        $script:ProgramData,
+        'Cisco',
+        'Cisco Secure Client',
+        'DefenseClaw',
+        'ipc'
+    )
     $lifecycleLockDirectory = Microsoft.PowerShell.Management\Join-Path `
         $script:ProgramData `
         'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle'
@@ -4034,6 +4160,8 @@ function Get-DefenseClawLayout {
         LibexecDirectory = $libexec
         ConfigDirectory = $configDirectory
         RuntimeDirectory = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'runtime')
+        ManagedIPCDirectory = $managedIPCDirectory
+        ManagedIPCSocketPath = (Microsoft.PowerShell.Management\Join-Path $managedIPCDirectory 'defenseclaw_ipc.sock')
         BrokerStateDirectory = $brokerStateDirectory
         BrokerAuthKeyPath = (Microsoft.PowerShell.Management\Join-Path $brokerStateDirectory 'broker-auth.key')
         GuardianDirectory = $guardianDirectory
@@ -7798,7 +7926,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
 function New-DefenseClawRequiredRights {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Admin', 'Install', 'ServiceInstall', 'State', 'ConfigDirectory', 'Config', 'MachinePolicy', 'AuthorizationDirectory', 'AuthorizationFile', 'Runtime')]
+        [ValidateSet('Admin', 'Install', 'ServiceInstall', 'State', 'ConfigDirectory', 'Config', 'MachinePolicy', 'AuthorizationDirectory', 'AuthorizationFile', 'Runtime', 'ManagedIPCDirectory')]
         [string]$Kind,
         [string]$GatewayServiceSID
     )
@@ -7833,6 +7961,13 @@ function New-DefenseClawRequiredRights {
         }
         'Runtime' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::Modify
+        }
+        'ManagedIPCDirectory' {
+            $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::FullControl
+            $required[$script:AuthenticatedUsersSID] = (
+                [Security.AccessControl.FileSystemRights]::ListDirectory -bor
+                [Security.AccessControl.FileSystemRights]::Traverse
+            )
         }
     }
     return $required
@@ -8080,6 +8215,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Kind AuthorizationFile `
         -GatewayServiceSID $gatewaySID
     $runtimeRights = New-DefenseClawRequiredRights -Kind Runtime -GatewayServiceSID $gatewaySID
+    $managedIPCDirectoryRights = New-DefenseClawRequiredRights `
+        -Kind ManagedIPCDirectory `
+        -GatewayServiceSID $gatewaySID
 
     foreach ($path in @($Layout.InstallRoot, $Layout.BinDirectory)) {
         Assert-DefenseClawPathAcl `
@@ -8163,6 +8301,18 @@ function Assert-DefenseClawEnterpriseDeployment {
             -Path $ancestor `
             -GatewayServiceSID $gatewaySID
     }
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.ManagedIPCDirectory `
+        -AllowedWriterSIDs $runtimeWriters `
+        -AllowedReaderSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID,
+            $gatewaySID,
+            $script:AuthenticatedUsersSID
+        ) `
+        -RequiredRights $managedIPCDirectoryRights `
+        -RejectUntrustedRead
     Assert-DefenseClawPathAcl `
         -Path $Layout.StateRoot `
         -AllowedWriterSIDs $adminWriters `

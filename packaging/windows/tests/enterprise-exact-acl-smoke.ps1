@@ -38,6 +38,7 @@ $expected = [ordered]@{
     AuthorizationFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$serviceSID)"
     LogDirectory = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
     GatewayLogDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
+    ManagedIPCDirectory = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$serviceSID)(A;;0x21;;;AU)"
 }
 $directoryKinds = @(
     'InstallDirectory',
@@ -48,7 +49,8 @@ $directoryKinds = @(
     'RuntimeDirectory',
     'AuthorizationDirectory',
     'LogDirectory',
-    'GatewayLogDirectory'
+    'GatewayLogDirectory',
+    'ManagedIPCDirectory'
 )
 
 $observed = & $module {
@@ -135,6 +137,7 @@ $pairings = [ordered]@{
     AuthorizationFile = 'AuthorizationFile'
     LogDirectory = 'Admin'
     GatewayLogDirectory = 'Runtime'
+    ManagedIPCDirectory = 'ManagedIPCDirectory'
 }
 if ($pairings.Count -ne $expected.Count) {
     throw 'installer/verifier pairing table does not cover every managed path kind'

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -943,6 +944,48 @@ func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t 
 	}
 	if ok, _ := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
 		t.Fatal("aggregate target failure reported connector coverage through a stale successful row")
+	}
+}
+
+func TestManagedGuardianCoverageAcceptsSerializedInstallResultContract(t *testing.T) {
+	authorizationDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
+	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+
+	authorization := managedGuardianAuthorization{
+		Version:      1,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+		OK:           true,
+		TargetCount:  1,
+		SuccessCount: 1,
+		ProtectedTargets: []managedGuardianAuthorizationTarget{{
+			User:      "alice",
+			UserHome:  "/home/alice",
+			Connector: "codex",
+			OK:        true,
+			Result: &enterprisehooks.InstallResult{
+				Connector:                  "codex",
+				UserHome:                   "/home/alice",
+				DataDir:                    "/home/alice/.defenseclaw",
+				HookContractID:             "contract-v1",
+				HookContractLockUpdatedAt:  "2026-08-21T12:34:56Z",
+				HookContractEntryUpdatedAt: "2026-08-21T12:34:55Z",
+			},
+		}},
+	}
+	data, err := json.Marshal(authorization)
+	if err != nil {
+		t.Fatalf("marshal real authorization record: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
+
+	if ok, reason := managedGuardianCoversConnectors("unused", []string{"codex"}); !ok {
+		t.Fatalf("serialized InstallResult contract rejected: %s", reason)
 	}
 }
 

@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -3850,25 +3851,13 @@ type managedGuardianAuthorization struct {
 }
 
 type managedGuardianAuthorizationTarget struct {
-	User      string                              `json:"user,omitempty"`
-	UserHome  string                              `json:"user_home,omitempty"`
-	SID       string                              `json:"sid,omitempty"`
-	Connector string                              `json:"connector"`
-	OK        bool                                `json:"ok"`
-	Error     string                              `json:"error,omitempty"`
-	Result    *managedGuardianAuthorizationResult `json:"result,omitempty"`
-}
-
-type managedGuardianAuthorizationResult struct {
-	Connector       string   `json:"connector"`
-	UserHome        string   `json:"user_home"`
-	DataDir         string   `json:"data_dir"`
-	HookConfigPaths []string `json:"hook_config_paths,omitempty"`
-	HookScripts     []string `json:"hook_scripts,omitempty"`
-	BackupFiles     []string `json:"backup_files,omitempty"`
-	CreatedDirs     []string `json:"created_dirs,omitempty"`
-	AgentVersion    string   `json:"agent_version,omitempty"`
-	HookContractID  string   `json:"hook_contract_id,omitempty"`
+	User      string                         `json:"user,omitempty"`
+	UserHome  string                         `json:"user_home,omitempty"`
+	SID       string                         `json:"sid,omitempty"`
+	Connector string                         `json:"connector"`
+	OK        bool                           `json:"ok"`
+	Error     string                         `json:"error,omitempty"`
+	Result    *enterprisehooks.InstallResult `json:"result,omitempty"`
 }
 
 const managedGuardianAuthorizationMaxBytes int64 = 4 << 20

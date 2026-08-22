@@ -513,6 +513,23 @@ namespace DefenseClaw.Windows.Tests
         -InstallRoot (Join-Path $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw') `
         -StateRoot (Join-Path $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw')
     $expectedCodexParent = Join-Path $script:ProgramData 'OpenAI\Codex'
+    $expectedManagedIPCDirectory = Join-Path `
+        $script:ProgramData `
+        'Cisco\Cisco Secure Client\DefenseClaw\ipc'
+    if (-not [string]::Equals(
+        [string]$layout.ManagedIPCDirectory,
+        $expectedManagedIPCDirectory,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "managed IPC contract path drift: $($layout.ManagedIPCDirectory)"
+    }
+    if (-not [string]::Equals(
+        [string]$layout.ManagedIPCSocketPath,
+        (Join-Path $expectedManagedIPCDirectory 'defenseclaw_ipc.sock'),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "managed IPC socket path drift: $($layout.ManagedIPCSocketPath)"
+    }
     if (-not [string]::Equals(
         [string]$layout.CodexMachinePolicyDirectory,
         $expectedCodexParent,
