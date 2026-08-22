@@ -117,6 +117,7 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	"CMD-RUBY-E":             CapExecShell,
 	"CMD-RM-RF":              CapExecShell,
 	"CMD-MKFS":               CapExecShell,
+	"CMD-DEVICE-WIPE":        CapExecShell,
 	"CMD-DD-IF":              CapExecShell,
 	"CMD-CHMOD-WORLD":        CapExecShell,
 	"CMD-CHOWN-ROOT":         CapExecShell,

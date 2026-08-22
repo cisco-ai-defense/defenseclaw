@@ -45,10 +45,26 @@ func Analyze(input Input) (facts Facts) {
 func analyze(input Input) Facts {
 	base := newParseOutput(DialectNone, 1)
 	base.status = StatusNotApplicable
+	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(
+		input.ActiveAgentFiles,
+	)
+	activeAgentFilesCaseInsensitive, activeAgentFilesCaseInsensitiveIssue :=
+		normalizeCaseInsensitiveActiveAgentFiles(
+			input.ActiveAgentFilesCaseInsensitive,
+			activeAgentFiles,
+		)
+	activeAgentFilesCaseInsensitiveUncertainIssue := IssueCode("")
+	if input.ActiveAgentFilesCaseInsensitiveUncertain &&
+		!input.ActiveAgentFilesUncertain {
+		activeAgentFilesCaseInsensitiveUncertainIssue = IssueInvalidSyntax
+	}
 	for _, issue := range []IssueCode{
 		validateToolName(input.Tool),
 		validateScalar(input.CWD, maxScalarBytes),
 		validateActiveHome(input.ActiveHome),
+		activeAgentFilesIssue,
+		activeAgentFilesCaseInsensitiveIssue,
+		activeAgentFilesCaseInsensitiveUncertainIssue,
 	} {
 		if issue == "" {
 			continue
@@ -60,11 +76,18 @@ func analyze(input Input) Facts {
 		}
 	}
 	if base.status == StatusInvalid || base.status == StatusLimitExceeded {
-		return base.factsWithContext(
+		facts := base.factsWithContext(
 			safeToolName(input.Tool),
 			safeScalar(input.CWD, maxScalarBytes),
 			"",
 		)
+		facts.ActiveAgentFiles = nil
+		facts.ActiveAgentFilesCaseInsensitive = nil
+		facts.ActiveAgentFilesCaseInsensitiveUncertain =
+			input.ActiveAgentFilesCaseInsensitiveUncertain &&
+				input.ActiveAgentFilesUncertain
+		facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+		return facts
 	}
 
 	extracted := extractArgsForTool(input.Args, input.Tool)
@@ -177,11 +200,19 @@ func analyze(input Input) Facts {
 	finalizePOSIXNoExecPreviews(&base)
 	deduplicateFacts(&base)
 	activeHome, _ := normalizeActiveHome(input.ActiveHome)
-	return base.factsWithContext(
+	facts := base.factsWithContext(
 		safeToolName(input.Tool),
 		safeScalar(cwd, maxScalarBytes),
 		activeHome,
 	)
+	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
+	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
+		activeAgentFilesCaseInsensitive,
+	)
+	facts.ActiveAgentFilesCaseInsensitiveUncertain =
+		input.ActiveAgentFilesCaseInsensitiveUncertain
+	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+	return facts
 }
 
 func analyzeStructuredArgv(
@@ -464,9 +495,19 @@ func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
 	if out == nil || command == nil {
 		return false
 	}
-	commandsByID := make(map[int64]*CommandFact, len(out.commands))
-	for index := range out.commands {
-		candidate := &out.commands[index]
+	return isolatedPOSIXCommandFacts(out.commands, command)
+}
+
+func isolatedPOSIXCommandFacts(
+	commands []CommandFact,
+	command *CommandFact,
+) bool {
+	if command == nil {
+		return false
+	}
+	commandsByID := make(map[int64]*CommandFact, len(commands))
+	for index := range commands {
+		candidate := &commands[index]
 		if candidate.ID == 0 {
 			return false
 		}
@@ -479,7 +520,7 @@ func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
 	if !ok {
 		return false
 	}
-	visited := make(map[int64]struct{}, len(out.commands))
+	visited := make(map[int64]struct{}, len(commands))
 	for {
 		if current.ID == 0 {
 			return false

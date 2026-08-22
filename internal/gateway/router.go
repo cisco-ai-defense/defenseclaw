@@ -1260,7 +1260,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 
 	// The typed router frame establishes a trusted action boundary, but this
 	// lane is observational and therefore cannot synchronously deny.
-	findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+	vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
+		DestinationApp: "builtin",
+		ToolName:       payload.Tool,
+		ToolID:         payload.ID,
+	})
+	findings := dispatchTrustedAction(vctx, trustedActionRequest{
 		Input: actionfacts.Input{
 			Tool: payload.Tool,
 			Args: payload.Args,
@@ -1268,6 +1273,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		LegacyText:         string(payload.Args),
 		Connector:          r.connectorName(),
 		EnforcementCapable: false,
+		recordTelemetry: func(observation trustedActionTelemetry) {
+			r.recordParserUncertaintyMetricV8(
+				vctx,
+				observation.ParserUncertaintyCount,
+			)
+		},
 	})
 	severity := HighestSeverity(findings)
 	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
@@ -1279,9 +1290,6 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
 
-		vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
-			DestinationApp: "builtin", ToolName: payload.Tool, ToolID: payload.ID,
-		})
 		emitVerdict(vctx, gatewaylog.StageRegex, gatewaylog.DirectionToolCall, "",
 			"alert", findings[0].Title, deriveSeverity(severity), []string{flaggedPattern}, 0,
 			emitVerdictExtras{RuleIDs: []string{flaggedPattern}})
@@ -1565,6 +1573,12 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		LegacyText:         legacyText,
 		Connector:          r.connectorName(),
 		EnforcementCapable: true,
+		recordTelemetry: func(observation trustedActionTelemetry) {
+			r.recordParserUncertaintyMetricV8(
+				approvalContext,
+				observation.ParserUncertaintyCount,
+			)
+		},
 	})
 	enforceableFindings := enforceableRuleFindings(allFindings)
 	dangerousByRules := len(enforceableFindings) > 0 &&

@@ -88,7 +88,7 @@ func runTrustedNativeGatewayStart(ctx context.Context, state hookruntime.State) 
 
 func newTrustedNativeGatewayStartCommand(ctx context.Context, state hookruntime.State) *exec.Cmd {
 	cmd := processutil.CommandContext(ctx, state.GatewayPath, "start")
-	cmd.Dir = filepath.Clean(state.DataRoot)
+	cmd.Dir = filepath.Dir(filepath.Clean(state.GatewayPath))
 	cmd.Env = trustedNativeGatewayStartEnvironment(os.Environ(), state.DataRoot)
 	return cmd
 }

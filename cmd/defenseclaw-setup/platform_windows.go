@@ -806,6 +806,10 @@ func processIdentity(pid uint32) (string, string, error) {
 	return processIdentityFromHandle(handle)
 }
 
+func currentSetupProcessIdentity() (string, string, error) {
+	return processIdentity(windows.GetCurrentProcessId())
+}
+
 func processIdentityFromHandle(handle windows.Handle) (string, string, error) {
 	waitResult, err := windows.WaitForSingleObject(handle, 0)
 	if err != nil {

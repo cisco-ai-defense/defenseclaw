@@ -7,6 +7,6 @@
   "agent_type": "openhands-cli",
   "tool_name": "terminal",
   "tool_input": {
-    "command": "cat /etc/shadow"
+    "command": "rm -rf /"
   }
 }

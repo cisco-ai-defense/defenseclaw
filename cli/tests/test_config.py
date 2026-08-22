@@ -740,6 +740,48 @@ class TestConfigLoadSave(unittest.TestCase):
         self.assertEqual(cfg.guardrail.connector, "")
         self.assertEqual(cfg.active_connector(), "codex")
 
+    def test_load_resolves_relative_device_key_beneath_configured_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            Path(data_dir, "config.yaml").write_text(
+                "config_version: 8\n"
+                f"data_dir: {data_dir}\n"
+                "gateway:\n"
+                "  device_key_file: identity/device.key\n",
+                encoding="utf-8",
+            )
+
+            cfg = load(data_dir=data_dir)
+
+        self.assertEqual(
+            cfg.gateway.device_key_file,
+            os.path.join(data_dir, "identity", "device.key"),
+        )
+
+    def test_relative_device_key_resolver_rejects_nonlocal_spellings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            self.assertEqual(
+                config_mod._resolve_relative_gateway_device_key_file(
+                    os.path.join("~", "device.key"),
+                    data_dir,
+                ),
+                os.path.join(data_dir, "~", "device.key"),
+            )
+            for key_file in (
+                "../outside/device.key",
+                r"C:device.key",
+                r"\device.key",
+                "device.key:stream",
+            ):
+                with self.subTest(key_file=key_file):
+                    self.assertIsNone(
+                        config_mod._resolve_relative_gateway_device_key_file(
+                            key_file,
+                            data_dir,
+                        )
+                    )
+
     def test_save_and_reload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(

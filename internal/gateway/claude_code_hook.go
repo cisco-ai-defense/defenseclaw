@@ -112,6 +112,9 @@ type claudeCodeHookResponse struct {
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	// Keep authenticated lifecycle state current even while inspection is
+	// disabled so a live same-session re-enable cannot lose active-file authority.
+	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
 	mode := a.claudeCodeMode()
 	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
@@ -152,10 +155,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:       toolName,
-				Args:       toolArgs,
-				CWD:        req.CWD,
-				ActiveHome: trustedSameHostHome(),
+				Tool:                                     toolName,
+				Args:                                     toolArgs,
+				CWD:                                      req.CWD,
+				ActiveHome:                               trustedSameHostHome(),
+				ActiveAgentFiles:                         activeAgentContext.files,
+				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
+				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
+				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 			},
 			LegacyText:         string(toolArgs),
 			Connector:          "claudecode",

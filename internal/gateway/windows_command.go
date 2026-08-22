@@ -467,6 +467,17 @@ func windowsPersistenceRegistryKey(args []string) bool {
 	return false
 }
 
+func windowsRegistryValueNameForProgram(program string, args []string) string {
+	switch strings.ToLower(program) {
+	case "reg", "reg.exe":
+		return windowsRegistryValueName(args)
+	case "set-itemproperty", "sp", "new-itemproperty":
+		return windowsPowerShellRegistryValueName(args)
+	default:
+		return ""
+	}
+}
+
 func windowsRegistryValueName(args []string) string {
 	for i, arg := range args {
 		lower := strings.ToLower(strings.TrimSpace(arg))
@@ -478,6 +489,41 @@ func windowsRegistryValueName(args []string) string {
 		}
 	}
 	return ""
+}
+
+func windowsPowerShellRegistryValueName(args []string) string {
+	valueName := ""
+	seen := false
+	for i := 0; i < len(args); i++ {
+		key, joinedValue, joined := strings.Cut(args[i], ":")
+		if !strings.EqualFold(key, "-Name") {
+			continue
+		}
+		if seen {
+			return ""
+		}
+		seen = true
+		if joined {
+			valueName = joinedValue
+		} else {
+			i++
+			if i >= len(args) {
+				return ""
+			}
+			valueName = args[i]
+		}
+		// Mirror ActionFacts' structured PowerShell operand boundary. Values
+		// that need expansion, wildcard binding, or option reinterpretation
+		// cannot provide an authoritative registry property name.
+		if valueName == "" || strings.HasPrefix(valueName, "-") ||
+			strings.ContainsAny(valueName, "$`*?[]{}") {
+			return ""
+		}
+	}
+	if !seen {
+		return ""
+	}
+	return strings.ToLower(valueName)
 }
 
 func windowsCommandCanReadSensitivePath(name string) bool {

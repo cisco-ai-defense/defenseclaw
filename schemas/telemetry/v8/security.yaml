@@ -3824,6 +3824,34 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: metric.defenseclaw.guardrail.parser_uncertainty
+  type: metric
+  brief: Trusted-action argument or parser uncertainty encountered during projection
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.guardrail.parser_uncertainty
+    instrument_type: counter
+    value_type: int64
+    unit: '{uncertainty}'
+    description: Trusted-action argument or parser uncertainty encountered during projection
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: guardrail.connector
+  x-defenseclaw:
+    bucket: guardrail.evaluation
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 - id: metric.defenseclaw.guardrail.judge.latency
   type: metric
   brief: LLM judge invocation latency (cache miss path includes model round-trip)

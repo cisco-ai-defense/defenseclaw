@@ -37,8 +37,11 @@ func TestTrustedGatewayStartCommandIsExactBoundAndWindowless(t *testing.T) {
 	if cmd.Path != state.GatewayPath || len(cmd.Args) != 2 || cmd.Args[0] != state.GatewayPath || cmd.Args[1] != "start" {
 		t.Fatalf("gateway start argv = %q, want exact recorded executable plus start", cmd.Args)
 	}
-	if cmd.Dir != dataRoot {
-		t.Fatalf("gateway start directory = %q, want %q", cmd.Dir, dataRoot)
+	if want := filepath.Dir(state.GatewayPath); cmd.Dir != want {
+		t.Fatalf("gateway start directory = %q, want trusted executable directory %q", cmd.Dir, want)
+	}
+	if cmd.Dir == dataRoot {
+		t.Fatalf("gateway start directory pins protected data root %q", dataRoot)
 	}
 	joined := strings.Join(cmd.Env, "\n")
 	for _, forbidden := range []string{

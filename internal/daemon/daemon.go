@@ -490,7 +490,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// No pipe, no goroutine — writes survive after we (the parent CLI) exit.
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Dir = d.dataDir
+	cmd.Dir = daemonStartDir(executable, d.dataDir)
 
 	// Detach from parent process group (platform-specific)
 	setSysProcAttr(cmd)

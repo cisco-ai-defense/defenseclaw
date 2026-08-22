@@ -7,6 +7,6 @@
   "agent_type": "hermes-cli",
   "tool_name": "execute_command",
   "tool_input": {
-    "command": "cat /etc/shadow"
+    "command": "rm -rf /"
   }
 }

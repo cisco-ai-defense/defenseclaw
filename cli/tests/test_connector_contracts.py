@@ -85,8 +85,20 @@ class TestConnectorContractManifest(unittest.TestCase):
                 fixture = connector_dir / fixture_name
                 if not fixture.is_file():
                     continue
-                event = json.loads(fixture.read_text(encoding="utf-8"))["hook_event_name"]
+                payload = json.loads(fixture.read_text(encoding="utf-8"))
+                event = next(
+                    (
+                        value
+                        for value in (
+                            payload.get("hook_event_name"),
+                            payload.get("hookEventName"),
+                        )
+                        if isinstance(value, str) and value
+                    ),
+                    None,
+                )
                 with self.subTest(connector=connector_dir.name, fixture=fixture_name):
+                    self.assertIsNotNone(event)
                     self.assertIn(event, structured)
                     if fixture_name == "pre_tool_block.json":
                         self.assertIn(event, blocked)
