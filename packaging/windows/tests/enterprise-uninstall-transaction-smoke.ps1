@@ -955,10 +955,23 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$PriorDeploymentActive,
                 [switch]$IncludeCodexMachineState,
                 [switch]$ManagedHooksTeardownPrepared,
                 [switch]$PreserveManagedHooksTeardownJournal
             )
+            if (-not $PSBoundParameters.ContainsKey(
+                    'PriorDeploymentActive'
+                )) {
+                throw 'transaction omitted the prior deployment activity contract'
+            }
+            if ([bool]$PriorDeploymentActive -ne
+                [bool]$script:HarnessState.installed) {
+                throw (
+                    'transaction prior deployment activity did not match ' +
+                    'the authenticated metadata fixture'
+                )
+            }
             $script:HarnessState.events.Add('transaction')
             $script:HarnessState.transaction_calls++
             $script:HarnessState.service_start_modes[

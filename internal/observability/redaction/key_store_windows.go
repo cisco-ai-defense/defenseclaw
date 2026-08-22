@@ -68,14 +68,20 @@ func loadOrCreateCorrelationKeyPlatform(dataDir string, entropy keyEntropyReader
 			return CorrelationKey{}, keyStoreError(KeyStoreErrorEntropy)
 		}
 		candidate := newCorrelationKey(material)
-		installed, installErr := installWindowsCorrelationKey(absolute, candidate, entropy, hooks)
+		installed, installErr := installWindowsCorrelationKey(
+			absolute,
+			directories[len(directories)-1],
+			candidate,
+			entropy,
+			hooks,
+		)
 		if installErr != nil {
 			return CorrelationKey{}, installErr
 		}
 		if installed {
 			return candidate, nil
 		}
-		// Another same-user creator won MoveFileEx's no-replace race. Reload
+		// Another same-service creator won the handle-bound no-replace race. Reload
 		// through the same pinned-handle and protected-DACL checks.
 	}
 	return CorrelationKey{}, keyStoreError(KeyStoreErrorInstall)
@@ -93,8 +99,8 @@ func openWindowsCorrelationKeyDirectoryChain(path string) ([]windows.Handle, err
 		chain[left], chain[right] = chain[right], chain[left]
 	}
 	handles := make([]windows.Handle, 0, len(chain))
-	for _, element := range chain {
-		handle, err := openWindowsCorrelationKeyDirectory(element)
+	for index, element := range chain {
+		handle, err := openWindowsCorrelationKeyDirectory(element, index == len(chain)-1)
 		if err != nil {
 			closeWindowsCorrelationKeyDirectories(handles)
 			return nil, err
@@ -104,7 +110,7 @@ func openWindowsCorrelationKeyDirectoryChain(path string) ([]windows.Handle, err
 	return handles, nil
 }
 
-func openWindowsCorrelationKeyDirectory(path string) (windows.Handle, error) {
+func openWindowsCorrelationKeyDirectory(path string, publicationRoot bool) (windows.Handle, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0, keyStoreError(KeyStoreErrorInvalidDataDir)
@@ -112,10 +118,17 @@ func openWindowsCorrelationKeyDirectory(path string) (windows.Handle, error) {
 	// Omitting FILE_SHARE_DELETE pins this path component. The caller retains a
 	// handle for every ancestor, so later absolute-path operations cannot be
 	// redirected by renaming any component after validation.
+	access := uint32(windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL)
+	if publicationRoot {
+		// FILE_RENAME_INFO resolves the fixed destination name relative to this
+		// pinned final directory handle. Request enumeration only on that leaf,
+		// never on ancestors that are held solely to prevent path replacement.
+		access |= windows.FILE_LIST_DIRECTORY
+	}
 	handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
 		return windows.CreateFile(
 			name,
-			windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+			access,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 			nil,
 			windows.OPEN_EXISTING,
@@ -541,7 +554,13 @@ func windowsCorrelationSameFile(left, right windows.ByHandleFileInformation) boo
 		left.FileIndexLow == right.FileIndexLow
 }
 
-func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entropy keyEntropyReader, hooks keyStoreHooks) (bool, error) {
+func installWindowsCorrelationKey(
+	dataDir string,
+	directory windows.Handle,
+	candidate CorrelationKey,
+	entropy keyEntropyReader,
+	hooks keyStoreHooks,
+) (installed bool, resultErr error) {
 	var suffix [keyTempRandomBytes]byte
 	if _, err := io.ReadFull(entropy, suffix[:]); err != nil {
 		return false, keyStoreError(KeyStoreErrorEntropy)
@@ -552,15 +571,7 @@ func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entr
 	if err != nil {
 		return false, err
 	}
-	tempPresent := true
-	cleanup := func() {
-		if !tempPresent {
-			return
-		}
-		_ = os.Remove(tempPath)
-		tempPresent = false
-	}
-	defer cleanup()
+	preserveFile := false
 	closed := false
 	closeTemp := func() error {
 		if closed {
@@ -569,7 +580,19 @@ func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entr
 		closed = true
 		return file.Close()
 	}
-	defer func() { _ = closeTemp() }()
+	defer func() {
+		if !preserveFile && !closed {
+			// DELETE was granted to this exact handle before hardening. Marking
+			// that authenticated inode for deletion avoids a path reopen after
+			// the final DACL removes the service's delete permission.
+			if err := markWindowsCorrelationKeyForDeletion(windows.Handle(file.Fd())); err != nil && resultErr == nil {
+				resultErr = keyStoreError(KeyStoreErrorTemporaryFile)
+			}
+		}
+		if err := closeTemp(); err != nil && resultErr == nil {
+			resultErr = keyStoreError(KeyStoreErrorTemporaryFile)
+		}
+	}()
 
 	material, ok := candidate.Material()
 	if !ok {
@@ -581,34 +604,50 @@ func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entr
 	if err := file.Sync(); err != nil {
 		return false, keyStoreError(KeyStoreErrorSync)
 	}
-	// Remove the creator's ACL-changing capability before the leaf name is
-	// published. The already-open staging handle retains WRITE_DAC/WRITE_OWNER
-	// only long enough to verify and, if Windows reclassifies the descriptor
-	// during rename, reassert the exact final state on the same inode.
-	if err := protectWindowsCorrelationSecurity(windows.Handle(file.Fd())); err != nil {
+	stagingHandle := windows.Handle(file.Fd())
+	if err := validateWindowsCorrelationStagingSecurity(stagingHandle); err != nil {
 		return false, err
 	}
-	if err := validateWindowsCorrelationKeyHandle(windows.Handle(file.Fd())); err != nil {
+	stagingInfo, err := windowsCorrelationHandleInformation(stagingHandle)
+	if err != nil {
 		return false, err
 	}
+	if err := validateWindowsCorrelationKeyPhysicalHandle(stagingHandle); err != nil {
+		return false, err
+	}
+	// Install and verify the final descriptor before the destination name is
+	// published. DELETE was granted when this handle was created, so tightening
+	// the DACL does not revoke its already-authorized handle-bound rename.
+	if err := protectWindowsCorrelationSecurity(stagingHandle); err != nil {
+		return false, err
+	}
+	if err := validateWindowsCorrelationKeyHandle(stagingHandle); err != nil {
+		return false, err
+	}
+	// A process termination in this short pre-rename window can leave a
+	// canonical, read-only temp inode. It cannot become or replace the final key;
+	// bounded cleanup of such crash residue requires the privileged installer,
+	// because granting the service permanent delete access would weaken the
+	// final key contract.
 	if err := runAfterTempSync(hooks); err != nil {
 		return false, keyStoreError(KeyStoreErrorInstall)
 	}
 
-	from, err := windows.UTF16PtrFromString(tempPath)
-	if err != nil {
-		return false, keyStoreError(KeyStoreErrorInstall)
-	}
-	to, err := windows.UTF16PtrFromString(targetPath)
-	if err != nil {
-		return false, keyStoreError(KeyStoreErrorInstall)
-	}
 	for attempt := 0; attempt < keyInstallAttempts; attempt++ {
-		err := windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
+		err := renameWindowsCorrelationKeyHandle(stagingHandle, directory)
 		if err == nil {
-			tempPresent = false
-			if err := finalizeWindowsCorrelationKeyHandle(windows.Handle(file.Fd())); err != nil {
+			if err := validatePublishedWindowsCorrelationKeyHandle(stagingHandle, stagingInfo); err != nil {
 				return false, err
+			}
+			// From this point onward the published inode has the exact final
+			// descriptor, physical shape, and pre-publication identity. Preserve
+			// it across later sync/test-hook failures so startup can reload it.
+			preserveFile = true
+			// Flush after both the handle-bound rename and final descriptor update.
+			// The handle still denies read/write sharing, so no other creator can
+			// load the destination until the exact final state is durable.
+			if err := file.Sync(); err != nil {
+				return false, keyStoreError(KeyStoreErrorSync)
 			}
 			if err := runAfterLink(hooks); err != nil {
 				return false, keyStoreError(KeyStoreErrorSync)
@@ -627,7 +666,7 @@ func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entr
 		if !windowsCorrelationOpenRetryable(err, true) {
 			return false, keyStoreError(KeyStoreErrorInstall)
 		}
-		if _, attributeErr := windows.GetFileAttributes(to); attributeErr == nil {
+		if _, attributeErr := windows.GetFileAttributes(windows.StringToUTF16Ptr(targetPath)); attributeErr == nil {
 			// A creator won but its destination is still transiently locked.
 			// The outer loop reloads it through the full handle and DACL checks.
 			return false, nil
@@ -639,25 +678,86 @@ func installWindowsCorrelationKey(dataDir string, candidate CorrelationKey, entr
 	return false, keyStoreError(KeyStoreErrorInstall)
 }
 
-// finalizeWindowsCorrelationKeyHandle validates the same staging handle after
-// its no-replace rename. The handle was opened with WRITE_DAC/WRITE_OWNER
-// before the final DACL removed those rights, so it can safely repair only a
-// trusted rename-time descriptor reclassification without reopening the
-// published path.
-func finalizeWindowsCorrelationKeyHandle(handle windows.Handle) error {
+type windowsCorrelationFileRenameInfo struct {
+	ReplaceIfExists uint32
+	RootDirectory   windows.Handle
+	FileNameLength  uint32
+	FileName        [1]uint16
+}
+
+// renameWindowsCorrelationKeyHandle publishes the already-authenticated
+// staging inode relative to the pinned data-directory handle. ReplaceIfExists
+// remains false: a collision is a concurrent winner, never authorization to
+// replace an existing key.
+func renameWindowsCorrelationKeyHandle(
+	handle windows.Handle,
+	directory windows.Handle,
+) error {
+	name, err := windows.UTF16FromString(correlationKeyFilename)
+	if err != nil || len(name) < 2 {
+		return windows.ERROR_INVALID_NAME
+	}
+	name = name[:len(name)-1]
+	var layout windowsCorrelationFileRenameInfo
+	nameBytes := len(name) * 2
+	bufferSize := int(unsafe.Offsetof(layout.FileName)) + nameBytes
+	buffer := make([]byte, bufferSize)
+	information := (*windowsCorrelationFileRenameInfo)(unsafe.Pointer(&buffer[0]))
+	information.RootDirectory = directory
+	information.FileNameLength = uint32(nameBytes)
+	copy(
+		(*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&information.FileName[0]))[:len(name):len(name)],
+		name,
+	)
+	err = windows.SetFileInformationByHandle(
+		handle,
+		windows.FileRenameInfo,
+		&buffer[0],
+		uint32(len(buffer)),
+	)
+	runtime.KeepAlive(buffer)
+	return err
+}
+
+// validatePublishedWindowsCorrelationKeyHandle proves that the no-replace
+// rename retained the exact pre-hardened staging inode and final descriptor.
+// It never repairs a published object; any mismatch remains fail-closed and is
+// deleted through the still-authenticated staging handle by the caller.
+func validatePublishedWindowsCorrelationKeyHandle(
+	handle windows.Handle,
+	stagingInfo windows.ByHandleFileInformation,
+) error {
 	if err := validateWindowsCorrelationKeyPhysicalHandle(handle); err != nil {
 		return err
 	}
-	needsHardening, err := windowsCorrelationSecurityNeedsHardening(handle)
+	publishedInfo, err := windowsCorrelationHandleInformation(handle)
 	if err != nil {
 		return err
 	}
-	if needsHardening {
-		if err := protectWindowsCorrelationSecurity(handle); err != nil {
-			return err
-		}
+	if !windowsCorrelationSameFile(stagingInfo, publishedInfo) {
+		return keyStoreError(KeyStoreErrorUnsafeType)
 	}
-	return validateWindowsCorrelationKeyHandle(handle)
+	if err := validateWindowsCorrelationKeyHandle(handle); err != nil {
+		return err
+	}
+	finalInfo, err := windowsCorrelationHandleInformation(handle)
+	if err != nil {
+		return err
+	}
+	if !windowsCorrelationSameFile(stagingInfo, finalInfo) {
+		return keyStoreError(KeyStoreErrorUnsafeType)
+	}
+	return nil
+}
+
+func markWindowsCorrelationKeyForDeletion(handle windows.Handle) error {
+	disposition := byte(1)
+	return windows.SetFileInformationByHandle(
+		handle,
+		windows.FileDispositionInfo,
+		&disposition,
+		uint32(unsafe.Sizeof(disposition)),
+	)
 }
 
 func verifyInstalledWindowsCorrelationKey(path string, candidate CorrelationKey) error {
@@ -688,11 +788,11 @@ func createWindowsCorrelationTemp(path string) (*os.File, error) {
 	}
 	handle, err := windows.CreateFile(
 		name,
-		windows.GENERIC_WRITE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
+		windows.GENERIC_WRITE|windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER,
+		windows.FILE_SHARE_DELETE,
 		attributes,
 		windows.CREATE_NEW,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_WRITE_THROUGH,
 		0,
 	)
 	runtime.KeepAlive(descriptor)
@@ -700,14 +800,14 @@ func createWindowsCorrelationTemp(path string) (*os.File, error) {
 		return nil, keyStoreError(KeyStoreErrorTemporaryFile)
 	}
 	if err := validateWindowsCorrelationStagingSecurity(handle); err != nil {
+		_ = markWindowsCorrelationKeyForDeletion(handle)
 		_ = windows.CloseHandle(handle)
-		_ = os.Remove(path)
 		return nil, err
 	}
 	file := os.NewFile(uintptr(handle), filepath.Base(path))
 	if file == nil {
+		_ = markWindowsCorrelationKeyForDeletion(handle)
 		_ = windows.CloseHandle(handle)
-		_ = os.Remove(path)
 		return nil, keyStoreError(KeyStoreErrorTemporaryFile)
 	}
 	return file, nil
