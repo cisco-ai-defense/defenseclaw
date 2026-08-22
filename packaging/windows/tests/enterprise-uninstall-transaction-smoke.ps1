@@ -294,6 +294,24 @@ try {
                 [Parameter(Mandatory)][bool]$ServicesRunning,
                 [bool]$ServicesExisted = $true
             )
+            $files = @()
+            if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.MetadataPath `
+                -PathType Leaf) {
+                $metadataBackup = $SnapshotPath + '.metadata.bak'
+                Microsoft.PowerShell.Management\Copy-Item `
+                    -LiteralPath $Layout.MetadataPath `
+                    -Destination $metadataBackup `
+                    -Force
+                $files = @(
+                    [ordered]@{
+                        path = $Layout.MetadataPath
+                        existed = $true
+                        backup = $metadataBackup
+                        security_descriptor = ''
+                    }
+                )
+            }
             $snapshot = [ordered]@{
                 schema_version = 1
                 gateway_service = 'DefenseClawGateway'
@@ -310,7 +328,7 @@ try {
                 managed_hooks_teardown_journal_preserved = $true
                 managed_hooks_teardown_journal_preimage_existed = $PreimageExisted
                 managed_hooks_teardown_journal_preimage_sha256 = $PreimageSHA256
-                files = @()
+                files = $files
                 services = @(
                     [ordered]@{
                         name = 'DefenseClawGateway'
@@ -762,6 +780,13 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [switch]$Required
             )
+            if ($script:HarnessState.operation -eq 'install' -and
+                -not [bool]$script:HarnessState.installed -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.MetadataPath `
+                    -PathType Leaf)) {
+                return $null
+            }
             return [pscustomobject]@{
                 installed = [bool]$script:HarnessState.installed
                 codex_target_enabled = $false
@@ -1498,6 +1523,20 @@ try {
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$Action
             )
+            if ($script:HarnessState.ContainsKey(
+                    'require_inactive_tombstone_adoption'
+                ) -and
+                [bool]$script:HarnessState.require_inactive_tombstone_adoption -and
+                $Action -in @('inspect', 'reconcile')) {
+                if (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.MetadataPath `
+                    -PathType Leaf) {
+                    throw 'protected deployment metadata marks this installation inactive'
+                }
+                $script:HarnessState.events.Add(
+                    "codex-requirements:$Action`:metadata-absent"
+                )
+            }
             return [pscustomobject]@{
                 ok = $true
                 codex_target_enabled = $false
@@ -2263,6 +2302,11 @@ targets:
                 -Parent $TestRoot `
                 -Label 'direct-reinstall-after-committed-crash'
             $layout = New-HarnessLayout -Root $root
+            [IO.File]::WriteAllText(
+                $layout.MetadataPath,
+                '{"schema_version":1,"installed":false}',
+                [Text.UTF8Encoding]::new($false)
+            )
             $oldJournal = [ordered]@{
                 schema_version = 1
                 phase = 'prepared'
@@ -2311,6 +2355,7 @@ targets:
                 removed_services = 0
                 purged_state = $false
                 install_saw_retired_journal = $false
+                require_inactive_tombstone_adoption = $true
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 2
@@ -2352,9 +2397,25 @@ targets:
                 -Sources $sources `
                 -GatewayServiceName 'DefenseClawGateway' `
                 -GuardianServiceName 'DefenseClawHookGuardian')
+            $reinstalledMetadata =
+                Microsoft.PowerShell.Management\Get-Content `
+                    -LiteralPath $layout.MetadataPath `
+                    -Raw |
+                    Microsoft.PowerShell.Utility\ConvertFrom-Json
             Assert-Harness `
                 -Condition ([bool]$script:HarnessState.install_saw_retired_journal) `
                 -Message 'direct reinstall did not retire changed-identity journal before transaction'
+            Assert-Harness `
+                -Condition (
+                    $script:HarnessState.events.IndexOf(
+                        'codex-requirements:inspect:metadata-absent'
+                    ) -ge 0 -and
+                    (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $layout.MetadataPath `
+                        -PathType Leaf) -and
+                    [bool]$reinstalledMetadata.installed
+                ) `
+                -Message 'direct reinstall did not transactionally replace the inactive tombstone with active metadata'
             Assert-Harness `
                 -Condition (
                     [bool]$script:HarnessState.queued_restart_blocked -and

@@ -4573,6 +4573,92 @@ function Test-DefenseClawMetadataInstalled {
     return [bool]$Metadata.installed
 }
 
+function Remove-DefenseClawInactiveDeploymentMetadataForInstall {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][string]$SnapshotPath
+    )
+    if (Test-DefenseClawMetadataInstalled -Metadata $Metadata) {
+        throw 'refusing to adopt active deployment metadata during Install'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.MetadataPath `
+            -PathType Leaf)) {
+        throw 'inactive deployment metadata disappeared before transactional adoption'
+    }
+    Assert-DefenseClawNoReparsePath -Path $Layout.MetadataPath
+    Assert-DefenseClawDescendant `
+        -Path $SnapshotPath `
+        -Root $Layout.StateRoot `
+        -Label 'inactive-metadata adoption snapshot' |
+        Microsoft.PowerShell.Core\Out-Null
+    Assert-DefenseClawNoReparsePath -Path $SnapshotPath
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $metadataPath = [IO.Path]::GetFullPath(
+        [string]$Layout.MetadataPath
+    ).TrimEnd('\')
+    $metadataEntries = @(
+        @($snapshot.files) |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [IO.Path]::GetFullPath([string]$_.path).TrimEnd('\'),
+                    $metadataPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($metadataEntries.Count -ne 1) {
+        throw 'transaction snapshot does not contain exactly one inactive metadata preimage'
+    }
+    $entry = $metadataEntries[0]
+    $existedProperty = $entry.PSObject.Properties['existed']
+    $backupProperty = $entry.PSObject.Properties['backup']
+    if ($null -eq $existedProperty -or
+        $existedProperty.Value -isnot [bool] -or
+        -not [bool]$existedProperty.Value -or
+        $null -eq $backupProperty -or
+        [string]::IsNullOrWhiteSpace([string]$backupProperty.Value)) {
+        throw 'transaction snapshot did not preserve the inactive metadata preimage'
+    }
+    $backupPath = Assert-DefenseClawDescendant `
+        -Path ([string]$backupProperty.Value) `
+        -Root ([IO.Path]::GetDirectoryName($SnapshotPath)) `
+        -Label 'inactive metadata transaction preimage'
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $backupPath `
+            -PathType Leaf)) {
+        throw 'inactive metadata transaction preimage is missing'
+    }
+    Assert-DefenseClawNoReparsePath -Path $backupPath
+    $currentHash = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.MetadataPath `
+            -Algorithm SHA256
+    ).Hash
+    $backupHash = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $backupPath `
+            -Algorithm SHA256
+    ).Hash
+    if (-not [string]::Equals(
+            $currentHash,
+            $backupHash,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'inactive deployment metadata changed after its transaction snapshot'
+    }
+    Microsoft.PowerShell.Management\Remove-Item `
+        -LiteralPath $Layout.MetadataPath `
+        -Force
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.MetadataPath) {
+        throw 'inactive deployment metadata remained after transactional adoption'
+    }
+}
+
 function Assert-DefenseClawMetadataIdentity {
     param(
         [Parameter(Mandatory)]$Metadata,
@@ -11483,6 +11569,18 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -GuardianServiceName $GuardianServiceName `
         -IncludeCodexMachineState:$priorCodexTargetEnabled
     try {
+        if ($Action -eq 'Install' -and $null -ne $metadata) {
+            # The inactive uninstall tombstone remains the authority for
+            # exact-scope adoption until New-DefenseClawTransaction has
+            # durably copied it. Retire it only inside that transaction so
+            # the hidden requirements helper sees fresh-install state. A
+            # failed reinstall restores the exact tombstone preimage; a
+            # successful reinstall publishes new active metadata below.
+            Remove-DefenseClawInactiveDeploymentMetadataForInstall `
+                -Layout $Layout `
+                -Metadata $metadata `
+                -SnapshotPath $snapshot
+        }
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
         Stop-DefenseClawService -Name $Layout.BrokerServiceName

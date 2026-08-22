@@ -3312,6 +3312,48 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "purge_cases = @($purgeResults)" in smoke
 
 
+def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    helper_start = module.index(
+        "function Remove-DefenseClawInactiveDeploymentMetadataForInstall"
+    )
+    helper_end = module.index(
+        "function Assert-DefenseClawMetadataIdentity", helper_start
+    )
+    helper = module[helper_start:helper_end]
+    assert "transaction snapshot does not contain exactly one" in helper
+    assert "Get-FileHash" in helper
+    assert "changed after its transaction snapshot" in helper
+    assert "Remove-Item" in helper
+
+    lifecycle_start = module.index(
+        "function Invoke-DefenseClawInstallLikeLifecycle"
+    )
+    lifecycle_end = module.index(
+        "function Invoke-DefenseClawUninstallLifecycle", lifecycle_start
+    )
+    lifecycle = module[lifecycle_start:lifecycle_end]
+    transaction = lifecycle.index("$snapshot = New-DefenseClawTransaction")
+    adoption = lifecycle.index(
+        "Remove-DefenseClawInactiveDeploymentMetadataForInstall"
+    )
+    inspection = lifecycle.index(
+        "Invoke-DefenseClawCodexRequirementsCommand", adoption
+    )
+    active_metadata = lifecycle.index(
+        "Write-DefenseClawJsonAtomic -Value $newMetadata", inspection
+    )
+    assert transaction < adoption < inspection < active_metadata
+
+    assert "codex-requirements:inspect:metadata-absent" in smoke
+    assert (
+        "direct reinstall did not transactionally replace the inactive tombstone"
+        in smoke
+    )
+
+
 def test_certification_cleanup_handles_partial_profiles_and_empty_parents() -> None:
     harness = read(HARNESS)
     profile_cleanup = harness[
