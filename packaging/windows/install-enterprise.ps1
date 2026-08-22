@@ -1866,16 +1866,27 @@ function ConvertTo-DefenseClawCodexWinGetVersion {
 
     if ($Value -isnot [string]) { return '' }
     $version = ([string]$Value).Trim()
-    if ($version.Length -eq 0 -or $version.Length -gt 64 -or
-        $version -cnotmatch '^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.([0-9]+))?$') {
+    if ($version.Length -eq 0 -or $version.Length -gt 64) {
         return ''
     }
-    if ($Matches[4] -and $Matches[4] -cne '0') { return '' }
+    # Do not depend on PowerShell's automatic $Matches variable here.
+    # `-cnotmatch` does not provide stable capture state across PowerShell
+    # editions, and a stale capture would make a valid signed PE fail closed.
+    $versionMatch = [regex]::Match(
+        $version,
+        '^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.([0-9]+))?$',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    if (-not $versionMatch.Success) { return '' }
+    if ($versionMatch.Groups[4].Success -and
+        $versionMatch.Groups[4].Value -cne '0') {
+        return ''
+    }
     try {
         $parsed = [Version]::new(
-            [int]$Matches[1],
-            [int]$Matches[2],
-            [int]$Matches[3]
+            [int]$versionMatch.Groups[1].Value,
+            [int]$versionMatch.Groups[2].Value,
+            [int]$versionMatch.Groups[3].Value
         )
     }
     catch {

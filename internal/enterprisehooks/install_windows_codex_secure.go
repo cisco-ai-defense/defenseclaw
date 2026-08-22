@@ -130,7 +130,11 @@ func installWindowsCodexManagedResult(
 				}
 				return cause
 			}
-			if err := os.MkdirAll(transaction.hookDir, 0o700); err != nil {
+			if err := ensureWindowsTargetOwnedDirectoryTree(
+				transaction.home,
+				transaction.hookDir,
+				transaction.targetSID,
+			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: create Codex managed runtime: %w", err))
 			}
 			if err := connector.ReconcileManagedNativeHookRuntime(

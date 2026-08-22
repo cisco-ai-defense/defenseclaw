@@ -1520,6 +1520,20 @@ try {
             )
             $script:HarnessState.events.Add('managed-core-acls')
         }
+        function script:Set-DefenseClawRetainedRuntimeAcls {
+            param(
+                [Parameter(Mandatory)][string]$RuntimeDirectory,
+                [Parameter(Mandatory)][string]$GatewayServiceSID
+            )
+            if (-not [string]::Equals(
+                    $RuntimeDirectory,
+                    [string]$script:HarnessState.layout.RuntimeDirectory,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or $GatewayServiceSID -cne 'S-1-5-80-1234') {
+                throw 'retained runtime ACL mock received the wrong identity'
+            }
+            $script:HarnessState.events.Add('retained-runtime-acls')
+        }
         function script:Initialize-DefenseClawManagedIPCDirectory {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
@@ -2215,6 +2229,9 @@ targets:
                 $managedIPC = $script:HarnessState.events.IndexOf(
                     'managed-ipc-directory'
                 )
+                $retainedRuntimeAcls = $script:HarnessState.events.IndexOf(
+                    'retained-runtime-acls'
+                )
                 $coreAcls = $script:HarnessState.events.IndexOf(
                     'managed-core-acls'
                 )
@@ -2230,7 +2247,8 @@ targets:
                         $transaction -ge 0 -and
                         $services -gt $transaction -and
                         $managedIPC -gt $services -and
-                        $coreAcls -gt $managedIPC -and
+                        $retainedRuntimeAcls -gt $managedIPC -and
+                        $coreAcls -gt $retainedRuntimeAcls -and
                         $capture -gt $coreAcls
                     ) `
                     -Message (
@@ -2238,6 +2256,7 @@ targets:
                         'transaction/service/IPC/ACL/snapshot ordering ' +
                         "(transaction=$transaction services=$services " +
                         "managed_ipc=$managedIPC core_acls=$coreAcls " +
+                        "retained_runtime_acls=$retainedRuntimeAcls " +
                         "capture=$capture; " +
                         "failure=$failure; events=[$eventTrace])"
                     )

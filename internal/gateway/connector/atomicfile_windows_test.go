@@ -55,6 +55,36 @@ func TestAtomicPrivateTempPinsEffectiveUserOwnerAtCreation(t *testing.T) {
 	}
 }
 
+func TestAtomicPrivateTempProtectionUsesLockedCreationHandle(t *testing.T) {
+	dir := t.TempDir()
+	file, path, err := atomicFileCreateTemp(dir, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	})
+
+	// The create handle excludes write sharing. A path-based DACL update would
+	// therefore fail against our own still-open handle, which is the regression
+	// this test guards. Protection validation must use the authenticated handle.
+	reopened, reopenErr := os.OpenFile(path, os.O_RDWR, 0)
+	if reopenErr == nil {
+		_ = reopened.Close()
+		t.Fatal("private staging handle unexpectedly permitted a write reopen")
+	}
+	if !errors.Is(reopenErr, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("write reopen error=%v, want ERROR_SHARING_VIOLATION", reopenErr)
+	}
+	if err := atomicFileValidateStagedProtection(file, 0o600); err != nil {
+		t.Fatalf("handle-bound private protection validation: %v", err)
+	}
+	if _, err := file.Write([]byte("managed\n")); err != nil {
+		t.Fatalf("write through authenticated creation handle: %v", err)
+	}
+}
+
 func TestAtomicWriteAcceptsVerifiedStateAfterVisibleLateReplaceFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	data := []byte("managed\n")

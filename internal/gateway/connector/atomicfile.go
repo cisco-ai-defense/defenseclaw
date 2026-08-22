@@ -23,8 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // atomicWriteFile writes data to a temp file in the same directory and then
@@ -86,18 +84,15 @@ func atomicWriteFileWithPublisher(
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
-		if err := safefile.ProtectFile(tmpPath); err != nil {
-			tmp.Close()
-			os.Remove(tmpPath)
-			return fmt.Errorf("protect temp file: %w", err)
-		}
-		// ProtectFile must address the file opened by CreateTemp. Verify that
-		// exact handle before placing any sensitive bytes into it so a pathname
-		// swap cannot redirect the protection operation to a different file.
+		// atomicFileCreateTemp creates private Windows files with their final
+		// owner and protected DACL in the handle-bound NtCreateFile operation.
+		// Validate that same handle before writing sensitive bytes. Do not reopen
+		// the pathname here: the staging handle deliberately denies write sharing,
+		// so a path-based protection pass would conflict with our own handle.
 		if err := atomicFileValidateStagedProtection(tmp, perm); err != nil {
 			tmp.Close()
 			os.Remove(tmpPath)
-			return fmt.Errorf("validate protected temp file: %w", err)
+			return fmt.Errorf("validate private temp file: %w", err)
 		}
 	}
 

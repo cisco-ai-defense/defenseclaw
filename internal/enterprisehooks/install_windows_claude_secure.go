@@ -214,7 +214,11 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			}
 			return cause
 		}
-		if err := os.MkdirAll(transaction.hookDir, 0o700); err != nil {
+		if err := ensureWindowsTargetOwnedDirectoryTree(
+			transaction.home,
+			transaction.hookDir,
+			transaction.targetSID,
+		); err != nil {
 			return fail(fmt.Errorf("enterprise hooks: create per-user hook runtime: %w", err))
 		}
 		if err := connector.WriteHookScriptsForConnectorObjectWithOpts(transaction.hookDir, setup, conn); err != nil {
