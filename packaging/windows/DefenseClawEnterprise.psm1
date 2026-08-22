@@ -7549,6 +7549,18 @@ function Wait-DefenseClawEnterpriseReadiness {
     throw "enterprise readiness timed out: broker_ready=$brokerReady gateway_ready=$gatewayReady guardian_ready=$guardianReady"
 }
 
+function Get-DefenseClawOptionalPropertyValues {
+    param(
+        [Parameter(Mandatory)][object]$Properties,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $property = $Properties.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return
+    }
+    return @($property.Value)
+}
+
 function Assert-DefenseClawServiceConfiguration {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -7557,7 +7569,7 @@ function Assert-DefenseClawServiceConfiguration {
         [Parameter(Mandatory)][string]$ExpectedDisplayName,
         [Parameter(Mandatory)][int]$ExpectedSidType,
         [Parameter(Mandatory)][string[]]$ExpectedPrivileges,
-        [Parameter(Mandatory)][string[]]$ExpectedEnvironment,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ExpectedEnvironment,
         [string[]]$ExpectedDependencies = @(),
         [ValidateSet(2, 3, 4)]
         [int[]]$ExpectedStartMode = @(2)
@@ -7599,7 +7611,7 @@ function Assert-DefenseClawServiceConfiguration {
         }
     }
     $actualDependencies = @(
-        $properties.DependOnService |
+        Get-DefenseClawOptionalPropertyValues -Properties $properties -Name 'DependOnService' |
             Microsoft.PowerShell.Core\Where-Object {
                 -not [string]::IsNullOrWhiteSpace([string]$_)
             } |
@@ -7628,7 +7640,11 @@ function Assert-DefenseClawServiceConfiguration {
     if ([int]$properties.FailureActionsOnNonCrashFailures -ne 1) {
         throw "service $Name does not recover non-crash failures"
     }
-    $actualEnvironment = @($properties.Environment | Microsoft.PowerShell.Core\ForEach-Object { [string]$_ } | Microsoft.PowerShell.Utility\Sort-Object)
+    $actualEnvironment = @(
+        Get-DefenseClawOptionalPropertyValues -Properties $properties -Name 'Environment' |
+            Microsoft.PowerShell.Core\ForEach-Object { [string]$_ } |
+            Microsoft.PowerShell.Utility\Sort-Object
+    )
     $wantedEnvironment = @($ExpectedEnvironment | Microsoft.PowerShell.Utility\Sort-Object)
     if (($actualEnvironment -join "`n") -cne ($wantedEnvironment -join "`n")) {
         throw "service $Name environment pin drift"

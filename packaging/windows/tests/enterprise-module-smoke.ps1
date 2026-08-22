@@ -319,6 +319,42 @@ namespace DefenseClaw.Windows.Tests
 }
 
 & $module {
+    $missingServiceName = 'DefenseClawEmptyEnvironmentFixture_' +
+        [Guid]::NewGuid().ToString('N')
+    $emptyEnvironmentAccepted = $false
+    try {
+        Assert-DefenseClawServiceConfiguration `
+            -Name $missingServiceName `
+            -ExpectedImage 'unused' `
+            -ExpectedAccount 'unused' `
+            -ExpectedDisplayName 'unused' `
+            -ExpectedSidType 1 `
+            -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
+            -ExpectedEnvironment @()
+    }
+    catch {
+        $expectedMissingService = "required Windows service is missing: $missingServiceName"
+        if ([string]$_.Exception.Message -cne $expectedMissingService) {
+            throw
+        }
+        $emptyEnvironmentAccepted = $true
+    }
+    if (-not $emptyEnvironmentAccepted) {
+        throw 'service verification did not accept an empty expected environment'
+    }
+
+    $missingRegistryProperties = [pscustomobject]@{
+        ImagePath = 'unused'
+    }
+    if (@(Get-DefenseClawOptionalPropertyValues `
+            -Properties $missingRegistryProperties `
+            -Name 'DependOnService').Count -ne 0 -or
+        @(Get-DefenseClawOptionalPropertyValues `
+            -Properties $missingRegistryProperties `
+            -Name 'Environment').Count -ne 0) {
+        throw 'missing service array properties were not normalized to empty arrays'
+    }
+
     $argumentFixture = [string[]]@(
         'config',
         'DefenseClawGateway',
@@ -968,6 +1004,8 @@ if (-not [bool]$teardownFailurePreserved) {
     fixed_native_helper_spoof_ignored = $true
     command_line_empty_argument_round_trip = $true
     command_line_invalid_arguments_rejected = $true
+    service_empty_environment_binding = $true
+    service_missing_array_properties_normalized = $true
     teardown_failure_diagnostic_preserved = $teardownFailurePreserved
     production_codex_home_absent = $true
     certification_codex_home_exact = $true

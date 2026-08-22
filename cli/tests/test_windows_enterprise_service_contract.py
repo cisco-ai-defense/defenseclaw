@@ -1205,6 +1205,8 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "fixed_native_helper_spoof_ignored",
                 "command_line_empty_argument_round_trip",
                 "command_line_invalid_arguments_rejected",
+                "service_empty_environment_binding",
+                "service_missing_array_properties_normalized",
                 "certification_scope_rejections",
                 "lifecycle_file_lock_reuse_stable",
             ),
