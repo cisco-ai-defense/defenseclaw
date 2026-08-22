@@ -120,6 +120,7 @@ foreach ($engineModuleName in @(
 }
 
 $script:SystemSID = 'S-1-5-18'
+$script:OwnerRightsSID = 'S-1-3-4'
 $script:AdministratorsSID = 'S-1-5-32-544'
 $script:UsersSID = 'S-1-5-32-545'
 $script:AuthenticatedUsersSID = 'S-1-5-11'
@@ -189,6 +190,41 @@ namespace $nativeNamespace
             internal uint NumberOfLinks;
             internal uint FileIndexHigh;
             internal uint FileIndexLow;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LUID
+        {
+            internal uint LowPart;
+            internal int HighPart;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LUID_AND_ATTRIBUTES
+        {
+            internal LUID Luid;
+            internal uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_PRIVILEGES
+        {
+            internal uint PrivilegeCount;
+            internal LUID_AND_ATTRIBUTES Privileges;
+        }
+
+        public sealed class RegularFileSecuritySnapshot
+        {
+            public string Identity { get; private set; }
+            public byte[] SecurityDescriptor { get; private set; }
+
+            internal RegularFileSecuritySnapshot(
+                string identity,
+                byte[] securityDescriptor)
+            {
+                Identity = identity;
+                SecurityDescriptor = securityDescriptor;
+            }
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -299,6 +335,75 @@ namespace $nativeNamespace
             out IntPtr dacl,
             out IntPtr sacl,
             out IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint SetSecurityInfo(
+            IntPtr handle,
+            int objectType,
+            uint securityInformation,
+            IntPtr owner,
+            IntPtr group,
+            IntPtr dacl,
+            IntPtr sacl);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSecurityDescriptorOwner(
+            IntPtr securityDescriptor,
+            out IntPtr owner,
+            [MarshalAs(UnmanagedType.Bool)] out bool ownerDefaulted);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSecurityDescriptorGroup(
+            IntPtr securityDescriptor,
+            out IntPtr group,
+            [MarshalAs(UnmanagedType.Bool)] out bool groupDefaulted);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSecurityDescriptorDacl(
+            IntPtr securityDescriptor,
+            [MarshalAs(UnmanagedType.Bool)] out bool daclPresent,
+            out IntPtr dacl,
+            [MarshalAs(UnmanagedType.Bool)] out bool daclDefaulted);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool OpenProcessToken(
+            IntPtr process,
+            uint desiredAccess,
+            out IntPtr token);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LookupPrivilegeValueW(
+            string systemName,
+            string name,
+            out LUID luid);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AdjustTokenPrivileges(
+            IntPtr token,
+            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+            ref TOKEN_PRIVILEGES newState,
+            uint bufferLength,
+            out TOKEN_PRIVILEGES previousState,
+            out uint returnLength);
+
+        [DllImport("advapi32.dll", EntryPoint = "AdjustTokenPrivileges", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool RestoreTokenPrivileges(
+            IntPtr token,
+            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+            ref TOKEN_PRIVILEGES newState,
+            uint bufferLength,
+            IntPtr previousState,
+            IntPtr returnLength);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         private static extern uint GetSecurityDescriptorLength(
@@ -756,6 +861,367 @@ namespace $nativeNamespace
             finally
             {
                 CloseHandle(handle);
+            }
+        }
+
+        private static string FileIdentity(
+            BY_HANDLE_FILE_INFORMATION information)
+        {
+            return String.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "{0:x8}:{1:x8}{2:x8}",
+                information.VolumeSerialNumber,
+                information.FileIndexHigh,
+                information.FileIndexLow);
+        }
+
+        private static void ValidateFixedRegularFile(
+            BY_HANDLE_FILE_INFORMATION information,
+            uint expectedSize,
+            string path)
+        {
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            if ((information.FileAttributes &
+                    (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+                throw new InvalidOperationException(
+                    "managed secret is not a no-follow regular file: " + path);
+            if (information.NumberOfLinks != 1)
+                throw new InvalidOperationException(
+                    "managed secret must have exactly one hard link: " + path);
+            ulong size = ((ulong)information.FileSizeHigh << 32) |
+                (ulong)information.FileSizeLow;
+            if (size != expectedSize)
+                throw new InvalidOperationException(
+                    "managed secret has an invalid fixed length: " + path);
+        }
+
+        private static byte[] GetFileSecurityDescriptorFromHandle(
+            IntPtr handle,
+            string path)
+        {
+            const int SE_FILE_OBJECT = 1;
+            const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+            const uint GROUP_SECURITY_INFORMATION = 0x00000002;
+            const uint DACL_SECURITY_INFORMATION = 0x00000004;
+            const ushort SE_SELF_RELATIVE = 0x8000;
+            const int ERROR_INSUFFICIENT_BUFFER = 122;
+            IntPtr owner;
+            IntPtr group;
+            IntPtr dacl;
+            IntPtr sacl;
+            IntPtr descriptor;
+            uint result = GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION |
+                    GROUP_SECURITY_INFORMATION |
+                    DACL_SECURITY_INFORMATION,
+                out owner,
+                out group,
+                out dacl,
+                out sacl,
+                out descriptor);
+            if (result != 0)
+                throw new Win32Exception(
+                    checked((int)result),
+                    "query managed secret security failed: " + path);
+            if (descriptor == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    "managed secret security query returned null: " + path);
+            try
+            {
+                ushort control;
+                uint revision;
+                if (!GetSecurityDescriptorControl(
+                    descriptor,
+                    out control,
+                    out revision))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query managed secret security control failed: " + path);
+                if ((control & SE_SELF_RELATIVE) != 0)
+                {
+                    uint length = GetSecurityDescriptorLength(descriptor);
+                    if (length == 0 || length > 1048576)
+                        throw new InvalidOperationException(
+                            "managed secret security length is invalid: " + path);
+                    byte[] bytes = new byte[checked((int)length)];
+                    Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+                    return bytes;
+                }
+                uint required = 0;
+                if (MakeSelfRelativeSD(descriptor, null, ref required))
+                    throw new InvalidOperationException(
+                        "managed secret security conversion returned no size: " + path);
+                int conversionError = Marshal.GetLastWin32Error();
+                if (conversionError != ERROR_INSUFFICIENT_BUFFER ||
+                    required == 0 ||
+                    required > 1048576)
+                    throw new Win32Exception(
+                        conversionError,
+                        "size managed secret security failed: " + path);
+                byte[] relative = new byte[checked((int)required)];
+                if (!MakeSelfRelativeSD(descriptor, relative, ref required))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "convert managed secret security failed: " + path);
+                if (required != relative.Length)
+                    throw new InvalidOperationException(
+                        "managed secret security conversion changed length: " + path);
+                return relative;
+            }
+            finally
+            {
+                LocalFree(descriptor);
+            }
+        }
+
+        private static IntPtr OpenFixedRegularFileSecurity(
+            string path,
+            uint desiredAccess,
+            uint expectedSize,
+            out BY_HANDLE_FILE_INFORMATION information)
+        {
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            IntPtr handle = CreateFileW(
+                path,
+                desiredAccess,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "open managed secret metadata failed: " + path);
+            try
+            {
+                if (!GetFileInformationByHandle(handle, out information))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query managed secret identity failed: " + path);
+                ValidateFixedRegularFile(information, expectedSize, path);
+                return handle;
+            }
+            catch
+            {
+                CloseHandle(handle);
+                throw;
+            }
+        }
+
+        public static RegularFileSecuritySnapshot
+            GetRegularFileSecuritySnapshotNoFollow(
+                string path,
+                uint expectedSize)
+        {
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint READ_CONTROL = 0x00020000;
+            BY_HANDLE_FILE_INFORMATION information;
+            IntPtr handle = OpenFixedRegularFileSecurity(
+                path,
+                FILE_READ_ATTRIBUTES | READ_CONTROL,
+                expectedSize,
+                out information);
+            try
+            {
+                return new RegularFileSecuritySnapshot(
+                    FileIdentity(information),
+                    GetFileSecurityDescriptorFromHandle(handle, path));
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
+        public static RegularFileSecuritySnapshot
+            SetRegularFileSecurityDescriptorNoFollow(
+                string path,
+                string sddl,
+                uint expectedSize,
+                string expectedIdentity)
+        {
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint READ_CONTROL = 0x00020000;
+            const uint WRITE_DAC = 0x00040000;
+            const uint WRITE_OWNER = 0x00080000;
+            const int SE_FILE_OBJECT = 1;
+            const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+            const uint GROUP_SECURITY_INFORMATION = 0x00000002;
+            const uint DACL_SECURITY_INFORMATION = 0x00000004;
+            const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+            const uint TOKEN_ADJUST_PRIVILEGES = 0x00000020;
+            const uint TOKEN_QUERY = 0x00000008;
+            const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+            const int ERROR_NOT_ALL_ASSIGNED = 1300;
+
+            IntPtr descriptor;
+            SECURITY_ATTRIBUTES ignored = SecurityAttributes(
+                sddl,
+                out descriptor);
+            try
+            {
+                IntPtr owner;
+                IntPtr group;
+                IntPtr dacl;
+                bool ownerDefaulted;
+                bool groupDefaulted;
+                bool daclPresent;
+                bool daclDefaulted;
+                if (!GetSecurityDescriptorOwner(
+                        descriptor,
+                        out owner,
+                        out ownerDefaulted) ||
+                    owner == IntPtr.Zero)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "managed secret descriptor has no owner");
+                if (!GetSecurityDescriptorGroup(
+                        descriptor,
+                        out group,
+                        out groupDefaulted) ||
+                    group == IntPtr.Zero)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "managed secret descriptor has no group");
+                if (!GetSecurityDescriptorDacl(
+                        descriptor,
+                        out daclPresent,
+                        out dacl,
+                        out daclDefaulted) ||
+                    !daclPresent ||
+                    dacl == IntPtr.Zero)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "managed secret descriptor has no DACL");
+
+                BY_HANDLE_FILE_INFORMATION before;
+                IntPtr handle = OpenFixedRegularFileSecurity(
+                    path,
+                    FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+                    expectedSize,
+                    out before);
+                try
+                {
+                    string beforeIdentity = FileIdentity(before);
+                    if (!String.Equals(
+                            beforeIdentity,
+                            expectedIdentity,
+                            StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            "managed secret identity changed before security update: " + path);
+
+                    IntPtr token;
+                    if (!OpenProcessToken(
+                            GetCurrentProcess(),
+                            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                            out token))
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "open installer token for managed secret owner update failed");
+                    uint setResult = 0;
+                    int restoreError = 0;
+                    try
+                    {
+                        LUID restoreLuid;
+                        if (!LookupPrivilegeValueW(
+                                null,
+                                "SeRestorePrivilege",
+                                out restoreLuid))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "resolve SeRestorePrivilege failed");
+                        TOKEN_PRIVILEGES enabled = new TOKEN_PRIVILEGES();
+                        enabled.PrivilegeCount = 1;
+                        enabled.Privileges.Luid = restoreLuid;
+                        enabled.Privileges.Attributes = SE_PRIVILEGE_ENABLED;
+                        TOKEN_PRIVILEGES previous;
+                        uint previousLength;
+                        if (!AdjustTokenPrivileges(
+                                token,
+                                false,
+                                ref enabled,
+                                checked((uint)Marshal.SizeOf(typeof(TOKEN_PRIVILEGES))),
+                                out previous,
+                                out previousLength))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "enable SeRestorePrivilege failed");
+                        int enableError = Marshal.GetLastWin32Error();
+                        if (enableError == ERROR_NOT_ALL_ASSIGNED)
+                            throw new Win32Exception(
+                                enableError,
+                                "installer token lacks SeRestorePrivilege");
+                        try
+                        {
+                            setResult = SetSecurityInfo(
+                                handle,
+                                SE_FILE_OBJECT,
+                                OWNER_SECURITY_INFORMATION |
+                                    GROUP_SECURITY_INFORMATION |
+                                    DACL_SECURITY_INFORMATION |
+                                    PROTECTED_DACL_SECURITY_INFORMATION,
+                                owner,
+                                group,
+                                dacl,
+                                IntPtr.Zero);
+                        }
+                        finally
+                        {
+                            if (!RestoreTokenPrivileges(
+                                    token,
+                                    false,
+                                    ref previous,
+                                    0,
+                                    IntPtr.Zero,
+                                    IntPtr.Zero))
+                                restoreError = Marshal.GetLastWin32Error();
+                        }
+                    }
+                    finally
+                    {
+                        CloseHandle(token);
+                    }
+                    if (restoreError != 0)
+                        throw new Win32Exception(
+                            restoreError,
+                            "restore installer token privileges failed");
+                    if (setResult != 0)
+                        throw new Win32Exception(
+                            checked((int)setResult),
+                            "set managed secret owner and DACL failed: " + path);
+
+                    BY_HANDLE_FILE_INFORMATION after;
+                    if (!GetFileInformationByHandle(handle, out after))
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "recheck managed secret identity failed: " + path);
+                    ValidateFixedRegularFile(after, expectedSize, path);
+                    string afterIdentity = FileIdentity(after);
+                    if (!String.Equals(
+                            beforeIdentity,
+                            afterIdentity,
+                            StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            "managed secret identity changed during security update: " + path);
+                    return new RegularFileSecuritySnapshot(
+                        afterIdentity,
+                        GetFileSecurityDescriptorFromHandle(handle, path));
+                }
+                finally
+                {
+                    CloseHandle(handle);
+                }
+            }
+            finally
+            {
+                LocalFree(descriptor);
             }
         }
 
@@ -1837,11 +2303,63 @@ function Get-DefenseClawServiceSID {
     }
 }
 
+function Get-DefenseClawDeterministicServiceSID {
+    param([Parameter(Mandatory)][string]$ServiceName)
+    Assert-DefenseClawServiceName -Name $ServiceName
+    # `sc.exe showsid` computes the S-1-5-80 virtual-service SID from the
+    # service name even when the SCM row is missing. This lets authenticated
+    # active-deployment repair validate a service-owned secret before safely
+    # recreating the service; fresh/inactive installs never use this path.
+    $lines = @(Invoke-DefenseClawNative `
+        -File $script:ScExe `
+        -Arguments @('showsid', $ServiceName) `
+        -Capture)
+    $matches = [regex]::Matches(
+        ($lines -join "`n"),
+        '(?<![0-9-])S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}(?![0-9-])',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    $values = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($match in $matches) {
+        [void]$values.Add([string]$match.Value)
+    }
+    if ($values.Count -ne 1) {
+        throw "sc.exe showsid did not return exactly one virtual-service SID for $ServiceName"
+    }
+    $value = @($values)[0]
+    try {
+        $sid = [Security.Principal.SecurityIdentifier]::new($value)
+    }
+    catch {
+        throw "sc.exe showsid returned an invalid SID for $ServiceName"
+    }
+    if (-not $sid.Value.StartsWith('S-1-5-80-', [StringComparison]::Ordinal)) {
+        throw "sc.exe showsid returned a SID outside the NT SERVICE authority for $ServiceName"
+    }
+    if (Test-DefenseClawServiceExists -Name $ServiceName) {
+        $resolved = Get-DefenseClawServiceSID -ServiceName $ServiceName
+        if ($resolved -cne $sid.Value) {
+            throw "resolved and deterministic service SIDs disagree for $ServiceName"
+        }
+    }
+    return $sid.Value
+}
+
+function Get-DefenseClawServiceSIDForRecovery {
+    param([Parameter(Mandatory)][string]$ServiceName)
+    if (Test-DefenseClawServiceExists -Name $ServiceName) {
+        return Get-DefenseClawServiceSID -ServiceName $ServiceName
+    }
+    return Get-DefenseClawDeterministicServiceSID -ServiceName $ServiceName
+}
+
 function New-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][bool]$IsDirectory,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -1860,6 +2378,24 @@ function New-DefenseClawCanonicalPathAcl {
     )
     if ($IsDirectory -ne ($Kind -in $directoryKinds)) {
         throw "ACL kind $Kind does not match the managed path object type"
+    }
+
+    if ($Kind -eq 'RuntimeSecretFile') {
+        # The correlation key is a persistent service secret, not an ordinary
+        # writable runtime file. OWNER RIGHTS suppresses the file owner's
+        # implicit WRITE_DAC while preserving READ_CONTROL; the exact gateway
+        # service SID receives read-only data access. Setup can replace this
+        # descriptor only through the no-follow, privilege-scoped native path
+        # in Set-DefenseClawPathAcl.
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $security.SetSecurityDescriptorSddlForm(
+            ((
+                'O:{0}G:BAD:P(A;;RC;;;{1})(A;;FA;;;SY)' +
+                '(A;;FA;;;BA)(A;;FR;;;{0})'
+            ) -f $GatewayServiceSID, $script:OwnerRightsSID),
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        return $security
     }
 
     $security = if ($IsDirectory) {
@@ -2021,7 +2557,10 @@ function Test-DefenseClawExactRawDACL {
         [Parameter(Mandatory)]
         [Security.AccessControl.RawSecurityDescriptor]$Actual,
         [Parameter(Mandatory)]
-        [Security.AccessControl.RawSecurityDescriptor]$Expected
+        [Security.AccessControl.RawSecurityDescriptor]$Expected,
+        [int]$IgnoredControlFlags = [int](
+            [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
+        )
     )
 
     # NTFS may persist a protected DACL with the benign AutoInherited (AI)
@@ -2030,14 +2569,11 @@ function Test-DefenseClawExactRawDACL {
     # descriptor control flag and the raw DACL bytes to match exactly. RawAcl
     # equality preserves ACE order, revision, type, flags, mask, SID, and
     # duplicates; it cannot hide an unrecognized or inherited ACE.
-    $ignoredFlag = [int](
-        [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
-    )
     $actualFlags = (
-        [int]$Actual.ControlFlags -band (-bnot $ignoredFlag)
+        [int]$Actual.ControlFlags -band (-bnot $IgnoredControlFlags)
     )
     $expectedFlags = (
-        [int]$Expected.ControlFlags -band (-bnot $ignoredFlag)
+        [int]$Expected.ControlFlags -band (-bnot $IgnoredControlFlags)
     )
     if ($actualFlags -ne $expectedFlags) {
         return $false
@@ -2063,6 +2599,90 @@ function Test-DefenseClawExactRawDACL {
     return $true
 }
 
+function Assert-DefenseClawCanonicalRawPathAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected
+    )
+    $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $Expected.GetSecurityDescriptorBinaryForm(),
+        0
+    )
+    $protectedFlag = [int](
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    )
+    if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
+        throw "managed DACL is not protected after exact ACL replacement: $Path"
+    }
+    $ownerSID = if ($null -eq $Actual.Owner) {
+        ''
+    }
+    else {
+        $Actual.Owner.Value
+    }
+    $groupSID = if ($null -eq $Actual.Group) {
+        ''
+    }
+    else {
+        $Actual.Group.Value
+    }
+    $expectedOwnerSID = if ($null -eq $expectedDescriptor.Owner) {
+        ''
+    }
+    else {
+        $expectedDescriptor.Owner.Value
+    }
+    $expectedGroupSID = if ($null -eq $expectedDescriptor.Group) {
+        ''
+    }
+    else {
+        $expectedDescriptor.Group.Value
+    }
+    if ($ownerSID -cne $expectedOwnerSID -or
+        $groupSID -cne $expectedGroupSID) {
+        throw (
+            'managed path owner/group do not match the exact canonical ' +
+            "descriptor after ACL replacement: $Path"
+        )
+    }
+    if (-not (Test-DefenseClawExactRawDACL `
+        -Actual $Actual `
+        -Expected $expectedDescriptor)) {
+        throw "managed path does not have the exact canonical DACL: $Path"
+    }
+}
+
+function Test-DefenseClawCanonicalRawPathAcl {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected
+    )
+    $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $Expected.GetSecurityDescriptorBinaryForm(),
+        0
+    )
+    $protectedFlag = [int](
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    )
+    if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
+        return $false
+    }
+    if ($null -eq $Actual.Owner -or
+        $null -eq $Actual.Group -or
+        $null -eq $expectedDescriptor.Owner -or
+        $null -eq $expectedDescriptor.Group -or
+        $Actual.Owner.Value -cne $expectedDescriptor.Owner.Value -or
+        $Actual.Group.Value -cne $expectedDescriptor.Group.Value) {
+        return $false
+    }
+    return [bool](Test-DefenseClawExactRawDACL `
+        -Actual $Actual `
+        -Expected $expectedDescriptor)
+}
+
 function Assert-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -2074,47 +2694,17 @@ function Assert-DefenseClawCanonicalPathAcl {
         $nativeSecurity::GetFileSecurityDescriptor($Path),
         0
     )
-    $protectedFlag = [int](
-        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
-    )
-    if (([int]$actualDescriptor.ControlFlags -band $protectedFlag) -eq 0) {
-        throw "managed DACL is not protected after exact ACL replacement: $Path"
-    }
-    $ownerSID = if ($null -eq $actualDescriptor.Owner) {
-        ''
-    }
-    else {
-        $actualDescriptor.Owner.Value
-    }
-    $groupSID = if ($null -eq $actualDescriptor.Group) {
-        ''
-    }
-    else {
-        $actualDescriptor.Group.Value
-    }
-    if ($ownerSID -ne $script:AdministratorsSID -or
-        $groupSID -ne $script:AdministratorsSID) {
-        throw (
-            'managed path owner/group are not the canonical Administrators ' +
-            "SID after exact ACL replacement: $Path"
-        )
-    }
-    $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
-        $Expected.GetSecurityDescriptorBinaryForm(),
-        0
-    )
-    if (-not (Test-DefenseClawExactRawDACL `
+    Assert-DefenseClawCanonicalRawPathAcl `
+        -Path $Path `
         -Actual $actualDescriptor `
-        -Expected $expectedDescriptor)) {
-        throw "managed path does not have the exact canonical DACL: $Path"
-    }
+        -Expected $Expected
 }
 
 function Set-DefenseClawPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -2129,6 +2719,33 @@ function Set-DefenseClawPathAcl {
         -IsDirectory $isDirectory `
         -Kind $Kind `
         -GatewayServiceSID $GatewayServiceSID
+    if ($Kind -eq 'RuntimeSecretFile') {
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+            $Path,
+            [uint32]32
+        )
+        $sddl = $security.GetSecurityDescriptorSddlForm(
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        $after = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+            $Path,
+            $sddl,
+            [uint32]32,
+            [string]$before.Identity
+        )
+        if ([string]$after.Identity -cne [string]$before.Identity) {
+            throw "managed secret identity changed during ACL replacement: $Path"
+        }
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $Path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$after.SecurityDescriptor,
+                0
+            )) `
+            -Expected $security
+        return
+    }
     Microsoft.PowerShell.Security\Set-Acl `
         -LiteralPath $Path `
         -AclObject $security `
@@ -4010,6 +4627,10 @@ function Set-DefenseClawRetainedRuntimeAcls {
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
     $root = [IO.Path]::GetFullPath($RuntimeDirectory).TrimEnd('\')
+    $redactionKeyPath = [IO.Path]::Combine(
+        $root,
+        'redaction-correlation.key'
+    )
     if (-not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $root `
             -PathType Container)) {
@@ -4064,9 +4685,23 @@ function Set-DefenseClawRetainedRuntimeAcls {
             if ($linkCount -ne 1) {
                 throw "refusing retained runtime file with $linkCount hard links: $full"
             }
+            $isRedactionKey = [string]::Equals(
+                $full,
+                $redactionKeyPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+            if ($isRedactionKey -and [int64]$item.Length -ne 32) {
+                throw "retained redaction correlation key has an invalid fixed length: $full"
+            }
             $files.Add([pscustomobject]@{
                 path = $full
                 identity = ([string]$nativeSecurity::GetFileIdentity($full)).ToLowerInvariant()
+                kind = $(if ($isRedactionKey) {
+                    'RuntimeSecretFile'
+                }
+                else {
+                    'RuntimeFile'
+                })
             })
         }
     }
@@ -4093,7 +4728,7 @@ function Set-DefenseClawRetainedRuntimeAcls {
         }
         Set-DefenseClawPathAcl `
             -Path $path `
-            -Kind RuntimeFile `
+            -Kind ([string]$file.kind) `
             -GatewayServiceSID $GatewayServiceSID
         Assert-DefenseClawNoReparsePath -Path $path
         $identityAfter = ([string]$nativeSecurity::GetFileIdentity($path)).ToLowerInvariant()
@@ -4102,6 +4737,489 @@ function Set-DefenseClawRetainedRuntimeAcls {
             throw "retained runtime file changed while its ACL was adopted: $path"
         }
     }
+}
+
+function New-DefenseClawLegacyRedactionKeyAcl {
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceSID,
+        [string]$GroupSID = $script:AdministratorsSID
+    )
+    $legacy = [Security.AccessControl.FileSecurity]::new()
+    $legacy.SetSecurityDescriptorSddlForm(
+        ((
+            'O:{0}G:{1}D:P(A;;FA;;;{0})' +
+            '(A;;FA;;;SY)(A;;FA;;;BA)'
+        ) -f $GatewayServiceSID, $GroupSID),
+        [Security.AccessControl.AccessControlSections]::All
+    )
+    return $legacy
+}
+
+function Get-DefenseClawRedactionKeySecurityClass {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [string]$GatewayServiceSID
+    )
+    if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
+        $adminExpected = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $false `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        if (Test-DefenseClawCanonicalRawPathAcl `
+                -Actual $Actual `
+                -Expected $adminExpected) {
+            return 'inactive_admin'
+        }
+        throw 'redaction correlation key has an unrecognized inactive ACL'
+    }
+
+    $secretExpected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $false `
+        -Kind RuntimeSecretFile `
+        -GatewayServiceSID $GatewayServiceSID
+    if (Test-DefenseClawCanonicalRawPathAcl `
+            -Actual $Actual `
+            -Expected $secretExpected) {
+        return 'runtime_secret'
+    }
+
+    # Releases before the RuntimeSecretFile contract created the key with the
+    # service as owner and exactly three FullControl ACEs. Group metadata was
+    # not standardized, so it is deliberately excluded from this one strict
+    # legacy matcher; it grants no access and is replaced during migration.
+    $protectedFlag = [int](
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    )
+    if ($null -ne $Actual.Owner -and
+        $Actual.Owner.Value -ceq $GatewayServiceSID -and
+        $null -ne $Actual.Group -and
+        (([int]$Actual.ControlFlags -band $protectedFlag) -ne 0)) {
+        $legacySecurity = New-DefenseClawLegacyRedactionKeyAcl `
+            -GatewayServiceSID $GatewayServiceSID `
+            -GroupSID $Actual.Group.Value
+        $legacy = [Security.AccessControl.RawSecurityDescriptor]::new(
+            $legacySecurity.GetSecurityDescriptorBinaryForm(),
+            0
+        )
+        $legacyIgnoredFlags = [int](
+            [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited -bor
+            [Security.AccessControl.ControlFlags]::GroupDefaulted
+        )
+        if (Test-DefenseClawExactRawDACL `
+                -Actual $Actual `
+                -Expected $legacy `
+                -IgnoredControlFlags $legacyIgnoredFlags) {
+            return 'legacy_runtime_secret'
+        }
+    }
+
+    # The repair defect in the immediately preceding builds rewrote this one
+    # fixed leaf using the exact generic RuntimeFile contract. Accept only that
+    # fully known form, then normalize it; arbitrary trusted-only ACLs remain
+    # rejected.
+    $brokenExpected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $false `
+        -Kind RuntimeFile `
+        -GatewayServiceSID $GatewayServiceSID
+    if (Test-DefenseClawCanonicalRawPathAcl `
+            -Actual $Actual `
+            -Expected $brokenExpected) {
+        return 'broken_runtime_file'
+    }
+    throw 'redaction correlation key has an unrecognized active ACL'
+}
+
+function Get-DefenseClawRedactionKeySecuritySnapshot {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [string]$GatewayServiceSID
+    )
+    $path = [IO.Path]::GetFullPath(
+        [string]$Layout.RedactionCorrelationKeyPath
+    ).TrimEnd('\')
+    $expectedPath = [IO.Path]::Combine(
+        [IO.Path]::GetFullPath(
+            [string]$Layout.RuntimeDirectory
+        ).TrimEnd('\'),
+        'redaction-correlation.key'
+    )
+    if (-not [string]::Equals(
+            $path,
+            $expectedPath,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'redaction correlation key path is outside its exact runtime location'
+    }
+    $restoreKind = if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
+        'AdminFile'
+    }
+    else {
+        'RuntimeSecretFile'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path `
+            -PathType Leaf)) {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+            throw 'redaction correlation key path is occupied by a non-file'
+        }
+        return [ordered]@{
+            schema_version = 2
+            path = $path
+            existed = $false
+            file_identity = ''
+            preimage_class = 'absent'
+            security_descriptor = ''
+            restore_kind = $restoreKind
+        }
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $captured = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+        $path,
+        [uint32]32
+    )
+    $actual = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$captured.SecurityDescriptor,
+        0
+    )
+    $preimageClass = Get-DefenseClawRedactionKeySecurityClass `
+        -Actual $actual `
+        -GatewayServiceSID $GatewayServiceSID
+    return [ordered]@{
+        schema_version = 2
+        path = $path
+        existed = $true
+        file_identity = [string]$captured.Identity
+        preimage_class = $preimageClass
+        security_descriptor = $actual.GetSddlForm(
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        restore_kind = $restoreKind
+    }
+}
+
+function Restore-DefenseClawRedactionKeySecuritySnapshot {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $path = [IO.Path]::GetFullPath(
+        [string]$Layout.RedactionCorrelationKeyPath
+    ).TrimEnd('\')
+    $priorGateway = @($Snapshot.services |
+        Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals(
+                [string]$_.name,
+                [string]$Snapshot.gateway_service,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        })
+    if ($priorGateway.Count -ne 1) {
+        throw 'pending transaction has invalid prior gateway service metadata'
+    }
+    $priorGatewayExistedProperty = $priorGateway[0].PSObject.Properties[
+        'existed'
+    ]
+    if ($null -eq $priorGatewayExistedProperty -or
+        $priorGatewayExistedProperty.Value -isnot [bool]) {
+        throw 'pending transaction has invalid prior gateway service metadata'
+    }
+    $priorGatewayExisted = [bool]$priorGateway[0].existed
+    $priorDeploymentProperty = $Snapshot.PSObject.Properties[
+        'prior_deployment_active'
+    ]
+    $priorDeploymentActive = if ($null -eq $priorDeploymentProperty) {
+        # Compatibility for older pending snapshots, which could only
+        # distinguish fresh/inactive state through service existence.
+        $priorGatewayExisted
+    }
+    elseif ($priorDeploymentProperty.Value -isnot [bool]) {
+        throw 'pending transaction has invalid prior deployment state'
+    }
+    else {
+        [bool]$priorDeploymentProperty.Value
+    }
+    if ($priorGatewayExisted -and -not $priorDeploymentActive) {
+        throw 'pending transaction has a gateway service without an active deployment'
+    }
+    $property = $Snapshot.PSObject.Properties['redaction_key_security']
+    if ($null -eq $property) {
+        # Compatibility with pending transactions written before metadata-only
+        # key snapshots. Normalize only a present fixed 32-byte leaf while the
+        # staged/prior gateway SID still resolves; no key data is opened.
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $path `
+                -PathType Leaf)) {
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+                throw 'redaction correlation key path is occupied by a non-file'
+            }
+            return
+        }
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $current = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+            $path,
+            [uint32]32
+        )
+        $currentRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$current.SecurityDescriptor,
+            0
+        )
+        $compatibilityAdmin = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $false `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        $currentIsAdmin = Test-DefenseClawCanonicalRawPathAcl `
+            -Actual $currentRaw `
+            -Expected $compatibilityAdmin
+        if (-not $priorDeploymentActive -and $currentIsAdmin) {
+            # Crash re-entry after the first rollback already produced the
+            # exact retained-admin form and removed the staged service.
+            return
+        }
+        $gatewaySID = Get-DefenseClawServiceSIDForRecovery `
+            -ServiceName ([string]$Snapshot.gateway_service)
+        if (-not $currentIsAdmin) {
+            [void](Get-DefenseClawRedactionKeySecurityClass `
+                -Actual $currentRaw `
+                -GatewayServiceSID $gatewaySID)
+        }
+        $compatibilityACL = if ($priorDeploymentActive) {
+            # A pre-metadata snapshot can restore an older gateway binary.
+            # Recreate the exact legacy contract that binary understands;
+            # successful forward repair will migrate it to RuntimeSecretFile.
+            New-DefenseClawLegacyRedactionKeyAcl `
+                -GatewayServiceSID $gatewaySID
+        }
+        else {
+            $compatibilityAdmin
+        }
+        $compatibilityResult = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+            $path,
+            $compatibilityACL.GetSecurityDescriptorSddlForm(
+                [Security.AccessControl.AccessControlSections]::All
+            ),
+            [uint32]32,
+            [string]$current.Identity
+        )
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$compatibilityResult.SecurityDescriptor,
+                0
+            )) `
+            -Expected $compatibilityACL
+        return
+    }
+
+    $recorded = $property.Value
+    $requiredProperties = @(
+        'schema_version',
+        'path',
+        'existed',
+        'file_identity',
+        'preimage_class',
+        'security_descriptor',
+        'restore_kind'
+    )
+    if ($null -eq $recorded) {
+        throw 'pending transaction has invalid redaction-key security metadata'
+    }
+    foreach ($name in $requiredProperties) {
+        if ($null -eq $recorded.PSObject.Properties[$name]) {
+            throw 'pending transaction has incomplete redaction-key security metadata'
+        }
+    }
+    if ([int]$recorded.schema_version -ne 2 -or
+        $recorded.existed -isnot [bool]) {
+        throw 'pending transaction has invalid redaction-key security metadata'
+    }
+    $recordedPath = [IO.Path]::GetFullPath(
+        [string]$recorded.path
+    ).TrimEnd('\')
+    if (-not [string]::Equals(
+            $recordedPath,
+            $path,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'pending transaction records a different redaction-key path'
+    }
+    if ($null -eq $priorDeploymentProperty) {
+        throw 'pending transaction omits prior deployment state for redaction-key metadata'
+    }
+    $expectedRestoreKind = if ($priorDeploymentActive) {
+        'RuntimeSecretFile'
+    }
+    else {
+        'AdminFile'
+    }
+    if ([string]$recorded.restore_kind -cne $expectedRestoreKind) {
+        throw 'pending transaction has an invalid redaction-key restore class'
+    }
+    if (-not [bool]$recorded.existed) {
+        if ([string]$recorded.preimage_class -cne 'absent' -or
+            -not [string]::IsNullOrEmpty([string]$recorded.file_identity) -or
+            -not [string]::IsNullOrEmpty(
+                [string]$recorded.security_descriptor
+            )) {
+            throw 'absent redaction-key preimage unexpectedly contains metadata'
+        }
+    }
+    elseif ([string]$recorded.file_identity -cnotmatch
+            '^[0-9a-f]{8}:[0-9a-f]{16}$' -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$recorded.security_descriptor
+        )) {
+        throw 'pending transaction has malformed redaction-key security metadata'
+    }
+
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path `
+            -PathType Leaf)) {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+            throw 'redaction correlation key path is occupied by a non-file'
+        }
+        if ([bool]$recorded.existed) {
+            throw 'redaction correlation key disappeared during lifecycle rollback'
+        }
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $current = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+        $path,
+        [uint32]32
+    )
+    $currentRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$current.SecurityDescriptor,
+        0
+    )
+    $adminExpected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $false `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    $currentIsAdmin = Test-DefenseClawCanonicalRawPathAcl `
+        -Actual $currentRaw `
+        -Expected $adminExpected
+
+    if (-not [bool]$recorded.existed) {
+        if (-not $priorDeploymentActive -and $currentIsAdmin) {
+            # Crash re-entry after the first rollback already retained the key
+            # safely. Runtime/audit state is intentionally retained too, so
+            # deleting this key would destroy correlation continuity.
+            return
+        }
+        $gatewaySID = Get-DefenseClawServiceSIDForRecovery `
+            -ServiceName ([string]$Snapshot.gateway_service)
+        $currentClass = if ($currentIsAdmin) {
+            'inactive_admin'
+        }
+        else {
+            Get-DefenseClawRedactionKeySecurityClass `
+                -Actual $currentRaw `
+                -GatewayServiceSID $gatewaySID
+        }
+        $allowedCurrentClasses = if ($priorDeploymentActive) {
+            @('runtime_secret', 'legacy_runtime_secret')
+        }
+        else {
+            @('runtime_secret')
+        }
+        if ([string]$currentClass -notin $allowedCurrentClasses) {
+            throw 'transaction-created redaction key is not in its exact canonical form'
+        }
+        $retainedExpected = if ($priorDeploymentActive) {
+            # A rollback may reactivate an older gateway binary, so retain the
+            # new key in the strict legacy service-readable form it supports.
+            New-DefenseClawLegacyRedactionKeyAcl `
+                -GatewayServiceSID $gatewaySID
+        }
+        else {
+            $adminExpected
+        }
+        $retained = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+            $path,
+            $retainedExpected.GetSecurityDescriptorSddlForm(
+                [Security.AccessControl.AccessControlSections]::All
+            ),
+            [uint32]32,
+            [string]$current.Identity
+        )
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$retained.SecurityDescriptor,
+                0
+            )) `
+            -Expected $retainedExpected
+        return
+    }
+
+    if ([string]$current.Identity -cne [string]$recorded.file_identity) {
+        throw 'redaction correlation key identity changed during lifecycle transaction'
+    }
+    try {
+        $recordedRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [string]$recorded.security_descriptor
+        )
+    }
+    catch {
+        throw 'pending transaction has an invalid redaction-key security descriptor'
+    }
+    $gatewaySID = ''
+    if ($priorDeploymentActive -or -not $currentIsAdmin) {
+        $gatewaySID = Get-DefenseClawServiceSIDForRecovery `
+            -ServiceName ([string]$Snapshot.gateway_service)
+    }
+    if (-not $currentIsAdmin) {
+        [void](Get-DefenseClawRedactionKeySecurityClass `
+            -Actual $currentRaw `
+            -GatewayServiceSID $gatewaySID)
+    }
+    $recordedClass = if ($priorDeploymentActive) {
+        Get-DefenseClawRedactionKeySecurityClass `
+            -Actual $recordedRaw `
+            -GatewayServiceSID $gatewaySID
+    }
+    else {
+        Get-DefenseClawRedactionKeySecurityClass -Actual $recordedRaw
+    }
+    if ([string]$recordedClass -cne [string]$recorded.preimage_class) {
+        throw 'pending transaction redaction-key preimage class does not match its descriptor'
+    }
+
+    # Existing-key rollback restores the exact authenticated descriptor, not
+    # merely an equivalent modern form. The one exception is the proven broken
+    # BA-owned RuntimeFile form: neither loader can restart with it, so restore
+    # the exact older three-ACE service-owned compatibility contract.
+    $expected = if ([string]$recordedClass -ceq 'broken_runtime_file') {
+        New-DefenseClawLegacyRedactionKeyAcl `
+            -GatewayServiceSID $gatewaySID
+    }
+    else {
+        $recordedSecurity = [Security.AccessControl.FileSecurity]::new()
+        $recordedSecurity.SetSecurityDescriptorSddlForm(
+            [string]$recorded.security_descriptor,
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        $recordedSecurity
+    }
+    $restoreSDDL = $expected.GetSecurityDescriptorSddlForm(
+        [Security.AccessControl.AccessControlSections]::All
+    )
+    $restored = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+        $path,
+        $restoreSDDL,
+        [uint32]32,
+        [string]$recorded.file_identity
+    )
+    Assert-DefenseClawCanonicalRawPathAcl `
+        -Path $path `
+        -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$restored.SecurityDescriptor,
+            0
+        )) `
+        -Expected $expected
 }
 
 function Set-DefenseClawManagedCoreAcls {
@@ -4305,6 +5423,9 @@ function Get-DefenseClawLayout {
     )
     $codexVendorDirectory = Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'OpenAI'
     $codexMachinePolicyDirectory = Microsoft.PowerShell.Management\Join-Path $codexVendorDirectory 'Codex'
+    $runtimeDirectory = Microsoft.PowerShell.Management\Join-Path `
+        $StateRoot `
+        'runtime'
     return @{
         InstallRoot = $InstallRoot
         StateRoot = $StateRoot
@@ -4314,7 +5435,12 @@ function Get-DefenseClawLayout {
         BinDirectory = $bin
         LibexecDirectory = $libexec
         ConfigDirectory = $configDirectory
-        RuntimeDirectory = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'runtime')
+        RuntimeDirectory = $runtimeDirectory
+        RedactionCorrelationKeyPath = (
+            Microsoft.PowerShell.Management\Join-Path `
+                $runtimeDirectory `
+                'redaction-correlation.key'
+        )
         ManagedIPCDirectory = $managedIPCDirectory
         ManagedIPCSocketPath = (Microsoft.PowerShell.Management\Join-Path $managedIPCDirectory 'defenseclaw_ipc.sock')
         BrokerStateDirectory = $brokerStateDirectory
@@ -4980,6 +6106,7 @@ function New-DefenseClawTransaction {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$PriorDeploymentActive,
         [switch]$IncludeCodexMachineState,
         [switch]$ManagedHooksTeardownPrepared,
         [switch]$PreserveManagedHooksTeardownJournal
@@ -5049,6 +6176,7 @@ function New-DefenseClawTransaction {
             core_hardening_certification = [bool](
                 $Layout.CoreHardeningCertification
             )
+            prior_deployment_active = [bool]$PriorDeploymentActive
             created_at = [DateTime]::UtcNow.ToString('o')
         }
         Write-DefenseClawJsonAtomic `
@@ -5096,6 +6224,31 @@ function New-DefenseClawTransaction {
         Write-DefenseClawJsonAtomic `
             -Value $quiescingIntent `
             -Path $Layout.PendingPath
+
+        $gatewayServiceEntry = $services |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$_.name,
+                    $GatewayServiceName,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            } |
+            Microsoft.PowerShell.Utility\Select-Object -First 1
+        $redactionKeyGatewaySID = if ($null -ne $gatewayServiceEntry -and
+            [bool]$gatewayServiceEntry.existed) {
+            Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+        }
+        elseif ($PriorDeploymentActive) {
+            Get-DefenseClawDeterministicServiceSID `
+                -ServiceName $GatewayServiceName
+        }
+        else {
+            ''
+        }
+        $redactionKeySecurity =
+            Get-DefenseClawRedactionKeySecuritySnapshot `
+                -Layout $Layout `
+                -GatewayServiceSID $redactionKeyGatewaySID
 
         $files = [Collections.Generic.List[object]]::new()
     $destinations = [Collections.Generic.List[string]]::new()
@@ -5217,6 +6370,7 @@ function New-DefenseClawTransaction {
         services_disabled_and_stopped_at = $servicesQuiescedAt
         certification_codex_home = [string]$Layout.CertificationCodexHome
         core_hardening_certification = [bool]$Layout.CoreHardeningCertification
+        prior_deployment_active = [bool]$PriorDeploymentActive
         agent_application_control_attested = [bool]$priorApplicationControlAttested
         claude_effective_policy_verified = [bool]$priorClaudeEffectivePolicyVerified
         codex_machine_state_included = [bool]$IncludeCodexMachineState
@@ -5230,6 +6384,7 @@ function New-DefenseClawTransaction {
         managed_hooks_teardown_journal_preimage_sha256 = [string](
             $teardownJournalPreimageSHA256
         )
+        redaction_key_security = $redactionKeySecurity
         files = $files
         services = $services
         created_shared_directories = @()
@@ -6420,6 +7575,13 @@ function Restore-DefenseClawTransaction {
             -DeferAutomaticStart
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName ([string]$snapshot.gateway_service)
     }
+    # The fixed 32-byte correlation key is intentionally excluded from the
+    # generic file-copy snapshot. Restore only its authenticated metadata on
+    # the same inode while the staged/prior gateway service SID still resolves
+    # and before any service can be removed or restarted.
+    Restore-DefenseClawRedactionKeySecuritySnapshot `
+        -Snapshot $snapshot `
+        -Layout $Layout
     # An NT SERVICE principal stops resolving once its service is deleted.
     $rolledBackGatewaySID = ''
     foreach ($service in $snapshot.services) {
@@ -8184,7 +9346,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
 function New-DefenseClawRequiredRights {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Admin', 'Install', 'ServiceInstall', 'State', 'ConfigDirectory', 'Config', 'MachinePolicy', 'AuthorizationDirectory', 'AuthorizationFile', 'Runtime', 'ManagedIPCDirectory')]
+        [ValidateSet('Admin', 'Install', 'ServiceInstall', 'State', 'ConfigDirectory', 'Config', 'MachinePolicy', 'AuthorizationDirectory', 'AuthorizationFile', 'Runtime', 'RuntimeSecret', 'ManagedIPCDirectory')]
         [string]$Kind,
         [string]$GatewayServiceSID
     )
@@ -8219,6 +9381,9 @@ function New-DefenseClawRequiredRights {
         }
         'Runtime' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::Modify
+        }
+        'RuntimeSecret' {
+            $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::Read
         }
         'ManagedIPCDirectory' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::FullControl
@@ -11744,6 +12909,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
         Assert-DefenseClawCodexManagedHooksStateFilePreflight -Layout $Layout
     }
+    $priorDeploymentActive = [bool](
+        $null -ne $metadata -and
+        (Test-DefenseClawMetadataInstalled -Metadata $metadata)
+    )
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
         -PathType Leaf) {
@@ -11759,6 +12928,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
+        -PriorDeploymentActive:$priorDeploymentActive `
         -IncludeCodexMachineState:$priorCodexTargetEnabled
     try {
         if ($Action -eq 'Install' -and $null -ne $metadata) {
@@ -12257,6 +13427,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
+            -PriorDeploymentActive `
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
             -PreserveManagedHooksTeardownJournal
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `

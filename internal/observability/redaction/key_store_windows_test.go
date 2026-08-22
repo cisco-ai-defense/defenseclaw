@@ -15,8 +15,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsCorrelationKeyAccessSeparatesReadFromHardening(t *testing.T) {
+	ordinary := windowsCorrelationExistingKeyAccess(false)
+	if ordinary&(windows.WRITE_DAC|windows.WRITE_OWNER) != 0 {
+		t.Fatalf("ordinary key open access 0x%x includes ACL-changing rights", ordinary)
+	}
+	if ordinary&windows.GENERIC_READ == 0 {
+		t.Fatalf("ordinary key open access 0x%x omits GENERIC_READ", ordinary)
+	}
+	hardening := windowsCorrelationExistingKeyAccess(true)
+	if hardening&windows.WRITE_DAC == 0 || hardening&windows.WRITE_OWNER == 0 {
+		t.Fatalf("migration key open access 0x%x omits ACL-changing rights", hardening)
+	}
+	if hardening&(windows.GENERIC_READ|windows.GENERIC_WRITE|windows.FILE_READ_DATA|windows.FILE_WRITE_DATA) != 0 {
+		t.Fatalf("migration key open access 0x%x includes key-data access", hardening)
+	}
+}
 
 func TestWindowsCorrelationKeyCreateLoadAndProtectedDACL(t *testing.T) {
 	dir := t.TempDir()
@@ -41,7 +59,52 @@ func TestWindowsCorrelationKeyCreateLoadAndProtectedDACL(t *testing.T) {
 	if info.Size() != hashV1KeySize {
 		t.Fatalf("key size = %d", info.Size())
 	}
+	assertWindowsCorrelationCanonicalSecurity(t, path)
 	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationKeyIsHardenedBeforePublication(t *testing.T) {
+	dir := t.TempDir()
+	entropy := bytes.NewReader(bytes.Repeat([]byte{0x6a}, hashV1KeySize+keyTempRandomBytes))
+	validatedStaging := false
+	hooks := keyStoreHooks{afterTempSync: func() error {
+		matches, err := filepath.Glob(filepath.Join(dir, correlationKeyTempPrefix+"*"))
+		if err != nil {
+			return err
+		}
+		if len(matches) != 1 {
+			return errors.New("expected one private staging key")
+		}
+		name, err := windows.UTF16PtrFromString(matches[0])
+		if err != nil {
+			return err
+		}
+		handle, err := windows.CreateFile(
+			name,
+			windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(handle) //nolint:errcheck
+		if err := validateWindowsCorrelationKeyHandle(handle); err != nil {
+			return err
+		}
+		validatedStaging = true
+		return nil
+	}}
+	if _, err := loadOrCreateCorrelationKeyPlatform(dir, entropy, hooks); err != nil {
+		t.Fatalf("install pre-hardened key: %v", err)
+	}
+	if !validatedStaging {
+		t.Fatal("staging key was not validated before publication")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, filepath.Join(dir, correlationKeyFilename))
 }
 
 func TestWindowsCorrelationKeyConcurrentCreatorsConverge(t *testing.T) {
@@ -180,6 +243,88 @@ func TestWindowsCorrelationKeyRetryableErrorClassification(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWindowsCorrelationKeyPinsConfiguredServiceOwner(t *testing.T) {
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatalf("resolve current Windows user: %v", err)
+	}
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawCorrelationFixture`)
+	previous := windowsCorrelationServiceAccountSID
+	windowsCorrelationServiceAccountSID = func(account string) (*windows.SID, error) {
+		if account != `NT SERVICE\DefenseClawCorrelationFixture` {
+			t.Fatalf("service account = %q", account)
+		}
+		return current.User.Sid, nil
+	}
+	t.Cleanup(func() { windowsCorrelationServiceAccountSID = previous })
+
+	owner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil || owner == nil || !owner.Equals(current.User.Sid) {
+		t.Fatalf("pinned owner = %v, %v", owner, err)
+	}
+	foreign, err := windows.StringToSid("S-1-5-80-1-2-3-4-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowsCorrelationServiceAccountSID = func(string) (*windows.SID, error) {
+		return foreign, nil
+	}
+	if _, err := windowsCorrelationExpectedOwnerSID(); !IsKeyStoreError(err, KeyStoreErrorUnavailable) {
+		t.Fatalf("mismatched service token error = %v, want unavailable", err)
+	}
+}
+
+func TestWindowsCorrelationKeyRequiresServicePinInManagedMode(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.WindowsServiceAccountEnv, "")
+	if _, err := windowsCorrelationExpectedOwnerSID(); !IsKeyStoreError(err, KeyStoreErrorUnavailable) {
+		t.Fatalf("missing managed service pin error = %v, want unavailable", err)
+	}
+}
+
+func TestWindowsCorrelationKeyMigratesLegacyServiceFullACLWithoutChangingMaterial(t *testing.T) {
+	dir := t.TempDir()
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	setWindowsCorrelationLegacySecurity(t, path)
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("migrate legacy key ACL: %v", err)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("legacy ACL migration changed correlation key material")
+	}
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatal("legacy ACL migration replaced the pinned key inode")
+	}
+	if !bytes.Equal(beforeBytes, afterBytes) {
+		t.Fatal("legacy ACL migration changed key bytes")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, path)
 }
 
 func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
@@ -471,6 +616,21 @@ func TestWindowsCorrelationKeyRejectsReparsePoint(t *testing.T) {
 	}
 }
 
+func TestWindowsCorrelationKeyRejectsHardLinkedLeaf(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	alias := filepath.Join(dir, "correlation-key-alias")
+	if err := os.Link(path, alias); err != nil {
+		t.Fatalf("create hard-link fixture: %v", err)
+	}
+	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafeType) {
+		t.Fatalf("hard-linked key error = %v, want unsafe type", err)
+	}
+}
+
 func TestWindowsCorrelationKeyRejectsReparseDirectory(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
@@ -508,6 +668,78 @@ func windowsCorrelationAccess(sid *windows.SID, access windows.ACCESS_MASK) wind
 			TrusteeType:  windows.TRUSTEE_IS_USER,
 			TrusteeValue: windows.TrusteeValueFromSID(sid),
 		},
+	}
+}
+
+func setWindowsCorrelationLegacySecurity(t *testing.T, path string) {
+	t.Helper()
+	descriptor, err := windowsCorrelationStagingSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, _, err := descriptor.Group()
+	if err != nil || group == nil {
+		t.Fatalf("resolve legacy key group: %v", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("resolve legacy key DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		group,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertWindowsCorrelationCanonicalSecurity(t *testing.T, path string) {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || descriptor == nil {
+		t.Fatalf("read key security descriptor: %v", err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		t.Fatalf("read key owner: %v", err)
+	}
+	expectedOwner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owner.Equals(expectedOwner) {
+		t.Fatalf("key owner = %s, want %s", owner.String(), expectedOwner.String())
+	}
+	group, _, err := descriptor.Group()
+	if err != nil || group == nil || !group.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		t.Fatalf("key group is not BUILTIN\\Administrators: %v", err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("key DACL is not protected")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("read key DACL: %v", err)
+	}
+	matches, err := windowsCorrelationACLMatches(dacl, windowsCorrelationCanonicalACL(expectedOwner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matches {
+		t.Fatal("key DACL does not match OW:RC,SY:FA,BA:FA,service:FR")
 	}
 }
 

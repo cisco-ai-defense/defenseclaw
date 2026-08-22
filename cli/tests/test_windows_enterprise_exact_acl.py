@@ -15,13 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "packaging" / "windows" / "DefenseClawEnterprise.psm1"
-SMOKE = (
-    ROOT
-    / "packaging"
-    / "windows"
-    / "tests"
-    / "enterprise-exact-acl-smoke.ps1"
-)
+SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-exact-acl-smoke.ps1"
 
 
 def _powershell_engines() -> list[str]:
@@ -31,15 +25,7 @@ def _powershell_engines() -> list[str]:
     ]
     windows_root = os.environ.get("SystemRoot")
     if windows_root:
-        candidates.append(
-            str(
-                Path(windows_root)
-                / "System32"
-                / "WindowsPowerShell"
-                / "v1.0"
-                / "powershell.exe"
-            )
-        )
+        candidates.append(str(Path(windows_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"))
 
     engines: list[str] = []
     seen: set[str] = set()
@@ -97,8 +83,9 @@ def _extract_function_body(source: str, function_name: str, terminator: str) -> 
 def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     source = MODULE.read_text(encoding="utf-8")
     setter = source[
-        source.index("function New-DefenseClawCanonicalPathAcl") :
-        source.index("function Set-DefenseClawBootstrapRootAcl")
+        source.index("function New-DefenseClawCanonicalPathAcl") : source.index(
+            "function Set-DefenseClawBootstrapRootAcl"
+        )
     ]
 
     assert "$security.SetAccessRuleProtection($true, $false)" in setter
@@ -119,15 +106,14 @@ def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     assert "$actualDACL.BinaryLength" in setter
     assert "$actualDACL.GetBinaryForm" in setter
     assertion = setter[
-        setter.index("function Assert-DefenseClawCanonicalPathAcl") :
-        setter.index("function Set-DefenseClawPathAcl")
+        setter.index("function Assert-DefenseClawCanonicalRawPathAcl") : setter.index("function Set-DefenseClawPathAcl")
     ]
     assert "GetSecurityDescriptorSddlForm" not in assertion
     assert "GetFileSecurityDescriptor" in assertion
     assert "Test-DefenseClawExactRawDACL" in assertion
     assert "Get-Acl" not in assertion
-    assert "$ownerSID -ne $script:AdministratorsSID" in assertion
-    assert "$groupSID -ne $script:AdministratorsSID" in assertion
+    assert "$ownerSID -cne $expectedOwnerSID" in assertion
+    assert "$groupSID -cne $expectedGroupSID" in assertion
     assert "Invoke-DefenseClawNative" not in setter
     assert "$script:IcaclsExe" not in setter
 
@@ -141,8 +127,9 @@ def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None
     """
     source = MODULE.read_text(encoding="utf-8")
     grant = source[
-        source.index("function Add-DefenseClawStateAncestorTraverseRule") :
-        source.index("function Assert-DefenseClawStateAncestorTraverse")
+        source.index("function Add-DefenseClawStateAncestorTraverseRule") : source.index(
+            "function Assert-DefenseClawStateAncestorTraverse"
+        )
     ]
 
     assert "PurgeAccessRules" in grant
@@ -170,8 +157,9 @@ def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None
 
     # The ancestor trust invariant still has to hold.
     verifier = source[
-        source.index("function Assert-DefenseClawStateAncestorTraverse") :
-        source.index("function Initialize-DefenseClawManagedRoot")
+        source.index("function Assert-DefenseClawStateAncestorTraverse") : source.index(
+            "function Initialize-DefenseClawManagedRoot"
+        )
     ]
     assert "Assert-DefenseClawTrustedAncestor" in verifier
     assert "must not " in verifier
@@ -180,8 +168,9 @@ def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None
     # The base is an OS directory and the root carries its own DACL, so neither
     # appears in the ancestor list.
     ancestors = source[
-        source.index("function Get-DefenseClawManagedRootAncestors") :
-        source.index("$script:StateAncestorTraverseRights")
+        source.index("function Get-DefenseClawManagedRootAncestors") : source.index(
+            "$script:StateAncestorTraverseRights"
+        )
     ]
     assert "$index -lt $components.Count - 1" in ancestors
 
@@ -236,7 +225,12 @@ def test_retained_runtime_acl_adoption_precedes_gateway_startup() -> None:
     assert "GetRegularFileLinkCountNoFollow" in adoption
     assert "GetFileIdentity" in adoption
     assert "-Kind RuntimeDirectory" in adoption
-    assert "-Kind RuntimeFile" in adoption
+    assert "'RuntimeFile'" in adoption
+    assert "-Kind ([string]$file.kind)" in adoption
+    assert "'redaction-correlation.key'" in adoption
+    assert "'RuntimeSecretFile'" in adoption
+    assert "[uint32]32" in adoption
+    assert "retained runtime file changed while its ACL was adopted" in adoption
     assert adoption.index("while ($pending.Count -gt 0)") < adoption.index(
         "foreach ($directory in $directories)",
     )
@@ -254,6 +248,82 @@ def test_retained_runtime_acl_adoption_precedes_gateway_startup() -> None:
     assert transaction_services.index("Set-DefenseClawRetainedRuntimeAcls") < (
         transaction_services.index("Set-DefenseClawManagedCoreAcls")
     )
+
+
+def test_redaction_key_transaction_is_metadata_only_and_restored_before_start() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    capture = _extract_function_body(
+        source,
+        "function Get-DefenseClawRedactionKeySecuritySnapshot",
+        "function Restore-DefenseClawRedactionKeySecuritySnapshot",
+    )
+    restore_metadata = _extract_function_body(
+        source,
+        "function Restore-DefenseClawRedactionKeySecuritySnapshot",
+        "function Set-DefenseClawManagedCoreAcls",
+    )
+
+    for body in (capture, restore_metadata):
+        assert "redaction-correlation.key" in body or ("$Layout.RedactionCorrelationKeyPath" in body)
+        assert "[uint32]32" in body
+        assert "Get-Content" not in body
+        assert "ReadAllBytes" not in body
+        assert "ReadAllText" not in body
+        assert "Copy-Item" not in body
+        assert "Get-FileHash" not in body
+
+    assert "GetRegularFileSecuritySnapshotNoFollow" in capture
+    assert "file_identity" in capture
+    assert "security_descriptor" in capture
+    assert "SetRegularFileSecurityDescriptorNoFollow" in restore_metadata
+    assert "[string]$recorded.file_identity" in restore_metadata
+
+    transaction = _extract_function_body(
+        source,
+        "function New-DefenseClawTransaction",
+        "function Set-DefenseClawTransactionManagedHooksTeardownPrepared",
+    )
+    capture_at = transaction.index(
+        "Get-DefenseClawRedactionKeySecuritySnapshot",
+    )
+    last_initial_stop_at = transaction.index(
+        "Stop-DefenseClawService -Name $brokerServiceName",
+    )
+    first_generic_copy_at = transaction.index(
+        "Microsoft.PowerShell.Management\\Copy-Item",
+    )
+    assert last_initial_stop_at < capture_at < first_generic_copy_at
+    assert transaction.index("redaction_key_security = $redactionKeySecurity") < (
+        transaction.index("Write-DefenseClawJsonAtomic -Value $snapshot")
+    )
+    destinations = transaction[
+        transaction.index("$destinations =") : transaction.index(
+            "$index = 0",
+            transaction.index("$destinations ="),
+        )
+    ]
+    assert "RedactionCorrelationKeyPath" not in destinations
+
+    restore = _extract_function_body(
+        source,
+        "function Restore-DefenseClawTransaction {",
+        "function Assert-DefenseClawRestoredTransactionReadyForActivation",
+    )
+    prior_services_at = restore.index("$previousServices =")
+    recreate_at = restore.index(
+        "Set-DefenseClawManagedServices `",
+        prior_services_at,
+    )
+    restore_key_at = restore.index(
+        "Restore-DefenseClawRedactionKeySecuritySnapshot",
+    )
+    remove_created_service_at = restore.index(
+        "Remove-DefenseClawService -Name ([string]$service.name)",
+    )
+    readiness_at = restore.index(
+        "Assert-DefenseClawRestoredTransactionReadyForActivation",
+    )
+    assert recreate_at < restore_key_at < remove_created_service_at < readiness_at
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell smoke")
@@ -291,16 +361,20 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
     assert payload == {
         "ok": True,
         "schema_version": 1,
-        "descriptors_checked": 17,
+        "descriptors_checked": 18,
         "stale_explicit_aces_retained": False,
         "object_type_mismatches_rejected": True,
         "auto_inherited_control_flag_accepted": True,
         "ace_mismatches_rejected": True,
         "native_raw_acl_query_checked": True,
         "split_explicit_aces_rejected": True,
-        "installer_verifier_pairings_checked": 17,
+        "installer_verifier_pairings_checked": 18,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
         "retained_runtime_tree_adopted": True,
         "retained_runtime_hard_links_rejected": True,
+        "retained_runtime_secret_acl_exact": True,
+        "retained_runtime_secret_bytes_preserved": True,
+        "retained_runtime_secret_hash_preserved": True,
+        "retained_runtime_secret_identity_preserved": True,
     }
