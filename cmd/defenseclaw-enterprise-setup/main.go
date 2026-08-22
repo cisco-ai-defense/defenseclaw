@@ -203,12 +203,10 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 		if !mutationAction {
 			return opts, false, errors.New("--mode / --connector are valid only with install, upgrade, or repair")
 		}
-		// Windows managed_enterprise lifecycle only supports codex + claudecode
-		// today (per specs 002/004/005). Reject cursor/amp at arg validation
-		// with a clear pointer rather than failing deep in the transaction
-		// with "managed-hook teardown does not support connector 'cursor'".
-		// Follow-up: docs/specs/006-windows-cursor-managed-lifecycle.
-		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true}
+		// Keep this closed set aligned with the native Windows lifecycle. Each
+		// entry must have reconcile, trusted-runtime, rollback, and teardown
+		// coverage before it is accepted at this boundary.
+		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true, "cursor": true}
 		for _, entry := range strings.Split(opts.Connector, ",") {
 			trimmed := strings.ToLower(strings.TrimSpace(entry))
 			if trimmed == "" {
@@ -217,8 +215,7 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 			if !supportedOnWindows[trimmed] {
 				return opts, false, fmt.Errorf(
 					"--connector entry %q is not supported on Windows managed_enterprise; "+
-						"supported: codex, claudecode. "+
-						"Follow-up: docs/specs/006-windows-cursor-managed-lifecycle.",
+						"supported: codex, claudecode, cursor.",
 					trimmed,
 				)
 			}

@@ -59,6 +59,7 @@ const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Pro
 var windowsHookConnectors = map[string]struct{}{
 	"claudecode": {},
 	"codex":      {},
+	"cursor":     {},
 }
 
 // EnumerationLogger receives one line per user profile the enumerator

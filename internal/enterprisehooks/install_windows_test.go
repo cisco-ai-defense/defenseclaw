@@ -1392,6 +1392,7 @@ func TestWindowsEnterpriseConnectorCertificationAllowsOnlyBuiltins(t *testing.T)
 	}{
 		{name: "codex", conn: connector.NewCodexConnector()},
 		{name: "claudecode", conn: connector.NewClaudeCodeConnector()},
+		{name: "cursor", conn: connector.NewCursorConnector()},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2492,6 +2493,8 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 		{name: "codex malformed", connector: "codex", version: "not-a-version", wantErr: true},
 		{name: "claude below", connector: "claudecode", version: "2.1.151", wantErr: true},
 		{name: "claude minimum", connector: "claudecode", version: "2.1.152"},
+		{name: "cursor below", connector: "cursor", version: "1.6.9", wantErr: true},
+		{name: "cursor minimum", connector: "cursor", version: "1.7.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := requireWindowsEnterpriseManagedAgentVersion(tc.connector, tc.version)

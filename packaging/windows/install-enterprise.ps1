@@ -1392,20 +1392,12 @@ function Assert-DefenseClawBootstrapModuleTrust {
 # per-key drift regression during a QA install.
 # ---------------------------------------------------------------------------
 
-# Windows managed_enterprise lifecycle supports a subset of the
-# cross-platform connector registry. Codex and Claude Code each ship
-# real per-user reconcile + teardown-snapshot machinery on Windows
-# (specs 002 / 004 / 005). Cursor and Amp exist in the connector
-# registry but have no Windows managed-hook lifecycle plumbing —
-# reconcile/teardown/trusted-state checks all fail closed on cursor
-# today, and shipping them here would strand user data on uninstall.
-# Cursor is tracked as a follow-up spec
-# (docs/specs/006-windows-cursor-managed-lifecycle/); until that
-# lands, reject at arg validation with a targeted error rather than
-# failing deep in the transaction with "managed-hook teardown does
-# not support connector 'cursor'".
+# Windows managed_enterprise supports only connectors with a complete native
+# reconcile, trusted-runtime, rollback, and teardown lifecycle. Cursor uses its
+# documented machine enterprise hook source while retaining per-user scoped
+# DefenseClaw runtime and credentials.
 $script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp')
-$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode')
+$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode', 'cursor')
 
 function ConvertTo-DefenseClawConnectorList {
     param([Parameter(Mandatory)][string]$Connector)
@@ -1418,7 +1410,7 @@ function ConvertTo-DefenseClawConnectorList {
             throw "-Connector entry '$trimmed' is not a recognised connector; expected one or more of: $($script:DefenseClawSupportedConnectors -join ', ')"
         }
         if ($trimmed -notin $script:DefenseClawWindowsManagedEnterpriseSupportedConnectors) {
-            throw "-Connector entry '$trimmed' is not supported on Windows managed_enterprise; supported: $($script:DefenseClawWindowsManagedEnterpriseSupportedConnectors -join ', '). Follow-up: docs/specs/006-windows-cursor-managed-lifecycle."
+            throw "-Connector entry '$trimmed' is not supported on Windows managed_enterprise; supported: $($script:DefenseClawWindowsManagedEnterpriseSupportedConnectors -join ', ')."
         }
         if ($normalized -notcontains $trimmed) {
             $normalized.Add($trimmed) | Out-Null
@@ -2037,6 +2029,7 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     $script:DefenseClawWindowsAgentVersionMinimum = @{
         'codex'      = '0.131.0'
         'claudecode' = '2.1.152'
+        'cursor'     = '1.7.0'
     }
     foreach ($u in $users) {
         foreach ($c in $Connectors) {

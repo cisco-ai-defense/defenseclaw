@@ -165,6 +165,7 @@ func newWindowsEnterpriseCertifiedConnectorRegistry() *connector.Registry {
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(connector.NewCodexConnector())
 	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
+	registry.RegisterBuiltin(connector.NewCursorConnector())
 	return registry
 }
 
@@ -257,7 +258,7 @@ target or aggregate guardian control is unhealthy.`,
 
 func init() {
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
-		"Hook-native connector to install or repair (for example codex or claudecode)")
+		"Hook-native connector to install or repair (codex, claudecode, or cursor on native Windows)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookUser, "user", "",
 		"Target local user name (resolves home, uid, and gid)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookUserHome, "user-home", "",
@@ -279,7 +280,7 @@ func init() {
 	enterpriseHooksInstallCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
-		"Administrator-managed connector to remove (built-in codex or claudecode on native Windows)")
+		"Administrator-managed connector to remove (built-in codex, claudecode, or cursor on native Windows)")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUser, "user", "",
 		"Target local user name (resolves home and SID)")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUserHome, "user-home", "",

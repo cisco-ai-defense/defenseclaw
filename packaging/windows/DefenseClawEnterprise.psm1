@@ -4223,6 +4223,7 @@ function Get-DefenseClawLayout {
         ClaudeEffectivePolicyVerified = $false
         ClaudeTargetEnabled = $false
         CodexTargetEnabled = $false
+        CursorTargetEnabled = $false
         CertificationCodexHome = [string]$CertificationCodexHome
     }
 }
@@ -4402,7 +4403,11 @@ function Get-DefenseClawDeploymentMetadata {
         }
         $Layout.CoreHardeningCertification = $recordedCoreCertification
     }
-    foreach ($targetName in @('claude_target_enabled', 'codex_target_enabled')) {
+    foreach ($targetName in @(
+        'claude_target_enabled',
+        'codex_target_enabled',
+        'cursor_target_enabled'
+    )) {
         $targetProperty = $metadata.PSObject.Properties[$targetName]
         if ($null -eq $targetProperty) {
             continue
@@ -4413,13 +4418,17 @@ function Get-DefenseClawDeploymentMetadata {
         if ($targetName -eq 'claude_target_enabled') {
             $Layout.ClaudeTargetEnabled = [bool]$targetProperty.Value
         }
-        else {
+        elseif ($targetName -eq 'codex_target_enabled') {
             $Layout.CodexTargetEnabled = [bool]$targetProperty.Value
+        }
+        else {
+            $Layout.CursorTargetEnabled = [bool]$targetProperty.Value
         }
     }
     if ([bool]$Layout.CoreHardeningCertification -and
-        [bool]$Layout.CodexTargetEnabled) {
-        throw 'core-hardening certification metadata cannot enable the Codex target'
+        ([bool]$Layout.CodexTargetEnabled -or
+            [bool]$Layout.CursorTargetEnabled)) {
+        throw 'core-hardening certification metadata cannot enable Codex or Cursor targets'
     }
     $providerLibraryProperty = $metadata.PSObject.Properties['provider_library_path']
     if ($null -ne $providerLibraryProperty -and
@@ -4525,6 +4534,9 @@ function New-DefenseClawDeploymentMetadata {
         claude_target_enabled = [bool](
             $Installed -and $Layout.ClaudeTargetEnabled
         )
+        cursor_target_enabled = [bool](
+            $Installed -and $Layout.CursorTargetEnabled
+        )
         claude_approved_client_enforced = [bool](
             $Installed -and $Layout.AgentApplicationControlAttested
         )
@@ -4542,14 +4554,16 @@ function New-DefenseClawDeploymentMetadata {
         external_security_prerequisites_satisfied = [bool](
             $Installed -and
             ($Layout.ClaudeTargetEnabled -or
-                $Layout.CodexTargetEnabled) -and
+                $Layout.CodexTargetEnabled -or
+                $Layout.CursorTargetEnabled) -and
             (-not $Layout.ClaudeTargetEnabled -or
                 $Layout.ClaudeEffectivePolicyVerified)
         )
         security_complete = [bool](
             $Installed -and
             ($Layout.ClaudeTargetEnabled -or
-                $Layout.CodexTargetEnabled) -and
+                $Layout.CodexTargetEnabled -or
+                $Layout.CursorTargetEnabled) -and
             (-not $Layout.ClaudeTargetEnabled -or
                 $Layout.ClaudeEffectivePolicyVerified)
         )
@@ -7179,6 +7193,7 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             'claude_target_enabled',
             'claude_effective_policy_verified',
             'codex_target_enabled',
+            'cursor_target_enabled',
             'security_complete'
         )) {
             $property = $report.PSObject.Properties[$booleanName]
@@ -7201,7 +7216,8 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         }
         $expectedSecurityComplete = [bool](
             ([bool]$report.claude_target_enabled -or
-                [bool]$report.codex_target_enabled) -and
+                [bool]$report.codex_target_enabled -or
+                [bool]$report.cursor_target_enabled) -and
             (-not [bool]$report.claude_target_enabled -or
                 [bool]$Layout.ClaudeEffectivePolicyVerified)
         )
@@ -7210,6 +7226,7 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         }
         $Layout.ClaudeTargetEnabled = [bool]$report.claude_target_enabled
         $Layout.CodexTargetEnabled = [bool]$report.codex_target_enabled
+        $Layout.CursorTargetEnabled = [bool]$report.cursor_target_enabled
         if ([bool]$Layout.CodexTargetEnabled) {
             if ($Action -in @('reconcile', 'verify')) {
                 if (@($report.managed_events).Count -ne 10) {
@@ -8137,6 +8154,19 @@ function Assert-DefenseClawEnterpriseDeployment {
         throw 'deployment metadata Codex target and machine-policy ownership state disagree'
     }
     $codexTargetEnabled = [bool]$codexTargetProperty.Value
+    $cursorTargetProperty = $metadata.PSObject.Properties[
+        'cursor_target_enabled'
+    ]
+    # Schema-1 deployments created before native Cursor support do not carry
+    # this field. Their only safe interpretation is Cursor disabled.
+    if ($null -ne $cursorTargetProperty -and
+        $cursorTargetProperty.Value -isnot [bool]) {
+        throw 'deployment metadata has an invalid Cursor target result'
+    }
+    $cursorTargetEnabled = [bool](
+        $null -ne $cursorTargetProperty -and
+        [bool]$cursorTargetProperty.Value
+    )
     if ($codexTargetEnabled) {
         if ([string]$metadata.codex_machine_policy_sha256 -cnotmatch
             '^[0-9a-f]{64}$') {
@@ -8203,7 +8233,8 @@ function Assert-DefenseClawEnterpriseDeployment {
     ]
     $expectedSecurityComplete = [bool](
         ([bool]$claudeTargetProperty.Value -or
-            $codexTargetEnabled) -and
+            $codexTargetEnabled -or
+            $cursorTargetEnabled) -and
         (-not [bool]$claudeTargetProperty.Value -or
             [bool]$claudeEffectiveProperty.Value)
     )
@@ -8223,6 +8254,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     )
     $Layout.ClaudeTargetEnabled = [bool]$claudeTargetProperty.Value
     $Layout.CodexTargetEnabled = $codexTargetEnabled
+    $Layout.CursorTargetEnabled = $cursorTargetEnabled
     $recordedAttestationHash = [string]$metadata.agent_application_control_attestation_sha256
     if ([bool]$Layout.CoreHardeningCertification) {
         if ((Microsoft.PowerShell.Management\Test-Path `
@@ -8920,6 +8952,7 @@ function Get-DefenseClawLifecycleStatus {
     $codexRequirementsReady = $false
     $codexRequirementsDisposition = $null
     $codexTargetEnabled = $false
+    $cursorTargetEnabled = [bool]$Layout.CursorTargetEnabled
     $claudeTargetEnabled = [bool]$Layout.ClaudeTargetEnabled
     $claudeEffectivePolicyVerified = [bool](
         $Layout.ClaudeEffectivePolicyVerified
@@ -8970,6 +9003,7 @@ function Get-DefenseClawLifecycleStatus {
                 $codexRequirementsReady = [bool]$codexReport.ok
                 $codexRequirementsDisposition = [string]$codexReport.disposition
                 $codexTargetEnabled = [bool]$codexReport.codex_target_enabled
+                $cursorTargetEnabled = [bool]$codexReport.cursor_target_enabled
                 $claudeTargetEnabled = [bool]$codexReport.claude_target_enabled
                 $claudeEffectivePolicyVerified = [bool](
                     $codexReport.claude_effective_policy_verified
@@ -9002,9 +9036,11 @@ function Get-DefenseClawLifecycleStatus {
             -not $pending -and
             $errors.Count -eq 0
     }
+    # Cursor uses the same protected Guardian/runtime readiness lane but does
+    # not require Codex machine policy or application-control proof.
     $externalSecuritySatisfied = [bool](
         $installed -and
-        ($claudeTargetEnabled -or $codexTargetEnabled) -and
+        ($claudeTargetEnabled -or $codexTargetEnabled -or $cursorTargetEnabled) -and
         (-not $claudeTargetEnabled -or
             $claudeEffectivePolicyVerified)
     )
@@ -9035,6 +9071,7 @@ function Get-DefenseClawLifecycleStatus {
         agent_application_control_prerequisite = $script:AgentApplicationControlPrerequisite
         codex_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
         codex_target_enabled = [bool]$codexTargetEnabled
+        cursor_target_enabled = [bool]$cursorTargetEnabled
         claude_target_enabled = [bool]$claudeTargetEnabled
         claude_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
         claude_minimum_client_version = '2.1.152'
@@ -11711,10 +11748,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -Action inspect
         if ([bool]$Layout.CoreHardeningCertification -and
-            [bool]$Layout.CodexTargetEnabled) {
+            ([bool]$Layout.CodexTargetEnabled -or
+                [bool]$Layout.CursorTargetEnabled)) {
             throw (
-                'Core-hardening certification is Claude-only and refuses an ' +
-                'enabled Codex target in the protected manifest'
+                'Core-hardening certification is Claude-only and refuses ' +
+                'enabled Codex or Cursor targets in the protected manifest'
             )
         }
         if ($Sources.ContainsKey('manifest') -and

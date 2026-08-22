@@ -32,6 +32,10 @@ func platformWatchDirs(InstallOptions) ([]string, bool, error) {
 	return nil, false, nil
 }
 
+func platformWatchOwnedFiles(InstallOptions) (WatchOwnership, bool, error) {
+	return WatchOwnership{}, false, nil
+}
+
 func platformRemoveManagedPolicy(context.Context, InstallOptions) error {
 	return fmt.Errorf("enterprise hooks: managed policy removal is supported only on native Windows")
 }

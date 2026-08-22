@@ -1,64 +1,59 @@
-# Spec 006 — Windows cursor managed_enterprise lifecycle (stub)
+# Spec 006 — Windows Cursor managed-enterprise lifecycle
 
-Extend the Windows `managed_enterprise` per-user hook lifecycle from the
-`codex` + `claudecode` pair to also cover `cursor`.
+Windows managed-enterprise supports Cursor through Cursor's documented
+machine-wide enterprise hook source:
 
-## Why
+`C:\ProgramData\Cursor\hooks.json`
 
-Cursor exists in the cross-platform connector registry (works on macOS
-`managed_enterprise`). On Windows the reconcile, teardown-snapshot,
-trusted-state, and native-hook-runtime writers all fail closed on
-`cursor` today — reject-with-an-error rather than "not implemented,"
-because shipping cursor without teardown-snapshot machinery would strand
-any pre-existing `%USERPROFILE%\.cursor\hooks.json` on uninstall (real
-data-loss risk).
+This path has higher priority than team, project, and user hook files. The
+integration deliberately does not modify `%USERPROFILE%\.cursor\hooks.json`.
 
-Existing rejection points (all `!= "codex" && != "claudecode"` checks):
+## Architecture
 
-- `internal/cli/hook_trusted_state_windows.go:137` — CLI subcommand
-  connector allow-list.
-- `internal/cli/windows_managed_hooks_teardown.go:636` — teardown /
-  snapshot machinery.
-- `internal/gateway/connector/subprocess.go:616` —
-  `ReconcileManagedNativeHookRuntime`.
-- `internal/gateway/connector/subprocess.go:635` —
-  `ValidateManagedNativeHookRuntime`.
-- `internal/gateway/connector/subprocess.go:937` — companion accept
-  list.
+- Setup installs one administrator-owned `defenseclaw-hook.ps1` adapter under
+  `C:\ProgramData\Cursor` and registers it in the enterprise `hooks.json`.
+- The adapter contains no credential or user identity. It streams Cursor's
+  JSON from stdin to the existing signed `defenseclaw-hook.exe` with
+  `hook --connector cursor --enterprise-managed` and returns its JSON verdict.
+- Cursor action hooks set `failClosed: true`; adapter startup, timeout, or
+  malformed-response failures return an explicit deny result.
+- Each enabled Windows user retains a separate ACL-protected DefenseClaw
+  runtime under `%USERPROFILE%\.defenseclaw\hooks`.
+- Protected, user-readable machine state contains only the non-secret mapping
+  from the current process SID to that
+  user's canonical runtime directory. The native hook derives the SID from its
+  process token; neither `USERPROFILE` nor a caller-supplied path selects a
+  runtime.
+- The original third-party configuration and its security metadata live in a
+  separate Administrator/SYSTEM-only rollback receipt; they are never copied
+  into the user-readable SID registry.
+- An unregistered SID, a changed path, an invalid ACL, or a drifted contract
+  fails closed.
 
-Plus arg-validation early-reject added in this PR at
-`cmd/defenseclaw-enterprise-setup/main.go` and
-`internal/cli/windows_enterprise_service.go` so the failure surfaces at
-the arg boundary instead of deep in the transaction.
+## Ownership and lifecycle
 
-## Scope
+DefenseClaw owns only entries whose command exactly matches its protected
+adapter path. Reconcile preserves unrelated enterprise hooks and settings.
+The protected ownership state records the installed adapter digest, machine
+identity, and exact enrolled SID set. The separate private receipt records the
+original configuration and security metadata and is hash-bound to that state.
 
-- Per-user reconcile writer for `%USERPROFILE%\.cursor\hooks.json`
-  routed through `managed.WriteServiceRuntimeFile` (managed-runtime
-  trust contract; not `atomicWriteFile`'s private-state contract).
-- Teardown snapshot + restore for `%USERPROFILE%\.cursor\hooks.json`
-  parallel to how spec 004 handles Claude Code's
-  `%USERPROFILE%\.claude\settings.json` and spec 002 handles Codex's
-  `%ProgramData%\OpenAI\Codex\requirements.toml`.
-- Trusted-state validator additions accepting a cursor row shape.
-- Manifest schema — no change (cursor already a valid connector).
-- Enumerator — likely no change (spec 005 D1 already enumerates all
-  supported connectors on the ProfileList walk).
-- Tests: cursor reconcile round-trip, snapshot preserves pre-existing
-  user hooks, uninstall restores exact bytes.
+Install and repair reconcile all per-user runtimes before publishing the
+machine hook. Guardian revokes stale SIDs and publishes the exact desired set.
+Rollback and uninstall snapshot all four global artifacts (configuration,
+adapter, public ownership state, and private receipt) in the protected
+lifecycle journal. Teardown
+removes DefenseClaw-owned entries while preserving unrelated hooks; it leaves
+a credential-free allow-only adapter tombstone for Cursor processes that may
+have cached the old command.
 
-## Non-goals
+## Native Cursor scope
 
-- Windows managed_enterprise `amp` support — separate spec if/when
-  needed.
-- Application control / machine-policy attestation for cursor —
-  cursor's hook is per-user with no machine-level component, unlike
-  Codex (machine `requirements.toml`) or Claude (machine
-  `managed-settings.json`).
+The supported Windows lifecycle is for native Cursor installations under the
+per-user or machine application roots. It does not treat `cursor-agent` in WSL
+or an npm package as a native Windows installation.
 
-## Follow-up
-
-Design + requirements + tasks + plan documents live alongside the other
-`docs/specs/00N-windows-*` specs (archived out-of-tree in the
-`defenseclaw-debug/windows-parity-windows/` folder per PR #767 body).
-Land this spec's documents there when the work starts.
+Cursor remains enterprise-scoped and not certified for general Windows use
+until the native install, multi-user, Guardian, repair, rollback, non-purge
+reinstall, purge, and fail-closed test matrix completes. Amp support remains
+out of scope.

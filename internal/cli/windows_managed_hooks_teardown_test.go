@@ -62,6 +62,12 @@ func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
 				AgentVersion: "2.1.152",
 			},
 			{
+				UserHome:     homeB,
+				SID:          "S-1-5-21-111-222-333-1002",
+				Connector:    "Cursor",
+				AgentVersion: "1.7.0",
+			},
+			{
 				UserHome:     `C:\Users\disabled`,
 				SID:          "S-1-5-21-111-222-333-1003",
 				Connector:    "codex",
@@ -70,12 +76,12 @@ func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
 			},
 		},
 	}
-	targets, claude, codex, err := windowsManagedHooksTeardownTargets(manifest)
+	targets, claude, codex, cursor, err := windowsManagedHooksTeardownTargets(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 2 || targets[0].Connector != "claudecode" ||
-		targets[1].Connector != "codex" {
+	if len(targets) != 3 || targets[0].Connector != "claudecode" ||
+		targets[1].Connector != "codex" || targets[2].Connector != "cursor" {
 		t.Fatalf("sorted targets = %+v", targets)
 	}
 	if !slices.Equal(claude, []string{"S-1-5-21-111-222-333-1001"}) {
@@ -88,6 +94,10 @@ func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
 			filepath.Join(homeB, ".defenseclaw"),
 		) {
 		t.Fatalf("Codex targets = %+v", codex)
+	}
+	if len(cursor) != 1 || cursor[0].SID != "S-1-5-21-111-222-333-1002" ||
+		!sameWindowsEnterprisePathCLI(cursor[0].DataDir, filepath.Join(homeB, ".defenseclaw")) {
+		t.Fatalf("Cursor targets = %+v", cursor)
 	}
 }
 
@@ -129,7 +139,7 @@ func TestWindowsManagedHooksTeardownTargetsRejectsExpansion(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			target := base
 			test.mutate(&target)
-			_, _, _, err := windowsManagedHooksTeardownTargets(
+			_, _, _, _, err := windowsManagedHooksTeardownTargets(
 				enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{target}},
 			)
 			if err == nil || !strings.Contains(err.Error(), test.match) {
@@ -307,6 +317,185 @@ func TestCompleteWindowsManagedHooksTeardownRollbackIsIdempotent(t *testing.T) {
 					test.wantVerifies,
 					test.wantWrites,
 				)
+			}
+		})
+	}
+}
+
+func TestRestoreWindowsManagedHooksTeardownCompositeCompensatesInReverse(t *testing.T) {
+	claudeErr := errors.New("Claude restore failed")
+	cursorErr := errors.New("Cursor restore failed")
+	codexErr := errors.New("Codex restore failed")
+	claudeCompensationErr := errors.New("Claude compensation failed")
+	cursorCompensationErr := errors.New("Cursor compensation failed")
+	for name, test := range map[string]struct {
+		claudeErr             error
+		cursorErr             error
+		codexErr              error
+		claudeCompensationErr error
+		cursorCompensationErr error
+		wantSteps             []string
+		wantErrors            []error
+	}{
+		"success": {
+			wantSteps: []string{"restore-claude", "restore-cursor", "restore-codex"},
+		},
+		"Claude failure stops immediately": {
+			claudeErr:  claudeErr,
+			wantSteps:  []string{"restore-claude"},
+			wantErrors: []error{claudeErr},
+		},
+		"Cursor failure compensates Claude": {
+			cursorErr:  cursorErr,
+			wantSteps:  []string{"restore-claude", "restore-cursor", "compensate-claude"},
+			wantErrors: []error{cursorErr},
+		},
+		"Codex failure compensates Cursor then Claude": {
+			codexErr:   codexErr,
+			wantSteps:  []string{"restore-claude", "restore-cursor", "restore-codex", "compensate-cursor", "compensate-claude"},
+			wantErrors: []error{codexErr},
+		},
+		"compensation failures are joined": {
+			codexErr:              codexErr,
+			claudeCompensationErr: claudeCompensationErr,
+			cursorCompensationErr: cursorCompensationErr,
+			wantSteps:             []string{"restore-claude", "restore-cursor", "restore-codex", "compensate-cursor", "compensate-claude"},
+			wantErrors:            []error{codexErr, cursorCompensationErr, claudeCompensationErr},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var steps []string
+			err := restoreWindowsManagedHooksTeardownComposite(
+				func() error {
+					steps = append(steps, "restore-claude")
+					return test.claudeErr
+				},
+				func() error {
+					steps = append(steps, "restore-cursor")
+					return test.cursorErr
+				},
+				func() error {
+					steps = append(steps, "restore-codex")
+					return test.codexErr
+				},
+				func() error {
+					steps = append(steps, "compensate-claude")
+					return test.claudeCompensationErr
+				},
+				func() error {
+					steps = append(steps, "compensate-cursor")
+					return test.cursorCompensationErr
+				},
+			)
+			if !slices.Equal(steps, test.wantSteps) {
+				t.Fatalf("steps = %v, want %v", steps, test.wantSteps)
+			}
+			if len(test.wantErrors) == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected composite restore failure")
+			}
+			for _, want := range test.wantErrors {
+				if !errors.Is(err, want) {
+					t.Fatalf("error %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsManagedHooksClaudeSnapshotsEqualRequiresExactPreimage(t *testing.T) {
+	base := enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot{
+		PolicyExisted: true,
+		Policy:        []byte("policy"),
+		StateExisted:  true,
+		State:         []byte("state"),
+	}
+	identical := base
+	identical.Policy = append([]byte(nil), base.Policy...)
+	identical.State = append([]byte(nil), base.State...)
+	if !windowsManagedHooksClaudeSnapshotsEqual(base, identical) {
+		t.Fatal("byte-identical Claude snapshots must permit partial Cursor teardown recovery")
+	}
+
+	changed := identical
+	changed.State = []byte("changed")
+	if windowsManagedHooksClaudeSnapshotsEqual(base, changed) {
+		t.Fatal("Claude preimage drift must prevent partial Cursor teardown recovery")
+	}
+}
+
+func TestRecoverWindowsManagedHooksCursorTeardownCapture(t *testing.T) {
+	captureErr := errors.New("strict capture failed")
+	healErr := errors.New("journal heal failed")
+	recaptureErr := errors.New("recapture failed")
+	for name, test := range map[string]struct {
+		initialErr error
+		allowHeal  bool
+		healErr    error
+		recapture  error
+		wantSteps  []string
+		wantErrors []error
+	}{
+		"strict capture succeeds": {},
+		"ambiguous state is not mutated": {
+			initialErr: captureErr,
+			wantErrors: []error{captureErr},
+		},
+		"heal failure is joined": {
+			initialErr: captureErr,
+			allowHeal:  true,
+			healErr:    healErr,
+			wantSteps:  []string{"heal"},
+			wantErrors: []error{captureErr, healErr},
+		},
+		"recapture failure is joined": {
+			initialErr: captureErr,
+			allowHeal:  true,
+			recapture:  recaptureErr,
+			wantSteps:  []string{"heal", "recapture"},
+			wantErrors: []error{captureErr, recaptureErr},
+		},
+		"authenticated partial state heals and recaptures": {
+			initialErr: captureErr,
+			allowHeal:  true,
+			wantSteps:  []string{"heal", "recapture"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var steps []string
+			err := recoverWindowsManagedHooksCursorTeardownCapture(
+				test.initialErr,
+				test.allowHeal,
+				func() error {
+					steps = append(steps, "heal")
+					return test.healErr
+				},
+				func() error {
+					steps = append(steps, "recapture")
+					return test.recapture
+				},
+			)
+			if !slices.Equal(steps, test.wantSteps) {
+				t.Fatalf("steps = %v, want %v", steps, test.wantSteps)
+			}
+			if len(test.wantErrors) == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected Cursor teardown capture recovery failure")
+			}
+			for _, want := range test.wantErrors {
+				if !errors.Is(err, want) {
+					t.Fatalf("error %q does not contain %q", err, want)
+				}
 			}
 		})
 	}

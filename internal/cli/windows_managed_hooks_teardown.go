@@ -27,8 +27,8 @@ import (
 )
 
 const (
-	windowsManagedHooksTeardownSchema      = 2
-	windowsManagedHooksTeardownJournalMax  = 4 << 20
+	windowsManagedHooksTeardownSchema      = 3
+	windowsManagedHooksTeardownJournalMax  = 32 << 20
 	windowsManagedHooksTeardownJournalFile = "managed-hooks-teardown-journal.json"
 )
 
@@ -50,6 +50,15 @@ type windowsManagedHooksTeardownJournal struct {
 	Targets             []windowsManagedHooksTeardownTarget                        `json:"targets"`
 	ClaudeTargetSIDs    []string                                                   `json:"claude_target_sids"`
 	Claude              enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot `json:"claude"`
+	CursorTargets       []enterprisehooks.WindowsCursorManagedRuntimeTarget        `json:"cursor_targets"`
+	Cursor              enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot `json:"cursor"`
+}
+
+type windowsManagedHooksTeardownMachineCapture struct {
+	claudeOpts     enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions
+	claudeSnapshot enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
+	cursorOpts     enterprisehooks.WindowsCursorManagedPolicyTeardownOptions
+	cursorSnapshot enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot
 }
 
 type windowsManagedHooksTeardownResult struct {
@@ -209,7 +218,7 @@ func runWindowsManagedHooksTeardown(
 	if err != nil {
 		return fail(err)
 	}
-	targets, claudeTargets, codexTargets, err := windowsManagedHooksTeardownTargets(manifest)
+	targets, claudeTargets, codexTargets, cursorTargets, err := windowsManagedHooksTeardownTargets(manifest)
 	if err != nil {
 		return fail(err)
 	}
@@ -251,12 +260,28 @@ func runWindowsManagedHooksTeardown(
 			break
 		}
 		identity.ClaudeTargetSIDs = currentClaude
-		report.EnrollmentTargetCount = len(currentClaude) + len(codexTargets)
+		currentCursor, cursorActive, readCursorErr :=
+			enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+		if readCursorErr != nil {
+			err = readCursorErr
+			break
+		}
+		currentCursor, err = windowsManagedHooksPartialCursorTargets(
+			cursorTargets,
+			currentCursor,
+			cursorActive,
+		)
+		if err != nil {
+			break
+		}
+		identity.CursorTargets = currentCursor
+		report.EnrollmentTargetCount = len(currentClaude) + len(codexTargets) + len(currentCursor)
 		var rollbackCompleted bool
 		var surviving int
 		rollbackCompleted, surviving, err = prepareWindowsManagedHooksTeardown(
 			opts,
 			windowsManagedHooksClaudeOptions(opts, currentClaude),
+			windowsManagedHooksCursorOptions(opts, currentCursor),
 			codexTargets,
 			identity,
 			report.JournalPath,
@@ -280,7 +305,7 @@ func runWindowsManagedHooksTeardown(
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
-				len(journal.ClaudeTargetSIDs) + len(codexTargets)
+				len(journal.ClaudeTargetSIDs) + len(codexTargets) + len(journal.CursorTargets)
 		}
 		if err == nil && journal.Phase != "prepared" {
 			err = fmt.Errorf(
@@ -307,7 +332,7 @@ func runWindowsManagedHooksTeardown(
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
-				len(journal.ClaudeTargetSIDs) + len(codexTargets)
+				len(journal.ClaudeTargetSIDs) + len(codexTargets) + len(journal.CursorTargets)
 		}
 		if err == nil && journal.Phase != "captured" &&
 			journal.Phase != "prepared" && journal.Phase != "rolled_back" {
@@ -320,6 +345,7 @@ func runWindowsManagedHooksTeardown(
 			err = rollbackWindowsManagedHooksTeardown(
 				opts,
 				windowsManagedHooksClaudeOptions(opts, journal.ClaudeTargetSIDs),
+				windowsManagedHooksCursorOptions(opts, journal.CursorTargets),
 				codexTargets,
 				journal,
 				report.JournalPath,
@@ -346,6 +372,7 @@ func runWindowsManagedHooksTeardown(
 func prepareWindowsManagedHooksTeardown(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
+	cursorOpts enterprisehooks.WindowsCursorManagedPolicyTeardownOptions,
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
 	identity windowsManagedHooksTeardownJournal,
 	journalPath string,
@@ -383,33 +410,45 @@ func prepareWindowsManagedHooksTeardown(
 		opts,
 		claudeOpts.TargetSIDs,
 		codexTargets,
+		cursorOpts.Targets,
 	); err != nil {
 		return false, 0, err
 	}
 
 	var captured enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
+	var capturedCursor enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot
 	persisted := false
 	var err error
 	captured, err = enterprisehooks.PrepareWindowsClaudeManagedPolicyTeardown(
 		claudeOpts,
 		func(snapshot enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot) error {
-			journal := identity
-			journal.Phase = "captured"
-			journal.Claude = snapshot
-			if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
-				return err
-			}
-			persisted = true
-			return nil
+			var cursorErr error
+			capturedCursor, cursorErr = enterprisehooks.PrepareWindowsCursorManagedPolicyTeardown(
+				cursorOpts,
+				func(cursorSnapshot enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot) error {
+					journal := identity
+					journal.Phase = "captured"
+					journal.Claude = snapshot
+					journal.Cursor = cursorSnapshot
+					if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
+						return err
+					}
+					persisted = true
+					return nil
+				},
+			)
+			return cursorErr
 		},
 	)
 	restoreOnFailure := func(cause error, surviving int) (bool, int, error) {
 		journal := identity
 		journal.Phase = "captured"
 		journal.Claude = captured
+		journal.Cursor = capturedCursor
 		if rollbackErr := rollbackWindowsManagedHooksTeardown(
 			opts,
 			claudeOpts,
+			cursorOpts,
 			codexTargets,
 			journal,
 			journalPath,
@@ -450,6 +489,7 @@ func prepareWindowsManagedHooksTeardown(
 	journal := identity
 	journal.Phase = "prepared"
 	journal.Claude = captured
+	journal.Cursor = capturedCursor
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
 		return restoreOnFailure(err, surviving)
 	}
@@ -494,6 +534,7 @@ func completeWindowsManagedHooksTeardownRollback(
 func rollbackWindowsManagedHooksTeardown(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
+	cursorOpts enterprisehooks.WindowsCursorManagedPolicyTeardownOptions,
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
@@ -501,38 +542,228 @@ func rollbackWindowsManagedHooksTeardown(
 	return completeWindowsManagedHooksTeardownRollback(
 		journal,
 		func() error {
-			if err := enterprisehooks.RestoreWindowsClaudeManagedPolicyTeardown(
+			current, err := captureWindowsManagedHooksTeardownMachineState(
 				claudeOpts,
-				journal.Claude,
-			); err != nil {
+				cursorOpts,
+				journal,
+			)
+			if err != nil {
 				return err
 			}
-			if len(codexTargets) != 0 {
-				return restoreWindowsCodexManagedHooks(opts, codexTargets)
-			}
-			disabled := opts
-			disabled.CodexTargetEnabled = false
-			codexReport, codexErr := connector.VerifyWindowsCodexMachineRequirements(disabled)
-			if codexErr != nil {
-				return codexErr
-			}
-			if !codexReport.OK || !codexReport.SafeToRemoveBinary ||
-				codexReport.SurvivingOwnedPathReferences != 0 {
-				return errors.New("Codex machine policy is not clean after teardown rollback")
-			}
-			return nil
+			return restoreWindowsManagedHooksTeardownComposite(
+				func() error {
+					return enterprisehooks.RestoreWindowsClaudeManagedPolicyTeardown(
+						claudeOpts,
+						journal.Claude,
+					)
+				},
+				func() error {
+					if current.cursorSnapshot.PolicyActive {
+						return enterprisehooks.RestoreWindowsCursorManagedPolicySnapshot(
+							cursorOpts,
+							current.cursorOpts,
+							journal.Cursor,
+						)
+					}
+					return enterprisehooks.RestoreWindowsCursorManagedPolicyTeardown(
+						cursorOpts,
+						journal.Cursor,
+					)
+				},
+				func() error {
+					if len(codexTargets) != 0 {
+						return restoreWindowsCodexManagedHooks(opts, codexTargets)
+					}
+					disabled := opts
+					disabled.CodexTargetEnabled = false
+					codexReport, codexErr := connector.VerifyWindowsCodexMachineRequirements(disabled)
+					if codexErr != nil {
+						return codexErr
+					}
+					if !codexReport.OK || !codexReport.SafeToRemoveBinary ||
+						codexReport.SurvivingOwnedPathReferences != 0 {
+						return errors.New("Codex machine policy is not clean after teardown rollback")
+					}
+					return nil
+				},
+				func() error {
+					return enterprisehooks.RestoreWindowsClaudeManagedPolicySnapshot(
+						current.claudeOpts,
+						claudeOpts,
+						current.claudeSnapshot,
+					)
+				},
+				func() error {
+					return enterprisehooks.RestoreWindowsCursorManagedPolicySnapshot(
+						current.cursorOpts,
+						cursorOpts,
+						current.cursorSnapshot,
+					)
+				},
+			)
 		},
 		func() error {
 			return verifyWindowsManagedHooksTeardownInstalled(
 				opts,
 				claudeOpts.TargetSIDs,
 				codexTargets,
+				cursorOpts.Targets,
 			)
 		},
 		func(updated windowsManagedHooksTeardownJournal) error {
 			return writeWindowsManagedHooksTeardownJournal(journalPath, updated)
 		},
 	)
+}
+
+func captureWindowsManagedHooksTeardownMachineState(
+	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
+	cursorOpts enterprisehooks.WindowsCursorManagedPolicyTeardownOptions,
+	journal windowsManagedHooksTeardownJournal,
+) (windowsManagedHooksTeardownMachineCapture, error) {
+	var result windowsManagedHooksTeardownMachineCapture
+	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil {
+		return result, fmt.Errorf("capture current Claude teardown enrollment: %w", err)
+	}
+	currentClaude, err = windowsManagedHooksPartialClaudeTargets(
+		claudeOpts.TargetSIDs,
+		currentClaude,
+		claudeActive,
+	)
+	if err != nil {
+		return result, err
+	}
+	result.claudeOpts = claudeOpts
+	result.claudeOpts.TargetSIDs = append([]string(nil), currentClaude...)
+	result.claudeSnapshot, err = enterprisehooks.CaptureWindowsClaudeManagedPolicySnapshot(
+		result.claudeOpts,
+	)
+	if err != nil {
+		return result, fmt.Errorf("capture current Claude teardown policy: %w", err)
+	}
+
+	captureCursor := func() error {
+		currentCursor, cursorActive, cursorErr := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+		if cursorErr != nil {
+			return fmt.Errorf("capture current Cursor teardown enrollment: %w", cursorErr)
+		}
+		currentCursor, cursorErr = windowsManagedHooksPartialCursorTargets(
+			cursorOpts.Targets,
+			currentCursor,
+			cursorActive,
+		)
+		if cursorErr != nil {
+			return cursorErr
+		}
+		result.cursorOpts = cursorOpts
+		result.cursorOpts.Targets = append(
+			[]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil),
+			currentCursor...,
+		)
+		result.cursorSnapshot, cursorErr = enterprisehooks.CaptureWindowsCursorManagedPolicySnapshot(
+			result.cursorOpts,
+		)
+		if cursorErr != nil {
+			return fmt.Errorf("capture current Cursor teardown policy: %w", cursorErr)
+		}
+		return nil
+	}
+	initialCursorErr := captureCursor()
+	// Cursor deactivation is journaled before Claude is removed. A process
+	// crash can therefore leave Cursor at a recognized write prefix while
+	// Claude is still the exact installed preimage. Only in that state may the
+	// authenticated Cursor teardown restore normalize the partial transaction
+	// before we recapture both sides for composite compensation.
+	if err := recoverWindowsManagedHooksCursorTeardownCapture(
+		initialCursorErr,
+		journal.Cursor.PolicyActive &&
+			windowsManagedHooksClaudeSnapshotsEqual(result.claudeSnapshot, journal.Claude),
+		func() error {
+			return enterprisehooks.RestoreWindowsCursorManagedPolicyTeardown(
+				cursorOpts,
+				journal.Cursor,
+			)
+		},
+		captureCursor,
+	); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func recoverWindowsManagedHooksCursorTeardownCapture(
+	initialCaptureErr error,
+	allowJournalHeal bool,
+	heal func() error,
+	recapture func() error,
+) error {
+	if initialCaptureErr == nil {
+		return nil
+	}
+	if !allowJournalHeal {
+		return initialCaptureErr
+	}
+	if healErr := heal(); healErr != nil {
+		return errors.Join(
+			initialCaptureErr,
+			fmt.Errorf("heal partial Cursor teardown before rollback: %w", healErr),
+		)
+	}
+	if recaptureErr := recapture(); recaptureErr != nil {
+		return errors.Join(
+			initialCaptureErr,
+			fmt.Errorf("recapture healed Cursor teardown policy: %w", recaptureErr),
+		)
+	}
+	return nil
+}
+
+func windowsManagedHooksClaudeSnapshotsEqual(
+	left, right enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot,
+) bool {
+	return left.PolicyExisted == right.PolicyExisted &&
+		bytes.Equal(left.Policy, right.Policy) &&
+		left.StateExisted == right.StateExisted &&
+		bytes.Equal(left.State, right.State)
+}
+
+func restoreWindowsManagedHooksTeardownComposite(
+	restoreClaude func() error,
+	restoreCursor func() error,
+	restoreCodex func() error,
+	compensateClaude func() error,
+	compensateCursor func() error,
+) error {
+	if err := restoreClaude(); err != nil {
+		return err
+	}
+	if err := restoreCursor(); err != nil {
+		if compensateErr := compensateClaude(); compensateErr != nil {
+			return errors.Join(
+				err,
+				fmt.Errorf("restore pre-rollback Claude policy after Cursor failure: %w", compensateErr),
+			)
+		}
+		return err
+	}
+	if err := restoreCodex(); err != nil {
+		failures := []error{err}
+		if compensateErr := compensateCursor(); compensateErr != nil {
+			failures = append(failures, fmt.Errorf(
+				"restore pre-rollback Cursor policy after Codex failure: %w",
+				compensateErr,
+			))
+		}
+		if compensateErr := compensateClaude(); compensateErr != nil {
+			failures = append(failures, fmt.Errorf(
+				"restore pre-rollback Claude policy after Codex failure: %w",
+				compensateErr,
+			))
+		}
+		return errors.Join(failures...)
+	}
+	return nil
 }
 
 func restoreWindowsCodexManagedHooks(
@@ -566,6 +797,9 @@ func verifyWindowsManagedHooksTeardownClean(
 	if err := enterprisehooks.VerifyWindowsClaudeManagedPolicyTeardown(); err != nil {
 		return 0, err
 	}
+	if err := enterprisehooks.VerifyWindowsCursorManagedPolicyTeardown(); err != nil {
+		return 0, err
+	}
 	disabled := opts
 	disabled.CodexTargetEnabled = false
 	report, err := connector.VerifyWindowsCodexMachineRequirements(disabled)
@@ -585,6 +819,7 @@ func verifyWindowsManagedHooksTeardownInstalled(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	claudeTargets []string,
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
+	cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
 ) error {
 	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
 	if err != nil {
@@ -610,6 +845,19 @@ func verifyWindowsManagedHooksTeardownInstalled(
 			return errors.New("Codex machine enrollment does not match the teardown manifest")
 		}
 	}
+	currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+	if err != nil {
+		return err
+	}
+	if cursorActive != (len(cursorTargets) != 0) || len(currentCursor) != len(cursorTargets) {
+		return errors.New("Cursor machine enrollment does not match the teardown manifest")
+	}
+	for index := range cursorTargets {
+		if !strings.EqualFold(currentCursor[index].SID, cursorTargets[index].SID) ||
+			!sameWindowsEnterprisePathCLI(currentCursor[index].DataDir, cursorTargets[index].DataDir) {
+			return errors.New("Cursor machine enrollment does not match the teardown manifest")
+		}
+	}
 	return nil
 }
 
@@ -619,22 +867,24 @@ func windowsManagedHooksTeardownTargets(
 	[]windowsManagedHooksTeardownTarget,
 	[]string,
 	[]connector.WindowsCodexManagedRuntimeTarget,
+	[]enterprisehooks.WindowsCursorManagedRuntimeTarget,
 	error,
 ) {
 	targets := make([]windowsManagedHooksTeardownTarget, 0, len(manifest.Targets))
 	claude := make([]string, 0, len(manifest.Targets))
 	codex := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(manifest.Targets))
+	cursor := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(manifest.Targets))
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
 		}
 		sid, err := windows.StringToSid(strings.TrimSpace(target.SID))
 		if err != nil || sid == nil {
-			return nil, nil, nil, fmt.Errorf("invalid managed-hook teardown SID %q", target.SID)
+			return nil, nil, nil, nil, fmt.Errorf("invalid managed-hook teardown SID %q", target.SID)
 		}
 		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-		if connectorName != "claudecode" && connectorName != "codex" {
-			return nil, nil, nil, fmt.Errorf(
+		if connectorName != "claudecode" && connectorName != "codex" && connectorName != "cursor" {
+			return nil, nil, nil, nil, fmt.Errorf(
 				"managed-hook teardown does not support connector %q",
 				target.Connector,
 			)
@@ -643,11 +893,11 @@ func windowsManagedHooksTeardownTargets(
 		if configured := strings.TrimSpace(target.DataDir); configured != "" {
 			configured, err = filepath.Abs(configured)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			configured = filepath.Clean(configured)
 			if !sameWindowsEnterprisePathCLI(configured, dataDir) {
-				return nil, nil, nil, fmt.Errorf(
+				return nil, nil, nil, nil, fmt.Errorf(
 					"managed-hook teardown target %s data_dir does not equal canonical %s",
 					sid,
 					dataDir,
@@ -669,6 +919,10 @@ func windowsManagedHooksTeardownTargets(
 				SID:     row.SID,
 				DataDir: row.DataDir,
 			})
+		case "cursor":
+			cursor = append(cursor, enterprisehooks.WindowsCursorManagedRuntimeTarget{
+				SID: row.SID, DataDir: row.DataDir,
+			})
 		}
 	}
 	sort.Slice(targets, func(i, j int) bool {
@@ -679,7 +933,8 @@ func windowsManagedHooksTeardownTargets(
 	})
 	sort.Strings(claude)
 	sort.Slice(codex, func(i, j int) bool { return codex[i].SID < codex[j].SID })
-	return targets, claude, codex, nil
+	sort.Slice(cursor, func(i, j int) bool { return cursor[i].SID < cursor[j].SID })
+	return targets, claude, codex, cursor, nil
 }
 
 func windowsManagedHooksTeardownFingerprint(
@@ -728,6 +983,36 @@ func validateWindowsManagedHooksTeardownJournal(
 		len(journal.Claude.State) > windowsManagedHooksTeardownJournalMax ||
 		(journal.Claude.PolicyExisted != (len(journal.ClaudeTargetSIDs) != 0)) {
 		return errors.New("managed-hook teardown journal contains an invalid Claude snapshot")
+	}
+	allowedCursorTargets := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(identity.Targets))
+	for _, target := range identity.Targets {
+		if target.Connector == "cursor" {
+			allowedCursorTargets = append(allowedCursorTargets, enterprisehooks.WindowsCursorManagedRuntimeTarget{
+				SID: target.SID, DataDir: target.DataDir,
+			})
+		}
+	}
+	if _, err := windowsManagedHooksPartialCursorTargets(
+		allowedCursorTargets,
+		journal.CursorTargets,
+		len(journal.CursorTargets) != 0,
+	); err != nil {
+		return err
+	}
+	cursorSnapshotActive := journal.Cursor.PolicyActive
+	if journal.Cursor.StateExisted != cursorSnapshotActive ||
+		journal.Cursor.ReceiptExisted != cursorSnapshotActive ||
+		(cursorSnapshotActive && (!journal.Cursor.AdapterExisted || !journal.Cursor.HooksExisted)) ||
+		len(journal.Cursor.Hooks) > windowsManagedHooksTeardownJournalMax ||
+		len(journal.Cursor.Adapter) > windowsManagedHooksTeardownJournalMax ||
+		len(journal.Cursor.State) > windowsManagedHooksTeardownJournalMax ||
+		len(journal.Cursor.Receipt) > windowsManagedHooksTeardownJournalMax ||
+		(journal.Cursor.HooksExisted != (journal.Cursor.HooksSecurityDescriptor != "" && journal.Cursor.HooksAttributes != 0)) ||
+		(journal.Cursor.AdapterExisted != (journal.Cursor.AdapterSecurityDescriptor != "" && journal.Cursor.AdapterAttributes != 0)) ||
+		(journal.Cursor.StateExisted != (journal.Cursor.StateSecurityDescriptor != "" && journal.Cursor.StateAttributes != 0)) ||
+		(journal.Cursor.ReceiptExisted != (journal.Cursor.ReceiptSecurityDescriptor != "" && journal.Cursor.ReceiptAttributes != 0)) ||
+		(cursorSnapshotActive != (len(journal.CursorTargets) != 0)) {
+		return errors.New("managed-hook teardown journal contains an invalid Cursor snapshot")
 	}
 	return nil
 }

@@ -75,7 +75,7 @@ const defaultHookFailMode = "closed"
 // cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
 // request budget while staying inside Cursor's 30-second command-hook timeout.
 // Keeping the adapter bound shorter than the vendor timeout gives it time to
-// terminate the launcher, remove the temporary payload, and emit fail-open JSON.
+// terminate the launcher and emit the configured fail-open/fail-closed JSON.
 const cursorAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
@@ -613,7 +613,7 @@ func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" {
+	if name != "codex" && name != "claudecode" && name != "cursor" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -632,7 +632,7 @@ func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" {
+	if name != "codex" && name != "claudecode" && name != "cursor" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -934,7 +934,7 @@ func validateHookRuntimeStateForContract(
 	if strings.TrimSpace(dataDir) == "" || name == "" {
 		return nil
 	}
-	if name != "claudecode" && name != "codex" {
+	if name != "claudecode" && name != "codex" && name != "cursor" {
 		return nil
 	}
 	hookDir := filepath.Join(dataDir, "hooks")

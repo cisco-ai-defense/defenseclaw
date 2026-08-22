@@ -64,6 +64,7 @@ type WindowsCodexMachineRequirementsOptions struct {
 	ClaudeEffectivePolicyVerified bool
 	ClaudeTargetEnabled           bool
 	CodexTargetEnabled            bool
+	CursorTargetEnabled           bool
 }
 
 // WindowsCodexManagedRuntimeTarget is the non-secret mapping a standard-user
@@ -114,6 +115,7 @@ type WindowsCodexMachineRequirementsReport struct {
 	ClaudeTargetEnabled           bool     `json:"claude_target_enabled"`
 	ClaudeEffectivePolicyVerified bool     `json:"claude_effective_policy_verified"`
 	CodexTargetEnabled            bool     `json:"codex_target_enabled"`
+	CursorTargetEnabled           bool     `json:"cursor_target_enabled"`
 	SecurityComplete              bool     `json:"security_complete"`
 	PreimageSHA256                string   `json:"preimage_sha256,omitempty"`
 	PostimageSHA256               string   `json:"postimage_sha256,omitempty"`
@@ -168,6 +170,7 @@ func windowsCodexMachineReport(action string, opts WindowsCodexMachineRequiremen
 		ClaudeTargetEnabled:                 opts.ClaudeTargetEnabled,
 		ClaudeEffectivePolicyVerified:       opts.ClaudeEffectivePolicyVerified,
 		CodexTargetEnabled:                  opts.CodexTargetEnabled,
+		CursorTargetEnabled:                 opts.CursorTargetEnabled,
 	}
 }
 

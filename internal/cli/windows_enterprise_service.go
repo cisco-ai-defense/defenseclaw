@@ -647,17 +647,10 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 				action,
 			)
 		}
-		// Windows managed_enterprise lifecycle only carries reconcile +
-		// teardown-snapshot plumbing for codex and claudecode today
-		// (specs 002/004/005). Cursor and Amp exist in the connector
-		// registry but their Windows managed_enterprise lifecycle
-		// hasn't been built — reconcile/teardown/trusted-state all
-		// fail closed on them deep inside the transaction. Reject at
-		// arg validation instead of letting the caller waste a
-		// transaction round-trip on
-		// "managed-hook teardown does not support connector 'cursor'".
-		// Follow-up: docs/specs/006-windows-cursor-managed-lifecycle.
-		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true}
+		// Keep this closed set aligned with the native Windows lifecycle. Each
+		// entry must have reconcile, trusted-runtime, rollback, and teardown
+		// coverage before it is accepted at this boundary.
+		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true, "cursor": true}
 		for _, entry := range strings.Split(opts.connector, ",") {
 			trimmed := strings.ToLower(strings.TrimSpace(entry))
 			if trimmed == "" {
@@ -666,8 +659,7 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			if !supportedOnWindows[trimmed] {
 				return fmt.Errorf(
 					"--connector entry %q is not supported on Windows managed_enterprise; "+
-						"supported: codex, claudecode. "+
-						"Follow-up: docs/specs/006-windows-cursor-managed-lifecycle.",
+						"supported: codex, claudecode, cursor.",
 					trimmed,
 				)
 			}

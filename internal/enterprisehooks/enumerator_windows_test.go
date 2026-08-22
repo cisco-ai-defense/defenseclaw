@@ -130,17 +130,18 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 			want: []string{},
 		},
 		{
-			name: "map with two supported entries, alphabetical order",
+			name: "map with supported entries, alphabetical order",
 			cfg: &config.Config{
 				Guardrail: config.GuardrailConfig{
 					Connector: "codex",
 					Connectors: map[string]config.PerConnectorGuardrailConfig{
 						"codex":      {},
 						"claudecode": {},
+						"cursor":     {},
 					},
 				},
 			},
-			want: []string{"claudecode", "codex"},
+			want: []string{"claudecode", "codex", "cursor"},
 		},
 		{
 			name: "map contains explicitly-disabled connector",

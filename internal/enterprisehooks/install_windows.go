@@ -49,6 +49,8 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		result, err = installWindowsClaudeManagedResult(ctx, opts)
 	case "codex":
 		result, err = installWindowsCodexManagedResult(ctx, opts)
+	case "cursor":
+		result, err = installWindowsCursorManagedResult(ctx, opts)
 	default:
 		result, err = installWindowsGenericManagedResult(ctx, opts)
 	}
@@ -61,7 +63,7 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 // fail-open normal-mode setting.
 func windowsEnterpriseHookFailMode(connectorName, configured string) string {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
-	case "codex", "claudecode":
+	case "codex", "claudecode", "cursor":
 		return "closed"
 	default:
 		return strings.TrimSpace(configured)
@@ -82,6 +84,8 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 		result, err = verifyWindowsClaudeManagedResult(ctx, opts)
 	case "codex":
 		result, err = verifyWindowsCodexManagedResult(ctx, opts)
+	case "cursor":
+		result, err = verifyWindowsCursorManagedResult(ctx, opts)
 	default:
 		result, err = verifyWindowsGenericManagedResult(ctx, opts)
 	}
@@ -99,6 +103,8 @@ func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) erro
 		minimum = "0.131.0"
 	case "claudecode":
 		minimum = "2.1.152"
+	case "cursor":
+		minimum = "1.7.0"
 	default:
 		return nil
 	}
@@ -334,7 +340,11 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if !connector.OwnsManagedHookRuntime(conn) {
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %q does not own a managed hook runtime", conn.Name())
 	}
-	if !connector.ConnectorSupportedOnHostOS(conn.Name()) {
+	// Cursor remains hidden from the general native-Windows setup surface
+	// until its release matrix is certified. This enterprise-only lifecycle is
+	// separately gated by the concrete built-in registry and the protected
+	// machine-policy implementation below.
+	if name != "cursor" && !connector.ConnectorSupportedOnHostOS(conn.Name()) {
 		support := connector.ConnectorSupportOnHostOS(conn.Name())
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %q is not supported on native Windows: %s", conn.Name(), support.Reason)
 	}
@@ -974,6 +984,35 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 			filepath.Dir(machineOpts.OwnershipPath),
 		)), true, nil
 	}
+	if name == "cursor" {
+		target, err := resolveWindowsGenericManagedTarget(opts)
+		if err != nil {
+			return nil, true, err
+		}
+		root, _, _, _, _, _, err := windowsCursorManagedPaths()
+		if err != nil {
+			return nil, true, err
+		}
+		userDirs := []string{
+			target.home,
+			target.dataDir,
+			filepath.Join(target.dataDir, "hooks"),
+		}
+		for _, dir := range userDirs {
+			if err := prepareWindowsGenericPath(
+				target.home,
+				dir,
+				target.sid,
+				true,
+				false,
+				false,
+				"Cursor watch directory",
+			); err != nil {
+				return nil, true, err
+			}
+		}
+		return sortedUnique(append(userDirs, root)), true, nil
+	}
 	if name != "claudecode" {
 		target, err := resolveWindowsGenericManagedTarget(opts)
 		if err != nil {
@@ -1022,6 +1061,33 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 		return nil, true, err
 	}
 	return sortedUnique([]string{home, dataDir, filepath.Join(dataDir, "hooks"), filepath.Dir(policyPath)}), true, nil
+}
+
+func platformWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) {
+	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
+		return WatchOwnership{}, false, nil
+	}
+	target, err := resolveWindowsGenericManagedTarget(opts)
+	if err != nil {
+		return WatchOwnership{}, true, err
+	}
+	_, hooksPath, adapterPath, statePath, receiptPath, _, err := windowsCursorManagedPaths()
+	if err != nil {
+		return WatchOwnership{}, true, err
+	}
+	hookDir := filepath.Join(target.dataDir, "hooks")
+	return WatchOwnership{
+		SharedWriter: []string{hooksPath},
+		ExclusiveWriter: sortedUnique([]string{
+			adapterPath,
+			statePath,
+			receiptPath,
+			filepath.Join(hookDir, ".hookcfg.cursor"),
+			filepath.Join(hookDir, ".hook-cursor.token"),
+			filepath.Join(target.dataDir, "hook_contract_lock.json"),
+			filepath.Join(target.dataDir, "hook_contract_lock.json.lock"),
+		}),
+	}, true, nil
 }
 
 func resolveWindowsEnterpriseDataDir(home, raw string) (string, error) {
@@ -1086,6 +1152,16 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 			machineOpts,
 			targetSID.String(),
 		)
+	}
+	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
+		if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+			return err
+		}
+		targetSID, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		if err != nil {
+			return err
+		}
+		return removeWindowsCursorManagedPolicyTarget(targetSID)
 	}
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
@@ -1205,6 +1281,7 @@ func newWindowsEnterpriseConnectorRegistry() *connector.Registry {
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(connector.NewCodexConnector())
 	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
+	registry.RegisterBuiltin(connector.NewCursorConnector())
 	return registry
 }
 
@@ -1219,6 +1296,10 @@ func certifyWindowsEnterpriseConnector(name string, conn connector.Connector) er
 		}
 	case "claudecode":
 		if _, ok := conn.(*connector.ClaudeCodeConnector); !ok {
+			return fmt.Errorf("enterprise hooks: connector %q is not the certified built-in Windows implementation", name)
+		}
+	case "cursor":
+		if !connector.IsBuiltinCursorConnector(conn) {
 			return fmt.Errorf("enterprise hooks: connector %q is not the certified built-in Windows implementation", name)
 		}
 	default:

@@ -1,7 +1,8 @@
-# defenseclaw-managed-hook v8
+# defenseclaw-managed-hook v9
 # Cursor 3.9.x on Windows delivers command-hook JSON as PowerShell pipeline
 # objects. Native executables receive only encoding preambles on that path, so
-# this adapter materializes the exact JSON bytes for the consoleless launcher.
+# this adapter streams the reconstructed UTF-8 JSON directly to the shared
+# consoleless launcher. It never materializes prompts or tool payloads on disk.
 [CmdletBinding()]
 param(
     [Parameter(ValueFromPipeline = $true)]
@@ -22,7 +23,6 @@ process {
 
 end {
     $hook = '{{.HookBinaryPS}}'
-    $payloadPath = Join-Path $PSScriptRoot (".cursor-input-" + [Guid]::NewGuid().ToString("N") + ".json")
     $exitCode = 2
     $responseWritten = $false
     try {
@@ -32,18 +32,6 @@ end {
         $payload = $parts -join [Environment]::NewLine
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         $payloadBytes = $utf8NoBom.GetBytes($payload)
-        $stream = [IO.File]::Open(
-            $payloadPath,
-            [IO.FileMode]::CreateNew,
-            [IO.FileAccess]::Write,
-            [IO.FileShare]::None
-        )
-        try {
-            $stream.Write($payloadBytes, 0, $payloadBytes.Length)
-        }
-        finally {
-            $stream.Dispose()
-        }
         # Windows PowerShell does not wait for GUI-subsystem executables when
         # they are invoked with `&`, and it does not reliably connect their
         # standard handles. defenseclaw-hook.exe intentionally uses that
@@ -51,32 +39,48 @@ end {
         # redirected handles and wait for the verdict before returning.
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
         $startInfo.FileName = $hook
-        $startInfo.Arguments = 'hook --connector cursor --input-file "' + $payloadPath + '"'
+        $startInfo.Arguments = 'hook --connector cursor{{if .Managed}} --enterprise-managed{{end}}'
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
 
         $process = New-Object System.Diagnostics.Process
         $process.StartInfo = $startInfo
+        $started = $false
+        $stdinClosed = $false
+        $stdinTask = $null
+        $timeoutMs = {{.HookTimeoutMS}}
+        $deadline = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             if (-not $process.Start()) {
                 throw "DefenseClaw hook launcher did not start"
             }
+            $started = $true
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
-            $timeoutMs = {{.HookTimeoutMS}}
-            if (-not $process.WaitForExit($timeoutMs)) {
-                try {
-                    $process.Kill()
-                    [void]$process.WaitForExit(5000)
-                }
-                catch {
-                    [Console]::Error.WriteLine(
-                        "defenseclaw: could not stop timed-out Cursor hook launcher: " + $_.Exception.Message
-                    )
-                }
+            $stdinStream = $process.StandardInput.BaseStream
+            $stdinTask = $stdinStream.WriteAsync($payloadBytes, 0, $payloadBytes.Length)
+            $remainingMs = $timeoutMs - [int]$deadline.ElapsedMilliseconds
+            if ($remainingMs -le 0 -or -not $stdinTask.Wait($remainingMs)) {
+                throw "DefenseClaw hook launcher timed out after ${timeoutMs}ms while receiving input"
+            }
+            $stdinTask.GetAwaiter().GetResult()
+            $process.StandardInput.Close()
+            $stdinClosed = $true
+
+            $remainingMs = $timeoutMs - [int]$deadline.ElapsedMilliseconds
+            if ($remainingMs -le 0 -or -not $process.WaitForExit($remainingMs)) {
                 throw "DefenseClaw hook launcher timed out after ${timeoutMs}ms"
+            }
+            $remainingMs = $timeoutMs - [int]$deadline.ElapsedMilliseconds
+            if ($remainingMs -le 0 -or -not $stdoutTask.Wait($remainingMs)) {
+                throw "DefenseClaw hook launcher timed out after ${timeoutMs}ms while reading output"
+            }
+            $remainingMs = $timeoutMs - [int]$deadline.ElapsedMilliseconds
+            if ($remainingMs -le 0 -or -not $stderrTask.Wait($remainingMs)) {
+                throw "DefenseClaw hook launcher timed out after ${timeoutMs}ms while reading diagnostics"
             }
             $stdout = $stdoutTask.GetAwaiter().GetResult()
             $stderr = $stderrTask.GetAwaiter().GetResult()
@@ -91,27 +95,45 @@ end {
             $exitCode = $process.ExitCode
         }
         finally {
+            if ($started -and -not $process.HasExited) {
+                try {
+                    $process.Kill()
+                    [void]$process.WaitForExit(5000)
+                }
+                catch {
+                    [Console]::Error.WriteLine(
+                        "defenseclaw: could not stop failed Cursor hook launcher: " + $_.Exception.Message
+                    )
+                }
+            }
+            if ($started -and -not $stdinClosed) {
+                try {
+                    $process.StandardInput.Close()
+                }
+                catch {
+                    [Console]::Error.WriteLine(
+                        "defenseclaw: could not close failed Cursor hook input: " + $_.Exception.Message
+                    )
+                }
+            }
+            $deadline.Stop()
             $process.Dispose()
         }
     }
     catch {
         [Console]::Error.WriteLine("defenseclaw: Cursor hook adapter failed: " + $_.Exception.Message)
         if (-not $responseWritten) {
+{{if eq .FailMode "open"}}
             [Console]::Out.Write('{"continue":true}')
+{{else}}
+            [Console]::Out.Write('{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}')
+{{end}}
         }
+{{if eq .FailMode "open"}}
         $exitCode = 0
-    }
-    finally {
-        try {
-            if (Test-Path -LiteralPath $payloadPath) {
-                Remove-Item -LiteralPath $payloadPath -Force -ErrorAction Stop
-            }
-        }
-        catch {
-            [Console]::Error.WriteLine(
-                "defenseclaw: could not remove temporary Cursor payload: " + $_.Exception.Message
-            )
-        }
+{{else}}
+        $exitCode = 2
+{{end}}
     }
     exit $exitCode
 }

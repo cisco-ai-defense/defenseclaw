@@ -25,8 +25,8 @@ import (
 )
 
 const (
-	windowsManagedHooksLifecycleSchema      = 1
-	windowsManagedHooksLifecycleJournalMax  = 4 << 20
+	windowsManagedHooksLifecycleSchema      = 2
+	windowsManagedHooksLifecycleJournalMax  = 32 << 20
 	windowsManagedHooksLifecycleJournalFile = "managed-hooks-lifecycle-journal.json"
 )
 
@@ -41,6 +41,8 @@ type windowsManagedHooksLifecycleJournal struct {
 	Targets               []windowsManagedHooksTeardownTarget                        `json:"targets"`
 	PriorClaudeTargetSIDs []string                                                   `json:"prior_claude_target_sids"`
 	Claude                enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot `json:"claude"`
+	PriorCursorTargets    []enterprisehooks.WindowsCursorManagedRuntimeTarget        `json:"prior_cursor_targets"`
+	Cursor                enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot `json:"cursor"`
 }
 
 type windowsManagedHooksLifecycleReport struct {
@@ -59,7 +61,13 @@ type windowsManagedHooksLifecycleContext struct {
 	pendingPath   string
 	targets       []windowsManagedHooksTeardownTarget
 	claudeTargets []string
+	cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget
 	fingerprint   string
+}
+
+type windowsManagedHooksClaudeLifecycleCapture struct {
+	opts     enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions
+	snapshot enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
 }
 
 func newWindowsManagedHooksLifecycleCommand() *cobra.Command {
@@ -175,10 +183,30 @@ func runWindowsManagedHooksLifecycle(
 		if err != nil {
 			return fail(err)
 		}
+		currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+		if err != nil {
+			return fail(err)
+		}
+		priorCursor, err := windowsManagedHooksPartialCursorTargets(
+			ctx.cursorTargets,
+			currentCursor,
+			cursorActive,
+		)
+		if err != nil {
+			return fail(err)
+		}
+		cursorSnapshot, err := enterprisehooks.CaptureWindowsCursorManagedPolicySnapshot(
+			windowsManagedHooksCursorOptions(ctx.opts, priorCursor),
+		)
+		if err != nil {
+			return fail(err)
+		}
 		journal := identity
 		journal.Phase = "captured"
 		journal.PriorClaudeTargetSIDs = prior
 		journal.Claude = snapshot
+		journal.PriorCursorTargets = priorCursor
+		journal.Cursor = cursorSnapshot
 		if err := writeWindowsManagedHooksLifecycleJournal(ctx.journalPath, journal); err != nil {
 			return fail(err)
 		}
@@ -197,15 +225,33 @@ func runWindowsManagedHooksLifecycle(
 				journal.Phase,
 			))
 		}
-		if err := enterprisehooks.RestoreWindowsClaudeManagedPolicySnapshot(
-			enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions{
-				HookExecutable:     journal.HookBinary,
-				GatewayAddr:        journal.GatewayAddr,
-				GatewayServiceName: journal.GatewayServiceName,
-				TargetSIDs:         append([]string(nil), journal.PriorClaudeTargetSIDs...),
+		priorClaudeOpts := windowsManagedHooksPriorClaudeOptions(journal)
+		currentClaude, err := captureWindowsManagedHooksLifecycleClaude(ctx, journal)
+		if err != nil {
+			return fail(err)
+		}
+		if err := restoreWindowsManagedHooksLifecycleComposite(
+			func() error {
+				return enterprisehooks.RestoreWindowsClaudeManagedPolicySnapshot(
+					priorClaudeOpts,
+					currentClaude.opts,
+					journal.Claude,
+				)
 			},
-			windowsManagedHooksClaudeOptions(ctx.opts, ctx.claudeTargets),
-			journal.Claude,
+			func() error {
+				return enterprisehooks.RestoreWindowsCursorManagedPolicySnapshot(
+					windowsManagedHooksPriorCursorOptions(journal),
+					windowsManagedHooksCursorOptions(ctx.opts, ctx.cursorTargets),
+					journal.Cursor,
+				)
+			},
+			func() error {
+				return enterprisehooks.RestoreWindowsClaudeManagedPolicySnapshot(
+					currentClaude.opts,
+					priorClaudeOpts,
+					currentClaude.snapshot,
+				)
+			},
 		); err != nil {
 			return fail(err)
 		}
@@ -327,7 +373,7 @@ func resolveWindowsManagedHooksLifecycleContext() (
 	if err != nil {
 		return ctx, err
 	}
-	targets, claudeTargets, _, err := windowsManagedHooksTeardownTargets(manifest)
+	targets, claudeTargets, _, cursorTargets, err := windowsManagedHooksTeardownTargets(manifest)
 	if err != nil {
 		return ctx, err
 	}
@@ -343,6 +389,7 @@ func resolveWindowsManagedHooksLifecycleContext() (
 		pendingPath:   filepath.Join(installState, "pending.json"),
 		targets:       targets,
 		claudeTargets: claudeTargets,
+		cursorTargets: cursorTargets,
 		fingerprint:   fingerprint,
 	}
 	return ctx, nil
@@ -377,6 +424,106 @@ func windowsManagedHooksClaudeOptions(
 	}
 }
 
+func windowsManagedHooksPriorClaudeOptions(
+	journal windowsManagedHooksLifecycleJournal,
+) enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions {
+	return enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions{
+		HookExecutable:     journal.HookBinary,
+		GatewayAddr:        journal.GatewayAddr,
+		GatewayServiceName: journal.GatewayServiceName,
+		TargetSIDs:         append([]string(nil), journal.PriorClaudeTargetSIDs...),
+	}
+}
+
+func captureWindowsManagedHooksLifecycleClaude(
+	ctx windowsManagedHooksLifecycleContext,
+	journal windowsManagedHooksLifecycleJournal,
+) (windowsManagedHooksClaudeLifecycleCapture, error) {
+	var result windowsManagedHooksClaudeLifecycleCapture
+	current, active, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
+	if err != nil {
+		return result, fmt.Errorf("capture current Claude lifecycle enrollment: %w", err)
+	}
+	type captureCandidate struct {
+		opts    enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions
+		allowed []string
+	}
+	candidates := []captureCandidate{
+		{opts: enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions{
+			HookExecutable:     journal.HookBinary,
+			GatewayAddr:        journal.GatewayAddr,
+			GatewayServiceName: journal.GatewayServiceName,
+			TargetSIDs:         append([]string(nil), current...),
+		}, allowed: journal.PriorClaudeTargetSIDs},
+		{opts: windowsManagedHooksClaudeOptions(ctx.opts, current), allowed: ctx.claudeTargets},
+	}
+	var failures []error
+	for _, candidate := range candidates {
+		if _, subsetErr := windowsManagedHooksPartialClaudeTargets(
+			candidate.allowed,
+			current,
+			active,
+		); subsetErr != nil {
+			failures = append(failures, subsetErr)
+			continue
+		}
+		snapshot, captureErr := enterprisehooks.CaptureWindowsClaudeManagedPolicySnapshot(candidate.opts)
+		if captureErr == nil {
+			result.opts = candidate.opts
+			result.snapshot = snapshot
+			return result, nil
+		}
+		failures = append(failures, captureErr)
+	}
+	return result, fmt.Errorf(
+		"capture current Claude lifecycle policy under journaled or staged identity: %w",
+		errors.Join(failures...),
+	)
+}
+
+func restoreWindowsManagedHooksLifecycleComposite(
+	restoreClaude func() error,
+	restoreCursor func() error,
+	compensateClaude func() error,
+) error {
+	if err := restoreClaude(); err != nil {
+		return err
+	}
+	if err := restoreCursor(); err != nil {
+		if compensateErr := compensateClaude(); compensateErr != nil {
+			return errors.Join(
+				err,
+				fmt.Errorf("restore current Claude policy after Cursor restore failure: %w", compensateErr),
+			)
+		}
+		return err
+	}
+	return nil
+}
+
+func windowsManagedHooksCursorOptions(
+	opts connector.WindowsCodexMachineRequirementsOptions,
+	targets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
+) enterprisehooks.WindowsCursorManagedPolicyTeardownOptions {
+	return enterprisehooks.WindowsCursorManagedPolicyTeardownOptions{
+		HookExecutable:     opts.HookBinary,
+		GatewayAddr:        opts.GatewayAddr,
+		GatewayServiceName: opts.GatewayServiceName,
+		Targets:            append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), targets...),
+	}
+}
+
+func windowsManagedHooksPriorCursorOptions(
+	journal windowsManagedHooksLifecycleJournal,
+) enterprisehooks.WindowsCursorManagedPolicyTeardownOptions {
+	return enterprisehooks.WindowsCursorManagedPolicyTeardownOptions{
+		HookExecutable:     journal.HookBinary,
+		GatewayAddr:        journal.GatewayAddr,
+		GatewayServiceName: journal.GatewayServiceName,
+		Targets:            append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), journal.PriorCursorTargets...),
+	}
+}
+
 func windowsManagedHooksPartialClaudeTargets(
 	manifestTargets []string,
 	currentTargets []string,
@@ -407,6 +554,43 @@ func windowsManagedHooksPartialClaudeTargets(
 			)
 		}
 		prior = append(prior, sid)
+	}
+	return prior, nil
+}
+
+func windowsManagedHooksPartialCursorTargets(
+	manifestTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
+	currentTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
+	active bool,
+) ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, error) {
+	if !active {
+		if len(currentTargets) != 0 {
+			return nil, errors.New("inactive Cursor machine enrollment reported targets")
+		}
+		return []enterprisehooks.WindowsCursorManagedRuntimeTarget{}, nil
+	}
+	if len(currentTargets) == 0 || !sort.SliceIsSorted(currentTargets, func(i, j int) bool {
+		return currentTargets[i].SID < currentTargets[j].SID
+	}) {
+		return nil, errors.New("active Cursor machine enrollment has a noncanonical target set")
+	}
+	allowed := make(map[string]string, len(manifestTargets))
+	for _, target := range manifestTargets {
+		allowed[strings.ToUpper(target.SID)] = target.DataDir
+	}
+	prior := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(currentTargets))
+	for index, target := range currentTargets {
+		if index > 0 && strings.EqualFold(currentTargets[index-1].SID, target.SID) {
+			return nil, errors.New("active Cursor machine enrollment contains a duplicate target SID")
+		}
+		dataDir, ok := allowed[strings.ToUpper(target.SID)]
+		if !ok || !sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
+			return nil, fmt.Errorf(
+				"Cursor machine enrollment contains target %s outside the protected lifecycle manifest",
+				target.SID,
+			)
+		}
+		prior = append(prior, target)
 	}
 	return prior, nil
 }
@@ -449,6 +633,36 @@ func validateWindowsManagedHooksLifecycleJournal(
 		len(journal.Claude.State) > windowsManagedHooksLifecycleJournalMax ||
 		(journal.Claude.PolicyExisted != (len(journal.PriorClaudeTargetSIDs) != 0)) {
 		return errors.New("managed-hook lifecycle journal contains an invalid Claude snapshot")
+	}
+	priorAllowedCursorTargets := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(journal.Targets))
+	for _, target := range journal.Targets {
+		if target.Connector == "cursor" {
+			priorAllowedCursorTargets = append(priorAllowedCursorTargets, enterprisehooks.WindowsCursorManagedRuntimeTarget{
+				SID: target.SID, DataDir: target.DataDir,
+			})
+		}
+	}
+	if _, err := windowsManagedHooksPartialCursorTargets(
+		priorAllowedCursorTargets,
+		journal.PriorCursorTargets,
+		len(journal.PriorCursorTargets) != 0,
+	); err != nil {
+		return err
+	}
+	cursorActive := journal.Cursor.PolicyActive
+	if journal.Cursor.StateExisted != cursorActive ||
+		journal.Cursor.ReceiptExisted != cursorActive ||
+		(cursorActive && (!journal.Cursor.HooksExisted || !journal.Cursor.AdapterExisted)) ||
+		len(journal.Cursor.Hooks) > windowsManagedHooksLifecycleJournalMax ||
+		len(journal.Cursor.Adapter) > windowsManagedHooksLifecycleJournalMax ||
+		len(journal.Cursor.State) > windowsManagedHooksLifecycleJournalMax ||
+		len(journal.Cursor.Receipt) > windowsManagedHooksLifecycleJournalMax ||
+		(journal.Cursor.HooksExisted != (journal.Cursor.HooksSecurityDescriptor != "" && journal.Cursor.HooksAttributes != 0)) ||
+		(journal.Cursor.AdapterExisted != (journal.Cursor.AdapterSecurityDescriptor != "" && journal.Cursor.AdapterAttributes != 0)) ||
+		(journal.Cursor.StateExisted != (journal.Cursor.StateSecurityDescriptor != "" && journal.Cursor.StateAttributes != 0)) ||
+		(journal.Cursor.ReceiptExisted != (journal.Cursor.ReceiptSecurityDescriptor != "" && journal.Cursor.ReceiptAttributes != 0)) ||
+		(cursorActive != (len(journal.PriorCursorTargets) != 0)) {
+		return errors.New("managed-hook lifecycle journal contains an invalid Cursor snapshot")
 	}
 	return nil
 }

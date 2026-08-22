@@ -1312,7 +1312,7 @@ func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 	}
 	if runtime.GOOS == "windows" && conn != nil {
 		name := normalizeConnectorName(conn.Name())
-		if name == "claudecode" || name == "codex" {
+		if name == "claudecode" || name == "codex" || name == "cursor" {
 			paths = append(paths, defenseclawHookBinary())
 		}
 	}
