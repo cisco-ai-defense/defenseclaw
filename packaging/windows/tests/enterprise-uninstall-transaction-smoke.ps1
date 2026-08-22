@@ -148,6 +148,9 @@ try {
             $brokerLogDirectory = Microsoft.PowerShell.Management\Join-Path `
                 $stateRoot `
                 'logs\broker'
+            $managedIPCDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $Root `
+                'managed-ipc'
             foreach ($directory in @(
                 $installRoot,
                 $stateRoot,
@@ -207,6 +210,12 @@ try {
                 )
                 RuntimeDirectory = (
                     Microsoft.PowerShell.Management\Join-Path $stateRoot 'runtime'
+                )
+                ManagedIPCDirectory = $managedIPCDirectory
+                ManagedIPCSocketPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $managedIPCDirectory `
+                        'defenseclaw_ipc.sock'
                 )
                 AuthorizationDirectory = (
                     Microsoft.PowerShell.Management\Join-Path $stateRoot 'authorization'
@@ -275,6 +284,7 @@ try {
                 )
                 CodexTargetEnabled = $false
                 ClaudeTargetEnabled = $true
+                CursorTargetEnabled = $false
                 AgentApplicationControlAttested = $true
                 ClaudeEffectivePolicyVerified = $true
                 CoreHardeningCertification = $false
@@ -1510,6 +1520,19 @@ try {
             )
             $script:HarnessState.events.Add('managed-core-acls')
         }
+        function script:Initialize-DefenseClawManagedIPCDirectory {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName
+            )
+            if ([string]::IsNullOrWhiteSpace(
+                    [string]$Layout.ManagedIPCDirectory
+                )) {
+                throw 'managed IPC mock received an empty contract path'
+            }
+            $null = $GatewayServiceName
+            $script:HarnessState.events.Add('managed-ipc-directory')
+        }
         function script:Set-DefenseClawManagedAcls {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
@@ -2189,6 +2212,9 @@ targets:
                 $services = $script:HarnessState.events.IndexOf(
                     'managed-services'
                 )
+                $managedIPC = $script:HarnessState.events.IndexOf(
+                    'managed-ipc-directory'
+                )
                 $coreAcls = $script:HarnessState.events.IndexOf(
                     'managed-core-acls'
                 )
@@ -2203,14 +2229,16 @@ targets:
                     -Condition (
                         $transaction -ge 0 -and
                         $services -gt $transaction -and
-                        $coreAcls -gt $services -and
+                        $managedIPC -gt $services -and
+                        $coreAcls -gt $managedIPC -and
                         $capture -gt $coreAcls
                     ) `
                     -Message (
                         "fresh install attempt $attempt violated " +
-                        'transaction/service/ACL/snapshot ordering ' +
+                        'transaction/service/IPC/ACL/snapshot ordering ' +
                         "(transaction=$transaction services=$services " +
-                        "core_acls=$coreAcls capture=$capture; " +
+                        "managed_ipc=$managedIPC core_acls=$coreAcls " +
+                        "capture=$capture; " +
                         "failure=$failure; events=[$eventTrace])"
                     )
 

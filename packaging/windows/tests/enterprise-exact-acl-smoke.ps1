@@ -38,7 +38,9 @@ $expected = [ordered]@{
     AuthorizationFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$serviceSID)"
     LogDirectory = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
     GatewayLogDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
-    ManagedIPCDirectory = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$serviceSID)(A;;0x21;;;AU)"
+    # FileSystemAccessRule adds Synchronize (0x100000) to explicit allow
+    # rules. ListDirectory | Traverse is therefore serialized as 0x100021.
+    ManagedIPCDirectory = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$serviceSID)(A;;0x100021;;;AU)"
 }
 $directoryKinds = @(
     'InstallDirectory',
