@@ -696,6 +696,26 @@ _probe_opencode_homebrew_version() {
   printf '%s' "${version}"
 }
 
+# Compare bounded dotted-decimal versions without GNU sort -V or Python.
+_numeric_dotted_version_is_newer() {
+  local candidate="$1" current="$2"
+  [[ ${#candidate} -le 64 && ${#current} -le 64 ]] || return 1
+  [[ "${candidate}" =~ ^[0-9]+(\.[0-9]+)+$ ]] || return 1
+  [[ "${current}" =~ ^[0-9]+(\.[0-9]+)+$ ]] || return 1
+  local candidate_rest="${candidate}" current_rest="${current}"
+  local candidate_part current_part
+  while [[ -n "${candidate_rest}" || -n "${current_rest}" ]]; do
+    candidate_part="${candidate_rest%%.*}"
+    current_part="${current_rest%%.*}"
+    [[ ${#candidate_part} -le 9 && ${#current_part} -le 9 ]] || return 1
+    if [[ "${candidate_rest}" == *.* ]]; then candidate_rest="${candidate_rest#*.}"; else candidate_rest=""; fi
+    if [[ "${current_rest}" == *.* ]]; then current_rest="${current_rest#*.}"; else current_rest=""; fi
+    if (( 10#${candidate_part} > 10#${current_part} )); then return 0; fi
+    if (( 10#${candidate_part} < 10#${current_part} )); then return 1; fi
+  done
+  return 1
+}
+
 discover_agent_version() {
   local connector="$1"
   local home="$2"
@@ -719,70 +739,14 @@ discover_agent_version() {
       done
       ;;
     codex)
-      # Codex-cli is a Rust binary that ships from three OpenAI-owned
-      # channels on macOS. Probe order picks the first-party
-      # ChatGPT.app bundled copy FIRST because it is the newest
-      # distribution (auto-updated with the desktop app) and it is
-      # what customers actually have on a fresh Mac — stray old
-      # `npm i -g @openai/codex` installs from an earlier engagement
-      # frequently linger and would otherwise win with a stale
-      # version that fails our MinAgentVersion contract gate.
-      #
-      # Order:
-      #   1. ChatGPT.app bundled binary       (Codex 0.145.0+ current)
-      #   2. Homebrew Caskroom                (versioned dir name)
-      #   3. npm module package.json         (user-global then system)
-      #   4. `command -v codex` last resort   (arbitrary PATH install)
-      #
-      # Every probe runs as the target user via sudo -u (not root).
-      # The app bundle is Gatekeeper-signed and world-readable by
-      # design; running its --version as an unprivileged user is
-      # safe. install.sh's outer sudo already dropped privs before
-      # calling this helper, matching the security posture of the
-      # hook guardian's connector.Setup call.
-      local vraw
+      # Protected Codex reconciliation is inventory-only until the guardian
+      # has published the exact executable receipt and validated its pinned
+      # signature/custody. Read passive, version-bound metadata here; never
+      # execute a ChatGPT.app image or an inherited PATH candidate.
 
-      # 1. ChatGPT.app bundled codex — /Applications/ChatGPT.app/
-      # Contents/Resources/codex is the current stable location; the
-      # older MacOS/ path is kept as a fallback for pre-2026 builds.
-      local chatgpt_codex
-      for chatgpt_codex in \
-        /Applications/ChatGPT.app/Contents/Resources/codex \
-        /Applications/ChatGPT.app/Contents/MacOS/codex; do
-        [[ -x "${chatgpt_codex}" ]] || continue
-        if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]]; then
-          vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" "${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
-        else
-          vraw="$("${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
-        fi
-        # Codex prints "codex-cli X.Y.Z" (or "codex-cli X.Y.Z-alpha.N");
-        # take the first token that looks like a version.
-        vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
-        if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
-      done
-
-      # 2. Homebrew cask keeps the binary under Caskroom with a
-      # version in the path itself:
-      #   /opt/homebrew/Caskroom/codex/<version>/...
-      # Glob-based version pick (avoids shellcheck SC2010 on ls|grep).
-      local caskroom ver dir dname
-      for caskroom in /opt/homebrew/Caskroom/codex /usr/local/Caskroom/codex; do
-        [[ -d "${caskroom}" ]] || continue
-        ver=""
-        for dir in "${caskroom}"/*/; do
-          [[ -d "${dir}" ]] || continue
-          dname="$(basename "${dir}")"
-          [[ "${dname}" =~ ^[0-9]+\.[0-9]+ ]] || continue
-          if [[ -z "${ver}" ]] || \
-             [[ "$(printf '%s\n%s\n' "${ver}" "${dname}" | sort -V | tail -1)" == "${dname}" ]]; then
-            ver="${dname}"
-          fi
-        done
-        if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
-      done
-
-      # 3. npm module package.json — user-global first (most likely
-      # up to date on developer boxes), then system dirs.
+      # npm module package.json — user-global first, then system dirs. A
+      # version is usable only when the same package version has an exact
+      # native image that discover_agent_executable can pair with it.
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
@@ -790,33 +754,56 @@ discover_agent_version() {
         /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
         [[ -f "${pkg}" ]] || continue
         local v; v="$(_probe_json_version "${pkg}" codex)"
-        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+        if [[ -n "${v}" ]] && [[ -n "$(discover_agent_executable codex "${home}" "${v}" 2>/dev/null || true)" ]]; then
+          echo "${v}"
+          return
+        fi
       done
 
-      # 4. Last resort: exec codex --version as the target user (not
-      # as root). Requires TARGET_USER to be known to the caller.
-      if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
-        local vraw
-        vraw="$(_read_codex_version_as_user "${DC_INSTALLER_TARGET_USER}" || true)"
-        # Codex prints "codex-cli X.Y.Z"; take just the version token.
-        vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
-        if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
+      # Standalone releases carry their exact version in the immutable layout
+      # segment paired by discover_agent_executable. Select the newest numeric
+      # version without launching any candidate.
+      local release_root release_dir release_name release_version newest
+      release_root="${home}/.codex/packages/standalone/releases"
+      newest=""
+      if [[ -d "${release_root}" && ! -L "${release_root}" ]]; then
+        for release_dir in "${release_root}"/*-aarch64-apple-darwin/; do
+          [[ -d "${release_dir}" && ! -L "${release_dir%/}" ]] || continue
+          release_name="$(basename "${release_dir%/}")"
+          release_version="${release_name%-aarch64-apple-darwin}"
+          [[ "${release_version}" =~ ^[0-9]+(\.[0-9]+)+$ ]] || continue
+          [[ -n "$(discover_agent_executable codex "${home}" "${release_version}" 2>/dev/null || true)" ]] || continue
+          if [[ -z "${newest}" ]] || _numeric_dotted_version_is_newer "${release_version}" "${newest}"; then
+            newest="${release_version}"
+          fi
+        done
       fi
+      if [[ -n "${newest}" ]]; then echo "${newest}"; return; fi
+
       ;;
     claudecode)
-      # Claude Code ships both as a standalone npm CLI (has a
-      # package.json we can read) and as a Cursor / VS Code extension.
-      local pkg
-      for pkg in \
-        "${home}"/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json \
-        /usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json \
-        /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/package.json \
-        "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
-        "${home}"/.vscode/extensions/anthropic.claude-code-*/package.json; do
-        [[ -f "${pkg}" ]] || continue
-        local v; v="$(_probe_json_version "${pkg}" claudecode)"
-        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
-      done
+      # Prefer the official native installer's exact versioned Mach-O. Read
+      # only directory metadata; the guardian will revalidate its signature,
+      # architecture, ACL, quarantine state, version binding, and digest.
+      local native_versions native_version native_image candidate_version candidate_count
+      native_versions="${home}/.local/share/claude/versions"
+      native_version=""
+      candidate_count=0
+      if [[ -d "${native_versions}" && ! -L "${native_versions}" ]]; then
+        for native_image in "${native_versions}"/*; do
+          candidate_count=$((candidate_count + 1))
+          [[ ${candidate_count} -le 256 ]] || { native_version=""; break; }
+          [[ -f "${native_image}" && -x "${native_image}" && ! -L "${native_image}" ]] || continue
+          candidate_version="$(basename "${native_image}")"
+          [[ ${#candidate_version} -le 64 && "${candidate_version}" =~ ^[0-9]+(\.[0-9]+)+$ ]] || continue
+          [[ -n "$(discover_agent_executable claudecode "${home}" "${candidate_version}" 2>/dev/null || true)" ]] || continue
+          if [[ -z "${native_version}" ]] || _numeric_dotted_version_is_newer "${candidate_version}" "${native_version}"; then
+            native_version="${candidate_version}"
+          fi
+        done
+        if [[ -n "${native_version}" ]]; then echo "${native_version}"; return; fi
+      fi
+
       ;;
     cursor)
       # Cursor.app is a signed macOS bundle; read the Info.plist rather
@@ -866,6 +853,50 @@ discover_agent_version() {
         _record_discovery_error opencode "${standalone}" "version-probe-failed"
       fi
 
+      ;;
+  esac
+}
+
+# discover_agent_executable CONNECTOR HOME VERSION -> exact protected native
+# image or "". This is intentionally narrower than passive version discovery:
+# it never consults PATH, follows a launcher symlink, or emits a JS/CMD wrapper.
+# Connector Setup remains the authority boundary and revalidates the selected
+# image's vendor signature, native architecture, quarantine, owner/ACL, digest,
+# and version before writing hook configuration.
+discover_agent_executable() {
+  local connector="$1"
+  local home="$2"
+  local version="$3"
+  local candidate pkg pkg_version parent
+  case "${connector}" in
+    codex)
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
+        /usr/local/lib/node_modules/@openai/codex/package.json \
+        /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        pkg_version="$(_probe_json_version "${pkg}" codex)"
+        [[ "${pkg_version}" == "${version}" ]] || continue
+        parent="${pkg%/package.json}"
+        for candidate in \
+          "${parent}/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex" \
+          "${parent%/@openai/codex}/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"; do
+          [[ -f "${candidate}" && -x "${candidate}" && ! -L "${candidate}" ]] || continue
+          printf '%s' "${candidate}"
+          return
+        done
+      done
+
+      candidate="${home}/.codex/packages/standalone/releases/${version}-aarch64-apple-darwin/bin/codex"
+      if [[ -f "${candidate}" && -x "${candidate}" && ! -L "${candidate}" ]]; then
+        printf '%s' "${candidate}"
+      fi
+      ;;
+    claudecode)
+      candidate="${home}/.local/share/claude/versions/${version}"
+      if [[ -f "${candidate}" && -x "${candidate}" && ! -L "${candidate}" ]]; then
+        printf '%s' "${candidate}"
+      fi
       ;;
   esac
 }
@@ -1173,8 +1204,12 @@ enumerate_local_users() {
 # connector later are picked up by the hook-enumerator's next re-render.
 yaml_double_quoted_scalar() {
   local value="$1"
+  # YAML 1.2 rejects C0 controls, DEL, and C1 controls. Validate UTF-8 first,
+  # then reject their exact byte encodings without rejecting ordinary Unicode
+  # continuation bytes (for example the middle byte of U+20AC).
+  printf '%s' "${value}" | /usr/bin/iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
   case "${value}" in
-    *$'\n'*|*$'\r'*|*$'\t'*) return 1;;
+    *[$'\001'-$'\037'$'\177']*|*$'\302'[$'\200'-$'\237']*) return 1;;
   esac
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
@@ -1204,7 +1239,7 @@ render_targets_manifest() {
     return 0
   fi
 
-  local line name uid gid home ver q_name q_home q_connector q_ver
+  local line name uid gid home ver executable q_name q_home q_connector q_ver q_executable executable_line
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
     name="${line%%:*}"
@@ -1222,7 +1257,20 @@ render_targets_manifest() {
       q_connector="$(yaml_double_quoted_scalar "${c}")" || continue
       ver="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_version "${c}" "${home}" 2>/dev/null || true)"
       [[ -n "${ver}" ]] || continue
-      q_ver="$(yaml_double_quoted_scalar "${ver}")" || q_ver='""'
+      # Protected native rows are an inseparable version/executable pair.
+      # A scalar that cannot be represented safely must drop the row instead
+      # of emitting an executable with an empty version that invalidates the
+      # guardian manifest.
+      q_ver="$(yaml_double_quoted_scalar "${ver}")" || continue
+      executable_line=''
+      case "${c}" in
+        codex|claudecode)
+          executable="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_executable "${c}" "${home}" "${ver}" 2>/dev/null || true)"
+          [[ -n "${executable}" ]] || continue
+          q_executable="$(yaml_double_quoted_scalar "${executable}")" || continue
+          executable_line="    agent_executable: ${q_executable}"
+          ;;
+      esac
       # data_dir is intentionally omitted from each target block: the
       # guardian's validateUserDataDir requires the data_dir to be inside
       # the target user's home (internal/enterprisehooks/installer.go),
@@ -1237,6 +1285,7 @@ render_targets_manifest() {
     gid: ${gid}
     connector: ${q_connector}
     agent_version: ${q_ver}
+${executable_line}
     enabled: true
 EOF
     done

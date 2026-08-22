@@ -391,6 +391,8 @@ Do not copy a root-owned placeholder into the user's profile. The native config 
 
 ### Bootstrap one target
 
+On Linux, version-only installation retains the existing contract:
+
 ```bash
 sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml \
   /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks install \
@@ -399,6 +401,27 @@ sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml \
   --agent-version "codex-cli 0.142.0" \
   --json
 ```
+
+On macOS, a fresh Codex or Claude Code install must pair the reviewed version
+with the exact canonical native executable selected by the administrator. Do
+not supply a wrapper, symlink, application-discovery result, or `PATH` name:
+
+```bash
+sudo DEFENSECLAW_CONFIG=/opt/cisco/secureclient/defenseclaw/etc/config.yaml \
+  /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway enterprise hooks install \
+  --user alice \
+  --connector codex \
+  --agent-version "codex-cli 0.146.0" \
+  --agent-executable /Users/alice/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex \
+  --json
+```
+
+The macOS guardian fails closed before connector setup when either half of
+this pair is missing or inconsistent. It revalidates the native image's
+custody, signer, architecture, quarantine/ACL state, bounded digest, and
+reported version before installing hooks. A repair with no explicit pair may
+reuse only the exact identity already sealed in the protected contract lock;
+it never falls back to discovery or `PATH`.
 
 Use `--user-home`, `--uid`, and `--gid` only for directory-backed or nonstandard identity systems where normal user lookup is unavailable. Keep `--data-dir`, `--api-addr`, and `--proxy-addr` at their managed-config defaults unless the packaged deployment intentionally uses different paths or ports.
 
@@ -535,6 +558,37 @@ Install the binary under `/opt/cisco/secureclient/defenseclaw/bin`, create the m
 
 Prepare the administrator-approved config and guardian manifest outside the managed destination. From the extracted DefenseClaw release archive, run:
 
+For macOS Codex and Claude Code targets, each enabled manifest row must pair
+`agent_version` with the exact canonical `agent_executable`. For example:
+
+```yaml
+version: 1
+targets:
+  - user: alice
+    connector: codex
+    agent_version: "codex-cli 0.146.0"
+    agent_executable: "/Users/alice/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"
+  - user: alice
+    connector: claudecode
+    agent_version: "2.1.219 (Claude Code)"
+    agent_executable: "/Users/alice/.local/share/claude/versions/2.1.219"
+```
+
+The packaged renderer emits a protected row only when it finds a passively
+paired version and native executable; it does not execute an unvalidated
+client during discovery. Hand-authored MDM manifests must follow the same
+pairing rule. A fresh Darwin Codex or Claude Code target without this evidence
+is rejected rather than discovered dynamically.
+
+OpenHands is intentionally not auto-rendered or admitted by the macOS
+enterprise guardian. Its current standalone image is unsigned, so a path and
+self-computed receipt hash are not publisher provenance. Keep OpenHands out of
+the guardian manifest until the deployment boundary supplies an
+administrator-reviewed release-digest policy; DefenseClaw fails closed instead
+of trusting a user-owned version directory. This remains unsupported for
+macOS enterprise hooks even though the connector is available as a preview;
+`--agent-executable` cannot override the missing publisher authority.
+
 ```bash
 sudo ./packaging/launchd/install-enterprise.sh \
   --binary ./defenseclaw \
@@ -657,7 +711,7 @@ Multiple connectors for the same user must have separate manifest entries. They 
 
 ### Change an agent version
 
-Update `agent_version` in the root-owned manifest before or with the endpoint agent upgrade. Run a manual reconcile and review hook-contract output. In action mode, unknown contract drift is a hard error unless an administrator explicitly opts into exploratory drift. Do not set `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` as a persistent fleet default.
+Update `agent_version` in the root-owned manifest before or with the endpoint agent upgrade. On macOS Codex and Claude Code targets, update `agent_executable` in the same change so it names the exact native image for that version; never carry an old path forward under a new version label. Run a manual reconcile and review hook-contract output. In action mode, unknown contract drift is a hard error unless an administrator explicitly opts into exploratory drift. Do not set `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` as a persistent fleet default.
 
 ### Remove a user from management
 

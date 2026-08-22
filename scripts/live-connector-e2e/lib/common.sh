@@ -63,6 +63,31 @@ dc_section() { printf '\n[live-e2e] ===== %s =====\n' "$*" >&2; }
 # dc_die <message> — log and exit non-zero.
 dc_die() { dc_err "$*"; exit 1; }
 
+# dc_without_provider_credentials <command> [args...] — run third-party
+# installers and pre-Setup metadata probes without inheriting live provider
+# credentials. The driver retains its shell variables and publishes only the
+# active provider after installation, immediately before protected setup.
+dc_without_provider_credentials() (
+  # A subshell keeps the caller's authenticated environment intact while also
+  # allowing a bounded installer function (not only an external command) to
+  # run with the same credential-free boundary. Every child it starts inherits
+  # the scrubbed environment.
+  unset \
+    OPENAI_API_KEY \
+    ANTHROPIC_API_KEY \
+    AMP_API_KEY \
+    GOOGLE_API_KEY \
+    CURSOR_API_KEY \
+    COPILOT_GITHUB_TOKEN \
+    LLM_API_KEY \
+    AZURE_OPENAI_API_KEY \
+    AWS_BEARER_TOKEN_BEDROCK \
+    AWS_ACCESS_KEY_ID \
+    AWS_SECRET_ACCESS_KEY \
+    AWS_SESSION_TOKEN
+  "$@"
+)
+
 # ---------------------------------------------------------------------------
 # OS detection
 # ---------------------------------------------------------------------------
@@ -150,7 +175,7 @@ PY
 dc_capture_version() {
   local connector="$1"; shift
   local raw
-  raw="$("$@" 2>&1 | head -n 3 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')" || raw="unknown"
+  raw="$(dc_without_provider_credentials "$@" 2>&1 | head -n 3 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')" || raw="unknown"
   [ -n "${raw}" ] || raw="unknown"
   dc_log "resolved ${connector} version: ${raw}"
   printf '%s' "${raw}"

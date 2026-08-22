@@ -20,6 +20,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner, Result
@@ -32,6 +34,68 @@ from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 from tests.helpers import record_test_setup_agent_selections
 from tests.permissions import set_known_windows_directory_acl
+
+
+@pytest.mark.parametrize("connector", ("codex", "claudecode", "openhands"))
+@pytest.mark.parametrize("mode", ("observe", "action"))
+def test_darwin_quickstart_and_tui_first_run_select_before_version_and_secrets(
+    connector: str,
+    mode: str,
+    tmp_path,
+) -> None:
+    events: list[str] = []
+
+    def select(data_dir, connectors):
+        assert tuple(connectors) == (connector,)
+        events.append("selection")
+        return record_test_setup_agent_selections(data_dir, connectors)
+
+    def admit(actual_connector, **kwargs):
+        assert actual_connector == connector
+        assert kwargs.get("_protected_record") is not None
+        events.append("version")
+        return True
+
+    def persist(*_args, **_kwargs):
+        events.append("secrets")
+
+    forbidden = AssertionError("first-run protected connector must not use generic discovery")
+    runner = CliRunner()
+    data_dir = os.fspath(tmp_path)
+    with (
+        patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+        patch("defenseclaw.platform_support.host_os", return_value="darwin"),
+        patch("defenseclaw.bootstrap.platform_support.host_os", return_value="darwin"),
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="darwin"),
+        patch("defenseclaw.agent_selection._HOST_PLATFORM", "darwin"),
+        patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            side_effect=select,
+        ) as selected,
+        patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            side_effect=admit,
+        ) as checked,
+        patch("defenseclaw.bootstrap._persist_first_run_secrets", side_effect=persist),
+        patch(
+            "defenseclaw.bootstrap._quiet_guardrail_setup",
+            return_value=StepResult("Guardrail", "pass", "test"),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+            side_effect=forbidden,
+        ) as discover,
+    ):
+        result = runner.invoke(
+            quickstart_cmd,
+            ["--connector", connector, "--mode", mode, "--skip-gateway", "--json-summary"],
+        )
+
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+    assert events[:3] == ["selection", "version", "secrets"]
+    selected.assert_called_once_with(data_dir, (connector,))
+    checked.assert_called_once()
+    discover.assert_not_called()
 
 
 class QuickstartProfileDefaultsTests(unittest.TestCase):

@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +26,46 @@ type fakeOpenHandsNativeProcess struct {
 	waited  bool
 }
 
-func TestProtectedSetupSelectionScopeIncludesOnlyOpenHandsOnDarwin(t *testing.T) {
+func openHandsMachOFixture(payload string) []byte {
+	return append([]byte{0xcf, 0xfa, 0xed, 0xfe}, []byte(payload)...)
+}
+
+func stubOpenHandsDarwinPlatformValidation(t *testing.T) {
+	t.Helper()
+	previousACL := validateOpenHandsDarwinFileACL
+	previousArchitecture := validateOpenHandsDarwinArchitecture
+	validateOpenHandsDarwinFileACL = func(string) error { return nil }
+	validateOpenHandsDarwinArchitecture = func(string) error { return nil }
+	t.Cleanup(func() {
+		validateOpenHandsDarwinFileACL = previousACL
+		validateOpenHandsDarwinArchitecture = previousArchitecture
+	})
+}
+
+func TestOpenHandsArchitectureListContains(t *testing.T) {
+	for _, test := range []struct {
+		output   string
+		expected string
+		want     bool
+	}{
+		{output: "arm64\n", expected: "arm64", want: true},
+		{output: "x86_64 arm64\n", expected: "arm64", want: true},
+		{output: "x86_64\n", expected: "arm64", want: false},
+		{output: "arm64e\n", expected: "arm64", want: false},
+	} {
+		if got := openHandsArchitectureListContains(test.output, test.expected); got != test.want {
+			t.Fatalf(
+				"openHandsArchitectureListContains(%q, %q) = %t, want %t",
+				test.output,
+				test.expected,
+				got,
+				test.want,
+			)
+		}
+	}
+}
+
+func TestProtectedSetupSelectionScopeIncludesCurrentDarwinConnectors(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		connector string
@@ -34,8 +75,11 @@ func TestProtectedSetupSelectionScopeIncludesOnlyOpenHandsOnDarwin(t *testing.T)
 		{name: "Darwin OpenHands", connector: "openhands", goos: "darwin", want: true},
 		{name: "Linux OpenHands", connector: "openhands", goos: "linux", want: false},
 		{name: "Windows OpenHands", connector: "openhands", goos: "windows", want: false},
-		{name: "Darwin Codex", connector: "codex", goos: "darwin", want: false},
+		{name: "Darwin Codex", connector: "codex", goos: "darwin", want: true},
+		{name: "Darwin Claude Code", connector: "claudecode", goos: "darwin", want: true},
+		{name: "Linux Claude Code", connector: "claudecode", goos: "linux", want: false},
 		{name: "Windows Codex", connector: "codex", goos: "windows", want: true},
+		{name: "Darwin OpenCode remains outside the generalized lock branch", connector: "opencode", goos: "darwin", want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := protectedSetupSelectionConnectorForOS(test.connector, test.goos); got != test.want {
@@ -46,6 +90,7 @@ func TestProtectedSetupSelectionScopeIncludesOnlyOpenHandsOnDarwin(t *testing.T)
 }
 
 func TestOpenHandsDarwinSetupExecutableAdmissionConsumesProtectedReceipt(t *testing.T) {
+	stubOpenHandsDarwinPlatformValidation(t)
 	root := testenv.PrivateTempDir(t)
 	dataDir := filepath.Join(root, "state")
 	trustedDir := filepath.Join(root, "trusted")
@@ -56,7 +101,7 @@ func TestOpenHandsDarwinSetupExecutableAdmissionConsumesProtectedReceipt(t *test
 		t.Fatal(err)
 	}
 	executable := filepath.Join(trustedDir, "openhands")
-	if err := os.WriteFile(executable, []byte("protected setup executable\n"), 0o700); err != nil {
+	if err := os.WriteFile(executable, openHandsMachOFixture("protected setup executable\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(executable, 0o700); err != nil {
@@ -105,7 +150,7 @@ func TestOpenHandsDarwinSetupExecutableAdmissionConsumesProtectedReceipt(t *test
 	if err := validateOpenHandsDarwinLockPublication(dataDir, entry); err != nil {
 		t.Fatalf("receipt-backed lock publication: %v", err)
 	}
-	if err := os.WriteFile(executable, []byte("replacement setup executable\n"), 0o700); err != nil {
+	if err := os.WriteFile(executable, openHandsMachOFixture("replacement setup executable\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := validateOpenHandsDarwinExecutable(opts, false); err == nil || !strings.Contains(err.Error(), "digest") {
@@ -113,6 +158,28 @@ func TestOpenHandsDarwinSetupExecutableAdmissionConsumesProtectedReceipt(t *test
 	}
 	if err := validateOpenHandsDarwinLockPublication(dataDir, entry); err == nil || !strings.Contains(err.Error(), "digest") {
 		t.Fatalf("mutated lock publication error = %v, want digest refusal", err)
+	}
+
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf 'OpenHands CLI 1.16.0\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stablePath, digest, ok = setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("capture hash-matching script evidence")
+	}
+	evidence := receipt.Selections["openhands"]
+	evidence.Executable = stablePath
+	evidence.SHA256 = digest
+	receipt.Selections["openhands"] = evidence
+	body, err = json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateOpenHandsDarwinExecutable(opts, false); err == nil || !strings.Contains(err.Error(), "Mach-O") {
+		t.Fatalf("hash-matching script admission error = %v, want Mach-O refusal", err)
 	}
 }
 
@@ -128,6 +195,7 @@ func (p *fakeOpenHandsNativeProcess) Wait() error {
 
 func newProtectedOpenHandsLaunchFixture(t *testing.T) (SetupOpts, string, string) {
 	t.Helper()
+	stubOpenHandsDarwinPlatformValidation(t)
 	root := testenv.PrivateTempDir(t)
 	dataDir := filepath.Join(root, "state")
 	trustedDir := filepath.Join(root, "trusted")
@@ -135,7 +203,7 @@ func newProtectedOpenHandsLaunchFixture(t *testing.T) (SetupOpts, string, string
 		t.Fatal(err)
 	}
 	executable := filepath.Join(trustedDir, "openhands")
-	if err := os.WriteFile(executable, []byte("protected OpenHands executable fixture\n"), 0o700); err != nil {
+	if err := os.WriteFile(executable, openHandsMachOFixture("protected OpenHands executable fixture\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(executable, 0o700); err != nil {
@@ -249,7 +317,7 @@ func TestOpenHandsProtectedLaunchFailsClosedOnCustodyDrift(t *testing.T) {
 			name: "executable digest",
 			mutate: func(t *testing.T, opts SetupOpts, _ string) {
 				t.Helper()
-				if err := os.WriteFile(opts.AgentExecutable, []byte("replaced executable\n"), 0o700); err != nil {
+				if err := os.WriteFile(opts.AgentExecutable, openHandsMachOFixture("replaced executable\n"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -300,6 +368,75 @@ func TestOpenHandsProtectedLaunchFailsClosedOnCustodyDrift(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), token) {
 				t.Fatalf("launch error leaked scoped token: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenHandsProtectedPublicationAndLaunchRejectExecutableCustodyDrift(t *testing.T) {
+	tests := []struct {
+		name    string
+		want    string
+		mutate  func(t *testing.T, opts SetupOpts)
+		skipWin bool
+	}{
+		{
+			name:    "group writable leaf mode",
+			want:    "writable mode",
+			skipWin: true,
+			mutate: func(t *testing.T, opts SetupOpts) {
+				t.Helper()
+				if err := os.Chmod(opts.AgentExecutable, 0o720); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "write capable leaf ACL",
+			want: "ACL",
+			mutate: func(t *testing.T, _ SetupOpts) {
+				t.Helper()
+				validateOpenHandsDarwinFileACL = func(string) error {
+					return errors.New("fixture write-capable Darwin ACL")
+				}
+			},
+		},
+		{
+			name: "wrong Mach-O architecture",
+			want: "architecture",
+			mutate: func(t *testing.T, _ SetupOpts) {
+				t.Helper()
+				validateOpenHandsDarwinArchitecture = func(string) error {
+					return errors.New("fixture Mach-O has no arm64 architecture")
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.skipWin && runtime.GOOS == "windows" {
+				t.Skip("POSIX executable mode semantics are unavailable on Windows")
+			}
+			opts, token, _ := newProtectedOpenHandsLaunchFixture(t)
+			entries, err := LoadProtectedHookContractLockEntries(opts.DataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry, ok := entries["openhands"]
+			if !ok {
+				t.Fatal("protected OpenHands lock entry is missing")
+			}
+			test.mutate(t, opts)
+
+			if err := validateOpenHandsDarwinLockPublication(opts.DataDir, entry); err == nil ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("lock publication custody drift error = %v, want %q refusal", err, test.want)
+			}
+			if _, _, err := prepareOpenHandsNativeLaunchLocked(opts, "darwin"); err == nil ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("protected launch custody drift error = %v, want %q refusal", err, test.want)
+			} else if strings.Contains(err.Error(), token) {
+				t.Fatalf("protected launch custody drift error leaked scoped token: %v", err)
 			}
 		})
 	}

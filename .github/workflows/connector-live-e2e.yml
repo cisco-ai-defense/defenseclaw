@@ -294,6 +294,68 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        if: steps.select.outputs.run == 'true' && matrix.connector == 'codex' && runner.os == 'macOS'
+        with:
+          node-version: "24"
+
+      # Native macOS Codex setup is executable-specific. Give the deterministic
+      # lifecycle matrix an authentic, pinned OpenAI image so production can
+      # enforce its normal Developer ID, architecture, quarantine, custody,
+      # receipt, and digest checks. Reuse the credential-free provision-only
+      # driver and install into its supported user npm layout: both the Go
+      # lifecycle fixture and the later Python contract smoke must select the
+      # same exact image without trusting an arbitrary runner-temp prefix.
+      - name: Install authenticated Codex lifecycle fixture
+        if: steps.select.outputs.run == 'true' && matrix.connector == 'codex' && runner.os == 'macOS'
+        env:
+          CODEX_VERSION: "0.146.0"
+          DC_E2E_CLIENT_PROVISION_ONLY: "1"
+        run: |
+          set -euo pipefail
+          # The built-in macOS setup authority recognizes ~/.npm-global. Keep
+          # the exact path literal here so the contract smoke exercises the
+          # production discovery allow-list rather than a CI-only override.
+          export npm_config_prefix="${HOME}/.npm-global"
+          # shellcheck source=scripts/live-connector-e2e/drivers/codex.sh
+          . scripts/live-connector-e2e/drivers/codex.sh
+          agent_install
+
+          codex_executable=""
+          for candidate in \
+            "${HOME}/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex" \
+            "${HOME}/.npm-global/lib/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"; do
+            if [ -f "${candidate}" ] && [ ! -L "${candidate}" ]; then
+              codex_executable="${candidate}"
+              break
+            fi
+          done
+          if [ -z "${codex_executable}" ]; then
+            echo "Pinned Codex package did not contain the expected native macOS arm64 image" >&2
+            exit 1
+          fi
+
+          echo "DEFENSECLAW_E2E_CODEX_NATIVE_EXECUTABLE=${codex_executable}" >> "${GITHUB_ENV}"
+          echo "DEFENSECLAW_E2E_CODEX_RAW_VERSION=codex-cli ${CODEX_VERSION}" >> "${GITHUB_ENV}"
+          echo "${HOME}/.npm-global/bin" >> "${GITHUB_PATH}"
+
+      # Claude's protected macOS selection discovers only an exact native
+      # release image. Reuse the checksum-verified live driver in its
+      # credential-free provision-only mode so the contract cell exercises the
+      # reviewed official image without configuring or exposing provider auth.
+      - name: Install authenticated Claude Code lifecycle fixture
+        if: steps.select.outputs.run == 'true' && matrix.connector == 'claudecode' && runner.os == 'macOS'
+        env:
+          CLAUDE_VERSION: "2.1.219"
+          DC_E2E_CLIENT_PROVISION_ONLY: "1"
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/live-connector-e2e/drivers/claudecode.sh
+          . scripts/live-connector-e2e/drivers/claudecode.sh
+          agent_install
+          test -f "${HOME}/.local/share/claude/versions/${CLAUDE_VERSION}"
+          test ! -L "${HOME}/.local/share/claude/versions/${CLAUDE_VERSION}"
+
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: steps.select.outputs.run == 'true'
 
@@ -388,8 +450,9 @@ jobs:
         # windows-live below; an unrun or failed cell proves nothing.
         #
         # Currently scoped to the connectors we can authenticate with Azure
-        # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands). Cursor and
-        # Copilot are deferred until their native keys exist — add
+        # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands), plus the
+        # reviewed OpenCode macOS npm client using its direct OpenAI key.
+        # Cursor and Copilot are deferred until their native keys exist — add
         # their cells back here when CURSOR_API_KEY /
         # COPILOT_GITHUB_TOKEN are configured.
         include:
@@ -399,8 +462,9 @@ jobs:
           - { connector: claudecode, os: macos-latest,   dcos: macos }
           - { connector: amp,        os: ubuntu-latest,  dcos: linux }
           - { connector: amp,        os: macos-latest,   dcos: macos }
-          # OpenHands needs the Docker runtime, so it is Linux-only.
+          - { connector: opencode,   os: macos-latest,   dcos: macos }
           - { connector: openhands,  os: ubuntu-latest,  dcos: linux }
+          - { connector: openhands,  os: macos-latest,   dcos: macos }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
@@ -460,9 +524,9 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: steps.select.outputs.run == 'true'
 
-      # Several live agents still use npm and OpenHands uses pipx. Claude's
-      # Windows lane uses Anthropic's native PowerShell installer; Node remains
-      # required by the other matrix cells.
+      # Several live agents still use npm. Claude's POSIX lane and OpenHands'
+      # macOS lane use checksum-verified official native releases; OpenHands
+      # Linux uses uv. The Windows Claude lane uses Anthropic's native installer.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: steps.select.outputs.run == 'true'
         with:
@@ -487,54 +551,6 @@ jobs:
         if: steps.select.outputs.run == 'true'
         run: defenseclaw init
 
-      # The driver re-runs `defenseclaw init` idempotently. Seed only the
-      # current connector's non-empty direct-provider keys before connector
-      # setup restarts the gateway; Azure/Bedrock credentials remain process-only.
-      - name: Seed DefenseClaw env
-        if: steps.select.outputs.run == 'true'
-        env:
-          MATRIX_CONNECTOR: ${{ matrix.connector }}
-          OPENAI_API_KEY: ${{ (matrix.connector == 'codex' || matrix.connector == 'opencode' || matrix.connector == 'openhands') && secrets.OPENAI_API_KEY || '' }}
-          ANTHROPIC_API_KEY: ${{ matrix.connector == 'claudecode' && secrets.ANTHROPIC_API_KEY || '' }}
-          AMP_API_KEY: ${{ matrix.connector == 'amp' && secrets.AMP_API_KEY || '' }}
-          CURSOR_API_KEY: ${{ matrix.connector == 'cursor' && secrets.CURSOR_API_KEY || '' }}
-          LLM_API_KEY: ${{ matrix.connector == 'openhands' && secrets.LLM_API_KEY || '' }}
-        run: |
-          env_file="${HOME}/.defenseclaw/.env"
-          mkdir -p "${HOME}/.defenseclaw"
-          touch "${env_file}"
-          write_key() {
-            local k="$1" v="$2"
-            [ -n "${v}" ] || return 0
-            grep -q "^${k}=" "${env_file}" 2>/dev/null && return 0
-            printf '%s=%s\n' "${k}" "${v}" >> "${env_file}"
-          }
-          case "${MATRIX_CONNECTOR}" in
-            codex|opencode)
-              write_key OPENAI_API_KEY "${OPENAI_API_KEY:-}"
-              ;;
-            claudecode)
-              write_key ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}"
-              ;;
-            amp)
-              write_key AMP_API_KEY "${AMP_API_KEY:-}"
-              ;;
-            cursor)
-              write_key CURSOR_API_KEY "${CURSOR_API_KEY:-}"
-              ;;
-            openhands)
-              write_key OPENAI_API_KEY "${OPENAI_API_KEY:-}"
-              write_key LLM_API_KEY "${LLM_API_KEY:-}"
-              ;;
-            copilot|hermes|devin|antigravity)
-              :
-              ;;
-            *)
-              echo "unexpected live connector for env seeding: ${MATRIX_CONNECTOR}" >&2
-              exit 1
-              ;;
-          esac
-
       # For Cursor, confirm headless `agent -p` actually fires
       # ~/.cursor/hooks.json before spending a full live run on it. If hooks
       # never reach the gateway, the live driver is skipped (recorded as a
@@ -550,17 +566,17 @@ jobs:
       - name: Live driver
         if: ${{ steps.select.outputs.run == 'true' && !(matrix.connector == 'cursor' && steps.cursor_validate.outputs.cursor_hooks_fire == '0') }}
         env:
-          OPENAI_API_KEY: ${{ (matrix.connector == 'codex' || matrix.connector == 'opencode' || matrix.connector == 'openhands') && secrets.OPENAI_API_KEY || '' }}
-          ANTHROPIC_API_KEY: ${{ matrix.connector == 'claudecode' && secrets.ANTHROPIC_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ (matrix.connector == 'opencode' || (matrix.connector == 'codex' && env.DC_USE_AZURE != '1') || (matrix.connector == 'openhands' && env.DC_USE_BEDROCK != '1' && env.DC_USE_AZURE != '1')) && secrets.OPENAI_API_KEY || '' }}
+          ANTHROPIC_API_KEY: ${{ (matrix.connector == 'claudecode' && env.DC_USE_BEDROCK != '1') && secrets.ANTHROPIC_API_KEY || '' }}
           AMP_API_KEY: ${{ matrix.connector == 'amp' && secrets.AMP_API_KEY || '' }}
           CURSOR_API_KEY: ${{ matrix.connector == 'cursor' && secrets.CURSOR_API_KEY || '' }}
           COPILOT_GITHUB_TOKEN: ${{ matrix.connector == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
-          LLM_API_KEY: ${{ matrix.connector == 'openhands' && secrets.LLM_API_KEY || '' }}
-          AZURE_OPENAI_API_KEY: ${{ (matrix.connector == 'codex' || matrix.connector == 'openhands') && secrets.AZURE_OPENAI_API_KEY || '' }}
-          AWS_BEARER_TOKEN_BEDROCK: ${{ (matrix.connector == 'claudecode' || matrix.connector == 'openhands') && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
-          AWS_ACCESS_KEY_ID: ${{ (matrix.connector == 'claudecode' || matrix.connector == 'openhands') && secrets.AWS_ACCESS_KEY_ID || '' }}
-          AWS_SECRET_ACCESS_KEY: ${{ (matrix.connector == 'claudecode' || matrix.connector == 'openhands') && secrets.AWS_SECRET_ACCESS_KEY || '' }}
-          AWS_SESSION_TOKEN: ${{ (matrix.connector == 'claudecode' || matrix.connector == 'openhands') && secrets.AWS_SESSION_TOKEN || '' }}
+          LLM_API_KEY: ${{ (matrix.connector == 'openhands' && env.DC_USE_BEDROCK != '1' && env.DC_USE_AZURE != '1') && secrets.LLM_API_KEY || '' }}
+          AZURE_OPENAI_API_KEY: ${{ ((matrix.connector == 'codex' && env.DC_USE_AZURE == '1') || (matrix.connector == 'openhands' && env.DC_USE_BEDROCK != '1' && env.DC_USE_AZURE == '1')) && secrets.AZURE_OPENAI_API_KEY || '' }}
+          AWS_BEARER_TOKEN_BEDROCK: ${{ ((matrix.connector == 'claudecode' || matrix.connector == 'openhands') && env.DC_USE_BEDROCK == '1') && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
+          AWS_ACCESS_KEY_ID: ${{ ((matrix.connector == 'claudecode' || matrix.connector == 'openhands') && env.DC_USE_BEDROCK == '1') && secrets.AWS_ACCESS_KEY_ID || '' }}
+          AWS_SECRET_ACCESS_KEY: ${{ ((matrix.connector == 'claudecode' || matrix.connector == 'openhands') && env.DC_USE_BEDROCK == '1') && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          AWS_SESSION_TOKEN: ${{ ((matrix.connector == 'claudecode' || matrix.connector == 'openhands') && env.DC_USE_BEDROCK == '1') && secrets.AWS_SESSION_TOKEN || '' }}
         run: bash scripts/live-connector-e2e/run.sh --layer live --connector "${{ matrix.connector }}"
 
       - name: Upload live results

@@ -8,7 +8,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -138,6 +141,126 @@ func TestEnterpriseHooksInstallJSONCoversTokenPreflightFailure(t *testing.T) {
 	}
 	if payload["ok"] != false || !strings.Contains(payload["error"].(string), "refusing symlink managed data_dir") {
 		t.Fatalf("payload = %#v, want JSON token preflight failure", payload)
+	}
+}
+
+func TestEnterpriseHooksInstallPassesExplicitAgentExecutable(t *testing.T) {
+	serviceData := newPrivateDir(t)
+	home := newPrivateDir(t)
+	executable := filepath.Join(home, "clients", "codex")
+
+	origCfg := cfg
+	origConnector := enterpriseHookConnector
+	origUser := enterpriseHookUser
+	origUserHome := enterpriseHookUserHome
+	origUID := enterpriseHookUID
+	origGID := enterpriseHookGID
+	origSID := enterpriseHookSID
+	origDataDir := enterpriseHookDataDir
+	origAgentVersion := enterpriseHookAgentVersion
+	origAgentExecutable := enterpriseHookAgentExecutable
+	origJSON := enterpriseHookJSON
+	origInstall := enterpriseHooksInstallTarget
+	t.Cleanup(func() {
+		cfg = origCfg
+		enterpriseHookConnector = origConnector
+		enterpriseHookUser = origUser
+		enterpriseHookUserHome = origUserHome
+		enterpriseHookUID = origUID
+		enterpriseHookGID = origGID
+		enterpriseHookSID = origSID
+		enterpriseHookDataDir = origDataDir
+		enterpriseHookAgentVersion = origAgentVersion
+		enterpriseHookAgentExecutable = origAgentExecutable
+		enterpriseHookJSON = origJSON
+		enterpriseHooksInstallTarget = origInstall
+	})
+
+	cfg = &config.Config{DataDir: serviceData}
+	cfg.Gateway.APIPort = 18970
+	cfg.Guardrail.Port = 4000
+	enterpriseHookConnector = "codex"
+	enterpriseHookUser = ""
+	enterpriseHookUserHome = home
+	enterpriseHookUID = os.Getuid()
+	enterpriseHookGID = os.Getgid()
+	enterpriseHookSID = ""
+	enterpriseHookDataDir = ""
+	enterpriseHookAgentVersion = "codex-cli 0.146.0"
+	enterpriseHookAgentExecutable = executable
+	enterpriseHookJSON = false
+
+	var captured enterprisehooks.InstallOptions
+	enterpriseHooksInstallTarget = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		captured = opts
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&bytes.Buffer{})
+	if err := runEnterpriseHooksInstall(cmd, nil); err != nil {
+		t.Fatalf("runEnterpriseHooksInstall: %v", err)
+	}
+	if captured.AgentExecutable != executable || captured.AgentVersion != "codex-cli 0.146.0" {
+		t.Fatalf("InstallOptions selection = version %q executable %q", captured.AgentVersion, captured.AgentExecutable)
+	}
+}
+
+func TestEnterpriseHooksReconcilePassesManifestAgentExecutable(t *testing.T) {
+	serviceData := newPrivateDir(t)
+	authorizationDir := newPrivateDir(t)
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
+	home := newPrivateDir(t)
+	executable := filepath.Join(home, "clients", "claude")
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	body := fmt.Sprintf(
+		"version: 1\ntargets:\n  - user_home: %q\n    uid: %d\n    gid: %d\n    connector: claudecode\n    agent_version: %q\n    agent_executable: %q\n",
+		home,
+		os.Getuid(),
+		os.Getgid(),
+		"2.1.219 (Claude Code)",
+		executable,
+	)
+	if err := os.WriteFile(manifest, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origCfg := cfg
+	origManifest := enterpriseHookManifest
+	origAPIAddr := enterpriseHookAPIAddr
+	origProxyAddr := enterpriseHookProxyAddr
+	origInstall := enterpriseHooksInstallTarget
+	origOwnership := enterpriseHookAuthorizationOwnershipSetter
+	t.Cleanup(func() {
+		cfg = origCfg
+		enterpriseHookManifest = origManifest
+		enterpriseHookAPIAddr = origAPIAddr
+		enterpriseHookProxyAddr = origProxyAddr
+		enterpriseHooksInstallTarget = origInstall
+		enterpriseHookAuthorizationOwnershipSetter = origOwnership
+	})
+	cfg = &config.Config{DataDir: serviceData}
+	cfg.Gateway.APIPort = 18970
+	cfg.Guardrail.Port = 4000
+	enterpriseHookManifest = manifest
+	enterpriseHookAPIAddr = ""
+	enterpriseHookProxyAddr = ""
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+
+	var captured enterprisehooks.InstallOptions
+	enterpriseHooksInstallTarget = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		captured = opts
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
+	}
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatalf("runEnterpriseHookReconcileOnce: %v", err)
+	}
+	if run.Failures != 0 || run.StateErr != nil {
+		t.Fatalf("reconcile result = failures %d stateErr %v rows %+v", run.Failures, run.StateErr, run.Rows)
+	}
+	if captured.AgentExecutable != executable || captured.AgentVersion != "2.1.219 (Claude Code)" {
+		t.Fatalf("reconcile InstallOptions selection = version %q executable %q", captured.AgentVersion, captured.AgentExecutable)
 	}
 }
 

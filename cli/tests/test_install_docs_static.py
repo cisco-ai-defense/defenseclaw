@@ -2207,6 +2207,23 @@ def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
     assert "  defaults:\n    redaction_profile: sensitive" in text
 
 
+def test_enterprise_macos_docs_require_exact_version_executable_pairs() -> None:
+    text = (ROOT / "docs-site/content/docs/setup/enterprise-deployment.mdx").read_text()
+    for expected in (
+        "On Linux, version-only installation retains the existing contract",
+        '--agent-version "codex-cli 0.146.0"',
+        "--agent-executable /Users/alice/.npm-global/lib/node_modules/@openai/codex",
+        'agent_version: "codex-cli 0.146.0"',
+        'agent_executable: "/Users/alice/.npm-global/lib/node_modules/@openai/codex',
+        'agent_version: "2.1.219 (Claude Code)"',
+        'agent_executable: "/Users/alice/.local/share/claude/versions/2.1.219"',
+        "A fresh Darwin Codex or Claude Code target without this evidence",
+        "`--agent-executable` cannot override the missing publisher authority",
+        "update `agent_executable` in the same change",
+    ):
+        assert expected in text
+
+
 def test_readme_delegates_observability_operations_to_the_website() -> None:
     readme = (ROOT / "README.md").read_text()
     implementation = (ROOT / "docs/OBSERVABILITY.md").read_text()

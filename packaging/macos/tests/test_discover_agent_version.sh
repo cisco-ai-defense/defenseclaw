@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # discover_agent_version: per-connector metadata probing.
 #
-# Binary fallbacks are limited to Codex and OpenCode's exact standalone path,
-# run through the bounded target-user helper. Tests mask host PATH clients and
-# stage explicit fixtures so no installed agent leaks into expected results.
+# Protected Codex/Claude discovery uses only passively version-bound native
+# layouts; no client executes before the guardian publishes and validates its
+# receipt. OpenCode retains its bounded target-user standalone probe.
 . "${PKG_DIR}/lib/installer_lib.sh"
 
 # Wrapper that masks any host `amp` / `claude` / `codex` / `opencode` CLI on PATH. We used
@@ -60,7 +60,7 @@ t_amp_missing_metadata_may_be_unversioned() {
   . "${PKG_DIR}/lib/installer_lib.sh"
 }
 
-t_claudecode_via_cursor_extension() {
+t_claudecode_extension_metadata_is_not_executable_authority() {
   local home; home="$(mktest_tmp)"
   local ext="${home}/.cursor/extensions/anthropic.claude-code-2.1.195-darwin-arm64"
   mkdir -p "${ext}"
@@ -70,10 +70,10 @@ JSON
 
   local got
   got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
-  assert_eq "${got}" "2.1.195" "claudecode version from Cursor extension"
+  assert_eq "${got}" "" "Cursor extension metadata cannot label a protected native image"
 }
 
-t_claudecode_via_vscode_extension() {
+t_claudecode_vscode_metadata_is_not_executable_authority() {
   local home; home="$(mktest_tmp)"
   local ext="${home}/.vscode/extensions/anthropic.claude-code-2.0.99-darwin-arm64"
   mkdir -p "${ext}"
@@ -83,7 +83,43 @@ JSON
 
   local got
   got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
-  assert_eq "${got}" "2.0.99" "claudecode version from VS Code extension"
+  assert_eq "${got}" "" "VS Code extension metadata cannot label a protected native image"
+}
+
+t_claudecode_native_version_image_is_paired_passively() {
+  local home; home="$(mktest_tmp)"
+  local versions="${home}/.local/share/claude/versions"
+  local older="${versions}/2.9.0" image="${versions}/2.10.0" sentinel="${home}/executed"
+  mkdir -p "${versions}"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "${sentinel}" > "${older}"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "${sentinel}" > "${image}"
+  chmod 0500 "${older}" "${image}"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.10.0" "Claude newest image uses numeric dotted comparison"
+  assert_eq "$(discover_agent_executable claudecode "${home}" "${got}")" "${image}" "Claude version pairs with the exact image"
+  [[ ! -e "${sentinel}" ]] || _fail "Claude image executed during passive discovery"
+}
+
+t_codex_standalone_newest_version_is_numeric_and_passive() {
+  local home; home="$(mktest_tmp)"
+  local root="${home}/.codex/packages/standalone/releases"
+  local older="${root}/0.99.0-aarch64-apple-darwin/bin/codex"
+  local newest="${root}/0.100.0-aarch64-apple-darwin/bin/codex"
+  local sentinel="${home}/executed"
+  mkdir -p "$(dirname "${older}")" "$(dirname "${newest}")"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "${sentinel}" > "${older}"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "${sentinel}" > "${newest}"
+  chmod 0500 "${older}" "${newest}"
+  local got
+  got="$(without_host_agent_bins discover_agent_version codex "${home}")"
+  assert_eq "${got}" "0.100.0" "Codex standalone newest selection is numeric"
+  assert_eq "$(discover_agent_executable codex "${home}" "${got}")" "${newest}" "Codex version pairs with exact standalone image"
+  [[ ! -e "${sentinel}" ]] || _fail "Codex image executed during passive discovery"
+  local body; body="$(declare -f discover_agent_version)"
+  assert_not_contains "${body}" "/usr/bin/python3" "protected passive discovery has no Python/CLT dependency"
+  assert_not_contains "${body}" "sort -V" "protected passive discovery has no GNU sort dependency"
 }
 
 t_claudecode_no_install_returns_empty() {
@@ -95,93 +131,43 @@ t_claudecode_no_install_returns_empty() {
 }
 
 t_codex_no_home_metadata_uses_system_or_empty() {
-  # With no metadata under the tmp HOME, the probe falls through to
-  # /Applications/ChatGPT.app -> Homebrew Caskroom -> system npm dirs
-  # -> PATH. On a CI/dev box without any codex install, that returns
-  # empty. On a dev box with codex installed (via any channel), we get
-  # a real version. Both are valid; assert the shape rather than the
-  # specific value.
+  # With no metadata under the tmp HOME, only an exactly paired system npm
+  # native image may produce a version. ChatGPT.app, Caskroom directory names,
+  # and PATH are deliberately not consulted.
   local home; home="$(mktest_tmp)"
   local got
   got="$(without_host_agent_bins discover_agent_version codex "${home}" 2>/dev/null || true)"
-  # Either empty, or a plausible version string (semver-ish, possibly
-  # with an -alpha.N / -beta.N suffix from ChatGPT.app pre-release builds).
+  # Either empty, or a plausible passively paired npm version.
   if [[ -n "${got}" && ! "${got}" =~ ^[0-9]+\.[0-9]+ ]]; then
     _fail "codex probe returned unexpected non-empty non-version: ${got}"
     return 1
   fi
 }
 
-t_codex_chatgpt_app_bundled_wins_over_npm() {
-  # Regression guard for the sathishr scenario: a customer with a stale
-  # `npm i -g @openai/codex@0.104.0` (predating our MinAgentVersion
-  # of 0.124.0) AND the ChatGPT.app desktop app installed (which
-  # bundles Codex 0.145.0+) MUST have the probe return the newer
-  # ChatGPT.app version. If the probe order regresses back to
-  # npm-first, this test catches it because the stale npm metadata
-  # would win and the guardian would fail with
-  # "codex agent version 0.104.0 is not verified against a known
-  # hook contract" on every reconcile — the exact silent-fail
-  # surface we shipped with in early 2026.7.3.
-  #
-  # Runs only when /Applications/ChatGPT.app is present so CI /
-  # non-desktop-app boxes still pass. On a box with ChatGPT.app
-  # missing this returns "skip".
-  local chatgpt_codex="/Applications/ChatGPT.app/Contents/Resources/codex"
-  if [[ ! -x "${chatgpt_codex}" ]]; then
-    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (ChatGPT.app not installed)\n'; fi
-    return 0
-  fi
-  local home; home="$(mktest_tmp)"
-  # Seed a stale user-npm codex install like sathishr had.
-  local pkg_dir="${home}/.npm-global/lib/node_modules/@openai/codex"
-  mkdir -p "${pkg_dir}"
-  cat > "${pkg_dir}/package.json" <<'JSON'
-{ "name": "@openai/codex", "version": "0.104.0" }
-JSON
-  # Probe as this user (DC_INSTALLER_TARGET_USER must resolve — use
-  # the current login user so sudo -n -u succeeds without a
-  # password prompt).
-  local got
-  got="$(DC_INSTALLER_TARGET_USER="$(id -un)" discover_agent_version codex "${home}" 2>&1)"
-  # Expect the ChatGPT.app-bundled version — a semver >= 0.124.0. The
-  # stale 0.104.0 must NOT win.
-  if [[ "${got}" == "0.104.0" ]]; then
-    _fail "codex probe returned the stale npm 0.104.0 instead of the newer ChatGPT.app-bundled version — the ChatGPT.app-first probe order must remain intact"
-    return 1
-  fi
-  if [[ ! "${got}" =~ ^[0-9]+\.[0-9]+ ]]; then
-    _fail "codex probe returned unexpected value with both stale npm + ChatGPT.app present: '${got}'"
-    return 1
-  fi
+t_codex_chatgpt_app_is_not_a_preselection_source() {
+  local version_body executable_body
+  version_body="$(declare -f discover_agent_version)"
+  executable_body="$(declare -f discover_agent_executable)"
+  assert_not_contains "${version_body}" '/Applications/ChatGPT.app/Contents' "Codex version discovery never executes ChatGPT.app"
+  assert_not_contains "${executable_body}" '/Applications/ChatGPT.app/Contents' "Codex executable discovery never selects ChatGPT.app pre-receipt"
+  assert_not_contains "${executable_body}" '--version' "Codex executable discovery remains passive"
 }
 
 t_codex_from_user_npm_metadata() {
-  # Verifies the npm fallback branch: seed a user-scoped npm package.json
-  # under the tmp HOME and expect the probe to read the version from it.
-  # Skips when a higher-priority source is present on the host
-  # (/Applications/ChatGPT.app-bundled binary or /*/Caskroom/codex/*
-  # dir) — those correctly win over stale npm installs on real customer
-  # boxes, but would defeat this test's fixture. The ChatGPT.app-wins
-  # case is covered by t_codex_chatgpt_app_bundled_wins_over_npm above.
-  if [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
-     || [[ -x /Applications/ChatGPT.app/Contents/MacOS/codex ]] \
-     || compgen -G "/opt/homebrew/Caskroom/codex/*/" >/dev/null 2>&1 \
-     || compgen -G "/usr/local/Caskroom/codex/*/" >/dev/null 2>&1; then
-    if [[ "${VERBOSE:-false}" == "true" ]]; then
-      printf '  skip (higher-priority codex source on host — see t_codex_chatgpt_app_bundled_wins_over_npm for the coverage)\n'
-    fi
-    return 0
-  fi
+  # Seed a user-scoped npm package plus its exact version-paired native image.
   local home; home="$(mktest_tmp)"
   local pkg_dir="${home}/.npm-global/lib/node_modules/@openai/codex"
-  mkdir -p "${pkg_dir}"
+  local native="${pkg_dir}/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"
+  mkdir -p "${pkg_dir}" "$(dirname "${native}")"
   cat > "${pkg_dir}/package.json" <<'JSON'
 { "name": "@openai/codex", "version": "0.142.0" }
 JSON
+  printf '#!/usr/bin/env bash\n# signed image fixture\n' > "${native}"
+  chmod 0500 "${native}"
   local got
   got="$(without_host_agent_bins discover_agent_version codex "${home}")"
-  assert_eq "${got}" "0.142.0" "codex version from user-npm metadata"
+  assert_eq "${got}" "0.142.0" "Codex version from native-paired user npm metadata"
+  assert_eq "$(discover_agent_executable codex "${home}" "${got}")" "${native}" "Codex npm version pairs with exact native image"
 }
 
 t_opencode_from_user_npm_metadata_without_executing_cli() {
@@ -670,21 +656,9 @@ t_discover_agent_version_records_error_for_corrupt_codex_npm() {
   # With the DC_DISCOVERY_ERRORS_LOG side channel, the corrupt
   # package.json is now surfaced to install.sh as a fatal condition.
   #
-  # Skip when a higher-priority codex source is present on the host —
-  # ChatGPT.app / Caskroom win over the npm probe, so a real dev box
-  # with codex installed via either channel would return a valid
-  # version and never touch our corrupt fixture. The unit-level
-  # coverage on _probe_json_version already proves the log-append
-  # semantics; this is the end-to-end guard for the codex npm branch.
-  if [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
-     || [[ -x /Applications/ChatGPT.app/Contents/MacOS/codex ]] \
-     || compgen -G "/opt/homebrew/Caskroom/codex/*/" >/dev/null 2>&1 \
-     || compgen -G "/usr/local/Caskroom/codex/*/" >/dev/null 2>&1; then
-    if [[ "${VERBOSE:-false}" == "true" ]]; then
-      printf '  skip (higher-priority codex source on host — end-to-end covered by _probe_json_version unit tests above)\n'
-    fi
-    return 0
-  fi
+  # Passive discovery always inspects this user metadata before any paired
+  # system source, so the corruption is reported even if a system npm image
+  # can subsequently supply a usable version.
   local home; home="$(mktest_tmp)"
   local log; log="$(mktest_tmp)/log"
   : > "${log}"
@@ -697,7 +671,9 @@ t_discover_agent_version_records_error_for_corrupt_codex_npm() {
   got="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
          DC_INSTALLER_TARGET_USER="bob" \
          without_host_agent_bins discover_agent_version codex "${home}" 2>/dev/null || true)"
-  assert_eq "${got}" "" "corrupt npm package.json still yields empty version (fall-through preserved)"
+  if [[ -n "${got}" && ! "${got}" =~ ^[0-9]+\.[0-9]+ ]]; then
+    _fail "corrupt home metadata fell through to malformed version output: ${got}"
+  fi
   # The log must have received an entry pointing at the corrupt file.
   assert_contains "$(cat "${log}")" "@openai/codex/package.json" \
     "corrupt codex package.json path was recorded in the discovery error log"
@@ -706,12 +682,14 @@ t_discover_agent_version_records_error_for_corrupt_codex_npm() {
 run_case "amp from trusted user npm metadata" t_amp_from_user_npm_metadata_without_executing_cli
 run_case "amp package metadata identity"      t_amp_metadata_requires_package_identity
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
-run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
-run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
+run_case "claudecode extension metadata is not executable authority" t_claudecode_extension_metadata_is_not_executable_authority
+run_case "claudecode VS Code metadata is not executable authority" t_claudecode_vscode_metadata_is_not_executable_authority
+run_case "claudecode native version image is paired passively" t_claudecode_native_version_image_is_paired_passively
+run_case "codex standalone newest version is numeric and passive" t_codex_standalone_newest_version_is_numeric_and_passive
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
-run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm
+run_case "codex ChatGPT.app is not a preselection source" t_codex_chatgpt_app_is_not_a_preselection_source
 run_case "opencode from user npm metadata without CLI execution" t_opencode_from_user_npm_metadata_without_executing_cli
 run_case "opencode package metadata requires identity + semver" t_opencode_package_metadata_requires_identity_and_semver
 run_case "opencode Homebrew metadata uses active formula without executing it" t_opencode_homebrew_metadata_uses_active_formula_without_executing_client

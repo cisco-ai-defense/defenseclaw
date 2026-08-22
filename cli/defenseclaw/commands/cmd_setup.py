@@ -4476,6 +4476,119 @@ def _read_picked_connector(data_dir: str | None) -> str | None:
     return None
 
 
+def _passive_darwin_protected_signal(
+    connector: str,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> agent_discovery.AgentSignal:
+    """Return presence-only setup UX evidence without launching the agent.
+
+    Codex, Claude Code, and OpenHands gain setup authority on macOS only after
+    their native image has passed the protected selection transaction.  A
+    picker or auto-detection scan runs before that transaction and therefore
+    must not execute ``--version`` on any of them.  Presence is sufficient for
+    suggesting a connector; exact identity and compatibility are established
+    immediately after the operator chooses the transaction roster.
+    """
+
+    from defenseclaw.agent_selection import _setup_agent_candidates
+
+    name = normalize_connector(connector)
+    if name not in _DARWIN_PROTECTED_SETUP_CONNECTORS:
+        raise ValueError(f"{name!r} is not a protected macOS setup connector")
+    target_dir = os.fspath(data_dir or os.path.expanduser("~/.defenseclaw"))
+    spec = agent_discovery._SPECS[name]
+    candidates = _setup_agent_candidates(name, spec, target_dir)
+    binary_path = next(
+        (
+            os.path.abspath(candidate)
+            for candidate in candidates
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK)
+        ),
+        "",
+    )
+
+    config_candidates: tuple[str, ...]
+    if name == "codex":
+        config_candidates = (connector_paths.connector_config_files("codex")[0],)
+    elif name == "claudecode":
+        config_candidates = tuple(reversed(connector_paths.claude_settings_paths(os.getcwd())))
+    else:
+        persistence = connector_paths.openhands_persistence_dir()
+        config_candidates = (
+            ".openhands/hooks.json",
+            os.path.join(persistence, "hooks.json"),
+            connector_paths.openhands_mcp_path(),
+            os.path.join(persistence, "settings.json"),
+            os.path.join(persistence, "agent_settings.json"),
+            os.path.join(persistence, "cli_config.json"),
+        )
+    config_path = next(
+        (
+            absolute
+            for candidate in config_candidates
+            if os.path.isfile(absolute := os.path.abspath(os.path.expanduser(candidate)))
+        ),
+        "",
+    )
+    return agent_discovery.AgentSignal(
+        name=name,
+        installed=bool(binary_path),
+        config_path=config_path,
+        binary_path=binary_path,
+        version="",
+        error=("version deferred to protected setup selection" if binary_path else ""),
+        configured=bool(config_path),
+    )
+
+
+def _discover_agents_for_setup(
+    *,
+    use_cache: bool = True,
+    refresh: bool = False,
+    data_dir: str | os.PathLike[str] | None = None,
+    persist_cache: bool = True,
+) -> agent_discovery.AgentDiscovery:
+    """Discover setup choices without pre-authority execution on macOS.
+
+    Ordinary inventory retains its complete versioned scan.  Setup-only UX is
+    different: before a roster has been selected it may passively locate the
+    three protected macOS clients, but it may execute only non-protected
+    connectors.  The mixed passive result is deliberately never written to the
+    shared discovery cache because blank protected versions are not runtime
+    contract evidence.
+    """
+
+    if platform_support.host_os() != "darwin":
+        discovery_kwargs: dict[str, Any] = {"use_cache": use_cache}
+        if refresh:
+            discovery_kwargs["refresh"] = True
+        if data_dir is not None:
+            discovery_kwargs["data_dir"] = data_dir
+        if not persist_cache:
+            discovery_kwargs["persist_cache"] = False
+        return agent_discovery.discover_agents(**discovery_kwargs)
+
+    require_trusted, _prefixes = agent_discovery._ai_discovery_trust_config(data_dir)
+    signals: list[agent_discovery.AgentSignal] = []
+    for name in agent_discovery.DISCOVERABLE_CONNECTORS:
+        if name in _DARWIN_PROTECTED_SETUP_CONNECTORS:
+            signals.append(_passive_darwin_protected_signal(name, data_dir=data_dir))
+        else:
+            signals.append(
+                agent_discovery._scan_agent(
+                    name,
+                    data_dir=data_dir,
+                    require_trusted_binary_paths=require_trusted,
+                )
+            )
+    return agent_discovery.AgentDiscovery(
+        scanned_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        agents={signal.name: signal for signal in signals},
+        cache_hit=False,
+    )
+
+
 def _detect_installed_connectors() -> list[str]:
     """Return verified installed applications in discovery precedence order.
 
@@ -4485,7 +4598,7 @@ def _detect_installed_connectors() -> list[str]:
     """
     # Setup/quickstart must reflect applications installed since the last
     # inventory cache was written, so always perform a fresh shared scan.
-    disc = agent_discovery.discover_agents(use_cache=False)
+    disc = _discover_agents_for_setup(use_cache=False)
     order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", ()) or tuple(disc.agents)
     found = [name for name in order if name in disc.agents and disc.agents[name].installed]
     return platform_support.supported_connectors(found)
@@ -4643,6 +4756,7 @@ def _check_connector_version_supported_for_setup(
     data_dir: str | os.PathLike[str] | None = None,
     _allow_prompt: bool = True,
     _trusted_prompt_cache: dict[str, bool] | None = None,
+    _protected_record: Any | None = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -4657,47 +4771,84 @@ def _check_connector_version_supported_for_setup(
     trusting a prefix — pass ``False`` to force the non-interactive path.
     ``_trusted_prompt_cache`` is a flow-local map keyed by trusted directory so
     batch setup can avoid asking the same yes/no question repeatedly.
+    ``_protected_record`` is a receipt-bound selection already validated by the
+    guardrail transaction. Its captured version is authoritative and must not
+    be replaced by a second PATH-based executable probe.
     """
     connector = normalize_connector(connector)
     label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
     action_mode = (mode or "").strip().lower() == "action"
     allow_drift = os.environ.get("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
-    try:
-        disc = agent_discovery.discover_agents(
-            use_cache=False,
-            refresh=True,
-            data_dir=data_dir,
-            # Native Windows OmniGent/OpenCode/Amp setup immediately records a protected,
-            # connector-scoped executable selection below.  Its admission scan
-            # therefore does not need to republish the process-wide discovery
-            # cache.  Leaving that cache untouched prevents an unrelated
-            # connector whose CLI is temporarily undiscoverable from losing
-            # already-sealed version and contract status when the gateway
-            # restarts every active connector.
-            persist_cache=not (
-                connector in {"omnigent", "opencode", "amp"}
-                and platform_support.host_os() == "windows"
-            ),
-        )
-        signal = disc.agents.get(connector)
-    except Exception as exc:
-        compatibility = resolve_connector_contract(connector, "")
-        if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
-            if emit:
-                ux.err(f"{label}: could not refresh local version discovery ({exc}); refusing action-mode hook setup.")
-                ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
-            return False
+    if (
+        platform_support.host_os() == "darwin"
+        and connector in _DARWIN_PROTECTED_SETUP_CONNECTORS
+        and _protected_record is None
+    ):
         if emit:
-            ux.warn(f"{label}: could not refresh local version discovery ({exc}); setup will continue.")
-        return True
-
+            ux.err(
+                f"{label}: protected macOS setup has no receipt-bound executable selection; "
+                "refusing version execution."
+            )
+        return False
+    signal = None
     raw_version = ""
-    installed = False
+    installed = _protected_record is not None
     probe_error = ""
-    if signal is not None:
-        raw_version = signal.version or ""
-        installed = bool(signal.installed)
-        probe_error = signal.error or ""
+    if _protected_record is not None:
+        if normalize_connector(getattr(_protected_record, "connector", "")) != connector:
+            raise OSError("protected executable selection record does not match the connector")
+        raw_version = getattr(_protected_record, "raw_version", "") or ""
+        if not isinstance(raw_version, str):
+            raise OSError("protected executable selection record has an invalid version")
+    else:
+        try:
+            if platform_support.host_os() == "darwin":
+                # A full passive-discovery refresh executes every connector's
+                # version command.  Once any protected macOS client is in the
+                # catalog, even admission of an unrelated connector must stay
+                # scoped so it cannot launch that client before selection.
+                require_trusted, _prefixes = agent_discovery._ai_discovery_trust_config(data_dir)
+                signal = agent_discovery._scan_agent(
+                    connector,
+                    data_dir=data_dir,
+                    require_trusted_binary_paths=require_trusted,
+                )
+            else:
+                disc = agent_discovery.discover_agents(
+                    use_cache=False,
+                    refresh=True,
+                    data_dir=data_dir,
+                    # Native Windows OmniGent/OpenCode/Amp setup immediately records a protected,
+                    # connector-scoped executable selection below.  Its admission scan
+                    # therefore does not need to republish the process-wide discovery
+                    # cache.  Leaving that cache untouched prevents an unrelated
+                    # connector whose CLI is temporarily undiscoverable from losing
+                    # already-sealed version and contract status when the gateway
+                    # restarts every active connector.
+                    persist_cache=not (
+                        connector in {"omnigent", "opencode", "amp"}
+                        and platform_support.host_os() == "windows"
+                    ),
+                )
+                signal = disc.agents.get(connector)
+        except Exception as exc:
+            compatibility = resolve_connector_contract(connector, "")
+            if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
+                if emit:
+                    ux.err(
+                        f"{label}: could not refresh local version discovery ({exc}); "
+                        "refusing action-mode hook setup."
+                    )
+                    ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+                return False
+            if emit:
+                ux.warn(f"{label}: could not refresh local version discovery ({exc}); setup will continue.")
+            return True
+
+        if signal is not None:
+            raw_version = signal.version or ""
+            installed = bool(signal.installed)
+            probe_error = signal.error or ""
 
     compatibility = resolve_connector_contract(connector, raw_version)
     version_display = raw_version or "(not probed)"
@@ -4853,6 +5004,40 @@ def _windows_opencode_requires_exact_selection(connector: str) -> bool:
     return normalize_connector(connector) == "opencode" and platform_support.host_os() == "windows"
 
 
+_DARWIN_PROTECTED_SETUP_CONNECTORS = frozenset({"codex", "claudecode", "openhands"})
+
+
+def _setup_agent_selection_connectors_for_host(
+    connectors: list[str] | tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return the exact receipt roster admitted on the current host."""
+
+    from defenseclaw.agent_selection import setup_agent_selection_connectors
+
+    if platform_support.host_os() == "darwin":
+        normalized = tuple(dict.fromkeys(normalize_connector(name) for name in connectors if name))
+        return tuple(name for name in normalized if name in _DARWIN_PROTECTED_SETUP_CONNECTORS)
+    return setup_agent_selection_connectors(connectors)
+
+
+def _guardrail_preselection_connectors(connectors: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Return executable selections that must precede guardrail secret publication."""
+
+    normalized = tuple(dict.fromkeys(normalize_connector(name) for name in connectors if name))
+    host_os = platform_support.host_os()
+    if host_os == "darwin":
+        return _setup_agent_selection_connectors_for_host(normalized)
+    if host_os != "windows" or not any(name == "opencode" for name in normalized):
+        return ()
+
+    # Preserve native-Windows OpenCode's existing complete-roster selection:
+    # when OpenCode is in scope, every protected Windows peer is selected in
+    # the same transaction before any setup mutation.
+    from defenseclaw.agent_selection import setup_agent_selection_connectors
+
+    return setup_agent_selection_connectors(normalized)
+
+
 def _record_windows_setup_agent_selections(
     data_dir: str | os.PathLike[str] | None,
     connectors: list[str] | tuple[str, ...],
@@ -4864,14 +5049,9 @@ def _record_windows_setup_agent_selections(
     host_os = platform_support.host_os()
     if host_os not in {"windows", "darwin"}:
         return None
-    from defenseclaw.agent_selection import (
-        record_setup_agent_selections,
-        setup_agent_selection_connectors,
-    )
+    from defenseclaw.agent_selection import record_setup_agent_selections
 
-    selected = setup_agent_selection_connectors(connectors)
-    if host_os == "darwin":
-        selected = tuple(name for name in selected if name == "openhands")
+    selected = _setup_agent_selection_connectors_for_host(connectors)
     if not selected:
         return None
 
@@ -4950,6 +5130,31 @@ def _check_guardrail_setup_connector_versions(
     )
     setup_snapshot = _prior_snapshot or _capture_setup_config_snapshot(app.cfg)
     exact_windows_opencode = any(_windows_opencode_requires_exact_selection(name) for name in targets)
+    darwin_protected_targets = (
+        _guardrail_preselection_connectors(tuple(targets)) if platform_support.host_os() == "darwin" else ()
+    )
+    verified_darwin_selection: _VerifiedSetupAgentSelections | None = None
+
+    if darwin_protected_targets:
+        try:
+            if _protected_selection is None:
+                raise OSError("protected macOS executable selection was not recorded")
+            if _protected_selection.connectors != darwin_protected_targets:
+                raise OSError("protected macOS selection does not cover this guardrail transaction")
+            verified_darwin_selection = _revalidate_setup_agent_selections(
+                app.cfg.data_dir,
+                _protected_selection,
+                transaction_snapshot=setup_snapshot,
+            )
+        except OSError as exc:
+            try:
+                _restore_setup_config_snapshot(app, setup_snapshot)
+            except Exception as rollback_exc:  # noqa: BLE001 — preserve proof and rollback failures.
+                raise click.ClickException(
+                    f"guardrail executable selection proof was invalid ({exc}); "
+                    f"prior state restoration failed: {rollback_exc}"
+                ) from exc
+            raise click.ClickException(f"guardrail executable selection changed before mutation: {exc}") from exc
 
     for connector in targets:
         if _windows_opencode_requires_exact_selection(connector):
@@ -4962,6 +5167,15 @@ def _check_guardrail_setup_connector_versions(
         }
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
+        if connector in darwin_protected_targets:
+            protected_record = verified_darwin_selection.record_for(connector) if verified_darwin_selection else None
+            if protected_record is None:
+                _restore_setup_config_snapshot(app, setup_snapshot)
+                raise click.ClickException(
+                    f"guardrail executable selection changed before mutation: "
+                    f"protected macOS selection has no {connector} record"
+                )
+            version_check_kwargs["_protected_record"] = protected_record
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
             if (mode or "").strip().lower() == "action":
                 _downgrade_guardrail_setup_action_connector(gc, connector)
@@ -4990,7 +5204,7 @@ def _check_guardrail_setup_connector_versions(
                     f"prior state restoration failed: {rollback_exc}"
                 ) from exc
             raise click.ClickException(f"guardrail executable selection changed before mutation: {exc}") from exc
-    else:
+    elif not darwin_protected_targets:
         _record_windows_setup_agent_selections(
             getattr(app.cfg, "data_dir", None),
             tuple(targets),
@@ -5620,11 +5834,12 @@ def setup_guardrail(
     guardrail_secret_transaction: _GuardrailSecretTransaction | None = None
 
     def preselect_guardrail_targets(targets: list[str] | tuple[str, ...]) -> None:
-        """Select exact OpenCode authority once, before guardrail mutation."""
+        """Select protected executable authority once, before guardrail mutation."""
 
         nonlocal protected_selection, selection_attempted, transaction_targets
         normalized_targets = tuple(dict.fromkeys(normalize_connector(name) for name in targets if name))
-        if not any(_windows_opencode_requires_exact_selection(name) for name in normalized_targets):
+        required_selections = _guardrail_preselection_connectors(normalized_targets)
+        if not required_selections:
             return
         if transaction_targets is not None and transaction_targets != normalized_targets:
             raise click.ClickException("guardrail transaction targets changed after selection")
@@ -5638,8 +5853,16 @@ def setup_guardrail(
                 normalized_targets,
                 _prior_snapshot=setup_snapshot,
             )
-            if protected_selection is None or protected_selection.record_for("opencode") is None:
-                raise click.ClickException("native-Windows OpenCode guardrail setup has no concrete exact selection")
+            if (
+                protected_selection is None
+                or protected_selection.connectors != required_selections
+                or any(protected_selection.record_for(name) is None for name in required_selections)
+            ):
+                if platform_support.host_os() == "windows":
+                    detail = "native-Windows OpenCode guardrail setup has no concrete exact selection"
+                else:
+                    detail = "native-macOS guardrail setup has no complete protected executable selection"
+                raise click.ClickException(detail)
         except Exception as exc:
             rollback_errors: list[str] = []
             for label, restore in (
@@ -5751,7 +5974,7 @@ def setup_guardrail(
             if (
                 explicit_connector
                 or not configured_connectors
-                or not any(_windows_opencode_requires_exact_selection(name) for name in configured_connectors)
+                or not _guardrail_preselection_connectors(tuple(configured_connectors))
             ):
                 target_connectors = (target_connector,)
             else:
@@ -6027,6 +6250,40 @@ def setup_guardrail(
         if secret_collection_failure_code is not None:
             raise _GuardrailSecretFailure(secret_collection_failure_code) from None
 
+    def validate_guardrail_versions() -> bool:
+        return _check_guardrail_setup_connector_versions(
+            app,
+            gc,
+            explicit_connector=(target_connector if non_interactive else explicit_connector),
+            allow_prompt=not non_interactive,
+            _prior_snapshot=setup_snapshot,
+            _protected_selection=protected_selection,
+            _transaction_targets=transaction_targets,
+        )
+
+    # On macOS these connectors are admitted by an exact, receipt-bound
+    # executable selection. Resolve their hook contracts from that protected
+    # record before a newly collected provider secret is published; a second
+    # PATH discovery here would execute an unselected process with that secret
+    # in scope. Native-Windows OpenCode retains its existing publication and
+    # validation order.
+    versions_supported: bool | None = None
+    if protected_selection is not None and platform_support.host_os() == "darwin":
+        try:
+            versions_supported = validate_guardrail_versions()
+        except BaseException as exc:
+            _clear_pending_guardrail_secrets(pending_guardrail_secrets)
+            try:
+                _restore_setup_config_snapshot(app, setup_snapshot)
+            except Exception as rollback_exc:  # noqa: BLE001 — preserve validation and rollback failures.
+                raise click.ClickException(
+                    f"guardrail version validation failed ({exc}); prior state restoration failed: {rollback_exc}"
+                ) from exc
+            raise
+        if not versions_supported:
+            _clear_pending_guardrail_secrets(pending_guardrail_secrets)
+            return
+
     secret_publication_expected = bool(pending_guardrail_secrets)
     secret_publication_failed = False
     secret_publication_rollback_incomplete = False
@@ -6069,20 +6326,13 @@ def setup_guardrail(
         return
 
     validation_failed_with_secret = False
-    try:
-        versions_supported = _check_guardrail_setup_connector_versions(
-            app,
-            gc,
-            explicit_connector=(target_connector if non_interactive else explicit_connector),
-            allow_prompt=not non_interactive,
-            _prior_snapshot=setup_snapshot,
-            _protected_selection=protected_selection,
-            _transaction_targets=transaction_targets,
-        )
-    except BaseException:
-        if guardrail_secret_transaction is None:
-            raise
-        validation_failed_with_secret = True
+    if versions_supported is None:
+        try:
+            versions_supported = validate_guardrail_versions()
+        except BaseException:
+            if guardrail_secret_transaction is None:
+                raise
+            validation_failed_with_secret = True
     if validation_failed_with_secret:
         rollback_status = restore_guardrail_setup_after_secret_publication()
         failure_code = (
@@ -7993,6 +8243,30 @@ def _apply_judge_enablement(
             gc.judge.hook_connectors = gate
 
 
+def _hook_setup_selection_roster(
+    cfg,
+    connector: str,
+    write_mode: str,
+) -> tuple[str, ...]:
+    """Return the full executable-selection roster for one hook setup."""
+
+    connector = normalize_connector(connector)
+    if write_mode != "add":
+        return (connector,)
+    # A protected selection receipt is transaction-scoped and replacing it
+    # removes entries that are not named by the new receipt. Carry the complete
+    # additive roster so sequential offline setup calls cannot erase an earlier
+    # peer's still-unpublished executable authority.
+    return tuple(
+        dict.fromkeys(
+            (
+                *(normalize_connector(name) for name in cfg.active_connectors() if name),
+                connector,
+            )
+        )
+    )
+
+
 def _apply_hook_connector_setup(
     app: AppContext,
     *,
@@ -8068,11 +8342,103 @@ def _apply_hook_connector_setup(
     if desired_mode not in ("observe", "action"):
         desired_mode = "observe"
 
+    cfg = app.cfg
+    gc = cfg.guardrail
+    selection_roster = _hook_setup_selection_roster(cfg, connector, write_mode)
+    protected_darwin = (
+        platform_support.host_os() == "darwin" and connector in _DARWIN_PROTECTED_SETUP_CONNECTORS
+    )
+    setup_snapshot: _SetupConfigSnapshot | None = None
+    verified = _protected_selection
+    owns_selection_snapshot = False
+
+    if protected_darwin:
+        # This function is also a supported compatibility boundary for direct
+        # callers.  Do not rely on every wrapper remembering to preselect: own
+        # a rollback point and exact selection here before any version command.
+        transaction_snapshot = _selection_transaction_snapshot
+        if transaction_snapshot is None:
+            try:
+                transaction_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=False)
+                setup_snapshot = transaction_snapshot
+                owns_selection_snapshot = True
+            except OSError as exc:
+                raise click.ClickException(
+                    f"cannot establish protected macOS {connector} setup rollback point: {exc}"
+                ) from exc
+        expected = _setup_agent_selection_connectors_for_host(selection_roster)
+        proof_preexisting = (
+            isinstance(verified, _VerifiedSetupAgentSelections)
+            and verified._seal is _SETUP_SELECTION_PROOF_SEAL
+            and verified.connectors == expected
+        )
+        if not proof_preexisting:
+            if _version_preflighted:
+                raise click.ClickException(
+                    f"protected macOS {connector} version preflight has no matching executable selection"
+                )
+            try:
+                verified = _record_windows_setup_agent_selections(
+                    getattr(app.cfg, "data_dir", None),
+                    selection_roster,
+                    _prior_snapshot=transaction_snapshot,
+                )
+            except Exception as exc:
+                try:
+                    _restore_setup_agent_selection_snapshot(app.cfg, transaction_snapshot)
+                except Exception as rollback_exc:  # noqa: BLE001 — preserve authority failures.
+                    raise click.ClickException(
+                        f"protected macOS {connector} selection failed ({exc}); "
+                        f"agent_selection.json rollback was incomplete: {rollback_exc}"
+                    ) from exc
+                raise
+        try:
+            if verified is None or verified.connectors != expected:
+                raise OSError("protected executable selection does not cover this setup transaction")
+            if proof_preexisting and not _version_preflighted:
+                verified = _revalidate_setup_agent_selections(
+                    cfg.data_dir,
+                    verified,
+                    transaction_snapshot=transaction_snapshot,
+                )
+            protected_record = verified.record_for(connector)
+            if protected_record is None:
+                raise OSError(f"protected executable selection has no {connector} record")
+        except OSError as exc:
+            try:
+                _restore_setup_agent_selection_snapshot(app.cfg, transaction_snapshot)
+            except Exception as rollback_exc:  # noqa: BLE001 — preserve proof and rollback failures.
+                raise click.ClickException(
+                    f"protected macOS {connector} selection changed ({exc}); "
+                    f"agent_selection.json rollback was incomplete: {rollback_exc}"
+                ) from exc
+            raise click.ClickException(f"protected macOS {connector} selection changed: {exc}") from exc
+
+        if not _version_preflighted:
+            admitted = _check_connector_version_supported_for_setup(
+                connector,
+                mode=desired_mode,
+                data_dir=getattr(app.cfg, "data_dir", None),
+                _allow_prompt=False,
+                _protected_record=protected_record,
+            )
+            if not admitted:
+                if desired_mode == "action" and _downgrade_refused_action and connector != "opencode":
+                    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+                    ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
+                    desired_mode = "observe"
+                else:
+                    if setup_snapshot is not None:
+                        _restore_setup_agent_selection_snapshot(app.cfg, setup_snapshot)
+                    return False
+            _version_preflighted = True
+        _protected_selection = verified
+        _selection_transaction_snapshot = transaction_snapshot
+
     exact_windows_opencode = _windows_opencode_requires_exact_selection(connector)
-    # Preserve the predecessor's ordering for every non-OpenCode connector:
-    # generic version admission still precedes rule-pack validation and the
-    # setup snapshot. Only native-Windows OpenCode takes the exact-selection
-    # branch below.
+    # Preserve the predecessor's ordering for non-protected connectors.
+    # Protected macOS setup and native-Windows OpenCode establish executable
+    # authority before version admission through their branches above/below.
     if not _version_preflighted and not exact_windows_opencode:
         version_check_kwargs = {
             "mode": desired_mode,
@@ -8095,40 +8461,33 @@ def _apply_hook_connector_setup(
             else:
                 return False
 
-    cfg = app.cfg
-    gc = cfg.guardrail
-    pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
     try:
-        setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
-    except OSError as exc:
-        click.echo(f"  ✗ Cannot establish connector setup rollback point: {exc}", err=True)
-        return False
-
-    verified = _protected_selection
-    selection_roster = (connector,)
-    if write_mode == "add":
-        # A protected selection receipt is transaction-scoped and replacing
-        # it removes entries that are not named by the new receipt.  Carry the
-        # complete additive roster so a sequence of ``--no-restart`` setup
-        # calls cannot erase an earlier peer's still-unpublished executable
-        # authority before the gateway gets its first chance to seal it in the
-        # contract lock.
-        selection_roster = tuple(
-            dict.fromkeys(
-                (
-                    *(normalize_connector(name) for name in cfg.active_connectors() if name),
-                    connector,
-                )
+        pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
+    except Exception:
+        if protected_darwin and setup_snapshot is not None:
+            _restore_setup_agent_selection_snapshot(app.cfg, setup_snapshot)
+        raise
+    if setup_snapshot is None:
+        try:
+            setup_snapshot = _capture_setup_config_snapshot(
+                app.cfg,
+                capture_runtime=_windows_runtime_rollback(restart),
             )
-        )
+        except OSError as exc:
+            click.echo(f"  ✗ Cannot establish connector setup rollback point: {exc}", err=True)
+            return False
+
+    protected_darwin_preflight = (
+        _version_preflighted
+        and platform_support.host_os() == "darwin"
+        and connector in _DARWIN_PROTECTED_SETUP_CONNECTORS
+    )
     if (
         isinstance(verified, _VerifiedSetupAgentSelections)
         and verified._seal is _SETUP_SELECTION_PROOF_SEAL
         and connector in verified.connectors
     ):
-        from defenseclaw.agent_selection import setup_agent_selection_connectors
-
-        if verified.connectors == setup_agent_selection_connectors(selection_roster):
+        if verified.connectors == _setup_agent_selection_connectors_for_host(selection_roster):
             selection_roster = verified.connectors
         else:
             verified = None
@@ -8141,6 +8500,18 @@ def _apply_hook_connector_setup(
             )
         except OSError:
             verified = None
+    if protected_darwin_preflight and (verified is None or verified.record_for(connector) is None):
+        if owns_selection_snapshot:
+            try:
+                _restore_setup_agent_selection_snapshot(app.cfg, setup_snapshot)
+            except Exception as rollback_exc:  # noqa: BLE001 — preserve drift and rollback failures.
+                raise click.ClickException(
+                    f"protected macOS {connector} executable selection changed after version preflight; "
+                    f"agent_selection.json rollback was incomplete: {rollback_exc}"
+                ) from rollback_exc
+        raise click.ClickException(
+            f"protected macOS {connector} executable selection changed after version preflight"
+        )
     if verified is None or verified.record_for(connector) is None:
         try:
             verified = _record_windows_setup_agent_selections(
@@ -8924,27 +9295,110 @@ def _setup_observability_alias(
         enable_judge = True
 
     trusted_prompt_cache: dict[str, bool] | None = {} if interactive else None
-    ok = _apply_hook_connector_setup(
-        app,
-        connector=connector,
-        mode=normalized_mode,
-        restart=restart,
-        allow_offline_audit=not restart,
-        workspace_dir=workspace_dir,
-        write_mode=write_mode,
-        rule_pack=rule_pack,
-        rule_pack_dir=rule_pack_dir,
-        block_message=block_message,
-        fail_mode=fail_mode,
-        hilt=human_approval,
-        hilt_min_severity=hilt_min_severity,
-        enable_judge=enable_judge,
-        judge_hook_connectors=judge_hook_connectors,
-        allow_trusted_path_prompt=interactive,
-        trusted_prompt_cache=trusted_prompt_cache,
-        _downgrade_refused_action=True,
+    selection_snapshot: _SetupConfigSnapshot | None = None
+    protected_selection: _VerifiedSetupAgentSelections | None = None
+    version_preflighted = False
+    selection_roster = _hook_setup_selection_roster(app.cfg, connector, write_mode)
+    protected_targets = (
+        _setup_agent_selection_connectors_for_host(selection_roster)
+        if platform_support.host_os() == "darwin"
+        else ()
     )
+    if connector in protected_targets:
+        try:
+            selection_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=False)
+        except OSError as exc:
+            raise click.ClickException(
+                f"cannot establish protected macOS {connector} setup rollback point: {exc}"
+            ) from exc
+        try:
+            protected_selection = _record_windows_setup_agent_selections(
+                getattr(app.cfg, "data_dir", None),
+                selection_roster,
+                _prior_snapshot=selection_snapshot,
+            )
+            if protected_selection is None or protected_selection.connectors != protected_targets:
+                raise OSError("protected executable selection does not cover this alias transaction")
+            protected_selection = _revalidate_setup_agent_selections(
+                app.cfg.data_dir,
+                protected_selection,
+                transaction_snapshot=selection_snapshot,
+            )
+            protected_record = protected_selection.record_for(connector)
+            if protected_record is None:
+                raise OSError(f"protected executable selection has no {connector} record")
+            admitted = _check_connector_version_supported_for_setup(
+                connector,
+                mode=normalized_mode,
+                data_dir=getattr(app.cfg, "data_dir", None),
+                _allow_prompt=False,
+                _protected_record=protected_record,
+            )
+            version_preflighted = True
+            if not admitted:
+                if normalized_mode == "action" and connector != "opencode":
+                    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+                    ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
+                    normalized_mode = "observe"
+                else:
+                    raise click.ClickException(
+                        f"connector {connector!r} did not pass protected macOS setup preflight"
+                    )
+        except Exception as exc:
+            try:
+                _restore_setup_agent_selection_snapshot(app.cfg, selection_snapshot)
+            except Exception as rollback_exc:  # noqa: BLE001 — preserve proof and rollback failures.
+                raise click.ClickException(
+                    f"protected macOS {connector} setup preflight failed ({exc}); "
+                    f"agent_selection.json rollback was incomplete: {rollback_exc}"
+                ) from exc
+            if isinstance(exc, click.ClickException):
+                raise
+            raise click.ClickException(f"protected macOS {connector} setup preflight failed: {exc}") from exc
+
+    try:
+        ok = _apply_hook_connector_setup(
+            app,
+            connector=connector,
+            mode=normalized_mode,
+            restart=restart,
+            allow_offline_audit=not restart,
+            workspace_dir=workspace_dir,
+            write_mode=write_mode,
+            rule_pack=rule_pack,
+            rule_pack_dir=rule_pack_dir,
+            block_message=block_message,
+            fail_mode=fail_mode,
+            hilt=human_approval,
+            hilt_min_severity=hilt_min_severity,
+            enable_judge=enable_judge,
+            judge_hook_connectors=judge_hook_connectors,
+            allow_trusted_path_prompt=interactive,
+            trusted_prompt_cache=trusted_prompt_cache,
+            _downgrade_refused_action=True,
+            _version_preflighted=version_preflighted,
+            _protected_selection=protected_selection,
+            _selection_transaction_snapshot=selection_snapshot,
+        )
+    except Exception as exc:
+        if selection_snapshot is not None:
+            try:
+                _restore_setup_agent_selection_snapshot(app.cfg, selection_snapshot)
+            except Exception as rollback_exc:  # noqa: BLE001 — preserve setup and rollback failures.
+                raise click.ClickException(
+                    f"connector {connector!r} setup failed ({exc}); "
+                    f"agent_selection.json rollback was incomplete: {rollback_exc}"
+                ) from exc
+        raise
     if not ok:
+        if selection_snapshot is not None:
+            try:
+                _restore_setup_agent_selection_snapshot(app.cfg, selection_snapshot)
+            except Exception as rollback_exc:  # noqa: BLE001 — do not strand preflight authority.
+                raise click.ClickException(
+                    f"failed to configure {connector} (mode={normalized_mode}); "
+                    f"agent_selection.json rollback was incomplete: {rollback_exc}"
+                ) from rollback_exc
         raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
     normalized_mode = app.cfg.guardrail.effective_mode(connector)
 
@@ -9333,7 +9787,7 @@ def _prompt_batch_trusted_prefixes(
         return cache
 
     try:
-        disc = agent_discovery.discover_agents(
+        disc = _discover_agents_for_setup(
             use_cache=False,
             refresh=True,
             data_dir=getattr(app.cfg, "data_dir", None),
@@ -9343,7 +9797,9 @@ def _prompt_batch_trusted_prefixes(
         return cache
 
     for connector in connector_modes:
-        if _windows_opencode_requires_exact_selection(connector):
+        if _windows_opencode_requires_exact_selection(connector) or (
+            platform_support.host_os() == "darwin" and connector in _DARWIN_PROTECTED_SETUP_CONNECTORS
+        ):
             continue
         signal = disc.agents.get(connector)
         if (
@@ -9418,9 +9874,10 @@ def _apply_setup_batch(
     }
 
     # Exact protected selection is the first compatibility authority in the
-    # batch. Windows OpenCode must succeed here before generic discovery can
-    # prompt for or persist any unrelated trusted prefix.
-    exact_windows_opencode = any(_windows_opencode_requires_exact_selection(name) for name in connectors)
+    # batch. It must succeed before generic discovery can prompt for or persist
+    # any unrelated trusted prefix, on both native-Windows OpenCode and the
+    # protected macOS connector subset.
+    protected_targets = _guardrail_preselection_connectors(tuple(connectors))
     protected_selection = _protected_selection
     if protected_selection is not None:
         try:
@@ -9429,9 +9886,14 @@ def _apply_setup_batch(
                 protected_selection,
                 transaction_snapshot=setup_snapshot,
             )
+            if protected_targets and protected_selection.connectors != protected_targets:
+                raise OSError("selection proof does not cover the complete protected batch roster")
         except OSError:
             protected_selection = None
-    if exact_windows_opencode and (protected_selection is None or protected_selection.record_for("opencode") is None):
+    if protected_targets and (
+        protected_selection is None
+        or any(protected_selection.record_for(name) is None for name in protected_targets)
+    ):
         try:
             protected_selection = _record_windows_setup_agent_selections(
                 getattr(app.cfg, "data_dir", None),
@@ -9449,7 +9911,7 @@ def _apply_setup_batch(
                 ) from exc
             raise
 
-    if allow_trusted_path_prompt and exact_windows_opencode:
+    if allow_trusted_path_prompt and protected_targets:
         try:
             trusted_prompt_cache = _prompt_batch_trusted_prefixes(app, resolved_connector_modes)
         except Exception as exc:
@@ -9476,6 +9938,14 @@ def _apply_setup_batch(
         }
         if trusted_prompt_cache is not None:
             preflight_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
+        if connector_name in protected_targets:
+            protected_record = protected_selection.record_for(connector_name) if protected_selection else None
+            if protected_record is None:
+                _restore_setup_config_snapshot(app, setup_snapshot)
+                raise click.ClickException(
+                    f"protected macOS connector {connector_name!r} has no receipt-bound batch selection"
+                )
+            preflight_kwargs["_protected_record"] = protected_record
         if not _check_connector_version_supported_for_setup(connector_name, **preflight_kwargs):
             if (connector_mode or "").strip().lower() == "action" and connector_name != "opencode":
                 label = _CONNECTOR_META.get(connector_name, {}).get("label", connector_name)
@@ -9676,9 +10146,9 @@ def _dispatch_bare_setup(
             return
 
     setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
-    exact_windows_opencode = any(_windows_opencode_requires_exact_selection(name) for name in targets)
+    protected_targets = _guardrail_preselection_connectors(tuple(targets))
     protected_selection: _VerifiedSetupAgentSelections | None = None
-    if exact_windows_opencode:
+    if protected_targets:
         try:
             protected_selection = _record_windows_setup_agent_selections(
                 getattr(app.cfg, "data_dir", None),
@@ -9704,7 +10174,7 @@ def _dispatch_bare_setup(
         try:
             gc = app.cfg.guardrail
             connector_modes = _prompt_batch_connector_modes(targets, gc, default_mode=mode)
-            if exact_windows_opencode:
+            if protected_targets:
                 # Trusted-path remediation runs inside _apply_setup_batch only
                 # after this exact protected selection has succeeded.
                 trusted_prompt_cache = {}
@@ -9726,7 +10196,7 @@ def _dispatch_bare_setup(
                 if configure_model:
                     _prompt_judge_model_config(app, gc)
         except Exception as exc:
-            if not exact_windows_opencode:
+            if not protected_targets:
                 raise
             try:
                 _restore_setup_config_snapshot(app, setup_snapshot)

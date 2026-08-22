@@ -23,8 +23,10 @@
         "~/.codex/rules",
         "/etc/codex/skills",
         ".agents/skills",
+        ".agents/plugins/api_marketplace.json",
         ".agents/plugins/marketplace.json",
         ".claude-plugin/marketplace.json",
+        ".cursor-plugin/marketplace.json",
         ".codex/config.toml",
         ".codex/agents",
         ".codex/rules",
@@ -520,24 +522,30 @@
         "~/.openhands/agent_settings.json",
         "~/.openhands/cli_config.json",
         "~/.openhands/mcp.json",
+        ".agents/agents",
         ".agents/skills",
+        ".openhands/agents",
         ".openhands/skills",
         ".openhands/microagents",
         "~/.openhands/skills/installed",
         "~/.openhands/cache/skills/public-skills/skills",
-        "AGENTS.md"
+        "AGENT.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        ".cursorrules"
       ],
       "extension_ids": [],
       "mcp_paths": [
         "~/.openhands/mcp.json"
       ],
       "package_names": [
-        "openhands-ai",
         "openhands"
       ],
       "env_var_names": [
-        "OPENHANDS_API_KEY",
-        "OPENHANDS_CONFIG_FILE"
+        "OPENHANDS_CONVERSATIONS_DIR",
+        "OPENHANDS_PERSISTENCE_DIR",
+        "OPENHANDS_WORK_DIR"
       ],
       "domain_patterns": [
         "openhands.dev"

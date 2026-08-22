@@ -33,7 +33,8 @@ DC_DRIVER_SUPPORTS_OTLP=0
 
 agent_install() {
   if ! command -v agent >/dev/null 2>&1 && ! command -v cursor-agent >/dev/null 2>&1; then
-    curl https://cursor.com/install -fsS | bash || return 1
+    dc_without_provider_credentials curl https://cursor.com/install -fsS | \
+      dc_without_provider_credentials bash || return 1
     export PATH="${HOME}/.local/bin:${PATH}"
   fi
   if command -v agent >/dev/null 2>&1; then

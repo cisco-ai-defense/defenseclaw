@@ -728,10 +728,12 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             connector_mode_warnings=connector_mode_warnings,
         )
     selection_targets: tuple[str, ...] | None = None
-    if platform_support.host_os() == "windows":
-        from defenseclaw.agent_selection import setup_agent_selection_connectors
+    if platform_support.host_os() in {"windows", "darwin"}:
+        from defenseclaw.commands.cmd_setup import _setup_agent_selection_connectors_for_host
 
-        selection_targets = setup_agent_selection_connectors(_first_run_connector_roster(options, connector))
+        selection_targets = _setup_agent_selection_connectors_for_host(
+            _first_run_connector_roster(options, connector)
+        )
 
     protected_selection, selection_error = _preflight_first_run_agent_selections(
         cfg.data_dir,
@@ -805,22 +807,54 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                     raise OSError(selection_error)
 
         cfg.environment = cfg_mod.detect_environment()
-        if connector != "none" and profile == "action":
-            exact_windows_opencode = (
-                connector == "opencode"
-                and platform_support.host_os() == "windows"
-                and protected_selection is not None
-                and protected_selection.record_for(connector) is not None
+        if connector != "none":
+            protected_record = (
+                protected_selection.record_for(connector)
+                if protected_selection is not None
+                else None
             )
-            mode_warning = None
-            if not exact_windows_opencode:
-                mode_warning = _first_run_action_mode_warning(
-                    connector,
-                    getattr(cfg, "data_dir", ""),
+            protected_version_authority = (
+                protected_record is not None
+                and (
+                    (connector == "opencode" and platform_support.host_os() == "windows")
+                    or (
+                        platform_support.host_os() == "darwin"
+                        and connector in {"codex", "claudecode", "openhands"}
+                    )
                 )
-            if mode_warning:
-                connector_mode_warnings.append(mode_warning)
-                profile = "observe"
+            )
+            if profile == "action":
+                mode_warning = None
+                if protected_version_authority:
+                    mode_warning = _first_run_action_mode_warning(
+                        connector,
+                        getattr(cfg, "data_dir", ""),
+                        protected_record=protected_record,
+                    )
+                else:
+                    mode_warning = _first_run_action_mode_warning(
+                        connector,
+                        getattr(cfg, "data_dir", ""),
+                    )
+                if mode_warning:
+                    connector_mode_warnings.append(mode_warning)
+                    profile = "observe"
+            elif protected_version_authority:
+                from defenseclaw.commands.cmd_setup import (
+                    _check_connector_version_supported_for_setup,
+                )
+
+                if not _check_connector_version_supported_for_setup(
+                    connector,
+                    mode=profile,
+                    emit=False,
+                    data_dir=getattr(cfg, "data_dir", ""),
+                    _allow_prompt=False,
+                    _protected_record=protected_record,
+                ):
+                    raise OSError(
+                        f"protected {connector} executable did not pass first-run version admission"
+                    )
 
         if connector != "none":
             _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
@@ -1142,18 +1176,16 @@ def _preflight_first_run_agent_selections(
 ) -> tuple[object | None, str]:
     """Record one complete protected roster before first-run state mutation."""
 
-    if platform_support.host_os() != "windows":
+    if platform_support.host_os() not in {"windows", "darwin"}:
         return None, ""
 
-    from defenseclaw.agent_selection import (
-        record_setup_agent_selections,
-        setup_agent_selection_connectors,
-    )
+    from defenseclaw.agent_selection import record_setup_agent_selections
+    from defenseclaw.commands.cmd_setup import _setup_agent_selection_connectors_for_host
 
     selected = (
         selected_connectors
         if selected_connectors is not None
-        else setup_agent_selection_connectors(_first_run_connector_roster(options, connector))
+        else _setup_agent_selection_connectors_for_host(_first_run_connector_roster(options, connector))
     )
     if not selected:
         return None, ""
@@ -1187,6 +1219,8 @@ def _preflight_first_run_agent_selections(
 def _first_run_action_mode_warning(
     connector: str,
     data_dir: str,
+    *,
+    protected_record: object | None = None,
 ) -> dict | None:
     """Return structured action-to-observe remediation for first-run flows."""
     from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
@@ -1197,8 +1231,12 @@ def _first_run_action_mode_warning(
         emit=False,
         data_dir=data_dir,
         _allow_prompt=False,
+        _protected_record=protected_record,
     ):
         return None
+
+    if protected_record is not None:
+        return _action_downgrade_record(connector)
 
     discovery = None
     try:

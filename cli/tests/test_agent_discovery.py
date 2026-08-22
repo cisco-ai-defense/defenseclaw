@@ -222,6 +222,30 @@ def test_omnigent_version_probe_uses_bounded_slow_start_timeout(monkeypatch) -> 
     assert invocation["text"] is False
 
 
+def test_claudecode_versioned_native_image_uses_connector_timeout(monkeypatch) -> None:
+    invocation: dict[str, object] = {}
+    binary = "/Users/tester/.local/share/claude/versions/2.1.219"
+
+    def run(command, **kwargs):
+        invocation["command"] = command
+        invocation.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout=b"2.1.219 (Claude Code)\n", stderr=b"")
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    version, error = ad._version_for_agent_binary(
+        "claudecode",
+        binary,
+        ("--version",),
+        require_trusted_binary_paths=False,
+    )
+
+    assert (version, error) == ("2.1.219 (Claude Code)", "")
+    assert invocation["command"] == [binary, "--version"]
+    assert invocation["timeout"] == 8.0
+    assert invocation["shell"] is False
+
+
 @pytest.fixture
 def windows_host_no_path(monkeypatch) -> None:
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
@@ -318,6 +342,31 @@ def test_cache_write_failure_is_truthful_and_preserves_existing(monkeypatch, tmp
 
     assert ad._write_cache(_discovery("codex"), data_dir=tmp_path) is False
     assert cache.read_text(encoding="utf-8") == "ORIGINAL\n"
+
+
+def test_cache_schema_v6_round_trips_separate_cursor_application_evidence(tmp_path):
+    discovery = _discovery()
+    discovery.scanned_at = ad._format_rfc3339(ad._now_utc())
+    discovery.agents["cursor"] = ad.AgentSignal(
+        name="cursor",
+        installed=True,
+        config_path="",
+        binary_path="/usr/local/bin/agent",
+        version="2026.08.22-a1b2c3d",
+        error="",
+        application_path="/Applications/Cursor.app",
+        application_version="3.13.25",
+    )
+
+    assert ad._write_cache(discovery, data_dir=tmp_path)
+    payload = json.loads((tmp_path / ad.CACHE_FILENAME).read_text(encoding="utf-8"))
+    cached = ad._read_cache(data_dir=tmp_path)
+
+    assert payload["version"] == 6
+    assert cached is not None
+    assert cached.agents["cursor"].version == "2026.08.22-a1b2c3d"
+    assert cached.agents["cursor"].application_path == "/Applications/Cursor.app"
+    assert cached.agents["cursor"].application_version == "3.13.25"
 
 
 def test_read_only_refresh_returns_fresh_scan_without_replacing_cache(monkeypatch, tmp_path):
@@ -568,6 +617,37 @@ def test_devin_canonical_user_mcp_file_is_configuration_evidence(
 
     assert signal.configured is True
     assert signal.config_path == str(mcp)
+
+
+def test_openhands_discovery_honors_persistence_root_and_preserves_project_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ambient = tmp_path / "ambient-profile"
+    persistence = tmp_path / "managed-openhands"
+    workspace = tmp_path / "workspace"
+    managed_hooks = persistence / "hooks.json"
+    managed_hooks.parent.mkdir(parents=True)
+    managed_hooks.write_text("{}\n", encoding="utf-8")
+    ambient_mcp = ambient / ".openhands" / "mcp.json"
+    ambient_mcp.parent.mkdir(parents=True)
+    ambient_mcp.write_text("{}\n", encoding="utf-8")
+    workspace.mkdir()
+    _pin_home(monkeypatch, ambient)
+    monkeypatch.setenv("OPENHANDS_PERSISTENCE_DIR", str(persistence))
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    user_signal = ad._scan_agent("openhands")
+
+    project_hooks = workspace / ".openhands" / "hooks.json"
+    project_hooks.parent.mkdir(parents=True)
+    project_hooks.write_text("{}\n", encoding="utf-8")
+    project_signal = ad._scan_agent("openhands")
+
+    assert user_signal.config_path == str(managed_hooks)
+    assert str(ambient) not in user_signal.config_path
+    assert project_signal.config_path == str(project_hooks.resolve())
 
 
 @pytest.mark.parametrize(
@@ -912,7 +992,7 @@ def test_antigravity_windows_version_probe_rejects_gui_fallback(
     assert "official token-bound LocalAppData\\agy\\bin\\agy.exe path" in error
 
 
-def test_cursor_macos_app_fallback_reads_metadata_without_launch(
+def test_cursor_macos_desktop_metadata_is_separate_from_agent_without_launch(
     monkeypatch,
     tmp_path,
     macos_host_no_path,
@@ -943,13 +1023,15 @@ def test_cursor_macos_app_fallback_reads_metadata_without_launch(
     signal = ad._scan_agent("cursor", require_trusted_binary_paths=True)
 
     assert signal.installed is True
-    assert signal.binary_path == str(binary)
-    assert signal.version == "3.13.25"
+    assert signal.binary_path == ""
+    assert signal.version == ""
+    assert signal.application_path == str(bundle.resolve())
+    assert signal.application_version == "3.13.25"
     assert signal.error == ""
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX execute bits are not meaningful on Windows")
-def test_cursor_macos_app_non_executable_cli_is_ignored(
+def test_cursor_macos_desktop_does_not_promote_embedded_launcher_to_agent(
     monkeypatch,
     tmp_path,
     macos_host_no_path,
@@ -967,8 +1049,15 @@ def test_cursor_macos_app_non_executable_cli_is_ignored(
 
     signal = ad._scan_agent("cursor", require_trusted_binary_paths=True)
 
-    assert signal.installed is False
+    assert signal.installed is True
     assert signal.binary_path == ""
+    assert signal.version == ""
+    assert signal.application_path == str(bundle.resolve())
+    assert signal.application_version == "3.13.25"
+
+
+
+
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation is not generally available on Windows CI")
@@ -993,10 +1082,12 @@ def test_cursor_macos_app_symlink_escape_remains_untrusted(
     signal = ad._scan_agent("cursor", require_trusted_binary_paths=True)
 
     assert signal.installed is False
-    assert ad.UNTRUSTED_PREFIX_ERROR in signal.error
+    assert signal.binary_path == ""
+    assert signal.application_path == ""
+    assert signal.error == ""
 
 
-def test_cursor_macos_app_outside_configured_roots_remains_untrusted(
+def test_cursor_macos_app_outside_application_roots_is_not_evidence(
     monkeypatch,
     tmp_path,
     macos_host_no_path,
@@ -1027,8 +1118,11 @@ def test_cursor_macos_app_outside_configured_roots_remains_untrusted(
     signal = ad._scan_agent("cursor", require_trusted_binary_paths=True)
 
     assert signal.installed is False
-    assert signal.binary_path == str(binary)
-    assert ad.UNTRUSTED_PREFIX_ERROR in signal.error
+    assert signal.binary_path == ""
+    assert signal.application_path == ""
+    assert signal.error == ""
+
+
 
 
 def test_cursor_macos_app_metadata_parser_errors_are_reported(
@@ -1079,6 +1173,36 @@ def test_cursor_standalone_agent_alias_is_detected(monkeypatch, tmp_path):
     assert signal.installed is True
     assert signal.binary_path == str(binary)
     assert signal.version == "3.13.25"
+
+
+def test_cursor_macos_candidates_never_mix_desktop_and_agent_names(
+    monkeypatch,
+    tmp_path,
+    macos_host_no_path,
+):
+    _pin_home(monkeypatch, tmp_path)
+    agent = tmp_path / ".local" / "bin" / "agent"
+    compatibility = tmp_path / ".local" / "bin" / "cursor-agent"
+    agent.parent.mkdir(parents=True)
+    for binary in (agent, compatibility):
+        binary.write_bytes(b"native agent")
+        binary.chmod(0o755)
+    names: list[str] = []
+    monkeypatch.setattr(
+        ad,
+        "_which",
+        lambda name: names.append(name) or "",
+    )
+
+    candidates = ad._binary_candidates_for_agent(
+        "cursor",
+        ad._SPECS["cursor"],
+        include_off_path_user_candidates=True,
+    )
+
+    assert names == ["agent", "cursor-agent"]
+    assert candidates == (str(agent), str(compatibility))
+    assert all(Path(candidate).name != "cursor" for candidate in candidates)
 
 
 def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_path):
@@ -2505,3 +2629,22 @@ def test_render_discovery_table_includes_connectors_and_cache_state():
     assert "cached" in rendered
     assert "codex" in rendered
     assert "yes" in rendered
+
+
+def test_render_discovery_table_labels_cursor_agent_and_desktop_versions():
+    discovery = _discovery()
+    discovery.agents["cursor"] = ad.AgentSignal(
+        name="cursor",
+        installed=True,
+        config_path="",
+        binary_path="/usr/local/bin/agent",
+        version="2026.08.22-a1b2c3d",
+        error="",
+        application_path="/Applications/Cursor.app",
+        application_version="3.13.25",
+    )
+
+    rendered = ad.render_discovery_table(discovery)
+
+    assert "agent=2026.08.22-a1b2c3d" in rendered
+    assert "desktop=3.13.25" in rendered

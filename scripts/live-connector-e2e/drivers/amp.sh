@@ -38,7 +38,7 @@ agent_install() {
     dc_err "AMP_API_KEY is required for the Amp live driver"
     return 1
   fi
-  npm install -g "@ampcode/cli@${AMP_VERSION:-latest}" || return 1
+  dc_without_provider_credentials npm install -g "@ampcode/cli@${AMP_VERSION:-latest}" || return 1
   DC_E2E_AGENT_VERSION="$(dc_capture_version amp amp --version)"
   export DC_E2E_AGENT_VERSION
   dc_write_env_key AMP_API_KEY "${AMP_API_KEY}"

@@ -387,6 +387,49 @@ t_scrub_py_syntax() {
   assert_status "${rc}" 0 "scrub_agent_configs.py parses"
 }
 
+t_scrub_py_keeps_managed_plugin_authorities_distinct() {
+  local body
+  body="$(cat "${PKG_DIR}/lib/scrub_agent_configs.py")"
+  assert_contains "${body}" 'connector="amp"' \
+    "Amp managed-plugin identity remains explicit"
+  assert_contains "${body}" '"amp", "plugins", "defenseclaw.ts"' \
+    "Amp target suffix remains fixed"
+  assert_contains "${body}" 'connector="opencode"' \
+    "OpenCode managed-plugin identity is explicit"
+  assert_contains "${body}" '"opencode", "plugins", "defenseclaw.js"' \
+    "OpenCode target suffix remains fixed"
+  assert_contains "${body}" 'MANAGED_PLUGIN_SPECS.get(connector)' \
+    "managed-plugin dispatch is limited to the explicit spec roster"
+  assert_contains "${body}" 'plugin/backup paths do not belong to the same user home' \
+    "fixed-location Amp target and authority stay bound to one user home"
+  assert_contains "${body}" 'MANAGED_TARGET_FROM_AUTHORITY = "--target-from-authority"' \
+    "OpenCode custom target discovery is an explicit authority-only mode"
+  assert_contains "${body}" 'MANAGED_RETAIN_AUTHORITY = "--retain-authority"' \
+    "batch uninstall can retain authority until its outer transaction commits"
+  assert_contains "${body}" 'backup target is not its exact managed plugin filename' \
+    "authority-derived OpenCode target stays bound to plugins/defenseclaw.js"
+}
+
+t_bundle_readme_documents_managed_plugin_scrub_runtime() {
+  local work readme body rc=0
+  work="$(mktest_tmp)"
+  readme="${work}/README.md"
+  "${REPO_ROOT}/scripts/write-macos-bundle-readme.sh" \
+    "${readme}" "test-version" "darwin" "arm64" || rc=$?
+  assert_status "${rc}" 0 "macOS bundle README generator succeeds"
+  body="$(cat "${readme}")"
+  assert_contains "${body}" 'managed plugin scrubber for `amp` and `opencode`' \
+    "bundle README identifies both Python scrub paths"
+  assert_contains "${body}" 'cleans an `amp` or `opencode`' \
+    "bundle README documents the OpenCode purge Python dependency"
+  assert_contains "${body}" 'private connector- and target-bound receipt authority' \
+    "bundle README describes the managed authority accurately"
+  assert_not_contains "${body}" 'required ONLY' \
+    "bundle README must not retain the former Amp-only dependency claim"
+  assert_not_contains "${body}" 'signed backup' \
+    "bundle README must not misdescribe private receipts as signed"
+}
+
 # _setup_bundle_fixture WITH_BINARY
 #   Prints the fresh tmpdir path on stdout, populated with the installer
 #   scaffolding (install.sh, installer_lib.sh, plist stub). When
@@ -711,6 +754,9 @@ run_case "install.sh executable"      t_install_sh_is_executable
 run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
 run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
 run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
+run_case "scrub managed plugin authority roster"  t_scrub_py_keeps_managed_plugin_authorities_distinct
+run_case "bundle README documents managed-plugin scrub runtime" \
+  t_bundle_readme_documents_managed_plugin_scrub_runtime
 run_case "install.sh does NOT create a service user (root-mode daemon)" t_install_does_not_create_service_user
 run_case "install.sh passes DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR on every hooks-install call" \
   t_install_passes_guardian_auth_dir_to_cli

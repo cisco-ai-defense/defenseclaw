@@ -45,19 +45,25 @@ done
 [ -n "${LAYER}" ]     || dc_die "--layer contract|live is required"
 [ -n "${CONNECTOR}" ] || dc_die "--connector <name|all> is required"
 
-# Executable shell-hook connectors (Layer B covers the subset with drivers).
+# Executable shell-hook connectors. Keep plugin/policy transports out of this
+# Layer-A roster even when they have a real-agent live driver.
 ALL_CONNECTORS=(codex claudecode amp cursor copilot openhands hermes devin antigravity)
+LIVE_CONNECTORS=(codex claudecode amp cursor copilot openhands hermes devin antigravity opencode)
 
 resolve_connectors() {
   if [ "${CONNECTOR}" = "all" ]; then
-    printf '%s\n' "${ALL_CONNECTORS[@]}"
+    if [ "${LAYER}" = "live" ]; then
+      printf '%s\n' "${LIVE_CONNECTORS[@]}"
+    else
+      printf '%s\n' "${ALL_CONNECTORS[@]}"
+    fi
   else
     printf '%s\n' "${CONNECTOR}"
   fi
 }
 
 run_contract() {
-  local c="$1" fixture_dir="" fixture_bin="" fixture_trusted=0 rc=0 cleanup_rc=0
+  local c="$1" fixture_dir="" fixture_bin="" fixture_src="" fixture_trusted=0 rc=0 cleanup_rc=0
 
   if [ "${c}" != "openhands" ] || [ "$(dc_detect_os)" != "macos" ]; then
     bash "${HERE}/contract-smoke.sh" "${c}"
@@ -65,22 +71,28 @@ run_contract() {
   fi
 
   # Darwin OpenHands setup deliberately requires a fresh protected executable
-  # selection. Layer A never runs a real agent, so provide only the deterministic
-  # version probe needed by the normal selection/receipt path. The private,
-  # non-link directory and executable still have to pass production custody,
-  # ancestry, version-contract, and digest admission unchanged.
+  # selection. Layer A never runs a real agent, so compile a minimal native
+  # Mach-O that implements only the deterministic version probe. A script
+  # fixture would incorrectly bypass the protected live execution boundary.
   fixture_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dc-contract-openhands.XXXXXX")" || return 1
   fixture_bin="${fixture_dir}/openhands"
+  fixture_src="${fixture_dir}/openhands.c"
   chmod 700 "${fixture_dir}" || rc=1
   if [ "${rc}" -eq 0 ]; then
     printf '%s\n' \
-      '#!/bin/sh' \
-      'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then' \
-      '  printf "%s\\n" "OpenHands CLI 1.16.0"' \
-      '  exit 0' \
-      'fi' \
-      'printf "%s\\n" "Layer A OpenHands fixture only supports --version" >&2' \
-      'exit 64' > "${fixture_bin}" || rc=1
+      '#include <stdio.h>' \
+      '#include <string.h>' \
+      'int main(int argc, char **argv) {' \
+      '  if (argc == 2 && strcmp(argv[1], "--version") == 0) {' \
+      '    puts("OpenHands CLI 1.16.0");' \
+      '    return 0;' \
+      '  }' \
+      '  fputs("Layer A OpenHands fixture only supports --version\\n", stderr);' \
+      '  return 64;' \
+      '}' > "${fixture_src}" || rc=1
+  fi
+  if [ "${rc}" -eq 0 ]; then
+    /usr/bin/cc -Os -o "${fixture_bin}" "${fixture_src}" || rc=1
   fi
   if [ "${rc}" -eq 0 ]; then
     chmod 700 "${fixture_bin}" || rc=1
@@ -108,6 +120,9 @@ run_contract() {
   fi
   if [ -f "${fixture_bin}" ]; then
     rm -f "${fixture_bin}" || cleanup_rc=1
+  fi
+  if [ -f "${fixture_src}" ]; then
+    rm -f "${fixture_src}" || cleanup_rc=1
   fi
   rmdir "${fixture_dir}" 2>/dev/null || cleanup_rc=1
 

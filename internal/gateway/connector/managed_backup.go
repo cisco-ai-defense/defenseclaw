@@ -367,18 +367,14 @@ func writeManagedFileBackup(path string, b managedFileBackup) error {
 	if err != nil {
 		return err
 	}
-	// Ensure the per-connector backup directory is owner-only (0o700)
-	// before atomicWriteFile lays down the file. atomicWriteFile uses
-	// MkdirAll(_, 0o755) by design — that perm is right for parent
-	// dirs of user-owned config files (e.g. ~/.codex/) but wrong for
-	// our own ${data_dir}/connector_backups/<connector>/ tree, which
-	// would otherwise be world-readable. Listing the connector_backups
-	// dir leaks which connectors the operator has installed; the
-	// payload itself already has 0o600 from atomicWriteFile.
-	if err := ensureManagedBackupDirRestricted(filepath.Dir(path)); err != nil {
+	// Ensure the managed backup tree is private before publishing its
+	// authority record. Darwin additionally clears and validates inherited
+	// ACLs on both managed directories and the staged file; chmod alone does
+	// not remove those grants.
+	if err := ensureManagedBackupAuthorityDirs(filepath.Dir(path)); err != nil {
 		return err
 	}
-	return atomicWriteFile(path, append(data, '\n'), 0o600)
+	return writeManagedBackupAuthority(path, append(data, '\n'))
 }
 
 // ensureManagedBackupDirRestricted creates *dir* with mode 0o700 if it

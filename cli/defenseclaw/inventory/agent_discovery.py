@@ -59,6 +59,8 @@ from defenseclaw.connector_paths import (
     devin_hook_config_path,
     hermes_config_path,
     omnigent_config_path,
+    openhands_mcp_path,
+    openhands_persistence_dir,
 )
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
@@ -79,7 +81,7 @@ UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 # separates a connector's on-disk configuration from a verified application
 # installation; older caches therefore cannot represent every current install
 # signal faithfully.
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
@@ -797,6 +799,8 @@ class AgentSignal:
     binary_path: str
     version: str
     error: str
+    application_path: str = ""
+    application_version: str = ""
     configured: bool = False
     active: bool = False
     mode: str = ""
@@ -1021,7 +1025,6 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
 
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
-        detail = signal.version or signal.error
         table.add_row(
             signal.name,
             "yes" if signal.installed else "no",
@@ -1029,7 +1032,7 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
             signal.mode if signal.active else "no",
             _display_path(signal.config_path),
             _display_path(signal.binary_path),
-            detail,
+            _signal_version_detail(signal),
         )
 
     console.print(table)
@@ -1053,6 +1056,16 @@ def _scan_agent(
         config_candidates = tuple(reversed(claude_settings_paths(os.getcwd())))
     elif name == "hermes":
         config_candidates = (hermes_config_path(),)
+    elif name == "openhands":
+        persistence = openhands_persistence_dir()
+        config_candidates = (
+            ".openhands/hooks.json",
+            os.path.join(persistence, "hooks.json"),
+            openhands_mcp_path(),
+            os.path.join(persistence, "settings.json"),
+            os.path.join(persistence, "agent_settings.json"),
+            os.path.join(persistence, "cli_config.json"),
+        )
     elif name == "antigravity":
         config_candidates = _dedup_nonempty_candidates(
             (
@@ -1073,9 +1086,7 @@ def _scan_agent(
     elif name == "amp":
         # Enterprise managed settings are read-only configuration evidence.
         # Keep the platform-owned path ahead of user/workspace candidates.
-        config_candidates = _dedup_nonempty_candidates(
-            (amp_managed_settings_path(), *config_candidates)
-        )
+        config_candidates = _dedup_nonempty_candidates((amp_managed_settings_path(), *config_candidates))
     elif name == "omnigent":
         config_path = omnigent_config_path()
         config_candidates = (config_path,)
@@ -1088,7 +1099,11 @@ def _scan_agent(
             )
         )
     config_path = _first_existing_file(config_candidates)
-    binary_candidates = _binary_candidates_for_agent(name, spec)
+    binary_candidates = _binary_candidates_for_agent(
+        name,
+        spec,
+        include_off_path_user_candidates=require_trusted_binary_paths,
+    )
     binary_path = binary_candidates[0] if binary_candidates else ""
     version = ""
     error = ""
@@ -1101,9 +1116,7 @@ def _scan_agent(
             candidate,
             spec.version_args,
             require_trusted_binary_paths=(
-                True
-                if name == "antigravity" and _is_windows_host()
-                else require_trusted_binary_paths
+                True if name == "antigravity" and _is_windows_host() else require_trusted_binary_paths
             ),
             data_dir=data_dir,
         )
@@ -1118,7 +1131,11 @@ def _scan_agent(
     if not version_ok and probe_errors:
         error = "; ".join(probe_errors)
 
-    installed = bool(binary_path) and version_ok
+    application_path = ""
+    application_version = ""
+    if name == "cursor" and _is_macos_host():
+        application_path, application_version = _cursor_macos_application_evidence()
+    installed = (bool(binary_path) and version_ok) or bool(application_path)
     return AgentSignal(
         name=name,
         installed=installed,
@@ -1126,6 +1143,8 @@ def _scan_agent(
         binary_path=binary_path,
         version=version,
         error=error,
+        application_path=application_path,
+        application_version=application_version,
         configured=bool(config_path),
     )
 
@@ -1685,6 +1704,7 @@ def _version_for_binary(
     binary_path: str,
     version_args: tuple[str, ...],
     *,
+    agent_name: str = "",
     require_trusted_binary_paths: bool = True,
     data_dir: str | os.PathLike[str] | None = None,
 ) -> tuple[str, str]:
@@ -1696,9 +1716,20 @@ def _version_for_binary(
     if require_trusted_binary_paths and not _is_trusted_binary_path(binary_path, data_dir=data_dir):
         return "", UNTRUSTED_PREFIX_ERROR
     binary_name = _binary_command_name(binary_path)
+    logical_name = _normalize_connector(agent_name)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"claude", "hermes", "omnigent", "openhands"}:
+    if binary_name in {"claude", "hermes", "omnigent", "openhands"} or logical_name in {
+        "claudecode",
+        "hermes",
+        "omnigent",
+        "openhands",
+    }:
+        # Native macOS Claude releases are stored under a version-number
+        # filename (for example ~/.local/share/claude/versions/2.1.219), so
+        # basename-only classification silently fell back to the generic
+        # two-second budget. Preserve the intended bounded slow-start budget
+        # using the already-known connector identity.
         timeout = 8.0
     elif binary_name == "opencode":
         # The official WinGet binary is a packaged Bun executable. Windows
@@ -1752,9 +1783,6 @@ def _version_for_agent_binary(
 ) -> tuple[str, str]:
     """Probe a CLI, or read metadata for a GUI that must not be launched."""
 
-    if name == "cursor" and _macos_app_bundle_for_binary(binary_path) is not None:
-        return _macos_app_version_for_binary(binary_path)
-
     if name == "antigravity" and _is_windows_host():
         if not _is_canonical_antigravity_windows_binary(binary_path):
             return "", "binary is not the official token-bound LocalAppData\\agy\\bin\\agy.exe path"
@@ -1783,9 +1811,8 @@ def _version_for_agent_binary(
     version, error = _version_for_binary(
         binary_path,
         version_args,
-        require_trusted_binary_paths=(
-            True if name == "devin" and _is_windows_host() else require_trusted_binary_paths
-        ),
+        agent_name=name,
+        require_trusted_binary_paths=(True if name == "devin" and _is_windows_host() else require_trusted_binary_paths),
         data_dir=data_dir,
     )
     if name == "devin" and not error:
@@ -2017,7 +2044,12 @@ def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
     return candidates[0] if candidates else ""
 
 
-def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]:
+def _binary_candidates_for_agent(
+    name: str,
+    spec: _AgentSpec,
+    *,
+    include_off_path_user_candidates: bool = False,
+) -> tuple[str, ...]:
     """Enumerate launchable-location candidates without trusting the first alias.
 
     Windows App Execution Aliases can exist on PATH while being protected or
@@ -2047,15 +2079,7 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
     # must never become Agent CLI hook-contract evidence.
     binary_names = (spec.binary_name,)
     if name == "cursor":
-        if _is_macos_host():
-            # Keep both standalone and app-bundle launchers. The latter is
-            # metadata-probed without execution and must still pass the
-            # configured application-root trust boundary.
-            binary_names = ("cursor-agent", "cursor", "agent")
-        else:
-            # Cursor renamed the primary Agent CLI entrypoint to ``agent``;
-            # ``cursor-agent`` remains the compatibility alias.
-            binary_names = ("agent", "cursor-agent")
+        binary_names = ("agent", "cursor-agent")
     # Windows Devin discovery is deliberately not PATH-based. The native
     # product exposes one canonical CLI under token-bound LocalAppData.
     if not (name == "devin" and _is_windows_host()):
@@ -2063,8 +2087,8 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             path = _which(binary_name)
             if path:
                 candidates.append(path)
-    if not _is_windows_host() and _is_macos_host():
-        for candidate in _macos_binary_candidates(name):
+    if not _is_windows_host() and _is_macos_host() and name == "cursor" and include_off_path_user_candidates:
+        for candidate in _cursor_macos_agent_binary_candidates():
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 candidates.append(os.path.abspath(candidate))
     if not _is_windows_host():
@@ -2108,6 +2132,18 @@ def _is_macos_host() -> bool:
     return sys.platform == "darwin"
 
 
+def _cursor_macos_agent_binary_candidates() -> tuple[str, ...]:
+    """Return documented off-PATH Cursor Agent CLI locations.
+
+    These user-owned locations are considered only when the caller requires
+    trusted binary paths. The normal trusted-prefix gate still decides whether
+    either executable may be launched for its version probe.
+    """
+
+    root = Path(os.path.expanduser("~/.local/bin"))
+    return tuple(os.fspath(root / name) for name in ("agent", "cursor-agent"))
+
+
 def _macos_application_roots() -> tuple[Path, ...]:
     """Return the standard system and per-user macOS application roots."""
 
@@ -2121,6 +2157,25 @@ def _macos_binary_candidates(connector: str) -> tuple[str, ...]:
         return ()
     relative = Path("Cursor.app") / "Contents" / "Resources" / "app" / "bin" / "cursor"
     return tuple(os.fspath(root / relative) for root in _macos_application_roots())
+
+
+def _cursor_macos_application_evidence() -> tuple[str, str]:
+    """Read bounded Cursor Desktop metadata without launching its CLI.
+
+    Resolve each expected embedded launcher through the existing application
+    bundle containment gate first. This keeps symlinked bundles or nested path
+    escapes from becoming installation evidence while preserving Desktop-only
+    inventory when the Agent CLI is not installed.
+    """
+
+    for binary_path in _macos_binary_candidates("cursor"):
+        bundle = _macos_app_bundle_for_binary(binary_path)
+        if bundle is None:
+            continue
+        version, error = _macos_app_version_for_binary(binary_path)
+        if version and not error:
+            return os.fspath(bundle), version
+    return "", ""
 
 
 def _macos_app_bundle_for_binary(binary_path: str) -> Path | None:
@@ -2278,6 +2333,8 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 binary_path=str(raw.get("binary_path") or ""),
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
+                application_path=str(raw.get("application_path") or ""),
+                application_version=str(raw.get("application_version") or ""),
                 configured=bool(raw.get("configured")),
             )
     except Exception:
@@ -2354,6 +2411,17 @@ def _display_path(path: str) -> str:
     return path or "-"
 
 
+def _signal_version_detail(signal: AgentSignal) -> str:
+    parts: list[str] = []
+    if signal.version:
+        parts.append(f"agent={signal.version}" if signal.name == "cursor" else signal.version)
+    elif signal.error:
+        parts.append(signal.error)
+    if signal.application_version:
+        parts.append(f"desktop={signal.application_version} ({_display_path(signal.application_path)})")
+    return "; ".join(parts)
+
+
 def _render_plain_table(disc: AgentDiscovery) -> str:
     lines = ["Agent discovery (cached)" if disc.cache_hit else "Agent discovery"]
     lines.append("connector | installed | configured | active/mode | config | binary | version/error")
@@ -2368,7 +2436,7 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
                     signal.mode if signal.active else "no",
                     _display_path(signal.config_path),
                     _display_path(signal.binary_path),
-                    signal.version or signal.error,
+                    _signal_version_detail(signal),
                 ]
             )
         )

@@ -300,6 +300,367 @@ class _BaseSetup(unittest.TestCase):
         self.app.cfg.claw.mode = sorted(connectors)[0]
 
 
+@pytest.mark.parametrize(
+    ("command", "connector", "protected_version"),
+    (
+        ("codex", "codex", "0.124.0"),
+        ("claude-code", "claudecode", "2.1.0"),
+        ("openhands", "openhands", "1.16.0"),
+    ),
+)
+def test_darwin_protected_alias_uses_receipt_version_without_generic_discovery(
+    command: str,
+    connector: str,
+    protected_version: str,
+) -> None:
+    app, tmp_dir, db_path = make_app_context()
+    app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
+        os.path.join(tmp_dir, "config.yaml"), b"x\n"
+    )
+    events: list[str] = []
+
+    def select(data_dir, connectors):
+        assert tuple(connectors) == (connector,)
+        events.append("selection")
+        records, errors = record_test_setup_agent_selections(data_dir, connectors)
+        record = records[connector]
+        records[connector] = type(record)(
+            connector=record.connector,
+            executable=record.executable,
+            raw_version=protected_version,
+            normalized_version=protected_version,
+            sha256=record.sha256,
+        )
+        receipt_path = Path(data_dir, "agent_selection.json")
+        payload = json.loads(receipt_path.read_bytes())
+        payload["selections"][connector]["raw_version"] = protected_version
+        payload["selections"][connector]["normalized_version"] = protected_version
+        atomic_write_private_bytes(
+            str(receipt_path),
+            (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+        )
+        return records, errors
+
+    compatibility = SimpleNamespace(
+        status=cmd_setup.STATUS_KNOWN,
+        contract=SimpleNamespace(contract_id=f"darwin-{connector}-alias-test"),
+        normalized_version=protected_version,
+        reason="",
+    )
+
+    def resolve_version(actual_connector, raw_version):
+        assert actual_connector == connector
+        assert raw_version == protected_version
+        events.append("version")
+        return compatibility
+
+    version_gate = cmd_setup._check_connector_version_supported_for_setup
+    revalidate = cmd_setup._revalidate_setup_agent_selections
+    forbidden = AssertionError("protected macOS alias must not execute generic agent discovery")
+    try:
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="darwin"),
+            patch("defenseclaw.agent_selection._HOST_PLATFORM", "darwin"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=select,
+            ) as selected,
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                side_effect=forbidden,
+            ) as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup.resolve_connector_contract",
+                side_effect=resolve_version,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                wraps=version_gate,
+            ) as checked,
+            patch(
+                "defenseclaw.commands.cmd_setup._revalidate_setup_agent_selections",
+                wraps=revalidate,
+            ) as proof_check,
+            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._log_setup_action", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
+        ):
+            result = _invoke([command, "--yes", "--no-restart"], app, catch=True)
+
+        assert result.exit_code == 0, _click_result_exception_diagnostics(result)
+        assert events == ["selection", "version"]
+        selected.assert_called_once()
+        discover.assert_not_called()
+        checked.assert_called_once()
+        assert proof_check.call_count == 2
+        protected_record = checked.call_args.kwargs.get("_protected_record")
+        assert protected_record is not None
+        assert protected_record.connector == connector
+        assert protected_record.raw_version == protected_version
+        assert checked.call_args.kwargs["_allow_prompt"] is False
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+@pytest.mark.parametrize(
+    ("connector", "protected_version"),
+    (
+        ("codex", "0.124.0"),
+        ("claudecode", "2.1.0"),
+        ("openhands", "1.16.0"),
+    ),
+)
+def test_darwin_protected_version_gate_fails_closed_without_receipt(
+    connector: str,
+    protected_version: str,
+) -> None:
+    del protected_version
+    forbidden = AssertionError("generic discovery cannot run before protected selection")
+    with (
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="darwin"),
+        patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+            side_effect=forbidden,
+        ) as discover,
+        patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery._scan_agent",
+            side_effect=forbidden,
+        ) as scan,
+    ):
+        admitted = cmd_setup._check_connector_version_supported_for_setup(
+            connector,
+            mode="observe",
+            emit=False,
+        )
+
+    assert admitted is False
+    discover.assert_not_called()
+    scan.assert_not_called()
+
+
+@pytest.mark.parametrize("connector", ("codex", "claudecode", "openhands"))
+def test_darwin_setup_detection_is_presence_only_for_protected_connector(
+    connector: str,
+) -> None:
+    protected_signal = cmd_setup.agent_discovery.AgentSignal(
+        name=connector,
+        installed=True,
+        config_path="",
+        binary_path=f"/Applications/{connector}",
+        version="",
+        error="version deferred to protected setup selection",
+    )
+    ordinary_signal = cmd_setup.agent_discovery.AgentSignal(
+        name="hermes",
+        installed=False,
+        config_path="",
+        binary_path="",
+        version="",
+        error="",
+    )
+    forbidden = AssertionError("setup detection must not launch protected candidates")
+    with (
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="darwin"),
+        patch.object(
+            cmd_setup.agent_discovery,
+            "DISCOVERABLE_CONNECTORS",
+            (connector, "hermes"),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup._passive_darwin_protected_signal",
+            return_value=protected_signal,
+        ) as passive,
+        patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery._scan_agent",
+            return_value=ordinary_signal,
+        ) as scan,
+        patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+            side_effect=forbidden,
+        ) as generic,
+    ):
+        discovered = cmd_setup._discover_agents_for_setup(use_cache=False)
+
+    assert discovered.agents[connector] is protected_signal
+    passive.assert_called_once_with(connector, data_dir=None)
+    scan.assert_called_once()
+    assert scan.call_args.args[0] == "hermes"
+    generic.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("connector", "protected_version"),
+    (
+        ("codex", "0.124.0"),
+        ("claudecode", "2.1.0"),
+        ("openhands", "1.16.0"),
+    ),
+)
+def test_darwin_core_fallback_selects_before_version_and_never_discovers(
+    connector: str,
+    protected_version: str,
+) -> None:
+    app, tmp_dir, db_path = make_app_context()
+    app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
+        os.path.join(tmp_dir, "config.yaml"), b"x\n"
+    )
+    events: list[str] = []
+
+    def select(data_dir, connectors):
+        events.append("selection")
+        records, errors = record_test_setup_agent_selections(data_dir, connectors)
+        record = records[connector]
+        records[connector] = type(record)(
+            connector=record.connector,
+            executable=record.executable,
+            raw_version=protected_version,
+            normalized_version=protected_version,
+            sha256=record.sha256,
+        )
+        receipt = Path(data_dir, "agent_selection.json")
+        payload = json.loads(receipt.read_bytes())
+        payload["selections"][connector]["raw_version"] = protected_version
+        payload["selections"][connector]["normalized_version"] = protected_version
+        atomic_write_private_bytes(
+            str(receipt),
+            (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+        )
+        return records, errors
+
+    def resolve_version(actual_connector, raw_version):
+        assert (actual_connector, raw_version) == (connector, protected_version)
+        events.append("version")
+        return SimpleNamespace(
+            status=cmd_setup.STATUS_KNOWN,
+            contract=SimpleNamespace(contract_id=f"darwin-{connector}-core-test"),
+            normalized_version=protected_version,
+            reason="",
+        )
+
+    forbidden = AssertionError("core fallback must not use generic protected discovery")
+    try:
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="darwin"),
+            patch("defenseclaw.agent_selection._HOST_PLATFORM", "darwin"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=select,
+            ) as selected,
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                side_effect=forbidden,
+            ) as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery._scan_agent",
+                side_effect=forbidden,
+            ) as scan,
+            patch(
+                "defenseclaw.commands.cmd_setup.resolve_connector_contract",
+                side_effect=resolve_version,
+            ),
+            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._log_setup_action", return_value=None),
+        ):
+            ok = cmd_setup._apply_hook_connector_setup(
+                app,
+                connector=connector,
+                restart=False,
+                allow_offline_audit=True,
+            )
+
+        assert ok is True
+        assert events == ["selection", "version"]
+        selected.assert_called_once()
+        discover.assert_not_called()
+        scan.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+@pytest.mark.parametrize(
+    ("connector", "protected_version"),
+    (
+        ("codex", "0.124.0"),
+        ("claudecode", "2.1.0"),
+        ("openhands", "1.16.0"),
+    ),
+)
+def test_darwin_bare_batch_selects_before_receipt_version_and_never_discovers(
+    connector: str,
+    protected_version: str,
+) -> None:
+    app, tmp_dir, db_path = make_app_context()
+    app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
+        os.path.join(tmp_dir, "config.yaml"), b"x\n"
+    )
+    events: list[str] = []
+
+    def select(data_dir, connectors):
+        events.append("selection")
+        records, errors = record_test_setup_agent_selections(data_dir, connectors)
+        record = records[connector]
+        records[connector] = type(record)(
+            connector=record.connector,
+            executable=record.executable,
+            raw_version=protected_version,
+            normalized_version=protected_version,
+            sha256=record.sha256,
+        )
+        receipt = Path(data_dir, "agent_selection.json")
+        payload = json.loads(receipt.read_bytes())
+        payload["selections"][connector]["raw_version"] = protected_version
+        payload["selections"][connector]["normalized_version"] = protected_version
+        atomic_write_private_bytes(
+            str(receipt),
+            (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+        )
+        return records, errors
+
+    def resolve_version(actual_connector, raw_version):
+        assert (actual_connector, raw_version) == (connector, protected_version)
+        events.append("version")
+        return SimpleNamespace(
+            status=cmd_setup.STATUS_KNOWN,
+            contract=SimpleNamespace(contract_id=f"darwin-{connector}-batch-test"),
+            normalized_version=protected_version,
+            reason="",
+        )
+
+    forbidden = AssertionError("bare batch must not use generic protected discovery")
+    try:
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="darwin"),
+            patch("defenseclaw.agent_selection._HOST_PLATFORM", "darwin"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=select,
+            ) as selected,
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                side_effect=forbidden,
+            ) as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery._scan_agent",
+                side_effect=forbidden,
+            ) as scan,
+            patch(
+                "defenseclaw.commands.cmd_setup.resolve_connector_contract",
+                side_effect=resolve_version,
+            ),
+            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._log_setup_action", return_value=None),
+        ):
+            result = _invoke(["-c", connector, "--no-restart"], app, catch=True)
+
+        assert result.exit_code == 0, _click_result_exception_diagnostics(result)
+        assert events == ["selection", "version"]
+        selected.assert_called_once()
+        discover.assert_not_called()
+        scan.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
 # ---------------------------------------------------------------------------
 # B3 / E4d — per-connector guardrail write-surface
 # ---------------------------------------------------------------------------
@@ -2561,6 +2922,104 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         proof_check.assert_called_once()
         generic.assert_not_called()
         self.assertEqual(secret_path.read_bytes(), prior_secret)
+
+    def test_darwin_claudecode_guardrail_validates_selected_version_before_secret_publication(self):
+        gc = self.app.cfg.guardrail
+        events: list[str] = []
+        protected_version = "2.1.0"
+        pending_secret = "disposable-order-marker"
+
+        def select(data_dir, connectors):
+            events.append("selection")
+            records, errors = record_test_setup_agent_selections(data_dir, connectors)
+            record = records["claudecode"]
+            records["claudecode"] = type(record)(
+                connector=record.connector,
+                executable=record.executable,
+                raw_version=protected_version,
+                normalized_version=protected_version,
+                sha256=record.sha256,
+            )
+            payload = json.loads(Path(data_dir, "agent_selection.json").read_bytes())
+            payload["selections"]["claudecode"]["raw_version"] = protected_version
+            payload["selections"]["claudecode"]["normalized_version"] = protected_version
+            atomic_write_private_bytes(
+                os.path.join(data_dir, "agent_selection.json"),
+                (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+            )
+            return records, errors
+
+        def configure_interactively(_app, target_gc, **kwargs):
+            target_gc.enabled = True
+            target_gc.connector = "claudecode"
+            target_gc.mode = "observe"
+            kwargs["_pre_mutation_selection"](("claudecode",))
+            kwargs["_pending_secrets"].append(
+                cmd_setup._PendingGuardrailSecret("DISPOSABLE_DARWIN_ORDER_KEY", pending_secret)
+            )
+            return True
+
+        compatibility = SimpleNamespace(
+            status=cmd_setup.STATUS_KNOWN,
+            contract=SimpleNamespace(contract_id="darwin-claudecode-test"),
+            normalized_version=protected_version,
+            reason="",
+        )
+
+        def resolve_version(connector, raw_version):
+            self.assertEqual(connector, "claudecode")
+            self.assertEqual(raw_version, protected_version)
+            events.append("version")
+            return compatibility
+
+        def publish(pending, data_dir):
+            self.assertEqual(data_dir, self.app.cfg.data_dir)
+            self.assertEqual([(item.env_name, item.value) for item in pending], [
+                ("DISPOSABLE_DARWIN_ORDER_KEY", pending_secret)
+            ])
+            events.append("publish")
+            cmd_setup._clear_pending_guardrail_secrets(pending)
+            return None
+
+        forbidden = AssertionError("protected macOS version validation must not execute PATH discovery")
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="darwin"),
+            patch("defenseclaw.agent_selection._HOST_PLATFORM", "darwin"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=select,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._interactive_guardrail_setup",
+                side_effect=configure_interactively,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                side_effect=forbidden,
+            ) as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup.resolve_connector_contract",
+                side_effect=resolve_version,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._publish_pending_guardrail_secrets",
+                side_effect=publish,
+            ) as secret_publish,
+            patch(
+                "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                return_value=(True, []),
+            ),
+        ):
+            result = _invoke(
+                ["guardrail", "--no-restart", "--no-verify"],
+                self.app,
+                catch=True,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=_click_result_exception_diagnostics(result))
+        self.assertEqual(events, ["selection", "version", "publish"])
+        discover.assert_not_called()
+        secret_publish.assert_called_once()
 
     def test_windows_opencode_guardrail_refusal_preserves_explicit_configured_and_picked_state(self):
         original_cfg = copy.deepcopy(self.app.cfg)

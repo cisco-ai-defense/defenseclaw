@@ -28,7 +28,8 @@
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
-      }
+      },
+      "notes": "Cursor Agent CLI and Cursor Desktop use distinct upstream release streams. Linux, macOS, and Windows validation metadata remain empty until durable packaged and authenticated official-client evidence is recorded."
     },
     "copilot": {
       "version_probe": "copilot --version",
@@ -38,22 +39,25 @@
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "Native Windows setup is supported. Authentication, HITL, and official-client live evidence remain unverified and unclaimed; Windows validation version/date/run fields remain empty and live=false."
+      "notes": "Native macOS and Windows setup paths are implemented. Authentication, HITL, and official-client live evidence remain unverified and unclaimed; macOS and Windows validation version/date/run fields remain empty and live=false."
     },
     "openhands": {
       "version_probe": "openhands --version",
       "live": true,
       "os": {
-        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
-      }
+        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "OpenHands CLI 1.16.0 and standalone OpenHands SDK 1.39.1 were reviewed separately. The protected Darwin launch path uses the SDK's trace-only native OTLP override without changing the CLI compatibility range; durable macOS certification evidence remains unrecorded."
     },
     "hermes": {
       "version_probe": "hermes --version",
       "live": false,
       "os": {
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "contract-only (Layer A); the identical exact 23-event shell-hook set and pre_tool_call response semantics were source-verified at official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0), bounded to <0.21.0. Packaged and real-client Windows validation remains pending."
+      "notes": "contract-only (Layer A); the identical exact 23-event shell-hook set and pre_tool_call response semantics were source-verified at official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0), bounded to >=0.19.0,<0.21.0. Packaged and real-client macOS and Windows validation remain pending."
     },
     "devin": {
       "version_probe": "devin --version",
@@ -63,21 +67,24 @@
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "Source-reviewed native Devin CLI hook contract pinned to 3000.4.25. Windows Setup additionally requires the exact current-user CLI path and trusted Exafunction, Inc. Authenticode signer. Authentic client live evidence remains pending and live=false; Restricted Mode, cloud, ACP, proxy, plugins, and native OTLP are unclaimed."
+      "notes": "Source-reviewed native Devin CLI hook contract pinned to 3000.4.25. Windows Setup additionally requires the exact current-user CLI path and trusted Exafunction, Inc. Authenticode signer. Authentic macOS and Windows client evidence remains pending and live=false; Restricted Mode, cloud, ACP, proxy, plugins, and native OTLP are unclaimed."
     },
     "opencode": {
       "version_probe": "opencode --version",
       "live": false,
       "os": {
+        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.19 (reviewed range >=1.18.10,<1.18.20); the relevant 1.18.19 plugin/runtime files are byte-identical to 1.18.11, and the reviewed config-parser delta does not alter plugin loading or hook dispatch. Native Windows setup is supported; authentic official-client validation metadata remains empty until the manual run is recorded, and live=false."
+      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.19 (reviewed range >=1.18.10,<1.18.20); the relevant 1.18.19 plugin/runtime files are byte-identical to 1.18.11, and the reviewed config-parser delta does not alter plugin loading or hook dispatch. Linux, macOS, and native Windows validation metadata remain empty until durable official-client evidence is recorded, and live=false."
     },
     "antigravity": {
       "version_probe": "agy --version",
       "live": false,
-      "notes": "Native Windows x64 setup is supported. The accepted protected harness pins official CLI 1.1.10 as availability metadata only, not as a validation record. No protected-client, authentication, HITL, client-provenance, or official-client live evidence is claimed; validation version/date/run fields remain empty and live=false. Enterprise/managed, Team, ProgramData, cloud-dashboard, MDM, and organization-policy surfaces remain out of scope and unverified. Real official-client E2E requires a dedicated pre-authenticated Windows runner because Google documents Windows Credential Manager/browser auth, not API-key bootstrap.",
+      "notes": "Native Windows x64 setup is supported, and the >=1.1.8 native hook contract is implemented on macOS arm64. Official CLI 1.1.10 is availability metadata only, not a validation record. No protected-client, authentication, HITL, client-provenance, or official-client live evidence is claimed; macOS and Windows validation fields remain empty and live=false. Enterprise/managed, Team, ProgramData, cloud-dashboard, MDM, and organization-policy surfaces remain out of scope and unverified. Real official-client E2E requires dedicated pre-authenticated runners because Google documents browser or platform credential-store authentication, not API-key bootstrap.",
       "os": {
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       }
     },
@@ -95,9 +102,10 @@
       "version_probe": "omnigent --version",
       "live": false,
       "os": {
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "contract-only; the supported native Windows server/SDK policy bridge and required CI remain native-degraded; live=false, authentic live and authentication/HITL evidence remain pending and unclaimed, and the CI gate does not add a public Setup availability gate"
+      "notes": "contract-only; OmniGent 0.7.0 uses the native-degraded awaited in-process policy bridge on macOS and Windows; required CI remain native-degraded; live=false, authentic live and authentication/HITL evidence remain pending and unclaimed, and the CI gate does not add a public Setup availability gate"
     }
   }
 }

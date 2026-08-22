@@ -41,21 +41,22 @@ import (
 )
 
 var (
-	enterpriseHookConnector     string
-	enterpriseHookUser          string
-	enterpriseHookUserHome      string
-	enterpriseHookUID           int
-	enterpriseHookGID           int
-	enterpriseHookSID           string
-	enterpriseHookDataDir       string
-	enterpriseHookAPIAddr       string
-	enterpriseHookProxyAddr     string
-	enterpriseHookAgentVersion  string
-	enterpriseHookManifest      string
-	enterpriseHookJSON          bool
-	enterpriseHookWatchInterval time.Duration
-	enterpriseHookWatchDebounce time.Duration
-	enterpriseHookWatchSettle   time.Duration
+	enterpriseHookConnector       string
+	enterpriseHookUser            string
+	enterpriseHookUserHome        string
+	enterpriseHookUID             int
+	enterpriseHookGID             int
+	enterpriseHookSID             string
+	enterpriseHookDataDir         string
+	enterpriseHookAPIAddr         string
+	enterpriseHookProxyAddr       string
+	enterpriseHookAgentVersion    string
+	enterpriseHookAgentExecutable string
+	enterpriseHookManifest        string
+	enterpriseHookJSON            bool
+	enterpriseHookWatchInterval   time.Duration
+	enterpriseHookWatchDebounce   time.Duration
+	enterpriseHookWatchSettle     time.Duration
 
 	enterpriseHooksRuntimeGOOS       = func() string { return runtime.GOOS }
 	enterpriseHooksPlatformPreflight = enterpriseHooksNativePlatformPreflight
@@ -75,6 +76,7 @@ var (
 	enterpriseHooksWatchRunE                   = runEnterpriseHooksWatch
 	enterpriseHookAuthorizationOwnershipSetter = setEnterpriseHookAuthorizationOwnership
 	enterpriseHooksRemoveManagedPolicy         = enterprisehooks.RemoveManagedPolicy
+	enterpriseHooksInstallTarget               = enterprisehooks.Install
 )
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
@@ -181,6 +183,8 @@ func init() {
 		"Local guardrail proxy host:port (default: 127.0.0.1:<guardrail.port>)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookAgentVersion, "agent-version", "",
 		"Raw local agent version used for hook-contract validation")
+	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookAgentExecutable, "agent-executable", "",
+		"Exact absolute native agent executable selected by the administrator (never resolved through PATH)")
 	enterpriseHooksInstallCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
@@ -310,6 +314,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
 		HILTEnabled:                  cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
 		AgentVersion:                 enterpriseHookAgentVersion,
+		AgentExecutable:              enterpriseHookAgentExecutable,
 		WorkspaceDir:                 cfg.ConnectorWorkspaceDir(),
 		Registry:                     newConnectorRegistryWithPlugins(),
 		AllowMissingHookConfigRepair: previousEnterpriseHookSuccess(cfg.DataDir, enterpriseHookUser, target.home, enterpriseHookConnector),
@@ -317,7 +322,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
-	result, err := enterprisehooks.Install(ctx, opts)
+	result, err := enterpriseHooksInstallTarget(ctx, opts)
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
@@ -478,6 +483,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(target.Connector),
 				HILTEnabled:                  cfg.EffectiveHILTForConnector(target.Connector).Enabled,
 				AgentVersion:                 strings.TrimSpace(target.AgentVersion),
+				AgentExecutable:              strings.TrimSpace(target.AgentExecutable),
 				WorkspaceDir:                 cfg.ConnectorWorkspaceDir(),
 				Registry:                     registry,
 				AllowMissingHookConfigRepair: previousEnterpriseHookSuccess(cfg.DataDir, target.User, resolved.home, target.Connector),
@@ -496,7 +502,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				}
 			}
 			var result enterprisehooks.InstallResult
-			result, err = enterprisehooks.Install(ctx, opts)
+			result, err = enterpriseHooksInstallTarget(ctx, opts)
 			if err == nil {
 				row.OK = true
 				row.UserHome = result.UserHome

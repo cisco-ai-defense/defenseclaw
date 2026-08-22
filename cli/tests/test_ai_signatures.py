@@ -204,8 +204,10 @@ def test_codex_signature_tracks_current_official_asset_layouts():
         "~/.codex/agents",
         "~/.codex/rules",
         ".agents/skills",
+        ".agents/plugins/api_marketplace.json",
         ".agents/plugins/marketplace.json",
         ".claude-plugin/marketplace.json",
+        ".cursor-plugin/marketplace.json",
         ".codex/config.toml",
         ".codex/agents",
         ".codex/rules",
@@ -219,6 +221,29 @@ def test_codex_signature_tracks_current_official_asset_layouts():
         ".codex/skills",
         ".agents/skills",
     } <= set(codex.skill_paths)
+
+
+def test_openhands_signature_tracks_current_persistence_and_agent_surfaces():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    openhands = signatures["openhands"]
+
+    assert openhands.package_names == ("openhands",)
+    assert set(openhands.env_var_names) == {
+        "OPENHANDS_CONVERSATIONS_DIR",
+        "OPENHANDS_PERSISTENCE_DIR",
+        "OPENHANDS_WORK_DIR",
+    }
+    assert {
+        ".agents/agents",
+        ".openhands/agents",
+        "AGENT.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        ".cursorrules",
+    } <= set(openhands.config_paths)
+    assert "openhands-ai" not in openhands.package_names
+    assert {"OPENHANDS_API_KEY", "OPENHANDS_CONFIG_FILE"}.isdisjoint(openhands.env_var_names)
 
 
 def test_custom_signature_pack_loads_from_managed_dir(tmp_path):

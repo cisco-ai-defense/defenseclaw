@@ -217,6 +217,38 @@ def test_gemini_official_cli_home_rejects_invalid_nonempty_paths(
         connector_paths.connector_home("geminicli")
 
 
+def test_openhands_persistence_binding_controls_user_mcp_read_write_and_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    persistence = tmp_path / "openhands-state"
+    monkeypatch.setenv("OPENHANDS_PERSISTENCE_DIR", str(persistence))
+
+    assert connector_paths.openhands_persistence_dir() == str(persistence)
+    assert connector_paths.openhands_mcp_path() == str(persistence / "mcp.json")
+    assert connector_paths.connector_home("openhands") == str(persistence)
+    assert connector_paths.connector_config_files("openhands")[:2] == [
+        str(persistence / "hooks.json"),
+        str(persistence / "mcp.json"),
+    ]
+
+    connector_paths.set_mcp_server("openhands", "bound", {"command": "one"})
+    assert [(entry.name, entry.command) for entry in connector_paths.mcp_servers("openhands")] == [("bound", "one")]
+    connector_paths.unset_mcp_server("openhands", "bound")
+    assert connector_paths.mcp_servers("openhands") == []
+
+
+@pytest.mark.parametrize(
+    "binding",
+    (" relative-state ", "relative-state", "../redirected", "bad\nstate"),
+)
+def test_openhands_persistence_binding_rejects_non_absolute_or_noncanonical_paths(
+    monkeypatch: pytest.MonkeyPatch, binding: str
+) -> None:
+    monkeypatch.setenv("OPENHANDS_PERSISTENCE_DIR", binding)
+    with pytest.raises(ValueError, match="absolute normalized path"):
+        connector_paths.openhands_persistence_dir()
+
+
 def test_windsurf_profile_binding_rejects_non_normalized_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1002,13 +1034,30 @@ class TestPluginDirs:
         (repo / ".git").mkdir()
         repo_plugin = repo / "packages" / "repo-plugin"
         repo_plugin.mkdir(parents=True)
+        api_plugin = repo / "packages" / "api-plugin"
+        api_plugin.mkdir(parents=True)
         legacy_plugin = repo / "packages" / "legacy-plugin"
         legacy_plugin.mkdir(parents=True)
+        cursor_plugin = repo / "packages" / "cursor-plugin"
+        cursor_plugin.mkdir(parents=True)
+        personal_api_plugin = fake_home / "personal-plugins" / "personal-api-plugin"
+        personal_api_plugin.mkdir(parents=True)
         personal_plugin = fake_home / "personal-plugins" / "personal-plugin"
         personal_plugin.mkdir(parents=True)
 
+        repo_api_marketplace = repo / ".agents" / "plugins" / "api_marketplace.json"
+        repo_api_marketplace.parent.mkdir(parents=True)
+        repo_api_marketplace.write_text(
+            json.dumps(
+                {
+                    "plugins": [
+                        {"name": "api", "source": {"source": "local", "path": "./packages/api-plugin"}},
+                    ]
+                }
+            )
+        )
         repo_marketplace = repo / ".agents" / "plugins" / "marketplace.json"
-        repo_marketplace.parent.mkdir(parents=True)
+        repo_marketplace.parent.mkdir(parents=True, exist_ok=True)
         repo_marketplace.write_text(
             json.dumps(
                 {
@@ -1037,8 +1086,30 @@ class TestPluginDirs:
                 }
             )
         )
+        cursor_marketplace = repo / ".cursor-plugin" / "marketplace.json"
+        cursor_marketplace.parent.mkdir(parents=True)
+        cursor_marketplace.write_text(
+            json.dumps(
+                {
+                    "plugins": [
+                        {"name": "cursor", "source": {"source": "local", "path": "./packages/cursor-plugin"}},
+                    ]
+                }
+            )
+        )
+        personal_api_marketplace = fake_home / ".agents" / "plugins" / "api_marketplace.json"
+        personal_api_marketplace.parent.mkdir(parents=True)
+        personal_api_marketplace.write_text(
+            json.dumps(
+                {
+                    "plugins": [
+                        {"name": "personal-api", "source": "./personal-plugins/personal-api-plugin"},
+                    ]
+                }
+            )
+        )
         personal_marketplace = fake_home / ".agents" / "plugins" / "marketplace.json"
-        personal_marketplace.parent.mkdir(parents=True)
+        personal_marketplace.parent.mkdir(parents=True, exist_ok=True)
         personal_marketplace.write_text(
             json.dumps(
                 {
@@ -1051,7 +1122,14 @@ class TestPluginDirs:
 
         dirs = connector_paths.plugin_dirs("codex", workspace_dir=str(repo))
 
-        assert dirs[:3] == [str(repo_plugin), str(legacy_plugin), str(personal_plugin)]
+        assert dirs[:6] == [
+            str(api_plugin),
+            str(repo_plugin),
+            str(legacy_plugin),
+            str(cursor_plugin),
+            str(personal_api_plugin),
+            str(personal_plugin),
+        ]
         assert str(custom_codex_home / "plugins" / "cache") in dirs
         assert str(custom_codex_home / "plugins") not in dirs
         assert str(repo / "plugins") not in dirs
@@ -1608,6 +1686,26 @@ class TestMCPServers:
         ]
         assert connector_paths.rule_dirs("cursor", workspace_dir=str(workspace)) == [
             str(workspace / ".cursor" / "rules"),
+        ]
+
+    def test_openhands_agent_and_instruction_paths_match_client_precedence(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: home)
+
+        assert connector_paths.agent_dirs("openhands", workspace_dir=str(workspace)) == [
+            str(workspace / ".agents" / "agents"),
+            str(home / ".agents" / "agents"),
+            str(home / ".openhands" / "agents"),
+            str(workspace / ".openhands" / "agents"),
+        ]
+        assert connector_paths.rule_dirs("openhands", workspace_dir=str(workspace)) == [
+            str(workspace / name)
+            for name in ("AGENTS.md", "AGENT.md", "CLAUDE.md", "GEMINI.md", ".cursorrules")
+        ]
+        assert connector_paths.rule_dirs("openhands") == [
+            str(home / name)
+            for name in ("AGENTS.md", "AGENT.md", "CLAUDE.md", "GEMINI.md", ".cursorrules")
         ]
 
     def test_devin_mcp_reads_canonical_and_legacy_files_in_precedence_order(
@@ -2583,8 +2681,11 @@ class TestConnectorConfigFiles:
             str(fake_home / ".codex" / "config.toml"),
             str(active / ".codex" / "config.toml"),
             str(repo / ".codex" / "config.toml"),
+            str(repo / ".agents" / "plugins" / "api_marketplace.json"),
             str(repo / ".agents" / "plugins" / "marketplace.json"),
             str(repo / ".claude-plugin" / "marketplace.json"),
+            str(repo / ".cursor-plugin" / "marketplace.json"),
+            str(fake_home / ".agents" / "plugins" / "api_marketplace.json"),
             str(fake_home / ".agents" / "plugins" / "marketplace.json"),
         ]
         assert not any(path.endswith(".mcp.json") for path in files)

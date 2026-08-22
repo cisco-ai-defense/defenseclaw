@@ -3694,6 +3694,69 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
 
         self.assertEqual([s["id"] for s in inv["skills"]], ["real-installed"])
 
+    def test_openhands_agents_follow_primary_then_legacy_precedence(self):
+        cfg = _make_cfg_for_connector(self.tmp, "openhands")
+        home = Path(self.tmp) / "home"
+        workspace = Path(self.tmp) / "repo"
+        cfg.claw.workspace_dir = str(workspace)
+        roots_and_names = (
+            (workspace / ".agents" / "agents", "reviewer"),
+            (home / ".agents" / "agents", "Reviewer"),
+            (home / ".openhands" / "agents", "helper"),
+            (workspace / ".openhands" / "agents", "reviewer"),
+        )
+        for root, name in roots_and_names:
+            root.mkdir(parents=True, exist_ok=True)
+            (root / f"{name}.md").write_text(f"# {name}\n", encoding="utf-8")
+            (root / "ignored.json").write_text("{}", encoding="utf-8")
+
+        with patch.dict(
+            os.environ,
+            {"HOME": str(home), "USERPROFILE": str(home)},
+            clear=False,
+        ):
+            rows = _agents_for_connector("openhands", cfg)
+
+        self.assertEqual([row["id"] for row in rows], ["reviewer", "Reviewer", "helper", "reviewer"])
+        reviewer = [row for row in rows if row["id"].casefold() == "reviewer"]
+        self.assertEqual(reviewer[0]["selection_state"], "documented-candidate")
+        self.assertFalse(reviewer[0].get("shadowed", False))
+        self.assertTrue(all(row["selection_state"] == "documented-shadowed" for row in reviewer[1:]))
+        self.assertEqual([row["source_family"] for row in rows], [".agents", ".agents", ".openhands", ".openhands"])
+
+    def test_openhands_instruction_inventory_is_workspace_scoped_case_insensitive_and_no_follow(self):
+        cfg = _make_cfg_for_connector(self.tmp, "openhands")
+        home = Path(self.tmp) / "home"
+        workspace = Path(self.tmp) / "repo"
+        workspace.mkdir()
+        home.mkdir()
+        cfg.claw.workspace_dir = str(workspace)
+        (workspace / "agents.MD").write_text("workspace agents", encoding="utf-8")
+        (workspace / "CLAUDE.md").write_text("workspace claude", encoding="utf-8")
+        (workspace / "ignored.md").write_text("not an OpenHands permanent instruction", encoding="utf-8")
+        (home / "GEMINI.md").write_text("user fallback must not layer with a workspace", encoding="utf-8")
+        outside = Path(self.tmp) / "outside.md"
+        outside.write_text("outside secret", encoding="utf-8")
+        linked = workspace / "GEMINI.md"
+        try:
+            linked.symlink_to(outside)
+        except OSError:
+            linked = None
+
+        with patch.dict(
+            os.environ,
+            {"HOME": str(home), "USERPROFILE": str(home)},
+            clear=False,
+        ):
+            rows = _rules_for_connector("openhands", cfg)
+
+        self.assertEqual({row["name"] for row in rows}, {"agents.MD", "CLAUDE.md"})
+        self.assertTrue(all(row["scope"] == "workspace" for row in rows))
+        self.assertTrue(all(row["no_follow_verified"] for row in rows))
+        self.assertFalse(any(row["source"] == str(home / "GEMINI.md") for row in rows))
+        if linked is not None:
+            self.assertFalse(any(row["source"] == str(linked) for row in rows))
+
     def test_skill_description_extracted_from_skill_md(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         skill_root = os.path.join(self.tmp, "skills")

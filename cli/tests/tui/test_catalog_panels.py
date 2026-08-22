@@ -384,8 +384,13 @@ def test_catalog_codex_labels_use_current_official_asset_layouts() -> None:
     assert "trusted projects only" in mcps
     assert ".mcp.json" not in mcps
     assert ".agents/plugins/marketplace.json" in plugins
+    assert ".agents/plugins/api_marketplace.json" in plugins
     assert ".claude-plugin/marketplace.json" in plugins
+    assert ".cursor-plugin/marketplace.json" in plugins
+    assert "~/.agents/plugins/api_marketplace.json" in plugins
     assert "plugins/cache" in plugins.replace("\\", "/")
+
+    assert "$OPENHANDS_PERSISTENCE_DIR/mcp.json" in connector_source_label("openhands", "mcps")
 
 
 def test_plugin_parse_connector_gate_actions_and_intents() -> None:

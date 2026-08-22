@@ -21,7 +21,8 @@ defenseclaw setup openhands --workspace /path/to/repo
 <Callout type="warning">
 OpenHands connector setup is supported on macOS and Linux. OpenHands CLI
 requires WSL on Windows, and DefenseClaw does not implement a WSL connector
-path, so native Windows setup is unsupported.
+path, so native Windows setup is unsupported. macOS support remains **preview**
+until a durable packaged and authenticated official-client run is recorded.
 </Callout>
 
 By default this is **global/user-scoped**: DefenseClaw writes native OpenHands hook entries into `~/.openhands/hooks.json` and installs the shared hook script at `~/.defenseclaw/hooks/openhands-hook.sh`. Pass `--workspace /path/to/repo` only when you intentionally want repo-local `.openhands/hooks.json` wiring for that repository. **There is no proxy-enforcement path** for OpenHands — blocking happens hook-side with OpenHands' documented exit code `2` deny response.
@@ -52,7 +53,15 @@ configuration.
 
 #### Version contract
 
-DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The OpenHands connector is documented and tested against `OpenHands CLI 1.16.0`; the hook contract remains listed as "unversioned / documented hooks" until upstream publishes a hook-version floor for `.openhands/hooks.json`.
+DefenseClaw validates the installed OpenHands CLI version during setup when the
+trusted `openhands --version` probe succeeds. The supported CLI contract is
+`>=1.12.0` because that release first loads the user-global
+`~/.openhands/hooks.json`; the current source review covers OpenHands CLI
+`1.16.0`. On macOS, setup additionally seals the exact regular, non-link
+Mach-O at `~/.local/share/openhands/versions/<version>/openhands` (or an
+operator-approved trusted prefix) and refuses scripts, custody drift, or digest
+drift before launch. The live harness installs the official 1.16.0 Apple-silicon
+standalone asset only after verifying its reviewed byte size and SHA-256.
 
 <Callout type="warning">
 Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. A repository-local `.openhands/hooks.json` can still override or layer with that behavior depending on OpenHands' own config loading. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly.
@@ -112,11 +121,45 @@ OpenHands documents `additionalContext` for context injection. DefenseClaw uses 
   </Folder>
 </Files>
 
-OpenHands MCP servers are managed in [`~/.openhands/mcp.json`](https://docs.openhands.dev/openhands/usage/cli/mcp-servers), so MCP discovery is global by default. Current OpenHands skills use `.agents/skills`; global setup resolves that as `~/.agents/skills`, and workspace setup resolves it under the pinned repository. DefenseClaw also discovers deprecated `.openhands/skills` and `.openhands/microagents` paths, installed skills in `~/.openhands/skills/installed`, and the public OpenHands extensions cache at `~/.openhands/cache/skills/public-skills/skills`. That cache is where OpenHands' own "Loaded: N skills" count comes from after the SDK syncs public skills. OpenHands has no plugin install surface in the documented local contract, so DefenseClaw treats plugins as unsupported and hides the Plugins TUI panel while `claw.mode=openhands`.
+OpenHands MCP servers are managed in
+[`$OPENHANDS_PERSISTENCE_DIR/mcp.json` or `~/.openhands/mcp.json`](https://docs.openhands.dev/openhands/usage/cli/mcp-servers),
+so MCP discovery is global by default. Current OpenHands skills use
+`.agents/skills`; global setup resolves that as `~/.agents/skills`, and
+workspace setup resolves it under the pinned repository. DefenseClaw also
+discovers `.agents/agents`, `.openhands/agents`, deprecated
+`.openhands/skills` and `.openhands/microagents` paths, installed skills in
+`~/.openhands/skills/installed`, and the public OpenHands extensions cache at
+`~/.openhands/cache/skills/public-skills/skills`. That cache is where
+OpenHands' own "Loaded: N skills" count comes from after the SDK syncs public
+skills. OpenHands has no documented CLI plugin-install surface, so plugins are
+explicitly **N/A** and the Plugins TUI panel stays hidden while
+`claw.mode=openhands`.
 
 `claw.workspace_dir` is optional. Empty means global user scope. When set via `--workspace`, workspace-local skills/rules discovery uses that repository until you clear it with a global setup run or point it at another workspace.
 
 The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` under `locations`, so `defenseclaw doctor` can report both the hook contract and the concrete hook/MCP/skill locations it is using.
+
+## Native telemetry on macOS
+
+The base OpenHands hook contract does not claim native OTLP. On macOS arm64,
+DefenseClaw has a narrower **trace-only native OTLP** override, source-reviewed
+against standalone OpenHands SDK `1.39.1`; that SDK review does not widen or
+otherwise change the CLI compatibility range. It does not claim native OTLP
+logs or metrics.
+
+Use the protected launch boundary after setup:
+
+```bash
+defenseclaw-gateway connector launch --connector openhands -- --headless -t "your prompt"
+```
+
+The launcher revalidates the sealed executable and hook digest, loads the
+owner-only connector-scoped OTLP token, and supplies it only in the child
+environment. It strips inherited Python loader, dynamic-loader, and OTLP
+overrides first. Arbitrary direct `openhands` launches intentionally receive
+no DefenseClaw OTLP credential. Hook audit remains the correlation authority;
+the reviewed SDK telemetry does not expose stable turn, action, tool-call,
+event, or model-response identifiers.
 
 ## Hook capabilities
 

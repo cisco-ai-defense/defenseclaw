@@ -1686,6 +1686,22 @@ _PARTIAL_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
 
 _UNVERIFIED_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
     (
+        "openhands",
+        "agents",
+    ): (
+        "documented local .agents/agents Markdown subagents and legacy "
+        ".openhands/agents fallbacks are inventoried in client precedence order; "
+        "runtime-provided built-ins and effective session activation remain unverified"
+    ),
+    (
+        "openhands",
+        "rules",
+    ): (
+        "the five documented permanent instruction-skill filenames under the selected "
+        "workspace or user root are inventoried case-insensitively without following links; "
+        "effective session activation remains unverified"
+    ),
+    (
         "opencode",
         "skills",
     ): (
@@ -1845,6 +1861,7 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
       ``$COPILOT_HOME/agents`` (default ``~/.copilot/agents``)
     * cursor     — explicitly pinned project ``.cursor/agents`` and user ``~/.cursor/agents``
     * devin      — pinned project ``.devin/agents`` and ``.agents/agents``
+    * openhands  — primary ``.agents/agents`` and legacy ``.openhands/agents``
     * antigravity — global/workspace custom agents plus plugin agent components
     * amp        — static plugin metadata and ``createAgent({name})`` calls
     """
@@ -1884,6 +1901,13 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
         )
     if name == "devin":
         return _agents_from_md_dirs(
+            connector_paths.agent_dirs(
+                name,
+                workspace_dir=_connector_workspace_dir(cfg),
+            )
+        )
+    if name == "openhands":
+        return _agents_from_openhands_dirs(
             connector_paths.agent_dirs(
                 name,
                 workspace_dir=_connector_workspace_dir(cfg),
@@ -1976,6 +2000,52 @@ def _rules_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
                 }
             )
         return rows
+    if normalized == "openhands":
+        workspace = _connector_workspace_dir(cfg)
+        candidates = connector_paths.rule_dirs(
+            "openhands",
+            workspace_dir=workspace,
+        )
+        if not candidates:
+            return []
+        root = os.path.dirname(candidates[0])
+        entries = _safe_codex_directory_entries(root)
+        if entries is None:
+            return []
+        wanted = {os.path.basename(path).casefold() for path in candidates}
+        matched: list[tuple[str, str]] = []
+        for entry in entries:
+            identity = entry.casefold()
+            if identity not in wanted:
+                continue
+            source = os.path.join(root, entry)
+            try:
+                connector_paths.reject_reparse_path(source)
+                info = os.stat(source, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                matched.append((identity, source))
+        collision_ids = {
+            identity
+            for identity, _source in matched
+            if sum(item_identity == identity for item_identity, _item_source in matched) > 1
+        }
+        return [
+            {
+                "id": os.path.basename(source),
+                "name": os.path.basename(source),
+                "source": source,
+                "scope": "workspace" if workspace else "user",
+                "kind": "instruction",
+                "source_format": "openhands-permanent-skill",
+                "discovery_only": True,
+                "activation_verified": False,
+                "no_follow_verified": True,
+                "collision": identity in collision_ids,
+            }
+            for identity, source in matched
+        ]
     if normalized == "opencode":
         return _opencode_rules(cfg)
     if normalized != "codex":
@@ -2673,6 +2743,37 @@ def _agents_from_md_dirs(agent_dirs: list[str]) -> list[dict[str, Any]]:
             if not key or key in seen:
                 continue
             seen.add(key)
+            rows.append(row)
+    return rows
+
+
+def _agents_from_openhands_dirs(agent_dirs: list[str]) -> list[dict[str, Any]]:
+    """Inventory direct Markdown subagents in OpenHands precedence order."""
+
+    home = os.path.normcase(os.path.abspath(os.path.expanduser("~")))
+    user_roots = {
+        os.path.normcase(os.path.join(home, family, "agents"))
+        for family in (".agents", ".openhands")
+    }
+    rows: list[dict[str, Any]] = []
+    selected: set[str] = set()
+    for agents_dir in agent_dirs:
+        normalized_dir = os.path.normcase(os.path.abspath(agents_dir))
+        family = os.path.basename(os.path.dirname(os.path.normpath(agents_dir))).casefold()
+        scope = "user" if normalized_dir in user_roots else "workspace"
+        for row in _agents_from_md_dir(agents_dir):
+            identity = str(row.get("id") or "").casefold()
+            if not identity:
+                continue
+            row["scope"] = scope
+            row["source_family"] = family
+            row["activation_verified"] = False
+            if identity in selected:
+                row["shadowed"] = True
+                row["selection_state"] = "documented-shadowed"
+            else:
+                selected.add(identity)
+                row["selection_state"] = "documented-candidate"
             rows.append(row)
     return rows
 

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +36,9 @@ from defenseclaw.connector_paths import (
 )
 from defenseclaw.context import AppContext
 from defenseclaw.platform_support import (
+    DARWIN_CONNECTOR_SUPPORT,
     DEPRECATED_CONNECTORS,
+    MACOS_CONNECTOR_SUPPORT,
     NOT_CERTIFIED,
     PREVIEW,
     PROXY_CONNECTORS,
@@ -83,6 +86,12 @@ WINDOWS_PREVIEW: set[str] = set()
 WINDOWS_NOT_CERTIFIED: set[str] = set()
 WINDOWS_UNSUPPORTED = {"geminicli", "openhands", "openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
+DARWIN_PREVIEW = {"antigravity", "claudecode", "codex", "cursor", "devin", "hermes", "openhands"}
+EMPTY_CERTIFICATION = {
+    "last_validated_version": "",
+    "last_validated_at": "",
+    "run_url": "",
+}
 
 
 def test_destination_platform_unsupported_centralizes_local_stack_gate() -> None:
@@ -149,6 +158,42 @@ def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:
         assert re.search(pattern, go_source), f"Go status/reason drift for {name}"
 
 
+def test_darwin_preview_taxonomy_matches_go_mirror_and_has_reasons() -> None:
+    assert MACOS_CONNECTOR_SUPPORT is DARWIN_CONNECTOR_SUPPORT
+    assert set(DARWIN_CONNECTOR_SUPPORT) == DARWIN_PREVIEW
+    go_source = (
+        Path(__file__).resolve().parents[2] / "internal" / "gateway" / "connector" / "platform_support.go"
+    ).read_text(encoding="utf-8")
+    for name, support in DARWIN_CONNECTOR_SUPPORT.items():
+        assert support.status == PREVIEW
+        assert support.reason.strip()
+        pattern = (
+            rf'"{re.escape(name)}":\s*\{{\s*'
+            rf"Status:\s*PlatformPreview,\s*"
+            rf'Reason:\s*"{re.escape(support.reason)}",'
+        )
+        assert re.search(pattern, go_source), f"Go Darwin status/reason drift for {name}"
+
+
+def test_uncertified_cross_platform_inventory_uses_empty_records_and_boolean_live() -> None:
+    inventory = json.loads(
+        (Path(__file__).resolve().parents[1] / "defenseclaw" / "inventory" / "validated_versions.json").read_text(
+            encoding="utf-8"
+        )
+    )["connectors"]
+    for connector, os_name in (
+        ("openhands", "macos"),
+        ("hermes", "macos"),
+        ("opencode", "linux"),
+        ("opencode", "macos"),
+        ("antigravity", "macos"),
+        ("omnigent", "macos"),
+    ):
+        assert inventory[connector]["os"][os_name] == EMPTY_CERTIFICATION
+    for connector, record in inventory.items():
+        assert type(record["live"]) is bool, connector
+
+
 def test_proxy_topology_is_distinct_from_windows_support() -> None:
     assert set(PROXY_CONNECTORS) == {"openclaw", "zeptoclaw"}
     assert set(GUARDRAIL_CONNECTORS) == set(PROXY_CONNECTORS)
@@ -181,13 +226,25 @@ def test_unknown_windows_connector_requires_certification() -> None:
     assert support.available is False
 
 
-def test_non_windows_behavior_is_unchanged() -> None:
-    for os_name in ("linux", "darwin"):
-        for name in ALL_CONNECTORS:
+def test_linux_behavior_is_unchanged_and_darwin_previews_remain_available() -> None:
+    for name in ALL_CONNECTORS:
+        support = connector_platform_support(name, "linux")
+        if name in DEPRECATED_CONNECTORS:
+            assert support.status == UNSUPPORTED
+            assert support.available is False
+        else:
+            assert support.status == SUPPORTED
+            assert support.available
+
+        for os_name in ("darwin", "macos"):
             support = connector_platform_support(name, os_name)
             if name in DEPRECATED_CONNECTORS:
                 assert support.status == UNSUPPORTED
                 assert support.available is False
+            elif name in DARWIN_PREVIEW:
+                assert support.status == PREVIEW
+                assert support.available
+                assert connector_preview_on_os(name, os_name)
             else:
                 assert support.status == SUPPORTED
                 assert support.available
@@ -327,16 +384,21 @@ def test_windows_views_include_supported_and_labeled_preview_connectors() -> Non
     assert "omnigent" in {choice.wire for choice in win_modes}
 
 
-def test_non_windows_views_are_unfiltered() -> None:
+def test_linux_views_are_unfiltered_and_darwin_previews_are_labeled() -> None:
     assert supported_connector_choices("linux") == tuple(
         connector for connector in CONNECTORS if connector not in DEPRECATED_CONNECTORS
     )
-    assert visible_mode_picker_choices("darwin") == tuple(
-        choice for choice in MODE_PICKER_CHOICES if choice.wire not in DEPRECATED_CONNECTORS
-    )
+    assert {choice.wire for choice in visible_mode_picker_choices("darwin")} == {
+        choice.wire for choice in MODE_PICKER_CHOICES if choice.wire not in DEPRECATED_CONNECTORS
+    }
     assert visible_connector_choices("linux") == tuple(
         connector for connector in CONNECTOR_CHOICES if connector not in DEPRECATED_CONNECTORS
     )
+
+    darwin_labels = {choice.wire: choice.label for choice in visible_mode_picker_choices("darwin")}
+    for connector in DARWIN_PREVIEW:
+        assert darwin_labels[connector].endswith("(preview)")
+    assert darwin_labels["devin"] == "Devin CLI (preview)"
 
 
 def test_discovery_default_preserves_non_windows_and_avoids_unsupported_windows() -> None:

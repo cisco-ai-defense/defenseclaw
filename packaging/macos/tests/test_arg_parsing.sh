@@ -110,9 +110,12 @@ t_uninstall_help() {
   assert_contains "${out}" "scrub DefenseClaw"        "scrub behavior documented"
   assert_contains "${out}" ".config/amp/plugins/defenseclaw.ts" "Amp plugin cleanup documented"
   assert_contains "${out}" "connector_backups/amp/config.json" "Amp backup authority documented"
+  assert_contains "${out}" ".config/opencode/plugins/defenseclaw.js" "OpenCode plugin cleanup documented"
+  assert_contains "${out}" "connector_backups/opencode/config.json" "OpenCode backup authority documented"
+  assert_contains "${out}" "custom OPENCODE_CONFIG_DIR plugin path" "custom OpenCode cleanup target documented"
 }
 
-t_uninstall_routes_amp_through_backup_authority() {
+t_uninstall_routes_managed_plugins_through_backup_authority() {
   local body
   body="$(cat "${UNINSTALL_SH}")"
   assert_contains "${body}" "scrub_agent_config amp" \
@@ -121,6 +124,22 @@ t_uninstall_routes_amp_through_backup_authority() {
     "purge targets only Amp's documented system plugin"
   assert_contains "${body}" '/.defenseclaw/connector_backups/amp/config.json' \
     "purge supplies Amp's structured backup authority"
+  assert_contains "${body}" "scrub_agent_config opencode" \
+    "purge invokes the OpenCode managed-plugin scrub handler"
+  assert_contains "${body}" '/.config/opencode/plugins/defenseclaw.js' \
+    "purge targets only OpenCode's documented managed plugin"
+  assert_contains "${body}" '/.defenseclaw/connector_backups/opencode/config.json' \
+    "purge supplies OpenCode's structured backup authority"
+  assert_contains "${body}" '--target-from-authority' \
+    "purge resolves custom OpenCode plugin locations only from private authority"
+  assert_contains "${body}" '--retain-authority' \
+    "purge retains managed-plugin receipts until every connector scrub succeeds"
+  assert_contains "${body}" 'may be under a custom OPENCODE_CONFIG_DIR' \
+    "keep-agent-configs warns about authority-captured custom OpenCode targets"
+  assert_contains "${body}" '_opencode_target="${_phome}/.config/opencode/plugins/defenseclaw.js"' \
+    "missing authority still exposes a default-location orphan to fail-closed cleanup"
+  assert_contains "${body}" '"${connector}" == "amp" || "${connector}" == "opencode"' \
+    "only whole-file managed plugins route through the Python authority engine"
 }
 
 t_install_help_documents_env() {
@@ -269,6 +288,6 @@ run_case "install HTTPS --override-endpoint accepted before preflight" t_install
 run_case "install DEFAULT_ENV=prod"       t_install_default_env_is_prod
 run_case "install userspace ownership is descriptor-anchored" t_install_userspace_ownership_stays_descriptor_anchored
 run_case "uninstall --help"               t_uninstall_help
-run_case "uninstall Amp cleanup uses backup authority" t_uninstall_routes_amp_through_backup_authority
+run_case "uninstall managed plugins use backup authority" t_uninstall_routes_managed_plugins_through_backup_authority
 run_case "uninstall --bogus"              t_uninstall_unknown_flag
 run_case "uninstall non-root rejected"    t_uninstall_requires_root

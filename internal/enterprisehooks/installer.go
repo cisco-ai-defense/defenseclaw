@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -43,20 +44,25 @@ type InstallOptions struct {
 	// OwnerSID identifies the target Windows user. It is ignored on Unix. When
 	// empty on Windows, the guardian resolves the owner from UserHome and then
 	// pins every subsequent owner/DACL check to that SID.
-	OwnerSID       string
-	DataDir        string
-	APIAddr        string
-	ProxyAddr      string
-	APIToken       string
-	OTLPPathToken  string
-	MasterKey      string
-	HookFailMode   string
-	GuardrailMode  string
-	HILTEnabled    bool
-	AgentVersion   string
-	HookContractID string
-	WorkspaceDir   string
-	Registry       *connector.Registry
+	OwnerSID      string
+	DataDir       string
+	APIAddr       string
+	ProxyAddr     string
+	APIToken      string
+	OTLPPathToken string
+	MasterKey     string
+	HookFailMode  string
+	GuardrailMode string
+	HILTEnabled   bool
+	AgentVersion  string
+	// AgentExecutable is the exact administrator-selected native client image.
+	// It is never resolved through PATH. Protected native connectors publish a
+	// short-lived digest-bound setup receipt for this path before Setup, then
+	// let the connector perform its normal provenance validation.
+	AgentExecutable string
+	HookContractID  string
+	WorkspaceDir    string
+	Registry        *connector.Registry
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -66,7 +72,15 @@ type InstallOptions struct {
 	AllowMissingHookConfigRepair bool
 }
 
-var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
+var (
+	publishEnterpriseHookAPIToken   = connector.PublishHookAPIToken
+	saveEnterpriseHookContractLock  = connector.SaveHookContractLockEntry
+	clearEnterpriseHookContractLock = connector.ClearHookContractLockEntry
+	publishEnterpriseAgentSelection = connector.PublishSetupAgentSelection
+	consumeEnterpriseAgentSelection = func(publication *connector.SetupAgentSelectionPublication) error {
+		return publication.Consume()
+	}
+)
 
 type InstallResult struct {
 	Connector       string   `json:"connector"`
@@ -155,6 +169,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		GuardrailMode:     strings.TrimSpace(opts.GuardrailMode),
 		HILTEnabled:       opts.HILTEnabled,
 		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
+		AgentExecutable:   strings.TrimSpace(opts.AgentExecutable),
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
 	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
@@ -165,137 +180,276 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.HookAPIToken = setupOpts.APIToken
 		setupOpts.HookAPITokenScoped = true
 	}
-	if setupOpts.AgentVersion == "" {
+	protectedSelection := connector.RequiresProtectedSetupAgentSelection(conn.Name())
+	if runtime.GOOS == "darwin" && strings.EqualFold(strings.TrimSpace(conn.Name()), "openhands") {
+		return InstallResult{}, errors.New(
+			"enterprise hooks: macOS OpenHands automatic admission is unavailable because its unsigned native image requires an administrator-pinned release digest",
+		)
+	}
+	if setupOpts.AgentExecutable != "" && !protectedSelection {
+		return InstallResult{}, fmt.Errorf(
+			"enterprise hooks: agent_executable is supported only for protected native connectors on this host",
+		)
+	}
+	if setupOpts.AgentVersion == "" && !protectedSelection {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
 	}
-	if setupOpts.HookContractID == "" {
+	if setupOpts.HookContractID == "" && setupOpts.AgentVersion != "" {
 		resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
 		setupOpts.HookContractID = resolution.Contract.ContractID
 	}
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
-		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
-		pluginArtifacts := connector.ManagedPluginArtifacts(conn, setupOpts)
-		// Endpoint-product bootstrap: on a fresh target where the
-		// user hasn't launched the agent yet, the native hook config
-		// file doesn't exist and validateActivationSurfaces below
-		// would refuse with "hook config file missing". Pre-create
-		// the connector's minimal-valid stub as the target user so
-		// the strict validate check has something to inspect.
-		//
-		// Design intent: DefenseClaw ships on customer Macs where we
-		// want enforcement live at pkg-install time — not deferred
-		// until the user happens to open each agent once. The stub
-		// is intentionally minimal (the agent's own default config
-		// content) so it won't override anything the user hasn't
-		// explicitly set; connector.Setup() below then patches in
-		// the DefenseClaw-owned entries.
-		if stub := defaultHookConfigStubForConnector(conn, setupOpts, home); stub.ContentPath != "" {
-			var bootstrapped bool
-			bootstrapErr := withOwnerCredentials(uid, gid, func() error {
-				written, werr := bootstrapMissingHookConfig(home, stub)
-				bootstrapped = written
-				return werr
-			})
-			if bootstrapErr != nil {
-				return fmt.Errorf("enterprise hooks: bootstrap missing hook config for %s: %w", conn.Name(), bootstrapErr)
-			}
-			_ = bootstrapped // reserved for future audit emission
-		}
-		if err := validateActivationSurfaces(
-			home,
-			paths,
-			uid,
-			opts.AllowMissingHookConfigRepair,
-			pluginArtifacts,
-		); err != nil {
-			return err
-		}
-		if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
-			return err
-		}
-		footprint := connector.AgentPaths{}
-		if ap, ok := conn.(connector.AgentPathProvider); ok {
-			footprint = ap.AgentPaths(setupOpts)
-		}
-		if err := validateInstallFootprintBeforeSetup(home, dataDir, uid, conn.Name(), footprint, opts.AllowMissingHookConfigRepair); err != nil {
-			return err
-		}
-
-		return withOwnerCredentials(uid, gid, func() error {
-			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
-			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
-			lockWriteAttempted := false
-			rollback := func(cause error) error {
-				failures := []error{cause}
-				if lockWriteAttempted {
-					var lockErr error
-					if strings.TrimSpace(previousLockEntry.Connector) == "" {
-						lockErr = connector.ClearHookContractLockEntry(dataDir, conn.Name())
-					} else {
-						lockErr = connector.SaveHookContractLockEntry(dataDir, previousLockEntry)
-					}
+		installTransaction := func() error {
+			var selectionPublication *connector.SetupAgentSelectionPublication
+			var previousLockEntry connector.HookContractLockEntry
+			if protectedSelection {
+				prepareErr := withOwnerCredentials(uid, gid, func() error {
+					// Capture the raw protected lock before a newer receipt can
+					// deliberately supersede it in ordinary filtered reads. Malformed,
+					// redirected, or insufficiently protected state fails closed.
+					entries, lockErr := connector.LoadProtectedHookContractLockEntries(dataDir)
 					if lockErr != nil {
-						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
+						return fmt.Errorf("enterprise hooks: capture protected hook contract lock: %w", lockErr)
 					}
+					previousLockEntry = entries[strings.ToLower(strings.TrimSpace(conn.Name()))]
+					if setupOpts.AgentExecutable == "" {
+						executable, rawVersion, valid := connector.ProtectedSetupAgentSelectionFromLock(
+							previousLockEntry,
+							conn.Name(),
+						)
+						if !valid {
+							return fmt.Errorf(
+								"enterprise hooks: connector %s requires agent_executable or valid durable protected setup evidence",
+								conn.Name(),
+							)
+						}
+						if setupOpts.AgentVersion != "" && setupOpts.AgentVersion != rawVersion {
+							return fmt.Errorf(
+								"enterprise hooks: connector %s agent_version does not match durable protected setup evidence",
+								conn.Name(),
+							)
+						}
+						setupOpts.AgentExecutable = executable
+						setupOpts.AgentVersion = rawVersion
+						return nil
+					}
+					if setupOpts.AgentVersion == "" {
+						return fmt.Errorf(
+							"enterprise hooks: connector %s requires agent_version with agent_executable",
+							conn.Name(),
+						)
+					}
+					var publishErr error
+					selectionPublication, publishErr = publishEnterpriseAgentSelection(
+						dataDir,
+						conn.Name(),
+						setupOpts.AgentExecutable,
+						setupOpts.AgentVersion,
+					)
+					if publishErr != nil {
+						failure := fmt.Errorf("enterprise hooks: publish protected agent selection: %w", publishErr)
+						if selectionPublication != nil {
+							if rollbackErr := selectionPublication.Rollback(); rollbackErr != nil {
+								failure = errors.Join(
+									failure,
+									fmt.Errorf("enterprise hooks: rollback failed protected agent selection publication: %w", rollbackErr),
+								)
+							}
+						}
+						return failure
+					}
+					return nil
+				})
+				if prepareErr != nil {
+					return prepareErr
 				}
-				if teardownErr := conn.Teardown(ctx, setupOpts); teardownErr != nil {
-					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
+			}
+			if setupOpts.HookContractID == "" && setupOpts.AgentVersion != "" {
+				resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
+				setupOpts.HookContractID = resolution.Contract.ContractID
+			}
+			rollbackSelection := func(cause error) error {
+				if selectionPublication == nil {
+					return cause
 				}
-				return errors.Join(failures...)
-			}
-			if err := conn.Setup(ctx, setupOpts); err != nil {
-				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
-			}
-			present, err := connector.OwnedHooksPresent(conn, setupOpts)
-			if err != nil {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
-			}
-			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
-			}
-			lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-			lockWriteAttempted = true
-			if err := connector.SaveHookContractLockEntry(dataDir, lockEntry); err != nil {
-				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
+				rollbackErr := withOwnerCredentials(uid, gid, selectionPublication.Rollback)
+				if rollbackErr != nil {
+					return errors.Join(
+						cause,
+						fmt.Errorf("enterprise hooks: restore protected agent selection: %w", rollbackErr),
+					)
+				}
+				return cause
 			}
 
-			if err := hardenInstallFootprint(
-				uid,
-				gid,
+			paths := connector.HookConfigPathsForConnector(conn, setupOpts)
+			pluginArtifacts := connector.ManagedPluginArtifacts(conn, setupOpts)
+			// Endpoint-product bootstrap: on a fresh target where the
+			// user hasn't launched the agent yet, the native hook config
+			// file doesn't exist and validateActivationSurfaces below
+			// would refuse with "hook config file missing". Pre-create
+			// the connector's minimal-valid stub as the target user so
+			// the strict validate check has something to inspect.
+			//
+			// Design intent: DefenseClaw ships on customer Macs where we
+			// want enforcement live at pkg-install time — not deferred
+			// until the user happens to open each agent once. The stub
+			// is intentionally minimal (the agent's own default config
+			// content) so it won't override anything the user hasn't
+			// explicitly set; connector.Setup() below then patches in
+			// the DefenseClaw-owned entries.
+			if stub := defaultHookConfigStubForConnector(conn, setupOpts, home); stub.ContentPath != "" {
+				var bootstrapped bool
+				bootstrapErr := withOwnerCredentials(uid, gid, func() error {
+					written, werr := bootstrapMissingHookConfig(home, stub)
+					bootstrapped = written
+					return werr
+				})
+				if bootstrapErr != nil {
+					return rollbackSelection(fmt.Errorf("enterprise hooks: bootstrap missing hook config for %s: %w", conn.Name(), bootstrapErr))
+				}
+				_ = bootstrapped // reserved for future audit emission
+			}
+			if err := validateActivationSurfaces(
 				home,
-				dataDir,
-				conn.Name(),
-				footprint,
 				paths,
+				uid,
+				opts.AllowMissingHookConfigRepair,
 				pluginArtifacts,
 			); err != nil {
-				return rollback(err)
+				return rollbackSelection(err)
 			}
-			// Plugin/policy runtimes load their scoped bearer from the target
-			// user's stable sidecar at event time. Publish only after every other
-			// fallible setup and hardening step has succeeded, so an earlier
-			// failure cannot strand a replacement credential beside a rolled-back
-			// runtime artifact.
-			if requiresScopedHookToken {
-				if err := publishEnterpriseHookAPIToken(dataDir, conn.Name(), setupOpts.HookAPIToken); err != nil {
-					return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
+			if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+				return rollbackSelection(err)
+			}
+			footprint := connector.AgentPaths{}
+			if ap, ok := conn.(connector.AgentPathProvider); ok {
+				footprint = ap.AgentPaths(setupOpts)
+			}
+			if err := validateInstallFootprintBeforeSetup(home, dataDir, uid, conn.Name(), footprint, opts.AllowMissingHookConfigRepair); err != nil {
+				return rollbackSelection(err)
+			}
+
+			setupErr := withOwnerCredentials(uid, gid, func() error {
+				conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
+				if !protectedSelection {
+					previousLockEntry = connector.LoadHookContractLockEntry(dataDir, conn.Name())
 				}
-			}
-			result = InstallResult{
-				Connector:       conn.Name(),
-				UserHome:        home,
-				DataDir:         dataDir,
-				HookConfigPaths: sortedUnique(paths),
-				HookScripts:     sortedUnique(footprint.HookScripts),
-				BackupFiles:     sortedUnique(footprint.BackupFiles),
-				CreatedDirs:     sortedUnique(footprint.CreatedDirs),
-				AgentVersion:    setupOpts.AgentVersion,
-				HookContractID:  lockEntry.ContractID,
+				lockWriteAttempted := false
+				rollback := func(cause error) error {
+					failures := []error{cause}
+					if lockWriteAttempted {
+						var lockErr error
+						if strings.TrimSpace(previousLockEntry.Connector) == "" {
+							lockErr = clearEnterpriseHookContractLock(dataDir, conn.Name())
+						} else {
+							lockErr = saveEnterpriseHookContractLock(dataDir, previousLockEntry)
+						}
+						if lockErr != nil {
+							failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
+						}
+					}
+					if teardownErr := conn.Teardown(ctx, setupOpts); teardownErr != nil {
+						failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
+					}
+					return errors.Join(failures...)
+				}
+				if err := conn.Setup(ctx, setupOpts); err != nil {
+					return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
+				}
+				present, err := connector.OwnedHooksPresent(conn, setupOpts)
+				if err != nil {
+					return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
+				}
+				if !present {
+					return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
+				}
+				lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
+				if protectedSelection && selectionPublication == nil &&
+					!connector.ProtectedSetupAgentLockIdentityMatches(previousLockEntry, lockEntry, conn.Name()) {
+					return rollback(errors.New(
+						"enterprise hooks: protected executable identity changed during lock-only repair",
+					))
+				}
+				// Atomic persistence can publish the replacement and still report a
+				// later durability/protection error. Treat every attempted save as
+				// potentially visible so rollback always restores the captured entry.
+				lockWriteAttempted = true
+				if err := saveEnterpriseHookContractLock(dataDir, lockEntry); err != nil {
+					return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
+				}
+
+				if err := hardenInstallFootprint(
+					uid,
+					gid,
+					home,
+					dataDir,
+					conn.Name(),
+					footprint,
+					paths,
+					pluginArtifacts,
+				); err != nil {
+					return rollback(err)
+				}
+				// Plugin/policy runtimes load their scoped bearer from the target
+				// user's stable sidecar at event time. Publish only after every other
+				// fallible setup and hardening step has succeeded, so an earlier
+				// failure cannot strand a replacement credential beside a rolled-back
+				// runtime artifact.
+				if requiresScopedHookToken {
+					if err := publishEnterpriseHookAPIToken(dataDir, conn.Name(), setupOpts.HookAPIToken); err != nil {
+						return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
+					}
+				}
+				if selectionPublication != nil {
+					if err := consumeEnterpriseAgentSelection(selectionPublication); err != nil {
+						if !selectionPublication.Consumed() {
+							return rollback(fmt.Errorf("enterprise hooks: consume protected agent selection: %w", err))
+						}
+					}
+				}
+				result = InstallResult{
+					Connector:       conn.Name(),
+					UserHome:        home,
+					DataDir:         dataDir,
+					HookConfigPaths: sortedUnique(paths),
+					HookScripts:     sortedUnique(footprint.HookScripts),
+					BackupFiles:     sortedUnique(footprint.BackupFiles),
+					CreatedDirs:     sortedUnique(footprint.CreatedDirs),
+					AgentVersion:    setupOpts.AgentVersion,
+					HookContractID:  lockEntry.ContractID,
+				}
+				return nil
+			})
+			if setupErr != nil {
+				return rollbackSelection(setupErr)
 			}
 			return nil
-		})
+		}
+		if protectedSelection {
+			var transaction *connector.ProtectedSetupAgentSelectionTransaction
+			prepareErr := withOwnerCredentials(uid, gid, func() error {
+				var leaseErr error
+				transaction, leaseErr = connector.PrepareProtectedSetupAgentSelectionTransaction(dataDir, conn.Name())
+				return leaseErr
+			})
+			if prepareErr != nil {
+				return fmt.Errorf("enterprise hooks: prepare protected setup transaction: %w", prepareErr)
+			}
+			if acquireErr := transaction.Acquire(); acquireErr != nil {
+				_ = transaction.Release()
+				return fmt.Errorf("enterprise hooks: acquire protected setup transaction: %w", acquireErr)
+			}
+			installErr := installTransaction()
+			releaseErr := transaction.Release()
+			if releaseErr != nil {
+				releaseErr = fmt.Errorf("enterprise hooks: release protected setup transaction: %w", releaseErr)
+			}
+			return errors.Join(installErr, releaseErr)
+		}
+		return installTransaction()
 	})
 	if err != nil {
 		return InstallResult{}, err

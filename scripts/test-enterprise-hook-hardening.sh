@@ -134,7 +134,7 @@ user_token_sidecar='true'
 
 case "$connector" in
     codex)
-        agent_version='codex-cli 0.142.0'
+        agent_version='codex-cli 0.146.0'
         hook_name='codex-hook.sh'
         native_config_rel='.codex/config.toml'
         native_config_seed='model = "gpt-5"'
@@ -142,7 +142,7 @@ case "$connector" in
         hook_payload='{"hook_event_name":"PreToolUse","tool_name":"shell","tool_input":{"command":"printf enterprise-ci"}}'
         ;;
     claudecode)
-        agent_version='2.1.187 (Claude Code)'
+        agent_version='2.1.219 (Claude Code)'
         hook_name='claude-code-hook.sh'
         native_config_rel='.claude/settings.json'
         native_config_seed='{}'
@@ -197,6 +197,7 @@ esac
 run_id="$$"
 root_prefix="${trusted_root}/defenseclaw-enterprise-ci-${connector}-${run_id}"
 target_home="${HOME}/.defenseclaw-enterprise-ci-${connector}-${run_id}"
+agent_executable=''
 root_binary="${root_prefix}/bin/defenseclaw-gateway"
 service_data="${root_prefix}/runtime"
 auth_dir="${root_prefix}/hook-guardian-state"
@@ -261,6 +262,90 @@ ensure_service_identity
 
 rm -rf -- "$target_home"
 install -d -m 0700 "$target_home"
+
+validate_official_macos_client() {
+    local path="$1"
+    local identifier="$2"
+    local team_id="$3"
+    local authority="$4"
+    local size detail architectures requirement
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -x "$path" ] || fail "official client is not a regular executable: $path"
+    size="$(wc -c <"$path" | tr -d '[:space:]')"
+    case "$size" in
+        ''|*[!0-9]*) fail "official client size is invalid: $path" ;;
+    esac
+    [ "$size" -gt 0 ] && [ "$size" -le 536870912 ] || fail "official client exceeds the 512 MiB bound: $path"
+    chmod 0500 "$path"
+    requirement="=identifier \"${identifier}\" and anchor apple generic and certificate leaf[subject.OU] = \"${team_id}\" and certificate leaf[subject.CN] = \"${authority}\""
+    /usr/bin/codesign --verify --strict --verbose=2 -R "$requirement" "$path" >/dev/null 2>&1 || fail "official client signature verification failed: $path"
+    detail="$(/usr/bin/codesign -dvvv "$path" 2>&1)" || fail "official client signature identity could not be read: $path"
+    printf '%s\n' "$detail" | grep -Fxq "Identifier=${identifier}" || fail "official client has the wrong signing identifier: $path"
+    printf '%s\n' "$detail" | grep -Fxq "TeamIdentifier=${team_id}" || fail "official client has the wrong signing team: $path"
+    printf '%s\n' "$detail" | grep -Fxq "Authority=${authority}" || fail "official client has the wrong signing authority: $path"
+    architectures="$(/usr/bin/lipo -archs "$path")" || fail "official client architecture could not be read: $path"
+    printf '%s\n' "$architectures" | tr ' ' '\n' | grep -Fxq arm64 || fail "official client is missing native arm64 code: $path"
+    if /usr/bin/xattr -p com.apple.quarantine "$path" >/dev/null 2>&1; then
+        fail "official client remains quarantined: $path"
+    fi
+}
+
+provision_official_macos_client() {
+    local driver_dir candidate package_json
+    driver_dir="$(cd "$(dirname "$0")/live-connector-e2e/drivers" && pwd -P)"
+    case "$connector" in
+        codex)
+            (
+                export HOME="$target_home"
+                export CODEX_VERSION='0.146.0'
+                export DC_E2E_CLIENT_PROVISION_ONLY=1
+                export npm_config_prefix="${target_home}/.npm-global"
+                # shellcheck source=scripts/live-connector-e2e/drivers/codex.sh
+                . "${driver_dir}/codex.sh"
+                agent_install
+            ) || fail "credential-free official Codex installation failed"
+            package_json="${target_home}/.npm-global/lib/node_modules/@openai/codex/package.json"
+            python3 - "$package_json" <<'PY' || fail "official Codex package metadata is invalid"
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if path.stat().st_size > 1_048_576:
+    raise SystemExit("Codex package metadata exceeds 1 MiB")
+document = json.loads(path.read_text(encoding="utf-8"))
+if document.get("name") != "@openai/codex" or document.get("version") != "0.146.0":
+    raise SystemExit("Codex package identity/version mismatch")
+PY
+            for candidate in \
+                "${target_home}/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex" \
+                "${target_home}/.npm-global/lib/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"; do
+                if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+                    agent_executable="$candidate"
+                    break
+                fi
+            done
+            [ -n "$agent_executable" ] || fail "official Codex package did not contain its reviewed arm64 native image"
+            validate_official_macos_client "$agent_executable" codex 2DC432GLL2 'Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)'
+            ;;
+        claudecode)
+            (
+                export HOME="$target_home"
+                export CLAUDE_VERSION='2.1.219'
+                export DC_E2E_CLIENT_PROVISION_ONLY=1
+                # shellcheck source=scripts/live-connector-e2e/drivers/claudecode.sh
+                . "${driver_dir}/claudecode.sh"
+                agent_install
+            ) || fail "credential-free official Claude Code installation failed"
+            agent_executable="${target_home}/.local/share/claude/versions/2.1.219"
+            validate_official_macos_client "$agent_executable" com.anthropic.claude-code Q6L2SF6YDW 'Developer ID Application: Anthropic PBC (Q6L2SF6YDW)'
+            ;;
+    esac
+}
+
+if [ "$(uname -s)" = Darwin ] && { [ "$connector" = codex ] || [ "$connector" = claudecode ]; }; then
+    provision_official_macos_client
+fi
+
 if [ "$artifact_kind" = plugin ]; then
     [ ! -e "$native_config" ] || fail "managed plugin must be absent before first install"
 else
@@ -367,6 +452,10 @@ rm -f "$config_tmp"
 uid="$(id -u)"
 gid="$(id -g)"
 manifest_tmp="${target_home}/targets.yaml"
+agent_executable_manifest=''
+if [ -n "$agent_executable" ]; then
+    agent_executable_manifest="    agent_executable: \"${agent_executable}\""
+fi
 cat >"$manifest_tmp" <<EOF
 version: 1
 targets:
@@ -376,6 +465,7 @@ targets:
     connector: ${connector}
     data_dir: ${user_data}
     agent_version: "${agent_version}"
+${agent_executable_manifest}
 EOF
 sudo -n install -o root -g "$admin_group" -m 0600 "$manifest_tmp" "$manifest_path"
 rm -f "$manifest_tmp"
@@ -485,6 +575,30 @@ PY
 }
 
 run_reconcile_checked "${target_home}/reconcile-initial.json"
+
+if [ -n "$agent_executable" ]; then
+    [ ! -e "${user_data}/agent_selection.json" ] || fail "successful reconcile left the short-lived setup selection receipt behind"
+    python3 - "${user_data}/hook_contract_lock.json" "$connector" "$agent_executable" "$agent_version" "$(file_hash "$agent_executable")" <<'PY' || fail "durable hook lock did not seal the selected executable"
+import json
+import pathlib
+import sys
+
+lock_path, connector, executable, raw_version, digest = sys.argv[1:]
+document = json.loads(pathlib.Path(lock_path).read_text(encoding="utf-8"))
+entry = (document.get("connectors") or {}).get(connector)
+if not isinstance(entry, dict):
+    raise SystemExit("connector lock entry missing")
+expected = {
+    "agent_executable": executable,
+    "agent_executable_source": "setup-selected",
+    "agent_executable_sha256": digest,
+    "raw_agent_version": raw_version,
+}
+for key, value in expected.items():
+    if entry.get(key) != value:
+        raise SystemExit(f"lock {key} mismatch")
+PY
+fi
 
 [ -f "$managed_artifact" ] || fail "managed connector artifact was not installed"
 if [ "$user_token_sidecar" = true ]; then

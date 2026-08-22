@@ -38,6 +38,11 @@ var (
 )
 
 func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
+	if strings.TrimSpace(opts.AgentExecutable) != "" {
+		return InstallResult{}, true, errors.New(
+			"enterprise hooks: agent_executable is not supported by native Windows managed policy",
+		)
+	}
 	result, err := installWindowsClaudeManagedResult(ctx, opts)
 	return result, true, err
 }

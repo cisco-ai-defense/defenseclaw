@@ -163,6 +163,58 @@ WINDOWS_UNSUPPORTED_CONNECTORS: frozenset[str] = frozenset(
     name for name, support in WINDOWS_CONNECTOR_SUPPORT.items() if support.status == UNSUPPORTED
 )
 
+# Explicit macOS states separate implemented availability from durable native
+# certification. Connectors absent from this map retain the established
+# supported behavior; deprecated names are rejected before this lookup.
+DARWIN_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
+    "codex": ConnectorPlatformSupport(
+        PREVIEW,
+        "Codex CLI and DefenseClaw's native macOS arm64 hook, OTLP, notify, "
+        "signed-executable, and exact-restore paths are implemented; durable packaged "
+        "and authenticated official-client certification evidence is not recorded.",
+    ),
+    "claudecode": ConnectorPlatformSupport(
+        PREVIEW,
+        "Claude Code and DefenseClaw's signed native Mach-O hook path are implemented "
+        "on macOS arm64; durable packaged and authenticated official-client certification "
+        "evidence is not recorded.",
+    ),
+    "cursor": ConnectorPlatformSupport(
+        PREVIEW,
+        "Cursor Agent and Cursor Desktop hook integrations are implemented on macOS arm64, "
+        "with distinct CLI and Desktop release streams; durable packaged and authenticated "
+        "official-client certification evidence is not recorded.",
+    ),
+    "devin": ConnectorPlatformSupport(
+        PREVIEW,
+        "Native Devin CLI lifecycle hooks are implemented on macOS arm64 using the pinned "
+        "3000.4.25 contract; durable authenticated official-client evidence is not recorded, "
+        "and cloud Devin, ACP, proxy, plugins, and native OTLP remain unclaimed.",
+    ),
+    "hermes": ConnectorPlatformSupport(
+        PREVIEW,
+        "Hermes Agent's >=0.19.0,<0.21.0 shell-hook contract and DefenseClaw's POSIX hook "
+        "entrypoint are implemented on macOS arm64; durable packaged and official-client "
+        "certification evidence is not recorded.",
+    ),
+    "openhands": ConnectorPlatformSupport(
+        PREVIEW,
+        "OpenHands CLI and DefenseClaw's protected native macOS arm64 hook and "
+        "trace-only OTLP launch paths are implemented; durable packaged and "
+        "authenticated official-client certification evidence is not recorded.",
+    ),
+    "antigravity": ConnectorPlatformSupport(
+        PREVIEW,
+        "Antigravity's >=1.1.8 hook contract and native macOS arm64 integration are "
+        "implemented; 1.1.10 is availability metadata only and durable authenticated "
+        "official-client certification evidence is not recorded.",
+    ),
+}
+
+# Compatibility spelling retained for callers and tests that use the product
+# platform name rather than Go's GOOS token.
+MACOS_CONNECTOR_SUPPORT = DARWIN_CONNECTOR_SUPPORT
+
 WINDOWS_CERTIFIED_ARCHITECTURES: frozenset[str] = frozenset({"amd64"})
 WINDOWS_NOT_CERTIFIED_ARCHITECTURES: frozenset[str] = frozenset({"arm64"})
 WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
@@ -186,7 +238,7 @@ def _normalize_os_name(os_name: str) -> str:
     value = (os_name or "").strip().lower()
     if value.startswith("win"):
         return "windows"
-    if value == "darwin":
+    if value in {"darwin", "macos"}:
         return "darwin"
     if value.startswith("linux"):
         return "linux"
@@ -217,6 +269,11 @@ def connector_platform_support(
                 NOT_CERTIFIED,
                 "This connector has not completed native Windows x64 certification.",
             ),
+        )
+    if resolved_os == "darwin":
+        return DARWIN_CONNECTOR_SUPPORT.get(
+            name,
+            ConnectorPlatformSupport(SUPPORTED, "Connector setup is supported on darwin."),
         )
     return ConnectorPlatformSupport(
         SUPPORTED,

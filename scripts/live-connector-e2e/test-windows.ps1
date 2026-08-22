@@ -3306,6 +3306,10 @@ connection.close()
         $nativeHarnessText,
         '(?s)function Invoke-SetupAcceptance\b.*?(?=\r?\nfunction Invoke-Contract)'
     ).Value
+    $invokeInstalledFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-Installed\b.*?(?=\r?\nfunction )'
+    ).Value
     $defaultOwnerFunction = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Set-CurrentUserAsDefaultOwner\b.*?(?=\r?\nfunction )'
@@ -3362,6 +3366,91 @@ connection.close()
         $setupAcceptanceFunction -match 'Remove-WizardAgentFixtures' -and
         $setupAcceptanceFunction -notmatch 'DEFENSECLAW_TRUSTED_BIN_PREFIXES') `
         'interactive Setup acceptance owns and cleans built-in-root fixtures without environment trust authority'
+    $startupRetryStart = $setupAcceptanceFunction.IndexOf(
+        '$startupResult = Invoke-Installed $startup', [StringComparison]::Ordinal
+    )
+    $startupRetryEnd = if ($startupRetryStart -ge 0) {
+        $setupAcceptanceFunction.IndexOf(
+            'Invoke-Installed $gateway @(''watchdog'', ''start'')',
+            $startupRetryStart,
+            [StringComparison]::Ordinal
+        )
+    } else { -1 }
+    $startupRetryBlock = if ($startupRetryStart -ge 0 -and $startupRetryEnd -gt $startupRetryStart) {
+        $setupAcceptanceFunction.Substring($startupRetryStart, $startupRetryEnd - $startupRetryStart)
+    } else { '' }
+    $startupRetryFirstLogIndex = $startupRetryBlock.IndexOf(
+        "'setup-gateway-startup.log'", [StringComparison]::Ordinal
+    )
+    $startupRetryDiagnosticIndex = $startupRetryBlock.IndexOf(
+        'Write-SetupAcceptanceConvergenceDiagnostics', [StringComparison]::Ordinal
+    )
+    $startupRetryMarkerIndex = $startupRetryBlock.IndexOf(
+        "'setup-gateway-startup-retry.txt'", [StringComparison]::Ordinal
+    )
+    $startupRetrySecondIndex = $startupRetryBlock.IndexOf(
+        'Invoke-Installed $startup @() -Timeout 90', [StringComparison]::Ordinal
+    )
+    $startupRetrySecondEnd = if ($startupRetrySecondIndex -ge 0) {
+        $startupRetryBlock.IndexOf('| Out-Null', $startupRetrySecondIndex, [StringComparison]::Ordinal)
+    } else { -1 }
+    $startupRetrySecondCall = if ($startupRetrySecondIndex -ge 0 -and
+        $startupRetrySecondEnd -gt $startupRetrySecondIndex) {
+        $startupRetryBlock.Substring(
+            $startupRetrySecondIndex,
+            $startupRetrySecondEnd + '| Out-Null'.Length - $startupRetrySecondIndex
+        )
+    } else { '' }
+    Assert-True ($invokeInstalledFunction -match '\[int\[\]\]\$Allowed = @\(0\)' -and
+        $startupRetryBlock -match
+            '\$startupResult = Invoke-Installed \$startup @\(\) -Allowed @\(0, 1\) -Timeout 90' -and
+        $startupRetryBlock -match '\$startupResult\.ExitCode -eq 1' -and
+        ([regex]::Matches($startupRetryBlock, 'Invoke-Installed \$startup @\(\)')).Count -eq 2 -and
+        ([regex]::Matches($startupRetryBlock, '-Allowed')).Count -eq 1 -and
+        $startupRetryFirstLogIndex -ge 0 -and
+        $startupRetryDiagnosticIndex -gt $startupRetryFirstLogIndex -and
+        $startupRetryMarkerIndex -gt $startupRetryDiagnosticIndex -and
+        $startupRetrySecondIndex -gt $startupRetryMarkerIndex -and
+        $startupRetryBlock.Contains('-Text "attempt=1`nexit_code=1`nretry=scheduled"') -and
+        $startupRetryBlock -match
+            'Write-BoundedText -Path \(Join-Path \$logs ''setup-gateway-startup-retry\.txt''\)' -and
+        $startupRetryBlock -match '-MaxBytes 4096' -and
+        $startupRetrySecondCall -match "'setup-gateway-startup-retry\.log'" -and
+        $startupRetrySecondCall -notmatch '-Allowed' -and
+        $startupRetryBlock -notmatch
+            'Start-Sleep|Invoke-Cleanup|Stop-SetupAcceptanceOtlpCollector|Remove-SafeDisposableTree') `
+        'post-config Startup retries exit 1 exactly once with bounded redacted diagnostics and a fixed nonsecret marker'
+    $repairRetryStart = $setupAcceptanceFunction.IndexOf(
+        '$repair = Invoke-WindowsSetupStandardUserProcess', [StringComparison]::Ordinal
+    )
+    $repairRetryEnd = if ($repairRetryStart -ge 0) {
+        $setupAcceptanceFunction.IndexOf(
+            '$configHashAfterRepair =', $repairRetryStart, [StringComparison]::Ordinal
+        )
+    } else { -1 }
+    $repairRetryBlock = if ($repairRetryStart -ge 0 -and $repairRetryEnd -gt $repairRetryStart) {
+        $setupAcceptanceFunction.Substring($repairRetryStart, $repairRetryEnd - $repairRetryStart)
+    } else { '' }
+    $repairRetryDiagnosticIndex = $repairRetryBlock.IndexOf(
+        'Write-SetupAcceptanceConvergenceDiagnostics', [StringComparison]::Ordinal
+    )
+    $repairRetrySecondIndex = $repairRetryBlock.IndexOf(
+        "'setup-repair-retry.log'", [StringComparison]::Ordinal
+    )
+    Assert-True ($repairRetryBlock -match '-AllowedExitCodes @\(0, 1603\)' -and
+        $repairRetryBlock -match '\$repair\.ExitCode -eq 1603' -and
+        $repairRetryBlock -match
+            '\$repairOutput\.Contains\(\$committedConvergenceSignal, \[StringComparison\]::Ordinal\)' -and
+        $repairRetryBlock -match
+            '\$repairOutput\.Contains\(\$eventHistorySignal, \[StringComparison\]::Ordinal\)' -and
+        $repairRetryBlock -match
+            '\$committedConvergenceSignal = ''installation committed but convergence is pending''' -and
+        $repairRetryBlock -match '\$eventHistorySignal = ''event_history=sqlite_write_failed''' -and
+        ([regex]::Matches($repairRetryBlock, 'Invoke-WindowsSetupStandardUserProcess')).Count -eq 2 -and
+        $repairRetryDiagnosticIndex -ge 0 -and $repairRetrySecondIndex -gt $repairRetryDiagnosticIndex -and
+        $repairRetryBlock -match 'setup-repair-event-history-retry\.txt' -and
+        $repairRetryBlock -notmatch 'Start-Sleep') `
+        'Setup acceptance retries only committed SQLite convergence through bounded journal recovery'
     Assert-True ($setupAcceptanceFunction -match "(?s)'setup', 'claude-code', '--yes', '--no-restart'.*?'setup', 'amp', '--yes', '--no-restart'.*?'setup', 'cursor', '--yes', '--no-restart'" -and
         $setupAcceptanceFunction -match 'foreach \(\$expectedConnector in @\(''codex'', ''claudecode'', ''amp'', ''cursor''\)\)' -and
         $setupAcceptanceFunction -match '(?s)connectors:\r?\n\s+amp: \{\}\r?\n\s+codex: \{\}\r?\n\s+claudecode: \{\}\r?\n\s+cursor: \{\}' -and

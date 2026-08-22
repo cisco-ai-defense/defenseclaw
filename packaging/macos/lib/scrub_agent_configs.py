@@ -15,15 +15,18 @@ the file shapes DefenseClaw's connectors write:
   ~/.config/amp/plugins/defenseclaw.ts
                            — standalone managed plugin; remove or restore only
                              through its exact managed-backup authority
+  ~/.config/opencode/plugins/defenseclaw.js
+                           — standalone managed plugin with the same exact
+                             target-bound restore authority
 
 Exit codes:
   0   — file successfully scrubbed (or no changes were needed)
   2   — file missing (nothing to do)
   3   — unsupported connector
-  4   — file unreadable / parse failure (left untouched)
+  4   — cleanup incomplete; inspect the target and rerun
 
 Usage:
-  scrub_agent_configs.py CONNECTOR FILE [DATADIR_PATTERN|AMP_BACKUP_FILE]
+  scrub_agent_configs.py CONNECTOR FILE [DATADIR_PATTERN|MANAGED_BACKUP_FILE] [--retain-authority]
 """
 
 from __future__ import annotations
@@ -36,7 +39,9 @@ import os
 import re
 import secrets
 import stat
+import subprocess
 import sys
+from dataclasses import dataclass
 
 DEFAULT_MARKERS = (
     "/.defenseclaw/hooks/",
@@ -81,7 +86,7 @@ def scrub_cursor(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]
     entry whose command matches a marker. Events with no entries left
     are removed too, so we don't leave empty arrays floating around.
     """
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
     if not isinstance(cfg, dict):
         return False, "not a JSON object"
@@ -104,18 +109,20 @@ def scrub_cursor(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]
 # DefenseClaw-owned keys in Claude Code's settings.json env block.
 # Kept in sync with claudeCodeOtelEnvKeys in
 # internal/gateway/connector/claudecode.go.
-CLAUDE_MANAGED_ENV_KEYS = frozenset({
-    "CLAUDE_CODE_ENABLE_TELEMETRY",
-    "DEFENSECLAW_FAIL_MODE",
-    "OTEL_METRICS_EXPORTER",
-    "OTEL_LOGS_EXPORTER",
-    "OTEL_EXPORTER_OTLP_PROTOCOL",
-    "OTEL_EXPORTER_OTLP_ENDPOINT",
-    "OTEL_EXPORTER_OTLP_HEADERS",
-    "OTEL_LOG_USER_PROMPTS",
-    "OTEL_RESOURCE_ATTRIBUTES",
-    "OTEL_SERVICE_NAME",
-})
+CLAUDE_MANAGED_ENV_KEYS = frozenset(
+    {
+        "CLAUDE_CODE_ENABLE_TELEMETRY",
+        "DEFENSECLAW_FAIL_MODE",
+        "OTEL_METRICS_EXPORTER",
+        "OTEL_LOGS_EXPORTER",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_LOG_USER_PROMPTS",
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "OTEL_SERVICE_NAME",
+    }
+)
 
 
 def scrub_claudecode(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
@@ -128,7 +135,7 @@ def scrub_claudecode(path: str, markers: tuple[str, ...]) -> tuple[bool, str | N
     strips any additional env value that references our data-dir markers.
     Non-DefenseClaw env entries are preserved.
     """
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
     if not isinstance(cfg, dict):
         return False, "not a JSON object"
@@ -207,7 +214,7 @@ def scrub_codex(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
     so we don't need to handle them — but if someone introduces them
     we just won't touch their content (safe failure mode)."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             lines = f.readlines()
     except OSError as e:
         return False, str(e)
@@ -308,83 +315,322 @@ def scrub_codex(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
     return True, None
 
 
-# ---------- managed plugin: Amp -----------------------------------------
+# ---------- whole-file managed plugins: Amp + OpenCode -----------------
 
 
-AMP_BACKUP_VERSION = 1
-AMP_BACKUP_SUFFIX = os.path.join(
-    ".defenseclaw", "connector_backups", "amp", "config.json"
-)
-AMP_PLUGIN_SUFFIX = os.path.join(
-    ".config", "amp", "plugins", "defenseclaw.ts"
-)
-AMP_MAX_BACKUP_BYTES = 64 * 1024 * 1024
+MANAGED_PLUGIN_BACKUP_VERSION = 1
+MANAGED_PLUGIN_MAX_BYTES = 64 * 1024 * 1024
+MANAGED_TARGET_FROM_AUTHORITY = "--target-from-authority"
+MANAGED_RETAIN_AUTHORITY = "--retain-authority"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+DARWIN_WRITE_ACL_PERMISSIONS = frozenset(
+    {
+        "add_file",
+        "add_subdirectory",
+        "append",
+        "chown",
+        "delete",
+        "delete_child",
+        "write",
+        "writeattr",
+        "writeextattr",
+        "writesecurity",
+    }
+)
+DARWIN_READ_ONLY_ACL_PERMISSIONS = frozenset(
+    {
+        "directory_inherit",
+        "execute",
+        "file_inherit",
+        "limit_inherit",
+        "list",
+        "only_inherit",
+        "read",
+        "readattr",
+        "readextattr",
+        "readsecurity",
+        "search",
+    }
+)
+DARWIN_ACL_PERMISSIONS = DARWIN_WRITE_ACL_PERMISSIONS | DARWIN_READ_ONLY_ACL_PERMISSIONS
+DARWIN_LS_MODE_RE = re.compile(
+    r"^[d-][r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-][+@]?$"
+)
+
+
+@dataclass(frozen=True)
+class ManagedPluginSpec:
+    connector: str
+    logical_name: str
+    target_suffix: str
+    backup_suffix: str
+    label: str
+    max_bytes: int = MANAGED_PLUGIN_MAX_BYTES
+    target_from_authority: bool = False
+
+
+AMP_PLUGIN_SPEC = ManagedPluginSpec(
+    connector="amp",
+    logical_name="config",
+    target_suffix=os.path.join(".config", "amp", "plugins", "defenseclaw.ts"),
+    backup_suffix=os.path.join(".defenseclaw", "connector_backups", "amp", "config.json"),
+    label="Amp",
+)
+OPENCODE_PLUGIN_SPEC = ManagedPluginSpec(
+    connector="opencode",
+    logical_name="config",
+    target_suffix=os.path.join(".config", "opencode", "plugins", "defenseclaw.js"),
+    backup_suffix=os.path.join(".defenseclaw", "connector_backups", "opencode", "config.json"),
+    label="OpenCode",
+    target_from_authority=True,
+)
+MANAGED_PLUGIN_SPECS = {spec.connector: spec for spec in (AMP_PLUGIN_SPEC, OPENCODE_PLUGIN_SPEC)}
 
 
 def _normalized_absolute(path: str, label: str) -> str:
-    if not isinstance(path, str) or not path or "\x00" in path:
+    if not isinstance(path, str) or not path or any(character in path for character in "\x00\r\n"):
         raise ValueError(f"{label} is empty or malformed")
     if not os.path.isabs(path):
         raise ValueError(f"{label} must be absolute")
-    return os.path.abspath(os.path.normpath(path))
+    normalized = os.path.abspath(os.path.normpath(path))
+    if path != normalized:
+        raise ValueError(f"{label} must be normalized")
+    return normalized
 
 
-def _amp_home_and_paths(plugin_path: str, backup_path: str) -> tuple[str, str, str]:
-    """Bind both inputs to the two fixed per-user Amp/DefenseClaw locations."""
-    plugin = _normalized_absolute(plugin_path, "Amp plugin path")
-    backup = _normalized_absolute(backup_path, "Amp backup path")
-    suffix_parts = AMP_BACKUP_SUFFIX.split(os.sep)
+def _managed_plugin_home_and_backup(spec: ManagedPluginSpec, backup_path: str) -> tuple[str, str]:
+    """Bind backup authority to one fixed location beneath a user home."""
+
+    backup = _normalized_absolute(backup_path, f"{spec.label} backup path")
+    suffix_parts = spec.backup_suffix.split(os.sep)
     backup_parts = backup.split(os.sep)
-    if (
-        len(backup_parts) <= len(suffix_parts)
-        or backup_parts[-len(suffix_parts):] != suffix_parts
-    ):
-        raise ValueError(
-            "Amp backup path is outside the expected connector backup location"
-        )
-    home_parts = backup_parts[:-len(suffix_parts)]
+    if len(backup_parts) <= len(suffix_parts) or backup_parts[-len(suffix_parts) :] != suffix_parts:
+        raise ValueError(f"{spec.label} backup path is outside the expected connector backup location")
+    home_parts = backup_parts[: -len(suffix_parts)]
     home = os.sep.join(home_parts) or os.sep
     if not home.startswith(os.sep) or home == os.sep:
-        raise ValueError("Amp backup path does not identify a safe user home")
-    expected_backup = os.path.join(home, AMP_BACKUP_SUFFIX)
-    expected_plugin = os.path.join(home, AMP_PLUGIN_SUFFIX)
-    if backup != expected_backup or plugin != expected_plugin:
-        raise ValueError("Amp plugin/backup paths do not belong to the same user home")
-    return home, plugin, backup
+        raise ValueError(f"{spec.label} backup path does not identify a safe user home")
+    expected_backup = os.path.join(home, spec.backup_suffix)
+    if backup != expected_backup:
+        raise ValueError(f"{spec.label} backup path is outside the expected connector backup location")
+    return home, backup
 
 
-def _validate_owned_directory(path: str) -> None:
+def _resolve_managed_plugin_target(
+    spec: ManagedPluginSpec,
+    home: str,
+    requested_path: str,
+    captured_path: str,
+) -> str:
+    """Resolve an explicit or authority-derived plugin path without fallback."""
+
+    captured = _normalized_absolute(captured_path, f"captured {spec.label} plugin path")
+    if requested_path == MANAGED_TARGET_FROM_AUTHORITY:
+        if not spec.target_from_authority:
+            raise ValueError(f"{spec.label} cleanup does not support authority-derived targets")
+        plugin = captured
+    else:
+        plugin = _normalized_absolute(requested_path, f"{spec.label} plugin path")
+        if plugin != captured:
+            raise ValueError(f"{spec.label} backup target path does not match the managed plugin")
+
+    if spec.target_from_authority:
+        if os.path.basename(plugin) != "defenseclaw.js" or os.path.basename(os.path.dirname(plugin)) != "plugins":
+            raise ValueError(f"{spec.label} backup target is not its exact managed plugin filename")
+    elif plugin != os.path.join(home, spec.target_suffix):
+        raise ValueError(f"{spec.label} plugin/backup paths do not belong to the same user home")
+    return plugin
+
+
+def _stable_file_metadata(info: os.stat_result) -> tuple[object, ...]:
+    """Return mutation-relevant metadata without access-time noise."""
+
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+        getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000)),
+        getattr(info, "st_ctime_ns", int(info.st_ctime * 1_000_000_000)),
+        getattr(info, "st_flags", None),
+    )
+
+
+def _same_stable_file_metadata(expected: os.stat_result, current: os.stat_result) -> bool:
+    return os.path.samestat(expected, current) and _stable_file_metadata(expected) == _stable_file_metadata(current)
+
+
+def _require_stable_file_metadata(expected: os.stat_result, current: os.stat_result, label: str) -> None:
+    if not _same_stable_file_metadata(expected, current):
+        raise OSError(f"{label} changed during cleanup")
+
+
+def _validate_darwin_acl_output(output: str, path: str, label: str, *, private: bool) -> None:
+    """Parse fixed-locale ``/bin/ls -lde`` output without accepting unknown ACEs."""
+
+    lines = output.splitlines()
+    mode_field = lines[0].split(maxsplit=1)[0] if lines else ""
+    if DARWIN_LS_MODE_RE.fullmatch(mode_field) is None:
+        raise OSError(f"cannot interpret {label} macOS ACL: {path}")
+
+    acl_lines: list[str] = []
+    for line in lines[1:]:
+        normalized = line.strip().lower()
+        if not normalized:
+            continue
+        entry = re.fullmatch(r"(\d+):\s+(.+)", normalized)
+        if entry is None or int(entry.group(1)) != len(acl_lines):
+            raise OSError(f"cannot interpret {label} macOS ACL: {path}")
+        acl_lines.append(normalized)
+
+    # ``ls -lde`` marks an ACL with ``+``; ``@`` means extended
+    # attributes without an ACL. Refuse output whose marker and entries
+    # disagree rather than silently discarding an unfamiliar line shape.
+    if mode_field.endswith("+") != bool(acl_lines):
+        raise OSError(f"cannot interpret {label} macOS ACL: {path}")
+    for line in acl_lines:
+        padded = f" {line} "
+        allow_index = padded.rfind(" allow ")
+        deny_index = padded.rfind(" deny ")
+        if allow_index > deny_index:
+            disposition = "allow"
+            disposition_index = allow_index
+        elif deny_index > allow_index:
+            disposition = "deny"
+            disposition_index = deny_index
+        else:
+            raise OSError(f"cannot interpret {label} macOS ACL: {path}")
+
+        permissions_text = padded[
+            disposition_index + len(disposition) + 2 :
+        ].strip()
+        if re.fullmatch(r"[a-z_]+(?:,[a-z_]+)*", permissions_text) is None:
+            raise OSError(f"cannot interpret {label} macOS ACL: {path}")
+        granted = {permission.strip() for permission in permissions_text.split(",")}
+        if not granted or not granted <= DARWIN_ACL_PERMISSIONS:
+            raise OSError(f"cannot interpret {label} macOS ACL: {path}")
+        if disposition == "deny":
+            continue
+        if private:
+            raise OSError(f"{label} has an allow ACL entry: {path}")
+        if granted & DARWIN_WRITE_ACL_PERMISSIONS:
+            raise OSError(f"{label} has a write-capable ACL: {path}")
+
+
+def _validate_darwin_acl(path: str, before: os.stat_result, label: str, *, private: bool) -> None:
+    """Reject write-capable (or any private-authority allow) macOS ACL."""
+
+    if sys.platform != "darwin":
+        return
+    try:
+        result = subprocess.run(
+            ["/bin/ls", "-lde", "--", path],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"cannot inspect {label} macOS ACL: {path}") from exc
+    try:
+        after = os.lstat(path)
+    except OSError as exc:
+        raise OSError(f"cannot revalidate {label} after ACL inspection: {path}") from exc
+    if not _same_stable_file_metadata(before, after):
+        raise OSError(f"{label} changed during ACL inspection: {path}")
+    if result.returncode != 0:
+        raise OSError(f"cannot inspect {label} macOS ACL: {path}")
+    _validate_darwin_acl_output(result.stdout, path, label, private=private)
+
+
+def _validate_owned_directory(path: str, label: str, *, private: bool = False) -> None:
     info = os.lstat(path)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise OSError(f"unsafe non-directory or symlink in Amp path: {path}")
+        raise OSError(f"unsafe non-directory or symlink in {label} path: {path}")
     if info.st_uid != os.geteuid():
-        raise OSError(f"Amp path is not owned by the target user: {path}")
-    if stat.S_IMODE(info.st_mode) & 0o022:
-        raise OSError(f"Amp path is group/other writable: {path}")
+        raise OSError(f"{label} path is not owned by the target user: {path}")
+    mode = stat.S_IMODE(info.st_mode)
+    if private and mode & 0o077:
+        raise OSError(f"{label} private path has broad permissions: {path}")
+    if mode & 0o022:
+        raise OSError(f"{label} path is group/other writable: {path}")
+    _validate_darwin_acl(path, info, f"{label} directory", private=private)
 
 
-def _validate_amp_directory_chains(home: str) -> None:
+def _validate_managed_plugin_backup_chain(spec: ManagedPluginSpec, home: str) -> None:
     # Validate every user-controlled component used below. The parent of HOME
     # is administered by macOS; starting at HOME also keeps this helper
     # testable under a private temporary directory.
-    for relative in (
-        "",
-        ".config",
-        os.path.join(".config", "amp"),
-        os.path.join(".config", "amp", "plugins"),
-        ".defenseclaw",
-        os.path.join(".defenseclaw", "connector_backups"),
-        os.path.join(".defenseclaw", "connector_backups", "amp"),
-    ):
+    relatives = [""]
+    for suffix in (os.path.dirname(spec.backup_suffix),):
+        current = ""
+        for component in suffix.split(os.sep):
+            current = os.path.join(current, component)
+            if current not in relatives:
+                relatives.append(current)
+    for relative in relatives:
         _validate_owned_directory(
-            os.path.join(home, relative) if relative else home
+            os.path.join(home, relative) if relative else home,
+            spec.label,
+            # The writer explicitly protects the final per-connector
+            # authority directory. Older installs may have non-writable 0755
+            # intermediate state directories, so do not invent a migration
+            # requirement for those ancestors during uninstall.
+            private=relative == os.path.dirname(spec.backup_suffix),
         )
 
 
-def _open_regular_file(
-    path: str, *, private: bool, max_bytes: int
-) -> tuple[int, os.stat_result]:
+def _trusted_system_directory_symlink(path: str, info: os.stat_result) -> bool:
+    if info.st_uid != 0:
+        return False
+    try:
+        parent = os.lstat(os.path.dirname(path))
+    except OSError:
+        return False
+    return stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0 and not (stat.S_IMODE(parent.st_mode) & 0o022)
+
+
+def _validate_managed_plugin_target_chain_once(spec: ManagedPluginSpec, clean: str) -> None:
+    trusted_owners = {0, os.geteuid()}
+    current = clean
+    while True:
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode):
+            trusted_darwin_alias = sys.platform == "darwin" and current in {"/etc", "/tmp", "/var"}
+            if current == clean or not (trusted_darwin_alias or _trusted_system_directory_symlink(current, info)):
+                raise OSError(f"unsafe directory symlink in {spec.label} target path: {current}")
+            current = os.path.dirname(current)
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError(f"unsafe non-directory in {spec.label} target path: {current}")
+        writable = bool(stat.S_IMODE(info.st_mode) & 0o022)
+        trusted_sticky = current != clean and info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+        if info.st_uid not in trusted_owners or (writable and not trusted_sticky):
+            raise OSError(f"{spec.label} target directory has unsafe custody: {current}")
+        _validate_darwin_acl(current, info, f"{spec.label} target directory", private=False)
+        parent = os.path.dirname(current)
+        if parent == current:
+            return
+        current = parent
+
+
+def _validate_managed_plugin_target_chain(spec: ManagedPluginSpec, plugin_path: str) -> None:
+    """Validate lexical and resolved target directory chains."""
+
+    parent = os.path.dirname(plugin_path)
+    _validate_managed_plugin_target_chain_once(spec, parent)
+    resolved = os.path.realpath(parent)
+    if resolved != parent:
+        _validate_managed_plugin_target_chain_once(spec, resolved)
+
+
+def _open_regular_file(path: str, *, private: bool, max_bytes: int, label: str) -> tuple[int, os.stat_result]:
     before = os.lstat(path)
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
         raise OSError(f"unsafe non-regular or symlinked file: {path}")
@@ -393,25 +639,35 @@ def _open_regular_file(
     fd = os.open(path, flags)
     try:
         info = os.fstat(fd)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or not os.path.samestat(before, info)
-        ):
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not os.path.samestat(before, info):
             raise OSError(f"file identity changed or is hard-linked: {path}")
         if info.st_uid != os.geteuid():
             raise OSError(f"file is not owned by the target user: {path}")
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            raise OSError(f"file is group/other writable: {path}")
         if private and stat.S_IMODE(info.st_mode) & 0o077:
             raise OSError(f"managed backup authority is not private: {path}")
+        _validate_darwin_acl(path, before, label, private=private)
+        current = os.lstat(path)
+        if not _same_stable_file_metadata(info, current):
+            raise OSError(f"file changed after ACL inspection: {path}")
         if info.st_size > max_bytes:
-            raise OSError(f"file exceeds the Amp cleanup size bound: {path}")
+            raise OSError(f"file exceeds the {label} cleanup size bound: {path}")
         return fd, info
     except BaseException:
         os.close(fd)
         raise
 
 
-def _read_fd_bounded(fd: int, max_bytes: int) -> bytes:
+def _read_fd_bounded(
+    fd: int,
+    expected_info: os.stat_result,
+    max_bytes: int,
+    label: str,
+) -> bytes:
+    before = os.fstat(fd)
+    _require_stable_file_metadata(expected_info, before, label)
+    os.lseek(fd, 0, os.SEEK_SET)
     chunks: list[bytes] = []
     remaining = max_bytes + 1
     while remaining > 0:
@@ -422,125 +678,129 @@ def _read_fd_bounded(fd: int, max_bytes: int) -> bytes:
         remaining -= len(chunk)
     payload = b"".join(chunks)
     if len(payload) > max_bytes:
-        raise OSError("file exceeds the Amp cleanup size bound")
+        raise OSError(f"file exceeds the {label} cleanup size bound")
+    after = os.fstat(fd)
+    _require_stable_file_metadata(expected_info, after, label)
     return payload
 
 
-def _parse_amp_backup(
-    payload: bytes, plugin_path: str
-) -> tuple[bool, int, bytes, str]:
+def _revalidate_open_file_digest(
+    fd: int,
+    expected_info: os.stat_result,
+    expected_digest: str,
+    max_bytes: int,
+    label: str,
+) -> None:
+    payload = _read_fd_bounded(fd, expected_info, max_bytes, label)
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise OSError(f"{label} content changed during cleanup")
+
+
+def _parse_managed_plugin_backup(spec: ManagedPluginSpec, payload: bytes) -> tuple[str, bool, int, bytes, str]:
     try:
         document = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid Amp backup JSON: {exc}") from exc
+        raise ValueError(f"invalid {spec.label} backup JSON: {exc}") from exc
     if not isinstance(document, dict):
-        raise ValueError("Amp backup must be a JSON object")
+        raise ValueError(f"{spec.label} backup must be a JSON object")
     version = document.get("version")
-    if isinstance(version, bool) or version != AMP_BACKUP_VERSION:
-        raise ValueError("Amp backup version is missing or unsupported")
-    if document.get("connector") != "amp" or document.get("logical_name") != "config":
-        raise ValueError("Amp backup connector identity is invalid")
-    captured = _normalized_absolute(
-        document.get("path", ""), "captured Amp plugin path"
-    )
-    if captured != plugin_path:
-        raise ValueError("Amp backup target path does not match the managed plugin")
+    if not isinstance(version, int) or isinstance(version, bool) or version != MANAGED_PLUGIN_BACKUP_VERSION:
+        raise ValueError(f"{spec.label} backup version is missing or unsupported")
+    if document.get("connector") != spec.connector or document.get("logical_name") != spec.logical_name:
+        raise ValueError(f"{spec.label} backup connector identity is invalid")
+    captured = _normalized_absolute(document.get("path", ""), f"captured {spec.label} plugin path")
 
     post_hash = document.get("post_sha256")
     if not isinstance(post_hash, str) or SHA256_RE.fullmatch(post_hash) is None:
-        raise ValueError("Amp backup post hash is missing or invalid")
+        raise ValueError(f"{spec.label} backup post hash is missing or invalid")
     existed = document.get("existed")
     if not isinstance(existed, bool):
-        raise ValueError("Amp backup existed flag is invalid")
+        raise ValueError(f"{spec.label} backup existed flag is invalid")
     mode = document.get("mode", 0)
-    if (
-        isinstance(mode, bool)
-        or not isinstance(mode, int)
-        or mode < 0
-        or mode > 0o777
-    ):
-        raise ValueError("Amp backup mode is invalid")
+    if isinstance(mode, bool) or not isinstance(mode, int) or mode < 0 or mode > 0o777:
+        raise ValueError(f"{spec.label} backup mode is invalid")
 
     pristine_hash = document.get("pristine_sha256")
     pristine_encoded = document.get("pristine_bytes", "")
     if not isinstance(pristine_encoded, str):
-        raise ValueError("Amp backup pristine payload is invalid")
+        raise ValueError(f"{spec.label} backup pristine payload is invalid")
     try:
         pristine = base64.b64decode(pristine_encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ValueError("Amp backup pristine payload is not canonical base64") from exc
-    if len(pristine) > AMP_MAX_BACKUP_BYTES:
-        raise ValueError("Amp backup pristine payload exceeds its size bound")
+        raise ValueError(f"{spec.label} backup pristine payload is not canonical base64") from exc
+    if len(pristine) > spec.max_bytes:
+        raise ValueError(f"{spec.label} backup pristine payload exceeds its size bound")
 
     if existed:
-        if (
-            not isinstance(pristine_hash, str)
-            or SHA256_RE.fullmatch(pristine_hash) is None
-        ):
-            raise ValueError("Amp backup pristine hash is invalid")
+        if not isinstance(pristine_hash, str) or SHA256_RE.fullmatch(pristine_hash) is None:
+            raise ValueError(f"{spec.label} backup pristine hash is invalid")
         if hashlib.sha256(pristine).hexdigest() != pristine_hash:
-            raise ValueError("Amp backup pristine payload hash does not match")
+            raise ValueError(f"{spec.label} backup pristine payload hash does not match")
         if mode == 0:
             mode = 0o600
     else:
         if pristine_hash != "missing" or pristine:
-            raise ValueError("Amp missing-file backup carries invalid pristine state")
+            raise ValueError(f"{spec.label} missing-file backup carries invalid pristine state")
+        if mode != 0:
+            raise ValueError(f"{spec.label} missing-file backup carries an invalid mode")
         mode = 0
-    return existed, mode, pristine, post_hash
+    return captured, existed, mode, pristine, post_hash
 
 
-def _hash_open_file(fd: int) -> str:
-    digest = hashlib.sha256()
-    while True:
-        chunk = os.read(fd, 64 * 1024)
-        if not chunk:
-            return digest.hexdigest()
-        digest.update(chunk)
+def _hash_open_file(
+    fd: int,
+    expected_info: os.stat_result,
+    max_bytes: int,
+    label: str,
+) -> str:
+    payload = _read_fd_bounded(fd, expected_info, max_bytes, label)
+    return hashlib.sha256(payload).hexdigest()
 
 
-def _replace_amp_plugin(
+def _replace_managed_plugin(
+    spec: ManagedPluginSpec,
     plugin_path: str,
+    plugin_fd: int,
     plugin_info: os.stat_result,
+    expected_hash: str,
     pristine: bytes,
     mode: int,
 ) -> None:
     parent = os.path.dirname(plugin_path)
     name = os.path.basename(plugin_path)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(
-        os, "O_NOFOLLOW", 0
-    )
+    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = os.open(parent, directory_flags)
-    temporary = (
-        f".{name}.defenseclaw-restore.{os.getpid()}.{secrets.token_hex(8)}"
-    )
+    temporary = f".{name}.defenseclaw-restore.{os.getpid()}.{secrets.token_hex(8)}"
     temporary_fd = -1
     try:
         named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if not stat.S_ISREG(named.st_mode) or not os.path.samestat(
-            plugin_info, named
-        ):
-            raise OSError("Amp plugin changed after its hash was verified")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(
-            os, "O_CLOEXEC", 0
-        )
+        if not stat.S_ISREG(named.st_mode) or not _same_stable_file_metadata(plugin_info, named):
+            raise OSError(f"{spec.label} plugin changed after its hash was verified")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         temporary_fd = os.open(temporary, flags, mode, dir_fd=directory_fd)
         view = memoryview(pristine)
         while view:
             written = os.write(temporary_fd, view)
             if written <= 0:
-                raise OSError("short write while restoring Amp plugin")
+                raise OSError(f"short write while restoring {spec.label} plugin")
             view = view[written:]
         os.fchmod(temporary_fd, mode)
         os.fsync(temporary_fd)
-        # Re-check immediately before the atomic replace. This refuses to
-        # overwrite a file that drifted during cleanup.
+        # Re-read the still-open source descriptor and then re-check its name
+        # immediately before the atomic replace. Identity alone does not catch
+        # an editor writing new bytes through the same inode.
+        _revalidate_open_file_digest(
+            plugin_fd,
+            plugin_info,
+            expected_hash,
+            spec.max_bytes,
+            f"{spec.label} plugin",
+        )
         named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if not stat.S_ISREG(named.st_mode) or not os.path.samestat(
-            plugin_info, named
-        ):
-            raise OSError("Amp plugin changed before its atomic restore")
+        if not stat.S_ISREG(named.st_mode) or not _same_stable_file_metadata(plugin_info, named):
+            raise OSError(f"{spec.label} plugin changed before its atomic restore")
         os.replace(
             temporary,
             name,
@@ -560,79 +820,228 @@ def _replace_amp_plugin(
         os.close(directory_fd)
 
 
-def _remove_amp_plugin(plugin_path: str, plugin_info: os.stat_result) -> None:
+def _remove_managed_plugin(
+    spec: ManagedPluginSpec,
+    plugin_path: str,
+    plugin_fd: int,
+    plugin_info: os.stat_result,
+    expected_hash: str,
+) -> None:
     parent = os.path.dirname(plugin_path)
     name = os.path.basename(plugin_path)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(
-        os, "O_NOFOLLOW", 0
-    )
+    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = os.open(parent, directory_flags)
     try:
+        _revalidate_open_file_digest(
+            plugin_fd,
+            plugin_info,
+            expected_hash,
+            spec.max_bytes,
+            f"{spec.label} plugin",
+        )
         named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if not stat.S_ISREG(named.st_mode) or not os.path.samestat(
-            plugin_info, named
-        ):
-            raise OSError("Amp plugin changed after its hash was verified")
+        if not stat.S_ISREG(named.st_mode) or not _same_stable_file_metadata(plugin_info, named):
+            raise OSError(f"{spec.label} plugin changed after its hash was verified")
         os.unlink(name, dir_fd=directory_fd)
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
 
 
-def scrub_amp(path: str, backup_path: str) -> tuple[bool, str | None]:
-    """Restore/remove the managed Amp plugin only under exact backup authority.
+def _consume_managed_plugin_authority(
+    spec: ManagedPluginSpec,
+    backup: str,
+    backup_fd: int,
+    backup_info: os.stat_result,
+    expected_hash: str,
+) -> None:
+    """Consume only the unchanged private receipt and durably sync its parent."""
+
+    _revalidate_open_file_digest(
+        backup_fd,
+        backup_info,
+        expected_hash,
+        spec.max_bytes,
+        f"{spec.label} backup authority",
+    )
+    current_backup = os.lstat(backup)
+    if not stat.S_ISREG(current_backup.st_mode) or not _same_stable_file_metadata(backup_info, current_backup):
+        raise OSError(f"{spec.label} backup authority changed during cleanup")
+    parent = os.path.dirname(backup)
+    name = os.path.basename(backup)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(parent, directory_flags)
+    try:
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(named.st_mode) or not _same_stable_file_metadata(backup_info, named):
+            raise OSError(f"{spec.label} backup authority changed before cleanup commit")
+        _revalidate_open_file_digest(
+            backup_fd,
+            backup_info,
+            expected_hash,
+            spec.max_bytes,
+            f"{spec.label} backup authority",
+        )
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(named.st_mode) or not _same_stable_file_metadata(backup_info, named):
+            raise OSError(f"{spec.label} backup authority changed before cleanup commit")
+        os.unlink(name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def scrub_managed_plugin(
+    spec: ManagedPluginSpec,
+    path: str,
+    backup_path: str,
+    *,
+    retain_authority: bool = False,
+) -> tuple[bool, str | None]:
+    """Restore/remove a managed plugin only under exact backup authority.
 
     Unlike the structured connector configs above, marker-based surgery is
     unsafe for a standalone TypeScript program. The backup identity binds the
     connector, logical name, target path, pristine bytes, and exact
     post-install hash. Drift or any unsafe path/file shape is a hard refusal.
     """
-    home, plugin_path, backup = _amp_home_and_paths(path, backup_path)
-    _validate_amp_directory_chains(home)
+    home, backup = _managed_plugin_home_and_backup(spec, backup_path)
+    _validate_managed_plugin_backup_chain(spec, home)
 
-    backup_fd, backup_info = _open_regular_file(
-        backup, private=True, max_bytes=AMP_MAX_BACKUP_BYTES
-    )
+    backup_fd, backup_info = _open_regular_file(backup, private=True, max_bytes=spec.max_bytes, label=spec.label)
     try:
-        payload = _read_fd_bounded(backup_fd, AMP_MAX_BACKUP_BYTES)
-        existed, mode, pristine, post_hash = _parse_amp_backup(
-            payload, plugin_path
+        payload = _read_fd_bounded(
+            backup_fd,
+            backup_info,
+            spec.max_bytes,
+            f"{spec.label} backup authority",
         )
+        backup_hash = hashlib.sha256(payload).hexdigest()
+        captured, existed, mode, pristine, post_hash = _parse_managed_plugin_backup(spec, payload)
+
+        plugin_path = _resolve_managed_plugin_target(spec, home, path, captured)
+
+        if not os.path.lexists(plugin_path):
+            if existed:
+                raise OSError(f"{spec.label} target is missing but its backup requires an exact restore")
+            _revalidate_open_file_digest(
+                backup_fd,
+                backup_info,
+                backup_hash,
+                spec.max_bytes,
+                f"{spec.label} backup authority",
+            )
+            if not retain_authority:
+                _consume_managed_plugin_authority(
+                    spec,
+                    backup,
+                    backup_fd,
+                    backup_info,
+                    backup_hash,
+                )
+            return True, None
+
+        _validate_managed_plugin_target_chain(spec, plugin_path)
+
+        plugin_fd, plugin_info = _open_regular_file(
+            plugin_path,
+            private=False,
+            max_bytes=spec.max_bytes,
+            label=spec.label,
+        )
+        try:
+            current_hash = _hash_open_file(
+                plugin_fd,
+                plugin_info,
+                spec.max_bytes,
+                f"{spec.label} plugin",
+            )
+            pristine_hash = hashlib.sha256(pristine).hexdigest() if existed else ""
+            already_restored = (
+                existed
+                and current_hash == pristine_hash
+                and stat.S_IMODE(plugin_info.st_mode) == mode
+            )
+            if current_hash != post_hash and not already_restored:
+                return False, (f"{spec.label} plugin drifted after setup; preserving it and its backup")
+
+            # The private receipt is the only authority for a whole-file
+            # mutation. Re-read it after target inspection so an in-place
+            # same-inode edit cannot authorize stale captured data.
+            _revalidate_open_file_digest(
+                backup_fd,
+                backup_info,
+                backup_hash,
+                spec.max_bytes,
+                f"{spec.label} backup authority",
+            )
+            if already_restored:
+                _revalidate_open_file_digest(
+                    plugin_fd,
+                    plugin_info,
+                    current_hash,
+                    spec.max_bytes,
+                    f"{spec.label} plugin",
+                )
+            elif existed:
+                _replace_managed_plugin(
+                    spec,
+                    plugin_path,
+                    plugin_fd,
+                    plugin_info,
+                    current_hash,
+                    pristine,
+                    mode,
+                )
+            else:
+                _remove_managed_plugin(
+                    spec,
+                    plugin_path,
+                    plugin_fd,
+                    plugin_info,
+                    current_hash,
+                )
+        finally:
+            os.close(plugin_fd)
+
+        if retain_authority:
+            _revalidate_open_file_digest(
+                backup_fd,
+                backup_info,
+                backup_hash,
+                spec.max_bytes,
+                f"{spec.label} backup authority",
+            )
+        else:
+            _consume_managed_plugin_authority(
+                spec,
+                backup,
+                backup_fd,
+                backup_info,
+                backup_hash,
+            )
+        return True, None
     finally:
         os.close(backup_fd)
 
-    plugin_fd, plugin_info = _open_regular_file(
-        plugin_path, private=False, max_bytes=AMP_MAX_BACKUP_BYTES
-    )
-    try:
-        if _hash_open_file(plugin_fd) != post_hash:
-            return False, "Amp plugin drifted after setup; preserving it and its backup"
-        if existed:
-            _replace_amp_plugin(plugin_path, plugin_info, pristine, mode)
-        else:
-            _remove_amp_plugin(plugin_path, plugin_info)
-    finally:
-        os.close(plugin_fd)
 
-    # Remove only the exact authority file we opened. A concurrent replacement
-    # is preserved and reported instead of unlinking by pathname.
-    current_backup = os.lstat(backup)
-    if not stat.S_ISREG(current_backup.st_mode) or not os.path.samestat(
-        backup_info, current_backup
-    ):
-        raise OSError("Amp backup authority changed during cleanup")
-    os.unlink(backup)
-    return True, None
+def scrub_amp(path: str, backup_path: str) -> tuple[bool, str | None]:
+    return scrub_managed_plugin(AMP_PLUGIN_SPEC, path, backup_path)
+
+
+def scrub_opencode(path: str, backup_path: str) -> tuple[bool, str | None]:
+    return scrub_managed_plugin(OPENCODE_PLUGIN_SPEC, path, backup_path)
 
 
 # ---------- dispatch -----------------------------------------------------
 
 
 HANDLERS = {
-    "cursor":     scrub_cursor,
+    "cursor": scrub_cursor,
     "claudecode": scrub_claudecode,
-    "codex":      scrub_codex,
+    "codex": scrub_codex,
 }
 
 
@@ -642,17 +1051,31 @@ def main(argv: list[str]) -> int:
         return 64
     connector = argv[1]
     path = argv[2]
-    if connector == "amp":
-        if len(argv) != 4 or not argv[3]:
+    managed_spec = MANAGED_PLUGIN_SPECS.get(connector)
+    if managed_spec is not None:
+        retain_authority = len(argv) == 5 and argv[4] == MANAGED_RETAIN_AUTHORITY
+        if len(argv) not in {4, 5} or not argv[3] or (len(argv) == 5 and not retain_authority):
             print(
-                "Amp cleanup requires its managed backup metadata path",
+                f"{managed_spec.label} cleanup requires its managed backup metadata path",
                 file=sys.stderr,
             )
             return 4
-        if not os.path.lexists(path):
-            return 2
+        authority_target = path == MANAGED_TARGET_FROM_AUTHORITY and managed_spec.target_from_authority
+        if not os.path.lexists(argv[3]):
+            if authority_target or not os.path.lexists(path):
+                return 2
+            print(
+                f"scrub failed for {path}: {managed_spec.label} backup authority is missing",
+                file=sys.stderr,
+            )
+            return 4
         try:
-            ok, err = scrub_amp(path, argv[3])
+            ok, err = scrub_managed_plugin(
+                managed_spec,
+                path,
+                argv[3],
+                retain_authority=retain_authority,
+            )
         except (OSError, ValueError) as e:
             print(f"scrub failed for {path}: {e}", file=sys.stderr)
             return 4

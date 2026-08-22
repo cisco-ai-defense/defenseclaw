@@ -39,6 +39,8 @@ var windowsUnsupportedConnectorNames = []string{
 
 var proxyConnectorNames = []string{"openclaw", "zeptoclaw"}
 
+var darwinPreviewConnectorNames = []string{"antigravity", "claudecode", "codex", "cursor", "devin", "hermes", "openhands"}
+
 func allWindowsConnectorNames() []string {
 	out := append([]string(nil), windowsSupportedConnectorNames...)
 	out = append(out, windowsPreviewConnectorNames...)
@@ -78,6 +80,29 @@ func TestWindowsConnectorSupportTaxonomy(t *testing.T) {
 		}
 		if strings.TrimSpace(support.Reason) == "" {
 			t.Errorf("%s has no support reason", name)
+		}
+	}
+}
+
+func TestDarwinConnectorSupportTaxonomy(t *testing.T) {
+	want := make(map[string]struct{}, len(darwinPreviewConnectorNames))
+	for _, name := range darwinPreviewConnectorNames {
+		want[name] = struct{}{}
+	}
+	if len(darwinConnectorSupport) != len(want) {
+		t.Fatalf("darwinConnectorSupport has %d entries, want %d", len(darwinConnectorSupport), len(want))
+	}
+	for name, support := range darwinConnectorSupport {
+		if _, ok := want[name]; !ok {
+			t.Errorf("unexpected Darwin support entry %q", name)
+		}
+		if support.Status != PlatformPreview || strings.TrimSpace(support.Reason) == "" {
+			t.Errorf("Darwin support for %s = %#v, want reasoned preview", name, support)
+		}
+		for _, goos := range []string{"darwin", "macos"} {
+			if got := ConnectorSupportOnOS(name, goos); got != support {
+				t.Errorf("%s on %s = %#v, want %#v", name, goos, got, support)
+			}
 		}
 	}
 }
@@ -136,6 +161,10 @@ func TestConnectorSupportOnOS(t *testing.T) {
 			want := PlatformSupported
 			if name == "geminicli" {
 				want = PlatformUnsupported
+			} else if goos == "darwin" {
+				if _, preview := darwinConnectorSupport[name]; preview {
+					want = PlatformPreview
+				}
 			}
 			if got := ConnectorSupportOnOS(name, goos).Status; got != want {
 				t.Errorf("%s on %s status=%q, want %q", name, goos, got, want)
@@ -145,6 +174,20 @@ func TestConnectorSupportOnOS(t *testing.T) {
 
 	if got := ConnectorSupportOnOS("plugin-example", "windows").Status; got != PlatformNotCertified {
 		t.Fatalf("unknown plugin status=%q, want not_certified", got)
+	}
+}
+
+func TestDeprecatedConnectorsRemainCleanupOnlyOnEveryOS(t *testing.T) {
+	for _, goos := range []string{"windows", "darwin", "linux"} {
+		for _, name := range []string{"geminicli", "windsurf"} {
+			support := ConnectorSupportOnOS(name, goos)
+			if support.Status != PlatformUnsupported {
+				t.Errorf("%s on %s status=%q, want unsupported", name, goos, support.Status)
+			}
+			if connectorSupportedOnOS(name, goos) {
+				t.Errorf("deprecated connector %s should remain cleanup-only on %s", name, goos)
+			}
+		}
 	}
 }
 

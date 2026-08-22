@@ -30,7 +30,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 dc_section "cursor headless hook validation"
 
 if ! command -v agent >/dev/null 2>&1 && ! command -v cursor-agent >/dev/null 2>&1; then
-  curl https://cursor.com/install -fsS | bash || dc_die "Cursor Agent install failed"
+  dc_without_provider_credentials curl https://cursor.com/install -fsS | \
+    dc_without_provider_credentials bash || dc_die "Cursor Agent install failed"
   export PATH="${HOME}/.local/bin:${PATH}"
 fi
 if command -v agent >/dev/null 2>&1; then

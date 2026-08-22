@@ -36,6 +36,7 @@ dc_connector_config_file() {
     antigravity) printf '%s/.gemini/config/hooks.json' "${HOME}" ;;
     hermes)      printf '%s/.hermes/config.yaml' "${HOME}" ;;
     amp)         printf '%s/.config/amp/plugins/defenseclaw.ts' "${HOME}" ;;
+    opencode)    printf '%s/plugins/defenseclaw.js' "${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}" ;;
     *)           printf '' ;;
   esac
 }

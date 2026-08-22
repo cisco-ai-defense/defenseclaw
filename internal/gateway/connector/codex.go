@@ -835,7 +835,7 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Idempotent:     true,
 			ConflictSafe:   true,
 			Notes: []string{
-				"Explicit CodeGuard setup installs the managed software-security skill under the personal .agents/skills root and records an ownership receipt for safe teardown.",
+				"Explicit CodeGuard setup installs the pinned Project CodeGuard skill at the managed personal .agents/skills/software-security target and records an ownership receipt for safe teardown.",
 			},
 		},
 		Telemetry: TelemetryCapability{
@@ -1075,6 +1075,10 @@ func CodexPluginSourceDirs(cwd string) []string {
 		repoRoot := layers[len(layers)-1]
 		marketplaces = append(marketplaces,
 			marketplaceRoot{
+				path: filepath.Join(repoRoot, ".agents", "plugins", "api_marketplace.json"),
+				root: repoRoot,
+			},
+			marketplaceRoot{
 				path: filepath.Join(repoRoot, ".agents", "plugins", "marketplace.json"),
 				root: repoRoot,
 			},
@@ -1082,13 +1086,23 @@ func CodexPluginSourceDirs(cwd string) []string {
 				path: filepath.Join(repoRoot, ".claude-plugin", "marketplace.json"),
 				root: repoRoot,
 			},
+			marketplaceRoot{
+				path: filepath.Join(repoRoot, ".cursor-plugin", "marketplace.json"),
+				root: repoRoot,
+			},
 		)
 	}
 	if home := strings.TrimSpace(homePath()); home != "" {
-		marketplaces = append(marketplaces, marketplaceRoot{
-			path: filepath.Join(home, ".agents", "plugins", "marketplace.json"),
-			root: home,
-		})
+		marketplaces = append(marketplaces,
+			marketplaceRoot{
+				path: filepath.Join(home, ".agents", "plugins", "api_marketplace.json"),
+				root: home,
+			},
+			marketplaceRoot{
+				path: filepath.Join(home, ".agents", "plugins", "marketplace.json"),
+				root: home,
+			},
+		)
 	}
 
 	var out []string

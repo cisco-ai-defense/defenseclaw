@@ -157,9 +157,7 @@ def test_amp_is_reachable_through_contract_and_manual_live_layers() -> None:
     assert "Amp event mismatch" in common
     assert 'defenseclaw-gateway hook --connector amp --event "${event}"' in common
 
-    contract = (ROOT / "scripts/live-connector-e2e/contract-smoke.sh").read_text(
-        encoding="utf-8"
-    )
+    contract = (ROOT / "scripts/live-connector-e2e/contract-smoke.sh").read_text(encoding="utf-8")
     assert 'dc_invoke_hook "${DC_E2E_CONNECTOR}" "${native_event}"' in contract
 
     driver = (ROOT / "scripts/live-connector-e2e/drivers/amp.sh").read_text(encoding="utf-8")
@@ -170,10 +168,148 @@ def test_amp_is_reachable_through_contract_and_manual_live_layers() -> None:
     assert "DC_DRIVER_SUPPORTS_OTLP=0" in driver
 
 
-def test_unix_contract_matrix_covers_executable_shell_hook_connectors() -> None:
-    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(
-        encoding="utf-8"
+def test_codex_live_driver_reports_registry_metadata_without_pre_setup_execution() -> None:
+    driver = (ROOT / "scripts/live-connector-e2e/drivers/codex.sh").read_text(encoding="utf-8")
+
+    assert "_codex_is_exact_version" in driver
+    assert "dc_without_provider_credentials npm view @openai/codex@latest version" in driver
+    assert (
+        'dc_without_provider_credentials npm install -g --ignore-scripts "@openai/codex@${version}"'
+        in driver
     )
+    assert 'DC_E2E_AGENT_VERSION="${version}"' in driver
+    assert "dc_capture_version codex" not in driver
+    assert "codex --version" not in driver
+    assert driver.index('DC_E2E_AGENT_VERSION="${version}"') < driver.index("dc_driver_main codex")
+
+
+def test_opencode_is_reachable_only_through_the_manual_macos_live_layer() -> None:
+    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(encoding="utf-8")
+    full_match = re.search(r"^\s*full='([^']+)'$", workflow, flags=re.MULTILINE)
+    assert full_match is not None
+    assert "opencode" not in json.loads(full_match.group(1))["connector"]
+
+    live = workflow.split("  live-matrix:", 1)[1].split("  windows-live:", 1)[0]
+    assert "if: ${{ github.event_name == 'workflow_dispatch' }}" in live
+    assert "{ connector: opencode,   os: macos-latest,   dcos: macos }" in live
+    assert "{ connector: opencode,   os: ubuntu-latest,  dcos: linux }" not in live
+
+    run = (ROOT / "scripts/live-connector-e2e/run.sh").read_text(encoding="utf-8")
+    contract_match = re.search(r"^ALL_CONNECTORS=\(([^)]*)\)$", run, flags=re.MULTILINE)
+    live_match = re.search(r"^LIVE_CONNECTORS=\(([^)]*)\)$", run, flags=re.MULTILINE)
+    assert contract_match is not None
+    assert live_match is not None
+    assert "opencode" not in contract_match.group(1).split()
+    assert "opencode" in live_match.group(1).split()
+
+    setup = (ROOT / "scripts/live-connector-e2e/lib/setup.sh").read_text(encoding="utf-8")
+    assert "${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}" in setup
+    assert "/plugins/defenseclaw.js" in setup
+
+    driver = (ROOT / "scripts/live-connector-e2e/drivers/opencode.sh").read_text(encoding="utf-8")
+    assert 'OPENCODE_REVIEWED_VERSION="1.18.19"' in driver
+    assert "^1\\.18\\.1[0-9]$" in driver
+    assert "export OPENCODE_DISABLE_AUTOUPDATE=1" in driver
+    assert driver.index("export OPENCODE_DISABLE_AUTOUPDATE=1") < driver.index("dc_driver_main opencode")
+    assert 'npm install -g "opencode-ai@${requested}"' in driver
+    assert 'dc_write_env_key OPENAI_API_KEY "${OPENAI_API_KEY}"' in driver
+    assert "OPENAI_API_KEY is required" in driver
+    assert "currently scoped to macOS" in driver
+    assert 'DC_DRIVER_MODE="${DC_DRIVER_MODE:-action}"' in driver
+    assert "DC_DRIVER_SUPPORTS_BLOCK=1" in driver
+    assert "DC_DRIVER_SUPPORTS_LIFECYCLE=0" in driver
+    assert "DC_DRIVER_SUPPORTS_OTLP=0" in driver
+    assert "opencode run --format json" in driver
+
+
+def test_claudecode_posix_live_driver_uses_the_sealed_official_native_release() -> None:
+    driver = (ROOT / "scripts/live-connector-e2e/drivers/claudecode.sh").read_text(encoding="utf-8")
+
+    assert "@anthropic-ai/claude-code" not in driver
+    assert "https://downloads.claude.ai/claude-code-releases/latest" in driver
+    assert '"https://downloads.claude.ai/claude-code-releases/${version}/manifest.json"' in driver
+    assert '"https://downloads.claude.ai/claude-code-releases/${version}/${platform}/claude"' in driver
+    assert "--proto '=https' --proto-redir '=https' --tlsv1.2" in driver
+    assert "--max-filesize 536870912" in driver
+    assert 're.fullmatch(r"[0-9a-f]{64}", checksum)' in driver
+    assert "size > 536_870_912" in driver
+    assert 'actual_checksum="$(claude_sha256_file "${download_path}")"' in driver
+    assert 'actual_checksum="$(claude_sha256_file "${staged}")"' in driver
+    assert '[ -e "${target}" ] || [ -L "${target}" ]' in driver
+    assert '[ -e "${launcher}" ] || [ -L "${launcher}" ]' in driver
+    assert 'ln -s "${target}" "${launcher}"' in driver
+    assert "ln -sfn" not in driver
+    assert "export DISABLE_AUTOUPDATER=1" in driver
+    assert 'DC_E2E_AGENT_VERSION="${version}"' in driver
+    assert "dc_capture_version claudecode" not in driver
+    assert "claude --version" not in driver
+    assert driver.index("export DISABLE_AUTOUPDATER=1") < driver.index('DC_E2E_AGENT_VERSION="${version}"')
+
+    docs = " ".join(
+        (ROOT / "docs-site/content/docs/connectors/claudecode.mdx").read_text(encoding="utf-8").split()
+    )
+    assert "Native macOS arm64 setup is **preview**" in docs
+    assert "`~/.local/share/claude/versions/<version>`" in docs
+    assert "Anthropic's pinned Developer ID identity" in docs
+    assert "no quarantine xattr" in docs
+
+
+def test_openhands_official_cli_and_protected_macos_live_path_are_reachable() -> None:
+    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(encoding="utf-8")
+    live = workflow.split("  live-matrix:", 1)[1].split("  windows-live:", 1)[0]
+    assert "{ connector: openhands,  os: ubuntu-latest,  dcos: linux }" in live
+    assert "{ connector: openhands,  os: macos-latest,   dcos: macos }" in live
+
+    driver = (ROOT / "scripts/live-connector-e2e/drivers/openhands.sh").read_text(encoding="utf-8")
+    assert "openhands-ai" not in driver
+    # Linux retains upstream's uv tool path; protected Darwin execution uses
+    # the real standalone Mach-O rather than sealing uv's console script.
+    assert 'package="openhands"' in driver
+    assert 'uv tool install --python 3.12 --force "${package}"' in driver
+    assert 'OPENHANDS_REVIEWED_MACOS_VERSION="1.16.0"' in driver
+    assert 'OPENHANDS_REVIEWED_MACOS_ARM64_SIZE="86732736"' in driver
+    assert (
+        'OPENHANDS_REVIEWED_MACOS_ARM64_SHA256="fa238330a452f2f1e933affb7edffda43c01f1ebd84194ecc564c5a6a306317f"'
+        in driver
+    )
+    assert "https://github.com/OpenHands/OpenHands-CLI/releases/download/${version}/openhands-macos-arm64" in driver
+    assert "--proto '=https' --proto-redir '=https' --tlsv1.2" in driver
+    assert "--max-filesize 100663296" in driver
+    assert 'target_dir="${versions_root}/${version}"' in driver
+    assert 'target="${target_dir}/openhands"' in driver
+    assert 'install -m 0500 "${download_path}" "${staged_dir}/openhands"' in driver
+    assert 'ln -s "${target}" "${launcher}"' in driver
+    assert 'DC_E2E_AGENT_VERSION="${version}"' in driver
+    assert "pinned to reviewed standalone release" in driver
+    assert 'DC_DRIVER_MODE="${DC_DRIVER_MODE:-action}"' in driver
+    assert 'if [ "$(dc_detect_os)" = "macos" ]; then' in driver
+    assert "DC_DRIVER_SUPPORTS_OTLP=1" in driver
+    assert "DC_DRIVER_SUPPORTS_OTLP=0" in driver
+    protected = "defenseclaw-gateway connector launch --connector openhands --"
+    assert protected in driver
+    assert '--headless --override-with-envs -t "${prompt}"' in driver
+    assert driver.index(protected) < driver.index("dc_driver_main openhands")
+
+    docs = " ".join(
+        (ROOT / "docs-site/content/docs/connectors/openhands.mdx").read_text(encoding="utf-8").split()
+    )
+    assert "macOS support remains **preview**" in docs
+    assert "`>=1.12.0`" in docs
+    assert "`~/.local/share/openhands/versions/<version>/openhands`" in docs
+    assert "refuses scripts" in docs
+    assert "reviewed byte size and SHA-256" in docs
+    assert "**trace-only native OTLP**" in docs
+    assert "standalone OpenHands SDK `1.39.1`" in docs
+    assert "does not widen or otherwise change the CLI compatibility range" in docs
+    assert "Plugins TUI panel stays hidden" in docs
+
+    run = (ROOT / "scripts/live-connector-e2e/run.sh").read_text(encoding="utf-8")
+    assert "/usr/bin/cc -Os" in run
+    assert "fixture would incorrectly bypass the protected live execution boundary" in run
+
+
+def test_unix_contract_matrix_covers_executable_shell_hook_connectors() -> None:
+    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(encoding="utf-8")
     full_match = re.search(r"^\s*full='([^']+)'$", workflow, flags=re.MULTILINE)
     assert full_match is not None
     expected = {
@@ -209,9 +345,7 @@ def test_unix_contract_matrix_covers_executable_shell_hook_connectors() -> None:
 
 def test_copilot_contract_normalizes_fixture_event_to_native_registration() -> None:
     fixture = json.loads(
-        (ROOT / "scripts/live-connector-e2e/golden/copilot/pre_tool_allow.json").read_text(
-            encoding="utf-8"
-        )
+        (ROOT / "scripts/live-connector-e2e/golden/copilot/pre_tool_allow.json").read_text(encoding="utf-8")
     )
     assert fixture["hook_event_name"] == "preToolUse"
 

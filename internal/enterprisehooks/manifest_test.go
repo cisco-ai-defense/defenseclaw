@@ -5,11 +5,21 @@
 package enterprisehooks
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func writeManifestFixture(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
 
 func TestLoadManifestRejectsUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
@@ -61,5 +71,49 @@ func TestLoadManifestAcceptsSIDOnlyTarget(t *testing.T) {
 	}
 	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != "S-1-5-21-111-222-333-1001" {
 		t.Fatalf("targets = %+v, want SID-only target", manifest.Targets)
+	}
+}
+
+func TestLoadManifestAcceptsExactAgentExecutable(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "codex")
+	path := writeManifestFixture(t, fmt.Sprintf(
+		`{"version":1,"targets":[{"user":"alice","connector":"codex","agent_version":"codex-cli 0.146.0","agent_executable":%q}]}`,
+		executable,
+	))
+	manifest, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got := manifest.Targets[0].AgentExecutable; got != executable {
+		t.Fatalf("agent_executable = %q, want %q", got, executable)
+	}
+}
+
+func TestLoadManifestRejectsInvalidAgentExecutable(t *testing.T) {
+	absolute := filepath.Join(t.TempDir(), "codex")
+	unclean := absolute + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(absolute)
+	for _, test := range []struct {
+		name       string
+		executable string
+		version    string
+	}{
+		{name: "relative", executable: "bin/codex", version: "codex-cli 0.146.0"},
+		{name: "unclean", executable: unclean, version: "codex-cli 0.146.0"},
+		{name: "surrounding whitespace", executable: " " + absolute, version: "codex-cli 0.146.0"},
+		{name: "line break", executable: absolute + "\nother", version: "codex-cli 0.146.0"},
+		{name: "missing version", executable: absolute},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeManifestFixture(t, fmt.Sprintf(
+				`{"version":1,"targets":[{"user":"alice","connector":"codex","agent_version":%q,"agent_executable":%q}]}`,
+				test.version,
+				test.executable,
+			))
+			_, err := LoadManifest(path)
+			if err == nil || (!strings.Contains(err.Error(), "invalid agent_executable") &&
+				!strings.Contains(err.Error(), "requires agent_version")) {
+				t.Fatalf("LoadManifest error = %v, want strict agent_executable refusal", err)
+			}
+		})
 	}
 }

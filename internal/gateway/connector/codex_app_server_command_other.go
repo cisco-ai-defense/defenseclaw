@@ -13,5 +13,7 @@ import (
 )
 
 func newCodexAppServerCommand(ctx context.Context, executable string) *exec.Cmd {
-	return processutil.CommandContext(ctx, executable, "app-server", "--stdio")
+	command := processutil.CommandContext(ctx, executable, "app-server", "--stdio")
+	configureCodexAppServerCommandPlatform(command)
+	return command
 }

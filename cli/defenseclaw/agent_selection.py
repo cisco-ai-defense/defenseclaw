@@ -28,8 +28,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import stat
+import subprocess
 import sys
 import uuid
 from collections.abc import Iterable
@@ -39,30 +41,46 @@ from pathlib import Path
 
 from defenseclaw import windows_acl
 from defenseclaw.connector_contracts import STATUS_KNOWN, normalize_agent_version, resolve_connector_contract
-from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.file_permissions import atomic_write_private_bytes, darwin_acl_write_error
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
 SELECTION_FILENAME = "agent_selection.json"
 SELECTION_SCHEMA_VERSION = 1
 SELECTION_LIFETIME = timedelta(minutes=15)
+_HOST_PLATFORM = sys.platform
 _CODEX_WINDOWS_PLATFORM_VARIANTS = (
     ("codex-win32-x64", "x86_64-pc-windows-msvc"),
     ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
 )
-_MAX_AGENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
-_SUPPORTED_CONNECTORS = frozenset(
-    {"codex", "claudecode", "hermes", "omnigent", "opencode", "amp", "openhands"}
+_CODEX_MACOS_PLATFORM_VARIANT = ("codex-darwin-arm64", "aarch64-apple-darwin")
+_CODEX_MACOS_TEAM_ID = "2DC432GLL2"
+_CODEX_MACOS_IDENTIFIER = "codex"
+_CLAUDE_CODE_MACOS_IDENTIFIER = "com.anthropic.claude-code"
+_CLAUDE_CODE_MACOS_TEAM_ID = "Q6L2SF6YDW"
+_CLAUDE_CODE_MACOS_VERSION_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))+")
+_OPENHANDS_MACOS_VERSION_RE = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
+_MACHO_MAGICS = frozenset(
+    {
+        b"\xce\xfa\xed\xfe",
+        b"\xcf\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xce",
+        b"\xfe\xed\xfa\xcf",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"\xca\xfe\xba\xbf",
+        b"\xbf\xba\xfe\xca",
+    }
 )
+_MAX_AGENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
+_SUPPORTED_CONNECTORS = frozenset({"codex", "claudecode", "hermes", "omnigent", "opencode", "amp", "openhands"})
 _PROTECTED_LOCK_EXECUTABLE_NAMES = {
     "codex": frozenset({"codex.exe"}),
     "hermes": frozenset({"hermes.exe"}),
     "omnigent": frozenset({"omnigent.exe", "omni.exe"}),
     "amp": frozenset({"amp.exe"}),
 }
-_OPENCODE_WINGET_PACKAGE_DIRS = (
-    "SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe",
-)
+_OPENCODE_WINGET_PACKAGE_DIRS = ("SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe",)
 
 
 @dataclass(frozen=True)
@@ -89,7 +107,7 @@ def setup_agent_selection_connectors(connectors: Iterable[str]) -> tuple[str, ..
             name
             for raw in connectors
             if (name := agent_discovery._normalize_connector(str(raw))) in _SUPPORTED_CONNECTORS
-            and (name != "openhands" or sys.platform == "darwin")
+            and (name != "openhands" or _HOST_PLATFORM == "darwin")
         )
     )
 
@@ -156,17 +174,19 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         rejection = "no installed executable was found in a built-in or operator-approved trusted prefix"
     for candidate in _setup_agent_candidates(connector, spec, data_dir):
         protected_windows_opencode = connector == "opencode" and os.name == "nt"
-        protected_darwin_openhands = connector == "openhands" and sys.platform == "darwin"
-        identity = _stable_selection_identity(candidate) if protected_darwin_openhands else None
-        if protected_darwin_openhands and identity is None:
+        protected_darwin = _HOST_PLATFORM == "darwin" and connector in {
+            "codex",
+            "claudecode",
+            "openhands",
+        }
+        identity = _stable_selection_identity(candidate) if protected_darwin else None
+        if protected_darwin and identity is None:
             continue
         if protected_windows_opencode:
             trusted = _is_windows_opencode_setup_binary(candidate)
-        elif protected_darwin_openhands:
-            trusted = is_setup_trusted_binary(candidate, data_dir, connector=connector)
         else:
-            trusted = is_setup_trusted_binary(candidate, data_dir)
-        if not trusted or (protected_darwin_openhands and _stable_selection_identity(candidate) != identity):
+            trusted = is_setup_trusted_binary(candidate, data_dir, connector=connector)
+        if not trusted or (protected_darwin and _stable_selection_identity(candidate) != identity):
             continue
         executable = os.path.realpath(os.path.abspath(candidate))
         digest = ""
@@ -196,13 +216,14 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         if probe_error or not raw_version:
             rejection = probe_error or "version probe returned no version"
             continue
-        if protected_darwin_openhands and _stable_selection_identity(executable) != identity:
-            rejection = "selected OpenHands executable changed while probing its version"
+        if protected_darwin and _stable_selection_identity(executable) != identity:
+            rejection = f"selected {connector} executable changed while probing its version"
             continue
         normalized = normalize_agent_version(raw_version)
         if not normalized:
             rejection = f"could not normalize agent version {raw_version!r}"
             continue
+        protected_darwin_openhands = connector == "openhands" and protected_darwin
         if connector == "amp" or protected_windows_opencode or protected_darwin_openhands:
             compatibility = resolve_connector_contract(connector, raw_version)
             if compatibility.status != STATUS_KNOWN or compatibility.normalized_version != normalized:
@@ -219,8 +240,8 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             except OSError as exc:
                 rejection = str(exc)
                 continue
-        if protected_darwin_openhands and _stable_selection_identity(executable) != identity:
-            rejection = "selected OpenHands executable changed while hashing"
+        if protected_darwin and _stable_selection_identity(executable) != identity:
+            rejection = f"selected {connector} executable changed while hashing"
             continue
         return SetupAgentSelection(
             connector=connector,
@@ -233,7 +254,7 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
 
 
 def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "") -> bool:
-    """Admit only built-in or protected-config prefixes, never env extras."""
+    """Admit only exact built-in client layouts or protected-config prefixes."""
 
     try:
         resolved = os.path.realpath(os.path.abspath(candidate))
@@ -257,8 +278,28 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
         return any(agent_discovery._windows_acl_chain_is_safe(resolved, root) for root in matching_roots)
     if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
         return False
-    if connector == "openhands" and sys.platform == "darwin":
-        if os.path.basename(resolved) != "openhands":
+    if _HOST_PLATFORM == "darwin" and connector == "claudecode":
+        if not _is_canonical_macos_claudecode_target(resolved):
+            return False
+        return any(_posix_setup_chain_is_safe(resolved, root) for root in matching_roots) and (
+            _validate_macos_claudecode_binary(resolved) is None
+        )
+    if _HOST_PLATFORM == "darwin" and connector == "codex":
+        if os.path.basename(resolved) != "codex":
+            return False
+        return any(_posix_setup_chain_is_safe(resolved, root) for root in matching_roots) and (
+            _macos_codex_binary_is_trusted(resolved)
+        )
+    if _HOST_PLATFORM == "darwin" and connector == "openhands":
+        configured_roots = agent_discovery._expand_bin_prefixes(configured)
+        operator_approved = any(
+            agent_discovery._path_is_within(resolved, root) for root in configured_roots
+        )
+        if (
+            os.path.basename(resolved) != "openhands"
+            or (not _is_canonical_macos_openhands_target(resolved) and not operator_approved)
+            or _validate_macos_openhands_binary(resolved) is not None
+        ):
             return False
         return any(_posix_setup_chain_is_safe(resolved, root) for root in matching_roots)
     try:
@@ -275,6 +316,187 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
     # discovery. Do not re-resolve them through the passive discovery registry:
     # that would discard a setup-only root after it was already validated.
     return True
+
+
+def _is_canonical_macos_claudecode_target(path: str) -> bool:
+    """Bind Claude selection to one native-installer version image."""
+
+    try:
+        resolved = os.path.realpath(os.path.abspath(path))
+        versions_root = os.path.realpath(os.path.join(os.fspath(Path.home()), ".local", "share", "claude", "versions"))
+    except (OSError, ValueError):
+        return False
+    return (
+        os.path.dirname(resolved) == versions_root
+        and _CLAUDE_CODE_MACOS_VERSION_RE.fullmatch(os.path.basename(resolved)) is not None
+    )
+
+
+def _macos_executable_is_macho(path: str) -> bool:
+    """Return whether *path* begins with a native or universal Mach-O magic."""
+
+    try:
+        with open(path, "rb") as stream:
+            return stream.read(4) in _MACHO_MAGICS
+    except OSError:
+        return False
+
+
+def _validate_macos_openhands_binary(path: str) -> str | None:
+    """Return a refusal unless OpenHands is a safe native arm64 Mach-O."""
+
+    if not _macos_executable_is_macho(path):
+        return "selected OpenHands executable is not a Mach-O image"
+    # Unit tests exercise Darwin routing on other hosts. The production
+    # inspection tools and ACL syntax are meaningful only on a real macOS host.
+    if platform.system() != "Darwin":
+        return None
+    acl_problem = darwin_acl_write_error(path)
+    if acl_problem is not None:
+        return f"OpenHands native image has unsafe file ACL: {acl_problem}"
+    if platform.machine().casefold() not in {"arm64", "aarch64"}:
+        return "OpenHands native selection is supported only on macOS arm64"
+    code, architectures = _run_macos_identity_command(["/usr/bin/lipo", "-archs", path])
+    if code != 0 or "arm64" not in architectures.split():
+        return "OpenHands Mach-O does not contain the native arm64 architecture"
+    return None
+
+
+def _is_canonical_macos_openhands_target(path: str) -> bool:
+    """Bind built-in OpenHands authority to one versioned standalone image."""
+
+    try:
+        resolved = os.path.realpath(os.path.abspath(path))
+        versions_root = os.path.realpath(
+            os.fspath(Path.home() / ".local" / "share" / "openhands" / "versions")
+        )
+    except (OSError, ValueError):
+        return False
+    version_dir = os.path.dirname(resolved)
+    return (
+        os.path.basename(resolved) == "openhands"
+        and os.path.dirname(version_dir) == versions_root
+        and _OPENHANDS_MACOS_VERSION_RE.fullmatch(os.path.basename(version_dir)) is not None
+    )
+
+
+def _macos_openhands_standalone_candidates() -> tuple[str, ...]:
+    """Enumerate exact versioned executables from the canonical install root."""
+
+    versions_root = Path.home() / ".local" / "share" / "openhands" / "versions"
+    try:
+        version_dirs = [
+            entry
+            for entry in os.scandir(versions_root)
+            if entry.is_dir(follow_symlinks=False) and _OPENHANDS_MACOS_VERSION_RE.fullmatch(entry.name)
+        ]
+    except OSError:
+        return ()
+    version_dirs.sort(
+        key=lambda entry: tuple(int(part) for part in entry.name.split(".")),
+        reverse=True,
+    )
+    candidates: list[str] = []
+    for version_dir in version_dirs:
+        candidate = os.path.join(version_dir.path, "openhands")
+        if os.path.isfile(candidate):
+            candidates.append(candidate)
+    return tuple(candidates)
+
+
+def _run_macos_identity_command(args: list[str]) -> tuple[int, str]:
+    """Run one fixed Apple identity tool with bounded output and duration."""
+
+    try:
+        completed = subprocess.run(
+            args,
+            shell=False,
+            timeout=10.0,
+            capture_output=True,
+            text=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return -1, str(exc)
+    output = agent_discovery._decode_version_probe_output((completed.stdout or b"") + (completed.stderr or b""))
+    return completed.returncode, output[:65_536]
+
+
+def _validate_macos_signed_binary(
+    path: str,
+    *,
+    product: str,
+    identifier: str,
+    team_id: str,
+    authority: str,
+) -> str | None:
+    """Return a refusal unless *path* is an arm64 signed native image."""
+
+    try:
+        info = os.stat(path, follow_symlinks=False)
+        with open(path, "rb") as stream:
+            magic = stream.read(4)
+    except OSError as exc:
+        return f"cannot inspect {product} native image: {exc}"
+    owner_ids = {0}
+    for accessor_name in ("getuid", "geteuid"):
+        accessor = getattr(os, accessor_name, None)
+        if accessor is not None:
+            owner_ids.add(accessor())
+    if not stat.S_ISREG(info.st_mode) or info.st_uid not in owner_ids or info.st_mode & 0o022:
+        return f"{product} native image has unsafe file custody"
+    if magic not in _MACHO_MAGICS:
+        return f"selected {product} executable is not a Mach-O image"
+    if platform.machine().casefold() not in {"arm64", "aarch64"}:
+        return f"{product} native selection is supported only on macOS arm64"
+
+    code, _detail = _run_macos_identity_command(["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", path])
+    if code != 0:
+        return f"{product} Mach-O code signature verification failed"
+    code, detail = _run_macos_identity_command(["/usr/bin/codesign", "-d", "--verbose=4", path])
+    required = (
+        f"Identifier={identifier}",
+        f"TeamIdentifier={team_id}",
+        authority,
+    )
+    identity_lines = {line.strip() for line in detail.splitlines() if line.strip()}
+    if code != 0 or any(marker not in identity_lines for marker in required):
+        return f"{product} Mach-O signature identity is not the pinned Developer ID"
+
+    code, architectures = _run_macos_identity_command(["/usr/bin/lipo", "-archs", path])
+    if code != 0 or "arm64" not in architectures.split():
+        return f"{product} Mach-O does not contain the native arm64 architecture"
+
+    code, quarantine = _run_macos_identity_command(["/usr/bin/xattr", "-p", "com.apple.quarantine", path])
+    # Presence is the security signal. An empty quarantine value is still an
+    # attached quarantine xattr and must not become an admission bypass.
+    if code == 0:
+        return f"{product} Mach-O is still quarantined; approve the official client before setup"
+    if code not in {0, 1}:
+        return f"{product} Mach-O quarantine state could not be inspected"
+    return None
+
+
+def _validate_macos_claudecode_binary(path: str) -> str | None:
+    return _validate_macos_signed_binary(
+        path,
+        product="Claude Code",
+        identifier=_CLAUDE_CODE_MACOS_IDENTIFIER,
+        team_id=_CLAUDE_CODE_MACOS_TEAM_ID,
+        authority="Authority=Developer ID Application: Anthropic PBC (Q6L2SF6YDW)",
+    )
+
+
+def _macos_codex_binary_is_trusted(path: str) -> bool:
+    return (
+        _validate_macos_signed_binary(
+            path,
+            product="Codex",
+            identifier=_CODEX_MACOS_IDENTIFIER,
+            team_id=_CODEX_MACOS_TEAM_ID,
+            authority="Authority=Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)",
+        )
+        is None
+    )
 
 
 def _stable_selection_identity(path: str) -> tuple[int, int, int, int, int] | None:
@@ -312,10 +534,7 @@ def _posix_setup_chain_is_safe(executable: str, root: str) -> bool:
             info = os.lstat(current)
             writable = bool(info.st_mode & 0o022)
             trusted_sticky_ancestor = (
-                not leaf
-                and stat.S_ISDIR(info.st_mode)
-                and bool(info.st_mode & stat.S_ISVTX)
-                and info.st_uid == 0
+                not leaf and stat.S_ISDIR(info.st_mode) and bool(info.st_mode & stat.S_ISVTX) and info.st_uid == 0
             )
             if (
                 is_link_or_reparse(current)
@@ -396,13 +615,36 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
         # Amp's supported npm package exposes a native amp.exe. Never let a
         # wrapper or differently named image inherit the protected selection
         # authority merely because passive discovery returned it.
-        discovered = [
-            candidate
-            for candidate in discovered
-            if os.path.basename(candidate).casefold() == "amp.exe"
-        ]
+        discovered = [candidate for candidate in discovered if os.path.basename(candidate).casefold() == "amp.exe"]
     candidates: list[str] = []
     paired_codex_root = ""
+    if connector == "openhands" and _HOST_PLATFORM == "darwin":
+        # The live installer publishes a PATH symlink, but the protected
+        # receipt must bind the versioned self-contained Mach-O itself.
+        candidates.extend(_macos_openhands_standalone_candidates())
+    if connector == "codex" and _HOST_PLATFORM == "darwin":
+        for root in roots:
+            candidates.extend(_codex_macos_npm_native_candidates(root))
+        candidates.extend(_macos_codex_standalone_candidates())
+    if connector == "claudecode" and _HOST_PLATFORM == "darwin":
+        # The official installer publishes ~/.local/bin/claude as a symlink.
+        # Select its canonical signed versions image, and also enumerate that
+        # exact directory so setup remains repairable without an inherited PATH.
+        candidates.extend(os.path.realpath(value) for value in discovered)
+        versions_root = Path.home() / ".local" / "share" / "claude" / "versions"
+        try:
+            installed_versions = [
+                entry.path
+                for entry in os.scandir(versions_root)
+                if entry.is_file(follow_symlinks=False) and _CLAUDE_CODE_MACOS_VERSION_RE.fullmatch(entry.name)
+            ]
+        except OSError:
+            installed_versions = []
+        installed_versions.sort(
+            key=lambda value: tuple(int(part) for part in os.path.basename(value).split(".")),
+            reverse=True,
+        )
+        candidates.extend(installed_versions)
     if connector == "codex" and discovered:
         # `_binary_candidates_for_agent` preserves PATH precedence, so its
         # first entry is the CLI the user actually launches.  When that entry
@@ -427,8 +669,10 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
                         break
     candidates.extend(discovered)
     names = {
-        "codex": ("codex.exe", "codex.cmd", "codex.bat", "codex.com"),
-        "claudecode": ("claude.exe", "claude.cmd", "claude.bat", "claude.com"),
+        "codex": (("codex",) if _HOST_PLATFORM == "darwin" else ("codex.exe", "codex.cmd", "codex.bat", "codex.com")),
+        "claudecode": (
+            ("claude",) if _HOST_PLATFORM == "darwin" else ("claude.exe", "claude.cmd", "claude.bat", "claude.com")
+        ),
         "hermes": ("hermes.exe",),
         "omnigent": ("omnigent.exe", "omni.exe"),
         "opencode": ("opencode.exe",),
@@ -455,7 +699,8 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
     # preserving PATH/discovery precedence within each class.  A stale package
     # tree must not outrank the currently selected Codex executable merely
     # because its absolute path sorts first.
-    candidates.sort(key=lambda value: os.path.splitext(value)[1].casefold() != ".exe")
+    if os.name == "nt":
+        candidates.sort(key=lambda value: os.path.splitext(value)[1].casefold() != ".exe")
     result: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -464,6 +709,66 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
             seen.add(key)
             result.append(candidate)
     return tuple(result)
+
+
+def _codex_macos_npm_native_candidates(root: str) -> tuple[str, ...]:
+    """Return the exact arm64 native image in official Codex npm layouts."""
+
+    if platform.machine().casefold() not in {"arm64", "aarch64"}:
+        return ()
+    package_name, target = _CODEX_MACOS_PLATFORM_VARIANT
+    package_variants = (
+        ("node_modules", "@openai", "codex", "node_modules", "@openai"),
+        ("node_modules", "@openai"),
+        # The POSIX built-in registry already names the package-manager's
+        # node_modules directory itself (for example
+        # /opt/homebrew/lib/node_modules), rather than its install prefix.
+        ("@openai", "codex", "node_modules", "@openai"),
+        ("@openai",),
+    )
+    candidates: list[str] = []
+    for prefix in package_variants:
+        candidate = os.path.join(
+            root,
+            *prefix,
+            package_name,
+            "vendor",
+            target,
+            "bin",
+            "codex",
+        )
+        if os.path.isfile(candidate):
+            candidates.append(candidate)
+    return tuple(candidates)
+
+
+def _macos_codex_standalone_candidates() -> tuple[str, ...]:
+    """Return canonical arm64 images from Codex's standalone layout."""
+
+    if platform.machine().casefold() not in {"arm64", "aarch64"}:
+        return ()
+    base = Path.home() / ".codex" / "packages" / "standalone"
+    candidates = [base / "current" / "bin" / "codex"]
+    try:
+        candidates.extend(
+            sorted(
+                (base / "releases").glob("*-aarch64-apple-darwin/bin/codex"),
+                reverse=True,
+            )
+        )
+    except OSError:
+        pass
+    canonical_base = os.path.realpath(base)
+    result: list[str] = []
+    for candidate in candidates:
+        resolved = os.path.realpath(candidate)
+        if (
+            agent_discovery._path_is_within(resolved, canonical_base)
+            and os.path.isfile(resolved)
+            and os.path.basename(resolved) == "codex"
+        ):
+            result.append(resolved)
+    return tuple(dict.fromkeys(result))
 
 
 def _codex_npm_native_candidates(root: str) -> tuple[str, ...]:
@@ -651,7 +956,10 @@ def _builtin_setup_trusted_prefixes() -> tuple[str, ...]:
     """Resolve Windows roots through APIs, independent of inherited env vars."""
 
     if os.name != "nt":
-        return agent_discovery._builtin_trusted_bin_prefixes()
+        roots = list(agent_discovery._builtin_trusted_bin_prefixes())
+        if _HOST_PLATFORM == "darwin":
+            roots.extend(_darwin_setup_trusted_prefixes(Path.home()))
+        return tuple(roots)
 
     local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
     roaming = _windows_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")
@@ -698,6 +1006,22 @@ def _builtin_setup_trusted_prefixes() -> tuple[str, ...]:
     # package-manager environment variables here.
     roots.extend(agent_discovery._windows_configured_package_manager_bin_prefixes())
     return tuple(dict.fromkeys(os.path.abspath(root) for root in roots if root))
+
+
+def _darwin_setup_trusted_prefixes(home: Path) -> tuple[str, ...]:
+    """Return exact built-in Darwin setup roots without consulting npm env."""
+
+    return (
+        # Setup-only authority for the exact official npm native image.
+        # Passive inventory still excludes user-writable npm roots; this path
+        # is admitted only by an explicit setup action and must pass the pinned
+        # macOS signature, canonical-layout, ACL/custody, version, and digest
+        # gates.
+        os.fspath(home / ".npm-global" / "lib" / "node_modules"),
+        os.fspath(home / ".local" / "share" / "claude" / "versions"),
+        os.fspath(home / ".local" / "share" / "openhands" / "versions"),
+        os.fspath(home / ".codex" / "packages" / "standalone"),
+    )
 
 
 def _windows_opencode_winget_package_prefixes(local_app_data: str) -> tuple[str, ...]:

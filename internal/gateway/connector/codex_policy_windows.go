@@ -29,7 +29,7 @@ func codexSystemRequirementsPath() (string, error) {
 // kill-on-close Job Object, and resumes it only after assignment. This closes
 // the cmd/npm-wrapper race where the direct process could otherwise create an
 // escaping node/native descendant before DefenseClaw obtained tree ownership.
-func startCodexAppServerTree(cmd *exec.Cmd) (func(), error) {
+func startCodexAppServerTree(cmd *exec.Cmd, _ ...string) (func(), error) {
 	return startCodexAppServerTreeObserved(cmd, nil)
 }
 

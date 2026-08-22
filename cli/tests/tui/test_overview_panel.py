@@ -932,7 +932,11 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     assert ".codex/config.toml" in codex_mcps
     assert ".mcp.json" not in codex_mcps
     assert ".claude-plugin/marketplace.json" in codex_plugins
+    assert ".agents/plugins/api_marketplace.json" in codex_plugins
+    assert ".cursor-plugin/marketplace.json" in codex_plugins
+    assert "~/.agents/plugins/api_marketplace.json" in codex_plugins
     assert "plugins/cache" in codex_plugins.replace("\\", "/")
+    assert "$OPENHANDS_PERSISTENCE_DIR/mcp.json" in connector_source_label("openhands", "mcps")
     assert ".cursor/skills" in connector_source_label("cursor", "skills")
     assert "./.devin/hooks.v1.json" in connector_source_label("devin", "config")
     assert str(devin_config / "mcp_config.json") in connector_source_label("devin", "mcps")
@@ -953,15 +957,9 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     assert "OPENCODE_CONFIG" in opencode_mcps
     assert "OPENCODE_CONFIG_CONTENT" in opencode_mcps
     assert "enterprise precedence excluded" in opencode_mcps
-    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
-        "opencode", "config"
-    )
-    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
-        "opencode", "plugins"
-    )
-    assert "excluded from inventory and scans" in connector_source_label(
-        "opencode", "plugins"
-    )
+    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label("opencode", "config")
+    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label("opencode", "plugins")
+    assert "excluded from inventory and scans" in connector_source_label("opencode", "plugins")
     assert ".opencode/{agent,agents}" in connector_source_label("opencode", "agents")
     assert "CLAUDE.md fallback" in connector_source_label("opencode", "rules")
     antigravity_mcps = connector_source_label("antigravity", "mcps")

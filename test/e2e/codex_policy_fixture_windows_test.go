@@ -61,7 +61,12 @@ func runCodexPolicyFixtureIfRequested() (bool, int) {
 	return true, 69
 }
 
-func seedCodexPolicyFixture(t *testing.T, dataDir string, opts *connector.SetupOpts) {
+func seedCodexPolicyFixture(
+	t *testing.T,
+	dataDir string,
+	_ connector.Connector,
+	opts *connector.SetupOpts,
+) *codexPolicyFixtureFinalizer {
 	t.Helper()
 	sourcePath, err := os.Executable()
 	if err != nil {
@@ -115,4 +120,5 @@ func seedCodexPolicyFixture(t *testing.T, dataDir string, opts *connector.SetupO
 	opts.AgentExecutable = entry.AgentExecutable
 	opts.HookContractID = entry.ContractID
 	t.Setenv(e2eCodexPolicyHelperEnv, "1")
+	return nil
 }

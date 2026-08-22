@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const activeConnectorFile = "active_connector.json"
@@ -45,9 +47,23 @@ const (
 	activeConnectorStateMaxBytes = 64 << 10
 	hookContractLockMaxBytes     = 2 << 20
 	hookRuntimeEvidenceMaxBytes  = 64 << 10
+	setupAgentExecutableMaxBytes = 512 << 20
 	agentSelectionMaxLifetime    = 15 * time.Minute
 	agentSelectionClockSkew      = 5 * time.Minute
 )
+
+// validateProtectedStateFileLeaf is a narrow Darwin seam for readers that
+// accept an existing protected-state file. Darwin extended ACLs are not
+// represented by the POSIX mode bits checked by the stable reader below.
+// Windows deliberately retains its existing owner policy: managed state may
+// be owned by Administrators, LocalSystem, or TrustedInstaller rather than the
+// current process user required by safefile.ValidatePrivateFile.
+var validateProtectedStateFileLeaf = func(path string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	return safefile.ValidatePrivateFile(path)
+}
 
 type agentSelectionReceipt struct {
 	SchemaVersion int                               `json:"schema_version"`
@@ -685,6 +701,10 @@ func LoadProtectedHookContractLockEntries(dataDir string) (map[string]HookContra
 	if !exists {
 		return map[string]HookContractLockEntry{}, nil
 	}
+	lockPath := filepath.Join(dataDir, hookContractLockFile)
+	if err := validateProtectedStateFileLeaf(lockPath); err != nil {
+		return nil, fmt.Errorf("validate protected hook contract lock: %w", err)
+	}
 	var lock hookContractLock
 	if err := json.Unmarshal(body, &lock); err != nil {
 		return nil, fmt.Errorf("decode hook contract lock: %w", err)
@@ -695,13 +715,13 @@ func LoadProtectedHookContractLockEntries(dataDir string) (map[string]HookContra
 	entries := make(map[string]HookContractLockEntry, len(lock.Connectors))
 	for rawName, entry := range lock.Connectors {
 		name := normalizeConnectorName(rawName)
-		if name == "" || name != strings.TrimSpace(rawName) {
+		if rawName != strings.TrimSpace(rawName) || name == "" || name != rawName {
 			return nil, fmt.Errorf("hook contract lock has non-canonical connector key %q", rawName)
 		}
 		if _, duplicate := entries[name]; duplicate {
 			return nil, fmt.Errorf("hook contract lock has duplicate connector key %q", name)
 		}
-		if normalizeConnectorName(entry.Connector) != name {
+		if entry.Connector != name {
 			return nil, fmt.Errorf("hook contract lock entry %q names connector %q", name, entry.Connector)
 		}
 		entries[name] = entry
@@ -969,7 +989,7 @@ func protectedSetupSelectionConnectorForOS(connectorName, goos string) bool {
 		return connectorName == "codex" || connectorName == "hermes" || connectorName == "omnigent" ||
 			connectorName == "opencode" || connectorName == "amp"
 	case "darwin":
-		return connectorName == "openhands"
+		return connectorName == "codex" || connectorName == "claudecode" || connectorName == "openhands"
 	default:
 		return false
 	}
@@ -1126,7 +1146,8 @@ func setupSelectedAgentExecutableEvidence(path string) (string, string, bool) {
 	}
 	path = filepath.Clean(path)
 	before, err := os.Lstat(path)
-	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
+		before.Size() <= 0 || before.Size() > setupAgentExecutableMaxBytes {
 		return "", "", false
 	}
 	file, err := os.Open(path)
@@ -1140,11 +1161,12 @@ func setupSelectedAgentExecutableEvidence(path string) (string, string, bool) {
 		return "", "", false
 	}
 	hash := sha256.New()
-	_, copyErr := io.Copy(hash, file)
+	copied, copyErr := io.Copy(hash, io.LimitReader(file, setupAgentExecutableMaxBytes+1))
 	openedAfter, openedAfterErr := file.Stat()
 	closeErr := file.Close()
 	after, statErr := os.Lstat(path)
-	if copyErr != nil || openedAfterErr != nil || closeErr != nil || statErr != nil ||
+	if copyErr != nil || copied <= 0 || copied > setupAgentExecutableMaxBytes ||
+		openedAfterErr != nil || closeErr != nil || statErr != nil ||
 		openedAfter.Mode()&os.ModeSymlink != 0 || !openedAfter.Mode().IsRegular() ||
 		after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
 		!os.SameFile(before, openedAfter) || !os.SameFile(openedAfter, after) ||
@@ -1371,7 +1393,7 @@ func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {
 	normalizedName := normalizeConnectorName(connectorName)
-	if runtime.GOOS == "darwin" && normalizedName == "openhands" {
+	if runtime.GOOS == "darwin" && protectedSetupSelectionConnectorForOS(normalizedName, "darwin") {
 		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
 			if selection, supersedes := supersedingProtectedSetupSelection(dataDir, normalizedName, entry); supersedes {
 				return selection.RawVersion
@@ -1423,15 +1445,15 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 }
 
 // LoadCachedAgentExecutable is retained as a compatibility name for setup
-// callers. On Windows, native executable-inspecting connectors never grant
-// authority from agent_discovery.json: an existing install uses its protected,
-// version/contract-bound lock entry, while a fresh install may consume the
-// short-lived setup-selected receipt. The connector revalidates source,
-// product, path, ACL, and digest before launch. Other platforms retain their
-// established discovery-cache behavior.
+// callers. Protected native executable-inspecting connectors on Windows and
+// macOS never grant authority from agent_discovery.json: an existing install
+// uses its protected, version/contract-bound lock entry, while a fresh install
+// may consume the short-lived setup-selected receipt. The connector revalidates
+// source, product, path, custody, and digest before launch. Other platforms
+// retain their established discovery-cache behavior.
 func LoadCachedAgentExecutable(dataDir, connectorName string) string {
 	normalizedName := normalizeConnectorName(connectorName)
-	if runtime.GOOS == "darwin" && normalizedName == "openhands" {
+	if runtime.GOOS == "darwin" && protectedSetupSelectionConnectorForOS(normalizedName, "darwin") {
 		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
 			if selection, supersedes := supersedingProtectedSetupSelection(dataDir, normalizedName, entry); supersedes {
 				return selection.Executable
@@ -1498,6 +1520,18 @@ func loadProtectedCodexContractEntry(dataDir string) (HookContractLockEntry, boo
 }
 
 func loadProtectedHookContractEntry(dataDir, connectorName string) (HookContractLockEntry, bool) {
+	connectorName = normalizeConnectorName(connectorName)
+	if runtime.GOOS == "darwin" && protectedSetupSelectionConnectorForOS(connectorName, "darwin") {
+		entries, err := LoadProtectedHookContractLockEntries(dataDir)
+		if err != nil {
+			// The protected file exists but is unsafe, malformed, or ambiguous.
+			// Preserve the established exists=true signal so callers fail closed
+			// instead of treating it as a fresh installation.
+			return HookContractLockEntry{}, true
+		}
+		entry, exists := entries[connectorName]
+		return entry, exists
+	}
 	path := filepath.Join(dataDir, hookContractLockFile)
 	_, statErr := os.Lstat(path)
 	fileExists := statErr == nil || !os.IsNotExist(statErr)
@@ -1511,7 +1545,7 @@ func loadProtectedHookContractEntry(dataDir, connectorName string) (HookContract
 		// callers fail closed instead of treating it as a fresh installation.
 		return HookContractLockEntry{}, true
 	}
-	entry, ok := lock.Connectors[normalizeConnectorName(connectorName)]
+	entry, ok := lock.Connectors[connectorName]
 	if !ok {
 		return HookContractLockEntry{}, false
 	}
@@ -1578,6 +1612,44 @@ func validCodexAgentExecutableEvidence(entry HookContractLockEntry) bool {
 	return validSetupSelectedAgentExecutableEvidence(entry, "codex")
 }
 
+// ProtectedSetupAgentSelectionFromLock returns the exact executable and raw
+// version sealed by a validated setup-selected lock entry. It deliberately
+// does not consult the short-lived setup receipt: reconciliation that did not
+// receive an explicit administrator selection must remain bound to the durable
+// identity captured before the transaction began.
+func ProtectedSetupAgentSelectionFromLock(
+	entry HookContractLockEntry,
+	connectorName string,
+) (executable, rawVersion string, ok bool) {
+	if !validSetupSelectedAgentExecutableEvidence(entry, connectorName) {
+		return "", "", false
+	}
+	return entry.AgentExecutable, entry.RawAgentVersion, true
+}
+
+// ProtectedSetupAgentLockIdentityMatches reports whether a newly computed
+// durable entry remains bound to the exact protected executable/version
+// authority captured before a lock-only repair began. It intentionally ignores
+// hook artifact and timestamp fields, which repair is expected to refresh.
+func ProtectedSetupAgentLockIdentityMatches(
+	captured, candidate HookContractLockEntry,
+	connectorName string,
+) bool {
+	if !validSetupSelectedAgentExecutableEvidence(captured, connectorName) ||
+		!validSetupSelectedAgentExecutableEvidence(candidate, connectorName) {
+		return false
+	}
+	return candidate.Connector == captured.Connector &&
+		candidate.RawAgentVersion == captured.RawAgentVersion &&
+		candidate.NormalizedAgentVersion == captured.NormalizedAgentVersion &&
+		candidate.ContractID == captured.ContractID &&
+		candidate.CompatibilityStatus == captured.CompatibilityStatus &&
+		candidate.CompatibilityReason == captured.CompatibilityReason &&
+		candidate.AgentExecutableSource == captured.AgentExecutableSource &&
+		candidate.AgentExecutable == captured.AgentExecutable &&
+		candidate.AgentExecutableSHA256 == captured.AgentExecutableSHA256
+}
+
 func validSetupSelectedAgentExecutableEvidence(entry HookContractLockEntry, connectorName string) bool {
 	connectorName = normalizeConnectorName(connectorName)
 	if entry.Connector != connectorName ||
@@ -1602,6 +1674,11 @@ func loadSetupAgentSelection(dataDir, connectorName string) (agentSelectionEvide
 	if !exists {
 		return agentSelectionEvidence{}, false
 	}
+	if runtime.GOOS == "darwin" && protectedSetupSelectionConnectorForOS(connectorName, "darwin") {
+		if err := validateProtectedStateFileLeaf(filepath.Join(dataDir, agentSelectionFile)); err != nil {
+			return agentSelectionEvidence{}, false
+		}
+	}
 	var receipt agentSelectionReceipt
 	if err := json.Unmarshal(data, &receipt); err != nil ||
 		receipt.SchemaVersion != agentSelectionSchemaVersion ||
@@ -1612,7 +1689,19 @@ func loadSetupAgentSelection(dataDir, connectorName string) (agentSelectionEvide
 		return agentSelectionEvidence{}, false
 	}
 	selection, ok := receipt.Selections[connectorName]
-	if !ok || selection.Connector != connectorName ||
+	if !ok || !validSetupAgentSelectionEvidence(connectorName, selection, time.Now().UTC()) {
+		return agentSelectionEvidence{}, false
+	}
+	return selection, true
+}
+
+func validSetupAgentSelectionEvidence(
+	connectorName string,
+	selection agentSelectionEvidence,
+	now time.Time,
+) bool {
+	connectorName = normalizeConnectorName(connectorName)
+	if connectorName == "" || selection.Connector != connectorName ||
 		selection.Source != "setup-selected" ||
 		strings.ContainsAny(selection.Executable, "\x00\r\n") ||
 		!filepath.IsAbs(selection.Executable) ||
@@ -1620,22 +1709,21 @@ func loadSetupAgentSelection(dataDir, connectorName string) (agentSelectionEvide
 		!validLowerHexSHA256(selection.SHA256) ||
 		strings.TrimSpace(selection.RawVersion) == "" ||
 		strings.TrimSpace(selection.NormalizedVersion) == "" {
-		return agentSelectionEvidence{}, false
+		return false
 	}
 	selectedAt, selectedErr := time.Parse(time.RFC3339, selection.SelectedAt)
 	expiresAt, expiresErr := time.Parse(time.RFC3339, selection.ExpiresAt)
-	now := time.Now().UTC()
 	if selectedErr != nil || expiresErr != nil || selectedAt.After(now.Add(agentSelectionClockSkew)) ||
 		!expiresAt.After(now) || !expiresAt.After(selectedAt) ||
 		expiresAt.Sub(selectedAt) > agentSelectionMaxLifetime {
-		return agentSelectionEvidence{}, false
+		return false
 	}
 	resolution := ResolveHookContract(connectorName, selection.RawVersion)
 	if resolution.Status != HookCompatibilityKnown ||
 		resolution.NormalizedVersion != selection.NormalizedVersion {
-		return agentSelectionEvidence{}, false
+		return false
 	}
-	return selection, true
+	return true
 }
 
 func readStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool) {

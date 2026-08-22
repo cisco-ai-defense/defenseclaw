@@ -1547,7 +1547,7 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.devin/config*.json (legacy read-only compatibility)",
         ),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
-        ("openhands", "mcps"): ("~/.openhands/mcp.json",),
+        ("openhands", "mcps"): ("$OPENHANDS_PERSISTENCE_DIR/mcp.json or ~/.openhands/mcp.json",),
         ("antigravity", "mcps"): (
             "~/.gemini/config/mcp_config.json",
             "<workspace>/.agents/mcp_config.json",
@@ -1563,8 +1563,11 @@ def connector_source_label(connector: str, category: str) -> str:
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
         ("codex", "plugins"): (
+            "./.agents/plugins/api_marketplace.json",
             "./.agents/plugins/marketplace.json",
             "./.claude-plugin/marketplace.json (legacy-compatible)",
+            "./.cursor-plugin/marketplace.json",
+            "~/.agents/plugins/api_marketplace.json",
             "~/.agents/plugins/marketplace.json",
             os.path.join(codex_root, "plugins", "cache"),
         ),
@@ -1627,7 +1630,9 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.config/amp/settings.json or settings.jsonc",
             "<workspace>/.amp/settings.json or settings.jsonc",
         ),
-        ("omnigent", "config"): ("$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",),
+        ("omnigent", "config"): (
+            "$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",
+        ),
     }
     return ", ".join(sources.get((connector, category), ()))
 

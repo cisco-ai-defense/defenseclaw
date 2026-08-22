@@ -4,8 +4,8 @@
 # The manifest schema is defined by ManifestTarget in
 # internal/enterprisehooks/manifest.go — LoadManifest requires that every
 # enabled target carry both `connector` and (`user` or `user_home`). The
-# fields we render (user, user_home, uid, gid, connector,
-# agent_version, enabled) mirror the struct's yaml tags 1:1.
+# fields we render (user, user_home, uid, gid, connector, agent_version,
+# agent_executable, enabled) mirror the struct's yaml tags 1:1.
 # (data_dir is intentionally omitted — see t_rows_omit_data_dir.)
 
 . "${PKG_DIR}/lib/installer_lib.sh"
@@ -36,6 +36,13 @@ _reset_discover_stub() {
       *)          printf ''        ;;
     esac
   }
+  discover_agent_executable() {
+    case "$1" in
+      codex)      printf '%s/.npm-global/lib/node_modules/@openai/codex/native/codex' "$2" ;;
+      claudecode) printf '%s/.local/share/claude/versions/%s' "$2" "$3" ;;
+      *)          printf '' ;;
+    esac
+  }
 }
 _reset_discover_stub
 
@@ -58,6 +65,8 @@ bob:502:20:/Users/bob"
   assert_contains "${out}" 'connector: "codex"'      "codex connector"
   assert_contains "${out}" 'connector: "claudecode"' "claudecode connector"
   assert_contains "${out}" 'connector: "opencode"'   "opencode connector"
+  assert_contains "${out}" 'agent_executable: "/Users/alice/.npm-global/lib/node_modules/@openai/codex/native/codex"' "Codex exact executable"
+  assert_contains "${out}" 'agent_executable: "/Users/bob/.local/share/claude/versions/2.5.0"' "Claude exact executable"
   # data_dir is deliberately NOT emitted per-target: the guardian's
   # validateUserDataDir requires data_dir to be inside the target user's
   # home, but SUPPORT_DIR/runtime is machine-wide root storage. Letting
@@ -155,6 +164,20 @@ t_all_connectors_absent_yields_zero_rows() {
   assert_eq "${count}" "0" "no target rows when nothing is installed"
 }
 
+t_protected_connector_without_exact_executable_is_skipped() {
+  _reset_discover_stub
+  discover_agent_executable() { printf ''; }
+  local users="alice:501:20:/Users/alice"
+  local out
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "amp,codex,claudecode" "${users}")"
+  assert_contains "${out}" 'connector: "amp"' "non-protected Amp row remains"
+  assert_not_contains "${out}" 'connector: "codex"' "Codex without an exact executable is skipped"
+  assert_not_contains "${out}" 'connector: "claudecode"' "Claude without an exact executable is skipped"
+  local count
+  count="$(printf '%s\n' "${out}" | grep -c "^  - user:" || true)"
+  assert_eq "${count}" "1" "only the connector not requiring exact macOS executable evidence remains"
+}
+
 t_rendered_yaml_parses() {
   _reset_discover_stub
   # Best-effort: if PyYAML is available, verify the output actually
@@ -243,20 +266,84 @@ t_hostile_agent_version_cannot_inject_targets() {
 import sys, json, yaml
 doc = yaml.safe_load(sys.stdin) or {}
 targets = doc.get("targets") or []
-assert len(targets) == 1, "expected one rendered target, got %r" % (targets,)
-target = targets[0]
-assert target.get("user") == "alice", target
-assert target.get("enabled") is True, target
-assert target.get("agent_version") == "", target
-print(json.dumps(target, sort_keys=True))
+assert doc.get("version") == 1, doc
+assert targets == [], "unsafe version must drop the protected row: %r" % (targets,)
+print(json.dumps(doc, sort_keys=True))
 ' 2>&1)" || {
     _fail "hostile agent_version reshaped targets.yaml: ${parsed}
 Rendered:
 ${out}"
     return 1
   }
-  assert_contains "${parsed}" '"user": "alice"' "only alice target remains after hostile version"
+  assert_contains "${parsed}" '"targets": []' "unsafe version drops the protected row"
+  assert_not_contains "${parsed}" '"user": "alice"' "unsafe paired row is not emitted"
   assert_not_contains "${parsed}" "victim" "hostile injected victim target not present"
+}
+
+t_hostile_agent_executable_round_trips_as_one_scalar() {
+  if ! command -v /usr/bin/python3 >/dev/null 2>&1 ||
+     ! /usr/bin/python3 -c "import yaml" 2>/dev/null; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (no PyYAML)\n'; fi
+    return 0
+  fi
+  discover_agent_version() { printf '0.146.0'; }
+  discover_agent_executable() { printf '%s' '/Users/alice/"quoted"\codex'; }
+
+  local out parsed
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex" "alice:501:20:/Users/alice")"
+  parsed="$(printf '%s\n' "${out}" | /usr/bin/python3 -c '
+import json, sys, yaml
+doc = yaml.safe_load(sys.stdin)
+targets = doc.get("targets") or []
+assert len(targets) == 1, targets
+target = targets[0]
+expected = "/Users/alice/" + chr(34) + "quoted" + chr(34) + chr(92) + "codex"
+assert target.get("agent_executable") == expected, target
+print(json.dumps(target, sort_keys=True))
+' 2>&1)" || {
+    _fail "hostile agent_executable did not round-trip as one YAML scalar: ${parsed}
+Rendered:
+${out}"
+    return 1
+  }
+  assert_contains "${parsed}" '"connector": "codex"' "hostile executable kept one Codex row"
+}
+
+t_yaml_controls_are_rejected_without_invalidating_manifest() {
+  local control
+  for control in $'\033' $'\013' $'\014' $'\177' $'\302\205'; do
+    if yaml_double_quoted_scalar "safe${control}unsafe" >/dev/null 2>&1; then
+      _fail "YAML scalar accepted a forbidden control byte"
+      return 1
+    fi
+  done
+
+  discover_agent_version() { printf '1.2.3\033injected'; }
+  discover_agent_executable() { printf '/Users/alice/codex'; }
+  local out count
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex" "alice:501:20:/Users/alice")"
+  count="$(printf '%s\n' "${out}" | grep -c '^  - user:' || true)"
+  assert_eq "${count}" "0" "control-bearing version drops its protected row"
+  assert_contains "${out}" "version: 1" "control-bearing metadata leaves a valid empty manifest"
+
+  discover_agent_version() { printf '0.146.0'; }
+  discover_agent_executable() { printf '/Users/alice/codex\033suffix'; }
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex" "alice:501:20:/Users/alice")"
+  count="$(printf '%s\n' "${out}" | grep -c '^  - user:' || true)"
+  assert_eq "${count}" "0" "control-bearing executable drops its protected row"
+
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex" $'alice:501:20:/Users/alice\033suffix')"
+  count="$(printf '%s\n' "${out}" | grep -c '^  - user:' || true)"
+  assert_eq "${count}" "0" "control-bearing home drops the user"
+}
+
+t_codex_protected_manifest_discovery_never_executes_chatgpt_app() {
+  local version_body executable_body
+  version_body="$(declare -f discover_agent_version)"
+  executable_body="$(declare -f discover_agent_executable)"
+  assert_not_contains "${version_body}" '/Applications/ChatGPT.app/Contents' "version discovery omits pre-receipt ChatGPT.app candidate"
+  assert_not_contains "${executable_body}" '/Applications/ChatGPT.app/Contents' "executable discovery omits pre-receipt ChatGPT.app candidate"
+  assert_not_contains "${executable_body}" '--version' "protected executable discovery is passive"
 }
 
 run_case "multi-user × multi-connector cross-product"           t_multi_user_multi_connector_produces_cross_product
@@ -265,7 +352,11 @@ run_case "empty user list still emits valid manifest"           t_empty_users_st
 run_case "empty connector list still emits valid manifest"      t_empty_connectors_still_emits_valid_manifest
 run_case "absent connectors are skipped (partial-box render)"   t_absent_connector_skipped_partial_box
 run_case "all connectors absent yields zero rows"               t_all_connectors_absent_yields_zero_rows
+run_case "protected connector without exact executable is skipped" t_protected_connector_without_exact_executable_is_skipped
 run_case "rendered targets.yaml parses (schema round-trip)"     t_rendered_yaml_parses
 run_case "rows pin enabled + int uid/gid"                       t_rows_pin_enabled_and_int_uid_gid
 run_case "rows omit data_dir (per-user Install default is used)" t_rows_omit_data_dir
 run_case "hostile agent version cannot inject targets"          t_hostile_agent_version_cannot_inject_targets
+run_case "hostile agent executable round-trips as one scalar"   t_hostile_agent_executable_round_trips_as_one_scalar
+run_case "YAML controls are rejected without invalid manifest" t_yaml_controls_are_rejected_without_invalidating_manifest
+run_case "Codex protected discovery never executes ChatGPT.app" t_codex_protected_manifest_discovery_never_executes_chatgpt_app

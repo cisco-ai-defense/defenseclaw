@@ -67,6 +67,9 @@ func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	if err := validateClaudeCodeAgentProvenance(opts); err != nil {
+		return fmt.Errorf("claudecode native agent provenance: %w", err)
+	}
 	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
 	if err != nil {
 		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
@@ -106,7 +109,7 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	if opts.InstallCodeGuard {
-		if err := ensureClaudeCodeCodeGuardPlugin(ctx); err != nil {
+		if err := ensureClaudeCodeCodeGuardPlugin(ctx, opts); err != nil {
 			return fmt.Errorf("claude CodeGuard plugin install: %w", err)
 		}
 	}

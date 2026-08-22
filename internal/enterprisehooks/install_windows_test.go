@@ -153,6 +153,53 @@ func windowsManagedInstallOptions(fixture windowsManagedInstallFixture) InstallO
 	}
 }
 
+func TestInstallWindowsRejectsAgentExecutableFromDirectAndManifestInputs(t *testing.T) {
+	originalAdmin := windowsEnterpriseAdministratorCheck
+	windowsEnterpriseAdministratorCheck = func() error {
+		t.Fatal("Windows executable rejection ran after administrator workflow")
+		return nil
+	}
+	t.Cleanup(func() { windowsEnterpriseAdministratorCheck = originalAdmin })
+
+	for _, test := range []struct {
+		name string
+		opts InstallOptions
+	}{
+		{
+			name: "direct",
+			opts: InstallOptions{ConnectorName: "claudecode", AgentExecutable: `C:\Users\alice\claude.exe`},
+		},
+		{
+			name: "manifest",
+			opts: func() InstallOptions {
+				path := filepath.Join(t.TempDir(), "targets.yaml")
+				body := []byte("version: 1\ntargets:\n  - user_home: 'C:\\Users\\alice'\n    connector: claudecode\n    agent_version: '2.1.219'\n    agent_executable: 'C:\\Users\\alice\\claude.exe'\n")
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				manifest, err := LoadManifest(path)
+				if err != nil {
+					t.Fatalf("LoadManifest: %v", err)
+				}
+				target := manifest.Targets[0]
+				return InstallOptions{
+					ConnectorName:   target.Connector,
+					UserHome:        target.UserHome,
+					AgentVersion:    target.AgentVersion,
+					AgentExecutable: target.AgentExecutable,
+				}
+			}(),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Install(context.Background(), test.opts)
+			if err == nil || !strings.Contains(err.Error(), "agent_executable is not supported") {
+				t.Fatalf("Install error = %v", err)
+			}
+		})
+	}
+}
+
 func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
 		"allowManagedHooksOnly": true,

@@ -21,6 +21,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+type codexPolicyFixtureFinalizer struct {
+	afterSetup    func(setupSucceeded bool) error
+	afterTeardown func() error
+}
+
 // TestConnectorLifecycle_Matrix runs the full Setup → VerifyClean →
 // Teardown → VerifyClean sequence against every built-in connector
 // using isolated tmpdir homes. This is the connector-package-level
@@ -47,6 +52,7 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 		t.Run(fx.Name, func(t *testing.T) {
 			home, dataDir := fx.Apply(t)
 			_ = home
+			var codexPolicyFixture *codexPolicyFixtureFinalizer
 
 			reg := connector.NewDefaultRegistry()
 			c, ok := reg.Get(fx.Name)
@@ -79,7 +85,7 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 				seedClaudeCodeSettingsParentDir(t)
 			case "codex":
 				seedCodexConfigParentDir(t)
-				seedCodexPolicyFixture(t, dataDir, &opts)
+				codexPolicyFixture = seedCodexPolicyFixture(t, dataDir, c, &opts)
 			}
 
 			// Stage 1: pre-Setup, fresh DataDir + isolated home →
@@ -102,17 +108,34 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 			// (sandbox enforcement requires external binaries that
 			// may not be present in CI), but never fail-open.
 			if err := c.Setup(context.Background(), opts); err != nil {
+				if codexPolicyFixture != nil {
+					if rollbackErr := codexPolicyFixture.afterSetup(false); rollbackErr != nil {
+						t.Fatalf("[%s] Setup failed (%v) and protected fixture rollback failed: %v", fx.Name, err, rollbackErr)
+					}
+					codexPolicyFixture = nil
+				}
 				if isExternalDependencyError(err) {
 					t.Skipf("[%s] Setup needs external dependency unavailable in this environment: %v",
 						fx.Name, err)
 				}
 				t.Fatalf("[%s] Setup: %v", fx.Name, err)
 			}
+			if codexPolicyFixture != nil {
+				if err := codexPolicyFixture.afterSetup(true); err != nil {
+					t.Fatalf("[%s] seal durable setup evidence and consume protected selection: %v", fx.Name, err)
+				}
+			}
 
 			// Stage 3: Teardown. MUST succeed even if Setup left
 			// residual state — Teardown is the recovery path.
 			if err := c.Teardown(context.Background(), opts); err != nil {
 				t.Errorf("[%s] Teardown: %v", fx.Name, err)
+			}
+			if codexPolicyFixture != nil {
+				if err := codexPolicyFixture.afterTeardown(); err != nil {
+					t.Errorf("[%s] restore protected fixture lock after Teardown: %v", fx.Name, err)
+				}
+				codexPolicyFixture = nil
 			}
 
 			// Stage 4: post-Teardown VerifyClean. The residual list

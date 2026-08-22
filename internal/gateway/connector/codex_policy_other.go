@@ -14,15 +14,19 @@ func codexSystemRequirementsPath() (string, error) {
 	return "/etc/codex/requirements.toml", nil
 }
 
-func startCodexAppServerTree(cmd *exec.Cmd) (func(), error) {
-	if err := cmd.Start(); err != nil {
+func startCodexAppServerTree(cmd *exec.Cmd, expectedDigest ...string) (func(), error) {
+	digest := ""
+	if len(expectedDigest) > 0 {
+		digest = expectedDigest[0]
+	}
+	if err := startCodexAppServerProcess(cmd, digest); err != nil {
 		return nil, err
 	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+				_ = terminateCodexAppServerProcess(cmd)
 			}
 			_ = cmd.Wait()
 		})

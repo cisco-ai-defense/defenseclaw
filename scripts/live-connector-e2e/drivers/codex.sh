@@ -72,10 +72,54 @@ wire_api = "responses"
 EOF
 }
 
+_codex_is_exact_version() {
+  [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
+}
+
+_codex_resolved_version() {
+  local requested="${CODEX_VERSION:-${DC_E2E_AGENT_VERSION_REQUEST:-latest}}"
+  local resolved
+  requested="${requested#v}"
+  case "${requested}" in
+    ""|default) requested="latest" ;;
+    latest) ;;
+    *)
+      if ! _codex_is_exact_version "${requested}"; then
+        dc_err "invalid Codex CLI version"
+        return 1
+      fi
+      ;;
+  esac
+
+  if [ "${requested}" = "latest" ]; then
+    # npm view reads registry metadata only; the resolved exact version is
+    # installed below and reported without executing the new CLI before Setup.
+    resolved="$(dc_without_provider_credentials npm view @openai/codex@latest version)" || return 1
+    resolved="$(printf '%s' "${resolved}" | tr -d '\r\n')"
+    if ! _codex_is_exact_version "${resolved}"; then
+      dc_err "npm returned an invalid Codex CLI version"
+      return 1
+    fi
+  else
+    resolved="${requested}"
+  fi
+  printf '%s' "${resolved}"
+}
+
 agent_install() {
-  npm install -g "@openai/codex@${CODEX_VERSION:-latest}" || return 1
-  DC_E2E_AGENT_VERSION="$(dc_capture_version codex codex --version)"
+  local version
+  version="$(_codex_resolved_version)" || return 1
+  # The official @openai/codex package has no lifecycle scripts. Keep npm's
+  # script runner disabled and withhold all provider credentials regardless.
+  dc_without_provider_credentials npm install -g --ignore-scripts "@openai/codex@${version}" || return 1
+  DC_E2E_AGENT_VERSION="${version}"
   export DC_E2E_AGENT_VERSION
+
+  # Credential-free installer consumers (including enterprise hardening CI)
+  # reuse this exact reviewed package path but stop before provider setup.
+  if [ "${DC_E2E_CLIENT_PROVISION_ONLY:-0}" = "1" ]; then
+    return 0
+  fi
 
   if [ "${DC_USE_AZURE:-0}" = "1" ]; then
     if [ -z "${AZURE_OPENAI_ENDPOINT:-}" ] || [ -z "${AZURE_OPENAI_DEPLOYMENT:-}" ] || [ -z "${AZURE_OPENAI_API_KEY:-}" ]; then
@@ -100,4 +144,6 @@ agent_run() {
     "${prompt}"
 }
 
-dc_driver_main codex
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  dc_driver_main codex
+fi

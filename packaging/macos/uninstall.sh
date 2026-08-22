@@ -27,6 +27,10 @@
 #       ~/.config/amp/plugins/defenseclaw.ts
 #                                    (restore/remove only when the structured
 #                                     backup identity + post hash still match)
+#       ~/.config/opencode/plugins/defenseclaw.js
+#                                    (default; an exact custom
+#                                     OPENCODE_CONFIG_DIR target may instead
+#                                     be captured by managed-backup authority)
 #     Non-DefenseClaw user entries in those files are preserved verbatim.
 #     Pass --keep-agent-configs to skip the scrub.
 
@@ -34,11 +38,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Path to the Python scrubber for the `amp` connector. Amp's plugin
-# lives at ~/.config/amp/plugins/defenseclaw.ts and is signed-backup-
-# managed by scrub_agent_configs.py — restoring the pre-install
-# plugin content on uninstall requires SHA-256 verification against a
-# manifest under ~/.defenseclaw/connector_backups/amp/config.json.
+# Path to the Python scrubber for whole-file managed plugins. Amp and
+# OpenCode are private-receipt-managed by scrub_agent_configs.py — restoring
+# their pre-install content requires SHA-256 verification against the exact
+# connector authority under ~/.defenseclaw/connector_backups/.
 # The codex/claudecode/cursor connectors are scrubbed by the Go
 # `defenseclaw-gateway enterprise hooks scrub` subcommand (no python3
 # runtime dependency). See scrub_agent_config() below for the split.
@@ -120,9 +123,13 @@ Options:
                           ~/.claude/settings.json
                           ~/.cursor/hooks.json
                           ~/.config/amp/plugins/defenseclaw.ts
+                          ~/.config/opencode/plugins/defenseclaw.js (default),
+                          or the exact custom OPENCODE_CONFIG_DIR plugin path
+                          captured in OpenCode's private backup authority
                         Non-DefenseClaw entries in those files are preserved.
-                        Amp cleanup uses:
+                        Managed plugin cleanup uses:
                           ~/.defenseclaw/connector_backups/amp/config.json
+                          ~/.defenseclaw/connector_backups/opencode/config.json
                         and refuses to change a drifted or unsafe plugin.
   --keep-agent-configs  With --purge, skip the agent-config scrub. Hook
                         scripts will be deleted, leaving dangling references
@@ -224,6 +231,7 @@ if [[ "${PURGE}" == "true" ]]; then
         printf '[uninstall] and will SCRUB DefenseClaw entries from each user'\''s:\n'
         printf '  ~/.codex/config.toml\n  ~/.claude/settings.json\n  ~/.cursor/hooks.json\n'
         printf '  ~/.config/amp/plugins/defenseclaw.ts (exact backup authority required)\n'
+        printf '  ~/.config/opencode/plugins/defenseclaw.js (default), or the exact custom OPENCODE_CONFIG_DIR plugin captured by private authority\n'
         printf '  (non-DefenseClaw entries preserved)\n'
       fi
     fi
@@ -481,14 +489,12 @@ _scrub_bin() {
 
 SCRUB_BIN="$(_scrub_bin)"
 
-# python3 resolver — used only by the `amp` connector's scrub path.
+# python3 resolver — used only by whole-file managed plugin scrub paths.
 # The other three connectors (codex / claudecode / cursor) route
 # through the Go binary at ${SCRUB_BIN} and do not need python3.
-# `amp` needs SHA-256 verification against a signed manifest to
-# restore its plugin file safely, which the Go scrubber doesn't
-# implement today; keeping python3 gated to this one connector
-# preserves the QA rip-out for the common case without regressing
-# Amp uninstall.
+# Amp and OpenCode need SHA-256 verification against connector-bound
+# manifests to restore their plugin files safely, which the structured Go
+# scrubber does not implement. Keep python3 gated to these two connectors.
 PY="$(command -v python3 || printf '/usr/bin/python3')"
 
 scrub_agent_config() {
@@ -496,8 +502,9 @@ scrub_agent_config() {
   local cfg="$2"
   local run_as_user="$3"   # empty ⇒ run as caller (root)
   local authority="${4:-}"
-  if [[ "${connector}" == "amp" ]]; then
-    if [[ ! -e "${cfg}" && ! -L "${cfg}" ]]; then
+  if [[ "${connector}" == "amp" || "${connector}" == "opencode" ]]; then
+    if [[ ! -e "${cfg}" && ! -L "${cfg}" \
+       && ! -e "${authority}" && ! -L "${authority}" ]]; then
       return 0
     fi
   elif [[ ! -f "${cfg}" ]]; then
@@ -506,13 +513,10 @@ scrub_agent_config() {
   log "  scrubbing ${connector} entries from ${cfg}"
   local rc=0
 
-  # Split-route: `amp` uses the Python scrubber (signed-backup
-  # restore of ~/.config/amp/plugins/defenseclaw.ts requires SHA-256
-  # verification against the manifest under
-  # ~/.defenseclaw/connector_backups/amp/config.json — logic that
-  # lives in scrub_agent_configs.py). Everything else uses the Go
-  # binary, which is python3-free per the QA rip-out.
-  if [[ "${connector}" == "amp" ]]; then
+  # Split-route: whole-file managed plugins use the Python scrubber for
+  # connector/path-bound SHA-256 backup authority. Structured hook configs
+  # use the Go binary, which remains python3-free per the QA rip-out.
+  if [[ "${connector}" == "amp" || "${connector}" == "opencode" ]]; then
     # Threat model parity with the Go binary path below: uninstall.sh
     # runs under `sudo`, and this branch executes SCRUB_PY as
     # root-or-target-user. Reuse the bundle tier of _scrub_bin_trusted
@@ -530,13 +534,15 @@ scrub_agent_config() {
     fi
     if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
       if [[ -n "${authority}" ]]; then
-        sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+        sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" \
+          "${connector}" "${cfg}" "${authority}" --retain-authority || rc=$?
       else
         sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
       fi
     else
       if [[ -n "${authority}" ]]; then
-        "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+        "${PY}" "${SCRUB_PY}" \
+          "${connector}" "${cfg}" "${authority}" --retain-authority || rc=$?
       else
         "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
       fi
@@ -562,7 +568,7 @@ scrub_agent_config() {
   case "${rc}" in
     0) ;;
     *)
-      warn "  scrub exited ${rc} for ${cfg} (left unmodified)"
+      warn "  scrub exited ${rc} for ${cfg} (cleanup incomplete; inspect the target and rerun)"
       SCRUB_FAILED="true"
       ;;
   esac
@@ -580,8 +586,16 @@ if [[ "${PURGE}" == "true" \
     scrub_agent_config amp \
       "${_phome}/.config/amp/plugins/defenseclaw.ts" "${_pu}" \
       "${_phome}/.defenseclaw/connector_backups/amp/config.json"
+    _opencode_authority="${_phome}/.defenseclaw/connector_backups/opencode/config.json"
+    _opencode_target="--target-from-authority"
+    if [[ ! -e "${_opencode_authority}" && ! -L "${_opencode_authority}" ]]; then
+      # Without authority a custom location is intentionally undiscoverable,
+      # but the default target must still fail closed if it remains live.
+      _opencode_target="${_phome}/.config/opencode/plugins/defenseclaw.js"
+    fi
+    scrub_agent_config opencode "${_opencode_target}" "${_pu}" "${_opencode_authority}"
   done <<< "${PURGE_TARGETS}"
-  unset _pu _puid _pgid _phome
+  unset _pu _puid _pgid _phome _opencode_authority _opencode_target
 fi
 
 # ---- remove files we own unconditionally --------------------------------
@@ -683,6 +697,11 @@ if [[ "${PURGE}" == "true" ]]; then
     fi
     while IFS=: read -r _pu _puid _pgid _phome; do
       [[ -z "${_pu}" || -z "${_phome}" ]] && continue
+      if [[ "${KEEP_AGENT_CONFIGS}" == "true" \
+         && ( -e "${_phome}/.defenseclaw/connector_backups/opencode/config.json" \
+           || -L "${_phome}/.defenseclaw/connector_backups/opencode/config.json" ) ]]; then
+        warn "--keep-agent-configs: the OpenCode plugin captured by private authority remains (this may be under a custom OPENCODE_CONFIG_DIR); its authority will be deleted"
+      fi
       if [[ -d "${_phome}/.defenseclaw" ]]; then
         log "purging ${_phome}/.defenseclaw"
         rm -rf "${_phome}/.defenseclaw"
@@ -691,7 +710,8 @@ if [[ "${PURGE}" == "true" ]]; then
         for cfg in "${_phome}/.codex/config.toml" \
                    "${_phome}/.claude/settings.json" \
                    "${_phome}/.cursor/hooks.json" \
-                   "${_phome}/.config/amp/plugins/defenseclaw.ts"; do
+                   "${_phome}/.config/amp/plugins/defenseclaw.ts" \
+                   "${_phome}/.config/opencode/plugins/defenseclaw.js"; do
           if [[ -f "${cfg}" ]]; then
             warn "--keep-agent-configs: ${cfg} remains after DefenseClaw runtime deletion (its managed hook/plugin may fail closed)"
           fi

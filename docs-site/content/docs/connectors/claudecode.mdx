@@ -42,6 +42,15 @@ Claude Code native Windows setup is supported. The hook and lifecycle contract
 is implemented, while official-client validation metadata remains empty and
 `live=false`; support availability is not a certification claim.
 
+Native macOS arm64 setup is **preview**. DefenseClaw selects the exact official
+native image under `~/.local/share/claude/versions/<version>` rather than an
+npm wrapper, requires a regular non-link arm64 Mach-O with Anthropic's pinned
+Developer ID identity, current-user custody, safe ancestry, and no quarantine
+xattr, then seals its path, version, and SHA-256 into protected setup evidence.
+Any missing, superseded, or drifted evidence fails before hook mutation.
+Durable packaged and authenticated official-client certification metadata is
+still empty, so availability is not a certification claim.
+
 Native OTLP uses managed loopback exporter settings with a Claude-scoped
 Authorization bearer. Logs and metrics are enabled; traces are explicitly
 disabled. Prompt and assistant-response content logging are independent

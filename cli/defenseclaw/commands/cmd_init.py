@@ -56,6 +56,16 @@ _WINDOWS_SETUP_EXECUTABLE = "DefenseClawSetup-x64.exe"
 _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 
 
+def _discover_agents_for_init(**kwargs):
+    """Use setup's passive protected-macOS discovery boundary."""
+
+    if platform_support.host_os() != "darwin":
+        return agent_discovery.discover_agents(**kwargs)
+    from defenseclaw.commands.cmd_setup import _discover_agents_for_setup
+
+    return _discover_agents_for_setup(**kwargs)
+
+
 @click.command("init")
 @click.option(
     "--skip-install",
@@ -993,7 +1003,7 @@ def _prompt_trust_discovery_prefixes(
         return disc
 
     ux.subhead("  Re-scanning connector versions with updated trusted prefixes...")
-    return agent_discovery.discover_agents(
+    return _discover_agents_for_init(
         use_cache=False,
         refresh=rescan_agents,
         data_dir=target_data_dir,
@@ -1025,7 +1035,7 @@ def _prompt_connector_selection(
                 # exact SST image in run_first_run. Do not publish or trust a
                 # generic discovery result before that transaction begins.
                 return names
-            disc = agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
+            disc = _discover_agents_for_init(refresh=rescan_agents, data_dir=data_dir)
             _prompt_trust_discovery_prefixes(
                 disc,
                 data_dir=data_dir,
@@ -1034,7 +1044,7 @@ def _prompt_connector_selection(
                 trusted_prompt_cache=trusted_prompt_cache,
             )
             return names
-    disc = agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
+    disc = _discover_agents_for_init(refresh=rescan_agents, data_dir=data_dir)
     disc = _prompt_trust_discovery_prefixes(
         disc,
         data_dir=data_dir,
@@ -1217,10 +1227,16 @@ def _supported_action_connectors(
     failed: list[str] = []
     for name in candidates:
         key = connector_paths.normalize(name)
-        if platform_support.host_os() == "windows" and key == "opencode":
+        if (
+            (platform_support.host_os() == "windows" and key == "opencode")
+            or (
+                platform_support.host_os() == "darwin"
+                and key in {"codex", "claudecode", "openhands"}
+            )
+        ):
             # Carry the requested mode provisionally. run_first_run performs
-            # the exact SST selection/version gate before any state mutation;
-            # generic discovery cannot downgrade or authorize this connector.
+            # the exact protected selection/version gate before any state
+            # mutation; generic discovery cannot downgrade or authorize it.
             out.append(key)
             continue
         if _check_connector_version_supported_for_setup(
@@ -1236,7 +1252,7 @@ def _supported_action_connectors(
 
     if allow_trusted_path_prompt and failed:
         try:
-            prompt_disc = agent_discovery.discover_agents(
+            prompt_disc = _discover_agents_for_init(
                 use_cache=False,
                 refresh=True,
                 data_dir=data_dir,
@@ -1329,7 +1345,7 @@ def _fresh_action_downgrade_record(
     here too so scripted init reports the same concrete reason the gate saw.
     """
     try:
-        discovery = agent_discovery.discover_agents(
+        discovery = _discover_agents_for_init(
             use_cache=False,
             refresh=True,
             data_dir=data_dir,
@@ -1436,7 +1452,7 @@ def _build_noninteractive_connector_settings(
             )
         return _single(connector, discover=False)
 
-    disc = agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
+    disc = _discover_agents_for_init(refresh=rescan_agents, data_dir=data_dir)
     detected = _installed_hook_connectors(disc)
 
     configured: list[str] = []
@@ -1639,7 +1655,8 @@ def _prompt_first_run_judge_llm_config(
         _LOCAL_LLM_DEFAULT_BASE_URL,
         _LOCAL_LLM_WIZARD_PROVIDERS,
         DEFENSECLAW_LLM_KEY_ENV,
-        _prompt_and_save_secret,
+        _load_dotenv,
+        _mask,
     )
 
     provider = pick_provider(
@@ -1668,13 +1685,25 @@ def _prompt_first_run_judge_llm_config(
         flag_value=None,
         non_interactive=False,
     )
-    _prompt_and_save_secret(key_env, llm_api_key, os.fspath(data_dir))
+    # Keep the value in-process until run_first_run has completed protected
+    # executable selection. Persisting it here would put a new provider secret
+    # into .env before the selected macOS client has executable authority.
+    dotenv_value = _load_dotenv(os.path.join(os.fspath(data_dir), ".env")).get(key_env, "")
+    effective_key = llm_api_key or os.environ.get(key_env, "") or dotenv_value
+    hint = _mask(effective_key) if effective_key else "(not set)"
+    entered_key = click.prompt(
+        f"  {key_env} [{hint}]",
+        default="",
+        show_default=False,
+        hide_input=True,
+    )
+    pending_key = entered_key or effective_key
     base_url = click.prompt(
         "  LLM base URL (leave blank to use provider default)",
         default=llm_base_url or "",
         show_default=bool(llm_base_url),
     )
-    return provider, model, "", key_env, base_url
+    return provider, model, pending_key, key_env, base_url
 
 
 def _activate_additional_connectors(
@@ -1725,17 +1754,25 @@ def _activate_additional_connectors(
             selected_keys.append(key)
 
     verified_selection = protected_selection
-    if platform_support.host_os() == "windows" and "opencode" in selected_keys:
-        from defenseclaw.agent_selection import setup_agent_selection_connectors
+    host_os = platform_support.host_os()
+    protected_first_run = (
+        (host_os == "windows" and "opencode" in selected_keys)
+        or (
+            host_os == "darwin"
+            and any(name in {"codex", "claudecode", "openhands"} for name in selected_keys)
+        )
+    )
+    if protected_first_run:
         from defenseclaw.commands.cmd_setup import (
             _capture_setup_config_snapshot,
             _record_windows_setup_agent_selections,
             _restore_setup_agent_selection_snapshot,
             _restore_setup_hook_contract_lock_snapshot,
             _revalidate_setup_agent_selections,
+            _setup_agent_selection_connectors_for_host,
         )
 
-        expected_selection = setup_agent_selection_connectors(selected_keys)
+        expected_selection = _setup_agent_selection_connectors_for_host(tuple(selected_keys))
         try:
             verified_selection = _revalidate_setup_agent_selections(
                 cfg.data_dir,
@@ -1767,9 +1804,15 @@ def _activate_additional_connectors(
                         f"authority rollback was incomplete: {'; '.join(rollback_errors)}"
                     ) from exc
                 raise
-        if verified_selection is None or verified_selection.record_for("opencode") is None:
+        if verified_selection is None or any(
+            verified_selection.record_for(name) is None for name in expected_selection
+        ):
+            if host_os == "windows":
+                detail = "native-Windows OpenCode extras require a fresh receipt-bound exact SST selection"
+            else:
+                detail = "protected macOS extras require a complete receipt-bound executable selection"
             raise click.ClickException(
-                "native-Windows OpenCode extras require a fresh receipt-bound exact SST selection"
+                detail
             )
 
     # Rebuild the multi map from the connector selection made in this init
@@ -1790,7 +1833,6 @@ def _activate_additional_connectors(
         # so without this the CLI would silently write an action-mode connector
         # the gateway then refuses to enforce.
         version_check_kwargs = {
-            "mode": "action",
             "emit": allow_trusted_path_prompt,
             "data_dir": getattr(cfg, "data_dir", None),
             "_allow_prompt": allow_trusted_path_prompt,
@@ -1799,15 +1841,27 @@ def _activate_additional_connectors(
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         exact_windows_opencode = (
             key == "opencode"
-            and platform_support.host_os() == "windows"
+            and host_os == "windows"
             and verified_selection is not None
             and verified_selection.record_for(key) is not None
         )
-        if (
-            mode == "action"
-            and not exact_windows_opencode
-            and not _check_connector_version_supported_for_setup(key, **version_check_kwargs)
-        ):
+        protected_darwin_record = (
+            verified_selection.record_for(key)
+            if host_os == "darwin"
+            and key in {"codex", "claudecode", "openhands"}
+            and verified_selection is not None
+            else None
+        )
+        if protected_darwin_record is not None:
+            version_check_kwargs["_protected_record"] = protected_darwin_record
+        version_admitted = True
+        if not exact_windows_opencode and (mode == "action" or protected_darwin_record is not None):
+            version_admitted = _check_connector_version_supported_for_setup(
+                key,
+                mode=mode,
+                **version_check_kwargs,
+            )
+        if mode == "action" and not version_admitted:
             warning = _fresh_action_downgrade_record(
                 key,
                 data_dir=getattr(cfg, "data_dir", None),
@@ -1821,6 +1875,10 @@ def _activate_additional_connectors(
                     err=True,
                 )
             mode = "observe"
+        elif not version_admitted:
+            raise click.ClickException(
+                f"connector {key!r} did not pass first-run version admission"
+            )
         pc.mode = "action" if mode == "action" else "observe"
         if s["fail_mode"]:
             pc.hook_fail_mode = "closed" if s["fail_mode"].lower() == "closed" else "open"
@@ -1878,7 +1936,7 @@ def _normalize_connector_arg(
 ) -> str:
     if connector is None and discover_default:
         try:
-            disc = agent_discovery.discover_agents(refresh=refresh_agents)
+            disc = _discover_agents_for_init(refresh=refresh_agents)
             discovered = agent_discovery.first_installed(disc, "codex")
             if platform_support.connector_supported_on_os(discovered):
                 connector = discovered

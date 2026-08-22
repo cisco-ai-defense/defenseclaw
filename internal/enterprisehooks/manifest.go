@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -28,7 +29,11 @@ type ManifestTarget struct {
 	Connector    string `json:"connector,omitempty" yaml:"connector,omitempty"`
 	DataDir      string `json:"data_dir,omitempty" yaml:"data_dir,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty" yaml:"agent_version,omitempty"`
-	Enabled      *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// AgentExecutable is an exact administrator-selected native client image.
+	// The guardian never resolves this value through PATH, and protected hosts
+	// bind it to a short-lived digest receipt before connector Setup.
+	AgentExecutable string `json:"agent_executable,omitempty" yaml:"agent_executable,omitempty"`
+	Enabled         *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 }
 
 func LoadManifest(path string) (Manifest, error) {
@@ -70,6 +75,15 @@ func LoadManifest(path string) (Manifest, error) {
 		}
 		if strings.TrimSpace(target.Connector) == "" {
 			return Manifest{}, fmt.Errorf("enterprise hooks: target %d requires connector", i)
+		}
+		if target.AgentExecutable != strings.TrimSpace(target.AgentExecutable) ||
+			strings.ContainsAny(target.AgentExecutable, "\x00\r\n") ||
+			(target.AgentExecutable != "" && (!filepath.IsAbs(target.AgentExecutable) ||
+				filepath.Clean(target.AgentExecutable) != target.AgentExecutable)) {
+			return Manifest{}, fmt.Errorf("enterprise hooks: target %d has invalid agent_executable", i)
+		}
+		if target.AgentExecutable != "" && strings.TrimSpace(target.AgentVersion) == "" {
+			return Manifest{}, fmt.Errorf("enterprise hooks: target %d requires agent_version with agent_executable", i)
 		}
 	}
 	return manifest, nil

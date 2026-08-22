@@ -231,33 +231,41 @@ TOML
   assert_contains "${out}" "my-own-hook.sh" "user hook script preserved"
 }
 
-_make_amp_fixture() {
-  local home="$1"
-  local managed="$2"
-  local existed="$3"
-  local pristine="$4"
-  local mode="${5:-384}" # decimal 0600
-  local plugin="${home}/.config/amp/plugins/defenseclaw.ts"
-  local backup="${home}/.defenseclaw/connector_backups/amp/config.json"
+_make_managed_plugin_fixture() {
+  local connector="$1"
+  local home="$2"
+  local managed="$3"
+  local existed="$4"
+  local pristine="$5"
+  local mode="${6:-384}" # decimal 0600
+  local config_root="${7:-${home}/.config/${connector}}"
+  local extension="ts"
+  [[ "${connector}" == "opencode" ]] && extension="js"
+  local plugin="${config_root}/plugins/defenseclaw.${extension}"
+  local backup="${home}/.defenseclaw/connector_backups/${connector}/config.json"
   local pristine_file="${home}/pristine.fixture"
   mkdir -p "$(dirname "${plugin}")" "$(dirname "${backup}")"
+  chmod 0700 \
+    "${home}/.defenseclaw" \
+    "${home}/.defenseclaw/connector_backups" \
+    "$(dirname "${backup}")"
   printf '%s' "${managed}" > "${plugin}"
   printf '%s' "${pristine}" > "${pristine_file}"
   chmod 0600 "${plugin}"
-  "${PY}" - "${plugin}" "${backup}" "${existed}" "${mode}" "${pristine_file}" <<'PY'
+  "${PY}" - "${connector}" "${plugin}" "${backup}" "${existed}" "${mode}" "${pristine_file}" <<'PY'
 import base64
 import hashlib
 import json
 import os
 import sys
 
-plugin, backup, existed_raw, mode_raw, pristine_path = sys.argv[1:]
+connector, plugin, backup, existed_raw, mode_raw, pristine_path = sys.argv[1:]
 managed = open(plugin, "rb").read()
 pristine = open(pristine_path, "rb").read()
 existed = existed_raw == "true"
 document = {
     "version": 1,
-    "connector": "amp",
+    "connector": connector,
     "logical_name": "config",
     "path": plugin,
     "existed": existed,
@@ -276,6 +284,14 @@ PY
   rm -f "${pristine_file}"
 }
 
+_make_amp_fixture() {
+  _make_managed_plugin_fixture amp "$@"
+}
+
+_make_opencode_fixture() {
+  _make_managed_plugin_fixture opencode "$@"
+}
+
 _mutate_amp_backup() {
   local backup="$1"
   local key="$2"
@@ -288,6 +304,25 @@ path, key, value = sys.argv[1:]
 with open(path, "r", encoding="utf-8") as stream:
     document = json.load(stream)
 document[key] = value
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(document, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
+  chmod 0600 "${backup}"
+}
+
+_mutate_managed_backup_json() {
+  local backup="$1"
+  local key="$2"
+  local value_json="$3"
+  "${PY}" - "${backup}" "${key}" "${value_json}" <<'PY'
+import json
+import sys
+
+path, key, value_json = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as stream:
+    document = json.load(stream)
+document[key] = json.loads(value_json)
 with open(path, "w", encoding="utf-8") as stream:
     json.dump(document, stream, indent=2, sort_keys=True)
     stream.write("\n")
@@ -464,6 +499,436 @@ t_amp_nonprivate_or_missing_backup_refuses() {
   assert_eq "${out}" "// managed plugin" "plugin preserved without backup authority"
 }
 
+t_managed_backup_parser_rejects_noncanonical_types() {
+  local home plugin backup rc
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/amp/plugins/defenseclaw.ts"
+  backup="${home}/.defenseclaw/connector_backups/amp/config.json"
+  _make_amp_fixture "${home}" "// managed plugin" false ""
+
+  _mutate_managed_backup_json "${backup}" version '1.0'
+  rc=0
+  ${PY} "${SCRUB}" amp "${plugin}" "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "floating-point backup version must refuse cleanup"
+  assert_file_exists "${plugin}"
+  assert_file_exists "${backup}"
+
+  _mutate_managed_backup_json "${backup}" version '1'
+  _mutate_managed_backup_json "${backup}" mode '511'
+  rc=0
+  ${PY} "${SCRUB}" amp "${plugin}" "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "missing-file backup with nonzero mode must refuse cleanup"
+  assert_file_exists "${plugin}"
+  assert_file_exists "${backup}"
+}
+
+t_darwin_acl_output_parser_is_fail_closed() {
+  local rc=0
+  "${PY}" - "${SCRUB}" <<'PY' || rc=$?
+import importlib.util
+import sys
+
+path = sys.argv[1]
+name = "defenseclaw_scrub_acl_test"
+spec = importlib.util.spec_from_file_location(name, path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[name] = module
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+validate = module._validate_darwin_acl_output
+plain = "-rw------- 1 user staff 0 Jan 1 00:00 config.json\n"
+deny = "-rw-------+ 1 user staff 0 Jan 1 00:00 config.json\n 0: everyone deny write\n"
+read_allow = "-rw-------+ 1 user staff 0 Jan 1 00:00 plugin.js\n 0: everyone allow read\n"
+xattr_only = "-rw-------@ 1 user staff 0 Jan 1 00:00 plugin.js\n"
+deny_with_keywords_in_name = (
+    "-rw-------+ 1 user staff 0 Jan 1 00:00 plugin.js\n"
+    " 0: user:display allow name deny write\n"
+)
+validate(plain, "/fixture", "fixture", private=True)
+validate(deny, "/fixture", "fixture", private=True)
+validate(read_allow, "/fixture", "fixture", private=False)
+validate(xattr_only, "/fixture", "fixture", private=True)
+validate(deny_with_keywords_in_name, "/fixture", "fixture", private=True)
+
+refused = (
+    ("not-a-mode 1 user staff 0 Jan 1 00:00 fixture\n", False),
+    ("-ww------- 1 user staff 0 Jan 1 00:00 fixture\n", False),
+    ("-rw-------+ 1 user staff 0 Jan 1 00:00 fixture\n", False),
+    ("-rw-------@ 1 user staff 0 Jan 1 00:00 fixture\n 0: everyone deny write\n", False),
+    (deny + "future: everyone allow write\n", False),
+    ("-rw-------+ 1 user staff 0 Jan 1 00:00 fixture\n 1: everyone deny write\n", False),
+    ("-rw-------+ 1 user staff 0 Jan 1 00:00 fixture\n 0: everyone unknown write\n", False),
+    ("-rw-------+ 1 user staff 0 Jan 1 00:00 fixture\n 0: everyone allow future_write\n", False),
+    ("-rw-------+ 1 user staff 0 Jan 1 00:00 fixture\n 0: everyone deny read,\n", False),
+    ("-rw-------+ 1 user staff 0 Jan 1 00:00 fixture\n 0: everyone allow write\n", False),
+    (read_allow, True),
+)
+for output, private in refused:
+    try:
+        validate(output, "/fixture", "fixture", private=private)
+    except OSError:
+        continue
+    raise SystemExit(f"ACL parser accepted unsafe/malformed output: {output!r}")
+PY
+  assert_status "${rc}" 0 "macOS ACL output parser rejects unknown syntax and authority allows"
+}
+
+t_managed_in_place_mutations_refuse_before_commit() {
+  local target_home target_plugin target_backup
+  local authority_home authority_plugin authority_backup
+  local consume_home consume_plugin consume_backup rc
+  target_home="$(mktest_tmp)"
+  target_plugin="${target_home}/.config/amp/plugins/defenseclaw.ts"
+  target_backup="${target_home}/.defenseclaw/connector_backups/amp/config.json"
+  _make_amp_fixture "${target_home}" "// managed target" false ""
+
+  authority_home="$(mktest_tmp)"
+  authority_plugin="${authority_home}/.config/amp/plugins/defenseclaw.ts"
+  authority_backup="${authority_home}/.defenseclaw/connector_backups/amp/config.json"
+  _make_amp_fixture "${authority_home}" "// managed authority" false ""
+
+  consume_home="$(mktest_tmp)"
+  consume_plugin="${consume_home}/.config/amp/plugins/defenseclaw.ts"
+  consume_backup="${consume_home}/.defenseclaw/connector_backups/amp/config.json"
+  _make_amp_fixture "${consume_home}" "// managed replacement" true "// restored pristine"
+  printf '%s' "// restored pristine" > "${consume_plugin}"
+  chmod 0600 "${consume_plugin}"
+
+  rc=0
+  "${PY}" - "${SCRUB}" \
+    "${target_plugin}" "${target_backup}" \
+    "${authority_plugin}" "${authority_backup}" \
+    "${consume_plugin}" "${consume_backup}" <<'PY' || rc=$?
+import importlib.util
+import os
+import sys
+
+(
+    scrub_path,
+    target,
+    target_backup,
+    authority_target,
+    authority,
+    consume_target,
+    consume_authority,
+) = sys.argv[1:]
+name = "defenseclaw_scrub_race_test"
+spec = importlib.util.spec_from_file_location(name, scrub_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[name] = module
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+original_revalidate = module._revalidate_open_file_digest
+
+
+def mutate_same_inode(path):
+    with open(path, "r+b", buffering=0) as stream:
+        first = stream.read(1)
+        stream.seek(0)
+        stream.write(b"!" if first != b"!" else b"?")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def exercise(
+    mutated_path,
+    plugin_path,
+    backup_path,
+    expect_target_unchanged,
+    mutate_on_match=1,
+):
+    expected = os.stat(mutated_path, follow_symlinks=False)
+    fired = False
+    matches = 0
+
+    def hooked(fd, *args, **kwargs):
+        nonlocal fired, matches
+        if os.path.samestat(os.fstat(fd), expected):
+            matches += 1
+            if not fired and matches == mutate_on_match:
+                mutate_same_inode(mutated_path)
+                fired = True
+        return original_revalidate(fd, *args, **kwargs)
+
+    module._revalidate_open_file_digest = hooked
+    before_target = open(plugin_path, "rb").read()
+    try:
+        module.scrub_managed_plugin(module.AMP_PLUGIN_SPEC, plugin_path, backup_path)
+    except OSError:
+        pass
+    else:
+        raise SystemExit(f"same-inode mutation of {mutated_path} was accepted")
+    finally:
+        module._revalidate_open_file_digest = original_revalidate
+    if not fired:
+        raise SystemExit(f"same-inode mutation hook did not fire for {mutated_path}")
+    if not os.path.exists(backup_path):
+        raise SystemExit("backup authority was consumed after an in-place mutation")
+    if expect_target_unchanged and open(plugin_path, "rb").read() != before_target:
+        raise SystemExit("target changed after in-place authority mutation")
+
+
+exercise(target, target, target_backup, False)
+exercise(authority, authority_target, authority, True)
+exercise(consume_authority, consume_target, consume_authority, True, mutate_on_match=2)
+PY
+  assert_status "${rc}" 0 "same-inode target/authority mutation is detected before mutation or receipt consumption"
+  assert_file_exists "${target_plugin}"
+  assert_file_exists "${target_backup}"
+  assert_file_exists "${authority_plugin}"
+  assert_file_exists "${authority_backup}"
+  assert_file_exists "${consume_plugin}"
+  assert_file_exists "${consume_backup}"
+}
+
+t_opencode_removes_unchanged_plugin_created_by_setup() {
+  local home plugin backup rc
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_opencode_fixture "${home}" "// defenseclaw managed OpenCode plugin" false ""
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}"
+  rc=$?; assert_status "${rc}" 0 "unchanged managed OpenCode plugin cleanup"
+  if [[ -e "${plugin}" || -L "${plugin}" ]]; then
+    _fail "OpenCode plugin created by setup was not removed"
+  fi
+  if [[ -e "${backup}" || -L "${backup}" ]]; then
+    _fail "consumed OpenCode backup authority was not removed"
+  fi
+}
+
+t_opencode_restores_exact_pristine_plugin_and_mode() {
+  local home plugin backup rc out mode
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_opencode_fixture \
+    "${home}" "// defenseclaw replacement" true "// operator pristine" 416
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}"
+  rc=$?; assert_status "${rc}" 0 "pre-existing OpenCode plugin restore"
+  out="$(cat "${plugin}")"
+  assert_eq "${out}" "// operator pristine" "pristine OpenCode bytes restored"
+  mode="$(stat -f '%Lp' "${plugin}" 2>/dev/null || stat -c '%a' "${plugin}")"
+  assert_eq "${mode}" "640" "pristine OpenCode mode restored"
+  if [[ -e "${backup}" ]]; then
+    _fail "consumed OpenCode restore metadata was not removed"
+  fi
+}
+
+t_opencode_drift_refuses_and_preserves_authority() {
+  local home plugin backup rc out
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_opencode_fixture "${home}" "// installed managed plugin" false ""
+  printf '%s' "// operator edited after setup" > "${plugin}"
+  rc=0
+  ${PY} "${SCRUB}" opencode "${plugin}" "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "drifted OpenCode plugin must refuse cleanup"
+  out="$(cat "${plugin}")"
+  assert_eq "${out}" "// operator edited after setup" "drifted OpenCode plugin preserved"
+  assert_file_exists "${backup}"
+}
+
+t_opencode_manifest_identity_and_path_mismatches_refuse() {
+  local home plugin backup rc out
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_opencode_fixture "${home}" "// unchanged managed plugin" false ""
+  _mutate_amp_backup "${backup}" connector amp
+  rc=0
+  ${PY} "${SCRUB}" opencode "${plugin}" "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "mismatched OpenCode connector identity must refuse cleanup"
+  out="$(cat "${plugin}")"
+  assert_eq "${out}" "// unchanged managed plugin" "plugin preserved on identity mismatch"
+
+  _mutate_amp_backup "${backup}" connector opencode
+  _mutate_amp_backup "${backup}" path "${home}/elsewhere/defenseclaw.js"
+  rc=0
+  ${PY} "${SCRUB}" opencode "${plugin}" "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "captured OpenCode target mismatch must refuse cleanup"
+  out="$(cat "${plugin}")"
+  assert_eq "${out}" "// unchanged managed plugin" "plugin preserved on path mismatch"
+  assert_file_exists "${backup}"
+}
+
+t_opencode_caller_target_and_authority_binding_refuse() {
+  local home other plugin backup wrong_target rc out
+  home="$(mktest_tmp)"
+  other="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  wrong_target="${home}/.config/opencode/plugins/not-defenseclaw.js"
+  _make_opencode_fixture "${home}" "// unchanged managed plugin" false ""
+  printf '%s' "// wrong target" > "${wrong_target}"
+
+  rc=0
+  ${PY} "${SCRUB}" opencode "${wrong_target}" "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "caller-selected OpenCode target must be exact"
+  rc=0
+  mkdir -p "${other}/not-authority"
+  cp "${backup}" "${other}/not-authority/config.json"
+  chmod 0600 "${other}/not-authority/config.json"
+  ${PY} "${SCRUB}" opencode "${plugin}" "${other}/not-authority/config.json" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "OpenCode authority must use the fixed per-user backup suffix"
+  out="$(cat "${plugin}")"
+  assert_eq "${out}" "// unchanged managed plugin" "plugin preserved on caller binding mismatch"
+  assert_file_exists "${backup}"
+}
+
+t_opencode_authority_resolves_custom_config_root() {
+  local home custom plugin backup rc
+  home="$(mktest_tmp)"
+  custom="${home}/custom/opencode"
+  plugin="${custom}/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_opencode_fixture "${home}" "// custom managed plugin" false "" 384 "${custom}"
+
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}"
+  rc=$?; assert_status "${rc}" 0 "custom OpenCode target resolved from authority"
+  if [[ -e "${plugin}" || -L "${plugin}" ]]; then
+    _fail "custom OpenCode plugin created by setup was not removed"
+  fi
+  if [[ -e "${backup}" || -L "${backup}" ]]; then
+    _fail "custom OpenCode authority was not consumed"
+  fi
+
+  _make_opencode_fixture "${home}" "// custom replacement" true "// custom pristine" 416 "${custom}"
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}"
+  rc=$?; assert_status "${rc}" 0 "custom OpenCode pristine target restored from authority"
+  assert_eq "$(cat "${plugin}")" "// custom pristine" "custom OpenCode pristine bytes restored"
+}
+
+t_opencode_cleanup_reentry_is_idempotent() {
+  local home plugin backup rc
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+
+  _make_opencode_fixture "${home}" "// managed plugin" false ""
+  rm -f "${plugin}"
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}"
+  rc=$?; assert_status "${rc}" 0 "reentry consumes create-only authority after prior unlink"
+  if [[ -e "${backup}" || -L "${backup}" ]]; then
+    _fail "create-only authority survived idempotent reentry"
+  fi
+
+  _make_opencode_fixture "${home}" "// managed replacement" true "// pristine bytes" 416
+  printf '%s' "// pristine bytes" > "${plugin}"
+  chmod 0640 "${plugin}"
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}"
+  rc=$?; assert_status "${rc}" 0 "reentry consumes restore authority after prior atomic restore"
+  assert_eq "$(cat "${plugin}")" "// pristine bytes" "reentry preserves already-restored bytes"
+  if [[ -e "${backup}" || -L "${backup}" ]]; then
+    _fail "restore authority survived idempotent reentry"
+  fi
+}
+
+t_opencode_missing_restore_target_refuses() {
+  local home plugin backup rc
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_opencode_fixture "${home}" "// managed replacement" true "// pristine"
+  rm -f "${plugin}"
+  rc=0
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "missing target with required restore state must refuse"
+  assert_file_exists "${backup}"
+}
+
+t_opencode_darwin_write_acls_refuse() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+  local home plugin backup rc
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_opencode_fixture "${home}" "// managed plugin" false ""
+
+  chmod +a "everyone allow write" "${plugin}"
+  rc=0
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "write-capable plugin ACL must refuse cleanup"
+  chmod -N "${plugin}"
+
+  chmod +a "everyone allow add_file" "$(dirname "${plugin}")"
+  rc=0
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "write-capable plugin-directory ACL must refuse cleanup"
+  chmod -N "$(dirname "${plugin}")"
+
+  chmod +a "everyone allow read" "${backup}"
+  rc=0
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "allow ACL on private authority must refuse cleanup"
+  chmod -N "${backup}"
+  assert_file_exists "${plugin}"
+  assert_file_exists "${backup}"
+}
+
+t_opencode_nonprivate_authority_directory_refuses() {
+  local home plugin backup rc
+  home="$(mktest_tmp)"
+  plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_opencode_fixture "${home}" "// managed plugin" false ""
+  chmod 0755 "$(dirname "${backup}")"
+  rc=0
+  ${PY} "${SCRUB}" opencode --target-from-authority "${backup}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "non-private OpenCode authority directory must refuse cleanup"
+  assert_file_exists "${plugin}"
+  assert_file_exists "${backup}"
+}
+
+t_managed_restore_retains_authority_across_batch_retry() {
+  local home amp_plugin amp_backup opencode_plugin opencode_backup rc
+  home="$(mktest_tmp)"
+  amp_plugin="${home}/.config/amp/plugins/defenseclaw.ts"
+  amp_backup="${home}/.defenseclaw/connector_backups/amp/config.json"
+  opencode_plugin="${home}/.config/opencode/plugins/defenseclaw.js"
+  opencode_backup="${home}/.defenseclaw/connector_backups/opencode/config.json"
+  _make_amp_fixture "${home}" "// managed replacement" true "// operator pristine" 416
+  _make_opencode_fixture "${home}" "// managed opencode" false ""
+  printf '%s' "// drifted opencode" > "${opencode_plugin}"
+
+  # Production order runs Amp immediately before OpenCode. A later OpenCode
+  # refusal must not strand an already-restored Amp file without its receipt.
+  ${PY} "${SCRUB}" amp "${amp_plugin}" "${amp_backup}" --retain-authority
+  rc=$?; assert_status "${rc}" 0 "batch scrub restores the managed plugin"
+  assert_eq "$(cat "${amp_plugin}")" "// operator pristine" "batch scrub restores exact pristine bytes"
+  assert_file_exists "${amp_backup}"
+
+  rc=0
+  ${PY} "${SCRUB}" opencode --target-from-authority "${opencode_backup}" \
+    --retain-authority >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 4 "a later OpenCode refusal aborts the first batch"
+  assert_eq "$(cat "${opencode_plugin}")" "// drifted opencode" \
+    "the later refusal preserves the drifted OpenCode plugin"
+  assert_file_exists "${amp_backup}"
+  assert_file_exists "${opencode_backup}"
+
+  printf '%s' "// managed opencode" > "${opencode_plugin}"
+  chmod 0600 "${opencode_plugin}"
+  ${PY} "${SCRUB}" amp "${amp_plugin}" "${amp_backup}" --retain-authority
+  rc=$?; assert_status "${rc}" 0 "the restored managed plugin is safe on batch retry"
+  ${PY} "${SCRUB}" opencode --target-from-authority "${opencode_backup}" --retain-authority
+  rc=$?; assert_status "${rc}" 0 "the repaired later OpenCode scrub succeeds"
+  if [[ -e "${opencode_plugin}" || -L "${opencode_plugin}" ]]; then
+    _fail "the repaired managed OpenCode plugin survived its batch retry scrub"
+  fi
+  assert_file_exists "${amp_backup}"
+  assert_file_exists "${opencode_backup}"
+
+  rm -rf "${home}/.defenseclaw"
+  if [[ -e "${amp_backup}" || -L "${amp_backup}" \
+     || -e "${opencode_backup}" || -L "${opencode_backup}" ]]; then
+    _fail "outer batch commit did not consume retained managed-plugin authority"
+  fi
+}
+
 t_missing_file_returns_2() {
   ${PY} "${SCRUB}" cursor "/nonexistent/$(date +%s).json" 2>/dev/null
   local rc=$?; assert_status "${rc}" 2 "missing file returns 2"
@@ -509,6 +974,20 @@ run_case "amp: missing post hash refuses"                    t_amp_missing_post_
 run_case "amp: symlink target is never followed"            t_amp_symlink_plugin_refuses_without_touching_target
 run_case "amp: hard-linked plugin refuses"                  t_amp_hardlinked_plugin_refuses
 run_case "amp: non-private/missing backup refuses"          t_amp_nonprivate_or_missing_backup_refuses
+run_case "managed plugin: exact backup schema types"         t_managed_backup_parser_rejects_noncanonical_types
+run_case "managed plugin: ACL output parser fails closed"    t_darwin_acl_output_parser_is_fail_closed
+run_case "managed plugin: in-place mutation refuses"         t_managed_in_place_mutations_refuse_before_commit
+run_case "opencode: removes unchanged setup plugin"         t_opencode_removes_unchanged_plugin_created_by_setup
+run_case "opencode: restores exact pristine plugin"         t_opencode_restores_exact_pristine_plugin_and_mode
+run_case "opencode: drift preserves plugin and authority"   t_opencode_drift_refuses_and_preserves_authority
+run_case "opencode: manifest identity/path mismatches refuse" t_opencode_manifest_identity_and_path_mismatches_refuse
+run_case "opencode: caller target/authority binding refuses" t_opencode_caller_target_and_authority_binding_refuse
+run_case "opencode: authority resolves custom target"        t_opencode_authority_resolves_custom_config_root
+run_case "opencode: cleanup reentry is idempotent"           t_opencode_cleanup_reentry_is_idempotent
+run_case "opencode: missing restore target refuses"          t_opencode_missing_restore_target_refuses
+run_case "opencode: Darwin write ACLs refuse"                t_opencode_darwin_write_acls_refuse
+run_case "opencode: non-private authority dir refuses"       t_opencode_nonprivate_authority_directory_refuses
+run_case "managed plugin: batch failure retains retry authority" t_managed_restore_retains_authority_across_batch_retry
 run_case "missing file returns 2"                           t_missing_file_returns_2
 run_case "unsupported connector returns 3"                  t_unsupported_connector_returns_3
 run_case "garbage JSON returns 4"                           t_garbage_json_returns_4

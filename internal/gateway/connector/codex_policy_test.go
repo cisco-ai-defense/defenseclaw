@@ -117,8 +117,8 @@ func TestInspectCodexSystemRequirements(t *testing.T) {
 }
 
 func TestInspectCodexPolicyFailsClosedForLegacyLockEvidence(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("protected Codex lock authority is native-Windows-only")
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("protected Codex lock authority is native-Windows/macOS-only")
 	}
 	dir := testenv.PrivateTempDir(t)
 	body := []byte(`{"version":2,"updated_at":"2026-07-14T00:00:00Z","connectors":{"codex":{"connector":"codex","updated_at":"2026-07-14T00:00:00Z"}}}`)
@@ -128,6 +128,20 @@ func TestInspectCodexPolicyFailsClosedForLegacyLockEvidence(t *testing.T) {
 	if _, err := inspectCodexEffectivePolicy(context.Background(), SetupOpts{DataDir: dir}); err == nil ||
 		!strings.Contains(err.Error(), "repair") {
 		t.Fatalf("legacy lock inspection error = %v, want repair refusal", err)
+	}
+}
+
+func TestInspectCodexPolicyFailsClosedForInvalidSelectionReceipt(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("protected Codex selection authority is native-Windows/macOS-only")
+	}
+	dir := testenv.PrivateTempDir(t)
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), []byte(`{"schema_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectCodexEffectivePolicy(context.Background(), SetupOpts{DataDir: dir}); err == nil ||
+		!strings.Contains(err.Error(), "invalid or expired") {
+		t.Fatalf("invalid selection receipt error = %v, want fail-closed refusal", err)
 	}
 }
 
@@ -202,8 +216,20 @@ func TestDecodeCodexRPCFiltersFloodAndKeepsTerminalOrdered(t *testing.T) {
 }
 
 func TestValidateCodexPolicyExecutableRejectsReplacement(t *testing.T) {
+	originalValidator := codexNativeExecutableValidator
+	originalVersionValidator := codexNativeExecutableVersionValidator
+	codexNativeExecutableValidator = func(string) error { return nil }
+	codexNativeExecutableVersionValidator = func(string, string, string) error { return nil }
+	t.Cleanup(func() {
+		codexNativeExecutableValidator = originalValidator
+		codexNativeExecutableVersionValidator = originalVersionValidator
+	})
 	dir := testenv.PrivateTempDir(t)
-	executable := filepath.Join(dir, "codex.exe")
+	executableName := "codex.exe"
+	if runtime.GOOS == "darwin" {
+		executableName = "codex"
+	}
+	executable := filepath.Join(dir, executableName)
 	if err := atomicWriteFile(executable, []byte("original-codex"), 0o700); err != nil {
 		t.Fatal(err)
 	}

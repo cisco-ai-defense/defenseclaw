@@ -709,6 +709,10 @@ def _codex_marketplace_files(workspace_dir: str | None) -> list[tuple[str, str]]
         pairs.extend(
             (
                 (
+                    os.path.join(project_root, ".agents", "plugins", "api_marketplace.json"),
+                    project_root,
+                ),
+                (
                     os.path.join(project_root, ".agents", "plugins", "marketplace.json"),
                     project_root,
                 ),
@@ -716,13 +720,23 @@ def _codex_marketplace_files(workspace_dir: str | None) -> list[tuple[str, str]]
                     os.path.join(project_root, ".claude-plugin", "marketplace.json"),
                     project_root,
                 ),
+                (
+                    os.path.join(project_root, ".cursor-plugin", "marketplace.json"),
+                    project_root,
+                ),
             )
         )
     user_root = os.path.abspath(str(Path.home()))
-    pairs.append(
+    pairs.extend(
         (
-            os.path.join(user_root, ".agents", "plugins", "marketplace.json"),
-            user_root,
+            (
+                os.path.join(user_root, ".agents", "plugins", "api_marketplace.json"),
+                user_root,
+            ),
+            (
+                os.path.join(user_root, ".agents", "plugins", "marketplace.json"),
+                user_root,
+            ),
         )
     )
     return pairs
@@ -744,6 +758,35 @@ def copilot_home() -> str:
             raise ValueError("COPILOT_HOME is not an absolute normalized path")
         return configured
     return os.path.join(os.path.abspath(str(Path.home())), ".copilot")
+
+
+def openhands_persistence_dir() -> str:
+    """Return OpenHands' exact user persistence directory.
+
+    The client treats ``OPENHANDS_PERSISTENCE_DIR`` as a write authority, so
+    reject whitespace, control characters, relative spellings, and paths that
+    still require normalization instead of silently retargeting writes.
+    """
+
+    configured = os.environ.get("OPENHANDS_PERSISTENCE_DIR")
+    if configured is not None:
+        if (
+            configured.strip() != configured
+            or "\x00" in configured
+            or "\r" in configured
+            or "\n" in configured
+            or not os.path.isabs(configured)
+            or os.path.normpath(configured) != configured
+        ):
+            raise ValueError("OPENHANDS_PERSISTENCE_DIR is not an absolute normalized path")
+        return configured
+    return os.path.join(os.path.abspath(str(Path.home())), ".openhands")
+
+
+def openhands_mcp_path() -> str:
+    """Return the user MCP registry under OpenHands' persistence root."""
+
+    return os.path.join(openhands_persistence_dir(), "mcp.json")
 
 
 def copilot_settings_paths(workspace_dir: str | None = None) -> list[str]:
@@ -1396,7 +1439,7 @@ def connector_home(
         root = _workspace_dir(workspace_dir)
         if root:
             return os.path.join(root, ".openhands")
-        return os.path.join(home, ".openhands")
+        return openhands_persistence_dir()
     if name == "antigravity":
         # Google documents one global customization root at ~/.gemini/config
         # and publishes no config-home environment override. workspace_dir is
@@ -1453,10 +1496,7 @@ def connector_config_files(
         paths = [
             os.path.join(codex_home(), "config.toml"),
             *_codex_project_config_paths(workspace_dir),
-            *[
-                marketplace_file
-                for marketplace_file, _source_root in _codex_marketplace_files(workspace_dir)
-            ],
+            *[marketplace_file for marketplace_file, _source_root in _codex_marketplace_files(workspace_dir)],
         ]
     elif name == "amp":
         paths = [
@@ -1487,8 +1527,8 @@ def connector_config_files(
         ]
     elif name == "openhands":
         paths = [
-            os.path.join(home, ".openhands", "hooks.json"),
-            os.path.join(home, ".openhands", "mcp.json"),
+            os.path.join(openhands_persistence_dir(), "hooks.json"),
+            openhands_mcp_path(),
             _workspace_path(workspace_dir, ".openhands", "hooks.json"),
         ]
     elif name == "antigravity":
@@ -1880,6 +1920,16 @@ def agent_dirs(
                 _workspace_path(workspace_dir, ".agents", "agents"),
             ]
         )
+    if name == "openhands":
+        home = str(Path.home())
+        return _dedup(
+            [
+                _workspace_path(workspace_dir, ".agents", "agents"),
+                os.path.join(home, ".agents", "agents"),
+                os.path.join(home, ".openhands", "agents"),
+                _workspace_path(workspace_dir, ".openhands", "agents"),
+            ]
+        )
     if name == "opencode":
         return _opencode_component_dirs("agent", workspace_dir)
     return []
@@ -1912,6 +1962,12 @@ def rule_dirs(
                 _workspace_path(workspace_dir, ".devin", "rules"),
             ]
         )
+    if name == "openhands":
+        root = _workspace_dir(workspace_dir) or os.path.abspath(str(Path.home()))
+        return [
+            os.path.join(root, filename)
+            for filename in ("AGENTS.md", "AGENT.md", "CLAUDE.md", "GEMINI.md", ".cursorrules")
+        ]
     if name == "opencode":
         return _opencode_instruction_roots(workspace_dir)
     if name != "codex":
@@ -3504,7 +3560,7 @@ def _copilot_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntr
 
 
 def _openhands_mcp_servers() -> list[MCPServerEntry]:
-    return _read_dotmcp_json(os.path.join(str(Path.home()), ".openhands", "mcp.json"))
+    return _read_dotmcp_json(openhands_mcp_path())
 
 
 def _antigravity_global_mcp_path() -> str:
@@ -4297,11 +4353,7 @@ def set_mcp_server(
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
-        path = (
-            os.path.join(workspace, ".codex", "config.toml")
-            if workspace
-            else _codex_config_toml_path()
-        )
+        path = os.path.join(workspace, ".codex", "config.toml") if workspace else _codex_config_toml_path()
         _set_codex_mcp_server_at_path(path, name, entry)
         return
     if name_n == "amp":
@@ -4335,8 +4387,7 @@ def set_mcp_server(
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "openhands":
-        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
-        _atomic_json_merge(path, ("mcpServers", name), entry)
+        _atomic_json_merge(openhands_mcp_path(), ("mcpServers", name), entry)
         return
     if name_n == "antigravity":
         _set_antigravity_mcp_server(name, entry, workspace_dir=workspace_dir)
@@ -4397,11 +4448,7 @@ def unset_mcp_server(
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
-        path = (
-            os.path.join(workspace, ".codex", "config.toml")
-            if workspace
-            else _codex_config_toml_path()
-        )
+        path = os.path.join(workspace, ".codex", "config.toml") if workspace else _codex_config_toml_path()
         _unset_codex_mcp_server_at_path(path, name)
         return
     if name_n == "amp":
@@ -4435,8 +4482,7 @@ def unset_mcp_server(
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "openhands":
-        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
-        _atomic_json_delete(path, ("mcpServers", name))
+        _atomic_json_delete(openhands_mcp_path(), ("mcpServers", name))
         return
     if name_n == "antigravity":
         _unset_antigravity_mcp_server(name, workspace_dir=workspace_dir)

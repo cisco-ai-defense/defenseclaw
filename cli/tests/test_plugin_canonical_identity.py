@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -410,3 +412,13 @@ def test_canonical_id_allows_symlinked_system_ancestor(tmp_path):
     source = _plugin(str(alias / "plugin"), "canonical-id")
 
     assert canonical_plugin_id(source) == ("canonical-id", "plugin.json")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS /var alias contract")
+def test_canonical_id_preserves_lexical_var_path_across_private_var_alias():
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as temp_dir:
+        assert temp_dir.startswith("/var/")
+        assert os.path.realpath(temp_dir).startswith("/private/var/")
+        source = _plugin(os.path.join(temp_dir, "plugin"), "canonical-id")
+
+        assert canonical_plugin_id(source) == ("canonical-id", "plugin.json")

@@ -99,11 +99,15 @@ func TestCodexComponentTargetsUseOfficialCurrentLayouts(t *testing.T) {
 		filepath.Join(repo, ".git"),
 		active,
 		filepath.Join(home, "personal-plugin"),
+		filepath.Join(home, "personal-api-plugin"),
+		filepath.Join(repo, "plugins", "api-plugin"),
 		filepath.Join(repo, "plugins", "repo-plugin"),
 		filepath.Join(repo, "plugins", "legacy-plugin"),
+		filepath.Join(repo, "plugins", "cursor-plugin"),
 		filepath.Join(home, ".agents", "plugins"),
 		filepath.Join(repo, ".agents", "plugins"),
 		filepath.Join(repo, ".claude-plugin"),
+		filepath.Join(repo, ".cursor-plugin"),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -117,12 +121,26 @@ func TestCodexComponentTargetsUseOfficialCurrentLayouts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(
+		filepath.Join(home, ".agents", "plugins", "api_marketplace.json"),
+		[]byte(`{"plugins":[{"source":"./personal-api-plugin"}]}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
 		filepath.Join(home, ".agents", "plugins", "marketplace.json"),
 		[]byte(`{"plugins":[
 			{"source":{"source":"local","path":"./personal-plugin"}},
 			{"source":{"source":"local","path":"./../escape"}},
 			{"source":{"source":"url","path":"./remote"}}
 		]}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(repo, ".agents", "plugins", "api_marketplace.json"),
+		[]byte(`{"plugins":[{"source":"./plugins/api-plugin"}]}`),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
@@ -141,16 +159,26 @@ func TestCodexComponentTargetsUseOfficialCurrentLayouts(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(
+		filepath.Join(repo, ".cursor-plugin", "marketplace.json"),
+		[]byte(`{"plugins":[{"source":{"source":"local","path":"./plugins/cursor-plugin"}}]}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CODEX_HOME", codexHome)
 
 	if err := WithUserHomeDir(home, func() error {
 		wantMarketplaceOrder := []string{
+			filepath.Join(repo, "plugins", "api-plugin"),
 			filepath.Join(repo, "plugins", "repo-plugin"),
 			filepath.Join(repo, "plugins", "legacy-plugin"),
+			filepath.Join(repo, "plugins", "cursor-plugin"),
+			filepath.Join(home, "personal-api-plugin"),
 			filepath.Join(home, "personal-plugin"),
 		}
 		if got := CodexPluginSourceDirs(active); !slices.Equal(got, wantMarketplaceOrder) {
-			t.Errorf("marketplace source order=%v want repo, legacy repo, personal %v", got, wantMarketplaceOrder)
+			t.Errorf("marketplace source order=%v want exact marketplace precedence %v", got, wantMarketplaceOrder)
 		}
 		targets := NewCodexConnector().ComponentTargets(active)
 		for component, want := range map[string]string{
@@ -166,8 +194,11 @@ func TestCodexComponentTargetsUseOfficialCurrentLayouts(t *testing.T) {
 		}
 		for _, want := range []string{
 			filepath.Join(home, "personal-plugin"),
+			filepath.Join(home, "personal-api-plugin"),
+			filepath.Join(repo, "plugins", "api-plugin"),
 			filepath.Join(repo, "plugins", "repo-plugin"),
 			filepath.Join(repo, "plugins", "legacy-plugin"),
+			filepath.Join(repo, "plugins", "cursor-plugin"),
 			filepath.Join(codexHome, "plugins", "cache"),
 		} {
 			if !slices.Contains(targets["plugin"], want) {

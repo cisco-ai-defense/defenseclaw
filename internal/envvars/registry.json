@@ -3128,6 +3128,102 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_E2E_CODEX_NATIVE_EXECUTABLE",
+      "category": "test_fixture",
+      "purpose": "Carries the exact authenticated Codex executable selected by the macOS connector lifecycle E2E fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute path to an authenticated Codex executable", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/codex_policy_fixture_darwin_test.go",
+          "description": "macOS Codex lifecycle E2E fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_CODEX_RAW_VERSION",
+      "category": "test_fixture",
+      "purpose": "Carries the raw version string for the authenticated Codex executable selected by the macOS connector lifecycle E2E fixture.",
+      "default": "unset",
+      "accepted_values": ["test-supplied raw Codex version string", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/codex_policy_fixture_darwin_test.go",
+          "description": "macOS Codex lifecycle E2E fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_TRANSACTION_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated child process used to verify Darwin setup-selection transaction locking.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/setup_agent_selection_test.go",
+          "description": "Darwin setup-selection transaction subprocess fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_TRANSACTION_DATA_DIR",
+      "category": "test_fixture",
+      "purpose": "Carries the protected data directory shared with the Darwin setup-selection transaction child fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute directory path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/setup_agent_selection_test.go",
+          "description": "Darwin setup-selection transaction subprocess fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_PARENT_SECRET",
+      "category": "test_fixture",
+      "purpose": "Carries a synthetic inherited secret used to verify protected Darwin agent children do not receive the parent environment.",
+      "default": "unset",
+      "accepted_values": ["test-defined sentinel value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/protected_child_credential_darwin_test.go",
+          "description": "Protected Darwin child environment-scrubbing fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_VERSION_PROBE_SECRET",
+      "category": "test_fixture",
+      "purpose": "Carries a synthetic inherited secret used to verify protected Darwin version probes do not receive the parent environment.",
+      "default": "unset",
+      "accepted_values": ["test-defined sentinel value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/protected_version_probe_darwin_test.go",
+          "description": "Protected Darwin version-probe environment-scrubbing fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",

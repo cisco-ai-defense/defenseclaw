@@ -19,6 +19,7 @@ package connector
 import (
 	"fmt"
 	"runtime"
+	"strings"
 )
 
 // PlatformSupportStatus is the operator-facing availability state for a
@@ -55,6 +56,10 @@ var deprecatedConnectorSupport = map[string]PlatformSupport{
 	"geminicli": {
 		Status: PlatformUnsupported,
 		Reason: "Gemini CLI integration is deprecated; use the Antigravity connector. Existing managed Gemini CLI state remains removable through teardown and uninstall.",
+	},
+	"windsurf": {
+		Status: PlatformUnsupported,
+		Reason: "Windsurf/Cascade is retired; use Devin. Existing authenticated Windsurf state remains recognizable only for upgrade and uninstall cleanup.",
 	},
 }
 
@@ -120,6 +125,40 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 }
 
+// darwinConnectorSupport records explicit implemented-but-not-yet-certified
+// native macOS states. Connectors absent from this map retain the established
+// supported behavior; deprecated names are rejected before this lookup.
+var darwinConnectorSupport = map[string]PlatformSupport{
+	"codex": {
+		Status: PlatformPreview,
+		Reason: "Codex CLI and DefenseClaw's native macOS arm64 hook, OTLP, notify, signed-executable, and exact-restore paths are implemented; durable packaged and authenticated official-client certification evidence is not recorded.",
+	},
+	"claudecode": {
+		Status: PlatformPreview,
+		Reason: "Claude Code and DefenseClaw's signed native Mach-O hook path are implemented on macOS arm64; durable packaged and authenticated official-client certification evidence is not recorded.",
+	},
+	"cursor": {
+		Status: PlatformPreview,
+		Reason: "Cursor Agent and Cursor Desktop hook integrations are implemented on macOS arm64, with distinct CLI and Desktop release streams; durable packaged and authenticated official-client certification evidence is not recorded.",
+	},
+	"devin": {
+		Status: PlatformPreview,
+		Reason: "Native Devin CLI lifecycle hooks are implemented on macOS arm64 using the pinned 3000.4.25 contract; durable authenticated official-client evidence is not recorded, and cloud Devin, ACP, proxy, plugins, and native OTLP remain unclaimed.",
+	},
+	"hermes": {
+		Status: PlatformPreview,
+		Reason: "Hermes Agent's >=0.19.0,<0.21.0 shell-hook contract and DefenseClaw's POSIX hook entrypoint are implemented on macOS arm64; durable packaged and official-client certification evidence is not recorded.",
+	},
+	"openhands": {
+		Status: PlatformPreview,
+		Reason: "OpenHands CLI and DefenseClaw's protected native macOS arm64 hook and trace-only OTLP launch paths are implemented; durable packaged and authenticated official-client certification evidence is not recorded.",
+	},
+	"antigravity": {
+		Status: PlatformPreview,
+		Reason: "Antigravity's >=1.1.8 hook contract and native macOS arm64 integration are implemented; 1.1.10 is availability metadata only and durable authenticated official-client certification evidence is not recorded.",
+	},
+}
+
 // IsProxyConnector reports whether name is a proxy/chat connector (as opposed
 // to a hook-based connector).
 func IsProxyConnector(name string) bool {
@@ -134,6 +173,10 @@ func ConnectorSupportOnOS(name, goos string) PlatformSupport {
 	if support, ok := deprecatedConnectorSupport[name]; ok {
 		return support
 	}
+	goos = strings.ToLower(strings.TrimSpace(goos))
+	if goos == "macos" {
+		goos = "darwin"
+	}
 	if goos == "windows" {
 		if support, ok := windowsConnectorSupport[name]; ok {
 			return support
@@ -141,6 +184,11 @@ func ConnectorSupportOnOS(name, goos string) PlatformSupport {
 		return PlatformSupport{
 			Status: PlatformNotCertified,
 			Reason: "This connector has not completed native Windows x64 certification.",
+		}
+	}
+	if goos == "darwin" {
+		if support, ok := darwinConnectorSupport[name]; ok {
+			return support
 		}
 	}
 	return PlatformSupport{

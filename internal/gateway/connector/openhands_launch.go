@@ -37,6 +37,11 @@ import (
 // failed setup can never revoke a token another concurrent setup just adopted.
 var openHandsLifecycleMu sync.Mutex
 
+var (
+	validateOpenHandsDarwinFileACL      = validateOpenHandsDarwinFileACLPlatform
+	validateOpenHandsDarwinArchitecture = validateOpenHandsDarwinArchitecturePlatform
+)
+
 func withOpenHandsLifecycleTransaction(opts SetupOpts, fn func() error) error {
 	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(opts.DataDir) {
 		return errors.New("openhands lifecycle transaction requires an absolute data dir")
@@ -229,6 +234,40 @@ func validateOpenHandsLoopbackAPIAddr(apiAddr string) error {
 	return nil
 }
 
+func openHandsExecutableIsMachO(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(file, magic[:]); err != nil {
+		return false
+	}
+	switch magic {
+	case [4]byte{0xce, 0xfa, 0xed, 0xfe},
+		[4]byte{0xcf, 0xfa, 0xed, 0xfe},
+		[4]byte{0xfe, 0xed, 0xfa, 0xce},
+		[4]byte{0xfe, 0xed, 0xfa, 0xcf},
+		[4]byte{0xca, 0xfe, 0xba, 0xbe},
+		[4]byte{0xbe, 0xba, 0xfe, 0xca},
+		[4]byte{0xca, 0xfe, 0xba, 0xbf},
+		[4]byte{0xbf, 0xba, 0xfe, 0xca}:
+		return true
+	default:
+		return false
+	}
+}
+
+func openHandsArchitectureListContains(output, expected string) bool {
+	for _, architecture := range strings.Fields(output) {
+		if architecture == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func validateOpenHandsDarwinExecutable(opts SetupOpts, sealedOnly bool) (string, error) {
 	selected := strings.TrimSpace(opts.AgentExecutable)
 	if selected == "" || selected != opts.AgentExecutable || strings.ContainsAny(selected, "\x00\r\n") ||
@@ -271,11 +310,26 @@ func validateOpenHandsDarwinExecutable(opts SetupOpts, sealedOnly bool) (string,
 		(runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 		return "", errors.New("selected OpenHands executable is not an executable regular non-link file")
 	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
+		return "", fmt.Errorf(
+			"selected OpenHands executable has unsafe writable mode %04o",
+			info.Mode().Perm(),
+		)
+	}
+	if !openHandsExecutableIsMachO(selected) {
+		return "", errors.New("selected OpenHands executable is not a Mach-O image")
+	}
 	if err := hookAPIValidateDirectory(filepath.Dir(selected)); err != nil {
 		return "", fmt.Errorf("validate selected OpenHands executable ancestry: %w", err)
 	}
 	if err := hookAPIValidateOwner(selected, info); err != nil {
 		return "", fmt.Errorf("validate selected OpenHands executable custody: %w", err)
+	}
+	if err := validateOpenHandsDarwinFileACL(selected); err != nil {
+		return "", fmt.Errorf("validate selected OpenHands executable ACL: %w", err)
+	}
+	if err := validateOpenHandsDarwinArchitecture(selected); err != nil {
+		return "", fmt.Errorf("validate selected OpenHands executable architecture: %w", err)
 	}
 	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(selected)
 	if !ok || !sameCodexExecutablePath(stablePath, selected) {

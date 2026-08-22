@@ -46,6 +46,119 @@ from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 from tests.helpers import record_test_setup_agent_selections
 
 
+@pytest.mark.parametrize("connector", ("codex", "claudecode", "openhands"))
+def test_darwin_init_defers_protected_action_admission_until_first_run_selection(
+    connector: str,
+    tmp_path,
+) -> None:
+    from defenseclaw.commands import cmd_init
+
+    forbidden = AssertionError("init action UX must not probe before protected selection")
+    with (
+        patch.object(cmd_init.platform_support, "host_os", return_value="darwin"),
+        patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            side_effect=forbidden,
+        ) as version,
+        patch.object(
+            cmd_init.agent_discovery,
+            "discover_agents",
+            side_effect=forbidden,
+        ) as discovery,
+    ):
+        supported = cmd_init._supported_action_connectors(
+            [connector],
+            data_dir=os.fspath(tmp_path),
+        )
+
+    assert supported == [connector]
+    version.assert_not_called()
+    discovery.assert_not_called()
+
+
+@pytest.mark.parametrize("connector", ("codex", "claudecode", "openhands"))
+@pytest.mark.parametrize("mode", ("observe", "action"))
+def test_darwin_init_extra_uses_receipt_bound_version_without_discovery(
+    connector: str,
+    mode: str,
+    tmp_path,
+) -> None:
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.commands import cmd_init
+    from defenseclaw.commands.cmd_setup import (
+        _capture_setup_config_snapshot,
+        _validate_setup_agent_selection_receipt,
+    )
+
+    data_dir = os.fspath(tmp_path)
+    primary = {
+        "connector": "amp",
+        "profile": "observe",
+        "fail_mode": None,
+        "human_approval": None,
+        "hilt_min_severity": None,
+    }
+    extras = [
+        {
+            "connector": connector,
+            "profile": mode,
+            "fail_mode": "closed",
+            "human_approval": False,
+            "hilt_min_severity": "HIGH",
+        }
+    ]
+    with (
+        patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+        patch("defenseclaw.agent_selection._HOST_PLATFORM", "darwin"),
+    ):
+        cfg = cfg_mod.default_config()
+        cfg_mod.prepare_fresh_v8_config(cfg)
+        cfg.guardrail.connector = "amp"
+        cfg.claw.mode = "amp"
+        cfg.save()
+        snapshot = _capture_setup_config_snapshot(cfg)
+        records, errors = record_test_setup_agent_selections(data_dir, (connector,))
+        assert errors == {}
+        proof = _validate_setup_agent_selection_receipt(
+            data_dir,
+            (connector,),
+            records,
+            prior_generation=snapshot.agent_selection_generation,
+        )
+
+        def admit(actual_connector, **kwargs):
+            assert actual_connector == connector
+            assert kwargs.get("_protected_record") == records[connector]
+            return True
+
+        forbidden = AssertionError("Darwin init extra must not use generic discovery")
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="darwin"),
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="darwin"),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=admit,
+            ) as version,
+            patch.object(
+                cmd_init.agent_discovery,
+                "discover_agents",
+                side_effect=forbidden,
+            ) as discovery,
+        ):
+            active, sidecar = cmd_init._activate_additional_connectors(
+                primary,
+                extras,
+                start_gateway=False,
+                quiet=True,
+                protected_selection=proof,
+            )
+
+    assert sidecar is None
+    assert set(active) == {"amp", connector}
+    version.assert_called_once()
+    discovery.assert_not_called()
+
+
 def _trusted_prefixes_from_config(data_dir: str) -> list[str]:
     import yaml
 
@@ -1011,7 +1124,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 patch("defenseclaw.commands._llm_picker.pick_model", return_value="gpt-4o") as model, \
                 patch("defenseclaw.commands._llm_picker.pick_key_env", return_value="OPENAI_API_KEY") as key_env, \
                 patch("defenseclaw.commands.cmd_setup._prompt_and_save_secret") as save_secret, \
-                patch.object(cmd_init.click, "prompt", return_value="https://api.example/v1"):
+                patch.object(cmd_init.click, "prompt", side_effect=["", "https://api.example/v1"]):
             got = cmd_init._prompt_first_run_judge_llm_config(
                 data_dir=self.tmp_dir,
                 llm_provider="",
@@ -1021,11 +1134,11 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 llm_base_url="",
             )
 
-        self.assertEqual(got, ("openai", "gpt-4o", "", "OPENAI_API_KEY", "https://api.example/v1"))
+        self.assertEqual(got, ("openai", "gpt-4o", "sk-test", "OPENAI_API_KEY", "https://api.example/v1"))
         provider.assert_called_once()
         model.assert_called_once()
         key_env.assert_called_once()
-        save_secret.assert_called_once_with("OPENAI_API_KEY", "sk-test", self.tmp_dir)
+        save_secret.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
