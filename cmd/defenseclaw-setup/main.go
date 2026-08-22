@@ -1186,6 +1186,14 @@ func runDeferredUninstallConnectorVerifyWithEnv(
 		!strings.EqualFold(filepath.Base(setupExecutable), setupArtifactName) {
 		return errors.New("deferred connector verification is not running from the transaction-owned Setup executable")
 	}
+	setupProcessPath, setupStartIdentity, err := currentSetupProcessIdentity()
+	if err != nil {
+		return fmt.Errorf("resolve deferred cleanup Setup process identity: %w", err)
+	}
+	if !samePath(setupProcessPath, setupExecutable) ||
+		!validSetupProcessStartIdentity(setupStartIdentity) {
+		return errors.New("deferred connector verification is not running in the authenticated Setup process instance")
+	}
 	transactionRoot, err := defaultTransactionRoot()
 	if err != nil {
 		return fmt.Errorf("resolve deferred cleanup transaction root: %w", err)
@@ -1194,6 +1202,7 @@ func runDeferredUninstallConnectorVerifyWithEnv(
 	args, err := deferredUninstallConnectorVerifyCommandArgs(
 		transaction,
 		setupExecutable,
+		setupStartIdentity,
 		recordPath,
 		connectorName,
 		env,
@@ -1220,11 +1229,12 @@ func runDeferredUninstallConnectorVerifyWithEnv(
 
 func deferredUninstallConnectorVerifyCommandArgs(
 	transaction setupTransaction,
-	setupExecutable, recordPath, connectorName string,
+	setupExecutable, setupStartIdentity, recordPath, connectorName string,
 	env []string,
 ) ([]string, error) {
 	if transaction.Action != "uninstall" || !validSetupTransactionID(transaction.ID) ||
-		!samePath(setupExecutable, transaction.MaintenancePath) {
+		!samePath(setupExecutable, transaction.MaintenancePath) ||
+		!validSetupProcessStartIdentity(setupStartIdentity) {
 		return nil, errors.New("deferred connector verification arguments are not bound to the uninstall transaction")
 	}
 	args, err := connectorLifecycleCommandArgs(
@@ -1239,10 +1249,16 @@ func deferredUninstallConnectorVerifyCommandArgs(
 	args = append(
 		args,
 		"--internal-setup-parent", setupExecutable,
+		"--internal-setup-start-identity", setupStartIdentity,
 		"--internal-deferred-cleanup-record", recordPath,
 		"--internal-deferred-cleanup-transaction", transaction.ID,
 	)
 	return args, nil
+}
+
+func validSetupProcessStartIdentity(value string) bool {
+	identity, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && identity > 0 && value == strconv.FormatInt(identity, 10)
 }
 
 func connectorLifecycleCommandArgs(dataRoot, connectorName, action string, env []string) ([]string, error) {

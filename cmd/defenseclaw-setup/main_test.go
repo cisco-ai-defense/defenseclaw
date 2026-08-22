@@ -39,6 +39,7 @@ func TestDeferredUninstallConnectorVerifyArgsBindExactCleanupAuthority(t *testin
 	transactionID := "0123456789abcdef0123456789abcdef"
 	root := t.TempDir()
 	setupPath := filepath.Join(root, "InstallerCache", setupArtifactName)
+	setupStartIdentity := "133713371337"
 	dataRoot := filepath.Join(root, "profile", ".defenseclaw")
 	configHome := filepath.Join(root, "profile", ".claude")
 	recordPath := filepath.Join(root, "InstallerState", "uninstall-cleanup.json")
@@ -51,6 +52,7 @@ func TestDeferredUninstallConnectorVerifyArgsBindExactCleanupAuthority(t *testin
 	args, err := deferredUninstallConnectorVerifyCommandArgs(
 		transaction,
 		setupPath,
+		setupStartIdentity,
 		recordPath,
 		"claudecode",
 		[]string{"CLAUDE_CONFIG_DIR=" + configHome},
@@ -65,6 +67,7 @@ func TestDeferredUninstallConnectorVerifyArgsBindExactCleanupAuthority(t *testin
 		"--config-home", configHome,
 		"--json",
 		"--internal-setup-parent", setupPath,
+		"--internal-setup-start-identity", setupStartIdentity,
 		"--internal-deferred-cleanup-record", recordPath,
 		"--internal-deferred-cleanup-transaction", transactionID,
 	}
@@ -77,11 +80,22 @@ func TestDeferredUninstallConnectorVerifyArgsBindExactCleanupAuthority(t *testin
 	if _, err := deferredUninstallConnectorVerifyCommandArgs(
 		foreign,
 		setupPath,
+		setupStartIdentity,
 		recordPath,
 		"claudecode",
 		[]string{"CLAUDE_CONFIG_DIR=" + configHome},
 	); err == nil {
 		t.Fatal("invalid cleanup transaction was accepted")
+	}
+	if _, err := deferredUninstallConnectorVerifyCommandArgs(
+		transaction,
+		setupPath,
+		"0001",
+		recordPath,
+		"claudecode",
+		[]string{"CLAUDE_CONFIG_DIR=" + configHome},
+	); err == nil {
+		t.Fatal("non-canonical Setup process start identity was accepted")
 	}
 }
 

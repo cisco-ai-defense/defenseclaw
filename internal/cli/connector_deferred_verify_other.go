@@ -7,6 +7,6 @@ package cli
 
 import "errors"
 
-func deferredVerifyParentImage(int) (string, error) {
-	return "", errors.New("deferred uninstall connector verification is Windows-only")
+func deferredVerifyParentImage(int) (deferredVerifyProcessIdentity, error) {
+	return deferredVerifyProcessIdentity{}, errors.New("deferred uninstall connector verification is Windows-only")
 }

@@ -12,9 +12,11 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -29,6 +31,7 @@ type deferredVerifyFixture struct {
 	dataRoot      string
 	configHome    string
 	transactionID string
+	startIdentity string
 	record        deferredVerifyCleanupRecord
 	journal       deferredVerifyJournal
 }
@@ -57,6 +60,7 @@ func newDeferredVerifyFixtureForConnector(t *testing.T, connectorName string) de
 		childPath:     filepath.Join(childRoot, deferredVerifyGatewayName),
 		dataRoot:      filepath.Join(root, "profile", ".defenseclaw"),
 		transactionID: "0123456789abcdef0123456789abcdef",
+		startIdentity: "133713371337",
 	}
 	switch connectorName {
 	case "codex":
@@ -115,6 +119,7 @@ func newDeferredVerifyFixtureForConnector(t *testing.T, connectorName string) de
 	fixture.command.Flags().String("config-home", "", "")
 	fixture.command.Flags().Bool("json", false, "")
 	fixture.command.Flags().String("internal-setup-parent", "", "")
+	fixture.command.Flags().String("internal-setup-start-identity", "", "")
 	fixture.command.Flags().String("internal-deferred-cleanup-record", "", "")
 	fixture.command.Flags().String("internal-deferred-cleanup-transaction", "", "")
 	for name, value := range map[string]string{
@@ -123,6 +128,7 @@ func newDeferredVerifyFixtureForConnector(t *testing.T, connectorName string) de
 		"config-home":                           fixture.configHome,
 		"json":                                  "true",
 		"internal-setup-parent":                 fixture.parentPath,
+		"internal-setup-start-identity":         fixture.startIdentity,
 		"internal-deferred-cleanup-record":      fixture.recordPath,
 		"internal-deferred-cleanup-transaction": fixture.transactionID,
 	} {
@@ -152,6 +158,7 @@ func (fixture deferredVerifyFixture) write(t *testing.T) {
 func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixture) {
 	t.Helper()
 	oldParent := connectorVerifySetupParent
+	oldStartIdentity := connectorVerifySetupStartIdentity
 	oldRecord := connectorVerifyCleanupRecord
 	oldTransaction := connectorVerifyCleanupTransaction
 	oldName := connectorFlagName
@@ -164,6 +171,7 @@ func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixtur
 	oldPrivate := deferredVerifyPrivateFile
 	t.Cleanup(func() {
 		connectorVerifySetupParent = oldParent
+		connectorVerifySetupStartIdentity = oldStartIdentity
 		connectorVerifyCleanupRecord = oldRecord
 		connectorVerifyCleanupTransaction = oldTransaction
 		connectorFlagName = oldName
@@ -176,6 +184,7 @@ func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixtur
 		deferredVerifyPrivateFile = oldPrivate
 	})
 	connectorVerifySetupParent = fixture.parentPath
+	connectorVerifySetupStartIdentity = fixture.startIdentity
 	connectorVerifyCleanupRecord = fixture.recordPath
 	connectorVerifyCleanupTransaction = fixture.transactionID
 	connectorFlagName = fixture.connectorName
@@ -184,7 +193,14 @@ func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixtur
 	connectorFlagConfigHome = fixture.configHome
 	connectorExit = func(code int) { t.Fatalf("unexpected connector exit %d", code) }
 	deferredVerifyExecutable = func() (string, error) { return fixture.childPath, nil }
-	deferredVerifyParent = func(int) (string, error) { return fixture.parentPath, nil }
+	deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
+		return deferredVerifyProcessIdentity{
+			ImagePath:     fixture.parentPath,
+			StartIdentity: fixture.startIdentity,
+			requireLive:   func() error { return nil },
+			close:         func() error { return nil },
+		}, nil
+	}
 	deferredVerifyPrivateFile = func(string) error { return nil }
 }
 
@@ -207,6 +223,70 @@ func TestDeferredUninstallVerifyAuthenticatesWithoutV8Config(t *testing.T) {
 	}
 	if _, err := os.Lstat(fixture.dataRoot); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("configless verification recreated deleted data root: %v", err)
+	}
+}
+
+func TestDeferredVerifyProcessStartIdentityIsCanonical(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{value: "133713371337", want: true},
+		{value: ""},
+		{value: "0"},
+		{value: "-1"},
+		{value: "01"},
+		{value: " 1"},
+		{value: "9223372036854775808"},
+	}
+	for _, test := range tests {
+		if got := validDeferredVerifyProcessStartIdentity(test.value); got != test.want {
+			t.Errorf("validDeferredVerifyProcessStartIdentity(%q) = %t, want %t", test.value, got, test.want)
+		}
+	}
+}
+
+func TestDeferredVerifyParentProcessIdentityUsesStableHandle(t *testing.T) {
+	if os.Getenv("DEFENSECLAW_DEFERRED_VERIFY_PARENT_HELPER") == "1" {
+		time.Sleep(30 * time.Second)
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, "-test.run=^TestDeferredVerifyParentProcessIdentityUsesStableHandle$")
+	command.Env = append(os.Environ(), "DEFENSECLAW_DEFERRED_VERIFY_PARENT_HELPER=1")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited && command.Process != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	identity, err := deferredVerifyParentImage(command.Process.Pid)
+	if err != nil {
+		t.Fatalf("open live process identity: %v", err)
+	}
+	t.Cleanup(func() { _ = identity.closeParent() })
+	if identity.ImagePath == "" || !validDeferredVerifyProcessStartIdentity(identity.StartIdentity) {
+		t.Fatalf("live process identity = path:%q start:%q", identity.ImagePath, identity.StartIdentity)
+	}
+	if err := identity.requireLiveParent(); err != nil {
+		t.Fatalf("live process was not live: %v", err)
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("killed helper exited successfully")
+	}
+	waited = true
+	if err := identity.requireLiveParent(); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("exited process liveness = %v, want os.ErrProcessDone", err)
 	}
 }
 
@@ -353,9 +433,51 @@ func TestDeferredUninstallVerifyRejectsBindingDrift(t *testing.T) {
 		{
 			name: "parent",
 			mutate: func(_ *testing.T, fixture *deferredVerifyFixture) {
-				deferredVerifyParent = func(int) (string, error) { return filepath.Join(filepath.Dir(fixture.parentPath), "foreign.exe"), nil }
+				deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
+					return deferredVerifyProcessIdentity{
+						ImagePath:     filepath.Join(filepath.Dir(fixture.parentPath), "foreign.exe"),
+						StartIdentity: fixture.startIdentity,
+						requireLive:   func() error { return nil },
+						close:         func() error { return nil },
+					}, nil
+				}
 			},
 			want: "live parent",
+		},
+		{
+			name: "parent process instance",
+			mutate: func(_ *testing.T, fixture *deferredVerifyFixture) {
+				deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
+					return deferredVerifyProcessIdentity{
+						ImagePath:     fixture.parentPath,
+						StartIdentity: "133713371338",
+						requireLive:   func() error { return nil },
+						close:         func() error { return nil },
+					}, nil
+				}
+			},
+			want: "live parent",
+		},
+		{
+			name: "parent exits during validation",
+			mutate: func(_ *testing.T, fixture *deferredVerifyFixture) {
+				liveChecks := 0
+				deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
+					return deferredVerifyProcessIdentity{
+						ImagePath:     fixture.parentPath,
+						StartIdentity: fixture.startIdentity,
+						requireLive: func() error {
+							liveChecks++
+							if liveChecks > 1 {
+								return os.ErrProcessDone
+							}
+							return nil
+						},
+						close: func() error { return nil },
+					}, nil
+				}
+			},
+			want: "revalidate live Setup parent",
 		},
 		{
 			name: "manifest digest",
@@ -435,16 +557,19 @@ func TestDeferredUninstallVerifyRejectsBindingDrift(t *testing.T) {
 
 func TestOrdinaryConnectorVerifyRetainsStrictRootPreRun(t *testing.T) {
 	oldParent := connectorVerifySetupParent
+	oldStartIdentity := connectorVerifySetupStartIdentity
 	oldRecord := connectorVerifyCleanupRecord
 	oldTransaction := connectorVerifyCleanupTransaction
 	oldRoot := connectorVerifyRootPersistentPreRun
 	t.Cleanup(func() {
 		connectorVerifySetupParent = oldParent
+		connectorVerifySetupStartIdentity = oldStartIdentity
 		connectorVerifyCleanupRecord = oldRecord
 		connectorVerifyCleanupTransaction = oldTransaction
 		connectorVerifyRootPersistentPreRun = oldRoot
 	})
 	connectorVerifySetupParent = ""
+	connectorVerifySetupStartIdentity = ""
 	connectorVerifyCleanupRecord = ""
 	connectorVerifyCleanupTransaction = ""
 	called := false
@@ -465,5 +590,15 @@ func TestDeferredConnectorVerifyRejectsPartialPrivateAuthorization(t *testing.T)
 	err := runConnectorVerifyPersistentPreRunE(fixture.command, nil)
 	if err == nil || !strings.Contains(err.Error(), "cleanup record path") {
 		t.Fatalf("partial private authorization error = %v", err)
+	}
+}
+
+func TestDeferredConnectorVerifyRequiresExplicitProcessInstanceBinding(t *testing.T) {
+	fixture := newDeferredVerifyFixture(t)
+	withDeferredVerifyFixtureGlobals(t, fixture)
+	fixture.command.Flags().Lookup("internal-setup-start-identity").Changed = false
+	err := runConnectorVerifyPersistentPreRunE(fixture.command, nil)
+	if err == nil || !strings.Contains(err.Error(), "every explicit authenticated binding") {
+		t.Fatalf("missing process-instance authorization error = %v", err)
 	}
 }

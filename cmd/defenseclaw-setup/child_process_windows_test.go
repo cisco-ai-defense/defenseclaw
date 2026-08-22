@@ -26,6 +26,27 @@ func TestCapturedSetupCommandDoesNotCreateAConsoleWindow(t *testing.T) {
 	}
 }
 
+func TestCurrentSetupProcessIdentityMatchesExecutable(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processPath, startIdentity, err := currentSetupProcessIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(processPath, executable) {
+		t.Fatalf("current process path = %q, want %q", processPath, executable)
+	}
+	if !validSetupProcessStartIdentity(startIdentity) {
+		t.Fatalf("current process start identity = %q", startIdentity)
+	}
+}
+
 func TestDirectoryCleanupCommandDeletesLiteralTarget(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "DefenseClaw Installer's Cache")
 	if err := os.MkdirAll(root, 0o755); err != nil {

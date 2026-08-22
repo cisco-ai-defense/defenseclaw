@@ -152,9 +152,15 @@ boundary.
   keys are never blessed after the fact; they remain usable but Doctor reports
   them for continuity review. After `DELETEUSERDATA=1`, post-reboot Windows
   cleanup now re-verifies the exact recorded Codex, Claude Code, and Amp homes
-  through a transaction-, journal-, digest-, and Setup-parent-bound configless
-  child; it neither recreates the deleted data root nor weakens ordinary
+  through a configless child bound to the exact transaction, journal, digest,
+  and Setup process instance; the child retains one stable parent handle and
+  checks its creation identity and liveness before and after authorization. It
+  neither recreates the deleted data root nor weakens ordinary
   `connector verify`, which still requires a valid v8 runtime configuration.
+  Managed-plugin residue verification normalizes only line terminators and
+  recognizes exact canonical historical marker lines, so LF- and CRLF-built
+  gateways find managed residue across upgrades without matching marker-like
+  suffixes or operator prose.
   Native Windows CI now requires both live
   audit-database custody and HMAC-bound device identity checks to pass.
 - **`make all` is again the explicit same-checkout developer reinstall**:

@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -849,9 +850,8 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
 	}
-	marker, _, _ := bytes.Cut(tmpl, []byte("\n"))
-	marker = bytes.TrimSuffix(marker, []byte("\r"))
-	if len(marker) == 0 || !bytes.HasPrefix(marker, []byte("// defenseclaw-managed-plugin v")) {
+	marker, valid := managedPluginOwnershipMarker(tmpl)
+	if !valid {
 		return false, fmt.Errorf("%s managed plugin identity is invalid", c.name)
 	}
 	installedMarker, _, _ := bytes.Cut(data, []byte("\n"))
@@ -1058,11 +1058,11 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		if templateErr != nil {
 			return fmt.Errorf("%s read managed plugin identity: %w", c.name, templateErr)
 		}
-		marker, _, _ := bytes.Cut(tmpl, []byte("\n"))
-		if len(marker) == 0 || !bytes.HasPrefix(marker, []byte("// defenseclaw-managed-plugin v")) {
+		marker, valid := managedPluginOwnershipMarker(tmpl)
+		if !valid {
 			return fmt.Errorf("%s managed plugin identity is invalid", c.name)
 		}
-		if bytes.Contains(data, marker) {
+		if managedPluginOwnershipMarkerPresent(data, marker) {
 			return fmt.Errorf("%s teardown incomplete: managed plugin still present at %s", c.name, path)
 		}
 		return nil
@@ -1085,6 +1085,51 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 	}
 	return nil
+}
+
+func managedPluginOwnershipMarker(template []byte) ([]byte, bool) {
+	marker, _, _ := bytes.Cut(template, []byte("\n"))
+	marker = bytes.TrimSuffix(marker, []byte("\r"))
+	return marker, validManagedPluginOwnershipMarker(marker)
+}
+
+func managedPluginOwnershipMarkerPresent(data, marker []byte) bool {
+	if !validManagedPluginOwnershipMarker(marker) {
+		return false
+	}
+	for {
+		line, rest, found := bytes.Cut(data, []byte("\n"))
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		// VerifyClean is intentionally stricter than the live ownership check:
+		// any exact canonical historical marker is residue, even if an edit moved
+		// it away from the first line. Generic product prose and marker-like
+		// suffixes remain operator content rather than ownership evidence.
+		if validManagedPluginOwnershipMarker(line) {
+			return true
+		}
+		if !found {
+			return false
+		}
+		data = rest
+	}
+}
+
+func validManagedPluginOwnershipMarker(marker []byte) bool {
+	const prefix = "// defenseclaw-managed-plugin v"
+	if !bytes.HasPrefix(marker, []byte(prefix)) {
+		return false
+	}
+	version := marker[len(prefix):]
+	if len(version) == 0 || version[0] < '1' || version[0] > '9' {
+		return false
+	}
+	for _, digit := range version[1:] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseUint(string(version), 10, 64)
+	return err == nil
 }
 
 func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {

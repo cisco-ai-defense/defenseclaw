@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -30,6 +31,27 @@ var (
 	deferredVerifyParent      = deferredVerifyParentImage
 	deferredVerifyPrivateFile = safefile.ValidatePrivateFile
 )
+
+type deferredVerifyProcessIdentity struct {
+	ImagePath     string
+	StartIdentity string
+	requireLive   func() error
+	close         func() error
+}
+
+func (identity deferredVerifyProcessIdentity) requireLiveParent() error {
+	if identity.requireLive == nil {
+		return errors.New("parent process liveness proof is unavailable")
+	}
+	return identity.requireLive()
+}
+
+func (identity deferredVerifyProcessIdentity) closeParent() error {
+	if identity.close == nil {
+		return errors.New("parent process handle is unavailable")
+	}
+	return identity.close()
+}
 
 type deferredVerifyCleanupRecord struct {
 	SchemaVersion      int      `json:"schema_version"`
@@ -74,6 +96,7 @@ func validateDeferredUninstallConnectorVerify(cmd *cobra.Command) error {
 		return errors.New("private authorization is accepted only by connector verify")
 	}
 	if !deferredVerifyFlagChanged(cmd, "internal-setup-parent") ||
+		!deferredVerifyFlagChanged(cmd, "internal-setup-start-identity") ||
 		!deferredVerifyFlagChanged(cmd, "internal-deferred-cleanup-record") ||
 		!deferredVerifyFlagChanged(cmd, "internal-deferred-cleanup-transaction") ||
 		!deferredVerifyFlagChanged(cmd, "connector") ||
@@ -85,6 +108,9 @@ func validateDeferredUninstallConnectorVerify(cmd *cobra.Command) error {
 	transactionID := connectorVerifyCleanupTransaction
 	if !validDeferredVerifyTransactionID(transactionID) {
 		return errors.New("cleanup transaction identity is invalid")
+	}
+	if !validDeferredVerifyProcessStartIdentity(connectorVerifySetupStartIdentity) {
+		return errors.New("Setup process start identity is invalid")
 	}
 	parentPath, err := normalizedDeferredVerifyPath(connectorVerifySetupParent, deferredVerifySetupName)
 	if err != nil {
@@ -124,8 +150,13 @@ func validateDeferredUninstallConnectorVerify(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("resolve live Setup parent: %w", err)
 	}
-	actualParent, err = normalizedDeferredVerifyPath(actualParent, deferredVerifySetupName)
-	if err != nil || !sameDeferredVerifyPath(actualParent, parentPath) {
+	defer func() { _ = actualParent.closeParent() }()
+	if err := actualParent.requireLiveParent(); err != nil {
+		return fmt.Errorf("authenticate live Setup parent process: %w", err)
+	}
+	actualParentPath, err := normalizedDeferredVerifyPath(actualParent.ImagePath, deferredVerifySetupName)
+	if err != nil || !sameDeferredVerifyPath(actualParentPath, parentPath) ||
+		actualParent.StartIdentity != connectorVerifySetupStartIdentity {
 		return errors.New("live parent process is not the authenticated Setup executable")
 	}
 
@@ -175,6 +206,9 @@ func validateDeferredUninstallConnectorVerify(cmd *cobra.Command) error {
 	if !deferredVerifyConfigHomeBound(transaction, connectorName, configHome) {
 		return errors.New("config home is outside the authenticated uninstall transaction")
 	}
+	if err := actualParent.requireLiveParent(); err != nil {
+		return fmt.Errorf("revalidate live Setup parent process: %w", err)
+	}
 	return nil
 }
 
@@ -199,6 +233,11 @@ func validDeferredVerifySHA256(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func validDeferredVerifyProcessStartIdentity(value string) bool {
+	identity, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && identity > 0 && value == strconv.FormatInt(identity, 10)
 }
 
 func normalizedDeferredVerifyPath(value, base string) (string, error) {
