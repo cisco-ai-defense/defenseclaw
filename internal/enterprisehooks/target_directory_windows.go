@@ -19,10 +19,10 @@ import (
 
 // ensureWindowsTargetOwnedDirectoryTree creates only missing descendants of
 // the authenticated target profile. Each directory receives its target owner
-// and a protected trusted-principal-only staging DACL in the native create
-// call, so an elevated target token's Administrators default owner cannot leak
-// into the managed runtime. The still-bound no-follow handle then receives and
-// verifies the exact canonical managed-runtime DACL before it is released.
+// and exact protected canonical DACL in the native create call, so an elevated
+// target token's Administrators default owner cannot leak into the managed
+// runtime and no weaker staging descriptor is ever published. The still-bound
+// no-follow handle verifies that exact contract before it is released.
 //
 // Existing descendants are never adopted or repaired here: every one must
 // already have the exact target-owner/DACL contract. All traversal is relative
@@ -152,9 +152,9 @@ func ensureWindowsTargetOwnedDirectoryTreeInto(
 					currentPath,
 				)
 			}
-			if err := canonicalizeWindowsTargetOwnedDirectoryHandle(child, currentPath, target); err != nil {
+			if err := validateWindowsTargetOwnedDirectoryHandle(child, currentPath, target); err != nil {
 				_ = windows.CloseHandle(child)
-				return fmt.Errorf("enterprise hooks: protect managed directory %s: %w", currentPath, err)
+				return fmt.Errorf("enterprise hooks: verify newly created managed directory %s: %w", currentPath, err)
 			}
 		} else if err := validateWindowsTargetOwnedDirectoryHandle(child, currentPath, target); err != nil {
 			_ = windows.CloseHandle(child)
@@ -171,26 +171,21 @@ func ensureWindowsTargetOwnedDirectoryTreeInto(
 }
 
 func windowsTargetOwnedDirectorySecurityDescriptor(target *windows.SID) (*windows.SECURITY_DESCRIPTOR, error) {
-	canonical, err := windowsUserPathCanonicalACEs(target, true)
+	applied, err := windowsUserPathAppliedCanonicalACEs(target, true)
 	if err != nil {
 		return nil, err
 	}
-	// NtCreateFile must return a WRITE_DAC-capable handle so the exact applied
-	// seven-ACE form can be installed without a path-based reopen. Keep this
-	// short-lived descriptor protected and limited to the same trusted
-	// principals as the final policy. Nothing is inheritable until the final
-	// DACL has been installed, and WRITE_DAC is granted only to the exact target
-	// token performing this bounded creation.
-	entries := make([]windows.EXPLICIT_ACCESS, 0, len(canonical))
-	for _, item := range canonical {
-		mask := item.mask
-		if item.sid.Equals(target) {
-			mask |= windows.WRITE_DAC
-		}
+	// Supply the exact seven-ACE applied representation in the create security
+	// descriptor. In particular, the effective OWNER RIGHTS ACE suppresses the
+	// target owner's implicit WRITE_DAC from the instant the name is published.
+	// The target/owner entries grant no WRITE_DAC capability; SYSTEM and enabled
+	// Administrators remain trusted by the canonical contract.
+	entries := make([]windows.EXPLICIT_ACCESS, 0, len(applied))
+	for _, item := range applied {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
-			AccessPermissions: mask,
+			AccessPermissions: item.mask,
 			AccessMode:        windows.GRANT_ACCESS,
-			Inheritance:       windows.NO_INHERITANCE,
+			Inheritance:       uint32(item.flags),
 			Trustee: windows.TRUSTEE{
 				TrusteeForm:  windows.TRUSTEE_IS_SID,
 				TrusteeType:  windows.TRUSTEE_IS_USER,
@@ -215,7 +210,27 @@ func windowsTargetOwnedDirectorySecurityDescriptor(target *windows.SID) (*window
 	if err := descriptor.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
 		return nil, err
 	}
-	return descriptor.ToSelfRelative()
+	selfRelative, err := descriptor.ToSelfRelative()
+	if err != nil {
+		return nil, err
+	}
+	dacl, _, err := selfRelative.DACL()
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: inspect target-owned directory create descriptor DACL: %w", err)
+	}
+	if dacl == nil {
+		return nil, fmt.Errorf("enterprise hooks: target-owned directory create descriptor has no DACL")
+	}
+	if err := validateWindowsUserPathProtectionACL(
+		"target-owned directory create descriptor",
+		selfRelative,
+		dacl,
+		target,
+		true,
+	); err != nil {
+		return nil, fmt.Errorf("enterprise hooks: reject noncanonical target-owned directory create descriptor: %w", err)
+	}
+	return selfRelative, nil
 }
 
 func openWindowsTargetDirectoryRoot(path string) (windows.Handle, error) {
@@ -267,7 +282,6 @@ func openOrCreateWindowsTargetDirectory(
 	}
 	access := uint32(
 		windows.READ_CONTROL |
-			windows.WRITE_DAC |
 			windows.FILE_READ_ATTRIBUTES |
 			windows.FILE_LIST_DIRECTORY |
 			windows.FILE_APPEND_DATA |
@@ -287,9 +301,10 @@ func openOrCreateWindowsTargetDirectory(
 		&status,
 		nil,
 		0,
-		// Keep the staging capability private until SetSecurityInfo has removed
-		// the target's temporary WRITE_DAC grant. A second process cannot open
-		// the published name and retain that grant while this handle is live.
+		// Deny data/delete sharing while the creator validates the atomically
+		// published final descriptor. Windows sharing does not cover metadata or
+		// security-only opens; safety therefore comes from the final DACL above,
+		// not from treating this share mode as a security-control mutex.
 		0,
 		windows.FILE_CREATE,
 		options,
@@ -303,7 +318,6 @@ func openOrCreateWindowsTargetDirectory(
 		return 0, false, err
 	}
 	attributes.SecurityDescriptor = nil
-	access &^= windows.WRITE_DAC
 	err = windows.NtCreateFile(
 		&handle,
 		access,
@@ -321,40 +335,6 @@ func openOrCreateWindowsTargetDirectory(
 		return 0, false, err
 	}
 	return handle, false, nil
-}
-
-func canonicalizeWindowsTargetOwnedDirectoryHandle(
-	handle windows.Handle,
-	path string,
-	target *windows.SID,
-) error {
-	// Prove that FILE_CREATE returned the expected target-owned, non-reparse
-	// directory before using the handle's one-time WRITE_DAC capability.
-	if err := validateWindowsGuardianACLHandle(handle, target, true, true, false); err != nil {
-		return fmt.Errorf("reject newly created target-owned directory: %w", err)
-	}
-	acl, err := windowsUserPathProtectionACL(target, true)
-	if err != nil {
-		return err
-	}
-	if err := windows.SetSecurityInfo(
-		handle,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		acl,
-		nil,
-	); err != nil {
-		return fmt.Errorf("apply canonical target-owned directory DACL: %w", err)
-	}
-	// Read and validate through the exact handle that received SetSecurityInfo.
-	// This deliberately keeps the single strict seven-ACE contract used by all
-	// other managed-runtime validation paths.
-	if err := validateWindowsTargetOwnedDirectoryHandle(handle, path, target); err != nil {
-		return fmt.Errorf("verify canonical target-owned directory DACL: %w", err)
-	}
-	return nil
 }
 
 func validateWindowsTargetOwnedDirectoryHandle(

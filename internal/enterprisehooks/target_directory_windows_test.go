@@ -82,12 +82,22 @@ func TestEnsureWindowsTargetOwnedDirectoryTreeRejectsPreexistingNoncanonicalDire
 	}
 }
 
-func TestOpenOrCreateWindowsTargetDirectoryKeepsStagingExclusive(t *testing.T) {
+func TestOpenOrCreateWindowsTargetDirectoryPublishesFinalDACLAtomically(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	path := filepath.Join(home, ".defenseclaw")
 	descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target)
 	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("create descriptor DACL is unavailable: %v", err)
+	}
+	if err := validateWindowsUserPathProtectionACL(path, descriptor, dacl, target, true); err != nil {
+		t.Fatalf("create descriptor is not the final canonical contract: %v", err)
+	}
+	if err := requireWindowsTestNoTargetOrOwnerRightsWriteDAC(target); err != nil {
 		t.Fatal(err)
 	}
 	var child windows.Handle
@@ -105,18 +115,41 @@ func TestOpenOrCreateWindowsTargetDirectoryKeepsStagingExclusive(t *testing.T) {
 		if !created {
 			return errors.New("test target directory already existed")
 		}
-		if err := requireWindowsTestDirectorySharingViolation(path); err != nil {
+		// Validate through the exact handle returned by FILE_CREATE before any
+		// other managed operation observes the published directory.
+		if err := validateWindowsTargetOwnedDirectoryHandle(child, path, target); err != nil {
 			return err
 		}
-		if err := canonicalizeWindowsTargetOwnedDirectoryHandle(child, path, target); err != nil {
+		// Metadata-only opens are not governed by Windows share flags and are
+		// safe once the final DACL was applied atomically.
+		metadata, err := openWindowsTestDirectoryNoFollow(path)
+		if err != nil {
+			return fmt.Errorf("open final directory metadata while creator handle is live: %w", err)
+		}
+		if err := windows.CloseHandle(metadata); err != nil {
 			return err
 		}
-		return requireWindowsTestDirectorySharingViolation(path)
+		// On a limited token, OWNER RIGHTS must also deny an actual WRITE_DAC
+		// open. An elevated test token intentionally receives that right through
+		// the separately trusted Administrators ACE, so its structural contract
+		// was asserted above instead of expecting a false denial here.
+		administratorsEnabled, err := windowsTestEffectiveAdministratorsEnabled()
+		if err != nil {
+			return err
+		}
+		if !administratorsEnabled {
+			if err := requireWindowsTestDirectoryAccessDenied(path, windows.WRITE_DAC); err != nil {
+				return err
+			}
+		}
+		// The zero-share creator handle still prevents data mutation until its
+		// same-handle validation is complete.
+		return requireWindowsTestDirectorySharingViolation(path, windows.FILE_WRITE_DATA)
 	}); err != nil {
 		if child != 0 {
 			_ = windows.CloseHandle(child)
 		}
-		t.Fatalf("create and canonicalize exclusive staging directory: %v", err)
+		t.Fatalf("create atomically protected target directory: %v", err)
 	}
 	if err := windows.CloseHandle(child); err != nil {
 		t.Fatalf("release canonical directory handle: %v", err)
@@ -210,11 +243,69 @@ func assertWindowsTargetOwnedCanonicalDirectory(
 	}
 }
 
-func requireWindowsTestDirectorySharingViolation(path string) error {
-	handle, err := openWindowsTestDirectoryNoFollow(path)
+func requireWindowsTestDirectoryAccessDenied(path string, access uint32) error {
+	handle, err := openWindowsTestDirectoryNoFollowAccess(path, access)
 	if err == nil && handle != 0 && handle != windows.InvalidHandle {
 		_ = windows.CloseHandle(handle)
-		return errors.New("competing open unexpectedly succeeded while staging handle was exclusive")
+		return fmt.Errorf("competing directory open with access 0x%x unexpectedly succeeded", access)
+	}
+	if err == nil {
+		return fmt.Errorf("competing directory open returned invalid handle %v without an error", handle)
+	}
+	if handle != 0 && handle != windows.InvalidHandle {
+		_ = windows.CloseHandle(handle)
+	}
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return fmt.Errorf("competing directory open error = %v, want access denied", err)
+	}
+	return nil
+}
+
+func requireWindowsTestNoTargetOrOwnerRightsWriteDAC(target *windows.SID) error {
+	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
+	if err != nil {
+		return err
+	}
+	expected, err := windowsUserPathAppliedCanonicalACEs(target, true)
+	if err != nil {
+		return err
+	}
+	if len(expected) != 7 {
+		return fmt.Errorf("directory create contract has %d ACEs, want exactly 7", len(expected))
+	}
+	for _, ace := range expected {
+		if (ace.sid.Equals(target) || ace.sid.Equals(ownerRights)) && ace.mask&windows.WRITE_DAC != 0 {
+			return fmt.Errorf("directory create contract grants WRITE_DAC to target or OWNER RIGHTS")
+		}
+	}
+	return nil
+}
+
+func windowsTestEffectiveAdministratorsEnabled() (bool, error) {
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return false, err
+	}
+	groups, err := windows.GetCurrentThreadEffectiveToken().GetTokenGroups()
+	if err != nil {
+		return false, err
+	}
+	for _, group := range groups.AllGroups() {
+		if group.Sid != nil &&
+			group.Sid.Equals(administrators) &&
+			group.Attributes&windows.SE_GROUP_ENABLED != 0 &&
+			group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func requireWindowsTestDirectorySharingViolation(path string, access uint32) error {
+	handle, err := openWindowsTestDirectoryNoFollowAccess(path, access)
+	if err == nil && handle != 0 && handle != windows.InvalidHandle {
+		_ = windows.CloseHandle(handle)
+		return fmt.Errorf("competing directory open with access 0x%x unexpectedly bypassed creator sharing", access)
 	}
 	if err == nil {
 		return fmt.Errorf("competing open returned invalid handle %v without an error", handle)
@@ -229,6 +320,13 @@ func requireWindowsTestDirectorySharingViolation(path string) error {
 }
 
 func openWindowsTestDirectoryNoFollow(path string) (windows.Handle, error) {
+	return openWindowsTestDirectoryNoFollowAccess(
+		path,
+		windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+	)
+}
+
+func openWindowsTestDirectoryNoFollowAccess(path string, access uint32) (windows.Handle, error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		return 0, err
@@ -239,7 +337,7 @@ func openWindowsTestDirectoryNoFollow(path string) (windows.Handle, error) {
 	}
 	return windows.CreateFile(
 		ptr,
-		windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+		access,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
