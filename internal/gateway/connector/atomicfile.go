@@ -81,11 +81,10 @@ func atomicWriteFileWithPublisher(
 		return nil
 	}
 
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	tmp, tmpPath, err := atomicFileCreateTemp(dir, perm)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
-	tmpPath := tmp.Name()
 	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
 		if err := safefile.ProtectFile(tmpPath); err != nil {
 			tmp.Close()

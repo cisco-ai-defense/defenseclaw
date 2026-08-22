@@ -15,6 +15,7 @@ package enterprisehooks
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -227,9 +228,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 
 // WriteTargetsManifestAtomic serialises `m` to YAML, compares it
 // byte-for-byte to the on-disk file at `path`, and — if the two
-// differ — writes the serialised bytes atomically via a
-// write-to-`.new` + `MoveFileEx(MOVEFILE_REPLACE_EXISTING |
-// MOVEFILE_WRITE_THROUGH)` swap.
+// differ — writes the serialised bytes through a protected staging file and
+// publishes it with the Windows replacement primitive that preserves the
+// destination's exact protected DACL.
 //
 // Returns `changed=false, err=nil` when the on-disk file is
 // byte-identical to the newly-serialised manifest. This is the
@@ -238,15 +239,15 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 // guardian and force it to re-reconcile identical rows (288
 // wakes/day on a stable 50-user fleet).
 //
-// Returns `changed=true, err=nil` on a successful atomic replace.
-// Returns `changed=false, err=<non-nil>` on any failure; the on-disk
-// file is left untouched.
+// Returns `changed=true, err=nil` on a successful atomic replace. Any staging
+// or pre-publication failure returns changed=false and leaves a known-good
+// destination untouched. A post-publication verification error returns
+// changed=true with the error so callers do not mistake the durable byte
+// change for a no-op.
 //
-// The caller is responsible for the DACL on `path` — this function
-// only writes the bytes. Under spec 005 the enumerator service runs
-// as LocalSystem (matching guardian), so SYSTEM's inherited
-// FullControl via the existing `AdminFile` ACL (from spec 003) is
-// enough; no ACL mutation happens here.
+// Both the parent and every published leaf must match the installer contract:
+// Administrators owner/group and a protected, exact SYSTEM + Administrators
+// FullControl DACL. Reparse points and multiply-linked files are rejected.
 func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -255,59 +256,97 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if !filepath.IsAbs(path) {
 		return false, fmt.Errorf("enterprise hooks: write targets manifest: path must be absolute: %s", path)
 	}
+	path = filepath.Clean(path)
+	dir := filepath.Dir(path)
+	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
+		return false, fmt.Errorf("enterprise hooks: validate hook guardian manifest parent ancestry: %w", err)
+	}
+	if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+		return false, fmt.Errorf("enterprise hooks: validate protected hook guardian manifest parent: %w", err)
+	}
 
 	serialised, err := marshalTargetsManifest(m)
 	if err != nil {
 		return false, err
 	}
 
+	destinationExists := false
+	if _, statErr := os.Lstat(path); statErr == nil {
+		destinationExists = true
+		if err := validateWindowsTargetsManifestObject(path, false); err != nil {
+			return false, fmt.Errorf("enterprise hooks: validate existing hook guardian manifest: %w", err)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return false, fmt.Errorf("enterprise hooks: inspect existing manifest %s: %w", path, statErr)
+	}
 	current, readErr := os.ReadFile(path)
-	if readErr == nil && bytes.Equal(current, serialised) {
+	if destinationExists && readErr == nil && bytes.Equal(current, serialised) {
 		// Byte-identical: skip the write entirely so the guardian's
 		// fsnotify watch does not wake. This is the primary
 		// steady-state code path — a stable box hits it every tick.
 		return false, nil
 	}
-	if readErr != nil && !os.IsNotExist(readErr) {
+	if destinationExists && readErr != nil {
 		return false, fmt.Errorf("enterprise hooks: read existing manifest %s: %w", path, readErr)
 	}
+	if !destinationExists && readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return false, fmt.Errorf("enterprise hooks: observe absent manifest %s: %w", path, readErr)
+	}
 
-	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".defenseclaw-targets-*.new")
 	if err != nil {
 		return false, fmt.Errorf("enterprise hooks: create temp manifest under %s: %w", dir, err)
 	}
 	tmpPath := tmp.Name()
-	// Best-effort cleanup on failure. If MoveFileEx succeeds the
-	// temp path is consumed, so os.Remove on a non-existent path is
-	// silently ignored below.
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
+	// Best-effort cleanup is unconditional. A successful replacement consumes
+	// tmpPath, and removing that now-absent name is harmless.
+	defer func() { _ = os.Remove(tmpPath) }()
+	if closeErr := tmp.Close(); closeErr != nil {
+		return false, fmt.Errorf("enterprise hooks: close new temp manifest %s: %w", tmpPath, closeErr)
+	}
+	// Protect the empty staging object before prompt-adjacent manifest bytes
+	// are written. The exact protected parent prevents an untrusted name swap.
+	if err := windowsTargetsManifestProtect(tmpPath, false); err != nil {
+		return false, fmt.Errorf("enterprise hooks: protect temp manifest %s: %w", tmpPath, err)
+	}
+	tmp, err = os.OpenFile(tmpPath, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: reopen protected temp manifest %s: %w", tmpPath, err)
+	}
 	if _, writeErr := tmp.Write(serialised); writeErr != nil {
 		_ = tmp.Close()
 		return false, fmt.Errorf("enterprise hooks: write temp manifest %s: %w", tmpPath, writeErr)
 	}
+	if syncErr := tmp.Sync(); syncErr != nil {
+		_ = tmp.Close()
+		return false, fmt.Errorf("enterprise hooks: sync temp manifest %s: %w", tmpPath, syncErr)
+	}
 	if closeErr := tmp.Close(); closeErr != nil {
 		return false, fmt.Errorf("enterprise hooks: close temp manifest %s: %w", tmpPath, closeErr)
 	}
-
-	fromPtr, err := windows.UTF16PtrFromString(tmpPath)
-	if err != nil {
-		return false, fmt.Errorf("enterprise hooks: encode temp manifest path: %w", err)
+	if err := validateWindowsTargetsManifestObject(tmpPath, false); err != nil {
+		return false, fmt.Errorf("enterprise hooks: validate protected temp manifest %s: %w", tmpPath, err)
 	}
-	toPtr, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return false, fmt.Errorf("enterprise hooks: encode manifest path: %w", err)
+	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
+		return false, fmt.Errorf("enterprise hooks: revalidate hook guardian manifest parent ancestry: %w", err)
 	}
-	if err := windows.MoveFileEx(
-		fromPtr,
-		toPtr,
-		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
-	); err != nil {
+	if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+		return false, fmt.Errorf("enterprise hooks: revalidate protected hook guardian manifest parent: %w", err)
+	}
+	// A destination can appear between the initial absence check and staging.
+	// It must already be an exact AdminFile before ReplaceFileW may preserve it.
+	if _, statErr := os.Lstat(path); statErr == nil {
+		if err := validateWindowsTargetsManifestObject(path, false); err != nil {
+			return false, fmt.Errorf("enterprise hooks: validate hook guardian manifest immediately before replace: %w", err)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return false, fmt.Errorf("enterprise hooks: inspect hook guardian manifest immediately before replace: %w", statErr)
+	}
+	if err := windowsTargetsManifestReplace(tmpPath, path); err != nil {
 		return false, fmt.Errorf("enterprise hooks: atomic replace %s: %w", path, err)
+	}
+	if err := validateWindowsTargetsManifestObject(path, false); err != nil {
+		return true, fmt.Errorf("enterprise hooks: validate published hook guardian manifest %s: %w", path, err)
 	}
 	return true, nil
 }

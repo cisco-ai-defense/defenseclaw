@@ -445,6 +445,7 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 	originalHigher := windowsClaudeHigherPolicyCheck
 	originalOwner := windowsManagedPolicyOwnerSID
 	originalDirTrust := windowsManagedPolicyDirTrustCheck
+	originalAncestorTrust := windowsManagedPolicyAncestorTrustCheck
 	originalFileTrust := windowsManagedPolicyFileTrustCheck
 	originalWriter := windowsManagedPolicyWriter
 	originalProfile := windowsEnterpriseProfilePathResolver
@@ -460,6 +461,9 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 	windowsClaudeHigherPolicyCheck = func() error { return nil }
 	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return targetSID, nil }
 	windowsManagedPolicyDirTrustCheck = func(path string) error {
+		return validateWindowsTestManagedPolicyProtection(path, targetSID, true)
+	}
+	windowsManagedPolicyAncestorTrustCheck = func(path string) error {
 		return validateWindowsTestManagedPolicyProtection(path, targetSID, true)
 	}
 	windowsManagedPolicyFileTrustCheck = func(path string) error {
@@ -537,6 +541,7 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 		windowsClaudeHigherPolicyCheck = originalHigher
 		windowsManagedPolicyOwnerSID = originalOwner
 		windowsManagedPolicyDirTrustCheck = originalDirTrust
+		windowsManagedPolicyAncestorTrustCheck = originalAncestorTrust
 		windowsManagedPolicyFileTrustCheck = originalFileTrust
 		windowsManagedPolicyWriter = originalWriter
 		windowsEnterpriseProfilePathResolver = originalProfile
@@ -2018,6 +2023,93 @@ func TestEnsureWindowsManagedPolicyDirectoryRejectsWritableAncestorWithoutArtifa
 		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("managed policy artifact created below untrusted ancestor %s: %v", path, statErr)
 		}
+	}
+}
+
+func TestEnsureWindowsManagedPolicyDirectoryUsesAncestorMaskBeforeProtectedCreation(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, nil)
+	policyDir := filepath.Dir(fixture.policyPath)
+	policyRoot := filepath.Dir(policyDir)
+	policyParent := filepath.Dir(policyRoot)
+	if err := os.Remove(policyDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(policyRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	originalAncestorTrust := windowsManagedPolicyAncestorTrustCheck
+	originalDirTrust := windowsManagedPolicyDirTrustCheck
+	ancestorValidated := false
+	windowsManagedPolicyAncestorTrustCheck = func(path string) error {
+		if sameWindowsEnterprisePath(path, policyParent) {
+			ancestorValidated = true
+			return nil
+		}
+		return originalAncestorTrust(path)
+	}
+	windowsManagedPolicyDirTrustCheck = func(path string) error {
+		if sameWindowsEnterprisePath(path, policyParent) {
+			return errors.New("stock known-folder create-child grant fails the leaf mask")
+		}
+		return originalDirTrust(path)
+	}
+	t.Cleanup(func() {
+		windowsManagedPolicyAncestorTrustCheck = originalAncestorTrust
+		windowsManagedPolicyDirTrustCheck = originalDirTrust
+	})
+
+	if err := ensureWindowsManagedPolicyDirectory(policyDir); err != nil {
+		t.Fatalf("create below narrowly trusted ancestor: %v", err)
+	}
+	if !ancestorValidated {
+		t.Fatal("first existing ancestor was not checked with the replacement-rights mask")
+	}
+	for _, path := range []string{policyRoot, policyDir} {
+		if err := originalDirTrust(path); err != nil {
+			t.Fatalf("created leaf %s did not receive strict protected ACL: %v", path, err)
+		}
+		if err := validateWindowsManagedPolicyDirectoryProtection(path); err != nil {
+			t.Fatalf("created leaf %s failed exact production ACL validation: %v", path, err)
+		}
+	}
+}
+
+func TestValidateWindowsManagedPolicyDirectoryProtectionRejectsUnprotectedLeaf(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, nil)
+	path := filepath.Dir(fixture.policyPath)
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("read fixture DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	originalDirTrust := windowsManagedPolicyDirTrustCheck
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { windowsManagedPolicyDirTrustCheck = originalDirTrust })
+	if err := validateWindowsManagedPolicyDirectoryProtection(path); err == nil {
+		t.Fatal("unprotected pre-created managed policy directory was accepted")
 	}
 }
 

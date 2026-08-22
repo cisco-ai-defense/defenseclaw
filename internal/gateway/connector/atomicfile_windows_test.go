@@ -17,6 +17,44 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
+func TestAtomicPrivateTempPinsEffectiveUserOwnerAtCreation(t *testing.T) {
+	dir := t.TempDir()
+	file, path, err := atomicFileCreateTemp(dir, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	})
+
+	wantOwner, err := windowsEffectiveUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		windows.Handle(file.Fd()),
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner == nil || !owner.Equals(wantOwner) {
+		t.Fatalf("private staging owner=%v, want effective user %s", owner, wantOwner)
+	}
+	if err := validateAtomicTransformBoundFilePrivatePlatform(file); err != nil {
+		t.Fatalf("private staging protection: %v", err)
+	}
+	if filepath.Dir(path) != dir || filepath.Base(path) == "" {
+		t.Fatalf("private staging path %q escaped directory %q", path, dir)
+	}
+}
+
 func TestAtomicWriteAcceptsVerifiedStateAfterVisibleLateReplaceFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	data := []byte("managed\n")

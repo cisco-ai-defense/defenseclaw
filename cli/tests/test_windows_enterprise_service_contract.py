@@ -97,6 +97,10 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$userHomeFull =" in discovery
     assert "$home =" not in discovery.casefold()
     assert "Get-DefenseClawClaudeWinGetMetadataVersion" in discovery
+    assert "Get-DefenseClawCodexWinGetMetadataVersion" in discovery
+    assert discovery.index("$machinePackage") < discovery.index(
+        "Get-DefenseClawCodexWinGetMetadataVersion"
+    )
     assert discovery.index("$machinePackage") < discovery.index(
         "Get-DefenseClawClaudeWinGetMetadataVersion"
     )
@@ -108,6 +112,10 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
         "Anthropic.ClaudeCode_Microsoft.Winget.Source_*"
         in winget_discovery
     )
+    assert "OpenAI.Codex_Microsoft.Winget.Source_*" in winget_discovery
+    assert "codex-x86_64-pc-windows-msvc.exe" in winget_discovery
+    assert "OpenAI OpCo, LLC" in winget_discovery
+    assert "Get-DefenseClawCodexWinGetEmbeddedVersion" in winget_discovery
     assert "[IO.SearchOption]::TopDirectoryOnly" in winget_discovery
     assert "[IO.SearchOption]::AllDirectories" not in winget_discovery
     assert (
@@ -122,6 +130,9 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$examined -gt 256" in winget_discovery
     assert "$matched -gt 32" in winget_discovery
     assert "Get-DefenseClawConnectorMetadataVersion" in renderer
+    assert "Resolve-DefenseClawConnectorMetadataVersion" in renderer
+    assert "-NativeCandidateObserved $nativeCandidateObserved" in renderer
+    assert "-DiscoveryFailed $metadataDiscoveryFailed" in renderer
     assert "$users = @(" in renderer
     assert "agent_version:" in renderer
     assert "enabled: false" in renderer
@@ -139,6 +150,14 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
         "eligible Claude user did not receive exactly one enabled target"
         in smoke
     )
+    assert (
+        "official WinGet Codex package was not discovered exactly once"
+        in smoke
+    )
+    assert "WinGet Codex owner identity did not reject a foreign owner" in smoke
+    assert "WinGet Codex discovery followed a package reparse point" in smoke
+    assert "below-minimum native Codex was replaced by fallback metadata" in smoke
+    assert "WinGet Codex fallback decision did not remain fail closed" in smoke
     assert "shorthand config did not explicitly select embedded rule-pack defaults" in smoke
 
 

@@ -325,6 +325,114 @@ foreach ($property in $comparisonCases.psobject.Properties) {
     }
 }
 
+$runtimeAdoption = & $module {
+    param($GatewaySID)
+    $root = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        'DefenseClaw-RuntimeAcl-' + [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $root `
+            -Force)
+        $nested = Microsoft.PowerShell.Management\Join-Path $root 'nested'
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $nested `
+            -Force)
+        $audit = Microsoft.PowerShell.Management\Join-Path $root 'audit.db'
+        $sidecar = Microsoft.PowerShell.Management\Join-Path $nested 'audit.db-wal'
+        [IO.File]::WriteAllText($audit, 'retained-audit')
+        [IO.File]::WriteAllText($sidecar, 'retained-sidecar')
+
+        # Model the administrator-only tree left by non-purge uninstall.
+        foreach ($directory in @($root, $nested)) {
+            Set-DefenseClawPathAcl `
+                -Path $directory `
+                -Kind AdminDirectory `
+                -GatewayServiceSID $GatewaySID
+        }
+        foreach ($file in @($audit, $sidecar)) {
+            Set-DefenseClawPathAcl `
+                -Path $file `
+                -Kind AdminFile `
+                -GatewayServiceSID $GatewaySID
+        }
+
+        Set-DefenseClawRetainedRuntimeAcls `
+            -RuntimeDirectory $root `
+            -GatewayServiceSID $GatewaySID
+        foreach ($directory in @($root, $nested)) {
+            $expectedDirectory = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory $true `
+                -Kind RuntimeDirectory `
+                -GatewayServiceSID $GatewaySID
+            Assert-DefenseClawCanonicalPathAcl `
+                -Path $directory `
+                -Expected $expectedDirectory
+        }
+        foreach ($file in @($audit, $sidecar)) {
+            $expectedFile = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory $false `
+                -Kind RuntimeFile `
+                -GatewayServiceSID $GatewaySID
+            Assert-DefenseClawCanonicalPathAcl `
+                -Path $file `
+                -Expected $expectedFile
+        }
+
+        $linked = Microsoft.PowerShell.Management\Join-Path $root 'linked.db'
+        $linkedAlias = Microsoft.PowerShell.Management\Join-Path $root 'linked-alias.db'
+        [IO.File]::WriteAllText($linked, 'linked-runtime')
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType HardLink `
+            -Path $linkedAlias `
+            -Target $linked `
+            -Force)
+        $native = Initialize-DefenseClawNativeSecurity
+        $descriptorBefore = [Convert]::ToBase64String(
+            $native::GetFileSecurityDescriptor($linked)
+        )
+        $hardLinkRejected = $false
+        try {
+            Set-DefenseClawRetainedRuntimeAcls `
+                -RuntimeDirectory $root `
+                -GatewayServiceSID $GatewaySID
+        }
+        catch {
+            $hardLinkRejected = $_.Exception.Message -match 'hard links'
+        }
+        $descriptorAfter = [Convert]::ToBase64String(
+            $native::GetFileSecurityDescriptor($linked)
+        )
+        return [pscustomobject]@{
+            retained_tree_adopted = $true
+            single_links_enforced = (
+                $native::GetRegularFileLinkCountNoFollow($audit) -eq 1
+            )
+            hard_link_rejected = $hardLinkRejected
+            hard_link_preflight_preserved_acl = (
+                $descriptorBefore -ceq $descriptorAfter
+            )
+        }
+    }
+    finally {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root) {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $root `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+} $serviceSID
+foreach ($property in $runtimeAdoption.psobject.Properties) {
+    if (-not [bool]$property.Value) {
+        throw "retained runtime ACL adoption regression failed: $($property.Name)"
+    }
+}
+
 $nativeDescriptor = & $module {
     param($Path)
     $native = Initialize-DefenseClawNativeSecurity
@@ -350,4 +458,6 @@ if ($null -eq $nativeDescriptor.DiscretionaryAcl) {
     installer_verifier_pairings_checked = $pairingsChecked
     acl_kind_sets_agree = [bool]$kindSetsAgree
     state_ancestor_grant_is_additive = $true
+    retained_runtime_tree_adopted = $true
+    retained_runtime_hard_links_rejected = $true
 } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress

@@ -282,7 +282,7 @@ func TestWindowsDefaultKnownFolderAncestorsAreTrusted(t *testing.T) {
 			t.Fatalf("%s is unset", envName)
 		}
 		t.Run(envName, func(t *testing.T) {
-			if err := validateTrustedWindowsPathElementWithWriter(path, true, "known-folder ancestor", nil, true); err != nil {
+			if err := ValidateTrustedDirectoryAncestor(path, "known-folder ancestor"); err != nil {
 				t.Fatalf("default %s trust probe failed for %s: %v", envName, path, err)
 			}
 		})

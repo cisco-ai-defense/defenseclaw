@@ -596,6 +596,51 @@ namespace $nativeNamespace
             }
         }
 
+        public static uint GetRegularFileLinkCountNoFollow(string path)
+        {
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            IntPtr handle = CreateFileW(
+                path,
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "open regular file for link-count query failed: " + path);
+            try
+            {
+                BY_HANDLE_FILE_INFORMATION information;
+                if (!GetFileInformationByHandle(handle, out information))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query regular file link count failed: " + path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                    throw new InvalidOperationException(
+                        "refusing link-count query through a reparse point: " + path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                    throw new InvalidOperationException(
+                        "link-count query requires a regular file: " + path);
+                if (information.NumberOfLinks == 0)
+                    throw new InvalidOperationException(
+                        "regular file reported an invalid zero link count: " + path);
+                return information.NumberOfLinks;
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
         public static byte[] GetFileSecurityDescriptor(string path)
         {
             const uint READ_CONTROL = 0x00020000;
@@ -3953,6 +3998,112 @@ function Set-DefenseClawManagedAcls {
     }
 }
 
+# A non-purge uninstall intentionally retains runtime state with an
+# administrator-only DACL. Before the replacement gateway starts, adopt every
+# retained runtime object into the exact ACL for the newly registered gateway
+# service SID. Preflight the whole tree before the first ACL change so a
+# hostile reparse point or hard link cannot redirect, or partially trigger,
+# the adoption pass.
+function Set-DefenseClawRetainedRuntimeAcls {
+    param(
+        [Parameter(Mandatory)][string]$RuntimeDirectory,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    $root = [IO.Path]::GetFullPath($RuntimeDirectory).TrimEnd('\')
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $root `
+            -PathType Container)) {
+        throw "retained runtime directory is missing or not a directory: $root"
+    }
+    Assert-DefenseClawNoReparsePath -Path $root
+
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $directories = [Collections.Generic.List[string]]::new()
+    $files = [Collections.Generic.List[object]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $directories.Add($root)
+    $pending.Push($root)
+    [void]$seen.Add($root)
+    $objectCount = 1
+    $maximumObjectCount = 16384
+
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        Assert-DefenseClawNoReparsePath -Path $directory
+        foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem `
+                -LiteralPath $directory `
+                -Force `
+                -ErrorAction Stop)) {
+            $full = Assert-DefenseClawDescendant `
+                -Path $item.FullName `
+                -Root $root `
+                -Label 'retained runtime object'
+            if (-not $seen.Add($full)) {
+                throw "retained runtime tree contains a duplicate path: $full"
+            }
+            $objectCount++
+            if ($objectCount -gt $maximumObjectCount) {
+                throw (
+                    'retained runtime tree exceeds the bounded adoption limit ' +
+                    "of $maximumObjectCount objects"
+                )
+            }
+            Assert-DefenseClawNoReparsePath -Path $full
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "refusing retained runtime reparse point: $full"
+            }
+            if ($item.PSIsContainer) {
+                $directories.Add($full)
+                $pending.Push($full)
+                continue
+            }
+            $linkCount = [uint32]$nativeSecurity::GetRegularFileLinkCountNoFollow($full)
+            if ($linkCount -ne 1) {
+                throw "refusing retained runtime file with $linkCount hard links: $full"
+            }
+            $files.Add([pscustomobject]@{
+                path = $full
+                identity = ([string]$nativeSecurity::GetFileIdentity($full)).ToLowerInvariant()
+            })
+        }
+    }
+
+    foreach ($directory in $directories) {
+        Assert-DefenseClawNoReparsePath -Path $directory
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $directory `
+                -PathType Container)) {
+            throw "retained runtime directory changed during ACL adoption: $directory"
+        }
+        Set-DefenseClawPathAcl `
+            -Path $directory `
+            -Kind RuntimeDirectory `
+            -GatewayServiceSID $GatewayServiceSID
+    }
+    foreach ($file in $files) {
+        $path = [string]$file.path
+        Assert-DefenseClawNoReparsePath -Path $path
+        $identityBefore = ([string]$nativeSecurity::GetFileIdentity($path)).ToLowerInvariant()
+        $linksBefore = [uint32]$nativeSecurity::GetRegularFileLinkCountNoFollow($path)
+        if ($identityBefore -cne ([string]$file.identity) -or $linksBefore -ne 1) {
+            throw "retained runtime file changed during ACL adoption: $path"
+        }
+        Set-DefenseClawPathAcl `
+            -Path $path `
+            -Kind RuntimeFile `
+            -GatewayServiceSID $GatewayServiceSID
+        Assert-DefenseClawNoReparsePath -Path $path
+        $identityAfter = ([string]$nativeSecurity::GetFileIdentity($path)).ToLowerInvariant()
+        $linksAfter = [uint32]$nativeSecurity::GetRegularFileLinkCountNoFollow($path)
+        if ($identityAfter -cne $identityBefore -or $linksAfter -ne 1) {
+            throw "retained runtime file changed while its ACL was adopted: $path"
+        }
+    }
+}
+
 function Set-DefenseClawManagedCoreAcls {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -3992,6 +4143,10 @@ function Set-DefenseClawManagedServicesForTransaction {
     Initialize-DefenseClawManagedIPCDirectory `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
+    Set-DefenseClawRetainedRuntimeAcls `
+        -RuntimeDirectory $Layout.RuntimeDirectory `
+        -GatewayServiceSID (Get-DefenseClawServiceSID `
+            -ServiceName $GatewayServiceName)
     Set-DefenseClawManagedCoreAcls `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
@@ -7439,7 +7594,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         throw "managed-hook teardown command emitted $($reports.Count) JSON reports; expected exactly one"
     }
     $report = $reports[0]
-    if ([int]$report.schema_version -ne 2) {
+    if ([int]$report.schema_version -ne 3) {
         throw "unsupported managed-hook teardown report schema: $($report.schema_version)"
     }
     if ([string]$report.action -cne $Action) {
@@ -7487,6 +7642,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         'enrollment_target_count',
         'succeeded_count',
         'verified_clean_count',
+        'verified_installed_count',
         'failed_count',
         'surviving_owned_path_references'
     )) {
@@ -7566,8 +7722,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
             $rollbackCompleted.Value -isnot [bool] -or
             -not [bool]$rollbackCompleted.Value -or
             $null -eq $verifiedInstalled -or
-            $verifiedInstalled.Value -is [bool] -or
-            [Convert]::ToInt64($verifiedInstalled.Value) -ne
+            [int64]$counts.verified_installed_count -ne
                 $counts.enrollment_target_count) {
             throw 'managed-hook teardown rollback did not restore and verify the exact pre-teardown enrollment'
         }
@@ -7643,7 +7798,7 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         throw "managed-hook lifecycle snapshot emitted $($reports.Count) JSON reports; expected exactly one"
     }
     $report = $reports[0]
-    if ([int]$report.schema_version -ne 1) {
+    if ([int]$report.schema_version -ne 2) {
         throw "unsupported managed-hook lifecycle snapshot schema: $($report.schema_version)"
     }
     if ([string]$report.action -cne $Action) {

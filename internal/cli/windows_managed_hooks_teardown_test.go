@@ -226,6 +226,7 @@ func TestWindowsManagedHooksTeardownReportJSONContract(t *testing.T) {
 		"enrollment_target_count",
 		"succeeded_count",
 		"verified_clean_count",
+		"verified_installed_count",
 		"failed_count",
 		"surviving_owned_path_references",
 	} {

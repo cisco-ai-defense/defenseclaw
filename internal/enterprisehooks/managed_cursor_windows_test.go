@@ -8,12 +8,97 @@ package enterprisehooks
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsCursorTransactionLockRetiresOnlyWithoutManagedArtifacts(t *testing.T) {
+	adapterPath := `C:\ProgramData\Cursor\defenseclaw-hook.ps1`
+	foreignHooks := []byte(`{"version":1,"hooks":{"operatorEvent":[{"type":"command","command":"operator-hook"}]}}`)
+	managedHooks, err := connector.MergeWindowsCursorEnterpriseHooks(
+		foreignHooks,
+		adapterPath,
+		"closed",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		artifacts  windowsCursorManagedArtifacts
+		wantRetire bool
+	}{
+		"completely absent": {
+			artifacts: windowsCursorManagedArtifacts{
+				adapter: windowsManagedFileSnapshot{path: adapterPath},
+			},
+			wantRetire: true,
+		},
+		"foreign hooks only": {
+			artifacts: windowsCursorManagedArtifacts{
+				hooks:   windowsManagedFileSnapshot{existed: true, data: foreignHooks},
+				adapter: windowsManagedFileSnapshot{path: adapterPath},
+			},
+			wantRetire: true,
+		},
+		"owned hook remains": {
+			artifacts: windowsCursorManagedArtifacts{
+				hooks:   windowsManagedFileSnapshot{existed: true, data: managedHooks},
+				adapter: windowsManagedFileSnapshot{path: adapterPath},
+			},
+		},
+		"adapter tombstone remains": {
+			artifacts: windowsCursorManagedArtifacts{
+				adapter: windowsManagedFileSnapshot{
+					path: adapterPath, existed: true, data: windowsCursorManagedTombstone(),
+				},
+			},
+		},
+		"private receipt remains": {
+			artifacts: windowsCursorManagedArtifacts{
+				adapter: windowsManagedFileSnapshot{path: adapterPath},
+				receipt: windowsManagedFileSnapshot{existed: true},
+			},
+		},
+		"public state remains": {
+			artifacts: windowsCursorManagedArtifacts{
+				adapter: windowsManagedFileSnapshot{path: adapterPath},
+				state:   windowsManagedFileSnapshot{existed: true},
+			},
+		},
+		"malformed config is ambiguous": {
+			artifacts: windowsCursorManagedArtifacts{
+				hooks:   windowsManagedFileSnapshot{existed: true, data: []byte(`{"hooks":`)},
+				adapter: windowsManagedFileSnapshot{path: adapterPath},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := windowsCursorManagedLockCanRetire(test.artifacts); got != test.wantRetire {
+				t.Fatalf("windowsCursorManagedLockCanRetire = %t, want %t", got, test.wantRetire)
+			}
+		})
+	}
+
+	lockPath := filepath.Join(t.TempDir(), windowsCursorManagedLockFile)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireWindowsCursorManagedLock(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireWindowsCursorManagedLock(lockPath); err != nil {
+		t.Fatalf("idempotent Cursor lock retirement: %v", err)
+	}
+	if _, err := os.Lstat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retired Cursor lock still exists: %v", err)
+	}
+}
 
 const (
 	windowsCursorTestTrustedSDDL = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;BU)"

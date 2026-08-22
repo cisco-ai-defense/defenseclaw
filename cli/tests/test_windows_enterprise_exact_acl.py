@@ -224,6 +224,38 @@ def test_fixed_managed_ipc_path_is_provisioned_for_the_exact_gateway_sid() -> No
     assert "$script:AuthenticatedUsersSID" in verifier
 
 
+def test_retained_runtime_acl_adoption_precedes_gateway_startup() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    adoption = _extract_function_body(
+        source,
+        "function Set-DefenseClawRetainedRuntimeAcls",
+        "function Set-DefenseClawManagedCoreAcls",
+    )
+    assert "Assert-DefenseClawDescendant" in adoption
+    assert "Assert-DefenseClawNoReparsePath" in adoption
+    assert "GetRegularFileLinkCountNoFollow" in adoption
+    assert "GetFileIdentity" in adoption
+    assert "-Kind RuntimeDirectory" in adoption
+    assert "-Kind RuntimeFile" in adoption
+    assert adoption.index("while ($pending.Count -gt 0)") < adoption.index(
+        "foreach ($directory in $directories)",
+    )
+
+    transaction_services = _extract_function_body(
+        source,
+        "function Set-DefenseClawManagedServicesForTransaction",
+        "function Get-DefenseClawLayout",
+    )
+    assert "-DeferAutomaticStart" in transaction_services
+    assert "Set-DefenseClawRetainedRuntimeAcls" in transaction_services
+    assert transaction_services.index("Set-DefenseClawManagedServices") < (
+        transaction_services.index("Set-DefenseClawRetainedRuntimeAcls")
+    )
+    assert transaction_services.index("Set-DefenseClawRetainedRuntimeAcls") < (
+        transaction_services.index("Set-DefenseClawManagedCoreAcls")
+    )
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell smoke")
 @pytest.mark.parametrize("engine", _powershell_engines_or_fail())
 def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
@@ -269,4 +301,6 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         "installer_verifier_pairings_checked": 17,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
+        "retained_runtime_tree_adopted": True,
+        "retained_runtime_hard_links_rejected": True,
     }

@@ -423,6 +423,16 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 	requirements := windowsPowerShellFunction(t, module, "Invoke-DefenseClawCodexRequirementsCommand")
 	teardown := windowsPowerShellFunction(t, module, "Invoke-DefenseClawManagedHooksTeardownCommand")
 	lifecycleSnapshot := windowsPowerShellFunction(t, module, "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand")
+	teardownSchema := readWindowsManagedHooksSchemaConstant(
+		t,
+		"windows_managed_hooks_teardown.go",
+		"windowsManagedHooksTeardownSchema",
+	)
+	lifecycleSchema := readWindowsManagedHooksSchemaConstant(
+		t,
+		"windows_managed_hooks_lifecycle.go",
+		"windowsManagedHooksLifecycleSchema",
+	)
 
 	for label, body := range map[string]string{"native": native, "gateway": gateway} {
 		if strings.Contains(body, "$LASTEXITCODE") ||
@@ -479,7 +489,11 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 	teardownFirstSuccessPath := strings.Index(teardown, "@('manifest_path'")
 	if teardownFailureCheck < 0 || teardownFirstSuccessPath < 0 ||
 		teardownFailureCheck > teardownFirstSuccessPath ||
-		!strings.Contains(teardown, "ConvertTo-DefenseClawBoundedDiagnostic -Value $detail") {
+		!strings.Contains(teardown, "ConvertTo-DefenseClawBoundedDiagnostic -Value $detail") ||
+		!strings.Contains(
+			teardown,
+			"if ([int]$report.schema_version -ne "+teardownSchema+")",
+		) {
 		t.Fatal("managed-hook teardown failure is masked by success-layout validation")
 	}
 	lifecycleFailureCheck := strings.Index(lifecycleSnapshot, "if ([int]$probe.exit_code -ne 0")
@@ -487,7 +501,11 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 	if lifecycleFailureCheck < 0 || lifecycleFirstSuccessPath < 0 ||
 		lifecycleFailureCheck > lifecycleFirstSuccessPath ||
 		!strings.Contains(lifecycleSnapshot, "managed-hooks-lifecycle-snapshot") ||
-		!strings.Contains(lifecycleSnapshot, "ConvertTo-DefenseClawBoundedDiagnostic -Value $detail") {
+		!strings.Contains(lifecycleSnapshot, "ConvertTo-DefenseClawBoundedDiagnostic -Value $detail") ||
+		!strings.Contains(
+			lifecycleSnapshot,
+			"if ([int]$report.schema_version -ne "+lifecycleSchema+")",
+		) {
 		t.Fatal("managed-hook lifecycle snapshot masks failures or escapes its hidden command contract")
 	}
 }
@@ -1409,6 +1427,27 @@ func readWindowsEnterpriseModule(t *testing.T) []byte {
 		t.Fatalf("ReadFile(%s): %v", modulePath, err)
 	}
 	return module
+}
+
+func readWindowsManagedHooksSchemaConstant(
+	t *testing.T,
+	filename string,
+	constant string,
+) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "internal", "cli", filename)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	pattern := regexp.MustCompile(
+		`(?m)^\s*` + regexp.QuoteMeta(constant) + `\s*=\s*([0-9]+)\s*$`,
+	)
+	match := pattern.FindSubmatch(body)
+	if len(match) != 2 {
+		t.Fatalf("could not resolve %s from %s", constant, path)
+	}
+	return string(match[1])
 }
 
 func readWindowsEnterpriseHarness(t *testing.T) []byte {

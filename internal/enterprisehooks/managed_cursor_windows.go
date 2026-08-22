@@ -163,6 +163,9 @@ func withWindowsCursorManagedTransaction(fn func() error) error {
 	if err := ensureWindowsManagedPolicyDirectory(root); err != nil {
 		return fmt.Errorf("enterprise hooks: prepare Cursor enterprise directory: %w", err)
 	}
+	if err := validateWindowsManagedPolicyDirectoryProtection(root); err != nil {
+		return fmt.Errorf("enterprise hooks: verify exact Cursor enterprise directory protection: %w", err)
+	}
 	if info, statErr := os.Lstat(lockPath); statErr == nil {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("enterprise hooks: refusing non-regular Cursor transaction lock: %s", lockPath)
@@ -178,14 +181,32 @@ func withWindowsCursorManagedTransaction(fn func() error) error {
 	for {
 		lock, lockErr := openWindowsClaudeManagedPolicyLockFile(lockPath)
 		if lockErr == nil {
-			defer windows.CloseHandle(lock)
+			closed := false
+			defer func() {
+				if !closed {
+					_ = windows.CloseHandle(lock)
+				}
+			}()
 			if err := setWindowsManagedPolicyProtection(lockPath, false, false); err != nil {
+				_ = windows.CloseHandle(lock)
+				closed = true
 				return fmt.Errorf("enterprise hooks: harden Cursor transaction lock: %w", err)
 			}
 			if err := windowsManagedPolicyFileTrustCheck(lockPath); err != nil {
+				_ = windows.CloseHandle(lock)
+				closed = true
 				return fmt.Errorf("enterprise hooks: verify Cursor transaction lock: %w", err)
 			}
-			return fn()
+			transactionErr := fn()
+			artifacts, snapshotErr := snapshotWindowsCursorManagedArtifacts()
+			retireLock := snapshotErr == nil && windowsCursorManagedLockCanRetire(artifacts)
+			closeErr := windows.CloseHandle(lock)
+			closed = closeErr == nil
+			var retireErr error
+			if closeErr == nil && retireLock {
+				retireErr = retireWindowsCursorManagedLock(lockPath)
+			}
+			return errors.Join(transactionErr, snapshotErr, closeErr, retireErr)
 		}
 		if !errors.Is(lockErr, windows.ERROR_SHARING_VIOLATION) &&
 			!errors.Is(lockErr, windows.ERROR_LOCK_VIOLATION) {
@@ -196,6 +217,35 @@ func withWindowsCursorManagedTransaction(fn func() error) error {
 		}
 		time.Sleep(windowsClaudeManagedLockRetry)
 	}
+}
+
+// windowsCursorManagedLockCanRetire is deliberately stricter than checking
+// only the public state file. The transaction lock is removed only when the
+// adapter, state, and private receipt are absent and hooks.json contains no
+// DefenseClaw-owned Cursor entry. A tombstone or malformed/ambiguous config
+// keeps the protected lock in place.
+func windowsCursorManagedLockCanRetire(artifacts windowsCursorManagedArtifacts) bool {
+	if artifacts.adapter.existed || artifacts.state.existed || artifacts.receipt.existed {
+		return false
+	}
+	if !artifacts.hooks.existed {
+		return true
+	}
+	cleaned, err := connector.RemoveWindowsCursorEnterpriseHooks(
+		artifacts.hooks.data,
+		artifacts.adapter.path,
+	)
+	return err == nil && connector.WindowsCursorEnterpriseHooksSemanticallyEqual(
+		cleaned,
+		artifacts.hooks.data,
+	)
+}
+
+func retireWindowsCursorManagedLock(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("enterprise hooks: retire unused Cursor transaction lock: %w", err)
+	}
+	return nil
 }
 
 func snapshotWindowsCursorManagedArtifacts() (windowsCursorManagedArtifacts, error) {

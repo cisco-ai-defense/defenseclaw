@@ -7,6 +7,7 @@ package ipc
 
 import (
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -90,14 +91,43 @@ func assertBaselineIPCACEs(t *testing.T, class aclObjectClass, wantAuthUsersMask
 		if got.Trustee.TrusteeForm != windows.TRUSTEE_IS_SID {
 			t.Errorf("entry %d (%s): TrusteeForm = %v, want TRUSTEE_IS_SID", i, tc.name, got.Trustee.TrusteeForm)
 		}
-		// The trustee value is a uintptr embedding the SID pointer;
-		// compare via TrusteeValueFromSID against the expected SID
-		// (which for slot 2 is the explicit fixture supplied to the ACL
-		// builder, so this asserts both identity and authority).
-		wantTV := windows.TrusteeValueFromSID(tc.want)
-		if got.Trustee.TrusteeValue != wantTV {
-			t.Errorf("entry %d (%s): trustee SID mismatch", i, tc.name)
-		}
+		assertExplicitAccessTrusteeSID(t, i, tc.name, got, tc.want)
+	}
+}
+
+// assertExplicitAccessTrusteeSID materializes a single EXPLICIT_ACCESS entry
+// through the same Windows ACL API used by applyBaselineIPCACL, then compares
+// the copied SID contents. TrusteeValue itself embeds a pointer, so comparing
+// it directly would reject equivalent independently allocated well-known SIDs.
+func assertExplicitAccessTrusteeSID(
+	t *testing.T,
+	index int,
+	name string,
+	entry windows.EXPLICIT_ACCESS,
+	want *windows.SID,
+) {
+	t.Helper()
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, nil)
+	if err != nil {
+		t.Fatalf("entry %d (%s): materialize ACL: %v", index, name, err)
+	}
+	if acl == nil {
+		t.Fatalf("entry %d (%s): materialized ACL is nil", index, name)
+	}
+	if acl.AceCount != 1 {
+		t.Fatalf("entry %d (%s): materialized ACE count = %d, want 1", index, name, acl.AceCount)
+	}
+
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(acl, 0, &ace); err != nil {
+		t.Fatalf("entry %d (%s): read materialized ACE: %v", index, name, err)
+	}
+	if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		t.Fatalf("entry %d (%s): materialized ACE is not an allow ACE", index, name)
+	}
+	got := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if !got.IsValid() || !got.Equals(want) {
+		t.Errorf("entry %d (%s): trustee SID = %s, want %s", index, name, got, want)
 	}
 }
 
