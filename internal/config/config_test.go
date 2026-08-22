@@ -551,6 +551,116 @@ func TestValidateDeploymentMode_Invalid(t *testing.T) {
 	}
 }
 
+func TestManagedEnterpriseListenerBindingsModeMatrix(t *testing.T) {
+	tests := []struct {
+		name          string
+		mode          string
+		apiBind       string
+		guardrailHost string
+		guardrail     bool
+		wantErr       string
+		wantAPIBind   string
+	}{
+		{
+			name:          "normal mode preserves explicit remote binds",
+			mode:          string(DeploymentModeUnmanagedBYOD),
+			apiBind:       "0.0.0.0",
+			guardrailHost: "192.0.2.10",
+			guardrail:     true,
+			wantAPIBind:   "0.0.0.0",
+		},
+		{
+			name:          "managed defaults stay loopback",
+			mode:          string(DeploymentModeManagedEnterprise),
+			guardrailHost: "127.0.0.1",
+			guardrail:     true,
+			wantAPIBind:   "127.0.0.1",
+		},
+		{
+			name:          "managed API remains IPv4 with independent IPv6 guardrail",
+			mode:          string(DeploymentModeManagedEnterprise),
+			apiBind:       "127.0.0.1",
+			guardrailHost: "[::1]",
+			guardrail:     true,
+			wantAPIBind:   "127.0.0.1",
+		},
+		{
+			name:    "managed API IPv6 loopback rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "::1",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API localhost rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "localhost",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API alternate IPv4 loopback rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "127.99.1.2",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API whitespace spelling rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: " 127.0.0.1 ",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API wildcard rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "0.0.0.0",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:          "managed proxy wildcard rejected",
+			mode:          string(DeploymentModeManagedEnterprise),
+			apiBind:       "127.0.0.1",
+			guardrailHost: "0.0.0.0",
+			guardrail:     true,
+			wantErr:       "guardrail proxy must bind to loopback",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DeploymentMode = test.mode
+			cfg.Gateway.APIBind = test.apiBind
+			cfg.Guardrail.Host = test.guardrailHost
+			cfg.Guardrail.Enabled = test.guardrail
+			err := validateManagedEnterpriseListenerBindings(cfg)
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("validateManagedEnterpriseListenerBindings: %v", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+			if test.wantErr == "" && cfg.Gateway.APIBind != test.wantAPIBind {
+				t.Fatalf(
+					"Gateway.APIBind = %q, want %q",
+					cfg.Gateway.APIBind,
+					test.wantAPIBind,
+				)
+			}
+		})
+	}
+}
+
+func TestIsLoopbackListenerHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "127.99.1.2", "::1", "[::1]", "localhost", " LOCALHOST "} {
+		if !isLoopbackListenerHost(host) {
+			t.Errorf("isLoopbackListenerHost(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{"", "0.0.0.0", "::", "192.0.2.10", "example.test", "localhost.example"} {
+		if isLoopbackListenerHost(host) {
+			t.Errorf("isLoopbackListenerHost(%q) = true, want false", host)
+		}
+	}
+}
+
 func TestValidateGatewayConfigReloadMode(t *testing.T) {
 	for _, mode := range []string{"", "hot", "restart", "HOT", " Restart "} {
 		t.Run(mode, func(t *testing.T) {

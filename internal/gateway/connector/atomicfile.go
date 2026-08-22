@@ -161,11 +161,19 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
 		return false
 	}
+	// The destination is commonly user-owned runtime state. Never size an
+	// allocation from attacker-controlled metadata: a sparse file can advertise
+	// terabytes while consuming almost no disk. A byte-for-byte match must have
+	// the exact expected length, and the bounded read below closes a grow-after-
+	// stat race without changing the comparison result.
+	if openedInfo.Size() != int64(len(data)) {
+		return false
+	}
 	pathInfo, err := os.Lstat(path)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
 		return false
 	}
-	current, err := io.ReadAll(file)
+	current, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
 	if err != nil || !bytes.Equal(current, data) {
 		return false
 	}

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -150,11 +151,20 @@ type Sidecar struct {
 	judgeBodiesReadyPending bool
 	judgeBodiesReadyDetails string
 
-	// cmidProviderMu guards cmidProviderInst. The provider is lazily
-	// constructed on first request via ensureCMIDProvider and reused
-	// for the sidecar's lifetime. Managed-mode wiring only.
-	cmidProviderMu   sync.Mutex
-	cmidProviderInst cloudreg.Provider
+	// cmidProviderMu guards cmidProviderInst AND cmidBuildLastLog.
+	// The provider is lazily constructed on first request via
+	// ensureCMIDProvider and reused for the sidecar's lifetime.
+	// Managed-mode wiring only.
+	cmidProviderMu    sync.Mutex
+	cmidProviderInst  cloudreg.Provider
+	cmidBuildLastLog  time.Time
+	cmidBuildLastKind string
+
+	// Last outcome of building the managed cloud auth provider, so
+	// /health can report whether inspection is reachable.
+	inspectionMu        sync.RWMutex
+	inspectionAvailable bool
+	inspectionDetail    string
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -715,10 +725,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// managed_enterprise: wire the AVC-authored env_config.json so the
 	// ConfigManager overlays cisco_ai_defense_endpoint on every reload
 	// and watches its parent dir for late arrivals (AVC packaging can
-	// drop the file AFTER DefenseClaw is installed). Opensource installs
-	// skip this call and get the pre-overlay behavior verbatim.
+	// drop the file AFTER DefenseClaw is installed). OSS installs skip
+	// this call and get the pre-overlay behavior verbatim.
 	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
-		s.configMgr.SetEnvConfigPath(config.DefaultEnvConfigPath)
+		envConfigPath, err := config.ResolveDefaultEnvConfigPath()
+		if err != nil {
+			return fmt.Errorf("resolve managed env_config path: %w", err)
+		}
+		s.configMgr.SetEnvConfigPath(envConfigPath)
 	}
 	configStartupReady := make(chan error, 1)
 	wg.Add(1)
@@ -1949,6 +1963,20 @@ func (s *Sidecar) ensureActiveHookRegistration(ctx context.Context, connectorNam
 func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 	cfg := s.currentConfig()
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		// Re-check cloudreg.Registered() on every hot-reload (T5.3).
+		// Factory registration is set once at init() time and does not
+		// change during runtime, but a config reload that switches
+		// deployment_mode from opensource to managed_enterprise on an
+		// OSS build should surface a distinct "no factory registered"
+		// state via /health instead of falling into the generic
+		// "provider unavailable" path that ensureCMIDProvider would
+		// otherwise take.
+		if !cloudreg.Registered() {
+			s.setInspectionAvailability(cloudreg.ErrNoProviderRegistered)
+			EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
+				"managed_enterprise + managed-cloud support absent: "+cloudreg.ErrNoProviderRegistered.Error())
+			return nil
+		}
 		return s.newManagedInspector(ctx, "remote inspection disabled")
 	}
 	// Opensource path — unchanged from before the picker was added.
@@ -1973,11 +2001,35 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 	cfg := s.currentConfig()
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	prov, err := s.ensureCMIDProvider(ctx)
-	if err != nil {
+	// Hard-failure gate: only bail when we truly have no provider to
+	// hand to the inspector. A non-nil provider with err != nil means
+	// the underlying library is currently unloadable (e.g. AVC hasn't
+	// dropped libcmidapi.dylib yet) but the inspector should still be
+	// constructed — every Inspect() call re-attempts Token()/Refresh(),
+	// and the CMID module retries dlopen internally on each attempt,
+	// so the lane self-heals once the library becomes loadable
+	// without a daemon restart.
+	if prov == nil {
+		detail := "managed cloud auth provider unavailable"
+		if err != nil {
+			detail = err.Error()
+		}
 		EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
-			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+err.Error())
+			"managed_enterprise + managed cloud auth unavailable — "+siteLabel+": "+detail)
 		recordCiscoInspectV8(ctx, metricRuntime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeUpstreamError)
 		return nil
+	}
+	if err != nil {
+		// Provider exists but its first Refresh failed. Log once at
+		// construction so operators tailing gateway.err.log see the
+		// starting state; per-inspect warnings from
+		// CiscoDefenseClawInspectClient.Inspect() will follow if the
+		// condition persists.
+		fmt.Fprintf(os.Stderr,
+			"[managed-cloud] CMID provider constructed but not yet ready (%s): %v — "+
+				"inspector will retry per-inspect; enforcement is fail-open until "+
+				"libcmidapi.dylib becomes loadable\n",
+			siteLabel, err)
 	}
 	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
 	if m == nil {
@@ -1990,28 +2042,162 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 	return m
 }
 
+// cmidBuildLogCooldown throttles the "CMID provider build failed"
+// stderr line emitted by logCMIDBuildError. Without a cooldown, every
+// call to ensureCMIDProvider that hit a hard failure (e.g. the trust
+// check on an untrusted lib path, or cloudreg factory not registered)
+// would repeat the same line on every inspect — thousands per hour
+// on a busy box. The first failure after each cooldown window is
+// emitted; the rest are suppressed until the window elapses OR the
+// stage changes (a different failure reason immediately re-arms so
+// operators see the new signal without waiting out the cooldown).
+const cmidBuildLogCooldown = 30 * time.Second
+
+// logCMIDBuildError emits a rate-limited operator-visible stderr line
+// describing why a CMID provider build or Refresh failed. Called from
+// every error branch in buildCMIDProvider and from the cached-Refresh-
+// failed branch of ensureCMIDProvider, so no failure mode is silent.
+//
+// stage is a short label naming which construction step tripped
+// ("path-trust", "cloudreg-new", "refresh-at-boot", "refresh-cached")
+// so operators reading the log can tell a fresh construction failure
+// apart from a live provider whose Refresh started failing after
+// working for a while.
+//
+// Caller must hold s.cmidProviderMu. cmidBuildLastLog and
+// cmidBuildLastKind live inside that lock's scope, so no additional
+// synchronisation is needed.
+func (s *Sidecar) logCMIDBuildError(stage string, err error) {
+	if err == nil {
+		return
+	}
+	now := time.Now()
+	if stage == s.cmidBuildLastKind && now.Sub(s.cmidBuildLastLog) < cmidBuildLogCooldown {
+		return
+	}
+	s.cmidBuildLastLog = now
+	s.cmidBuildLastKind = stage
+	fmt.Fprintf(os.Stderr,
+		"[managed-cloud] CMID provider build failed at %s: %v\n",
+		stage, err)
+}
+
 // ensureCMIDProvider lazily constructs the managed cloud auth provider
 // on first use and caches it for the sidecar's lifetime.
 // Managed_enterprise only. Returns an error when the underlying
 // provider cannot Refresh (unsupported OS, no provider registered,
 // agent unavailable after the retry ladder). The error is surfaced so
 // the caller can take the fail-closed path.
+//
+// T5.2 note: every call — cached or fresh — updates
+// setInspectionAvailability with the latest Refresh outcome, so
+// /health cannot lag reality. Previously setInspectionAvailability
+// only fired on the first successful build; a cached provider whose
+// upstream auth later dropped kept reporting inspection_available=true
+// while every inspect call failed.
 func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
 	s.cmidProviderMu.Lock()
 	defer s.cmidProviderMu.Unlock()
 	if s.cmidProviderInst != nil {
-		return s.cmidProviderInst, nil
+		// Refresh to check current availability. Keep the cached
+		// provider even on error — the provider's own Token()/
+		// Refresh() cycle handles per-call dlopen retries, so
+		// discarding the cache would just force a fresh cloudreg.New
+		// on the next hook without changing the outcome. Callers
+		// gate on the returned error, not the provider value.
+		err := s.cmidProviderInst.Refresh(ctx)
+		s.setInspectionAvailability(err)
+		if err != nil {
+			s.logCMIDBuildError("refresh-cached", err)
+		}
+		return s.cmidProviderInst, err
 	}
-	cfg := s.currentConfig()
-	prov, err := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath})
-	if err != nil {
-		return nil, err
-	}
-	if err := prov.Refresh(ctx); err != nil {
-		return nil, err
+	prov, buildErr := s.buildCMIDProvider(ctx)
+	s.setInspectionAvailability(buildErr)
+	// buildCMIDProvider returns (nil, err) only on hard failures
+	// (unregistered factory, untrusted path). A transient Refresh
+	// error returns (prov, err) — cache the provider so subsequent
+	// Token() calls can retry dlopen from the CMID module's own
+	// acquire loop, and the inspection lane self-heals once the
+	// library is loadable.
+	if prov == nil {
+		return nil, buildErr
 	}
 	s.cmidProviderInst = prov
+	return prov, buildErr
+}
+
+func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
+	libPath := strings.TrimSpace(s.currentConfig().CloudAuth.LibPath)
+	if libPath == "" {
+		// Secure Client nests the identity library under version
+		// directories that move on its own upgrade schedule, so it
+		// cannot be pinned at install time. Finding nothing leaves the
+		// provider its own default.
+		libPath = managed.DiscoverCMIDLibrary()
+	}
+	if libPath != "" {
+		// This is the one config value that ends in native code running
+		// inside the gateway's service account, so it faces the same path
+		// trust the deployment demands of every other artifact: an
+		// administrator-owned library, on an administrator-owned path. An
+		// empty value leaves the provider to find its own library.
+		if err := managed.ValidateTrustedFilePath(libPath, "managed cloud auth library"); err != nil {
+			wrapped := fmt.Errorf("refusing untrusted managed cloud auth library: %w", err)
+			s.logCMIDBuildError("path-trust", wrapped)
+			return nil, wrapped
+		}
+	}
+	prov, err := cloudreg.New(cloudreg.Config{LibPath: libPath})
+	if err != nil {
+		// Hard failure: no factory registered (OSS build) or unsupported
+		// OS. Nothing to retry — return nil so caller fails closed.
+		s.logCMIDBuildError("cloudreg-new", err)
+		return nil, err
+	}
+	// Warm-up Refresh. Failure here is NOT fatal: on a fresh box, AVC
+	// may not have placed libcmidapi.dylib yet, and dlopen returns
+	// "not available". We still return the provider so the caller
+	// (ensureCMIDProvider) can cache it — every subsequent Token()
+	// call retries dlopen internally (see internal/managed/cmid/
+	// cmid_impl.go acquire()), so the inspection lane self-heals the
+	// moment the library becomes loadable. Previously we discarded
+	// the provider on Refresh error, which caused newManagedInspector
+	// to return a nil Inspector for the entire process lifetime and
+	// silently converted every hook into fail-open on installs where
+	// the CMID library arrived post-boot.
+	//
+	// The returned error is still surfaced so ensureCMIDProvider can
+	// record the current availability state on /health; only the
+	// provider-vs-nil signal changes.
+	if err := prov.Refresh(ctx); err != nil {
+		s.logCMIDBuildError("refresh-at-boot", err)
+		return prov, err
+	}
 	return prov, nil
+}
+
+// setInspectionAvailability records whether managed inspection can reach
+// a credential provider. A failure here is what makes pickInspector
+// return nil, so /health reports it alongside enforcement mode.
+func (s *Sidecar) setInspectionAvailability(err error) {
+	s.inspectionMu.Lock()
+	defer s.inspectionMu.Unlock()
+	s.inspectionAvailable = err == nil
+	if err != nil {
+		s.inspectionDetail = err.Error()
+		return
+	}
+	s.inspectionDetail = ""
+}
+
+// inspectionAvailability reports the last managed-inspection outcome.
+// False until a provider has been built at least once, which is why the
+// managed guardrail probes at startup.
+func (s *Sidecar) inspectionAvailability() (bool, string) {
+	s.inspectionMu.RLock()
+	defer s.inspectionMu.RUnlock()
+	return s.inspectionAvailable, s.inspectionDetail
 }
 
 func (s *Sidecar) apiSnapshot() *APIServer {
@@ -3506,6 +3692,23 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 		return nil
 	}
 
+	// Managed mode disables the local detectors, so remote inspection is
+	// all that stands between a tool call and its upstream. A build with
+	// no credential factory can never reach it.
+	if !cloudreg.Registered() {
+		err := fmt.Errorf(
+			"managed_enterprise requires managed-cloud support: %w",
+			cloudreg.ErrNoProviderRegistered,
+		)
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+		return err
+	}
+	// A registered factory that fails now may only be waiting on the
+	// local agent, so probe once and report rather than refuse.
+	if _, err := s.ensureCMIDProvider(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: inspection unavailable at boot: %v\n", err)
+	}
+
 	type managedConnectorRegistration struct {
 		conn connector.Connector
 		opts connector.SetupOpts
@@ -3581,15 +3784,24 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			enforcementEnabled = hookEnforcement
 			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
 		}
-		s.health.SetGuardrail(state, status, map[string]interface{}{
-			"summary":             summary,
-			"connectors":          succeeded,
-			"enforcement_enabled": enforcementEnabled,
-			"proxy_port":          "closed",
-			"hint":                hint,
-			"lifecycle_manager":   "enterprise_hook_guardian",
-			"guardian_verified":   covered,
-		})
+		inspectionAvailable, inspectionDetail := s.inspectionAvailability()
+		detail := map[string]interface{}{
+			"summary":              summary,
+			"connectors":           succeeded,
+			"enforcement_enabled":  enforcementEnabled,
+			"inspection_available": inspectionAvailable,
+			"proxy_port":           "closed",
+			"hint":                 hint,
+			"lifecycle_manager":    "enterprise_hook_guardian",
+			"guardian_verified":    covered,
+		}
+		if !inspectionAvailable {
+			detail["inspection_error"] = inspectionDetail
+			// enforcement_enabled describes the configured hook mode, so
+			// say plainly that nothing is inspecting behind it.
+			detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected"
+		}
+		s.health.SetGuardrail(state, status, detail)
 	}
 	publishHealth()
 	fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise multi-connector hook mode: %d connector(s): %s — proxy port closed; enterprise hook guardian owns hook files\n", len(succeeded), strings.Join(succeeded, ", "))
@@ -3607,30 +3819,128 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 }
 
 type managedGuardianAuthorization struct {
-	ProtectedTargets []struct {
-		Connector string `json:"connector"`
-		OK        bool   `json:"ok"`
-	} `json:"protected_targets"`
+	Version          int                                  `json:"version"`
+	UpdatedAt        string                               `json:"updated_at"`
+	OK               bool                                 `json:"ok"`
+	TargetCount      int                                  `json:"target_count"`
+	SuccessCount     int                                  `json:"success_count"`
+	FailureCount     int                                  `json:"failure_count"`
+	ProtectedTargets []managedGuardianAuthorizationTarget `json:"protected_targets"`
 }
+
+type managedGuardianAuthorizationTarget struct {
+	User      string                              `json:"user,omitempty"`
+	UserHome  string                              `json:"user_home,omitempty"`
+	SID       string                              `json:"sid,omitempty"`
+	Connector string                              `json:"connector"`
+	OK        bool                                `json:"ok"`
+	Error     string                              `json:"error,omitempty"`
+	Result    *managedGuardianAuthorizationResult `json:"result,omitempty"`
+}
+
+type managedGuardianAuthorizationResult struct {
+	Connector       string   `json:"connector"`
+	UserHome        string   `json:"user_home"`
+	DataDir         string   `json:"data_dir"`
+	HookConfigPaths []string `json:"hook_config_paths,omitempty"`
+	HookScripts     []string `json:"hook_scripts,omitempty"`
+	BackupFiles     []string `json:"backup_files,omitempty"`
+	CreatedDirs     []string `json:"created_dirs,omitempty"`
+	AgentVersion    string   `json:"agent_version,omitempty"`
+	HookContractID  string   `json:"hook_contract_id,omitempty"`
+}
+
+const managedGuardianAuthorizationMaxBytes int64 = 4 << 20
 
 func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (bool, string) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
 	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
 		return false, err.Error()
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Sprintf("open hook guardian authorization: %v", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, fmt.Sprintf("inspect hook guardian authorization: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, "hook guardian authorization is not a regular file"
+	}
+	if info.Size() > managedGuardianAuthorizationMaxBytes {
+		return false, fmt.Sprintf(
+			"hook guardian authorization exceeds %d bytes",
+			managedGuardianAuthorizationMaxBytes,
+		)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, managedGuardianAuthorizationMaxBytes+1))
 	if err != nil {
 		return false, fmt.Sprintf("read hook guardian authorization: %v", err)
 	}
+	if int64(len(data)) > managedGuardianAuthorizationMaxBytes {
+		return false, fmt.Sprintf(
+			"hook guardian authorization exceeds %d bytes",
+			managedGuardianAuthorizationMaxBytes,
+		)
+	}
 	var authorization managedGuardianAuthorization
-	if err := json.Unmarshal(data, &authorization); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&authorization); err != nil {
 		return false, fmt.Sprintf("parse hook guardian authorization: %v", err)
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return false, "parse hook guardian authorization: trailing content"
+	}
+	// Accept version==0 (pre-spec-005 files that omit the `version`
+	// key entirely — JSON decode leaves the int zero) alongside the
+	// current version==1 envelope. This keeps macOS hosts covered
+	// during a non-lockstep upgrade where the gateway rolls to
+	// spec-005+ before the guardian process on the same host has
+	// re-published its authorization file (T5.6). Anything above 1 is
+	// an unknown-future format and stays rejected.
+	if authorization.Version < 0 || authorization.Version > 1 {
+		return false, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
+	}
+	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
+		return false, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
+	}
+	if !authorization.OK ||
+		authorization.TargetCount < 0 ||
+		authorization.SuccessCount < 0 ||
+		authorization.FailureCount < 0 ||
+		authorization.FailureCount != 0 ||
+		authorization.SuccessCount != authorization.TargetCount ||
+		authorization.TargetCount != len(authorization.ProtectedTargets) {
+		return false, fmt.Sprintf(
+			"hook guardian authorization is incomplete (%d/%d targets succeeded, %d failed)",
+			authorization.SuccessCount,
+			authorization.TargetCount,
+			authorization.FailureCount,
+		)
+	}
 	covered := make(map[string]struct{}, len(authorization.ProtectedTargets))
+	targets := make(map[string]struct{}, len(authorization.ProtectedTargets))
 	for _, target := range authorization.ProtectedTargets {
-		if target.OK {
-			covered[strings.ToLower(strings.TrimSpace(target.Connector))] = struct{}{}
+		if !target.OK || strings.TrimSpace(target.Error) != "" {
+			return false, "hook guardian authorization contains an unsuccessful protected target"
 		}
+		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
+		if connectorName == "" && target.Result != nil {
+			connectorName = strings.ToLower(strings.TrimSpace(target.Result.Connector))
+		}
+		key := managedGuardianTargetKey(target, connectorName)
+		if connectorName == "" || key == "" {
+			return false, "hook guardian authorization contains an incomplete protected target"
+		}
+		if _, duplicate := targets[key]; duplicate {
+			return false, fmt.Sprintf("hook guardian authorization contains duplicate protected target %q", key)
+		}
+		targets[key] = struct{}{}
+		covered[connectorName] = struct{}{}
 	}
 	for _, name := range connectorNames {
 		if _, ok := covered[strings.ToLower(strings.TrimSpace(name))]; !ok {
@@ -3638,6 +3948,35 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		}
 	}
 	return true, ""
+}
+
+func managedGuardianTargetKey(target managedGuardianAuthorizationTarget, connectorName string) string {
+	if connectorName == "" {
+		return ""
+	}
+	if sid := strings.ToUpper(strings.TrimSpace(target.SID)); sid != "" {
+		return connectorName + "\x00sid\x00" + sid
+	}
+	if userName := strings.TrimSpace(target.User); userName != "" {
+		return connectorName + "\x00user\x00" + userName
+	}
+	home := strings.TrimSpace(target.UserHome)
+	if home == "" && target.Result != nil {
+		home = strings.TrimSpace(target.Result.UserHome)
+	}
+	if home == "" {
+		return ""
+	}
+	cleaned := filepath.Clean(home)
+	// Windows paths are case-insensitive at the OS level; different-case
+	// spellings of the same user home (e.g. `C:\Users\Alice` vs
+	// `c:\users\alice`) refer to the same directory and MUST hash to the
+	// same guardian target so dedup + freshness tracking stay coherent.
+	// On unix the case matters, so preserve the original.
+	if runtime.GOOS == "windows" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	return connectorName + "\x00home\x00" + cleaned
 }
 
 func connectorNames(conns []connector.Connector) []string {

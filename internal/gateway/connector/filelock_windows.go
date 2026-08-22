@@ -19,10 +19,17 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"golang.org/x/sys/windows"
+)
+
+var (
+	windowsManagedFileLockTimeout = 2 * time.Second
+	windowsManagedFileLockRetry   = 25 * time.Millisecond
 )
 
 // withFileLock acquires an exclusive, blocking lock on path+".lock" before
@@ -36,6 +43,14 @@ import (
 // (it returned an error on contention instead of waiting) and left a stale
 // lock file that hard-failed all callers for up to a minute after a crash.
 func withFileLock(path string, fn func() error) error {
+	return withFileLockMode(path, false, fn)
+}
+
+// withFileLockMode preserves ordinary Windows connector behavior while giving
+// the LocalSystem guardian a hard acquisition deadline. A target user can hold
+// a per-user .lock indefinitely; managed reconciliation must report that row
+// and continue to later targets/ticks instead of blocking the service thread.
+func withFileLockMode(path string, managedEnterprise bool, fn func() error) error {
 	lockPath := path + ".lock"
 
 	// O_RDWR (not O_EXCL): every caller opens the shared lock file; mutual
@@ -50,10 +65,34 @@ func withFileLock(path string, fn func() error) error {
 
 	handle := windows.Handle(lockFile.Fd())
 	overlapped := new(windows.Overlapped)
-	// Lock 1 byte at offset 0. All callers use the same range, so this
-	// serializes them. No LOCKFILE_FAIL_IMMEDIATELY flag -> the call blocks.
-	if err := windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped); err != nil {
-		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK)
+	if managedEnterprise {
+		flags |= windows.LOCKFILE_FAIL_IMMEDIATELY
+	}
+	deadline := time.Now().Add(windowsManagedFileLockTimeout)
+	for {
+		err = windows.LockFileEx(handle, flags, 0, 1, 0, overlapped)
+		if err == nil {
+			break
+		}
+		if !managedEnterprise || !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+			return fmt.Errorf("acquire lock %s: %w", lockPath, err)
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf(
+				"acquire managed lock %s: timed out after %s: %w",
+				lockPath,
+				windowsManagedFileLockTimeout,
+				err,
+			)
+		}
+		delay := windowsManagedFileLockRetry
+		if remaining := time.Until(deadline); delay > remaining {
+			delay = remaining
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 	}
 	defer func() {
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)

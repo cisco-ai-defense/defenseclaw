@@ -1464,15 +1464,35 @@ func TestValidSourceCommitRequiresExactLowercaseGitOID(t *testing.T) {
 	}
 }
 
-func TestVerifyPayloadManifestRejectsManagedEnterpriseWithoutOverlay(t *testing.T) {
+func TestVerifyPayloadManifestRejectsManagedEnterprise(t *testing.T) {
 	manifest := payloadManifest{
-		SchemaVersion:      1,
+		SchemaVersion:      2,
 		Version:            "1.2.3",
 		SourceCommit:       "0123456789abcdef0123456789abcdef01234567",
 		DistributionFlavor: "managed-enterprise",
 	}
-	if err := verifyPayloadManifest(t.TempDir(), manifest); err == nil {
-		t.Fatal("verifyPayloadManifest accepted a managed-enterprise payload without the private Windows CMID overlay")
+	err := verifyPayloadManifest(t.TempDir(), manifest)
+	if err == nil {
+		t.Fatal("per-user Setup accepted a managed-enterprise payload")
+	}
+	if !strings.Contains(err.Error(), "per-user Setup accepts only oss") {
+		t.Fatalf("managed-enterprise flavor produced a non-flavor error: %v", err)
+	}
+}
+
+func TestVerifyPayloadManifestRejectsUnknownDistributionFlavor(t *testing.T) {
+	manifest := payloadManifest{
+		SchemaVersion:      2,
+		Version:            "1.2.3",
+		SourceCommit:       "0123456789abcdef0123456789abcdef01234567",
+		DistributionFlavor: "unknown",
+	}
+	err := verifyPayloadManifest(t.TempDir(), manifest)
+	if err == nil {
+		t.Fatal("verifyPayloadManifest accepted an unknown distribution flavor")
+	}
+	if !strings.Contains(err.Error(), "unsupported payload distribution flavor") {
+		t.Fatalf("unknown flavor produced a non-flavor error: %v", err)
 	}
 }
 

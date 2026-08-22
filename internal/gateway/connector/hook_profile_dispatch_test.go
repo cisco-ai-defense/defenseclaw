@@ -444,7 +444,7 @@ func TestAntigravityProfileRespond_Parity(t *testing.T) {
 			event:      "PreToolUse",
 			action:     "allow",
 			raw:        "block",
-			additional: "DefenseClaw would block this in action mode a HIGH antigravity hook finding: matched policy",
+			additional: "DefenseClaw would block this in action mode: HIGH antigravity hook finding: matched policy",
 			expected:   nil,
 		},
 		{
@@ -816,7 +816,9 @@ func TestCodexAdditionalContextForProfile(t *testing.T) {
 		{"observe_block_with_reason", "block", "HIGH", "matched policy", false,
 			"DefenseClaw observed a HIGH Codex hook finding: matched policy"},
 		{"action_would_block", "block", "HIGH", "matched policy", true,
-			"DefenseClaw would block this in action mode a HIGH Codex hook finding: matched policy"},
+			"DefenseClaw would block this in action mode: HIGH Codex hook finding: matched policy"},
+		{"action_would_block_no_reason", "block", "HIGH", "", true,
+			"DefenseClaw would block this in action mode: HIGH Codex hook finding."},
 		{"alert_no_reason", "alert", "MEDIUM", "", false,
 			"DefenseClaw observed a MEDIUM Codex hook finding."},
 	}

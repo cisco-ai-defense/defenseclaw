@@ -16,6 +16,10 @@ internal/gateway/connector/openclaw_extension/*
 # Generated only while building DefenseClawSetup-x64.exe.
 cmd/defenseclaw-setup/payload/*.zip
 
+# Generated only while building DefenseClawSetup-Enterprise-x64.exe.
+cmd/defenseclaw-enterprise-setup/payload/*
+!cmd/defenseclaw-enterprise-setup/payload/.gitkeep
+
 # Editor and IDE metadata
 .idea/
 .vscode/

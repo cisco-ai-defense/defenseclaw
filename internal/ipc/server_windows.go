@@ -1,0 +1,184 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package ipc
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+)
+
+// windowsSocketParentDirMode is the mode passed to os.MkdirAll for
+// the socket's parent directory. Windows os.Chmod respects only the
+// read-only bit, so this constant primarily documents intent — the
+// authoritative access control is the DACL applied by
+// applyBaselineIPCACL below.
+const windowsSocketParentDirMode = os.FileMode(0o750)
+
+// allowUnsafeSocketOverrideForTest is an IN-PROCESS test hook that
+// permits an override socket path outside the trusted ProgramData
+// root. When true, validateWindowsSocketPathOverride skips the
+// trusted-root anchor and applies only the shape checks (1-3). Only a
+// test binary in the same Go package can flip this — service binaries
+// (defenseclaw.exe / defenseclaw-gateway.exe) never touch it, so a
+// production process cannot have the anchor disabled by any env,
+// registry, or config surface. See CR spec-004:PRRT_kwDORuAK-s6aoOZv
+// for the rationale — the earlier env-var-based escape hatch was
+// reachable from the service environment and thus disabled the
+// fail-closed boundary in every production Windows binary.
+var allowUnsafeSocketOverrideForTest bool
+
+// bindListenerForOS is the Windows bind block for the spec 004
+// initial-cut deferred-auth IPC surface. Differences from
+// server_unix.go's sibling:
+//
+//   - Skips os.Chmod on the socket file (Windows Chmod only touches
+//     the read-only bit — Unix mode bits don't map to Windows DACLs).
+//   - Skips os.Chown / staff-GID handling (Windows has no uid/gid).
+//   - Applies a four-ACE baseline hygiene DACL via
+//     applyBaselineIPCACL at BOTH the parent directory and the
+//     socket file, with SE_DACL_PROTECTED so ancestor policy on
+//     ProgramData cannot silently over-permit (spec 004 REQ-03
+//     through REQ-05).
+//
+// Returns the raw net.Listener; the caller wraps it in the codesign
+// validating listener (a passthrough on Windows — the Windows
+// codesign validator in peerauth_windows.go returns the inner
+// listener verbatim under the initial-cut posture).
+func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
+	// Refuse an operator override that points the socket at a
+	// pre-existing path outside our dedicated dir. Applying
+	// applyBaselineIPCACL to a shared directory would REPLACE the
+	// caller's original DACL — including any ACEs Cisco Secure
+	// Client or an unrelated installer relies on. See CR
+	// spec-004:PRRT_kwDORuAK-s6ankzx and
+	// spec-004:PRRT_kwDORuAK-s6aoCwa.
+	if err := validateWindowsSocketPathOverride(s.socketPath); err != nil {
+		return nil, err
+	}
+
+	dir := filepath.Dir(s.socketPath)
+	if err := os.MkdirAll(dir, windowsSocketParentDirMode); err != nil {
+		return nil, fmt.Errorf("ipc: mkdir %s: %w", dir, err)
+	}
+	// Refuse a reparse point (junction / symlink) anywhere in the
+	// parent chain. A local user who pre-creates a junction at the
+	// target `ipc` dir before the daemon starts would otherwise cause
+	// os.MkdirAll to reuse the junction and applyBaselineIPCACL to
+	// rewrite the DACL of the junction's TARGET — a shared directory
+	// the attacker controls. RejectReparseChain walks from dir up to
+	// the volume root, so a junction at any ancestor level is refused
+	// too. See CR spec-004:PRRT_kwDORuAK-s6aoCwa.
+	if err := winpath.RejectReparseChain(dir); err != nil {
+		return nil, fmt.Errorf("ipc: reject reparse chain %s: %w", dir, err)
+	}
+	// Directory gets the traverse+list-only Authenticated Users ACE.
+	// FILE_ADD_FILE is deliberately refused so an auth-user cannot
+	// pre-create a decoy at the socket path while the daemon is
+	// stopped (CR spec-004:PRRT_kwDORuAK-s6ankzk).
+	if err := applyBaselineIPCACL(dir, aclObjectDirectory); err != nil {
+		return nil, err
+	}
+
+	// Best-effort remove of a stale socket file from a previous run
+	// (matches the unix path — spec 004 REQ-20 bind-only-once).
+	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("ipc: remove stale socket %s: %w", s.socketPath, err)
+	}
+
+	lc := &net.ListenConfig{}
+	inner, err := lc.Listen(ctx, "unix", s.socketPath)
+	if err != nil {
+		// A clearly-Windows-old-version error (WSAEAFNOSUPPORT or
+		// similar) surfaces here; the wrapping preserves the OS
+		// message so a triage path can distinguish "AF_UNIX not
+		// supported" from a permission failure.
+		return nil, fmt.Errorf("ipc: listen unix %s: %w", s.socketPath, err)
+	}
+	// Socket file gets the read+write Authenticated Users ACE —
+	// enough for connect() + gRPC handshake, no WRITE_DAC.
+	if err := applyBaselineIPCACL(s.socketPath, aclObjectSocketFile); err != nil {
+		_ = inner.Close()
+		return nil, err
+	}
+	return inner, nil
+}
+
+// validateWindowsSocketPathOverride refuses an operator override
+// (cfg.Managed.SocketPath) that would cause applyBaselineIPCACL to
+// rewrite the DACL of a shared or user-visible directory. Enforces:
+//
+//  1. Absolute path, no relative traversal.
+//  2. Basename equals SocketFileName (defenseclaw_ipc.sock) — refuses
+//     an override that points at a shared directory's existing file.
+//  3. Parent directory basename is "ipc" — cheap shape check.
+//  4. Cleaned parent equals `<TrustedProgramData>\<managed-IPC-relative>`
+//     (case-insensitive on Windows). Refuses an override that lives
+//     under a user-writable ancestor like `C:\Users\<user>\ipc\` —
+//     otherwise a local user could plant the socket file (or a
+//     junction) there before the daemon starts and have the DACL
+//     rewritten under their control.
+//
+// Tests in this package that legitimately need to scratch-dir the
+// IPC surface can set allowUnsafeSocketOverrideForTest to true for
+// the duration of the test; check (4) then degrades and only checks
+// 1-3 apply. No service binary can flip that flag — there is no
+// exported setter, no env-var reader, and no config surface — so a
+// production Windows install has NO way to disable the trusted-root
+// anchor. See CR spec-004:PRRT_kwDORuAK-s6aoCwa and
+// spec-004:PRRT_kwDORuAK-s6aoOZv.
+func validateWindowsSocketPathOverride(socketPath string) error {
+	if socketPath == "" {
+		return fmt.Errorf("ipc: socket path is empty")
+	}
+	if !filepath.IsAbs(socketPath) {
+		return fmt.Errorf("ipc: socket path override must be absolute: %s", socketPath)
+	}
+	clean := filepath.Clean(socketPath)
+	if filepath.Base(clean) != SocketFileName {
+		return fmt.Errorf("ipc: socket path override must end in %q (got %s)", SocketFileName, clean)
+	}
+	parent := filepath.Clean(filepath.Dir(clean))
+	if filepath.Base(parent) != "ipc" {
+		return fmt.Errorf("ipc: socket path override must live under an 'ipc' directory (got parent %s)", parent)
+	}
+
+	// Anchor: parent must equal the trusted managed-IPC root. The
+	// in-process test hook (allowUnsafeSocketOverrideForTest) is the
+	// only bypass, and it can only be flipped from a test binary in
+	// this package — no env, registry, or config surface reaches it.
+	// Service binaries thus have no way to disable the anchor.
+	if allowUnsafeSocketOverrideForTest {
+		return nil
+	}
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return fmt.Errorf("ipc: resolve trusted program data root: %w", err)
+	}
+	if programData == "" {
+		return fmt.Errorf("ipc: trusted program data root is empty; refusing to bind IPC surface")
+	}
+	trustedParent := filepath.Clean(filepath.Join(programData, windowsManagedIPCRelativeDir))
+	if !strings.EqualFold(parent, trustedParent) {
+		return fmt.Errorf(
+			"ipc: socket path override must live under the trusted managed root %q (got parent %q)",
+			trustedParent, parent,
+		)
+	}
+	return nil
+}

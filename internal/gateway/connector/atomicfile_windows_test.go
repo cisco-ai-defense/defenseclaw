@@ -192,3 +192,40 @@ func setAtomicFileUnsafeReadDACL(path string) error {
 		nil, nil, acl, nil,
 	)
 }
+
+func TestAtomicFileAlreadyMatchesRejectsHugeSparseFileWithoutSizingAllocationFromDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "target-owned-runtime.json")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.DeviceIoControl(
+		windows.Handle(file.Fd()),
+		windows.FSCTL_SET_SPARSE,
+		nil,
+		0,
+		nil,
+		0,
+		nil,
+		nil,
+	); err != nil {
+		_ = file.Close()
+		if errors.Is(err, windows.ERROR_INVALID_FUNCTION) ||
+			errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+			t.Skipf("test volume does not support sparse files: %v", err)
+		}
+		t.Fatal(err)
+	}
+	const sparseSize = int64(1) << 40
+	if err := file.Truncate(sparseSize); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if atomicFileAlreadyMatches(path, []byte("managed\n"), 0o600) {
+		t.Fatal("huge sparse target-owned file matched a short canonical payload")
+	}
+}

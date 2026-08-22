@@ -22,7 +22,7 @@ func repositoryIcon(t *testing.T) string {
 }
 
 func TestCompleteWindowsExecutableInventory(t *testing.T) {
-	want := []Component{"gateway", "hook", "launcher", "startup", "setup"}
+	want := []Component{"gateway", "hook", "launcher", "startup", "setup", "enterprise-setup"}
 	if len(AllComponents) != len(want) {
 		t.Fatalf("component inventory = %v, want %v", AllComponents, want)
 	}
@@ -51,10 +51,16 @@ func TestManifestContractForEveryComponent(t *testing.T) {
 				t.Fatalf("manifest is not XML: %v", err)
 			}
 			text := string(manifest)
+			requiredLevel := `level="asInvoker" uiAccess="false"`
+			forbiddenLevel := "requireAdministrator"
+			if component == ComponentEnterpriseSetup {
+				requiredLevel = `level="requireAdministrator" uiAccess="false"`
+				forbiddenLevel = `level="asInvoker"`
+			}
 			for _, required := range []string{
 				`processorArchitecture="amd64"`,
 				`version="12.34.56.0"`,
-				`level="asInvoker" uiAccess="false"`,
+				requiredLevel,
 				`{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}`,
 				`PerMonitorV2,PerMonitor`,
 				`<longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>`,
@@ -63,14 +69,15 @@ func TestManifestContractForEveryComponent(t *testing.T) {
 					t.Errorf("manifest missing %q", required)
 				}
 			}
-			for _, forbidden := range []string{"requireAdministrator", "highestAvailable", "autoElevate"} {
+			for _, forbidden := range []string{forbiddenLevel, "highestAvailable", "autoElevate"} {
 				if strings.Contains(text, forbidden) {
 					t.Errorf("manifest contains forbidden elevation marker %q", forbidden)
 				}
 			}
 			hasCommonControls := strings.Contains(text, "Microsoft.Windows.Common-Controls")
-			if hasCommonControls != (component == ComponentSetup) {
-				t.Errorf("common-controls v6 present = %v, want %v", hasCommonControls, component == ComponentSetup)
+			wantCommonControls := component == ComponentSetup || component == ComponentEnterpriseSetup
+			if hasCommonControls != wantCommonControls {
+				t.Errorf("common-controls v6 present = %v, want %v", hasCommonControls, wantCommonControls)
 			}
 		})
 	}
@@ -139,15 +146,17 @@ func TestManifestArchitectureMatchesTarget(t *testing.T) {
 }
 
 func TestSetupResourcesRemainAMD64Only(t *testing.T) {
-	manifest, err := Manifest(ComponentSetup, "1.2.3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(manifest), `processorArchitecture="amd64"`) {
-		t.Fatalf("default Setup manifest is not AMD64:\n%s", manifest)
-	}
-	if _, err := ManifestForTarget(TargetWindowsARM64, ComponentSetup, "1.2.3"); err == nil {
-		t.Fatal("ARM64 Setup resources unexpectedly succeeded")
+	for _, component := range []Component{ComponentSetup, ComponentEnterpriseSetup} {
+		manifest, err := Manifest(component, "1.2.3")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(manifest), `processorArchitecture="amd64"`) {
+			t.Fatalf("default %s manifest is not AMD64:\n%s", component, manifest)
+		}
+		if _, err := ManifestForTarget(TargetWindowsARM64, component, "1.2.3"); err == nil {
+			t.Fatalf("ARM64 %s resources unexpectedly succeeded", component)
+		}
 	}
 	if _, err := ManifestForTarget(Target("windows_amd64_v1"), ComponentGateway, "1.2.3"); err == nil {
 		t.Fatal("uncanonical target bypassed ParseTarget validation")

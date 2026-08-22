@@ -24,6 +24,10 @@ func platformInstall(context.Context, InstallOptions) (InstallResult, bool, erro
 	return InstallResult{}, false, nil
 }
 
+func platformVerify(context.Context, InstallOptions) (InstallResult, bool, error) {
+	return InstallResult{}, false, nil
+}
+
 func platformWatchDirs(InstallOptions) ([]string, bool, error) {
 	return nil, false, nil
 }

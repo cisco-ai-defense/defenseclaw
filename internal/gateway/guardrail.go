@@ -343,6 +343,15 @@ func (g *GuardrailInspector) mergeVerdict(local, cisco *ScanVerdict) *ScanVerdic
 		// enforcement (guardrail.mode = action) driven by AID
 		// classification, while local regex behaves as an "observe"
 		// signal in the same install.
+		if cisco == nil {
+			// Every merge on the proxy lane that lands here without
+			// a cloud verdict is a fail-open. The structured event
+			// stream already records these as managed-AID fail-opens;
+			// the stderr line makes the condition visible to anyone
+			// tailing gateway.err.log live. Rate-limited so a
+			// persistently broken cloud lane cannot flood the log.
+			logManagedAIDSkip("proxy-cisco-nil", "AID inspector returned no verdict")
+		}
 		local = demoteLocalBlockForManaged(local)
 		return mergeVerdictsManaged(local, cisco)
 	}

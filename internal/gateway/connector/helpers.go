@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -101,7 +102,10 @@ const windowsSafePATHCommandPrefix = "set NoDefaultCurrentDirectoryInExePath=1&&
 // defenseclawHookBinaryOverride is a test seam for exercising generated
 // Windows configs with an installed launcher path that contains spaces. It is
 // intentionally package-private and empty in production.
-var defenseclawHookBinaryOverride string
+var (
+	defenseclawHookBinaryOverrideMu sync.RWMutex
+	defenseclawHookBinaryOverride   string
+)
 
 // hookInvocationCommand returns the command string an agent runtime is
 // configured to run for a DefenseClaw hook.
@@ -163,18 +167,25 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 }
 
 // defenseclawHookBinary returns the stable native HookRuntime launcher on
-// Windows after the running gateway proves its installer-owned layout.
+// Windows after the running gateway proves its installer-owned layout, from
+// either the native per-user package or a managed enterprise deployment.
 // Repository builds have no matching installer state and retain the legacy
 // ~/.local/bin fallback, so generated config never points at a movable checkout
 // merely because that checkout is currently running setup.
 func defenseclawHookBinary() string {
-	if strings.TrimSpace(defenseclawHookBinaryOverride) != "" {
-		return defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverrideMu.RLock()
+	override := strings.TrimSpace(defenseclawHookBinaryOverride)
+	defenseclawHookBinaryOverrideMu.RUnlock()
+	if override != "" {
+		return override
 	}
 	if runtime.GOOS == "windows" {
 		if executable, err := os.Executable(); err == nil {
 			if packaged := packagedWindowsHookBinary(executable); packaged != "" {
 				return packaged
+			}
+			if enterprise := managedEnterpriseWindowsHookBinary(executable); enterprise != "" {
+				return enterprise
 			}
 		}
 		if home := strings.TrimSpace(userHomeDir()); home != "" {
@@ -186,6 +197,37 @@ func defenseclawHookBinary() string {
 		return exe
 	}
 	return "defenseclaw-gateway"
+}
+
+// NativeHookExecutable returns the exact launcher path connector setup will
+// persist on the current host. The enterprise guardian compares this path to
+// its separately trusted sibling executable before allowing an impersonated
+// per-user mutation, preventing connector rendering from falling back to a
+// user-writable launcher.
+func NativeHookExecutable() string {
+	return defenseclawHookBinary()
+}
+
+// PinNativeHookExecutableForTest fixes the launcher path connector rendering
+// resolves and returns a restore function. Cross-package tests use it to supply
+// the connector side of the guardian's authoritative-launcher comparison from a
+// source the guardian side does not share.
+//
+// It panics unless the process is a test binary. Only testing.Init registers
+// test.v, so this detects one without importing testing into a shipped binary.
+func PinNativeHookExecutableForTest(path string) func() {
+	if flag.Lookup("test.v") == nil {
+		panic("connector: PinNativeHookExecutableForTest is test-only")
+	}
+	defenseclawHookBinaryOverrideMu.Lock()
+	previous := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = path
+	defenseclawHookBinaryOverrideMu.Unlock()
+	return func() {
+		defenseclawHookBinaryOverrideMu.Lock()
+		defenseclawHookBinaryOverride = previous
+		defenseclawHookBinaryOverrideMu.Unlock()
+	}
 }
 
 type nativeWindowsInstallState struct {

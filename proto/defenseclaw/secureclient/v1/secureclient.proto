@@ -39,6 +39,23 @@ message HealthSnapshot {
 
   // DefenseClaw product/runtime version, if available.
   string defense_claw_version = 3;
+
+  // Managed-enterprise deferred-config state, plumbed through from
+  // internal/gateway/health.go's HealthSnapshot.Configuration.State
+  // (spec 003 REQ-19 / REQ-20). Present on Windows and macOS managed-
+  // enterprise deployments; UNSPECIFIED on every other build (OSS,
+  // SaaS, DP, CP) so a Secure Client UI can key on the value without
+  // additional deployment-mode probing. See
+  // docs/specs/004-windows-ui-ipc/design.md § Interfaces.
+  //
+  // Semantic layering with `availability` above: `availability` reports
+  // overall reachability of the DefenseClaw runtime; `configuration_state`
+  // reports whether the managed-enterprise UCB drop has completed. A
+  // "starting" availability + "waiting_for_config" configuration_state
+  // means "gateway process is up but config.yaml has not arrived yet",
+  // which lets Secure Client render a first-class "waiting for
+  // configuration" UI state distinct from a generic "starting" spinner.
+  ConfigurationState configuration_state = 4;
 }
 
 enum ServiceAvailability {
@@ -49,6 +66,24 @@ enum ServiceAvailability {
   SERVICE_AVAILABILITY_UNAVAILABLE = 4;
   SERVICE_AVAILABILITY_DISABLED_BY_POLICY = 5;
   SERVICE_AVAILABILITY_ERROR = 6;
+}
+
+// ConfigurationState mirrors internal/gateway/health.go's
+// ConfigurationState (spec 003) on the wire. The values track the
+// managed-enterprise UCB drop lifecycle:
+//   - UNSPECIFIED: non-managed-enterprise or unknown (proto3 default).
+//   - WAITING_FOR_CONFIG: gateway daemon has not yet loaded config.yaml.
+//   - WAITING_FOR_TARGETS: config.yaml loaded, hook-guardian has not
+//     yet loaded targets.yaml.
+//   - READY: both files loaded, hook enforcement engaged.
+// Downstream Secure Client UIs treat UNSPECIFIED as "no configuration
+// tracking here" — the field is absent from every non-managed
+// deployment's HealthSnapshot and MUST NOT be rendered as an error.
+enum ConfigurationState {
+  CONFIGURATION_STATE_UNSPECIFIED = 0;
+  CONFIGURATION_STATE_WAITING_FOR_CONFIG = 1;
+  CONFIGURATION_STATE_WAITING_FOR_TARGETS = 2;
+  CONFIGURATION_STATE_READY = 3;
 }
 
 message GetStatsSnapshotRequest {

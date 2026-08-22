@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build-managed-bundle.sh
+# build-managed-macos-bundle.sh
 #
 # Wrapper around `make packaging-macos-bundle` for the Cisco-managed
 # release. Fetches the private cloudreg overlay + CMID module from
@@ -18,11 +18,11 @@
 #     with a token in $HOME/.netrc / GH_TOKEN.
 #
 # Usage:
-#   scripts/build-managed-bundle.sh                       # develop HEAD
-#   scripts/build-managed-bundle.sh --ref v1.2.3          # a tag
-#   scripts/build-managed-bundle.sh --ref abcd1234        # a commit sha
-#   scripts/build-managed-bundle.sh --ai-common-dir /path # skip clone; reuse an existing checkout
-#   scripts/build-managed-bundle.sh --keep                # keep the ai-common checkout after the build
+#   packaging/scripts/build-managed-macos-bundle.sh                       # develop HEAD
+#   packaging/scripts/build-managed-macos-bundle.sh --ref v1.2.3          # a tag
+#   packaging/scripts/build-managed-macos-bundle.sh --ref abcd1234        # a commit sha
+#   packaging/scripts/build-managed-macos-bundle.sh --ai-common-dir /path # skip clone; reuse an existing checkout
+#   packaging/scripts/build-managed-macos-bundle.sh --keep                # keep the ai-common checkout after the build
 #
 # Environment overrides (all optional, forwarded to make):
 #   BUNDLE_GOARCH    (default: arm64; no other value is supported) — see Makefile
@@ -56,7 +56,9 @@ AI_COMMON_DIR=""
 KEEP="false"
 
 usage() {
-  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+  # The header comment block ends at line 35. A wider range would leak the
+  # shell code that follows into --help output.
+  sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -72,7 +74,7 @@ done
 
 # ---- location bookkeeping ----------------------------------------------
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 AI_COMMON_REPO_SSH="${AI_COMMON_REPO_SSH:-git@github.com-aispg:cisco-aispg/ai-common.git}"
 AI_COMMON_REPO_HTTPS="${AI_COMMON_REPO_HTTPS:-https://github.com/cisco-aispg/ai-common.git}"
@@ -101,13 +103,20 @@ BUNDLE_TAGS="${BUNDLE_TAGS:-cmid}"
 
 require_bin() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "build-managed-bundle: missing required tool: $1" >&2
+    echo "build-managed-macos-bundle: missing required tool: $1" >&2
     exit 1
   }
 }
 
 require_bin git
 require_bin go
+# `lipo` is intentionally not required here anymore. The Apple-Silicon-only
+# gate at the top of the script now enforces the platform, and the macOS
+# make target no longer stitches a universal binary — the arm64-only pin
+# from main-side PR #722 makes `lipo` a leftover dependency. The `uname
+# -s == Darwin` and `macos_hardware_machine == arm64` checks earlier in
+# the script already reject non-macOS and Rosetta-emulated hosts fail-
+# closed, superseding the previous separate Darwin block that lived here.
 
 # ---- ai-common checkout -------------------------------------------------
 
@@ -138,11 +147,16 @@ if [[ -z "${AI_COMMON_DIR}" ]]; then
   fi
 else
   if [[ ! -d "${AI_COMMON_DIR}/.git" ]]; then
-    echo "build-managed-bundle: --ai-common-dir must point at a git checkout: ${AI_COMMON_DIR}" >&2
+    echo "build-managed-macos-bundle: --ai-common-dir must point at a git checkout: ${AI_COMMON_DIR}" >&2
     exit 1
   fi
   echo "==> using existing ai-common checkout at ${AI_COMMON_DIR}"
-  ( cd "${AI_COMMON_DIR}" && git fetch --quiet origin "${REF}" && git checkout --quiet "${REF}" )
+  # Check out the fetched ref via FETCH_HEAD, not a possibly-stale local
+  # branch. `git checkout develop` selects the local tracking branch which
+  # can lag behind origin, so the build would then pin `cmid` to a stale
+  # commit that no longer matches --ref. Detached matches the sibling
+  # build-managed-windows-bundle.sh's behavior.
+  ( cd "${AI_COMMON_DIR}" && git fetch --quiet origin "${REF}" && git checkout --quiet --detach FETCH_HEAD )
 fi
 
 cleanup() {
@@ -159,14 +173,14 @@ trap cleanup EXIT
 
 OVERLAY_PATH="${AI_COMMON_DIR}/defenseclaw_cmid_overlay/provider_cisco.go"
 if [[ ! -f "${OVERLAY_PATH}" ]]; then
-  echo "build-managed-bundle: overlay file not found in ai-common@${REF}:" >&2
+  echo "build-managed-macos-bundle: overlay file not found in ai-common@${REF}:" >&2
   echo "    ${OVERLAY_PATH}" >&2
   echo "    (has the cmid PR been merged into ${REF}?)" >&2
   exit 1
 fi
 
 if [[ ! -f "${AI_COMMON_DIR}/cmid/go.mod" ]]; then
-  echo "build-managed-bundle: cmid module not found in ai-common@${REF}:" >&2
+  echo "build-managed-macos-bundle: cmid module not found in ai-common@${REF}:" >&2
   echo "    ${AI_COMMON_DIR}/cmid/go.mod" >&2
   exit 1
 fi
@@ -187,7 +201,7 @@ echo "==> computing pseudo-version for ai-common/cmid @ ${REF}"
 # the ref itself. HEAD is exactly the ref the operator asked to build.
 COMMIT_SHA="$(git -C "${AI_COMMON_DIR}" rev-parse HEAD)"
 if [[ -z "${COMMIT_SHA}" ]]; then
-  echo "build-managed-bundle: could not resolve HEAD commit sha on ${REF}" >&2
+  echo "build-managed-macos-bundle: could not resolve HEAD commit sha on ${REF}" >&2
   exit 1
 fi
 COMMIT_SHORT="${COMMIT_SHA:0:12}"
