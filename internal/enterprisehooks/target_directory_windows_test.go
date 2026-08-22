@@ -212,9 +212,15 @@ func assertWindowsTargetOwnedCanonicalDirectory(
 
 func requireWindowsTestDirectorySharingViolation(path string) error {
 	handle, err := openWindowsTestDirectoryNoFollow(path)
-	if handle != 0 {
+	if err == nil && handle != 0 && handle != windows.InvalidHandle {
 		_ = windows.CloseHandle(handle)
 		return errors.New("competing open unexpectedly succeeded while staging handle was exclusive")
+	}
+	if err == nil {
+		return fmt.Errorf("competing open returned invalid handle %v without an error", handle)
+	}
+	if handle != 0 && handle != windows.InvalidHandle {
+		_ = windows.CloseHandle(handle)
 	}
 	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		return fmt.Errorf("competing open error = %v, want sharing violation", err)
