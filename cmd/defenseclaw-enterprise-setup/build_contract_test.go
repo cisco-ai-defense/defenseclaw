@@ -43,6 +43,7 @@ func TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap(t *testing.T) {
 	for _, required := range []string{
 		"DefenseClawSetup-Enterprise-x64.exe",
 		"./cmd/defenseclaw-enterprise-setup",
+		"defenseclaw-cmid-broker.exe",
 		"defenseclaw-gateway.exe",
 		"defenseclaw-hook.exe",
 		"install-enterprise.ps1",

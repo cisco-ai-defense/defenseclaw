@@ -1243,6 +1243,45 @@ function Get-DefenseClawEnumeratorServiceName {
     throw "cannot derive enumerator service name from unexpected guardian name: $GuardianServiceName"
 }
 
+function Get-DefenseClawCMIDBrokerServiceName {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    Assert-DefenseClawServiceName -Name $GatewayServiceName
+    if ($GatewayServiceName -ceq 'DefenseClawGateway') {
+        return 'DefenseClawCMIDBroker'
+    }
+    if ($GatewayServiceName -cmatch '^DefenseClawCertGateway_([a-f0-9]{10})$') {
+        return "DefenseClawCMIDBroker_$($Matches[1])"
+    }
+    throw "cannot derive credential broker service name from unexpected gateway name: $GatewayServiceName"
+}
+
+function Get-DefenseClawCMIDBrokerImage {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if ([string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
+        throw 'credential broker provider library path is missing'
+    }
+    return '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"' -f `
+        $Layout.BrokerPath, $Layout.BrokerServiceName, $GatewayServiceName, `
+        $Layout.BrokerPipeName, $Layout.BrokerAuthKeyPath, `
+        $Layout.ProviderLibraryPath, $Layout.BrokerLogPath
+}
+
+function Get-DefenseClawManagedServiceNames {
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    return @(
+        $GatewayServiceName,
+        (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName),
+        $GuardianServiceName,
+        (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName)
+    )
+}
+
 function Resolve-DefenseClawCertificationCodexHome {
     param(
         [string]$Path,
@@ -2661,6 +2700,9 @@ function Get-DefenseClawServiceEnvironmentValues {
         [Parameter(Mandatory)][string]$AuthorizationDirectory,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$LogPath,
+        [string]$BrokerPipeName,
+        [string]$BrokerServiceName,
+        [string]$BrokerAuthKeyPath,
         [switch]$AgentApplicationControlAttested,
         [switch]$ClaudeEffectivePolicyVerified
     )
@@ -2676,6 +2718,18 @@ function Get-DefenseClawServiceEnvironmentValues {
         "DEFENSECLAW_WINDOWS_SERVICE_LOG=$LogPath"
     )) {
         $values.Add($value)
+    }
+    $brokerValues = @($BrokerPipeName, $BrokerServiceName, $BrokerAuthKeyPath)
+    $brokerValueCount = @($brokerValues | Microsoft.PowerShell.Core\Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_)
+    }).Count
+    if ($brokerValueCount -ne 0 -and $brokerValueCount -ne 3) {
+        throw 'credential broker service environment is partially configured'
+    }
+    if ($brokerValueCount -eq 3) {
+        $values.Add("DEFENSECLAW_CMID_BROKER_PIPE=$BrokerPipeName")
+        $values.Add("DEFENSECLAW_CMID_BROKER_SERVICE_NAME=$BrokerServiceName")
+        $values.Add("DEFENSECLAW_CMID_BROKER_AUTH_KEY=$BrokerAuthKeyPath")
     }
     if ($AgentApplicationControlAttested) {
         $values.Add('DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED=1')
@@ -2695,6 +2749,9 @@ function Set-DefenseClawServiceEnvironment {
         [Parameter(Mandatory)][string]$AuthorizationDirectory,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$LogPath,
+        [string]$BrokerPipeName,
+        [string]$BrokerServiceName,
+        [string]$BrokerAuthKeyPath,
         [switch]$AgentApplicationControlAttested,
         [switch]$ClaudeEffectivePolicyVerified
     )
@@ -2709,9 +2766,70 @@ function Set-DefenseClawServiceEnvironment {
         -AuthorizationDirectory $AuthorizationDirectory `
         -GatewayServiceName $GatewayServiceName `
         -LogPath $LogPath `
+        -BrokerPipeName $BrokerPipeName `
+        -BrokerServiceName $BrokerServiceName `
+        -BrokerAuthKeyPath $BrokerAuthKeyPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified)
     [void](Microsoft.PowerShell.Management\New-ItemProperty -LiteralPath $serviceKey -Name Environment -PropertyType MultiString -Value $values -Force)
+}
+
+function Set-DefenseClawCMIDBrokerAuthKey {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
+        throw "credential broker key directory is missing: $directory"
+    }
+    Assert-DefenseClawNoReparsePath -Path $directory
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetSecurityDescriptorSddlForm(
+        "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$gatewaySID)",
+        (
+            [Security.AccessControl.AccessControlSections]::Owner -bor
+            [Security.AccessControl.AccessControlSections]::Group -bor
+            [Security.AccessControl.AccessControlSections]::Access
+        )
+    )
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf) {
+        Assert-DefenseClawNoReparsePath -Path $Path
+        $existing = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force
+        if ([int64]$existing.Length -ne 32) {
+            throw 'credential broker authentication key must be exactly 32 bytes'
+        }
+        Microsoft.PowerShell.Security\Set-Acl `
+            -LiteralPath $Path `
+            -AclObject $security `
+            -ErrorAction Stop
+        return
+    }
+    $temporary = Microsoft.PowerShell.Management\Join-Path `
+        $directory `
+        ('.broker-auth.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+    $key = [byte[]]::new(32)
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($key)
+        [IO.File]::WriteAllBytes($temporary, $key)
+        Microsoft.PowerShell.Security\Set-Acl `
+            -LiteralPath $temporary `
+            -AclObject $security `
+            -ErrorAction Stop
+        Microsoft.PowerShell.Management\Move-Item `
+            -LiteralPath $temporary `
+            -Destination $Path `
+            -Force
+    }
+    finally {
+        $generator.Dispose()
+        [Array]::Clear($key, 0, $key.Length)
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
+        }
+    }
 }
 
 function Get-DefenseClawFailureActionsBytes {
@@ -3022,6 +3140,12 @@ function Set-DefenseClawManagedServices {
     param(
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][string]$BrokerServiceName,
+        [Parameter(Mandatory)][string]$BrokerPath,
+        [Parameter(Mandatory)][string]$BrokerPipeName,
+        [Parameter(Mandatory)][string]$BrokerAuthKeyPath,
+        [Parameter(Mandatory)][string]$ProviderLibraryPath,
+        [Parameter(Mandatory)][string]$BrokerLogPath,
         [Parameter(Mandatory)][string]$GatewayPath,
         [Parameter(Mandatory)][string]$ManifestPath,
         [Parameter(Mandatory)][string]$RuntimeDirectory,
@@ -3035,10 +3159,17 @@ function Set-DefenseClawManagedServices {
     )
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
+    Assert-DefenseClawServiceName -Name $BrokerServiceName
+    if ($BrokerServiceName -cne (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)) {
+        throw 'credential broker service name does not match the gateway identity'
+    }
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawServiceName -Name $enumeratorServiceName
     $gatewayAccount = "NT SERVICE\$GatewayServiceName"
     $gatewayImage = '"{0}"' -f $GatewayPath
+    $brokerImage = '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"' -f `
+        $BrokerPath, $BrokerServiceName, $GatewayServiceName, $BrokerPipeName, `
+        $BrokerAuthKeyPath, $ProviderLibraryPath, $BrokerLogPath
     $guardianImage = '"{0}" enterprise hooks watch --manifest "{1}" --interval 1m' -f $GatewayPath, $ManifestPath
     # Spec 005 D1: third SCM service reuses the gateway binary, invoked
     # with the `enterprise windows enumerate` subcommand. Runs as
@@ -3054,6 +3185,36 @@ function Set-DefenseClawManagedServices {
     # sufficient: SCM may still execute an already queued failure restart.
     $configuredStart = if ($DeferAutomaticStart) { 'disabled' } else { 'auto' }
 
+    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+        -Name $BrokerServiceName `
+        -ExpectedImage $brokerImage `
+        -AllowArgumentUpgrade
+    if (Test-DefenseClawServiceExists -Name $BrokerServiceName) {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+            'config', $BrokerServiceName,
+            'binPath=', $brokerImage,
+            'type=', 'own',
+            'start=', $configuredStart,
+            'error=', 'normal',
+            'depend=', '/',
+            'obj=', 'LocalSystem',
+            'DisplayName=', 'DefenseClaw Credential Broker'
+        ))
+    }
+    else {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+            'create', $BrokerServiceName,
+            'binPath=', $brokerImage,
+            'type=', 'own',
+            'start=', $configuredStart,
+            'error=', 'normal',
+            'depend=', '/',
+            'obj=', 'LocalSystem',
+            'DisplayName=', 'DefenseClaw Credential Broker'
+        ))
+    }
+    Assert-DefenseClawServiceImagePath -Name $BrokerServiceName -ExpectedImage $brokerImage
+
     if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'config', $GatewayServiceName,
@@ -3061,7 +3222,7 @@ function Set-DefenseClawManagedServices {
             'type=', 'own',
             'start=', $configuredStart,
             'error=', 'normal',
-            'depend=', '/',
+            'depend=', $BrokerServiceName,
             'obj=', $gatewayAccount,
             'DisplayName=', 'DefenseClaw Enterprise Gateway'
         ))
@@ -3073,7 +3234,7 @@ function Set-DefenseClawManagedServices {
             'type=', 'own',
             'start=', $configuredStart,
             'error=', 'normal',
-            'depend=', '/',
+            'depend=', $BrokerServiceName,
             'obj=', $gatewayAccount,
             'DisplayName=', 'DefenseClaw Enterprise Gateway'
         ))
@@ -3150,10 +3311,14 @@ function Set-DefenseClawManagedServices {
         -ExpectedImage $enumeratorImage
 
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GatewayServiceName, 'restricted'))
+    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $BrokerServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GuardianServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $enumeratorServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $GatewayServiceName, 'SeChangeNotifyPrivilege'
+    ))
+    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+        'privs', $BrokerServiceName, 'SeChangeNotifyPrivilege'
     ))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $GuardianServiceName,
@@ -3163,7 +3328,7 @@ function Set-DefenseClawManagedServices {
         'privs', $enumeratorServiceName,
         'SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege'
     ))
-    foreach ($service in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
+    foreach ($service in @($BrokerServiceName, $GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'failure', $service,
             'reset=', '86400',
@@ -3181,6 +3346,14 @@ function Set-DefenseClawManagedServices {
         Set-DefenseClawServiceRegistryAcl -Name $service
     }
 
+    Set-DefenseClawCMIDBrokerAuthKey `
+        -Path $BrokerAuthKeyPath `
+        -GatewayServiceName $GatewayServiceName
+    Microsoft.PowerShell.Management\Remove-ItemProperty `
+        -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$BrokerServiceName" `
+        -Name Environment `
+        -ErrorAction SilentlyContinue
+
     Set-DefenseClawServiceEnvironment `
         -Name $GatewayServiceName `
         -RuntimeDirectory $RuntimeDirectory `
@@ -3188,6 +3361,9 @@ function Set-DefenseClawManagedServices {
         -AuthorizationDirectory $AuthorizationDirectory `
         -GatewayServiceName $GatewayServiceName `
         -LogPath $GatewayLogPath `
+        -BrokerPipeName $BrokerPipeName `
+        -BrokerServiceName $BrokerServiceName `
+        -BrokerAuthKeyPath $BrokerAuthKeyPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified
     Set-DefenseClawServiceEnvironment `
@@ -3345,12 +3521,13 @@ function Wait-DefenseClawServiceFailureRestartQuiescence {
     # Reassert the fail-closed state after the full 60-second canonical
     # failure-action window plus safety margin. Every restart queued before
     # quiescence has now attempted against a disabled service and drained.
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    foreach ($name in @($GatewayServiceName, $BrokerServiceName, $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
     }
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName)) {
+    foreach ($name in @($GuardianServiceName, $GatewayServiceName, $brokerServiceName)) {
         Stop-DefenseClawService -Name $name
     }
 }
@@ -3453,6 +3630,7 @@ function Get-DefenseClawTransactionServiceStates {
     # enumerator as absent. Post-upgrade transactions always carry
     # all 3.
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
     $states = @{}
     foreach ($service in @($Services)) {
         $nameProperty = $service.PSObject.Properties['name']
@@ -3465,6 +3643,7 @@ function Get-DefenseClawTransactionServiceStates {
         $name = [string]$nameProperty.Value
         $canonicalName = @(
             $GatewayServiceName,
+            $brokerServiceName,
             $GuardianServiceName,
             $enumeratorServiceName
         ) | Microsoft.PowerShell.Core\Where-Object {
@@ -3513,6 +3692,19 @@ function Get-DefenseClawTransactionServiceStates {
             start_mode = 0
         }
     }
+    if (-not $states.ContainsKey($brokerServiceName)) {
+        $states[$brokerServiceName] = [pscustomobject]@{
+            service = [pscustomobject]@{
+                name = $brokerServiceName
+                existed = $false
+                running = $false
+                start_mode = 0
+            }
+            existed = $false
+            running = $false
+            start_mode = 0
+        }
+    }
     return $states
 }
 
@@ -3536,7 +3728,8 @@ function Restore-DefenseClawTransactionServiceStartModes {
     # crash mid-restore leaves enumerator disabled which is a safe
     # posture (no targets.yaml writes until the next transaction).
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName, $enumeratorServiceName)) {
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    foreach ($name in @($brokerServiceName, $GuardianServiceName, $GatewayServiceName, $enumeratorServiceName)) {
         $state = $states[$name]
         if ($null -ne $state -and [bool]$state.existed) {
             Set-DefenseClawServiceStartMode `
@@ -3559,7 +3752,7 @@ function Set-DefenseClawManagedAcls {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
     }
-    foreach ($path in @($Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
             Set-DefenseClawPathAcl -Path $path -Kind InstallFile -GatewayServiceSID $gatewaySID
         }
@@ -3577,6 +3770,7 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
+    Set-DefenseClawPathAcl -Path $Layout.BrokerStateDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.AuthorizationDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.AuthorizationLedgerPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.AuthorizationLedgerPath -Kind AuthorizationFile -GatewayServiceSID $gatewaySID
@@ -3584,11 +3778,15 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.LogDirectory -Kind LogDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GatewayLogDirectory -Kind GatewayLogDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GuardianLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
+    Set-DefenseClawPathAcl -Path $Layout.BrokerLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayLogPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayLogPath -Kind RuntimeFile -GatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GuardianLogPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GuardianLogPath -Kind AdminFile -GatewayServiceSID $gatewaySID
+    }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.BrokerLogPath -PathType Leaf) {
+        Set-DefenseClawPathAcl -Path $Layout.BrokerLogPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.MetadataPath -Kind AdminFile -GatewayServiceSID $gatewaySID
@@ -3659,6 +3857,12 @@ function Set-DefenseClawManagedServicesForTransaction {
     Set-DefenseClawManagedServices `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
+        -BrokerServiceName $Layout.BrokerServiceName `
+        -BrokerPath $Layout.BrokerPath `
+        -BrokerPipeName $Layout.BrokerPipeName `
+        -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
+        -ProviderLibraryPath $Layout.ProviderLibraryPath `
+        -BrokerLogPath $Layout.BrokerLogPath `
         -GatewayPath $Layout.GatewayPath `
         -ManifestPath $Layout.ManifestPath `
         -RuntimeDirectory $Layout.RuntimeDirectory `
@@ -3771,9 +3975,11 @@ function Get-DefenseClawLayout {
     $libexec = Microsoft.PowerShell.Management\Join-Path $InstallRoot 'libexec'
     $configDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'etc'
     $guardianDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian'
+    $brokerStateDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'cmid-broker'
     $installState = Microsoft.PowerShell.Management\Join-Path $StateRoot 'install'
     $logDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'logs'
     $gatewayLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'gateway'
+    $brokerLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'cmid-broker'
     $guardianLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'guardian'
     $lifecycleLockDirectory = Microsoft.PowerShell.Management\Join-Path `
         $script:ProgramData `
@@ -3828,16 +4034,24 @@ function Get-DefenseClawLayout {
         LibexecDirectory = $libexec
         ConfigDirectory = $configDirectory
         RuntimeDirectory = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'runtime')
+        BrokerStateDirectory = $brokerStateDirectory
+        BrokerAuthKeyPath = (Microsoft.PowerShell.Management\Join-Path $brokerStateDirectory 'broker-auth.key')
         GuardianDirectory = $guardianDirectory
         AuthorizationDirectory = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian-state')
         AuthorizationLedgerPath = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian-state\protected_targets.json')
         LogDirectory = $logDirectory
         GatewayLogDirectory = $gatewayLogDirectory
+        BrokerLogDirectory = $brokerLogDirectory
         GuardianLogDirectory = $guardianLogDirectory
         GatewayLogPath = (Microsoft.PowerShell.Management\Join-Path $gatewayLogDirectory 'gateway.log')
+        BrokerLogPath = (Microsoft.PowerShell.Management\Join-Path $brokerLogDirectory 'cmid-broker.log')
         GuardianLogPath = (Microsoft.PowerShell.Management\Join-Path $guardianLogDirectory 'hook-guardian.log')
         InstallStateDirectory = $installState
         GatewayPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-gateway.exe')
+        BrokerPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-cmid-broker.exe')
+        BrokerServiceName = (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)
+        BrokerPipeName = ('\\.\pipe\{0}' -f (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName))
+        ProviderLibraryPath = ''
         HookPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe')
         CLIPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw.exe')
         ConfigPath = (Microsoft.PowerShell.Management\Join-Path $configDirectory 'config.yaml')
@@ -3939,10 +4153,12 @@ function New-DefenseClawLayoutDirectories {
         $Layout.StateRoot,
         $Layout.ConfigDirectory,
         $Layout.RuntimeDirectory,
+        $Layout.BrokerStateDirectory,
         $Layout.GuardianDirectory,
         $Layout.AuthorizationDirectory,
         $Layout.LogDirectory,
         $Layout.GatewayLogDirectory,
+        $Layout.BrokerLogDirectory,
         $Layout.GuardianLogDirectory,
         $Layout.InstallStateDirectory,
         $Layout.TransactionsDirectory
@@ -4077,6 +4293,12 @@ function Get-DefenseClawDeploymentMetadata {
         [bool]$Layout.CodexTargetEnabled) {
         throw 'core-hardening certification metadata cannot enable the Codex target'
     }
+    $providerLibraryProperty = $metadata.PSObject.Properties['provider_library_path']
+    if ($null -ne $providerLibraryProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$providerLibraryProperty.Value)) {
+        $Layout.ProviderLibraryPath = Resolve-DefenseClawFullPath `
+            -Path ([string]$providerLibraryProperty.Value)
+    }
     return $metadata
 }
 
@@ -4089,6 +4311,7 @@ function New-DefenseClawDeploymentMetadata {
     )
     $hashes = [ordered]@{}
     foreach ($entry in @(
+        @('broker', $Layout.BrokerPath),
         @('gateway', $Layout.GatewayPath),
         @('hook', $Layout.HookPath),
         @('cli', $Layout.CLIPath),
@@ -4146,6 +4369,11 @@ function New-DefenseClawDeploymentMetadata {
         guardian_service = $GuardianServiceName
         gateway_account = "NT SERVICE\$GatewayServiceName"
         guardian_account = 'LocalSystem'
+        broker_service = $Layout.BrokerServiceName
+        broker_account = 'LocalSystem'
+        broker_pipe = $Layout.BrokerPipeName
+        broker_auth_key_path = $Layout.BrokerAuthKeyPath
+        provider_library_path = $Layout.ProviderLibraryPath
         codex_machine_policy_parent = $Layout.CodexMachinePolicyDirectory
         codex_machine_policy_parent_preserved_on_uninstall = $true
         codex_machine_policy_path = $Layout.CodexMachinePolicyPath
@@ -4237,6 +4465,15 @@ function Assert-DefenseClawMetadataIdentity {
     )) {
         throw "deployment metadata belongs to guardian service $($Metadata.guardian_service), not $GuardianServiceName"
     }
+    $brokerProperty = $Metadata.PSObject.Properties['broker_service']
+    if ($null -ne $brokerProperty -and
+        -not [string]::Equals(
+            [string]$brokerProperty.Value,
+            (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'deployment metadata belongs to a different credential broker service'
+    }
 }
 
 function Assert-DefenseClawOwnedServiceOrAbsent {
@@ -4283,6 +4520,50 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
     $expectedAccount = if ($Guardian -or $Enumerator) { 'LocalSystem' } else { "NT SERVICE\$Name" }
     if (-not [string]::Equals($objectName, $expectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
         throw "refusing to replace service $Name owned by unexpected account $objectName"
+    }
+}
+
+function Assert-DefenseClawCMIDBrokerServiceOrAbsent {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$ExpectedImage,
+        [switch]$AllowArgumentUpgrade
+    )
+    if (-not (Test-DefenseClawServiceExists -Name $Name)) {
+        return
+    }
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $image = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+        -LiteralPath $key `
+        -Name ImagePath)
+    $ownedImage = [string]::Equals(
+            $image,
+            $ExpectedImage,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    if (-not $ownedImage -and $AllowArgumentUpgrade) {
+        $closingQuote = $ExpectedImage.IndexOf('"', 1)
+        if ($ExpectedImage.Length -gt 2 -and $ExpectedImage[0] -eq '"' -and
+            $closingQuote -gt 1) {
+            $expectedPrefix = $ExpectedImage.Substring(0, $closingQuote + 1) + ' service '
+            $ownedImage = $image.StartsWith(
+                $expectedPrefix,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        }
+    }
+    if (-not $ownedImage) {
+        throw "refusing to replace foreign credential broker service $Name with ImagePath $image"
+    }
+    $account = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+        -LiteralPath $key `
+        -Name ObjectName)
+    if (-not [string]::Equals(
+            $account,
+            'LocalSystem',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "refusing to replace credential broker service $Name owned by unexpected account $account"
     }
 }
 
@@ -4339,8 +4620,9 @@ function New-DefenseClawTransaction {
     # via the same helper Set-DefenseClawManagedServices uses so a
     # certification-run cross-check is enforced.
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
     $services = [Collections.Generic.List[object]]::new()
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
+    foreach ($name in @($BrokerServiceName, $GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         $service = Microsoft.PowerShell.Management\Get-Service `
             -Name $name `
             -ErrorAction SilentlyContinue
@@ -4377,6 +4659,7 @@ function New-DefenseClawTransaction {
             state_root = $Layout.StateRoot
             gateway_service = $GatewayServiceName
             guardian_service = $GuardianServiceName
+            provider_library_path = [string]$Layout.ProviderLibraryPath
             services = $services
             service_activation_phase = 'quiesced'
             certification_codex_home = [string]$Layout.CertificationCodexHome
@@ -4398,7 +4681,7 @@ function New-DefenseClawTransaction {
         # so its final cycle (already in flight) can complete and drop
         # a coherent targets.yaml before the transaction reads it as
         # a preimage.
-        foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
+        foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName, $enumeratorServiceName)) {
             $service = $services |
                 Microsoft.PowerShell.Core\Where-Object {
                     [string]::Equals(
@@ -4421,6 +4704,7 @@ function New-DefenseClawTransaction {
         Stop-DefenseClawService -Name $enumeratorServiceName
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
+        Stop-DefenseClawService -Name $brokerServiceName
         $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
         $quiescingIntent['services_disabled_and_stopped_at'] =
             $servicesQuiescedAt
@@ -4433,6 +4717,7 @@ function New-DefenseClawTransaction {
         $files = [Collections.Generic.List[object]]::new()
     $destinations = [Collections.Generic.List[string]]::new()
     foreach ($destination in @(
+        $Layout.BrokerPath,
         $Layout.GatewayPath,
         $Layout.HookPath,
         $Layout.CLIPath,
@@ -4440,6 +4725,7 @@ function New-DefenseClawTransaction {
         $Layout.ManifestPath,
         $Layout.InstallerPath,
         $Layout.ModulePath,
+        $Layout.BrokerAuthKeyPath,
         $Layout.MetadataPath,
         $Layout.AgentApplicationControlAttestationPath
     )) {
@@ -4543,6 +4829,7 @@ function New-DefenseClawTransaction {
         state_root = $Layout.StateRoot
         gateway_service = $GatewayServiceName
         guardian_service = $GuardianServiceName
+        provider_library_path = [string]$Layout.ProviderLibraryPath
         service_activation_phase = 'quiesced'
         services_disabled_and_stopped_at = $servicesQuiescedAt
         certification_codex_home = [string]$Layout.CertificationCodexHome
@@ -4608,7 +4895,9 @@ function New-DefenseClawTransaction {
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
                     $GatewayServiceName,
-                    $GuardianServiceName
+                    $brokerServiceName,
+                    $GuardianServiceName,
+                    $enumeratorServiceName
                 )) {
                     $service = $services |
                         Microsoft.PowerShell.Core\Where-Object {
@@ -4627,6 +4916,7 @@ function New-DefenseClawTransaction {
                 }
                 Stop-DefenseClawService -Name $GuardianServiceName
                 Stop-DefenseClawService -Name $GatewayServiceName
+                Stop-DefenseClawService -Name $brokerServiceName
                 $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
                 Set-DefenseClawServiceActivationPhase `
                     -State $quiescingIntent `
@@ -5552,6 +5842,14 @@ function Restore-DefenseClawTransaction {
     $Layout.CoreHardeningCertification = [bool](
         $snapshotCoreCertificationProperty.Value
     )
+    $snapshotProviderProperty = $snapshot.PSObject.Properties['provider_library_path']
+    if ($null -ne $snapshotProviderProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$snapshotProviderProperty.Value)) {
+        $Layout.ProviderLibraryPath = Resolve-DefenseClawFullPath `
+            -Path ([string]$snapshotProviderProperty.Value) `
+            -MustExist `
+            -Leaf
+    }
     Assert-DefenseClawServiceName -Name ([string]$snapshot.gateway_service)
     Assert-DefenseClawServiceName -Name ([string]$snapshot.guardian_service)
     if ([string]::Equals(
@@ -5569,19 +5867,33 @@ function Restore-DefenseClawTransaction {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
+    if (-not [string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
+        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+            -Name $Layout.BrokerServiceName `
+            -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                -Layout $Layout `
+                -GatewayServiceName ([string]$snapshot.gateway_service))
+    }
     # A retained snapshot may be recovered after a reboot or after the final
     # validated activation step. Disable every live owned service before the
     # first stop or file restore. Besides preventing boot activation, disabled
     # start makes any already queued SCM failure restart fail closed.
     foreach ($name in @(
         [string]$snapshot.gateway_service,
-        [string]$snapshot.guardian_service
+        [string]$Layout.BrokerServiceName,
+        [string]$snapshot.guardian_service,
+        (Get-DefenseClawEnumeratorServiceName -GuardianServiceName ([string]$snapshot.guardian_service))
     )) {
         if (Test-DefenseClawServiceExists -Name $name) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
     }
-    foreach ($name in @([string]$snapshot.guardian_service, [string]$snapshot.gateway_service)) {
+    foreach ($name in @(
+        (Get-DefenseClawEnumeratorServiceName -GuardianServiceName ([string]$snapshot.guardian_service)),
+        [string]$snapshot.guardian_service,
+        [string]$snapshot.gateway_service,
+        [string]$Layout.BrokerServiceName
+    )) {
         if (-not [string]::IsNullOrWhiteSpace($name)) {
             Stop-DefenseClawService -Name $name
         }
@@ -5707,6 +6019,12 @@ function Restore-DefenseClawTransaction {
         Set-DefenseClawManagedServices `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
             -GuardianServiceName ([string]$snapshot.guardian_service) `
+            -BrokerServiceName $Layout.BrokerServiceName `
+            -BrokerPath $Layout.BrokerPath `
+            -BrokerPipeName $Layout.BrokerPipeName `
+            -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
+            -ProviderLibraryPath $Layout.ProviderLibraryPath `
+            -BrokerLogPath $Layout.BrokerLogPath `
             -GatewayPath $Layout.GatewayPath `
             -ManifestPath $Layout.ManifestPath `
             -RuntimeDirectory $Layout.RuntimeDirectory `
@@ -5790,8 +6108,10 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         # and any transaction-created services were already removed above.
         return $false
     }
-    if ($existing.Count -ne 2) {
-        throw 'refusing to reactivate a partially restored managed service pair'
+    $gatewayState = $states[[string]$Snapshot.gateway_service]
+    $guardianState = $states[[string]$Snapshot.guardian_service]
+    if (-not [bool]$gatewayState.existed -or -not [bool]$guardianState.existed) {
+        throw 'refusing to reactivate a partially restored managed service set'
     }
     Assert-DefenseClawEnterpriseDeployment `
         -Layout $Layout `
@@ -5818,12 +6138,13 @@ function Start-DefenseClawTransactionServices {
     # action cannot race recovery. Running+disabled is a valid pre-repair
     # snapshot, so services that must run are temporarily demand-started,
     # started guardian-first, and only then returned to exact recorded modes.
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName)) {
         if ([bool]$states[$name].existed) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
     }
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName)) {
+    foreach ($name in @($GuardianServiceName, $GatewayServiceName, $brokerServiceName)) {
         if ([bool]$states[$name].existed) {
             Stop-DefenseClawService -Name $name
         }
@@ -5840,6 +6161,7 @@ function Start-DefenseClawTransactionServices {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
     $gateway = $states[$GatewayServiceName]
+    $broker = $states[$brokerServiceName]
     $guardian = $states[$GuardianServiceName]
     $gatewayNeedsProtection = (
         [bool]$gateway.existed -and (
@@ -5849,6 +6171,17 @@ function Start-DefenseClawTransactionServices {
     )
     if ($gatewayNeedsProtection -and -not [bool]$guardian.existed) {
         throw 'refusing to reactivate gateway without its recorded guardian service'
+    }
+    if ($gatewayNeedsProtection -and [bool]$broker.existed -and
+        -not ([bool]$broker.running -or [int]$broker.start_mode -eq 2)) {
+        throw 'refusing to reactivate a broker-backed gateway without its recorded credential broker'
+    }
+    $brokerTemporarilyRequired = [bool]$broker.existed -and (
+        [bool]$broker.running -or $gatewayNeedsProtection
+    )
+    if ($brokerTemporarilyRequired) {
+        Set-DefenseClawServiceStartMode -Name $brokerServiceName -StartMode 3
+        Start-DefenseClawService -Name $brokerServiceName
     }
     $guardianTemporarilyRequired = (
         [bool]$guardian.running -or $gatewayNeedsProtection
@@ -6211,6 +6544,14 @@ function Recover-DefenseClawQuiescingIntent {
             throw "pending lifecycle quiescing intent does not match $($binding[0])"
         }
     }
+    $providerProperty = $Intent.PSObject.Properties['provider_library_path']
+    if ($null -ne $providerProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$providerProperty.Value)) {
+        $Layout.ProviderLibraryPath = Resolve-DefenseClawFullPath `
+            -Path ([string]$providerProperty.Value) `
+            -MustExist `
+            -Leaf
+    }
     $certificationProperty = $Intent.PSObject.Properties[
         'certification_codex_home'
     ]
@@ -6278,9 +6619,11 @@ function Recover-DefenseClawQuiescingIntent {
         -Label 'quiescing transaction directory')
 
     $services = @($Intent.services)
-    if ($services.Count -ne 2) {
-        throw 'pending lifecycle quiescing intent must record exactly two services'
+    if ($services.Count -lt 2 -or $services.Count -gt 4) {
+        throw 'pending lifecycle quiescing intent has an invalid managed service count'
     }
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     $serviceState = @{}
     foreach ($service in $services) {
         $nameProperty = $service.PSObject.Properties['name']
@@ -6294,7 +6637,12 @@ function Recover-DefenseClawQuiescingIntent {
             throw 'pending lifecycle quiescing intent has invalid service state'
         }
         $name = [string]$nameProperty.Value
-        if ($name -notin @($GatewayServiceName, $GuardianServiceName) -or
+        if ($name -notin @(
+                $GatewayServiceName,
+                $brokerServiceName,
+                $GuardianServiceName,
+                $enumeratorServiceName
+            ) -or
             $serviceState.ContainsKey($name)) {
             throw 'pending lifecycle quiescing intent contains an unexpected or duplicate service'
         }
@@ -6320,15 +6668,28 @@ function Recover-DefenseClawQuiescingIntent {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
+    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+        -Name $Layout.BrokerServiceName `
+        -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName) `
+        -AllowArgumentUpgrade
+    if ($serviceState.ContainsKey($brokerServiceName)) {
+        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+            -Name $brokerServiceName `
+            -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName)
+    }
     # A process/reboot recovery never trusts elapsed wall time from the prior
     # process. Reestablish both disabled+stopped, publish a fresh durable
     # quiescence point, and drain the complete failure-action window.
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
     }
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName)) {
+    foreach ($name in @($enumeratorServiceName, $GuardianServiceName, $GatewayServiceName, $brokerServiceName)) {
         Stop-DefenseClawService -Name $name
     }
     $recoveryQuiescedAt = [DateTime]::UtcNow.ToString('o')
@@ -7164,10 +7525,16 @@ function Wait-DefenseClawEnterpriseReadiness {
         [int]$TimeoutSeconds = 90
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $brokerReady = $false
     $gatewayReady = $false
     $guardianReady = $false
     do {
-        $gatewayReady = Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName
+        $broker = Microsoft.PowerShell.Management\Get-Service `
+            -Name $Layout.BrokerServiceName `
+            -ErrorAction SilentlyContinue
+        $brokerReady = $null -ne $broker -and
+            $broker.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        $gatewayReady = $brokerReady -and (Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName)
         if ($gatewayReady) {
             $guardianReady = Test-DefenseClawGuardianReady `
                 -Layout $Layout `
@@ -7179,7 +7546,7 @@ function Wait-DefenseClawEnterpriseReadiness {
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "enterprise readiness timed out: gateway_ready=$gatewayReady guardian_ready=$guardianReady"
+    throw "enterprise readiness timed out: broker_ready=$brokerReady gateway_ready=$gatewayReady guardian_ready=$guardianReady"
 }
 
 function Assert-DefenseClawServiceConfiguration {
@@ -7191,6 +7558,7 @@ function Assert-DefenseClawServiceConfiguration {
         [Parameter(Mandatory)][int]$ExpectedSidType,
         [Parameter(Mandatory)][string[]]$ExpectedPrivileges,
         [Parameter(Mandatory)][string[]]$ExpectedEnvironment,
+        [string[]]$ExpectedDependencies = @(),
         [ValidateSet(2, 3, 4)]
         [int[]]$ExpectedStartMode = @(2)
     )
@@ -7223,12 +7591,24 @@ function Assert-DefenseClawServiceConfiguration {
     if ([int]$properties.DelayedAutoStart -ne 0) {
         throw "service $Name DelayedAutoStart drift: $($properties.DelayedAutoStart)"
     }
-    foreach ($dependencyProperty in @('DependOnService', 'DependOnGroup', 'Group')) {
+    foreach ($dependencyProperty in @('DependOnGroup', 'Group')) {
         $dependency = $properties.PSObject.Properties[$dependencyProperty]
         if ($null -ne $dependency -and
             @($dependency.Value | Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
             throw "service $Name has an unexpected $dependencyProperty dependency"
         }
+    }
+    $actualDependencies = @(
+        $properties.DependOnService |
+            Microsoft.PowerShell.Core\Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_)
+            } |
+            Microsoft.PowerShell.Core\ForEach-Object { [string]$_ } |
+            Microsoft.PowerShell.Utility\Sort-Object
+    )
+    $wantedDependencies = @($ExpectedDependencies | Microsoft.PowerShell.Utility\Sort-Object)
+    if (($actualDependencies -join "`n") -cne ($wantedDependencies -join "`n")) {
+        throw "service $Name dependency drift"
     }
     if ([int]$properties.ServiceSidType -ne $ExpectedSidType) {
         throw "service $Name ServiceSidType drift: $($properties.ServiceSidType), expected $ExpectedSidType"
@@ -7308,6 +7688,9 @@ function Assert-DefenseClawManagedServiceConfigurations {
             -AuthorizationDirectory $Layout.AuthorizationDirectory `
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GatewayLogPath `
+            -BrokerPipeName $Layout.BrokerPipeName `
+            -BrokerServiceName $Layout.BrokerServiceName `
+            -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
     )
@@ -7322,6 +7705,18 @@ function Assert-DefenseClawManagedServiceConfigurations {
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
     )
+    $brokerImage = Get-DefenseClawCMIDBrokerImage `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
+    Assert-DefenseClawServiceConfiguration `
+        -Name $Layout.BrokerServiceName `
+        -ExpectedImage $brokerImage `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Credential Broker' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
+        -ExpectedEnvironment @() `
+        -ExpectedStartMode $expectedStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
@@ -7330,6 +7725,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $gatewayEnvironment `
+        -ExpectedDependencies @($Layout.BrokerServiceName) `
         -ExpectedStartMode $expectedStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GuardianServiceName `
@@ -7686,7 +8082,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -AllowedWriterSIDs $adminWriters `
         -RequiredRights $serviceInstallRights `
         -AllowUsersRead
-    foreach ($path in @($Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
         Assert-DefenseClawPathAcl `
             -Path $path `
             -AllowedWriterSIDs $adminWriters `
@@ -7702,6 +8098,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     }
     $adminOnlyPaths = [Collections.Generic.List[string]]::new()
     foreach ($path in @(
+        $Layout.BrokerLogDirectory,
         $Layout.GuardianDirectory,
         $Layout.InstallStateDirectory,
         $Layout.ManifestPath,
@@ -7774,6 +8171,12 @@ function Assert-DefenseClawEnterpriseDeployment {
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $authorizationDirectoryRights `
         -RejectUntrustedRead
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.BrokerStateDirectory `
+        -AllowedWriterSIDs $adminWriters `
+        -AllowedReaderSIDs $gatewayReaders `
+        -RequiredRights $authorizationDirectoryRights `
+        -RejectUntrustedRead
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.AuthorizationLedgerPath -PathType Leaf) {
         Assert-DefenseClawPathAcl `
             -Path $Layout.AuthorizationLedgerPath `
@@ -7807,7 +8210,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RejectUntrustedRead
     }
 
-    foreach ($requiredHash in @('gateway', 'hook', 'installer', 'module')) {
+    foreach ($requiredHash in @('broker', 'gateway', 'hook', 'installer', 'module')) {
         if ($null -eq $metadata.hashes.PSObject.Properties[$requiredHash]) {
             throw "deployment metadata is missing required artifact hash: $requiredHash"
         }
@@ -7819,6 +8222,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     foreach ($property in $metadata.hashes.PSObject.Properties) {
         # Must cover every key the hash writer emits.
         $path = switch ($property.Name) {
+            'broker' { $Layout.BrokerPath }
             'gateway' { $Layout.GatewayPath }
             'hook' { $Layout.HookPath }
             'cli' { $Layout.CLIPath }
@@ -7843,7 +8247,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         "DEFENSECLAW_WINDOWS_SERVICE_NAME=$GatewayServiceName",
         "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME=$GatewayServiceName",
         "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName",
-        "DEFENSECLAW_WINDOWS_SERVICE_LOG=$($Layout.GatewayLogPath)"
+        "DEFENSECLAW_WINDOWS_SERVICE_LOG=$($Layout.GatewayLogPath)",
+        "DEFENSECLAW_CMID_BROKER_PIPE=$($Layout.BrokerPipeName)",
+        "DEFENSECLAW_CMID_BROKER_SERVICE_NAME=$($Layout.BrokerServiceName)",
+        "DEFENSECLAW_CMID_BROKER_AUTH_KEY=$($Layout.BrokerAuthKeyPath)"
     )
     $guardianEnvironment = [string[]]@(
         "DEFENSECLAW_HOME=$($Layout.RuntimeDirectory)",
@@ -7912,6 +8319,15 @@ function Assert-DefenseClawEnterpriseDeployment {
         )
     }
     Assert-DefenseClawServiceConfiguration `
+        -Name $Layout.BrokerServiceName `
+        -ExpectedImage (Get-DefenseClawCMIDBrokerImage -Layout $Layout -GatewayServiceName $GatewayServiceName) `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Credential Broker' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
+        -ExpectedEnvironment @() `
+        -ExpectedStartMode $expectedServiceStartMode
+    Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
         -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
@@ -7919,6 +8335,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $gatewayEnvironment `
+        -ExpectedDependencies @($Layout.BrokerServiceName) `
         -ExpectedStartMode $expectedServiceStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GuardianServiceName `
@@ -7957,6 +8374,13 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
 
     if ($RequireReadiness) {
+        $brokerService = Microsoft.PowerShell.Management\Get-Service `
+            -Name $Layout.BrokerServiceName `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $brokerService -or
+            $brokerService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+            throw 'credential broker SCM process is not running'
+        }
         if (-not (Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName)) {
             throw 'gateway SCM process is running but authenticated health is not ready'
         }
@@ -7994,6 +8418,7 @@ function Get-DefenseClawArtifactPath {
         [Parameter(Mandatory)][string]$Name
     )
     $path = switch ($Name) {
+        'broker' { $Layout.BrokerPath }
         'gateway' { $Layout.GatewayPath }
         'hook' { $Layout.HookPath }
         'cli' { $Layout.CLIPath }
@@ -8015,7 +8440,7 @@ function Assert-DefenseClawRecordedArtifactHashes {
         # gate, and the only way out is an Upgrade that replaces the artifact.
         [string]$Action = 'this action'
     )
-    foreach ($required in @('gateway', 'hook', 'installer', 'module')) {
+    foreach ($required in @('broker', 'gateway', 'hook', 'installer', 'module')) {
         if ($required -notin $ReplacedArtifacts -and
             $null -eq $Metadata.hashes.PSObject.Properties[$required]) {
             throw "deployment metadata is missing required artifact hash: $required"
@@ -8053,6 +8478,8 @@ function Assert-DefenseClawRecordedArtifactHashes {
 function Get-DefenseClawLifecycleSources {
     param(
         [Parameter(Mandatory)][string]$Action,
+        [string]$BrokerBinary,
+        [string]$ProviderLibrary,
         [string]$GatewayBinary,
         [string]$HookBinary,
         [string]$CLIBinary,
@@ -8078,6 +8505,8 @@ function Get-DefenseClawLifecycleSources {
     }
     if ($Action -eq 'Install') {
         $required = @(
+            @('BrokerBinary', $BrokerBinary),
+            @('ProviderLibrary', $ProviderLibrary),
             @('GatewayBinary', $GatewayBinary),
             @('HookBinary', $HookBinary)
         )
@@ -8099,12 +8528,16 @@ function Get-DefenseClawLifecycleSources {
         }
     }
     if ($Action -eq 'Upgrade' -and
-        ([string]::IsNullOrWhiteSpace($GatewayBinary) -or
+        ([string]::IsNullOrWhiteSpace($BrokerBinary) -or
+        [string]::IsNullOrWhiteSpace($ProviderLibrary) -or
+        [string]::IsNullOrWhiteSpace($GatewayBinary) -or
         [string]::IsNullOrWhiteSpace($HookBinary))) {
-        throw 'Upgrade requires -GatewayBinary and -HookBinary'
+        throw 'Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, and -HookBinary'
     }
 
     foreach ($entry in @(
+        @('broker', $BrokerBinary, 'credential broker executable', $true),
+        @('provider_library', $ProviderLibrary, 'managed credential provider library', $true),
         @('gateway', $GatewayBinary, 'gateway executable', $true),
         @('hook', $HookBinary, 'hook executable', $true),
         @('cli', $CLIBinary, 'CLI executable', $true),
@@ -8228,6 +8661,7 @@ function Get-DefenseClawLifecycleStatus {
     $installed = $null -ne $metadata -and (Test-DefenseClawMetadataInstalled -Metadata $metadata)
     $pending = Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf
     $gatewayState = Get-DefenseClawServiceState -Name $GatewayServiceName
+    $brokerState = Get-DefenseClawServiceState -Name $Layout.BrokerServiceName
     $guardianState = Get-DefenseClawServiceState -Name $GuardianServiceName
     $gatewayReady = $false
     $guardianReady = $false
@@ -8301,6 +8735,7 @@ function Get-DefenseClawLifecycleStatus {
     }
     $healthy = if ($installed) {
         $gatewayState -eq 'running' -and
+            $brokerState -eq 'running' -and
             $guardianState -eq 'running' -and
             $gatewayReady -and
             $guardianReady -and
@@ -8310,6 +8745,7 @@ function Get-DefenseClawLifecycleStatus {
     }
     else {
         $gatewayState -eq 'absent' -and
+            $brokerState -eq 'absent' -and
             $guardianState -eq 'absent' -and
             -not $pending -and
             $errors.Count -eq 0
@@ -8332,8 +8768,10 @@ function Get-DefenseClawLifecycleStatus {
         state_root = $Layout.StateRoot
         transaction_pending = [bool]$pending
         gateway_service = $GatewayServiceName
+        broker_service = $Layout.BrokerServiceName
         guardian_service = $GuardianServiceName
         gateway_service_state = $gatewayState
+        broker_service_state = $brokerState
         guardian_service_state = $guardianState
         gateway_ready = [bool]$gatewayReady
         guardian_ready = [bool]$guardianReady
@@ -8444,6 +8882,7 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.LibexecDirectory
     )
     $allowedFiles = @(
+        $Layout.BrokerPath,
         $Layout.GatewayPath,
         $Layout.HookPath,
         $Layout.CLIPath,
@@ -8658,6 +9097,7 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec')
     )
     $files = @(
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-gateway.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw.exe'),
@@ -9037,7 +9477,7 @@ function Publish-DefenseClawSelfUninstallReceipt {
             -PathType Leaf)) {
         throw 'self-uninstall receipt publication requires a pending lifecycle transaction'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "self-uninstall receipt publication refused while service exists: $name"
         }
@@ -9379,7 +9819,7 @@ function Set-DefenseClawSelfUninstallReceiptCommitted {
         -LiteralPath $Layout.ManagedHooksTeardownJournalPath) {
         throw 'self-uninstall retirement cannot commit before teardown-journal retirement'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "self-uninstall retirement cannot commit while service exists: $name"
         }
@@ -9818,7 +10258,7 @@ function Assert-DefenseClawSelfUninstallCommittedState {
         -LiteralPath $Layout.PendingPath) {
         throw 'committed self-uninstall recovery found pending transaction evidence'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "committed self-uninstall recovery found live service: $name"
         }
@@ -10458,7 +10898,7 @@ function Publish-DefenseClawStatePurgeIntent {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'refusing state-purge intent publication while a lifecycle transaction is pending'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "refusing state-purge intent publication while service exists: $name"
         }
@@ -10531,7 +10971,7 @@ function Complete-DefenseClawStatePurge {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -Required
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "refusing authenticated state purge while service exists: $name"
         }
@@ -10614,7 +11054,7 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'committed-uninstall cleanup requires transaction retirement'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "committed-uninstall cleanup refused while service exists: $name"
         }
@@ -10772,6 +11212,18 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$NoStart
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    if ($Sources.ContainsKey('provider_library')) {
+        $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
+        throw "$Action requires a validated managed credential provider library"
+    }
+    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+        -Name $Layout.BrokerServiceName `
+        -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName) `
+        -AllowArgumentUpgrade
     if ($null -ne $metadata) {
         Assert-DefenseClawMetadataIdentity `
             -Metadata $metadata `
@@ -10809,6 +11261,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $replaced = @($Sources.Keys | Microsoft.PowerShell.Core\Where-Object {
             $_ -in @(
                 'gateway',
+                'broker',
                 'hook',
                 'cli',
                 'installer',
@@ -10866,6 +11319,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     try {
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
+        Stop-DefenseClawService -Name $Layout.BrokerServiceName
         # Upgrade/Repair must capture the old machine-policy identity before a
         # replacement config or manifest changes its endpoint/target set. New
         # gateway/hook bytes are staged first so even an upgrade from a release
@@ -10877,7 +11331,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             @('config', 'manifest')
         }
         foreach ($name in @($Sources.Keys | Microsoft.PowerShell.Core\Where-Object {
-            $_ -notin $deferredPolicySources
+            $_ -notin $deferredPolicySources -and $_ -ne 'provider_library'
         })) {
             $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
             Install-DefenseClawSourceDescriptor `
@@ -10886,6 +11340,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         }
         foreach ($requiredPath in @(
             $Layout.GatewayPath,
+            $Layout.BrokerPath,
             $Layout.HookPath,
             $Layout.ConfigPath,
             $Layout.ManifestPath,
@@ -10922,6 +11377,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         # the installer transaction and their absence would be a
         # real install failure regardless of deferred mode.
         $requiredArtifacts = @(
+            @{Path = $Layout.BrokerPath;    SourceKey = $null},
             @{Path = $Layout.GatewayPath;   SourceKey = $null},
             @{Path = $Layout.HookPath;      SourceKey = $null},
             @{Path = $Layout.ConfigPath;    SourceKey = 'config'},
@@ -11033,6 +11489,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -AuthorizationDirectory $Layout.AuthorizationDirectory `
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GatewayLogPath `
+            -BrokerPipeName $Layout.BrokerPipeName `
+            -BrokerServiceName $Layout.BrokerServiceName `
+            -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
         Set-DefenseClawServiceEnvironment `
@@ -11136,6 +11595,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName
             }
+            # The LocalSystem broker must be live before any restricted
+            # gateway path can request a credential.
+            Set-DefenseClawServiceStartMode `
+                -Name $Layout.BrokerServiceName `
+                -StartMode 3
+            Start-DefenseClawService -Name $Layout.BrokerServiceName
             # The guardian becomes startable, publishes a fresh successful
             # reconcile, and remains live while gateway is still disabled.
             Set-DefenseClawServiceStartMode `
@@ -11185,6 +11650,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             # before pending cleanup can start only validated services.
             Set-DefenseClawServiceStartMode `
                 -Name $GuardianServiceName `
+                -StartMode 2
+            Set-DefenseClawServiceStartMode `
+                -Name $Layout.BrokerServiceName `
                 -StartMode 2
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
@@ -11391,6 +11859,12 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Name $GatewayServiceName `
             -ExpectedGatewayPath $Layout.GatewayPath
         Remove-DefenseClawService -Name $GatewayServiceName
+        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+            -Name $Layout.BrokerServiceName `
+            -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName)
+        Remove-DefenseClawService -Name $Layout.BrokerServiceName
         $tombstone = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -11674,6 +12148,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [Parameter(Mandatory)]
         [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Status', 'Verify', 'Uninstall')]
         [string]$Action,
+        [string]$BrokerBinary,
+        [string]$ProviderLibrary,
         [string]$GatewayBinary,
         [string]$HookBinary,
         [string]$CLIBinary,
@@ -11891,6 +12367,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     $sources = Get-DefenseClawLifecycleSources `
         -Action $Action `
+        -BrokerBinary $BrokerBinary `
+        -ProviderLibrary $ProviderLibrary `
         -GatewayBinary $GatewayBinary `
         -HookBinary $HookBinary `
         -CLIBinary $CLIBinary `

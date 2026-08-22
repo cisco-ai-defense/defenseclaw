@@ -18,6 +18,8 @@ param(
     [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Status', 'Verify', 'Uninstall')]
     [string]$Action = 'Install',
 
+    [string]$BrokerBinary,
+    [string]$ProviderLibrary,
     [string]$GatewayBinary,
     [string]$HookBinary,
     [string]$CLIBinary,
@@ -2177,6 +2179,8 @@ try {
 
     $arguments = @{
         Action = $Action
+        BrokerBinary = $BrokerBinary
+        ProviderLibrary = $ProviderLibrary
         GatewayBinary = $GatewayBinary
         HookBinary = $HookBinary
         CLIBinary = $CLIBinary

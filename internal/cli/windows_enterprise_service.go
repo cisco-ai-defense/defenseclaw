@@ -46,6 +46,7 @@ const (
 )
 
 type windowsEnterpriseLifecycleOptions struct {
+	brokerBinary                  string
 	gatewayBinary                 string
 	hookBinary                    string
 	cliBinary                     string
@@ -79,9 +80,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// install-enterprise.ps1 renders a minimal managed_enterprise
 	// config.yaml + per-user targets.yaml into its protected bootstrap
 	// directory before invoking the lifecycle transaction.
-	mode       string
-	connector  string
-	jsonOutput bool
+	mode            string
+	connector       string
+	jsonOutput      bool
+	providerLibrary string
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -131,14 +133,15 @@ type windowsServiceConfigValidation struct {
 }
 
 var (
-	windowsEnterpriseCommandRunner        = runWindowsEnterprisePowerShell
-	windowsEnterpriseScriptFinder         = findWindowsEnterpriseInstaller
-	windowsEnterprisePayloadStager        = stageWindowsEnterprisePayload
-	windowsEnterpriseTrustValidator       = validateWindowsEnterpriseInstallerTrust
-	windowsEnterpriseExecutableResolver   = os.Executable
-	windowsEnterpriseProgramFilesResolver = trustedWindowsEnterpriseProgramFiles
-	windowsEnterpriseProgramDataResolver  = trustedWindowsEnterpriseProgramData
-	windowsEnterpriseMachineRootsResolver = resolveWindowsEnterpriseMachineRoots
+	windowsEnterpriseCommandRunner           = runWindowsEnterprisePowerShell
+	windowsEnterpriseScriptFinder            = findWindowsEnterpriseInstaller
+	windowsEnterprisePayloadStager           = stageWindowsEnterprisePayload
+	windowsEnterpriseTrustValidator          = validateWindowsEnterpriseInstallerTrust
+	windowsEnterpriseExecutableResolver      = os.Executable
+	windowsEnterpriseProgramFilesResolver    = trustedWindowsEnterpriseProgramFiles
+	windowsEnterpriseProgramDataResolver     = trustedWindowsEnterpriseProgramData
+	windowsEnterpriseMachineRootsResolver    = resolveWindowsEnterpriseMachineRoots
+	windowsEnterpriseProviderLibraryResolver = managed.DiscoverCMIDLibrary
 )
 
 type windowsEnterprisePowerShellTempOps struct {
@@ -195,6 +198,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 		},
 	}
 	flags := cmd.Flags()
+	flags.StringVar(&opts.brokerBinary, "broker-binary", "", "source defenseclaw-cmid-broker.exe")
 	flags.StringVar(&opts.gatewayBinary, "gateway-binary", "", "source defenseclaw-gateway.exe")
 	flags.StringVar(&opts.hookBinary, "hook-binary", "", "source defenseclaw-hook.exe")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
@@ -272,6 +276,15 @@ func runWindowsEnterpriseLifecycle(
 	}
 	if err := validateWindowsEnterpriseLifecycleSecurityOptions(cmd, action, opts); err != nil {
 		return failPreflight(err)
+	}
+	mutation := action == "install" || action == "upgrade" || action == "repair"
+	if mutation && strings.TrimSpace(opts.brokerBinary) != "" {
+		opts.providerLibrary = strings.TrimSpace(windowsEnterpriseProviderLibraryResolver())
+		if opts.providerLibrary == "" {
+			return failPreflight(errors.New(
+				"the managed credential provider library was not found in the trusted Secure Client installation",
+			))
+		}
 	}
 	script, err := windowsEnterpriseScriptFinder(opts.installerPath)
 	if err != nil {
@@ -498,6 +511,8 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 			args = append(args, flag, value)
 		}
 	}
+	appendValue("-BrokerBinary", opts.brokerBinary)
+	appendValue("-ProviderLibrary", opts.providerLibrary)
 	appendValue("-GatewayBinary", opts.gatewayBinary)
 	appendValue("-HookBinary", opts.hookBinary)
 	appendValue("-CLIBinary", opts.cliBinary)

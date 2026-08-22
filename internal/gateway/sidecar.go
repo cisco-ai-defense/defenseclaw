@@ -46,6 +46,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -2128,6 +2129,26 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 }
 
 func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
+	brokerConfig, brokerConfigured, brokerConfigErr := cmidbroker.ConfigFromEnvironment(os.Getenv)
+	if brokerConfigErr != nil {
+		wrapped := fmt.Errorf("managed cloud broker configuration rejected: %w", brokerConfigErr)
+		s.logCMIDBuildError("broker-config", wrapped)
+		return nil, wrapped
+	}
+	if brokerConfigured {
+		provider, err := cmidbroker.NewClientProvider(brokerConfig)
+		if err != nil {
+			wrapped := fmt.Errorf("managed cloud broker unavailable: %w", err)
+			s.logCMIDBuildError("broker-client", wrapped)
+			return nil, wrapped
+		}
+		if err := provider.Refresh(ctx); err != nil {
+			s.logCMIDBuildError("broker-refresh-at-boot", err)
+			return provider, err
+		}
+		return provider, nil
+	}
+
 	libPath := strings.TrimSpace(s.currentConfig().CloudAuth.LibPath)
 	if libPath == "" {
 		// Secure Client nests the identity library under version

@@ -44,6 +44,7 @@ var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 var requiredPayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
+	"defenseclaw-cmid-broker.exe",
 	"defenseclaw-gateway.exe",
 	"defenseclaw-hook.exe",
 	"defenseclaw.exe",
