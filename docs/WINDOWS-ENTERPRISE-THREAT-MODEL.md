@@ -190,8 +190,11 @@ not an administrator authority even though it is a machine service.
 1. The LocalSystem guardian validates the protected config, manifest, runtime,
    and explicit Windows target fields.
 2. It resolves an active WTS session and queries its user token.
-3. It rejects a SID mismatch, service identity, full/elevated token,
-   high-integrity token, UIAccess token, or missing active session.
+3. It rejects a SID mismatch, service identity, or missing active session.
+   Full-integrity / elevated / high-integrity / UIAccess tokens are
+   permitted with an advisory ("elevated target relaxation" — see
+   below); enrollment proceeds and the reconcile loop's tamper-recovery
+   provides best-effort protection.
 4. A bounded callback runs on a dedicated locked OS thread under the exact
    target token. User paths are revalidated immediately before use. Regular
    files with multiple NTFS links are rejected and, only for a previously
@@ -351,7 +354,33 @@ not an administrator authority even though it is a machine service.
    owns. The guardian provides bounded eventual recovery and truthful health,
    not simultaneous immutability. Endpoint policy can remove this gap where a
    vendor supports machine-managed hooks.
-2. A target without an active, safe WTS token cannot be repaired. The guardian
+2. **Elevated target relaxation.** An earlier revision of the guardian
+   fail-closed any target session whose active WTS token was elevated,
+   full-integrity, or UIAccess. That refusal denied per-user inspection
+   to every user in the local Administrators group — including all users
+   of the built-in Administrator account (RID `-500`), users on hosts
+   with UAC disabled, and members of the Administrators group on a
+   host whose token-filter policy has been turned off. In real
+   deployments these are common configurations, so the strict refusal
+   traded "no inspection for admin sessions" for "no inspection for
+   any admin-group user at all." The current guardian permits enrollment
+   of elevated targets and emits a rate-limited stderr advisory
+   (`[hook-guardian] WARN: target SID … active-session token is
+   <reason>; per-user hook enrollment proceeds best-effort …`) so
+   operators can see which sessions run at full integrity. Trust
+   assumption unchanged: a fully-elevated user can uninstall
+   DefenseClaw entirely or edit its files directly, so the previous
+   hook-level refusal never actually defended against a determined
+   admin attacker — it only refused to try. Reconciler tamper-recovery
+   (fsnotify + 5-min interval) still restores DefenseClaw-owned
+   artifacts within one reconcile cycle after accidental or malicious
+   drift; the residual gap is the bounded window between tamper and
+   next reconcile tick, during which an elevated target can bypass its
+   own hooks. That gap was always present for uninstall / kill-service
+   attack shapes; the relaxation extends it to per-file tampering.
+   Endpoint policy (WDAC / AppLocker / SmartScreen) remains the
+   authoritative defense against a determined elevated attacker.
+3. A target without an active, safe WTS token cannot be repaired. The guardian
    records failure and retries rather than writing the profile as LocalSystem.
 3. Application control and vendor MDM/GPO policy are optional defense-in-depth
    controls, not features DefenseClaw can synthesize. Their absence does not

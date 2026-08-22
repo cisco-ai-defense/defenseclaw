@@ -8,10 +8,13 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -189,10 +192,52 @@ func validateWindowsEnterpriseTargetToken(token windows.Token, target *windows.S
 	if err := validateWindowsEnterpriseTokenSID(token, target); err != nil {
 		return err
 	}
-	if err := validateWindowsEnterpriseNonElevatedToken(token); err != nil {
-		return fmt.Errorf("target token for SID %s is not safe for per-user mutation: %w", target, err)
+	advisory, err := assessWindowsEnterpriseTokenElevation(token)
+	if err != nil {
+		return fmt.Errorf("target token for SID %s failed elevation assessment: %w", target, err)
+	}
+	if advisory != "" {
+		logWindowsEnterpriseTokenElevationAdvisory(target, advisory)
 	}
 	return nil
+}
+
+// logWindowsEnterpriseTokenElevationAdvisory emits a rate-limited stderr
+// line whenever an interactive target's active-session token is elevated.
+// Guardian reconcile proceeds regardless (the fsnotify + interval loop
+// restores DefenseClaw-owned artifacts on drift, so admin tampering with
+// their own hooks reverts within one reconcile cycle) — the advisory is
+// how operators tailing gateway.err.log see which sessions run at full
+// integrity so they can decide whether to require a non-admin login for
+// those users. See docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md § "Elevated
+// target relaxation" for the softened posture rationale.
+var windowsEnterpriseTokenAdvisoryLoggerMu sync.Mutex
+var windowsEnterpriseTokenAdvisoryLastEmit = map[string]time.Time{}
+
+func logWindowsEnterpriseTokenElevationAdvisory(target *windows.SID, advisory string) {
+	if target == nil {
+		return
+	}
+	key := target.String() + "|" + advisory
+	now := time.Now()
+	windowsEnterpriseTokenAdvisoryLoggerMu.Lock()
+	last, seen := windowsEnterpriseTokenAdvisoryLastEmit[key]
+	if seen && now.Sub(last) < 60*time.Second {
+		windowsEnterpriseTokenAdvisoryLoggerMu.Unlock()
+		return
+	}
+	windowsEnterpriseTokenAdvisoryLastEmit[key] = now
+	windowsEnterpriseTokenAdvisoryLoggerMu.Unlock()
+	fmt.Fprintf(
+		os.Stderr,
+		"[hook-guardian] WARN: target SID %s active-session token is %s; "+
+			"per-user hook enrollment proceeds best-effort — reconciler "+
+			"restores DefenseClaw-owned artifacts on drift, but an elevated "+
+			"target can trivially disable inspection between reconcile ticks. "+
+			"See WINDOWS-ENTERPRISE-THREAT-MODEL.md § Elevated target relaxation.\n",
+		target,
+		advisory,
+	)
 }
 
 type windowsEnterpriseTokenSecurityFacts struct {
@@ -202,24 +247,52 @@ type windowsEnterpriseTokenSecurityFacts struct {
 	uiAccess      uint32
 }
 
-func validateWindowsEnterpriseNonElevatedToken(token windows.Token) error {
+// assessWindowsEnterpriseTokenElevation reads the target token's
+// integrity facts and returns:
+//
+//   - advisory != ""  — the token is elevated / full-admin /
+//                       high-integrity / UIAccess. Callers should log
+//                       the advisory and proceed with enrollment; the
+//                       guardian's reconcile loop will restore any
+//                       admin-driven drift on the per-user artifacts.
+//   - advisory == "", err == nil — token is a normal non-admin session,
+//                       enrollment safe.
+//   - err != nil      — could not read the token or the token reports
+//                       an unknown elevation type. This is a real
+//                       integrity failure (WTS or the token itself is
+//                       misbehaving), not an "admin user" case; the
+//                       caller should propagate.
+//
+// This replaces the prior validateWindowsEnterpriseNonElevatedToken
+// which returned a hard error for admin sessions. The softening is
+// deliberate: rejecting admin sessions denied per-user inspection to
+// every user who happens to be a member of the local Administrators
+// group (common in QA endpoints, real-world lab deployments, and
+// small-team production boxes). The reconcile loop already provides
+// tamper-recovery for accidental or malicious drift; refusing enrollment
+// altogether was strictly worse than best-effort inspection. Trust
+// boundary against a determined elevated attacker is unchanged — an
+// elevated user could uninstall DefenseClaw entirely, so hook-level
+// hardening never defended against them (see threat model § "Trusted
+// or outside scope").
+func assessWindowsEnterpriseTokenElevation(token windows.Token) (string, error) {
 	elevated, err := windowsEnterpriseTokenUint32(token, windows.TokenElevation)
 	if err != nil {
-		return fmt.Errorf("read token elevation: %w", err)
+		return "", fmt.Errorf("read token elevation: %w", err)
 	}
 	elevationType, err := windowsEnterpriseTokenUint32(token, windows.TokenElevationType)
 	if err != nil {
-		return fmt.Errorf("read token elevation type: %w", err)
+		return "", fmt.Errorf("read token elevation type: %w", err)
 	}
 	integrityRID, err := windowsEnterpriseTokenIntegrityRID(token)
 	if err != nil {
-		return fmt.Errorf("read token integrity: %w", err)
+		return "", fmt.Errorf("read token integrity: %w", err)
 	}
 	uiAccess, err := windowsEnterpriseTokenUint32(token, windows.TokenUIAccess)
 	if err != nil {
-		return fmt.Errorf("read token UIAccess: %w", err)
+		return "", fmt.Errorf("read token UIAccess: %w", err)
 	}
-	return validateWindowsEnterpriseTokenSecurityFacts(windowsEnterpriseTokenSecurityFacts{
+	return assessWindowsEnterpriseTokenSecurityFacts(windowsEnterpriseTokenSecurityFacts{
 		elevated:      elevated,
 		elevationType: elevationType,
 		integrityRID:  integrityRID,
@@ -227,30 +300,40 @@ func validateWindowsEnterpriseNonElevatedToken(token windows.Token) error {
 	})
 }
 
-func validateWindowsEnterpriseTokenSecurityFacts(facts windowsEnterpriseTokenSecurityFacts) error {
+func assessWindowsEnterpriseTokenSecurityFacts(facts windowsEnterpriseTokenSecurityFacts) (string, error) {
 	const (
 		tokenElevationTypeDefault = 1
 		tokenElevationTypeFull    = 2
 		tokenElevationTypeLimited = 3
 		mandatoryHighRID          = 0x3000
 	)
-	if facts.elevated != 0 {
-		return fmt.Errorf("elevated token is rejected")
-	}
+	// An unknown elevation type is a real integrity failure — the token
+	// is reporting a value that isn't in the Windows-documented set. Keep
+	// this as a hard error so a genuinely broken WTS query doesn't get
+	// silently downgraded to "just elevated, proceed."
 	switch facts.elevationType {
-	case tokenElevationTypeDefault, tokenElevationTypeLimited:
-	case tokenElevationTypeFull:
-		return fmt.Errorf("full administrator token is rejected")
+	case tokenElevationTypeDefault, tokenElevationTypeLimited, tokenElevationTypeFull:
+		// valid values — fall through to advisory synthesis below
 	default:
-		return fmt.Errorf("unknown token elevation type %d", facts.elevationType)
+		return "", fmt.Errorf("unknown token elevation type %d", facts.elevationType)
+	}
+	var reasons []string
+	if facts.elevated != 0 {
+		reasons = append(reasons, "elevated")
+	}
+	if facts.elevationType == tokenElevationTypeFull {
+		reasons = append(reasons, "full-administrator")
 	}
 	if facts.integrityRID >= mandatoryHighRID {
-		return fmt.Errorf("high-integrity token (RID 0x%x) is rejected", facts.integrityRID)
+		reasons = append(reasons, fmt.Sprintf("high-integrity(RID=0x%x)", facts.integrityRID))
 	}
 	if facts.uiAccess != 0 {
-		return fmt.Errorf("UIAccess token is rejected")
+		reasons = append(reasons, "UIAccess")
 	}
-	return nil
+	if len(reasons) == 0 {
+		return "", nil
+	}
+	return strings.Join(reasons, "+"), nil
 }
 
 func windowsEnterpriseTokenUint32(token windows.Token, informationClass uint32) (uint32, error) {
@@ -333,16 +416,20 @@ func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, er
 			primary.Close()
 			continue
 		}
-		if err := validateWindowsEnterpriseNonElevatedToken(primary); err != nil {
+		advisory, err := assessWindowsEnterpriseTokenElevation(primary)
+		if err != nil {
 			primary.Close()
 			return 0, fmt.Errorf(
-				"enterprise hooks: active-session token for explicit target SID %s is elevated or otherwise unsafe: %w",
+				"enterprise hooks: active-session token for explicit target SID %s failed elevation assessment: %w",
 				target,
 				err,
 			)
 		}
+		if advisory != "" {
+			logWindowsEnterpriseTokenElevationAdvisory(target, advisory)
+		}
 		var impersonation windows.Token
-		err := windows.DuplicateTokenEx(
+		err = windows.DuplicateTokenEx(
 			primary,
 			windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE|windows.TOKEN_DUPLICATE,
 			nil,

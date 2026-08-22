@@ -14,11 +14,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestWindowsEnterpriseTokenSecurityFactsRejectPrivilege(t *testing.T) {
+func TestWindowsEnterpriseTokenSecurityFactsAdvisory(t *testing.T) {
 	tests := []struct {
-		name    string
-		facts   windowsEnterpriseTokenSecurityFacts
-		wantErr string
+		name         string
+		facts        windowsEnterpriseTokenSecurityFacts
+		wantAdvisory string // empty = clean pass (non-admin session)
+		wantErr      string // set only for real integrity failures
 	}{
 		{
 			name:  "standard_default_medium",
@@ -28,26 +29,31 @@ func TestWindowsEnterpriseTokenSecurityFactsRejectPrivilege(t *testing.T) {
 			name:  "filtered_admin_limited_medium",
 			facts: windowsEnterpriseTokenSecurityFacts{elevationType: 3, integrityRID: 0x2000},
 		},
+		// Cases that USED to be hard-rejected now produce a non-empty
+		// advisory but no error. Enrollment proceeds; caller logs the
+		// advisory. Reconciler restores drift.
 		{
-			name:    "elevated_flag",
-			facts:   windowsEnterpriseTokenSecurityFacts{elevated: 1, elevationType: 2, integrityRID: 0x3000},
-			wantErr: "elevated token",
+			name:         "elevated_flag_now_advisory",
+			facts:        windowsEnterpriseTokenSecurityFacts{elevated: 1, elevationType: 2, integrityRID: 0x3000},
+			wantAdvisory: "elevated+full-administrator+high-integrity(RID=0x3000)",
 		},
 		{
-			name:    "full_admin",
-			facts:   windowsEnterpriseTokenSecurityFacts{elevationType: 2, integrityRID: 0x2000},
-			wantErr: "full administrator token",
+			name:         "full_admin_now_advisory",
+			facts:        windowsEnterpriseTokenSecurityFacts{elevationType: 2, integrityRID: 0x2000},
+			wantAdvisory: "full-administrator",
 		},
 		{
-			name:    "high_integrity",
-			facts:   windowsEnterpriseTokenSecurityFacts{elevationType: 1, integrityRID: 0x3000},
-			wantErr: "high-integrity token",
+			name:         "high_integrity_now_advisory",
+			facts:        windowsEnterpriseTokenSecurityFacts{elevationType: 1, integrityRID: 0x3000},
+			wantAdvisory: "high-integrity(RID=0x3000)",
 		},
 		{
-			name:    "ui_access",
-			facts:   windowsEnterpriseTokenSecurityFacts{elevationType: 1, integrityRID: 0x2000, uiAccess: 1},
-			wantErr: "UIAccess token",
+			name:         "ui_access_now_advisory",
+			facts:        windowsEnterpriseTokenSecurityFacts{elevationType: 1, integrityRID: 0x2000, uiAccess: 1},
+			wantAdvisory: "UIAccess",
 		},
+		// Unknown elevation type stays a hard error — that's a real
+		// integrity failure of the token itself, not "user is admin."
 		{
 			name:    "unknown_elevation_type",
 			facts:   windowsEnterpriseTokenSecurityFacts{elevationType: 99, integrityRID: 0x2000},
@@ -56,15 +62,18 @@ func TestWindowsEnterpriseTokenSecurityFactsRejectPrivilege(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateWindowsEnterpriseTokenSecurityFacts(tc.facts)
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("validation failed: %v", err)
+			advisory, err := assessWindowsEnterpriseTokenSecurityFacts(tc.facts)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("assess error = %v, want %q", err, tc.wantErr)
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("validation error = %v, want %q", err, tc.wantErr)
+			if err != nil {
+				t.Fatalf("assess failed: %v", err)
+			}
+			if advisory != tc.wantAdvisory {
+				t.Fatalf("advisory = %q, want %q", advisory, tc.wantAdvisory)
 			}
 		})
 	}
