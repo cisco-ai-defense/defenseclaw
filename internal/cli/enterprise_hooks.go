@@ -165,6 +165,7 @@ func newWindowsEnterpriseCertifiedConnectorRegistry() *connector.Registry {
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(connector.NewCodexConnector())
 	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
+	registry.RegisterBuiltin(connector.NewCursorConnector())
 	return registry
 }
 
@@ -257,7 +258,7 @@ target or aggregate guardian control is unhealthy.`,
 
 func init() {
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
-		"Hook-native connector to install or repair (for example codex or claudecode)")
+		"Hook-native connector to install or repair (codex, claudecode, or cursor on native Windows)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookUser, "user", "",
 		"Target local user name (resolves home, uid, and gid)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookUserHome, "user-home", "",
@@ -279,7 +280,7 @@ func init() {
 	enterpriseHooksInstallCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
-		"Administrator-managed connector to remove (built-in codex or claudecode on native Windows)")
+		"Administrator-managed connector to remove (built-in codex, claudecode, or cursor on native Windows)")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUser, "user", "",
 		"Target local user name (resolves home and SID)")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUserHome, "user-home", "",
@@ -579,25 +580,17 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	}
 	if stateExists && authorizationExists && stateErr == nil && authorizationErr == nil {
 		report.Errors = append(report.Errors, compareEnterpriseHookGuardianRecords(state, authorization, enterpriseHookManifest)...)
-	}
-	live, liveErr := runEnterpriseHookVerifyOnce(cmd.Context())
-	if liveErr != nil {
-		report.Errors = append(report.Errors, fmt.Sprintf("live hook verification failed: %v", liveErr))
-	} else {
-		report.Verification = live.Rows
+		// The Guardian is the trusted live verifier on native Windows: it runs
+		// as LocalSystem, reconciles every enabled target, and publishes this
+		// bounded result together with an independently protected authorization
+		// record. Reopening target-owned files here would perform the same checks
+		// under the status caller's token, which is not necessarily authorized to
+		// read those protected files. Treat only the fresh, matching pair above as
+		// the status verification result; the explicit `verify` command remains
+		// the caller-token, point-in-time diagnostic path.
+		report.Verification = append([]enterpriseHookReconcileRow(nil), state.Results...)
 		report.ClaudeEffectivePolicyVerified =
-			enterpriseHooksClaudeEffectivePolicyVerified(live.Rows)
-		if live.AuthorizationErr != nil {
-			report.Errors = append(report.Errors, fmt.Sprintf("live protected authorization check failed: %v", live.AuthorizationErr))
-		}
-		for _, row := range live.Rows {
-			if !row.OK {
-				report.Errors = append(
-					report.Errors,
-					fmt.Sprintf("live verification failed for %s: %s", enterpriseHookTargetLabel(row), row.Error),
-				)
-			}
-		}
+			enterpriseHooksClaudeEffectivePolicyVerified(state.Results)
 	}
 	report.OK = len(report.Errors) == 0
 	if enterpriseHookJSON {

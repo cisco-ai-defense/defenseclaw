@@ -328,6 +328,7 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		}
 	}
 	if mutation {
+		appendValue("--broker-binary", filepath.Join(stageRoot, "defenseclaw-cmid-broker.exe"))
 		appendValue("--gateway-binary", filepath.Join(stageRoot, "defenseclaw-gateway.exe"))
 		appendValue("--hook-binary", filepath.Join(stageRoot, "defenseclaw-hook.exe"))
 		appendValue("--cli-binary", filepath.Join(stageRoot, "defenseclaw.exe"))

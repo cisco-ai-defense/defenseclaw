@@ -52,6 +52,12 @@ func TestWindowsCodexMachineSecurityCompleteRequiresEnabledTarget(t *testing.T) 
 		t.Fatal("Codex-only target should be security-complete without optional application control")
 	}
 
+	opts.CodexTargetEnabled = false
+	opts.CursorTargetEnabled = true
+	if !windowsCodexMachineSecurityComplete(opts) {
+		t.Fatal("Cursor-only target should be security-complete without optional application control")
+	}
+
 	opts.EnterpriseTargetEnabled = false
 	if windowsCodexMachineSecurityComplete(opts) {
 		t.Fatal("disabled last target must clear security_complete")

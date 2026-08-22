@@ -6,10 +6,82 @@
 package cli
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+func TestRestoreWindowsManagedHooksLifecycleCompositeCompensatesClaude(t *testing.T) {
+	claudeErr := errors.New("Claude restore failed")
+	cursorErr := errors.New("Cursor restore failed")
+	compensationErr := errors.New("Claude compensation failed")
+	for name, test := range map[string]struct {
+		claudeErr       error
+		cursorErr       error
+		compensationErr error
+		wantSteps       []string
+		wantErrors      []error
+	}{
+		"success": {
+			wantSteps: []string{"restore-claude", "restore-cursor"},
+		},
+		"Claude failure stops before Cursor": {
+			claudeErr:  claudeErr,
+			wantSteps:  []string{"restore-claude"},
+			wantErrors: []error{claudeErr},
+		},
+		"Cursor failure restores Claude preimage": {
+			cursorErr:  cursorErr,
+			wantSteps:  []string{"restore-claude", "restore-cursor", "compensate-claude"},
+			wantErrors: []error{cursorErr},
+		},
+		"compensation failure is joined": {
+			cursorErr:       cursorErr,
+			compensationErr: compensationErr,
+			wantSteps:       []string{"restore-claude", "restore-cursor", "compensate-claude"},
+			wantErrors:      []error{cursorErr, compensationErr},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var steps []string
+			err := restoreWindowsManagedHooksLifecycleComposite(
+				func() error {
+					steps = append(steps, "restore-claude")
+					return test.claudeErr
+				},
+				func() error {
+					steps = append(steps, "restore-cursor")
+					return test.cursorErr
+				},
+				func() error {
+					steps = append(steps, "compensate-claude")
+					return test.compensationErr
+				},
+			)
+			if !slices.Equal(steps, test.wantSteps) {
+				t.Fatalf("steps = %v, want %v", steps, test.wantSteps)
+			}
+			if len(test.wantErrors) == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected composite restore failure")
+			}
+			for _, want := range test.wantErrors {
+				if !errors.Is(err, want) {
+					t.Fatalf("error %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
 
 func TestWindowsManagedHooksLifecycleCommandIsHiddenAndBounded(t *testing.T) {
 	command := newWindowsManagedHooksLifecycleCommand()
@@ -155,6 +227,36 @@ func TestValidateWindowsManagedHooksLifecycleJournalToleratesGatewayAddrAndTarge
 		changedIdentity,
 	); err != nil {
 		t.Fatalf("protected prior snapshot was rejected after a staged manifest change: %v", err)
+	}
+}
+
+func TestWindowsManagedHooksPriorCursorOptionsUseJournalIdentityAcrossGatewayDrift(t *testing.T) {
+	journal := windowsManagedHooksLifecycleJournal{
+		HookBinary:         `C:\Program Files\DefenseClaw\A\defenseclaw-hook.exe`,
+		GatewayAddr:        "127.0.0.1:18970",
+		GatewayServiceName: "DefenseClawGatewayA",
+		PriorCursorTargets: []enterprisehooks.WindowsCursorManagedRuntimeTarget{{
+			SID:     "S-1-5-21-111-222-333-1001",
+			DataDir: `C:\Users\alice\.defenseclaw`,
+		}},
+	}
+	current := connector.WindowsCodexMachineRequirementsOptions{
+		HookBinary:         `C:\Program Files\DefenseClaw\B\defenseclaw-hook.exe`,
+		GatewayAddr:        "127.0.0.1:18971",
+		GatewayServiceName: "DefenseClawGatewayB",
+	}
+	priorOpts := windowsManagedHooksPriorCursorOptions(journal)
+	currentOpts := windowsManagedHooksCursorOptions(current, nil)
+	if priorOpts.HookExecutable != journal.HookBinary ||
+		priorOpts.GatewayAddr != journal.GatewayAddr ||
+		priorOpts.GatewayServiceName != journal.GatewayServiceName ||
+		len(priorOpts.Targets) != 1 {
+		t.Fatalf("prior Cursor restore identity did not come from the journal: %+v", priorOpts)
+	}
+	if priorOpts.HookExecutable == currentOpts.HookExecutable ||
+		priorOpts.GatewayAddr == currentOpts.GatewayAddr ||
+		priorOpts.GatewayServiceName == currentOpts.GatewayServiceName {
+		t.Fatal("prior Cursor restore identity was contaminated by the staged deployment")
 	}
 }
 

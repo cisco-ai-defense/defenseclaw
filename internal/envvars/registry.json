@@ -1017,6 +1017,48 @@
       "security_note": "Managed-runtime writer identity — only the installer-pinned virtual service account may receive the corresponding write grants."
     },
     {
+      "name": "DEFENSECLAW_CMID_BROKER_PIPE",
+      "category": "runtime_path",
+      "purpose": "Identify the exact local named pipe used by the restricted Windows gateway to reach the isolated managed credential provider broker.",
+      "default": "unset (legacy in-process provider path)",
+      "accepted_values": ["\\\\.\\pipe\\DefenseClawCMIDBroker", "installer-owned certification pipe", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/cmidbroker/broker.go", "description": "Selects the broker client only when the complete protected service environment is present"}
+      ],
+      "since": "0.9.0",
+      "security_note": "Local IPC identity boundary — the installer pins this value in the protected gateway service registry environment; partial configuration fails closed."
+    },
+    {
+      "name": "DEFENSECLAW_CMID_BROKER_SERVICE_NAME",
+      "category": "runtime_path",
+      "purpose": "Bind the gateway broker client to the exact installer-owned LocalSystem credential broker service.",
+      "default": "unset (legacy in-process provider path)",
+      "accepted_values": ["DefenseClawCMIDBroker", "installer-owned certification broker service", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/cmidbroker/broker.go", "description": "Cross-checks the broker service, gateway service, and pipe identity tuple"}
+      ],
+      "since": "0.9.0",
+      "security_note": "SCM identity boundary — changing this value cannot redirect the client because only exact production and certification tuples are accepted."
+    },
+    {
+      "name": "DEFENSECLAW_CMID_BROKER_AUTH_KEY",
+      "category": "credential",
+      "purpose": "Select the protected 32-byte key used by the Windows gateway to authenticate credential broker responses.",
+      "default": "unset (legacy in-process provider path)",
+      "accepted_values": ["absolute installer-owned broker-auth.key path", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/cmidbroker/broker.go", "description": "Loads the key through the exact Windows ACL and stable-handle validator"}
+      ],
+      "since": "0.9.0",
+      "security_note": "Authentication material path — the key bytes never belong in an environment variable, log, event, or diagnostic; the environment contains only its protected path."
+    },
+    {
       "name": "DEFENSECLAW_UNIX_SERVICE_ACCOUNT",
       "category": "runtime_path",
       "purpose": "Override the unix service-account username the managed runtime trust check accepts as a legitimate leaf-owner alongside root. Empty falls back to the installer-created \"defenseclaw\" account.",

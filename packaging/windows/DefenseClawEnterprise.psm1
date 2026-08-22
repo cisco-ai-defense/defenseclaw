@@ -120,8 +120,10 @@ foreach ($engineModuleName in @(
 }
 
 $script:SystemSID = 'S-1-5-18'
+$script:OwnerRightsSID = 'S-1-3-4'
 $script:AdministratorsSID = 'S-1-5-32-544'
 $script:UsersSID = 'S-1-5-32-545'
+$script:AuthenticatedUsersSID = 'S-1-5-11'
 $script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 $script:ServiceSDDL = 'D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)'
 $script:ServiceDescription = 'Administrator-managed DefenseClaw service; standard users have query-only SCM access.'
@@ -188,6 +190,41 @@ namespace $nativeNamespace
             internal uint NumberOfLinks;
             internal uint FileIndexHigh;
             internal uint FileIndexLow;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LUID
+        {
+            internal uint LowPart;
+            internal int HighPart;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LUID_AND_ATTRIBUTES
+        {
+            internal LUID Luid;
+            internal uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_PRIVILEGES
+        {
+            internal uint PrivilegeCount;
+            internal LUID_AND_ATTRIBUTES Privileges;
+        }
+
+        public sealed class RegularFileSecuritySnapshot
+        {
+            public string Identity { get; private set; }
+            public byte[] SecurityDescriptor { get; private set; }
+
+            internal RegularFileSecuritySnapshot(
+                string identity,
+                byte[] securityDescriptor)
+            {
+                Identity = identity;
+                SecurityDescriptor = securityDescriptor;
+            }
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -298,6 +335,75 @@ namespace $nativeNamespace
             out IntPtr dacl,
             out IntPtr sacl,
             out IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint SetSecurityInfo(
+            IntPtr handle,
+            int objectType,
+            uint securityInformation,
+            IntPtr owner,
+            IntPtr group,
+            IntPtr dacl,
+            IntPtr sacl);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSecurityDescriptorOwner(
+            IntPtr securityDescriptor,
+            out IntPtr owner,
+            [MarshalAs(UnmanagedType.Bool)] out bool ownerDefaulted);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSecurityDescriptorGroup(
+            IntPtr securityDescriptor,
+            out IntPtr group,
+            [MarshalAs(UnmanagedType.Bool)] out bool groupDefaulted);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSecurityDescriptorDacl(
+            IntPtr securityDescriptor,
+            [MarshalAs(UnmanagedType.Bool)] out bool daclPresent,
+            out IntPtr dacl,
+            [MarshalAs(UnmanagedType.Bool)] out bool daclDefaulted);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool OpenProcessToken(
+            IntPtr process,
+            uint desiredAccess,
+            out IntPtr token);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LookupPrivilegeValueW(
+            string systemName,
+            string name,
+            out LUID luid);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AdjustTokenPrivileges(
+            IntPtr token,
+            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+            ref TOKEN_PRIVILEGES newState,
+            uint bufferLength,
+            out TOKEN_PRIVILEGES previousState,
+            out uint returnLength);
+
+        [DllImport("advapi32.dll", EntryPoint = "AdjustTokenPrivileges", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool RestoreTokenPrivileges(
+            IntPtr token,
+            [MarshalAs(UnmanagedType.Bool)] bool disableAllPrivileges,
+            ref TOKEN_PRIVILEGES newState,
+            uint bufferLength,
+            IntPtr previousState,
+            IntPtr returnLength);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         private static extern uint GetSecurityDescriptorLength(
@@ -595,6 +701,51 @@ namespace $nativeNamespace
             }
         }
 
+        public static uint GetRegularFileLinkCountNoFollow(string path)
+        {
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            IntPtr handle = CreateFileW(
+                path,
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "open regular file for link-count query failed: " + path);
+            try
+            {
+                BY_HANDLE_FILE_INFORMATION information;
+                if (!GetFileInformationByHandle(handle, out information))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query regular file link count failed: " + path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                    throw new InvalidOperationException(
+                        "refusing link-count query through a reparse point: " + path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                    throw new InvalidOperationException(
+                        "link-count query requires a regular file: " + path);
+                if (information.NumberOfLinks == 0)
+                    throw new InvalidOperationException(
+                        "regular file reported an invalid zero link count: " + path);
+                return information.NumberOfLinks;
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
         public static byte[] GetFileSecurityDescriptor(string path)
         {
             const uint READ_CONTROL = 0x00020000;
@@ -710,6 +861,367 @@ namespace $nativeNamespace
             finally
             {
                 CloseHandle(handle);
+            }
+        }
+
+        private static string FileIdentity(
+            BY_HANDLE_FILE_INFORMATION information)
+        {
+            return String.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "{0:x8}:{1:x8}{2:x8}",
+                information.VolumeSerialNumber,
+                information.FileIndexHigh,
+                information.FileIndexLow);
+        }
+
+        private static void ValidateFixedRegularFile(
+            BY_HANDLE_FILE_INFORMATION information,
+            uint expectedSize,
+            string path)
+        {
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            if ((information.FileAttributes &
+                    (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+                throw new InvalidOperationException(
+                    "managed secret is not a no-follow regular file: " + path);
+            if (information.NumberOfLinks != 1)
+                throw new InvalidOperationException(
+                    "managed secret must have exactly one hard link: " + path);
+            ulong size = ((ulong)information.FileSizeHigh << 32) |
+                (ulong)information.FileSizeLow;
+            if (size != expectedSize)
+                throw new InvalidOperationException(
+                    "managed secret has an invalid fixed length: " + path);
+        }
+
+        private static byte[] GetFileSecurityDescriptorFromHandle(
+            IntPtr handle,
+            string path)
+        {
+            const int SE_FILE_OBJECT = 1;
+            const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+            const uint GROUP_SECURITY_INFORMATION = 0x00000002;
+            const uint DACL_SECURITY_INFORMATION = 0x00000004;
+            const ushort SE_SELF_RELATIVE = 0x8000;
+            const int ERROR_INSUFFICIENT_BUFFER = 122;
+            IntPtr owner;
+            IntPtr group;
+            IntPtr dacl;
+            IntPtr sacl;
+            IntPtr descriptor;
+            uint result = GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION |
+                    GROUP_SECURITY_INFORMATION |
+                    DACL_SECURITY_INFORMATION,
+                out owner,
+                out group,
+                out dacl,
+                out sacl,
+                out descriptor);
+            if (result != 0)
+                throw new Win32Exception(
+                    checked((int)result),
+                    "query managed secret security failed: " + path);
+            if (descriptor == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    "managed secret security query returned null: " + path);
+            try
+            {
+                ushort control;
+                uint revision;
+                if (!GetSecurityDescriptorControl(
+                    descriptor,
+                    out control,
+                    out revision))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query managed secret security control failed: " + path);
+                if ((control & SE_SELF_RELATIVE) != 0)
+                {
+                    uint length = GetSecurityDescriptorLength(descriptor);
+                    if (length == 0 || length > 1048576)
+                        throw new InvalidOperationException(
+                            "managed secret security length is invalid: " + path);
+                    byte[] bytes = new byte[checked((int)length)];
+                    Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+                    return bytes;
+                }
+                uint required = 0;
+                if (MakeSelfRelativeSD(descriptor, null, ref required))
+                    throw new InvalidOperationException(
+                        "managed secret security conversion returned no size: " + path);
+                int conversionError = Marshal.GetLastWin32Error();
+                if (conversionError != ERROR_INSUFFICIENT_BUFFER ||
+                    required == 0 ||
+                    required > 1048576)
+                    throw new Win32Exception(
+                        conversionError,
+                        "size managed secret security failed: " + path);
+                byte[] relative = new byte[checked((int)required)];
+                if (!MakeSelfRelativeSD(descriptor, relative, ref required))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "convert managed secret security failed: " + path);
+                if (required != relative.Length)
+                    throw new InvalidOperationException(
+                        "managed secret security conversion changed length: " + path);
+                return relative;
+            }
+            finally
+            {
+                LocalFree(descriptor);
+            }
+        }
+
+        private static IntPtr OpenFixedRegularFileSecurity(
+            string path,
+            uint desiredAccess,
+            uint expectedSize,
+            out BY_HANDLE_FILE_INFORMATION information)
+        {
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            IntPtr handle = CreateFileW(
+                path,
+                desiredAccess,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "open managed secret metadata failed: " + path);
+            try
+            {
+                if (!GetFileInformationByHandle(handle, out information))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query managed secret identity failed: " + path);
+                ValidateFixedRegularFile(information, expectedSize, path);
+                return handle;
+            }
+            catch
+            {
+                CloseHandle(handle);
+                throw;
+            }
+        }
+
+        public static RegularFileSecuritySnapshot
+            GetRegularFileSecuritySnapshotNoFollow(
+                string path,
+                uint expectedSize)
+        {
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint READ_CONTROL = 0x00020000;
+            BY_HANDLE_FILE_INFORMATION information;
+            IntPtr handle = OpenFixedRegularFileSecurity(
+                path,
+                FILE_READ_ATTRIBUTES | READ_CONTROL,
+                expectedSize,
+                out information);
+            try
+            {
+                return new RegularFileSecuritySnapshot(
+                    FileIdentity(information),
+                    GetFileSecurityDescriptorFromHandle(handle, path));
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
+        public static RegularFileSecuritySnapshot
+            SetRegularFileSecurityDescriptorNoFollow(
+                string path,
+                string sddl,
+                uint expectedSize,
+                string expectedIdentity)
+        {
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint READ_CONTROL = 0x00020000;
+            const uint WRITE_DAC = 0x00040000;
+            const uint WRITE_OWNER = 0x00080000;
+            const int SE_FILE_OBJECT = 1;
+            const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+            const uint GROUP_SECURITY_INFORMATION = 0x00000002;
+            const uint DACL_SECURITY_INFORMATION = 0x00000004;
+            const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+            const uint TOKEN_ADJUST_PRIVILEGES = 0x00000020;
+            const uint TOKEN_QUERY = 0x00000008;
+            const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+            const int ERROR_NOT_ALL_ASSIGNED = 1300;
+
+            IntPtr descriptor;
+            SECURITY_ATTRIBUTES ignored = SecurityAttributes(
+                sddl,
+                out descriptor);
+            try
+            {
+                IntPtr owner;
+                IntPtr group;
+                IntPtr dacl;
+                bool ownerDefaulted;
+                bool groupDefaulted;
+                bool daclPresent;
+                bool daclDefaulted;
+                if (!GetSecurityDescriptorOwner(
+                        descriptor,
+                        out owner,
+                        out ownerDefaulted) ||
+                    owner == IntPtr.Zero)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "managed secret descriptor has no owner");
+                if (!GetSecurityDescriptorGroup(
+                        descriptor,
+                        out group,
+                        out groupDefaulted) ||
+                    group == IntPtr.Zero)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "managed secret descriptor has no group");
+                if (!GetSecurityDescriptorDacl(
+                        descriptor,
+                        out daclPresent,
+                        out dacl,
+                        out daclDefaulted) ||
+                    !daclPresent ||
+                    dacl == IntPtr.Zero)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "managed secret descriptor has no DACL");
+
+                BY_HANDLE_FILE_INFORMATION before;
+                IntPtr handle = OpenFixedRegularFileSecurity(
+                    path,
+                    FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+                    expectedSize,
+                    out before);
+                try
+                {
+                    string beforeIdentity = FileIdentity(before);
+                    if (!String.Equals(
+                            beforeIdentity,
+                            expectedIdentity,
+                            StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            "managed secret identity changed before security update: " + path);
+
+                    IntPtr token;
+                    if (!OpenProcessToken(
+                            GetCurrentProcess(),
+                            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                            out token))
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "open installer token for managed secret owner update failed");
+                    uint setResult = 0;
+                    int restoreError = 0;
+                    try
+                    {
+                        LUID restoreLuid;
+                        if (!LookupPrivilegeValueW(
+                                null,
+                                "SeRestorePrivilege",
+                                out restoreLuid))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "resolve SeRestorePrivilege failed");
+                        TOKEN_PRIVILEGES enabled = new TOKEN_PRIVILEGES();
+                        enabled.PrivilegeCount = 1;
+                        enabled.Privileges.Luid = restoreLuid;
+                        enabled.Privileges.Attributes = SE_PRIVILEGE_ENABLED;
+                        TOKEN_PRIVILEGES previous;
+                        uint previousLength;
+                        if (!AdjustTokenPrivileges(
+                                token,
+                                false,
+                                ref enabled,
+                                checked((uint)Marshal.SizeOf(typeof(TOKEN_PRIVILEGES))),
+                                out previous,
+                                out previousLength))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "enable SeRestorePrivilege failed");
+                        int enableError = Marshal.GetLastWin32Error();
+                        if (enableError == ERROR_NOT_ALL_ASSIGNED)
+                            throw new Win32Exception(
+                                enableError,
+                                "installer token lacks SeRestorePrivilege");
+                        try
+                        {
+                            setResult = SetSecurityInfo(
+                                handle,
+                                SE_FILE_OBJECT,
+                                OWNER_SECURITY_INFORMATION |
+                                    GROUP_SECURITY_INFORMATION |
+                                    DACL_SECURITY_INFORMATION |
+                                    PROTECTED_DACL_SECURITY_INFORMATION,
+                                owner,
+                                group,
+                                dacl,
+                                IntPtr.Zero);
+                        }
+                        finally
+                        {
+                            if (!RestoreTokenPrivileges(
+                                    token,
+                                    false,
+                                    ref previous,
+                                    0,
+                                    IntPtr.Zero,
+                                    IntPtr.Zero))
+                                restoreError = Marshal.GetLastWin32Error();
+                        }
+                    }
+                    finally
+                    {
+                        CloseHandle(token);
+                    }
+                    if (restoreError != 0)
+                        throw new Win32Exception(
+                            restoreError,
+                            "restore installer token privileges failed");
+                    if (setResult != 0)
+                        throw new Win32Exception(
+                            checked((int)setResult),
+                            "set managed secret owner and DACL failed: " + path);
+
+                    BY_HANDLE_FILE_INFORMATION after;
+                    if (!GetFileInformationByHandle(handle, out after))
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "recheck managed secret identity failed: " + path);
+                    ValidateFixedRegularFile(after, expectedSize, path);
+                    string afterIdentity = FileIdentity(after);
+                    if (!String.Equals(
+                            beforeIdentity,
+                            afterIdentity,
+                            StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            "managed secret identity changed during security update: " + path);
+                    return new RegularFileSecuritySnapshot(
+                        afterIdentity,
+                        GetFileSecurityDescriptorFromHandle(handle, path));
+                }
+                finally
+                {
+                    CloseHandle(handle);
+                }
+            }
+            finally
+            {
+                LocalFree(descriptor);
             }
         }
 
@@ -1243,6 +1755,45 @@ function Get-DefenseClawEnumeratorServiceName {
     throw "cannot derive enumerator service name from unexpected guardian name: $GuardianServiceName"
 }
 
+function Get-DefenseClawCMIDBrokerServiceName {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    Assert-DefenseClawServiceName -Name $GatewayServiceName
+    if ($GatewayServiceName -ceq 'DefenseClawGateway') {
+        return 'DefenseClawCMIDBroker'
+    }
+    if ($GatewayServiceName -cmatch '^DefenseClawCertGateway_([a-f0-9]{10})$') {
+        return "DefenseClawCMIDBroker_$($Matches[1])"
+    }
+    throw "cannot derive credential broker service name from unexpected gateway name: $GatewayServiceName"
+}
+
+function Get-DefenseClawCMIDBrokerImage {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if ([string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
+        throw 'credential broker provider library path is missing'
+    }
+    return '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"' -f `
+        $Layout.BrokerPath, $Layout.BrokerServiceName, $GatewayServiceName, `
+        $Layout.BrokerPipeName, $Layout.BrokerAuthKeyPath, `
+        $Layout.ProviderLibraryPath, $Layout.BrokerLogPath
+}
+
+function Get-DefenseClawManagedServiceNames {
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    return @(
+        $GatewayServiceName,
+        (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName),
+        $GuardianServiceName,
+        (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName)
+    )
+}
+
 function Resolve-DefenseClawCertificationCodexHome {
     param(
         [string]$Path,
@@ -1752,11 +2303,63 @@ function Get-DefenseClawServiceSID {
     }
 }
 
+function Get-DefenseClawDeterministicServiceSID {
+    param([Parameter(Mandatory)][string]$ServiceName)
+    Assert-DefenseClawServiceName -Name $ServiceName
+    # `sc.exe showsid` computes the S-1-5-80 virtual-service SID from the
+    # service name even when the SCM row is missing. This lets authenticated
+    # active-deployment repair validate a service-owned secret before safely
+    # recreating the service; fresh/inactive installs never use this path.
+    $lines = @(Invoke-DefenseClawNative `
+        -File $script:ScExe `
+        -Arguments @('showsid', $ServiceName) `
+        -Capture)
+    $matches = [regex]::Matches(
+        ($lines -join "`n"),
+        '(?<![0-9-])S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}(?![0-9-])',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    $values = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($match in $matches) {
+        [void]$values.Add([string]$match.Value)
+    }
+    if ($values.Count -ne 1) {
+        throw "sc.exe showsid did not return exactly one virtual-service SID for $ServiceName"
+    }
+    $value = @($values)[0]
+    try {
+        $sid = [Security.Principal.SecurityIdentifier]::new($value)
+    }
+    catch {
+        throw "sc.exe showsid returned an invalid SID for $ServiceName"
+    }
+    if (-not $sid.Value.StartsWith('S-1-5-80-', [StringComparison]::Ordinal)) {
+        throw "sc.exe showsid returned a SID outside the NT SERVICE authority for $ServiceName"
+    }
+    if (Test-DefenseClawServiceExists -Name $ServiceName) {
+        $resolved = Get-DefenseClawServiceSID -ServiceName $ServiceName
+        if ($resolved -cne $sid.Value) {
+            throw "resolved and deterministic service SIDs disagree for $ServiceName"
+        }
+    }
+    return $sid.Value
+}
+
+function Get-DefenseClawServiceSIDForRecovery {
+    param([Parameter(Mandatory)][string]$ServiceName)
+    if (Test-DefenseClawServiceExists -Name $ServiceName) {
+        return Get-DefenseClawServiceSID -ServiceName $ServiceName
+    }
+    return Get-DefenseClawDeterministicServiceSID -ServiceName $ServiceName
+}
+
 function New-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][bool]$IsDirectory,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -1770,10 +2373,29 @@ function New-DefenseClawCanonicalPathAcl {
         'RuntimeDirectory',
         'AuthorizationDirectory',
         'LogDirectory',
-        'GatewayLogDirectory'
+        'GatewayLogDirectory',
+        'ManagedIPCDirectory'
     )
     if ($IsDirectory -ne ($Kind -in $directoryKinds)) {
         throw "ACL kind $Kind does not match the managed path object type"
+    }
+
+    if ($Kind -eq 'RuntimeSecretFile') {
+        # The correlation key is a persistent service secret, not an ordinary
+        # writable runtime file. OWNER RIGHTS suppresses the file owner's
+        # implicit WRITE_DAC while preserving READ_CONTROL; the exact gateway
+        # service SID receives read-only data access. Setup can replace this
+        # descriptor only through the no-follow, privilege-scoped native path
+        # in Set-DefenseClawPathAcl.
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $security.SetSecurityDescriptorSddlForm(
+            ((
+                'O:{0}G:BAD:P(A;;RC;;;{1})(A;;FA;;;SY)' +
+                '(A;;FA;;;BA)(A;;FR;;;{0})'
+            ) -f $GatewayServiceSID, $script:OwnerRightsSID),
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        return $security
     }
 
     $security = if ($IsDirectory) {
@@ -1889,9 +2511,25 @@ function New-DefenseClawCanonicalPathAcl {
                 rights = [Security.AccessControl.FileSystemRights]::Modify
             })
         }
+        'ManagedIPCDirectory' {
+            # Match the gateway's bind-time IPC baseline: only the exact
+            # service SID may create/remove the socket, while authenticated
+            # clients receive path traversal and child-name lookup only.
+            $entries.Add([pscustomobject]@{
+                sid = $GatewayServiceSID
+                rights = [Security.AccessControl.FileSystemRights]::FullControl
+            })
+            $entries.Add([pscustomobject]@{
+                sid = $script:AuthenticatedUsersSID
+                rights = (
+                    [Security.AccessControl.FileSystemRights]::ListDirectory -bor
+                    [Security.AccessControl.FileSystemRights]::Traverse
+                )
+            })
+        }
     }
 
-    $inheritanceFlags = if ($IsDirectory) {
+    $inheritanceFlags = if ($IsDirectory -and $Kind -ne 'ManagedIPCDirectory') {
         [Security.AccessControl.InheritanceFlags]::ObjectInherit -bor
             [Security.AccessControl.InheritanceFlags]::ContainerInherit
     }
@@ -1919,7 +2557,10 @@ function Test-DefenseClawExactRawDACL {
         [Parameter(Mandatory)]
         [Security.AccessControl.RawSecurityDescriptor]$Actual,
         [Parameter(Mandatory)]
-        [Security.AccessControl.RawSecurityDescriptor]$Expected
+        [Security.AccessControl.RawSecurityDescriptor]$Expected,
+        [int]$IgnoredControlFlags = [int](
+            [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
+        )
     )
 
     # NTFS may persist a protected DACL with the benign AutoInherited (AI)
@@ -1928,14 +2569,11 @@ function Test-DefenseClawExactRawDACL {
     # descriptor control flag and the raw DACL bytes to match exactly. RawAcl
     # equality preserves ACE order, revision, type, flags, mask, SID, and
     # duplicates; it cannot hide an unrecognized or inherited ACE.
-    $ignoredFlag = [int](
-        [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
-    )
     $actualFlags = (
-        [int]$Actual.ControlFlags -band (-bnot $ignoredFlag)
+        [int]$Actual.ControlFlags -band (-bnot $IgnoredControlFlags)
     )
     $expectedFlags = (
-        [int]$Expected.ControlFlags -band (-bnot $ignoredFlag)
+        [int]$Expected.ControlFlags -band (-bnot $IgnoredControlFlags)
     )
     if ($actualFlags -ne $expectedFlags) {
         return $false
@@ -1961,6 +2599,90 @@ function Test-DefenseClawExactRawDACL {
     return $true
 }
 
+function Assert-DefenseClawCanonicalRawPathAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected
+    )
+    $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $Expected.GetSecurityDescriptorBinaryForm(),
+        0
+    )
+    $protectedFlag = [int](
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    )
+    if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
+        throw "managed DACL is not protected after exact ACL replacement: $Path"
+    }
+    $ownerSID = if ($null -eq $Actual.Owner) {
+        ''
+    }
+    else {
+        $Actual.Owner.Value
+    }
+    $groupSID = if ($null -eq $Actual.Group) {
+        ''
+    }
+    else {
+        $Actual.Group.Value
+    }
+    $expectedOwnerSID = if ($null -eq $expectedDescriptor.Owner) {
+        ''
+    }
+    else {
+        $expectedDescriptor.Owner.Value
+    }
+    $expectedGroupSID = if ($null -eq $expectedDescriptor.Group) {
+        ''
+    }
+    else {
+        $expectedDescriptor.Group.Value
+    }
+    if ($ownerSID -cne $expectedOwnerSID -or
+        $groupSID -cne $expectedGroupSID) {
+        throw (
+            'managed path owner/group do not match the exact canonical ' +
+            "descriptor after ACL replacement: $Path"
+        )
+    }
+    if (-not (Test-DefenseClawExactRawDACL `
+        -Actual $Actual `
+        -Expected $expectedDescriptor)) {
+        throw "managed path does not have the exact canonical DACL: $Path"
+    }
+}
+
+function Test-DefenseClawCanonicalRawPathAcl {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected
+    )
+    $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $Expected.GetSecurityDescriptorBinaryForm(),
+        0
+    )
+    $protectedFlag = [int](
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    )
+    if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
+        return $false
+    }
+    if ($null -eq $Actual.Owner -or
+        $null -eq $Actual.Group -or
+        $null -eq $expectedDescriptor.Owner -or
+        $null -eq $expectedDescriptor.Group -or
+        $Actual.Owner.Value -cne $expectedDescriptor.Owner.Value -or
+        $Actual.Group.Value -cne $expectedDescriptor.Group.Value) {
+        return $false
+    }
+    return [bool](Test-DefenseClawExactRawDACL `
+        -Actual $Actual `
+        -Expected $expectedDescriptor)
+}
+
 function Assert-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -1972,47 +2694,17 @@ function Assert-DefenseClawCanonicalPathAcl {
         $nativeSecurity::GetFileSecurityDescriptor($Path),
         0
     )
-    $protectedFlag = [int](
-        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
-    )
-    if (([int]$actualDescriptor.ControlFlags -band $protectedFlag) -eq 0) {
-        throw "managed DACL is not protected after exact ACL replacement: $Path"
-    }
-    $ownerSID = if ($null -eq $actualDescriptor.Owner) {
-        ''
-    }
-    else {
-        $actualDescriptor.Owner.Value
-    }
-    $groupSID = if ($null -eq $actualDescriptor.Group) {
-        ''
-    }
-    else {
-        $actualDescriptor.Group.Value
-    }
-    if ($ownerSID -ne $script:AdministratorsSID -or
-        $groupSID -ne $script:AdministratorsSID) {
-        throw (
-            'managed path owner/group are not the canonical Administrators ' +
-            "SID after exact ACL replacement: $Path"
-        )
-    }
-    $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
-        $Expected.GetSecurityDescriptorBinaryForm(),
-        0
-    )
-    if (-not (Test-DefenseClawExactRawDACL `
+    Assert-DefenseClawCanonicalRawPathAcl `
+        -Path $Path `
         -Actual $actualDescriptor `
-        -Expected $expectedDescriptor)) {
-        throw "managed path does not have the exact canonical DACL: $Path"
-    }
+        -Expected $Expected
 }
 
 function Set-DefenseClawPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -2027,6 +2719,33 @@ function Set-DefenseClawPathAcl {
         -IsDirectory $isDirectory `
         -Kind $Kind `
         -GatewayServiceSID $GatewayServiceSID
+    if ($Kind -eq 'RuntimeSecretFile') {
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+            $Path,
+            [uint32]32
+        )
+        $sddl = $security.GetSecurityDescriptorSddlForm(
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        $after = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+            $Path,
+            $sddl,
+            [uint32]32,
+            [string]$before.Identity
+        )
+        if ([string]$after.Identity -cne [string]$before.Identity) {
+            throw "managed secret identity changed during ACL replacement: $Path"
+        }
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $Path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$after.SecurityDescriptor,
+                0
+            )) `
+            -Expected $security
+        return
+    }
     Microsoft.PowerShell.Security\Set-Acl `
         -LiteralPath $Path `
         -AclObject $security `
@@ -2403,6 +3122,11 @@ function Assert-DefenseClawPathAcl {
         [Parameter(Mandatory)][string[]]$AllowedWriterSIDs,
         [string[]]$AllowedReaderSIDs = @(),
         [hashtable]$RequiredRights = @{},
+        [string[]]$AllowedOwnerSIDs = @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ),
         [switch]$AllowUsersRead,
         [switch]$RejectUntrustedRead,
         [switch]$AllowInheritance
@@ -2417,7 +3141,7 @@ function Assert-DefenseClawPathAcl {
         throw "managed path has an absent or null DACL: $Path"
     }
     $ownerSID = ConvertTo-DefenseClawSID -Identity $acl.Owner
-    if ($ownerSID -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+    if ($ownerSID -notin $AllowedOwnerSIDs) {
         throw "untrusted owner $ownerSID on managed path: $Path"
     }
     if (-not $AllowInheritance -and -not $acl.AreAccessRulesProtected) {
@@ -2661,6 +3385,9 @@ function Get-DefenseClawServiceEnvironmentValues {
         [Parameter(Mandatory)][string]$AuthorizationDirectory,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$LogPath,
+        [string]$BrokerPipeName,
+        [string]$BrokerServiceName,
+        [string]$BrokerAuthKeyPath,
         [switch]$AgentApplicationControlAttested,
         [switch]$ClaudeEffectivePolicyVerified
     )
@@ -2676,6 +3403,18 @@ function Get-DefenseClawServiceEnvironmentValues {
         "DEFENSECLAW_WINDOWS_SERVICE_LOG=$LogPath"
     )) {
         $values.Add($value)
+    }
+    $brokerValues = @($BrokerPipeName, $BrokerServiceName, $BrokerAuthKeyPath)
+    $brokerValueCount = @($brokerValues | Microsoft.PowerShell.Core\Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_)
+    }).Count
+    if ($brokerValueCount -ne 0 -and $brokerValueCount -ne 3) {
+        throw 'credential broker service environment is partially configured'
+    }
+    if ($brokerValueCount -eq 3) {
+        $values.Add("DEFENSECLAW_CMID_BROKER_PIPE=$BrokerPipeName")
+        $values.Add("DEFENSECLAW_CMID_BROKER_SERVICE_NAME=$BrokerServiceName")
+        $values.Add("DEFENSECLAW_CMID_BROKER_AUTH_KEY=$BrokerAuthKeyPath")
     }
     if ($AgentApplicationControlAttested) {
         $values.Add('DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED=1')
@@ -2695,6 +3434,9 @@ function Set-DefenseClawServiceEnvironment {
         [Parameter(Mandatory)][string]$AuthorizationDirectory,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$LogPath,
+        [string]$BrokerPipeName,
+        [string]$BrokerServiceName,
+        [string]$BrokerAuthKeyPath,
         [switch]$AgentApplicationControlAttested,
         [switch]$ClaudeEffectivePolicyVerified
     )
@@ -2709,9 +3451,70 @@ function Set-DefenseClawServiceEnvironment {
         -AuthorizationDirectory $AuthorizationDirectory `
         -GatewayServiceName $GatewayServiceName `
         -LogPath $LogPath `
+        -BrokerPipeName $BrokerPipeName `
+        -BrokerServiceName $BrokerServiceName `
+        -BrokerAuthKeyPath $BrokerAuthKeyPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified)
     [void](Microsoft.PowerShell.Management\New-ItemProperty -LiteralPath $serviceKey -Name Environment -PropertyType MultiString -Value $values -Force)
+}
+
+function Set-DefenseClawCMIDBrokerAuthKey {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory -PathType Container)) {
+        throw "credential broker key directory is missing: $directory"
+    }
+    Assert-DefenseClawNoReparsePath -Path $directory
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetSecurityDescriptorSddlForm(
+        "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$gatewaySID)",
+        (
+            [Security.AccessControl.AccessControlSections]::Owner -bor
+            [Security.AccessControl.AccessControlSections]::Group -bor
+            [Security.AccessControl.AccessControlSections]::Access
+        )
+    )
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf) {
+        Assert-DefenseClawNoReparsePath -Path $Path
+        $existing = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force
+        if ([int64]$existing.Length -ne 32) {
+            throw 'credential broker authentication key must be exactly 32 bytes'
+        }
+        Microsoft.PowerShell.Security\Set-Acl `
+            -LiteralPath $Path `
+            -AclObject $security `
+            -ErrorAction Stop
+        return
+    }
+    $temporary = Microsoft.PowerShell.Management\Join-Path `
+        $directory `
+        ('.broker-auth.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+    $key = [byte[]]::new(32)
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($key)
+        [IO.File]::WriteAllBytes($temporary, $key)
+        Microsoft.PowerShell.Security\Set-Acl `
+            -LiteralPath $temporary `
+            -AclObject $security `
+            -ErrorAction Stop
+        Microsoft.PowerShell.Management\Move-Item `
+            -LiteralPath $temporary `
+            -Destination $Path `
+            -Force
+    }
+    finally {
+        $generator.Dispose()
+        [Array]::Clear($key, 0, $key.Length)
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
+        }
+    }
 }
 
 function Get-DefenseClawFailureActionsBytes {
@@ -3022,6 +3825,12 @@ function Set-DefenseClawManagedServices {
     param(
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][string]$BrokerServiceName,
+        [Parameter(Mandatory)][string]$BrokerPath,
+        [Parameter(Mandatory)][string]$BrokerPipeName,
+        [Parameter(Mandatory)][string]$BrokerAuthKeyPath,
+        [Parameter(Mandatory)][string]$ProviderLibraryPath,
+        [Parameter(Mandatory)][string]$BrokerLogPath,
         [Parameter(Mandatory)][string]$GatewayPath,
         [Parameter(Mandatory)][string]$ManifestPath,
         [Parameter(Mandatory)][string]$RuntimeDirectory,
@@ -3035,10 +3844,17 @@ function Set-DefenseClawManagedServices {
     )
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
+    Assert-DefenseClawServiceName -Name $BrokerServiceName
+    if ($BrokerServiceName -cne (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)) {
+        throw 'credential broker service name does not match the gateway identity'
+    }
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawServiceName -Name $enumeratorServiceName
     $gatewayAccount = "NT SERVICE\$GatewayServiceName"
     $gatewayImage = '"{0}"' -f $GatewayPath
+    $brokerImage = '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"' -f `
+        $BrokerPath, $BrokerServiceName, $GatewayServiceName, $BrokerPipeName, `
+        $BrokerAuthKeyPath, $ProviderLibraryPath, $BrokerLogPath
     $guardianImage = '"{0}" enterprise hooks watch --manifest "{1}" --interval 1m' -f $GatewayPath, $ManifestPath
     # Spec 005 D1: third SCM service reuses the gateway binary, invoked
     # with the `enterprise windows enumerate` subcommand. Runs as
@@ -3054,6 +3870,36 @@ function Set-DefenseClawManagedServices {
     # sufficient: SCM may still execute an already queued failure restart.
     $configuredStart = if ($DeferAutomaticStart) { 'disabled' } else { 'auto' }
 
+    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+        -Name $BrokerServiceName `
+        -ExpectedImage $brokerImage `
+        -AllowArgumentUpgrade
+    if (Test-DefenseClawServiceExists -Name $BrokerServiceName) {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+            'config', $BrokerServiceName,
+            'binPath=', $brokerImage,
+            'type=', 'own',
+            'start=', $configuredStart,
+            'error=', 'normal',
+            'depend=', '/',
+            'obj=', 'LocalSystem',
+            'DisplayName=', 'DefenseClaw Credential Broker'
+        ))
+    }
+    else {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+            'create', $BrokerServiceName,
+            'binPath=', $brokerImage,
+            'type=', 'own',
+            'start=', $configuredStart,
+            'error=', 'normal',
+            'depend=', '/',
+            'obj=', 'LocalSystem',
+            'DisplayName=', 'DefenseClaw Credential Broker'
+        ))
+    }
+    Assert-DefenseClawServiceImagePath -Name $BrokerServiceName -ExpectedImage $brokerImage
+
     if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'config', $GatewayServiceName,
@@ -3061,7 +3907,7 @@ function Set-DefenseClawManagedServices {
             'type=', 'own',
             'start=', $configuredStart,
             'error=', 'normal',
-            'depend=', '/',
+            'depend=', $BrokerServiceName,
             'obj=', $gatewayAccount,
             'DisplayName=', 'DefenseClaw Enterprise Gateway'
         ))
@@ -3073,7 +3919,7 @@ function Set-DefenseClawManagedServices {
             'type=', 'own',
             'start=', $configuredStart,
             'error=', 'normal',
-            'depend=', '/',
+            'depend=', $BrokerServiceName,
             'obj=', $gatewayAccount,
             'DisplayName=', 'DefenseClaw Enterprise Gateway'
         ))
@@ -3150,10 +3996,14 @@ function Set-DefenseClawManagedServices {
         -ExpectedImage $enumeratorImage
 
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GatewayServiceName, 'restricted'))
+    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $BrokerServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GuardianServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $enumeratorServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $GatewayServiceName, 'SeChangeNotifyPrivilege'
+    ))
+    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+        'privs', $BrokerServiceName, 'SeChangeNotifyPrivilege'
     ))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $GuardianServiceName,
@@ -3163,7 +4013,7 @@ function Set-DefenseClawManagedServices {
         'privs', $enumeratorServiceName,
         'SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege'
     ))
-    foreach ($service in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
+    foreach ($service in @($BrokerServiceName, $GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'failure', $service,
             'reset=', '86400',
@@ -3181,6 +4031,14 @@ function Set-DefenseClawManagedServices {
         Set-DefenseClawServiceRegistryAcl -Name $service
     }
 
+    Set-DefenseClawCMIDBrokerAuthKey `
+        -Path $BrokerAuthKeyPath `
+        -GatewayServiceName $GatewayServiceName
+    Microsoft.PowerShell.Management\Remove-ItemProperty `
+        -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$BrokerServiceName" `
+        -Name Environment `
+        -ErrorAction SilentlyContinue
+
     Set-DefenseClawServiceEnvironment `
         -Name $GatewayServiceName `
         -RuntimeDirectory $RuntimeDirectory `
@@ -3188,6 +4046,9 @@ function Set-DefenseClawManagedServices {
         -AuthorizationDirectory $AuthorizationDirectory `
         -GatewayServiceName $GatewayServiceName `
         -LogPath $GatewayLogPath `
+        -BrokerPipeName $BrokerPipeName `
+        -BrokerServiceName $BrokerServiceName `
+        -BrokerAuthKeyPath $BrokerAuthKeyPath `
         -AgentApplicationControlAttested:$AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$ClaudeEffectivePolicyVerified
     Set-DefenseClawServiceEnvironment `
@@ -3345,12 +4206,13 @@ function Wait-DefenseClawServiceFailureRestartQuiescence {
     # Reassert the fail-closed state after the full 60-second canonical
     # failure-action window plus safety margin. Every restart queued before
     # quiescence has now attempted against a disabled service and drained.
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    foreach ($name in @($GatewayServiceName, $BrokerServiceName, $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
     }
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName)) {
+    foreach ($name in @($GuardianServiceName, $GatewayServiceName, $brokerServiceName)) {
         Stop-DefenseClawService -Name $name
     }
 }
@@ -3453,6 +4315,7 @@ function Get-DefenseClawTransactionServiceStates {
     # enumerator as absent. Post-upgrade transactions always carry
     # all 3.
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
     $states = @{}
     foreach ($service in @($Services)) {
         $nameProperty = $service.PSObject.Properties['name']
@@ -3465,6 +4328,7 @@ function Get-DefenseClawTransactionServiceStates {
         $name = [string]$nameProperty.Value
         $canonicalName = @(
             $GatewayServiceName,
+            $brokerServiceName,
             $GuardianServiceName,
             $enumeratorServiceName
         ) | Microsoft.PowerShell.Core\Where-Object {
@@ -3513,6 +4377,19 @@ function Get-DefenseClawTransactionServiceStates {
             start_mode = 0
         }
     }
+    if (-not $states.ContainsKey($brokerServiceName)) {
+        $states[$brokerServiceName] = [pscustomobject]@{
+            service = [pscustomobject]@{
+                name = $brokerServiceName
+                existed = $false
+                running = $false
+                start_mode = 0
+            }
+            existed = $false
+            running = $false
+            start_mode = 0
+        }
+    }
     return $states
 }
 
@@ -3536,7 +4413,8 @@ function Restore-DefenseClawTransactionServiceStartModes {
     # crash mid-restore leaves enumerator disabled which is a safe
     # posture (no targets.yaml writes until the next transaction).
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName, $enumeratorServiceName)) {
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    foreach ($name in @($brokerServiceName, $GuardianServiceName, $GatewayServiceName, $enumeratorServiceName)) {
         $state = $states[$name]
         if ($null -ne $state -and [bool]$state.existed) {
             Set-DefenseClawServiceStartMode `
@@ -3544,6 +4422,87 @@ function Restore-DefenseClawTransactionServiceStartModes {
                 -StartMode ([int]$state.start_mode)
         }
     }
+}
+
+function Initialize-DefenseClawManagedIPCDirectory {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    $expectedIPCDirectory = [IO.Path]::Combine(
+        $script:ProgramData,
+        'Cisco',
+        'Cisco Secure Client',
+        'DefenseClaw',
+        'ipc'
+    ).TrimEnd('\')
+    $ipcDirectory = Assert-DefenseClawCanonicalVolumePath `
+        -Path ([IO.Path]::GetFullPath([string]$Layout.ManagedIPCDirectory).TrimEnd('\')) `
+        -Label 'managed IPC directory'
+    if (-not [string]::Equals(
+            $ipcDirectory,
+            $expectedIPCDirectory,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "managed IPC directory must use the fixed AVC contract path: $expectedIPCDirectory"
+    }
+    Assert-DefenseClawNoReparsePath -Path $ipcDirectory -AllowMissingLeaf
+    $parent = [IO.Path]::GetDirectoryName($ipcDirectory)
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $parent `
+            -PathType Container)) {
+        Initialize-DefenseClawManagedRoot `
+            -Path $parent `
+            -Label 'managed IPC parent' `
+            -RequiredBase $script:ProgramData
+    }
+    else {
+        Assert-DefenseClawTrustedAncestors `
+            -Path $parent `
+            -RequiredBase $script:ProgramData
+    }
+
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ipcDirectory) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $ipcDirectory `
+                -PathType Container)) {
+            throw "managed IPC path is occupied by a non-directory: $ipcDirectory"
+        }
+        # The fixed AVC path is a single-listener contract. Validate before
+        # replacement so a certification service cannot seize a directory
+        # owned by another live gateway SID. The current service is accepted
+        # as owner for migration from a directory it created itself.
+        Assert-DefenseClawPathAcl `
+            -Path $ipcDirectory `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID,
+                $gatewaySID
+            ) `
+            -AllowedReaderSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID,
+                $gatewaySID,
+                $script:AuthenticatedUsersSID
+            ) `
+            -AllowedOwnerSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID,
+                $gatewaySID
+            ) `
+            -RejectUntrustedRead
+    }
+    else {
+        [void](New-DefenseClawProtectedDirectory -Path $ipcDirectory)
+    }
+    Set-DefenseClawPathAcl `
+        -Path $ipcDirectory `
+        -Kind ManagedIPCDirectory `
+        -GatewayServiceSID $gatewaySID
 }
 
 function Set-DefenseClawManagedAcls {
@@ -3559,7 +4518,7 @@ function Set-DefenseClawManagedAcls {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
     }
-    foreach ($path in @($Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
             Set-DefenseClawPathAcl -Path $path -Kind InstallFile -GatewayServiceSID $gatewaySID
         }
@@ -3570,6 +4529,18 @@ function Set-DefenseClawManagedAcls {
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID
     }
+    if (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManagedIPCDirectory `
+            -PathType Container) {
+        Set-DefenseClawPathAcl `
+            -Path $Layout.ManagedIPCDirectory `
+            -Kind ManagedIPCDirectory `
+            -GatewayServiceSID $gatewaySID
+    }
+    elseif (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManagedIPCDirectory) {
+        throw "managed IPC path is occupied by a non-directory: $($Layout.ManagedIPCDirectory)"
+    }
     Set-DefenseClawPathAcl -Path $Layout.StateRoot -Kind StateDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GuardianDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
@@ -3577,6 +4548,7 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
+    Set-DefenseClawPathAcl -Path $Layout.BrokerStateDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.AuthorizationDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.AuthorizationLedgerPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.AuthorizationLedgerPath -Kind AuthorizationFile -GatewayServiceSID $gatewaySID
@@ -3584,11 +4556,15 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.LogDirectory -Kind LogDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GatewayLogDirectory -Kind GatewayLogDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GuardianLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
+    Set-DefenseClawPathAcl -Path $Layout.BrokerLogDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayLogPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayLogPath -Kind RuntimeFile -GatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GuardianLogPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GuardianLogPath -Kind AdminFile -GatewayServiceSID $gatewaySID
+    }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.BrokerLogPath -PathType Leaf) {
+        Set-DefenseClawPathAcl -Path $Layout.BrokerLogPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.MetadataPath -Kind AdminFile -GatewayServiceSID $gatewaySID
@@ -3639,6 +4615,613 @@ function Set-DefenseClawManagedAcls {
     }
 }
 
+# A non-purge uninstall intentionally retains runtime state with an
+# administrator-only DACL. Before the replacement gateway starts, adopt every
+# retained runtime object into the exact ACL for the newly registered gateway
+# service SID. Preflight the whole tree before the first ACL change so a
+# hostile reparse point or hard link cannot redirect, or partially trigger,
+# the adoption pass.
+function Set-DefenseClawRetainedRuntimeAcls {
+    param(
+        [Parameter(Mandatory)][string]$RuntimeDirectory,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    $root = [IO.Path]::GetFullPath($RuntimeDirectory).TrimEnd('\')
+    $redactionKeyPath = [IO.Path]::Combine(
+        $root,
+        'redaction-correlation.key'
+    )
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $root `
+            -PathType Container)) {
+        throw "retained runtime directory is missing or not a directory: $root"
+    }
+    Assert-DefenseClawNoReparsePath -Path $root
+
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $directories = [Collections.Generic.List[string]]::new()
+    $files = [Collections.Generic.List[object]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $directories.Add($root)
+    $pending.Push($root)
+    [void]$seen.Add($root)
+    $objectCount = 1
+    $maximumObjectCount = 16384
+
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        Assert-DefenseClawNoReparsePath -Path $directory
+        foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem `
+                -LiteralPath $directory `
+                -Force `
+                -ErrorAction Stop)) {
+            $full = Assert-DefenseClawDescendant `
+                -Path $item.FullName `
+                -Root $root `
+                -Label 'retained runtime object'
+            if (-not $seen.Add($full)) {
+                throw "retained runtime tree contains a duplicate path: $full"
+            }
+            $objectCount++
+            if ($objectCount -gt $maximumObjectCount) {
+                throw (
+                    'retained runtime tree exceeds the bounded adoption limit ' +
+                    "of $maximumObjectCount objects"
+                )
+            }
+            Assert-DefenseClawNoReparsePath -Path $full
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "refusing retained runtime reparse point: $full"
+            }
+            if ($item.PSIsContainer) {
+                $directories.Add($full)
+                $pending.Push($full)
+                continue
+            }
+            $linkCount = [uint32]$nativeSecurity::GetRegularFileLinkCountNoFollow($full)
+            if ($linkCount -ne 1) {
+                throw "refusing retained runtime file with $linkCount hard links: $full"
+            }
+            $isRedactionKey = [string]::Equals(
+                $full,
+                $redactionKeyPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+            if ($isRedactionKey -and [int64]$item.Length -ne 32) {
+                throw "retained redaction correlation key has an invalid fixed length: $full"
+            }
+            $files.Add([pscustomobject]@{
+                path = $full
+                identity = ([string]$nativeSecurity::GetFileIdentity($full)).ToLowerInvariant()
+                kind = $(if ($isRedactionKey) {
+                    'RuntimeSecretFile'
+                }
+                else {
+                    'RuntimeFile'
+                })
+            })
+        }
+    }
+
+    foreach ($directory in $directories) {
+        Assert-DefenseClawNoReparsePath -Path $directory
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $directory `
+                -PathType Container)) {
+            throw "retained runtime directory changed during ACL adoption: $directory"
+        }
+        Set-DefenseClawPathAcl `
+            -Path $directory `
+            -Kind RuntimeDirectory `
+            -GatewayServiceSID $GatewayServiceSID
+    }
+    foreach ($file in $files) {
+        $path = [string]$file.path
+        Assert-DefenseClawNoReparsePath -Path $path
+        $identityBefore = ([string]$nativeSecurity::GetFileIdentity($path)).ToLowerInvariant()
+        $linksBefore = [uint32]$nativeSecurity::GetRegularFileLinkCountNoFollow($path)
+        if ($identityBefore -cne ([string]$file.identity) -or $linksBefore -ne 1) {
+            throw "retained runtime file changed during ACL adoption: $path"
+        }
+        Set-DefenseClawPathAcl `
+            -Path $path `
+            -Kind ([string]$file.kind) `
+            -GatewayServiceSID $GatewayServiceSID
+        Assert-DefenseClawNoReparsePath -Path $path
+        $identityAfter = ([string]$nativeSecurity::GetFileIdentity($path)).ToLowerInvariant()
+        $linksAfter = [uint32]$nativeSecurity::GetRegularFileLinkCountNoFollow($path)
+        if ($identityAfter -cne $identityBefore -or $linksAfter -ne 1) {
+            throw "retained runtime file changed while its ACL was adopted: $path"
+        }
+    }
+}
+
+function New-DefenseClawLegacyRedactionKeyAcl {
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceSID,
+        [string]$GroupSID = $script:AdministratorsSID
+    )
+    $legacy = [Security.AccessControl.FileSecurity]::new()
+    $legacy.SetSecurityDescriptorSddlForm(
+        ((
+            'O:{0}G:{1}D:P(A;;FA;;;{0})' +
+            '(A;;FA;;;SY)(A;;FA;;;BA)'
+        ) -f $GatewayServiceSID, $GroupSID),
+        [Security.AccessControl.AccessControlSections]::All
+    )
+    return $legacy
+}
+
+function Get-DefenseClawRedactionKeySecurityClass {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [string]$GatewayServiceSID
+    )
+    if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
+        $adminExpected = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $false `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        if (Test-DefenseClawCanonicalRawPathAcl `
+                -Actual $Actual `
+                -Expected $adminExpected) {
+            return 'inactive_admin'
+        }
+        throw 'redaction correlation key has an unrecognized inactive ACL'
+    }
+
+    $secretExpected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $false `
+        -Kind RuntimeSecretFile `
+        -GatewayServiceSID $GatewayServiceSID
+    if (Test-DefenseClawCanonicalRawPathAcl `
+            -Actual $Actual `
+            -Expected $secretExpected) {
+        return 'runtime_secret'
+    }
+
+    # Releases before the RuntimeSecretFile contract created the key with the
+    # service as owner and exactly three FullControl ACEs. Group metadata was
+    # not standardized, so it is deliberately excluded from this one strict
+    # legacy matcher; it grants no access and is replaced during migration.
+    $protectedFlag = [int](
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    )
+    if ($null -ne $Actual.Owner -and
+        $Actual.Owner.Value -ceq $GatewayServiceSID -and
+        $null -ne $Actual.Group -and
+        (([int]$Actual.ControlFlags -band $protectedFlag) -ne 0)) {
+        $legacySecurity = New-DefenseClawLegacyRedactionKeyAcl `
+            -GatewayServiceSID $GatewayServiceSID `
+            -GroupSID $Actual.Group.Value
+        $legacy = [Security.AccessControl.RawSecurityDescriptor]::new(
+            $legacySecurity.GetSecurityDescriptorBinaryForm(),
+            0
+        )
+        $legacyIgnoredFlags = [int](
+            [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited -bor
+            [Security.AccessControl.ControlFlags]::GroupDefaulted
+        )
+        if (Test-DefenseClawExactRawDACL `
+                -Actual $Actual `
+                -Expected $legacy `
+                -IgnoredControlFlags $legacyIgnoredFlags) {
+            return 'legacy_runtime_secret'
+        }
+    }
+
+    # The repair defect in the immediately preceding builds rewrote this one
+    # fixed leaf using the exact generic RuntimeFile contract. Accept only that
+    # fully known form, then normalize it; arbitrary trusted-only ACLs remain
+    # rejected.
+    $brokenExpected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $false `
+        -Kind RuntimeFile `
+        -GatewayServiceSID $GatewayServiceSID
+    if (Test-DefenseClawCanonicalRawPathAcl `
+            -Actual $Actual `
+            -Expected $brokenExpected) {
+        return 'broken_runtime_file'
+    }
+    throw 'redaction correlation key has an unrecognized active ACL'
+}
+
+function Get-DefenseClawRedactionKeySecuritySnapshot {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [string]$GatewayServiceSID
+    )
+    $path = [IO.Path]::GetFullPath(
+        [string]$Layout.RedactionCorrelationKeyPath
+    ).TrimEnd('\')
+    $expectedPath = [IO.Path]::Combine(
+        [IO.Path]::GetFullPath(
+            [string]$Layout.RuntimeDirectory
+        ).TrimEnd('\'),
+        'redaction-correlation.key'
+    )
+    if (-not [string]::Equals(
+            $path,
+            $expectedPath,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'redaction correlation key path is outside its exact runtime location'
+    }
+    $restoreKind = if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
+        'AdminFile'
+    }
+    else {
+        'RuntimeSecretFile'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path `
+            -PathType Leaf)) {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+            throw 'redaction correlation key path is occupied by a non-file'
+        }
+        return [ordered]@{
+            schema_version = 2
+            path = $path
+            existed = $false
+            file_identity = ''
+            preimage_class = 'absent'
+            security_descriptor = ''
+            restore_kind = $restoreKind
+        }
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $captured = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+        $path,
+        [uint32]32
+    )
+    $actual = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$captured.SecurityDescriptor,
+        0
+    )
+    $preimageClass = Get-DefenseClawRedactionKeySecurityClass `
+        -Actual $actual `
+        -GatewayServiceSID $GatewayServiceSID
+    return [ordered]@{
+        schema_version = 2
+        path = $path
+        existed = $true
+        file_identity = [string]$captured.Identity
+        preimage_class = $preimageClass
+        security_descriptor = $actual.GetSddlForm(
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        restore_kind = $restoreKind
+    }
+}
+
+function Restore-DefenseClawRedactionKeySecuritySnapshot {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $path = [IO.Path]::GetFullPath(
+        [string]$Layout.RedactionCorrelationKeyPath
+    ).TrimEnd('\')
+    $priorGateway = @($Snapshot.services |
+        Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals(
+                [string]$_.name,
+                [string]$Snapshot.gateway_service,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        })
+    if ($priorGateway.Count -ne 1) {
+        throw 'pending transaction has invalid prior gateway service metadata'
+    }
+    $priorGatewayExistedProperty = $priorGateway[0].PSObject.Properties[
+        'existed'
+    ]
+    if ($null -eq $priorGatewayExistedProperty -or
+        $priorGatewayExistedProperty.Value -isnot [bool]) {
+        throw 'pending transaction has invalid prior gateway service metadata'
+    }
+    $priorGatewayExisted = [bool]$priorGateway[0].existed
+    $priorDeploymentProperty = $Snapshot.PSObject.Properties[
+        'prior_deployment_active'
+    ]
+    $priorDeploymentActive = if ($null -eq $priorDeploymentProperty) {
+        # Compatibility for older pending snapshots, which could only
+        # distinguish fresh/inactive state through service existence.
+        $priorGatewayExisted
+    }
+    elseif ($priorDeploymentProperty.Value -isnot [bool]) {
+        throw 'pending transaction has invalid prior deployment state'
+    }
+    else {
+        [bool]$priorDeploymentProperty.Value
+    }
+    if ($priorGatewayExisted -and -not $priorDeploymentActive) {
+        throw 'pending transaction has a gateway service without an active deployment'
+    }
+    $property = $Snapshot.PSObject.Properties['redaction_key_security']
+    if ($null -eq $property) {
+        # Compatibility with pending transactions written before metadata-only
+        # key snapshots. Normalize only a present fixed 32-byte leaf while the
+        # staged/prior gateway SID still resolves; no key data is opened.
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $path `
+                -PathType Leaf)) {
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+                throw 'redaction correlation key path is occupied by a non-file'
+            }
+            return
+        }
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $current = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+            $path,
+            [uint32]32
+        )
+        $currentRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$current.SecurityDescriptor,
+            0
+        )
+        $compatibilityAdmin = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $false `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        $currentIsAdmin = Test-DefenseClawCanonicalRawPathAcl `
+            -Actual $currentRaw `
+            -Expected $compatibilityAdmin
+        if (-not $priorDeploymentActive -and $currentIsAdmin) {
+            # Crash re-entry after the first rollback already produced the
+            # exact retained-admin form and removed the staged service.
+            return
+        }
+        $gatewaySID = Get-DefenseClawServiceSIDForRecovery `
+            -ServiceName ([string]$Snapshot.gateway_service)
+        if (-not $currentIsAdmin) {
+            [void](Get-DefenseClawRedactionKeySecurityClass `
+                -Actual $currentRaw `
+                -GatewayServiceSID $gatewaySID)
+        }
+        $compatibilityACL = if ($priorDeploymentActive) {
+            # A pre-metadata snapshot can restore an older gateway binary.
+            # Recreate the exact legacy contract that binary understands;
+            # successful forward repair will migrate it to RuntimeSecretFile.
+            New-DefenseClawLegacyRedactionKeyAcl `
+                -GatewayServiceSID $gatewaySID
+        }
+        else {
+            $compatibilityAdmin
+        }
+        $compatibilityResult = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+            $path,
+            $compatibilityACL.GetSecurityDescriptorSddlForm(
+                [Security.AccessControl.AccessControlSections]::All
+            ),
+            [uint32]32,
+            [string]$current.Identity
+        )
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$compatibilityResult.SecurityDescriptor,
+                0
+            )) `
+            -Expected $compatibilityACL
+        return
+    }
+
+    $recorded = $property.Value
+    $requiredProperties = @(
+        'schema_version',
+        'path',
+        'existed',
+        'file_identity',
+        'preimage_class',
+        'security_descriptor',
+        'restore_kind'
+    )
+    if ($null -eq $recorded) {
+        throw 'pending transaction has invalid redaction-key security metadata'
+    }
+    foreach ($name in $requiredProperties) {
+        if ($null -eq $recorded.PSObject.Properties[$name]) {
+            throw 'pending transaction has incomplete redaction-key security metadata'
+        }
+    }
+    if ([int]$recorded.schema_version -ne 2 -or
+        $recorded.existed -isnot [bool]) {
+        throw 'pending transaction has invalid redaction-key security metadata'
+    }
+    $recordedPath = [IO.Path]::GetFullPath(
+        [string]$recorded.path
+    ).TrimEnd('\')
+    if (-not [string]::Equals(
+            $recordedPath,
+            $path,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'pending transaction records a different redaction-key path'
+    }
+    if ($null -eq $priorDeploymentProperty) {
+        throw 'pending transaction omits prior deployment state for redaction-key metadata'
+    }
+    $expectedRestoreKind = if ($priorDeploymentActive) {
+        'RuntimeSecretFile'
+    }
+    else {
+        'AdminFile'
+    }
+    if ([string]$recorded.restore_kind -cne $expectedRestoreKind) {
+        throw 'pending transaction has an invalid redaction-key restore class'
+    }
+    if (-not [bool]$recorded.existed) {
+        if ([string]$recorded.preimage_class -cne 'absent' -or
+            -not [string]::IsNullOrEmpty([string]$recorded.file_identity) -or
+            -not [string]::IsNullOrEmpty(
+                [string]$recorded.security_descriptor
+            )) {
+            throw 'absent redaction-key preimage unexpectedly contains metadata'
+        }
+    }
+    elseif ([string]$recorded.file_identity -cnotmatch
+            '^[0-9a-f]{8}:[0-9a-f]{16}$' -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$recorded.security_descriptor
+        )) {
+        throw 'pending transaction has malformed redaction-key security metadata'
+    }
+
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path `
+            -PathType Leaf)) {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) {
+            throw 'redaction correlation key path is occupied by a non-file'
+        }
+        if ([bool]$recorded.existed) {
+            throw 'redaction correlation key disappeared during lifecycle rollback'
+        }
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $current = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+        $path,
+        [uint32]32
+    )
+    $currentRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$current.SecurityDescriptor,
+        0
+    )
+    $adminExpected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $false `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    $currentIsAdmin = Test-DefenseClawCanonicalRawPathAcl `
+        -Actual $currentRaw `
+        -Expected $adminExpected
+
+    if (-not [bool]$recorded.existed) {
+        if (-not $priorDeploymentActive -and $currentIsAdmin) {
+            # Crash re-entry after the first rollback already retained the key
+            # safely. Runtime/audit state is intentionally retained too, so
+            # deleting this key would destroy correlation continuity.
+            return
+        }
+        $gatewaySID = Get-DefenseClawServiceSIDForRecovery `
+            -ServiceName ([string]$Snapshot.gateway_service)
+        $currentClass = if ($currentIsAdmin) {
+            'inactive_admin'
+        }
+        else {
+            Get-DefenseClawRedactionKeySecurityClass `
+                -Actual $currentRaw `
+                -GatewayServiceSID $gatewaySID
+        }
+        $allowedCurrentClasses = if ($priorDeploymentActive) {
+            @('runtime_secret', 'legacy_runtime_secret')
+        }
+        else {
+            @('runtime_secret')
+        }
+        if ([string]$currentClass -notin $allowedCurrentClasses) {
+            throw 'transaction-created redaction key is not in its exact canonical form'
+        }
+        $retainedExpected = if ($priorDeploymentActive) {
+            # A rollback may reactivate an older gateway binary, so retain the
+            # new key in the strict legacy service-readable form it supports.
+            New-DefenseClawLegacyRedactionKeyAcl `
+                -GatewayServiceSID $gatewaySID
+        }
+        else {
+            $adminExpected
+        }
+        $retained = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+            $path,
+            $retainedExpected.GetSecurityDescriptorSddlForm(
+                [Security.AccessControl.AccessControlSections]::All
+            ),
+            [uint32]32,
+            [string]$current.Identity
+        )
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$retained.SecurityDescriptor,
+                0
+            )) `
+            -Expected $retainedExpected
+        return
+    }
+
+    if ([string]$current.Identity -cne [string]$recorded.file_identity) {
+        throw 'redaction correlation key identity changed during lifecycle transaction'
+    }
+    try {
+        $recordedRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [string]$recorded.security_descriptor
+        )
+    }
+    catch {
+        throw 'pending transaction has an invalid redaction-key security descriptor'
+    }
+    $gatewaySID = ''
+    if ($priorDeploymentActive -or -not $currentIsAdmin) {
+        $gatewaySID = Get-DefenseClawServiceSIDForRecovery `
+            -ServiceName ([string]$Snapshot.gateway_service)
+    }
+    if (-not $currentIsAdmin) {
+        [void](Get-DefenseClawRedactionKeySecurityClass `
+            -Actual $currentRaw `
+            -GatewayServiceSID $gatewaySID)
+    }
+    $recordedClass = if ($priorDeploymentActive) {
+        Get-DefenseClawRedactionKeySecurityClass `
+            -Actual $recordedRaw `
+            -GatewayServiceSID $gatewaySID
+    }
+    else {
+        Get-DefenseClawRedactionKeySecurityClass -Actual $recordedRaw
+    }
+    if ([string]$recordedClass -cne [string]$recorded.preimage_class) {
+        throw 'pending transaction redaction-key preimage class does not match its descriptor'
+    }
+
+    # Existing-key rollback restores the exact authenticated descriptor, not
+    # merely an equivalent modern form. The one exception is the proven broken
+    # BA-owned RuntimeFile form: neither loader can restart with it, so restore
+    # the exact older three-ACE service-owned compatibility contract.
+    $expected = if ([string]$recordedClass -ceq 'broken_runtime_file') {
+        New-DefenseClawLegacyRedactionKeyAcl `
+            -GatewayServiceSID $gatewaySID
+    }
+    else {
+        $recordedSecurity = [Security.AccessControl.FileSecurity]::new()
+        $recordedSecurity.SetSecurityDescriptorSddlForm(
+            [string]$recorded.security_descriptor,
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        $recordedSecurity
+    }
+    $restoreSDDL = $expected.GetSecurityDescriptorSddlForm(
+        [Security.AccessControl.AccessControlSections]::All
+    )
+    $restored = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+        $path,
+        $restoreSDDL,
+        [uint32]32,
+        [string]$recorded.file_identity
+    )
+    Assert-DefenseClawCanonicalRawPathAcl `
+        -Path $path `
+        -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$restored.SecurityDescriptor,
+            0
+        )) `
+        -Expected $expected
+}
+
 function Set-DefenseClawManagedCoreAcls {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -3659,6 +5242,12 @@ function Set-DefenseClawManagedServicesForTransaction {
     Set-DefenseClawManagedServices `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
+        -BrokerServiceName $Layout.BrokerServiceName `
+        -BrokerPath $Layout.BrokerPath `
+        -BrokerPipeName $Layout.BrokerPipeName `
+        -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
+        -ProviderLibraryPath $Layout.ProviderLibraryPath `
+        -BrokerLogPath $Layout.BrokerLogPath `
         -GatewayPath $Layout.GatewayPath `
         -ManifestPath $Layout.ManifestPath `
         -RuntimeDirectory $Layout.RuntimeDirectory `
@@ -3669,6 +5258,13 @@ function Set-DefenseClawManagedServicesForTransaction {
         -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
         -DeferAutomaticStart
+    Initialize-DefenseClawManagedIPCDirectory `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
+    Set-DefenseClawRetainedRuntimeAcls `
+        -RuntimeDirectory $Layout.RuntimeDirectory `
+        -GatewayServiceSID (Get-DefenseClawServiceSID `
+            -ServiceName $GatewayServiceName)
     Set-DefenseClawManagedCoreAcls `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
@@ -3771,10 +5367,19 @@ function Get-DefenseClawLayout {
     $libexec = Microsoft.PowerShell.Management\Join-Path $InstallRoot 'libexec'
     $configDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'etc'
     $guardianDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian'
+    $brokerStateDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'cmid-broker'
     $installState = Microsoft.PowerShell.Management\Join-Path $StateRoot 'install'
     $logDirectory = Microsoft.PowerShell.Management\Join-Path $StateRoot 'logs'
     $gatewayLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'gateway'
+    $brokerLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'cmid-broker'
     $guardianLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'guardian'
+    $managedIPCDirectory = [IO.Path]::Combine(
+        $script:ProgramData,
+        'Cisco',
+        'Cisco Secure Client',
+        'DefenseClaw',
+        'ipc'
+    )
     $lifecycleLockDirectory = Microsoft.PowerShell.Management\Join-Path `
         $script:ProgramData `
         'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle'
@@ -3818,6 +5423,9 @@ function Get-DefenseClawLayout {
     )
     $codexVendorDirectory = Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'OpenAI'
     $codexMachinePolicyDirectory = Microsoft.PowerShell.Management\Join-Path $codexVendorDirectory 'Codex'
+    $runtimeDirectory = Microsoft.PowerShell.Management\Join-Path `
+        $StateRoot `
+        'runtime'
     return @{
         InstallRoot = $InstallRoot
         StateRoot = $StateRoot
@@ -3827,17 +5435,32 @@ function Get-DefenseClawLayout {
         BinDirectory = $bin
         LibexecDirectory = $libexec
         ConfigDirectory = $configDirectory
-        RuntimeDirectory = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'runtime')
+        RuntimeDirectory = $runtimeDirectory
+        RedactionCorrelationKeyPath = (
+            Microsoft.PowerShell.Management\Join-Path `
+                $runtimeDirectory `
+                'redaction-correlation.key'
+        )
+        ManagedIPCDirectory = $managedIPCDirectory
+        ManagedIPCSocketPath = (Microsoft.PowerShell.Management\Join-Path $managedIPCDirectory 'defenseclaw_ipc.sock')
+        BrokerStateDirectory = $brokerStateDirectory
+        BrokerAuthKeyPath = (Microsoft.PowerShell.Management\Join-Path $brokerStateDirectory 'broker-auth.key')
         GuardianDirectory = $guardianDirectory
         AuthorizationDirectory = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian-state')
         AuthorizationLedgerPath = (Microsoft.PowerShell.Management\Join-Path $StateRoot 'hook-guardian-state\protected_targets.json')
         LogDirectory = $logDirectory
         GatewayLogDirectory = $gatewayLogDirectory
+        BrokerLogDirectory = $brokerLogDirectory
         GuardianLogDirectory = $guardianLogDirectory
         GatewayLogPath = (Microsoft.PowerShell.Management\Join-Path $gatewayLogDirectory 'gateway.log')
+        BrokerLogPath = (Microsoft.PowerShell.Management\Join-Path $brokerLogDirectory 'cmid-broker.log')
         GuardianLogPath = (Microsoft.PowerShell.Management\Join-Path $guardianLogDirectory 'hook-guardian.log')
         InstallStateDirectory = $installState
         GatewayPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-gateway.exe')
+        BrokerPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-cmid-broker.exe')
+        BrokerServiceName = (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)
+        BrokerPipeName = ('\\.\pipe\{0}' -f (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName))
+        ProviderLibraryPath = ''
         HookPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe')
         CLIPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw.exe')
         ConfigPath = (Microsoft.PowerShell.Management\Join-Path $configDirectory 'config.yaml')
@@ -3881,6 +5504,7 @@ function Get-DefenseClawLayout {
         ClaudeEffectivePolicyVerified = $false
         ClaudeTargetEnabled = $false
         CodexTargetEnabled = $false
+        CursorTargetEnabled = $false
         CertificationCodexHome = [string]$CertificationCodexHome
     }
 }
@@ -3939,10 +5563,12 @@ function New-DefenseClawLayoutDirectories {
         $Layout.StateRoot,
         $Layout.ConfigDirectory,
         $Layout.RuntimeDirectory,
+        $Layout.BrokerStateDirectory,
         $Layout.GuardianDirectory,
         $Layout.AuthorizationDirectory,
         $Layout.LogDirectory,
         $Layout.GatewayLogDirectory,
+        $Layout.BrokerLogDirectory,
         $Layout.GuardianLogDirectory,
         $Layout.InstallStateDirectory,
         $Layout.TransactionsDirectory
@@ -4058,7 +5684,11 @@ function Get-DefenseClawDeploymentMetadata {
         }
         $Layout.CoreHardeningCertification = $recordedCoreCertification
     }
-    foreach ($targetName in @('claude_target_enabled', 'codex_target_enabled')) {
+    foreach ($targetName in @(
+        'claude_target_enabled',
+        'codex_target_enabled',
+        'cursor_target_enabled'
+    )) {
         $targetProperty = $metadata.PSObject.Properties[$targetName]
         if ($null -eq $targetProperty) {
             continue
@@ -4069,13 +5699,23 @@ function Get-DefenseClawDeploymentMetadata {
         if ($targetName -eq 'claude_target_enabled') {
             $Layout.ClaudeTargetEnabled = [bool]$targetProperty.Value
         }
-        else {
+        elseif ($targetName -eq 'codex_target_enabled') {
             $Layout.CodexTargetEnabled = [bool]$targetProperty.Value
+        }
+        else {
+            $Layout.CursorTargetEnabled = [bool]$targetProperty.Value
         }
     }
     if ([bool]$Layout.CoreHardeningCertification -and
-        [bool]$Layout.CodexTargetEnabled) {
-        throw 'core-hardening certification metadata cannot enable the Codex target'
+        ([bool]$Layout.CodexTargetEnabled -or
+            [bool]$Layout.CursorTargetEnabled)) {
+        throw 'core-hardening certification metadata cannot enable Codex or Cursor targets'
+    }
+    $providerLibraryProperty = $metadata.PSObject.Properties['provider_library_path']
+    if ($null -ne $providerLibraryProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$providerLibraryProperty.Value)) {
+        $Layout.ProviderLibraryPath = Resolve-DefenseClawFullPath `
+            -Path ([string]$providerLibraryProperty.Value)
     }
     return $metadata
 }
@@ -4089,6 +5729,7 @@ function New-DefenseClawDeploymentMetadata {
     )
     $hashes = [ordered]@{}
     foreach ($entry in @(
+        @('broker', $Layout.BrokerPath),
         @('gateway', $Layout.GatewayPath),
         @('hook', $Layout.HookPath),
         @('cli', $Layout.CLIPath),
@@ -4146,6 +5787,11 @@ function New-DefenseClawDeploymentMetadata {
         guardian_service = $GuardianServiceName
         gateway_account = "NT SERVICE\$GatewayServiceName"
         guardian_account = 'LocalSystem'
+        broker_service = $Layout.BrokerServiceName
+        broker_account = 'LocalSystem'
+        broker_pipe = $Layout.BrokerPipeName
+        broker_auth_key_path = $Layout.BrokerAuthKeyPath
+        provider_library_path = $Layout.ProviderLibraryPath
         codex_machine_policy_parent = $Layout.CodexMachinePolicyDirectory
         codex_machine_policy_parent_preserved_on_uninstall = $true
         codex_machine_policy_path = $Layout.CodexMachinePolicyPath
@@ -4169,6 +5815,9 @@ function New-DefenseClawDeploymentMetadata {
         claude_target_enabled = [bool](
             $Installed -and $Layout.ClaudeTargetEnabled
         )
+        cursor_target_enabled = [bool](
+            $Installed -and $Layout.CursorTargetEnabled
+        )
         claude_approved_client_enforced = [bool](
             $Installed -and $Layout.AgentApplicationControlAttested
         )
@@ -4186,14 +5835,16 @@ function New-DefenseClawDeploymentMetadata {
         external_security_prerequisites_satisfied = [bool](
             $Installed -and
             ($Layout.ClaudeTargetEnabled -or
-                $Layout.CodexTargetEnabled) -and
+                $Layout.CodexTargetEnabled -or
+                $Layout.CursorTargetEnabled) -and
             (-not $Layout.ClaudeTargetEnabled -or
                 $Layout.ClaudeEffectivePolicyVerified)
         )
         security_complete = [bool](
             $Installed -and
             ($Layout.ClaudeTargetEnabled -or
-                $Layout.CodexTargetEnabled) -and
+                $Layout.CodexTargetEnabled -or
+                $Layout.CursorTargetEnabled) -and
             (-not $Layout.ClaudeTargetEnabled -or
                 $Layout.ClaudeEffectivePolicyVerified)
         )
@@ -4217,6 +5868,92 @@ function Test-DefenseClawMetadataInstalled {
     return [bool]$Metadata.installed
 }
 
+function Remove-DefenseClawInactiveDeploymentMetadataForInstall {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][string]$SnapshotPath
+    )
+    if (Test-DefenseClawMetadataInstalled -Metadata $Metadata) {
+        throw 'refusing to adopt active deployment metadata during Install'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.MetadataPath `
+            -PathType Leaf)) {
+        throw 'inactive deployment metadata disappeared before transactional adoption'
+    }
+    Assert-DefenseClawNoReparsePath -Path $Layout.MetadataPath
+    Assert-DefenseClawDescendant `
+        -Path $SnapshotPath `
+        -Root $Layout.StateRoot `
+        -Label 'inactive-metadata adoption snapshot' |
+        Microsoft.PowerShell.Core\Out-Null
+    Assert-DefenseClawNoReparsePath -Path $SnapshotPath
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $metadataPath = [IO.Path]::GetFullPath(
+        [string]$Layout.MetadataPath
+    ).TrimEnd('\')
+    $metadataEntries = @(
+        @($snapshot.files) |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [IO.Path]::GetFullPath([string]$_.path).TrimEnd('\'),
+                    $metadataPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($metadataEntries.Count -ne 1) {
+        throw 'transaction snapshot does not contain exactly one inactive metadata preimage'
+    }
+    $entry = $metadataEntries[0]
+    $existedProperty = $entry.PSObject.Properties['existed']
+    $backupProperty = $entry.PSObject.Properties['backup']
+    if ($null -eq $existedProperty -or
+        $existedProperty.Value -isnot [bool] -or
+        -not [bool]$existedProperty.Value -or
+        $null -eq $backupProperty -or
+        [string]::IsNullOrWhiteSpace([string]$backupProperty.Value)) {
+        throw 'transaction snapshot did not preserve the inactive metadata preimage'
+    }
+    $backupPath = Assert-DefenseClawDescendant `
+        -Path ([string]$backupProperty.Value) `
+        -Root ([IO.Path]::GetDirectoryName($SnapshotPath)) `
+        -Label 'inactive metadata transaction preimage'
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $backupPath `
+            -PathType Leaf)) {
+        throw 'inactive metadata transaction preimage is missing'
+    }
+    Assert-DefenseClawNoReparsePath -Path $backupPath
+    $currentHash = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.MetadataPath `
+            -Algorithm SHA256
+    ).Hash
+    $backupHash = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $backupPath `
+            -Algorithm SHA256
+    ).Hash
+    if (-not [string]::Equals(
+            $currentHash,
+            $backupHash,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'inactive deployment metadata changed after its transaction snapshot'
+    }
+    Microsoft.PowerShell.Management\Remove-Item `
+        -LiteralPath $Layout.MetadataPath `
+        -Force
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.MetadataPath) {
+        throw 'inactive deployment metadata remained after transactional adoption'
+    }
+}
+
 function Assert-DefenseClawMetadataIdentity {
     param(
         [Parameter(Mandatory)]$Metadata,
@@ -4236,6 +5973,15 @@ function Assert-DefenseClawMetadataIdentity {
         [StringComparison]::OrdinalIgnoreCase
     )) {
         throw "deployment metadata belongs to guardian service $($Metadata.guardian_service), not $GuardianServiceName"
+    }
+    $brokerProperty = $Metadata.PSObject.Properties['broker_service']
+    if ($null -ne $brokerProperty -and
+        -not [string]::Equals(
+            [string]$brokerProperty.Value,
+            (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'deployment metadata belongs to a different credential broker service'
     }
 }
 
@@ -4286,6 +6032,50 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
     }
 }
 
+function Assert-DefenseClawCMIDBrokerServiceOrAbsent {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$ExpectedImage,
+        [switch]$AllowArgumentUpgrade
+    )
+    if (-not (Test-DefenseClawServiceExists -Name $Name)) {
+        return
+    }
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $image = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+        -LiteralPath $key `
+        -Name ImagePath)
+    $ownedImage = [string]::Equals(
+            $image,
+            $ExpectedImage,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    if (-not $ownedImage -and $AllowArgumentUpgrade) {
+        $closingQuote = $ExpectedImage.IndexOf('"', 1)
+        if ($ExpectedImage.Length -gt 2 -and $ExpectedImage[0] -eq '"' -and
+            $closingQuote -gt 1) {
+            $expectedPrefix = $ExpectedImage.Substring(0, $closingQuote + 1) + ' service '
+            $ownedImage = $image.StartsWith(
+                $expectedPrefix,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        }
+    }
+    if (-not $ownedImage) {
+        throw "refusing to replace foreign credential broker service $Name with ImagePath $image"
+    }
+    $account = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+        -LiteralPath $key `
+        -Name ObjectName)
+    if (-not [string]::Equals(
+            $account,
+            'LocalSystem',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "refusing to replace credential broker service $Name owned by unexpected account $account"
+    }
+}
+
 function Assert-DefenseClawServiceImagePath {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -4316,6 +6106,7 @@ function New-DefenseClawTransaction {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$PriorDeploymentActive,
         [switch]$IncludeCodexMachineState,
         [switch]$ManagedHooksTeardownPrepared,
         [switch]$PreserveManagedHooksTeardownJournal
@@ -4339,8 +6130,9 @@ function New-DefenseClawTransaction {
     # via the same helper Set-DefenseClawManagedServices uses so a
     # certification-run cross-check is enforced.
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
     $services = [Collections.Generic.List[object]]::new()
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
+    foreach ($name in @($BrokerServiceName, $GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         $service = Microsoft.PowerShell.Management\Get-Service `
             -Name $name `
             -ErrorAction SilentlyContinue
@@ -4377,12 +6169,14 @@ function New-DefenseClawTransaction {
             state_root = $Layout.StateRoot
             gateway_service = $GatewayServiceName
             guardian_service = $GuardianServiceName
+            provider_library_path = [string]$Layout.ProviderLibraryPath
             services = $services
             service_activation_phase = 'quiesced'
             certification_codex_home = [string]$Layout.CertificationCodexHome
             core_hardening_certification = [bool](
                 $Layout.CoreHardeningCertification
             )
+            prior_deployment_active = [bool]$PriorDeploymentActive
             created_at = [DateTime]::UtcNow.ToString('o')
         }
         Write-DefenseClawJsonAtomic `
@@ -4398,7 +6192,7 @@ function New-DefenseClawTransaction {
         # so its final cycle (already in flight) can complete and drop
         # a coherent targets.yaml before the transaction reads it as
         # a preimage.
-        foreach ($name in @($GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
+        foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName, $enumeratorServiceName)) {
             $service = $services |
                 Microsoft.PowerShell.Core\Where-Object {
                     [string]::Equals(
@@ -4421,6 +6215,7 @@ function New-DefenseClawTransaction {
         Stop-DefenseClawService -Name $enumeratorServiceName
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
+        Stop-DefenseClawService -Name $brokerServiceName
         $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
         $quiescingIntent['services_disabled_and_stopped_at'] =
             $servicesQuiescedAt
@@ -4430,9 +6225,35 @@ function New-DefenseClawTransaction {
             -Value $quiescingIntent `
             -Path $Layout.PendingPath
 
+        $gatewayServiceEntry = $services |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$_.name,
+                    $GatewayServiceName,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            } |
+            Microsoft.PowerShell.Utility\Select-Object -First 1
+        $redactionKeyGatewaySID = if ($null -ne $gatewayServiceEntry -and
+            [bool]$gatewayServiceEntry.existed) {
+            Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+        }
+        elseif ($PriorDeploymentActive) {
+            Get-DefenseClawDeterministicServiceSID `
+                -ServiceName $GatewayServiceName
+        }
+        else {
+            ''
+        }
+        $redactionKeySecurity =
+            Get-DefenseClawRedactionKeySecuritySnapshot `
+                -Layout $Layout `
+                -GatewayServiceSID $redactionKeyGatewaySID
+
         $files = [Collections.Generic.List[object]]::new()
     $destinations = [Collections.Generic.List[string]]::new()
     foreach ($destination in @(
+        $Layout.BrokerPath,
         $Layout.GatewayPath,
         $Layout.HookPath,
         $Layout.CLIPath,
@@ -4440,6 +6261,7 @@ function New-DefenseClawTransaction {
         $Layout.ManifestPath,
         $Layout.InstallerPath,
         $Layout.ModulePath,
+        $Layout.BrokerAuthKeyPath,
         $Layout.MetadataPath,
         $Layout.AgentApplicationControlAttestationPath
     )) {
@@ -4543,10 +6365,12 @@ function New-DefenseClawTransaction {
         state_root = $Layout.StateRoot
         gateway_service = $GatewayServiceName
         guardian_service = $GuardianServiceName
+        provider_library_path = [string]$Layout.ProviderLibraryPath
         service_activation_phase = 'quiesced'
         services_disabled_and_stopped_at = $servicesQuiescedAt
         certification_codex_home = [string]$Layout.CertificationCodexHome
         core_hardening_certification = [bool]$Layout.CoreHardeningCertification
+        prior_deployment_active = [bool]$PriorDeploymentActive
         agent_application_control_attested = [bool]$priorApplicationControlAttested
         claude_effective_policy_verified = [bool]$priorClaudeEffectivePolicyVerified
         codex_machine_state_included = [bool]$IncludeCodexMachineState
@@ -4560,6 +6384,7 @@ function New-DefenseClawTransaction {
         managed_hooks_teardown_journal_preimage_sha256 = [string](
             $teardownJournalPreimageSHA256
         )
+        redaction_key_security = $redactionKeySecurity
         files = $files
         services = $services
         created_shared_directories = @()
@@ -4608,7 +6433,9 @@ function New-DefenseClawTransaction {
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
                     $GatewayServiceName,
-                    $GuardianServiceName
+                    $brokerServiceName,
+                    $GuardianServiceName,
+                    $enumeratorServiceName
                 )) {
                     $service = $services |
                         Microsoft.PowerShell.Core\Where-Object {
@@ -4627,6 +6454,7 @@ function New-DefenseClawTransaction {
                 }
                 Stop-DefenseClawService -Name $GuardianServiceName
                 Stop-DefenseClawService -Name $GatewayServiceName
+                Stop-DefenseClawService -Name $brokerServiceName
                 $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
                 Set-DefenseClawServiceActivationPhase `
                     -State $quiescingIntent `
@@ -5552,6 +7380,14 @@ function Restore-DefenseClawTransaction {
     $Layout.CoreHardeningCertification = [bool](
         $snapshotCoreCertificationProperty.Value
     )
+    $snapshotProviderProperty = $snapshot.PSObject.Properties['provider_library_path']
+    if ($null -ne $snapshotProviderProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$snapshotProviderProperty.Value)) {
+        $Layout.ProviderLibraryPath = Resolve-DefenseClawFullPath `
+            -Path ([string]$snapshotProviderProperty.Value) `
+            -MustExist `
+            -Leaf
+    }
     Assert-DefenseClawServiceName -Name ([string]$snapshot.gateway_service)
     Assert-DefenseClawServiceName -Name ([string]$snapshot.guardian_service)
     if ([string]::Equals(
@@ -5569,19 +7405,33 @@ function Restore-DefenseClawTransaction {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
+    if (-not [string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
+        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+            -Name $Layout.BrokerServiceName `
+            -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                -Layout $Layout `
+                -GatewayServiceName ([string]$snapshot.gateway_service))
+    }
     # A retained snapshot may be recovered after a reboot or after the final
     # validated activation step. Disable every live owned service before the
     # first stop or file restore. Besides preventing boot activation, disabled
     # start makes any already queued SCM failure restart fail closed.
     foreach ($name in @(
         [string]$snapshot.gateway_service,
-        [string]$snapshot.guardian_service
+        [string]$Layout.BrokerServiceName,
+        [string]$snapshot.guardian_service,
+        (Get-DefenseClawEnumeratorServiceName -GuardianServiceName ([string]$snapshot.guardian_service))
     )) {
         if (Test-DefenseClawServiceExists -Name $name) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
     }
-    foreach ($name in @([string]$snapshot.guardian_service, [string]$snapshot.gateway_service)) {
+    foreach ($name in @(
+        (Get-DefenseClawEnumeratorServiceName -GuardianServiceName ([string]$snapshot.guardian_service)),
+        [string]$snapshot.guardian_service,
+        [string]$snapshot.gateway_service,
+        [string]$Layout.BrokerServiceName
+    )) {
         if (-not [string]::IsNullOrWhiteSpace($name)) {
             Stop-DefenseClawService -Name $name
         }
@@ -5707,6 +7557,12 @@ function Restore-DefenseClawTransaction {
         Set-DefenseClawManagedServices `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
             -GuardianServiceName ([string]$snapshot.guardian_service) `
+            -BrokerServiceName $Layout.BrokerServiceName `
+            -BrokerPath $Layout.BrokerPath `
+            -BrokerPipeName $Layout.BrokerPipeName `
+            -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
+            -ProviderLibraryPath $Layout.ProviderLibraryPath `
+            -BrokerLogPath $Layout.BrokerLogPath `
             -GatewayPath $Layout.GatewayPath `
             -ManifestPath $Layout.ManifestPath `
             -RuntimeDirectory $Layout.RuntimeDirectory `
@@ -5719,6 +7575,13 @@ function Restore-DefenseClawTransaction {
             -DeferAutomaticStart
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName ([string]$snapshot.gateway_service)
     }
+    # The fixed 32-byte correlation key is intentionally excluded from the
+    # generic file-copy snapshot. Restore only its authenticated metadata on
+    # the same inode while the staged/prior gateway service SID still resolves
+    # and before any service can be removed or restarted.
+    Restore-DefenseClawRedactionKeySecuritySnapshot `
+        -Snapshot $snapshot `
+        -Layout $Layout
     # An NT SERVICE principal stops resolving once its service is deleted.
     $rolledBackGatewaySID = ''
     foreach ($service in $snapshot.services) {
@@ -5790,8 +7653,10 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         # and any transaction-created services were already removed above.
         return $false
     }
-    if ($existing.Count -ne 2) {
-        throw 'refusing to reactivate a partially restored managed service pair'
+    $gatewayState = $states[[string]$Snapshot.gateway_service]
+    $guardianState = $states[[string]$Snapshot.guardian_service]
+    if (-not [bool]$gatewayState.existed -or -not [bool]$guardianState.existed) {
+        throw 'refusing to reactivate a partially restored managed service set'
     }
     Assert-DefenseClawEnterpriseDeployment `
         -Layout $Layout `
@@ -5818,12 +7683,13 @@ function Start-DefenseClawTransactionServices {
     # action cannot race recovery. Running+disabled is a valid pre-repair
     # snapshot, so services that must run are temporarily demand-started,
     # started guardian-first, and only then returned to exact recorded modes.
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName)) {
         if ([bool]$states[$name].existed) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
     }
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName)) {
+    foreach ($name in @($GuardianServiceName, $GatewayServiceName, $brokerServiceName)) {
         if ([bool]$states[$name].existed) {
             Stop-DefenseClawService -Name $name
         }
@@ -5840,6 +7706,7 @@ function Start-DefenseClawTransactionServices {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
     $gateway = $states[$GatewayServiceName]
+    $broker = $states[$brokerServiceName]
     $guardian = $states[$GuardianServiceName]
     $gatewayNeedsProtection = (
         [bool]$gateway.existed -and (
@@ -5849,6 +7716,17 @@ function Start-DefenseClawTransactionServices {
     )
     if ($gatewayNeedsProtection -and -not [bool]$guardian.existed) {
         throw 'refusing to reactivate gateway without its recorded guardian service'
+    }
+    if ($gatewayNeedsProtection -and [bool]$broker.existed -and
+        -not ([bool]$broker.running -or [int]$broker.start_mode -eq 2)) {
+        throw 'refusing to reactivate a broker-backed gateway without its recorded credential broker'
+    }
+    $brokerTemporarilyRequired = [bool]$broker.existed -and (
+        [bool]$broker.running -or $gatewayNeedsProtection
+    )
+    if ($brokerTemporarilyRequired) {
+        Set-DefenseClawServiceStartMode -Name $brokerServiceName -StartMode 3
+        Start-DefenseClawService -Name $brokerServiceName
     }
     $guardianTemporarilyRequired = (
         [bool]$guardian.running -or $gatewayNeedsProtection
@@ -6211,6 +8089,14 @@ function Recover-DefenseClawQuiescingIntent {
             throw "pending lifecycle quiescing intent does not match $($binding[0])"
         }
     }
+    $providerProperty = $Intent.PSObject.Properties['provider_library_path']
+    if ($null -ne $providerProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$providerProperty.Value)) {
+        $Layout.ProviderLibraryPath = Resolve-DefenseClawFullPath `
+            -Path ([string]$providerProperty.Value) `
+            -MustExist `
+            -Leaf
+    }
     $certificationProperty = $Intent.PSObject.Properties[
         'certification_codex_home'
     ]
@@ -6278,9 +8164,11 @@ function Recover-DefenseClawQuiescingIntent {
         -Label 'quiescing transaction directory')
 
     $services = @($Intent.services)
-    if ($services.Count -ne 2) {
-        throw 'pending lifecycle quiescing intent must record exactly two services'
+    if ($services.Count -lt 2 -or $services.Count -gt 4) {
+        throw 'pending lifecycle quiescing intent has an invalid managed service count'
     }
+    $brokerServiceName = Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     $serviceState = @{}
     foreach ($service in $services) {
         $nameProperty = $service.PSObject.Properties['name']
@@ -6294,7 +8182,12 @@ function Recover-DefenseClawQuiescingIntent {
             throw 'pending lifecycle quiescing intent has invalid service state'
         }
         $name = [string]$nameProperty.Value
-        if ($name -notin @($GatewayServiceName, $GuardianServiceName) -or
+        if ($name -notin @(
+                $GatewayServiceName,
+                $brokerServiceName,
+                $GuardianServiceName,
+                $enumeratorServiceName
+            ) -or
             $serviceState.ContainsKey($name)) {
             throw 'pending lifecycle quiescing intent contains an unexpected or duplicate service'
         }
@@ -6320,15 +8213,28 @@ function Recover-DefenseClawQuiescingIntent {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
+    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+        -Name $Layout.BrokerServiceName `
+        -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName) `
+        -AllowArgumentUpgrade
+    if ($serviceState.ContainsKey($brokerServiceName)) {
+        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+            -Name $brokerServiceName `
+            -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName)
+    }
     # A process/reboot recovery never trusts elapsed wall time from the prior
     # process. Reestablish both disabled+stopped, publish a fresh durable
     # quiescence point, and drain the complete failure-action window.
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName, $enumeratorServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             Set-DefenseClawServiceStartMode -Name $name -StartMode 4
         }
     }
-    foreach ($name in @($GuardianServiceName, $GatewayServiceName)) {
+    foreach ($name in @($enumeratorServiceName, $GuardianServiceName, $GatewayServiceName, $brokerServiceName)) {
         Stop-DefenseClawService -Name $name
     }
     $recoveryQuiescedAt = [DateTime]::UtcNow.ToString('o')
@@ -6604,6 +8510,7 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             'claude_target_enabled',
             'claude_effective_policy_verified',
             'codex_target_enabled',
+            'cursor_target_enabled',
             'security_complete'
         )) {
             $property = $report.PSObject.Properties[$booleanName]
@@ -6626,7 +8533,8 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         }
         $expectedSecurityComplete = [bool](
             ([bool]$report.claude_target_enabled -or
-                [bool]$report.codex_target_enabled) -and
+                [bool]$report.codex_target_enabled -or
+                [bool]$report.cursor_target_enabled) -and
             (-not [bool]$report.claude_target_enabled -or
                 [bool]$Layout.ClaudeEffectivePolicyVerified)
         )
@@ -6635,6 +8543,7 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         }
         $Layout.ClaudeTargetEnabled = [bool]$report.claude_target_enabled
         $Layout.CodexTargetEnabled = [bool]$report.codex_target_enabled
+        $Layout.CursorTargetEnabled = [bool]$report.cursor_target_enabled
         if ([bool]$Layout.CodexTargetEnabled) {
             if ($Action -in @('reconcile', 'verify')) {
                 if (@($report.managed_events).Count -ne 10) {
@@ -6847,7 +8756,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         throw "managed-hook teardown command emitted $($reports.Count) JSON reports; expected exactly one"
     }
     $report = $reports[0]
-    if ([int]$report.schema_version -ne 2) {
+    if ([int]$report.schema_version -ne 3) {
         throw "unsupported managed-hook teardown report schema: $($report.schema_version)"
     }
     if ([string]$report.action -cne $Action) {
@@ -6895,6 +8804,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         'enrollment_target_count',
         'succeeded_count',
         'verified_clean_count',
+        'verified_installed_count',
         'failed_count',
         'surviving_owned_path_references'
     )) {
@@ -6974,8 +8884,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
             $rollbackCompleted.Value -isnot [bool] -or
             -not [bool]$rollbackCompleted.Value -or
             $null -eq $verifiedInstalled -or
-            $verifiedInstalled.Value -is [bool] -or
-            [Convert]::ToInt64($verifiedInstalled.Value) -ne
+            [int64]$counts.verified_installed_count -ne
                 $counts.enrollment_target_count) {
             throw 'managed-hook teardown rollback did not restore and verify the exact pre-teardown enrollment'
         }
@@ -7051,7 +8960,7 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         throw "managed-hook lifecycle snapshot emitted $($reports.Count) JSON reports; expected exactly one"
     }
     $report = $reports[0]
-    if ([int]$report.schema_version -ne 1) {
+    if ([int]$report.schema_version -ne 2) {
         throw "unsupported managed-hook lifecycle snapshot schema: $($report.schema_version)"
     }
     if ([string]$report.action -cne $Action) {
@@ -7164,10 +9073,16 @@ function Wait-DefenseClawEnterpriseReadiness {
         [int]$TimeoutSeconds = 90
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $brokerReady = $false
     $gatewayReady = $false
     $guardianReady = $false
     do {
-        $gatewayReady = Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName
+        $broker = Microsoft.PowerShell.Management\Get-Service `
+            -Name $Layout.BrokerServiceName `
+            -ErrorAction SilentlyContinue
+        $brokerReady = $null -ne $broker -and
+            $broker.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        $gatewayReady = $brokerReady -and (Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName)
         if ($gatewayReady) {
             $guardianReady = Test-DefenseClawGuardianReady `
                 -Layout $Layout `
@@ -7179,7 +9094,19 @@ function Wait-DefenseClawEnterpriseReadiness {
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "enterprise readiness timed out: gateway_ready=$gatewayReady guardian_ready=$guardianReady"
+    throw "enterprise readiness timed out: broker_ready=$brokerReady gateway_ready=$gatewayReady guardian_ready=$guardianReady"
+}
+
+function Get-DefenseClawOptionalPropertyValues {
+    param(
+        [Parameter(Mandatory)][object]$Properties,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $property = $Properties.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return
+    }
+    return @($property.Value)
 }
 
 function Assert-DefenseClawServiceConfiguration {
@@ -7190,7 +9117,8 @@ function Assert-DefenseClawServiceConfiguration {
         [Parameter(Mandatory)][string]$ExpectedDisplayName,
         [Parameter(Mandatory)][int]$ExpectedSidType,
         [Parameter(Mandatory)][string[]]$ExpectedPrivileges,
-        [Parameter(Mandatory)][string[]]$ExpectedEnvironment,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ExpectedEnvironment,
+        [string[]]$ExpectedDependencies = @(),
         [ValidateSet(2, 3, 4)]
         [int[]]$ExpectedStartMode = @(2)
     )
@@ -7223,12 +9151,24 @@ function Assert-DefenseClawServiceConfiguration {
     if ([int]$properties.DelayedAutoStart -ne 0) {
         throw "service $Name DelayedAutoStart drift: $($properties.DelayedAutoStart)"
     }
-    foreach ($dependencyProperty in @('DependOnService', 'DependOnGroup', 'Group')) {
+    foreach ($dependencyProperty in @('DependOnGroup', 'Group')) {
         $dependency = $properties.PSObject.Properties[$dependencyProperty]
         if ($null -ne $dependency -and
             @($dependency.Value | Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
             throw "service $Name has an unexpected $dependencyProperty dependency"
         }
+    }
+    $actualDependencies = @(
+        Get-DefenseClawOptionalPropertyValues -Properties $properties -Name 'DependOnService' |
+            Microsoft.PowerShell.Core\Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_)
+            } |
+            Microsoft.PowerShell.Core\ForEach-Object { [string]$_ } |
+            Microsoft.PowerShell.Utility\Sort-Object
+    )
+    $wantedDependencies = @($ExpectedDependencies | Microsoft.PowerShell.Utility\Sort-Object)
+    if (($actualDependencies -join "`n") -cne ($wantedDependencies -join "`n")) {
+        throw "service $Name dependency drift"
     }
     if ([int]$properties.ServiceSidType -ne $ExpectedSidType) {
         throw "service $Name ServiceSidType drift: $($properties.ServiceSidType), expected $ExpectedSidType"
@@ -7248,7 +9188,11 @@ function Assert-DefenseClawServiceConfiguration {
     if ([int]$properties.FailureActionsOnNonCrashFailures -ne 1) {
         throw "service $Name does not recover non-crash failures"
     }
-    $actualEnvironment = @($properties.Environment | Microsoft.PowerShell.Core\ForEach-Object { [string]$_ } | Microsoft.PowerShell.Utility\Sort-Object)
+    $actualEnvironment = @(
+        Get-DefenseClawOptionalPropertyValues -Properties $properties -Name 'Environment' |
+            Microsoft.PowerShell.Core\ForEach-Object { [string]$_ } |
+            Microsoft.PowerShell.Utility\Sort-Object
+    )
     $wantedEnvironment = @($ExpectedEnvironment | Microsoft.PowerShell.Utility\Sort-Object)
     if (($actualEnvironment -join "`n") -cne ($wantedEnvironment -join "`n")) {
         throw "service $Name environment pin drift"
@@ -7308,6 +9252,9 @@ function Assert-DefenseClawManagedServiceConfigurations {
             -AuthorizationDirectory $Layout.AuthorizationDirectory `
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GatewayLogPath `
+            -BrokerPipeName $Layout.BrokerPipeName `
+            -BrokerServiceName $Layout.BrokerServiceName `
+            -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
     )
@@ -7322,6 +9269,18 @@ function Assert-DefenseClawManagedServiceConfigurations {
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
     )
+    $brokerImage = Get-DefenseClawCMIDBrokerImage `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
+    Assert-DefenseClawServiceConfiguration `
+        -Name $Layout.BrokerServiceName `
+        -ExpectedImage $brokerImage `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Credential Broker' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
+        -ExpectedEnvironment @() `
+        -ExpectedStartMode $expectedStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
@@ -7330,6 +9289,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $gatewayEnvironment `
+        -ExpectedDependencies @($Layout.BrokerServiceName) `
         -ExpectedStartMode $expectedStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GuardianServiceName `
@@ -7386,7 +9346,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
 function New-DefenseClawRequiredRights {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Admin', 'Install', 'ServiceInstall', 'State', 'ConfigDirectory', 'Config', 'MachinePolicy', 'AuthorizationDirectory', 'AuthorizationFile', 'Runtime')]
+        [ValidateSet('Admin', 'Install', 'ServiceInstall', 'State', 'ConfigDirectory', 'Config', 'MachinePolicy', 'AuthorizationDirectory', 'AuthorizationFile', 'Runtime', 'RuntimeSecret', 'ManagedIPCDirectory')]
         [string]$Kind,
         [string]$GatewayServiceSID
     )
@@ -7421,6 +9381,16 @@ function New-DefenseClawRequiredRights {
         }
         'Runtime' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::Modify
+        }
+        'RuntimeSecret' {
+            $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::Read
+        }
+        'ManagedIPCDirectory' {
+            $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::FullControl
+            $required[$script:AuthenticatedUsersSID] = (
+                [Security.AccessControl.FileSystemRights]::ListDirectory -bor
+                [Security.AccessControl.FileSystemRights]::Traverse
+            )
         }
     }
     return $required
@@ -7504,6 +9474,19 @@ function Assert-DefenseClawEnterpriseDeployment {
         throw 'deployment metadata Codex target and machine-policy ownership state disagree'
     }
     $codexTargetEnabled = [bool]$codexTargetProperty.Value
+    $cursorTargetProperty = $metadata.PSObject.Properties[
+        'cursor_target_enabled'
+    ]
+    # Schema-1 deployments created before native Cursor support do not carry
+    # this field. Their only safe interpretation is Cursor disabled.
+    if ($null -ne $cursorTargetProperty -and
+        $cursorTargetProperty.Value -isnot [bool]) {
+        throw 'deployment metadata has an invalid Cursor target result'
+    }
+    $cursorTargetEnabled = [bool](
+        $null -ne $cursorTargetProperty -and
+        [bool]$cursorTargetProperty.Value
+    )
     if ($codexTargetEnabled) {
         if ([string]$metadata.codex_machine_policy_sha256 -cnotmatch
             '^[0-9a-f]{64}$') {
@@ -7570,7 +9553,8 @@ function Assert-DefenseClawEnterpriseDeployment {
     ]
     $expectedSecurityComplete = [bool](
         ([bool]$claudeTargetProperty.Value -or
-            $codexTargetEnabled) -and
+            $codexTargetEnabled -or
+            $cursorTargetEnabled) -and
         (-not [bool]$claudeTargetProperty.Value -or
             [bool]$claudeEffectiveProperty.Value)
     )
@@ -7590,6 +9574,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     )
     $Layout.ClaudeTargetEnabled = [bool]$claudeTargetProperty.Value
     $Layout.CodexTargetEnabled = $codexTargetEnabled
+    $Layout.CursorTargetEnabled = $cursorTargetEnabled
     $recordedAttestationHash = [string]$metadata.agent_application_control_attestation_sha256
     if ([bool]$Layout.CoreHardeningCertification) {
         if ((Microsoft.PowerShell.Management\Test-Path `
@@ -7668,6 +9653,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Kind AuthorizationFile `
         -GatewayServiceSID $gatewaySID
     $runtimeRights = New-DefenseClawRequiredRights -Kind Runtime -GatewayServiceSID $gatewaySID
+    $managedIPCDirectoryRights = New-DefenseClawRequiredRights `
+        -Kind ManagedIPCDirectory `
+        -GatewayServiceSID $gatewaySID
 
     foreach ($path in @($Layout.InstallRoot, $Layout.BinDirectory)) {
         Assert-DefenseClawPathAcl `
@@ -7686,7 +9674,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -AllowedWriterSIDs $adminWriters `
         -RequiredRights $serviceInstallRights `
         -AllowUsersRead
-    foreach ($path in @($Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
         Assert-DefenseClawPathAcl `
             -Path $path `
             -AllowedWriterSIDs $adminWriters `
@@ -7702,6 +9690,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     }
     $adminOnlyPaths = [Collections.Generic.List[string]]::new()
     foreach ($path in @(
+        $Layout.BrokerLogDirectory,
         $Layout.GuardianDirectory,
         $Layout.InstallStateDirectory,
         $Layout.ManifestPath,
@@ -7751,6 +9740,18 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GatewayServiceSID $gatewaySID
     }
     Assert-DefenseClawPathAcl `
+        -Path $Layout.ManagedIPCDirectory `
+        -AllowedWriterSIDs $runtimeWriters `
+        -AllowedReaderSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID,
+            $gatewaySID,
+            $script:AuthenticatedUsersSID
+        ) `
+        -RequiredRights $managedIPCDirectoryRights `
+        -RejectUntrustedRead
+    Assert-DefenseClawPathAcl `
         -Path $Layout.StateRoot `
         -AllowedWriterSIDs $adminWriters `
         -AllowedReaderSIDs $gatewayReaders `
@@ -7770,6 +9771,12 @@ function Assert-DefenseClawEnterpriseDeployment {
         -RejectUntrustedRead
     Assert-DefenseClawPathAcl `
         -Path $Layout.AuthorizationDirectory `
+        -AllowedWriterSIDs $adminWriters `
+        -AllowedReaderSIDs $gatewayReaders `
+        -RequiredRights $authorizationDirectoryRights `
+        -RejectUntrustedRead
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.BrokerStateDirectory `
         -AllowedWriterSIDs $adminWriters `
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $authorizationDirectoryRights `
@@ -7807,7 +9814,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RejectUntrustedRead
     }
 
-    foreach ($requiredHash in @('gateway', 'hook', 'installer', 'module')) {
+    foreach ($requiredHash in @('broker', 'gateway', 'hook', 'installer', 'module')) {
         if ($null -eq $metadata.hashes.PSObject.Properties[$requiredHash]) {
             throw "deployment metadata is missing required artifact hash: $requiredHash"
         }
@@ -7819,6 +9826,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     foreach ($property in $metadata.hashes.PSObject.Properties) {
         # Must cover every key the hash writer emits.
         $path = switch ($property.Name) {
+            'broker' { $Layout.BrokerPath }
             'gateway' { $Layout.GatewayPath }
             'hook' { $Layout.HookPath }
             'cli' { $Layout.CLIPath }
@@ -7843,7 +9851,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         "DEFENSECLAW_WINDOWS_SERVICE_NAME=$GatewayServiceName",
         "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME=$GatewayServiceName",
         "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName",
-        "DEFENSECLAW_WINDOWS_SERVICE_LOG=$($Layout.GatewayLogPath)"
+        "DEFENSECLAW_WINDOWS_SERVICE_LOG=$($Layout.GatewayLogPath)",
+        "DEFENSECLAW_CMID_BROKER_PIPE=$($Layout.BrokerPipeName)",
+        "DEFENSECLAW_CMID_BROKER_SERVICE_NAME=$($Layout.BrokerServiceName)",
+        "DEFENSECLAW_CMID_BROKER_AUTH_KEY=$($Layout.BrokerAuthKeyPath)"
     )
     $guardianEnvironment = [string[]]@(
         "DEFENSECLAW_HOME=$($Layout.RuntimeDirectory)",
@@ -7912,6 +9923,15 @@ function Assert-DefenseClawEnterpriseDeployment {
         )
     }
     Assert-DefenseClawServiceConfiguration `
+        -Name $Layout.BrokerServiceName `
+        -ExpectedImage (Get-DefenseClawCMIDBrokerImage -Layout $Layout -GatewayServiceName $GatewayServiceName) `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Credential Broker' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
+        -ExpectedEnvironment @() `
+        -ExpectedStartMode $expectedServiceStartMode
+    Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
         -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
@@ -7919,6 +9939,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $gatewayEnvironment `
+        -ExpectedDependencies @($Layout.BrokerServiceName) `
         -ExpectedStartMode $expectedServiceStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GuardianServiceName `
@@ -7957,6 +9978,13 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
 
     if ($RequireReadiness) {
+        $brokerService = Microsoft.PowerShell.Management\Get-Service `
+            -Name $Layout.BrokerServiceName `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $brokerService -or
+            $brokerService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+            throw 'credential broker SCM process is not running'
+        }
         if (-not (Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName)) {
             throw 'gateway SCM process is running but authenticated health is not ready'
         }
@@ -7994,6 +10022,7 @@ function Get-DefenseClawArtifactPath {
         [Parameter(Mandatory)][string]$Name
     )
     $path = switch ($Name) {
+        'broker' { $Layout.BrokerPath }
         'gateway' { $Layout.GatewayPath }
         'hook' { $Layout.HookPath }
         'cli' { $Layout.CLIPath }
@@ -8015,7 +10044,7 @@ function Assert-DefenseClawRecordedArtifactHashes {
         # gate, and the only way out is an Upgrade that replaces the artifact.
         [string]$Action = 'this action'
     )
-    foreach ($required in @('gateway', 'hook', 'installer', 'module')) {
+    foreach ($required in @('broker', 'gateway', 'hook', 'installer', 'module')) {
         if ($required -notin $ReplacedArtifacts -and
             $null -eq $Metadata.hashes.PSObject.Properties[$required]) {
             throw "deployment metadata is missing required artifact hash: $required"
@@ -8053,6 +10082,8 @@ function Assert-DefenseClawRecordedArtifactHashes {
 function Get-DefenseClawLifecycleSources {
     param(
         [Parameter(Mandatory)][string]$Action,
+        [string]$BrokerBinary,
+        [string]$ProviderLibrary,
         [string]$GatewayBinary,
         [string]$HookBinary,
         [string]$CLIBinary,
@@ -8078,6 +10109,8 @@ function Get-DefenseClawLifecycleSources {
     }
     if ($Action -eq 'Install') {
         $required = @(
+            @('BrokerBinary', $BrokerBinary),
+            @('ProviderLibrary', $ProviderLibrary),
             @('GatewayBinary', $GatewayBinary),
             @('HookBinary', $HookBinary)
         )
@@ -8099,12 +10132,16 @@ function Get-DefenseClawLifecycleSources {
         }
     }
     if ($Action -eq 'Upgrade' -and
-        ([string]::IsNullOrWhiteSpace($GatewayBinary) -or
+        ([string]::IsNullOrWhiteSpace($BrokerBinary) -or
+        [string]::IsNullOrWhiteSpace($ProviderLibrary) -or
+        [string]::IsNullOrWhiteSpace($GatewayBinary) -or
         [string]::IsNullOrWhiteSpace($HookBinary))) {
-        throw 'Upgrade requires -GatewayBinary and -HookBinary'
+        throw 'Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, and -HookBinary'
     }
 
     foreach ($entry in @(
+        @('broker', $BrokerBinary, 'credential broker executable', $true),
+        @('provider_library', $ProviderLibrary, 'managed credential provider library', $true),
         @('gateway', $GatewayBinary, 'gateway executable', $true),
         @('hook', $HookBinary, 'hook executable', $true),
         @('cli', $CLIBinary, 'CLI executable', $true),
@@ -8228,12 +10265,14 @@ function Get-DefenseClawLifecycleStatus {
     $installed = $null -ne $metadata -and (Test-DefenseClawMetadataInstalled -Metadata $metadata)
     $pending = Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf
     $gatewayState = Get-DefenseClawServiceState -Name $GatewayServiceName
+    $brokerState = Get-DefenseClawServiceState -Name $Layout.BrokerServiceName
     $guardianState = Get-DefenseClawServiceState -Name $GuardianServiceName
     $gatewayReady = $false
     $guardianReady = $false
     $codexRequirementsReady = $false
     $codexRequirementsDisposition = $null
     $codexTargetEnabled = $false
+    $cursorTargetEnabled = [bool]$Layout.CursorTargetEnabled
     $claudeTargetEnabled = [bool]$Layout.ClaudeTargetEnabled
     $claudeEffectivePolicyVerified = [bool](
         $Layout.ClaudeEffectivePolicyVerified
@@ -8284,6 +10323,7 @@ function Get-DefenseClawLifecycleStatus {
                 $codexRequirementsReady = [bool]$codexReport.ok
                 $codexRequirementsDisposition = [string]$codexReport.disposition
                 $codexTargetEnabled = [bool]$codexReport.codex_target_enabled
+                $cursorTargetEnabled = [bool]$codexReport.cursor_target_enabled
                 $claudeTargetEnabled = [bool]$codexReport.claude_target_enabled
                 $claudeEffectivePolicyVerified = [bool](
                     $codexReport.claude_effective_policy_verified
@@ -8301,6 +10341,7 @@ function Get-DefenseClawLifecycleStatus {
     }
     $healthy = if ($installed) {
         $gatewayState -eq 'running' -and
+            $brokerState -eq 'running' -and
             $guardianState -eq 'running' -and
             $gatewayReady -and
             $guardianReady -and
@@ -8310,13 +10351,16 @@ function Get-DefenseClawLifecycleStatus {
     }
     else {
         $gatewayState -eq 'absent' -and
+            $brokerState -eq 'absent' -and
             $guardianState -eq 'absent' -and
             -not $pending -and
             $errors.Count -eq 0
     }
+    # Cursor uses the same protected Guardian/runtime readiness lane but does
+    # not require Codex machine policy or application-control proof.
     $externalSecuritySatisfied = [bool](
         $installed -and
-        ($claudeTargetEnabled -or $codexTargetEnabled) -and
+        ($claudeTargetEnabled -or $codexTargetEnabled -or $cursorTargetEnabled) -and
         (-not $claudeTargetEnabled -or
             $claudeEffectivePolicyVerified)
     )
@@ -8332,8 +10376,10 @@ function Get-DefenseClawLifecycleStatus {
         state_root = $Layout.StateRoot
         transaction_pending = [bool]$pending
         gateway_service = $GatewayServiceName
+        broker_service = $Layout.BrokerServiceName
         guardian_service = $GuardianServiceName
         gateway_service_state = $gatewayState
+        broker_service_state = $brokerState
         guardian_service_state = $guardianState
         gateway_ready = [bool]$gatewayReady
         guardian_ready = [bool]$guardianReady
@@ -8345,6 +10391,7 @@ function Get-DefenseClawLifecycleStatus {
         agent_application_control_prerequisite = $script:AgentApplicationControlPrerequisite
         codex_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
         codex_target_enabled = [bool]$codexTargetEnabled
+        cursor_target_enabled = [bool]$cursorTargetEnabled
         claude_target_enabled = [bool]$claudeTargetEnabled
         claude_approved_client_enforced = [bool]$Layout.AgentApplicationControlAttested
         claude_minimum_client_version = '2.1.152'
@@ -8444,6 +10491,7 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.LibexecDirectory
     )
     $allowedFiles = @(
+        $Layout.BrokerPath,
         $Layout.GatewayPath,
         $Layout.HookPath,
         $Layout.CLIPath,
@@ -8658,6 +10706,7 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec')
     )
     $files = @(
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-gateway.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw.exe'),
@@ -9037,7 +11086,7 @@ function Publish-DefenseClawSelfUninstallReceipt {
             -PathType Leaf)) {
         throw 'self-uninstall receipt publication requires a pending lifecycle transaction'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "self-uninstall receipt publication refused while service exists: $name"
         }
@@ -9379,7 +11428,7 @@ function Set-DefenseClawSelfUninstallReceiptCommitted {
         -LiteralPath $Layout.ManagedHooksTeardownJournalPath) {
         throw 'self-uninstall retirement cannot commit before teardown-journal retirement'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "self-uninstall retirement cannot commit while service exists: $name"
         }
@@ -9818,7 +11867,7 @@ function Assert-DefenseClawSelfUninstallCommittedState {
         -LiteralPath $Layout.PendingPath) {
         throw 'committed self-uninstall recovery found pending transaction evidence'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "committed self-uninstall recovery found live service: $name"
         }
@@ -10458,7 +12507,7 @@ function Publish-DefenseClawStatePurgeIntent {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'refusing state-purge intent publication while a lifecycle transaction is pending'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "refusing state-purge intent publication while service exists: $name"
         }
@@ -10531,7 +12580,7 @@ function Complete-DefenseClawStatePurge {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -Required
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "refusing authenticated state purge while service exists: $name"
         }
@@ -10614,7 +12663,7 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'committed-uninstall cleanup requires transaction retirement'
     }
-    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
         if (Test-DefenseClawServiceExists -Name $name) {
             throw "committed-uninstall cleanup refused while service exists: $name"
         }
@@ -10772,6 +12821,18 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$NoStart
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    if ($Sources.ContainsKey('provider_library')) {
+        $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
+        throw "$Action requires a validated managed credential provider library"
+    }
+    Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+        -Name $Layout.BrokerServiceName `
+        -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName) `
+        -AllowArgumentUpgrade
     if ($null -ne $metadata) {
         Assert-DefenseClawMetadataIdentity `
             -Metadata $metadata `
@@ -10809,6 +12870,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $replaced = @($Sources.Keys | Microsoft.PowerShell.Core\Where-Object {
             $_ -in @(
                 'gateway',
+                'broker',
                 'hook',
                 'cli',
                 'installer',
@@ -10847,6 +12909,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
         Assert-DefenseClawCodexManagedHooksStateFilePreflight -Layout $Layout
     }
+    $priorDeploymentActive = [bool](
+        $null -ne $metadata -and
+        (Test-DefenseClawMetadataInstalled -Metadata $metadata)
+    )
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
         -PathType Leaf) {
@@ -10862,10 +12928,24 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
+        -PriorDeploymentActive:$priorDeploymentActive `
         -IncludeCodexMachineState:$priorCodexTargetEnabled
     try {
+        if ($Action -eq 'Install' -and $null -ne $metadata) {
+            # The inactive uninstall tombstone remains the authority for
+            # exact-scope adoption until New-DefenseClawTransaction has
+            # durably copied it. Retire it only inside that transaction so
+            # the hidden requirements helper sees fresh-install state. A
+            # failed reinstall restores the exact tombstone preimage; a
+            # successful reinstall publishes new active metadata below.
+            Remove-DefenseClawInactiveDeploymentMetadataForInstall `
+                -Layout $Layout `
+                -Metadata $metadata `
+                -SnapshotPath $snapshot
+        }
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
+        Stop-DefenseClawService -Name $Layout.BrokerServiceName
         # Upgrade/Repair must capture the old machine-policy identity before a
         # replacement config or manifest changes its endpoint/target set. New
         # gateway/hook bytes are staged first so even an upgrade from a release
@@ -10877,7 +12957,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             @('config', 'manifest')
         }
         foreach ($name in @($Sources.Keys | Microsoft.PowerShell.Core\Where-Object {
-            $_ -notin $deferredPolicySources
+            $_ -notin $deferredPolicySources -and $_ -ne 'provider_library'
         })) {
             $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
             Install-DefenseClawSourceDescriptor `
@@ -10886,6 +12966,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         }
         foreach ($requiredPath in @(
             $Layout.GatewayPath,
+            $Layout.BrokerPath,
             $Layout.HookPath,
             $Layout.ConfigPath,
             $Layout.ManifestPath,
@@ -10922,6 +13003,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         # the installer transaction and their absence would be a
         # real install failure regardless of deferred mode.
         $requiredArtifacts = @(
+            @{Path = $Layout.BrokerPath;    SourceKey = $null},
             @{Path = $Layout.GatewayPath;   SourceKey = $null},
             @{Path = $Layout.HookPath;      SourceKey = $null},
             @{Path = $Layout.ConfigPath;    SourceKey = 'config'},
@@ -10991,10 +13073,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -Action inspect
         if ([bool]$Layout.CoreHardeningCertification -and
-            [bool]$Layout.CodexTargetEnabled) {
+            ([bool]$Layout.CodexTargetEnabled -or
+                [bool]$Layout.CursorTargetEnabled)) {
             throw (
-                'Core-hardening certification is Claude-only and refuses an ' +
-                'enabled Codex target in the protected manifest'
+                'Core-hardening certification is Claude-only and refuses ' +
+                'enabled Codex or Cursor targets in the protected manifest'
             )
         }
         if ($Sources.ContainsKey('manifest') -and
@@ -11033,6 +13116,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -AuthorizationDirectory $Layout.AuthorizationDirectory `
             -GatewayServiceName $GatewayServiceName `
             -LogPath $Layout.GatewayLogPath `
+            -BrokerPipeName $Layout.BrokerPipeName `
+            -BrokerServiceName $Layout.BrokerServiceName `
+            -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
         Set-DefenseClawServiceEnvironment `
@@ -11136,6 +13222,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName
             }
+            # The LocalSystem broker must be live before any restricted
+            # gateway path can request a credential.
+            Set-DefenseClawServiceStartMode `
+                -Name $Layout.BrokerServiceName `
+                -StartMode 3
+            Start-DefenseClawService -Name $Layout.BrokerServiceName
             # The guardian becomes startable, publishes a fresh successful
             # reconcile, and remains live while gateway is still disabled.
             Set-DefenseClawServiceStartMode `
@@ -11185,6 +13277,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             # before pending cleanup can start only validated services.
             Set-DefenseClawServiceStartMode `
                 -Name $GuardianServiceName `
+                -StartMode 2
+            Set-DefenseClawServiceStartMode `
+                -Name $Layout.BrokerServiceName `
                 -StartMode 2
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
@@ -11332,6 +13427,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
+            -PriorDeploymentActive `
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
             -PreserveManagedHooksTeardownJournal
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `
@@ -11391,6 +13487,12 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Name $GatewayServiceName `
             -ExpectedGatewayPath $Layout.GatewayPath
         Remove-DefenseClawService -Name $GatewayServiceName
+        Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+            -Name $Layout.BrokerServiceName `
+            -ExpectedImage (Get-DefenseClawCMIDBrokerImage `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName)
+        Remove-DefenseClawService -Name $Layout.BrokerServiceName
         $tombstone = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -11674,6 +13776,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [Parameter(Mandatory)]
         [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Status', 'Verify', 'Uninstall')]
         [string]$Action,
+        [string]$BrokerBinary,
+        [string]$ProviderLibrary,
         [string]$GatewayBinary,
         [string]$HookBinary,
         [string]$CLIBinary,
@@ -11891,6 +13995,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     $sources = Get-DefenseClawLifecycleSources `
         -Action $Action `
+        -BrokerBinary $BrokerBinary `
+        -ProviderLibrary $ProviderLibrary `
         -GatewayBinary $GatewayBinary `
         -HookBinary $HookBinary `
         -CLIBinary $CLIBinary `

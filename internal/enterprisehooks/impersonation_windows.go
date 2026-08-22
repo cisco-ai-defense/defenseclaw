@@ -251,17 +251,17 @@ type windowsEnterpriseTokenSecurityFacts struct {
 // integrity facts and returns:
 //
 //   - advisory != ""  — the token is elevated / full-admin /
-//                       high-integrity / UIAccess. Callers should log
-//                       the advisory and proceed with enrollment; the
-//                       guardian's reconcile loop will restore any
-//                       admin-driven drift on the per-user artifacts.
+//     high-integrity / UIAccess. Callers should log
+//     the advisory and proceed with enrollment; the
+//     guardian's reconcile loop will restore any
+//     admin-driven drift on the per-user artifacts.
 //   - advisory == "", err == nil — token is a normal non-admin session,
-//                       enrollment safe.
+//     enrollment safe.
 //   - err != nil      — could not read the token or the token reports
-//                       an unknown elevation type. This is a real
-//                       integrity failure (WTS or the token itself is
-//                       misbehaving), not an "admin user" case; the
-//                       caller should propagate.
+//     an unknown elevation type. This is a real
+//     integrity failure (WTS or the token itself is
+//     misbehaving), not an "admin user" case; the
+//     caller should propagate.
 //
 // This replaces the prior validateWindowsEnterpriseNonElevatedToken
 // which returned a hard error for admin sessions. The softening is

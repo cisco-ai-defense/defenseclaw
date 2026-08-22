@@ -1250,8 +1250,8 @@ func main() {
 // actual Windows launch boundary: Get-Content reads a vendor temp file and
 // passes the payload through PowerShell's object pipeline into the configured
 // hook command. A native executable receives only encoding preambles on this
-// boundary; the generated adapter must recover the JSON exactly, invoke the
-// launcher through --input-file, forward stdout, and remove its payload file.
+// boundary; the generated adapter must recover the JSON exactly, stream it to
+// the launcher's redirected stdin, and forward stdout without writing payloads.
 func TestCursorWindowsAdapterPreservesObjectPipelineJSON(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Cursor PowerShell transport is Windows-specific")
@@ -1265,24 +1265,21 @@ func TestCursorWindowsAdapterPreservesObjectPipelineJSON(t *testing.T) {
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
 func main() {
-	for i, arg := range os.Args {
-		if arg != "--input-file" || i+1 >= len(os.Args) {
-			continue
-		}
-		payload, err := os.ReadFile(os.Args[i+1])
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(8)
-		}
-		_, _ = os.Stdout.Write(payload)
-		return
+	if len(os.Args) != 4 || os.Args[1] != "hook" || os.Args[2] != "--connector" || os.Args[3] != "cursor" {
+		fmt.Fprintln(os.Stderr, "unexpected hook arguments")
+		os.Exit(9)
 	}
-	fmt.Fprintln(os.Stderr, "missing input file argument")
-	os.Exit(9)
+	payload, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(8)
+	}
+	_, _ = os.Stdout.Write(payload)
 }
 `
 	if err := os.WriteFile(helperSource, []byte(helperBody), 0o600); err != nil {
@@ -1328,13 +1325,6 @@ func main() {
 	}
 	if !strings.Contains(strings.TrimSpace(string(out)), payload) {
 		t.Fatalf("adapter output did not preserve JSON\nwant: %s\ngot: %q", payload, out)
-	}
-	leftovers, err := filepath.Glob(filepath.Join(hookDir, ".cursor-input-*.json"))
-	if err != nil {
-		t.Fatalf("find adapter payload leftovers: %v", err)
-	}
-	if len(leftovers) != 0 {
-		t.Fatalf("adapter left temporary payload files behind: %v", leftovers)
 	}
 }
 
@@ -1716,15 +1706,16 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				}
 				adapterText := string(adapter)
 				if !strings.Contains(adapterText, windowsHookBinaryName) ||
-					!strings.Contains(adapterText, "--input-file") {
-					t.Errorf("Cursor adapter does not invoke the native launcher through --input-file:\n%s", adapter)
+					!strings.Contains(adapterText, "RedirectStandardInput = $true") {
+					t.Errorf("Cursor adapter does not stream payloads to the native launcher:\n%s", adapter)
 				}
 				for _, marker := range []string{
 					"$timeoutMs = 10000",
-					"WaitForExit($timeoutMs)",
+					"$deadline = [System.Diagnostics.Stopwatch]::StartNew()",
+					"WriteAsync($payloadBytes, 0, $payloadBytes.Length)",
+					"WaitForExit($remainingMs)",
 					"$process.Kill()",
-					`{"continue":true}`,
-					"could not remove temporary Cursor payload",
+					`{"continue":false,"permission":"deny"`,
 				} {
 					if !strings.Contains(adapterText, marker) {
 						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)

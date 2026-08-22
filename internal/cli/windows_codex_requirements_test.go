@@ -45,11 +45,12 @@ func TestResolveWindowsCodexManifestApplicabilityUsesGuardianManifest(t *testing
 			Targets: []enterprisehooks.ManifestTarget{
 				{Connector: "claudecode"},
 				{Connector: "codex"},
+				{Connector: "cursor"},
 			},
 		}, nil
 	}
 
-	anyEnabled, codexEnabled, claudeEnabled, err :=
+	anyEnabled, codexEnabled, claudeEnabled, cursorEnabled, err :=
 		resolveWindowsCodexManifestApplicability(stateRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -60,12 +61,13 @@ func TestResolveWindowsCodexManifestApplicabilityUsesGuardianManifest(t *testing
 	if trustedPath == filepath.Join(stateRoot, "etc", "targets.yaml") {
 		t.Fatal("legacy etc targets path must never be consulted")
 	}
-	if !anyEnabled || !codexEnabled || !claudeEnabled {
+	if !anyEnabled || !codexEnabled || !claudeEnabled || !cursorEnabled {
 		t.Fatalf(
-			"applicability any=%t codex=%t claude=%t, want all true",
+			"applicability any=%t codex=%t claude=%t cursor=%t, want all true",
 			anyEnabled,
 			codexEnabled,
 			claudeEnabled,
+			cursorEnabled,
 		)
 	}
 }

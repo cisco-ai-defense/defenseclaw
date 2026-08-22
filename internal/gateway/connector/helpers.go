@@ -149,12 +149,11 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if connector == "antigravity" {
 		return windowsAntigravityHookCommand()
 	}
-	// Cursor 3.9.x writes the hook payload to a temporary file and then feeds
-	// it through Windows PowerShell's object pipeline. A native executable on
-	// that boundary receives encoding preambles instead of the JSON. The
-	// generated PowerShell adapter accepts the object pipeline, writes UTF-8
-	// without a BOM into the secured hooks directory, then invokes the
-	// consoleless launcher with a validated --input-file path.
+	// Cursor 3.9.x feeds hook payloads through Windows PowerShell's object
+	// pipeline. A native executable on that boundary receives encoding
+	// preambles instead of the JSON. The generated PowerShell adapter accepts
+	// the object pipeline and streams reconstructed UTF-8 without a BOM to the
+	// consoleless launcher's redirected stdin; payloads never touch disk.
 	if connector == "cursor" {
 		adapter := strings.TrimSuffix(unixCommand, ".sh") + ".ps1"
 		return "& " + powershellQuoteLiteral(adapter)

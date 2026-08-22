@@ -5,8 +5,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -101,6 +103,124 @@ func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 	}
 	if !reflect.DeepEqual(issues, want) {
 		t.Fatalf("issues = %#v, want %#v", issues, want)
+	}
+}
+
+func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t *testing.T) {
+	originalCfg := cfg
+	originalManifest := enterpriseHookManifest
+	originalJSON := enterpriseHookJSON
+	originalStateTrust := enterpriseHookGuardianStateFileTrustCheck
+	originalAuthorizationTrust := enterpriseHookAuthorizationFileTrustCheck
+	t.Cleanup(func() {
+		cfg = originalCfg
+		enterpriseHookManifest = originalManifest
+		enterpriseHookJSON = originalJSON
+		enterpriseHookGuardianStateFileTrustCheck = originalStateTrust
+		enterpriseHookAuthorizationFileTrustCheck = originalAuthorizationTrust
+	})
+
+	scope := t.TempDir()
+	dataDir := filepath.Join(scope, "runtime")
+	authorizationDir := filepath.Join(scope, "authorization")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(authorizationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
+	enterpriseHookGuardianStateFileTrustCheck = func(string) error { return nil }
+	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+
+	manifest := filepath.Join(scope, "hook-guardian", "targets.yaml")
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	rows := []enterpriseHookReconcileRow{
+		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "claudecode", OK: true},
+		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "codex", OK: true},
+		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "cursor", OK: true},
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    updatedAt,
+		Manifest:     manifest,
+		OK:           true,
+		TargetCount:  len(rows),
+		SuccessCount: len(rows),
+		Results:      rows,
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        updatedAt,
+		OK:               true,
+		TargetCount:      len(rows),
+		SuccessCount:     len(rows),
+		ProtectedTargets: rows,
+	}
+	for path, value := range map[string]any{
+		filepath.Join(dataDir, hookGuardianStateFile):                  state,
+		filepath.Join(authorizationDir, hookGuardianAuthorizationFile): authorization,
+	} {
+		body, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg = &config.Config{DataDir: dataDir, DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	enterpriseHookManifest = manifest
+	enterpriseHookJSON = true
+	var stdout bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	if err := runEnterpriseHooksStatus(cmd, nil); err != nil {
+		t.Fatalf("status from fresh LocalSystem records: %v", err)
+	}
+	var report enterpriseHookStatusReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode status report: %v", err)
+	}
+	if !report.OK || len(report.Verification) != len(rows) {
+		t.Fatalf("status report = %+v, want healthy three-target Guardian verification", report)
+	}
+	if report.ClaudeEffectivePolicyVerified != enterpriseHooksClaudeEffectivePolicyVerified(rows) {
+		t.Fatalf(
+			"Claude effective-policy status = %t, want trusted Guardian-derived value %t",
+			report.ClaudeEffectivePolicyVerified,
+			enterpriseHooksClaudeEffectivePolicyVerified(rows),
+		)
+	}
+	if _, err := os.Lstat(rows[0].UserHome); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("status touched protected target path: %v", err)
+	}
+
+	// A readable pair is not enough: if the protected authorization record no
+	// longer matches the fresh Guardian result, status must stay unhealthy.
+	authorization.SuccessCount--
+	body, err := json.Marshal(authorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(authorizationDir, hookGuardianAuthorizationFile),
+		append(body, '\n'),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := runEnterpriseHooksStatus(cmd, nil); err == nil {
+		t.Fatal("status accepted mismatched Guardian/authorization records")
+	}
+	report = enterpriseHookStatusReport{}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode mismatched status report: %v", err)
+	}
+	if report.OK || len(report.Errors) == 0 {
+		t.Fatalf("mismatched Guardian/authorization status = %+v, want unhealthy", report)
 	}
 }
 

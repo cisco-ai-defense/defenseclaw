@@ -42,13 +42,19 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 	); err != nil {
 		return InstallResult{}, true, err
 	}
+	unlockRuntime, err := lockWindowsUserRuntimeTransaction(opts.OwnerSID)
+	if err != nil {
+		return InstallResult{}, true, err
+	}
+	defer unlockRuntime()
 	var result InstallResult
-	var err error
 	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
 	case "claudecode":
 		result, err = installWindowsClaudeManagedResult(ctx, opts)
 	case "codex":
 		result, err = installWindowsCodexManagedResult(ctx, opts)
+	case "cursor":
+		result, err = installWindowsCursorManagedResult(ctx, opts)
 	default:
 		result, err = installWindowsGenericManagedResult(ctx, opts)
 	}
@@ -61,7 +67,7 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 // fail-open normal-mode setting.
 func windowsEnterpriseHookFailMode(connectorName, configured string) string {
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
-	case "codex", "claudecode":
+	case "codex", "claudecode", "cursor":
 		return "closed"
 	default:
 		return strings.TrimSpace(configured)
@@ -82,6 +88,8 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 		result, err = verifyWindowsClaudeManagedResult(ctx, opts)
 	case "codex":
 		result, err = verifyWindowsCodexManagedResult(ctx, opts)
+	case "cursor":
+		result, err = verifyWindowsCursorManagedResult(ctx, opts)
 	default:
 		result, err = verifyWindowsGenericManagedResult(ctx, opts)
 	}
@@ -99,6 +107,8 @@ func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) erro
 		minimum = "0.131.0"
 	case "claudecode":
 		minimum = "2.1.152"
+	case "cursor":
+		minimum = "1.7.0"
 	default:
 		return nil
 	}
@@ -334,7 +344,11 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if !connector.OwnsManagedHookRuntime(conn) {
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %q does not own a managed hook runtime", conn.Name())
 	}
-	if !connector.ConnectorSupportedOnHostOS(conn.Name()) {
+	// Cursor remains hidden from the general native-Windows setup surface
+	// until its release matrix is certified. This enterprise-only lifecycle is
+	// separately gated by the concrete built-in registry and the protected
+	// machine-policy implementation below.
+	if name != "cursor" && !connector.ConnectorSupportedOnHostOS(conn.Name()) {
 		support := connector.ConnectorSupportOnHostOS(conn.Name())
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %q is not supported on native Windows: %s", conn.Name(), support.Reason)
 	}
@@ -654,7 +668,10 @@ func prepareWindowsGenericPath(home, raw string, target *windows.SID, wantDir, r
 			info, statErr = os.Lstat(current)
 		}
 		if errors.Is(statErr, os.ErrNotExist) {
-			if final && required {
+			// If any component is absent, the requested final path is absent as
+			// well. Required callers must fail here instead of treating a missing
+			// intermediate managed directory as an acceptable optional suffix.
+			if required {
 				return fmt.Errorf("enterprise hooks: %s is missing: %s", label, current)
 			}
 			return nil
@@ -974,6 +991,35 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 			filepath.Dir(machineOpts.OwnershipPath),
 		)), true, nil
 	}
+	if name == "cursor" {
+		target, err := resolveWindowsGenericManagedTarget(opts)
+		if err != nil {
+			return nil, true, err
+		}
+		root, _, _, _, _, _, err := windowsCursorManagedPaths()
+		if err != nil {
+			return nil, true, err
+		}
+		userDirs := []string{
+			target.home,
+			target.dataDir,
+			filepath.Join(target.dataDir, "hooks"),
+		}
+		for _, dir := range userDirs {
+			if err := prepareWindowsGenericPath(
+				target.home,
+				dir,
+				target.sid,
+				true,
+				false,
+				false,
+				"Cursor watch directory",
+			); err != nil {
+				return nil, true, err
+			}
+		}
+		return sortedUnique(append(userDirs, root)), true, nil
+	}
 	if name != "claudecode" {
 		target, err := resolveWindowsGenericManagedTarget(opts)
 		if err != nil {
@@ -1022,6 +1068,33 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 		return nil, true, err
 	}
 	return sortedUnique([]string{home, dataDir, filepath.Join(dataDir, "hooks"), filepath.Dir(policyPath)}), true, nil
+}
+
+func platformWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) {
+	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
+		return WatchOwnership{}, false, nil
+	}
+	target, err := resolveWindowsGenericManagedTarget(opts)
+	if err != nil {
+		return WatchOwnership{}, true, err
+	}
+	_, hooksPath, adapterPath, statePath, receiptPath, _, err := windowsCursorManagedPaths()
+	if err != nil {
+		return WatchOwnership{}, true, err
+	}
+	hookDir := filepath.Join(target.dataDir, "hooks")
+	return WatchOwnership{
+		SharedWriter: []string{hooksPath},
+		ExclusiveWriter: sortedUnique([]string{
+			adapterPath,
+			statePath,
+			receiptPath,
+			filepath.Join(hookDir, ".hookcfg.cursor"),
+			filepath.Join(hookDir, ".hook-cursor.token"),
+			filepath.Join(target.dataDir, "hook_contract_lock.json"),
+			filepath.Join(target.dataDir, "hook_contract_lock.json.lock"),
+		}),
+	}, true, nil
 }
 
 func resolveWindowsEnterpriseDataDir(home, raw string) (string, error) {
@@ -1086,6 +1159,16 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 			machineOpts,
 			targetSID.String(),
 		)
+	}
+	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
+		if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+			return err
+		}
+		targetSID, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		if err != nil {
+			return err
+		}
+		return removeWindowsCursorManagedPolicyTarget(targetSID)
 	}
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
@@ -1205,6 +1288,7 @@ func newWindowsEnterpriseConnectorRegistry() *connector.Registry {
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(connector.NewCodexConnector())
 	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
+	registry.RegisterBuiltin(connector.NewCursorConnector())
 	return registry
 }
 
@@ -1219,6 +1303,10 @@ func certifyWindowsEnterpriseConnector(name string, conn connector.Connector) er
 		}
 	case "claudecode":
 		if _, ok := conn.(*connector.ClaudeCodeConnector); !ok {
+			return fmt.Errorf("enterprise hooks: connector %q is not the certified built-in Windows implementation", name)
+		}
+	case "cursor":
+		if !connector.IsBuiltinCursorConnector(conn) {
 			return fmt.Errorf("enterprise hooks: connector %q is not the certified built-in Windows implementation", name)
 		}
 	default:
@@ -1871,9 +1959,10 @@ func windowsSIDString(sid *windows.SID) string {
 }
 
 type windowsRuntimeFileSnapshot struct {
-	path    string
-	existed bool
-	data    []byte
+	path          string
+	parentExisted bool
+	existed       bool
+	data          []byte
 }
 
 func windowsClaudeRuntimePaths(opts connector.SetupOpts, conn connector.Connector) []string {
@@ -1898,6 +1987,23 @@ func snapshotWindowsRuntimeFiles(paths []string) ([]windowsRuntimeFileSnapshot, 
 	snapshots := make([]windowsRuntimeFileSnapshot, 0, len(paths))
 	for _, path := range paths {
 		snapshot := windowsRuntimeFileSnapshot{path: path}
+		parent := filepath.Dir(path)
+		parentInfo, parentErr := os.Lstat(parent)
+		if parentErr != nil && !errors.Is(parentErr, os.ErrNotExist) {
+			return nil, fmt.Errorf(
+				"enterprise hooks: snapshot runtime parent %s: %w",
+				parent,
+				parentErr,
+			)
+		} else if parentErr == nil &&
+			(!parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0) {
+			return nil, fmt.Errorf(
+				"enterprise hooks: refusing unsafe runtime parent during snapshot: %s",
+				parent,
+			)
+		} else if parentErr == nil {
+			snapshot.parentExisted = true
+		}
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			snapshots = append(snapshots, snapshot)
@@ -1981,12 +2087,17 @@ func restoreWindowsRuntimeFiles(
 ) error {
 	var failures []string
 	for _, snapshot := range snapshots {
+		// An absent file beneath an originally absent parent is already restored
+		// to its exact preimage. A parent that existed at snapshot time remains
+		// mandatory even when this particular file did not exist, so rollback
+		// cannot hide cross-connector damage to the shared runtime directory.
+		parentRequired := snapshot.existed || snapshot.parentExisted
 		if err := prepareWindowsGenericPath(
 			home,
 			filepath.Dir(snapshot.path),
 			target,
 			true,
-			true,
+			parentRequired,
 			true,
 			"runtime rollback parent",
 		); err != nil {

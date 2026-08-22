@@ -44,11 +44,12 @@ var semanticVersionPattern = regexp.MustCompile(`^(?:v)?([0-9]+)\.([0-9]+)\.([0-
 type Component string
 
 const (
-	ComponentGateway  Component = "gateway"
-	ComponentHook     Component = "hook"
-	ComponentLauncher Component = "launcher"
-	ComponentStartup  Component = "startup"
-	ComponentSetup    Component = "setup"
+	ComponentGateway    Component = "gateway"
+	ComponentCMIDBroker Component = "cmid-broker"
+	ComponentHook       Component = "hook"
+	ComponentLauncher   Component = "launcher"
+	ComponentStartup    Component = "startup"
+	ComponentSetup      Component = "setup"
 	// ComponentEnterpriseSetup is deliberately distinct from ComponentSetup.
 	// The ordinary Setup is a per-user, asInvoker application; the enterprise
 	// bootstrap owns machine-wide services and ACLs and must therefore run only
@@ -62,6 +63,7 @@ const (
 // identity and resources. CPython and cosign retain their upstream resources.
 var AllComponents = []Component{
 	ComponentGateway,
+	ComponentCMIDBroker,
 	ComponentHook,
 	ComponentLauncher,
 	ComponentStartup,
@@ -126,6 +128,13 @@ var componentMetadataByName = map[Component]componentMetadata{
 		FileDescription:  "DefenseClaw Gateway",
 		InternalName:     "defenseclaw-gateway",
 		OriginalFilename: "defenseclaw.exe",
+	},
+	ComponentCMIDBroker: {
+		AssemblyName:     "Cisco.DefenseClaw.CMIDBroker",
+		Description:      "DefenseClaw isolated cloud credential broker",
+		FileDescription:  "DefenseClaw Credential Broker",
+		InternalName:     "defenseclaw-cmid-broker",
+		OriginalFilename: "defenseclaw-cmid-broker.exe",
 	},
 	ComponentHook: {
 		AssemblyName:     "Cisco.DefenseClaw.Hook",

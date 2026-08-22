@@ -120,6 +120,24 @@ func applyBaselineIPCACL(path string, class aclObjectClass) error {
 // selects the per-object-type Authenticated Users mask; see
 // applyBaselineIPCACL's docs for the rationale.
 func baselineIPCACEs(class aclObjectClass) ([]windows.EXPLICIT_ACCESS, error) {
+	gatewaySID, err := resolveGatewayServiceSID()
+	if err != nil {
+		return nil, err
+	}
+	return baselineIPCACEsForGatewaySID(class, gatewaySID)
+}
+
+// baselineIPCACEsForGatewaySID keeps deterministic ACL-shape tests independent
+// of whether the test host has registered the production gateway service. The
+// production entry point above still resolves the configured SCM identity, and
+// this helper independently preserves the NT SERVICE authority boundary.
+func baselineIPCACEsForGatewaySID(
+	class aclObjectClass,
+	gatewaySID *windows.SID,
+) ([]windows.EXPLICIT_ACCESS, error) {
+	if !sidIsNTService(gatewaySID) {
+		return nil, fmt.Errorf("ipc: gateway service SID does not live under NT SERVICE authority")
+	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
 		return nil, fmt.Errorf("ipc: resolve SYSTEM SID: %w", err)
@@ -132,11 +150,6 @@ func baselineIPCACEs(class aclObjectClass) ([]windows.EXPLICIT_ACCESS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ipc: resolve Authenticated Users SID: %w", err)
 	}
-	gatewaySID, err := resolveGatewayServiceSID()
-	if err != nil {
-		return nil, err
-	}
-
 	// SYSTEM + Administrators + gateway service: full control on
 	// both object classes. Authenticated Users: per-class mask.
 	//

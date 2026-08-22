@@ -43,12 +43,128 @@ func ResolveWindowsManagedHookRuntime(
 		return resolveWindowsClaudeManagedHookRuntime(hookExecutable)
 	case "codex":
 		return resolveWindowsCodexManagedHookRuntime(hookExecutable)
+	case "cursor":
+		return resolveWindowsCursorManagedHookRuntime(hookExecutable)
 	default:
 		return WindowsManagedHookRuntime{}, fmt.Errorf(
 			"enterprise hooks: unsupported Windows managed connector %q",
 			connectorName,
 		)
 	}
+}
+
+func resolveWindowsCursorManagedHookRuntime(
+	hookExecutable string,
+) (WindowsManagedHookRuntime, error) {
+	target, err := resolveWindowsCursorManagedPolicyTarget()
+	result := WindowsManagedHookRuntime{
+		Connector: "cursor",
+		DataDir:   target.dataDir,
+	}
+	if err != nil {
+		return result, err
+	}
+	if !target.active {
+		return result, nil
+	}
+	result.PolicyActive = true
+	result.GatewayAddr = target.gatewayAddr
+	result.GatewayServiceName = target.gatewayServiceName
+	if !sameWindowsEnterprisePath(target.hookExecutable, hookExecutable) {
+		return result, fmt.Errorf(
+			"enterprise hooks: invoking hook executable %s does not match active Cursor policy executable %s",
+			hookExecutable,
+			target.hookExecutable,
+		)
+	}
+	if !target.registered {
+		sid := "<unknown>"
+		if target.targetSID != nil {
+			sid = target.targetSID.String()
+		}
+		return result, fmt.Errorf(
+			"%s: connector cursor current SID %s is absent from the protected target set",
+			WindowsManagedSIDUnregisteredReason,
+			sid,
+		)
+	}
+	if err := validateWindowsCursorManagedRuntime(target); err != nil {
+		return result, err
+	}
+	result.Registered = true
+	return result, nil
+}
+
+func validateWindowsCursorManagedRuntime(
+	target windowsCursorManagedPolicyTarget,
+) error {
+	if target.targetSID == nil {
+		return errors.New("enterprise hooks: Cursor managed runtime target SID is required")
+	}
+	if err := windowsEnterpriseHookTrustCheck(target.hookExecutable); err != nil {
+		return fmt.Errorf("enterprise hooks: Cursor managed hook executable trust check failed: %w", err)
+	}
+	hookDir := filepath.Join(target.dataDir, "hooks")
+	tokenPath, err := connector.HookTokenFilePath(hookDir, "cursor")
+	if err != nil {
+		return err
+	}
+	for _, item := range []struct {
+		path string
+		dir  bool
+	}{
+		{target.dataDir, true},
+		{hookDir, true},
+		{filepath.Join(hookDir, ".hookcfg"), false},
+		{filepath.Join(hookDir, ".hookcfg.lock"), false},
+		{filepath.Join(hookDir, ".hookcfg.cursor"), false},
+		{tokenPath, false},
+		{filepath.Join(target.dataDir, "hook_contract_lock.json"), false},
+		{filepath.Join(target.dataDir, "hook_contract_lock.json.lock"), false},
+	} {
+		if err := validateWindowsUserPathElement(
+			item.path,
+			target.targetSID,
+			item.dir,
+			item.dir,
+			true,
+		); err != nil {
+			return fmt.Errorf("enterprise hooks: Cursor managed runtime trust check failed for %s: %w", item.path, err)
+		}
+		if !item.dir {
+			info, err := os.Lstat(item.path)
+			if err != nil {
+				return err
+			}
+			if info.Size() > windowsEnterpriseUserFileMaxBytes {
+				return fmt.Errorf("enterprise hooks: Cursor runtime file exceeds the bounded size: %s", item.path)
+			}
+		}
+	}
+	if err := connector.ValidateManagedNativeHookRuntime(
+		target.dataDir,
+		target.gatewayAddr,
+		"cursor",
+	); err != nil {
+		return fmt.Errorf("enterprise hooks: Cursor managed runtime sidecars are invalid: %w", err)
+	}
+	_, hooksPath, adapterPath, _, _, _, err := windowsCursorManagedPaths()
+	if err != nil {
+		return err
+	}
+	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: load Cursor managed hook contract: %w", err)
+	}
+	if lock.Connector != "cursor" ||
+		len(lock.Locations.HookConfigPaths) != 1 ||
+		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], hooksPath) ||
+		len(lock.Locations.HookScriptPaths) != 1 ||
+		!sameWindowsEnterprisePath(lock.Locations.HookScriptPaths[0], adapterPath) ||
+		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		return errors.New("enterprise hooks: Cursor managed hook contract does not identify the active enterprise adapter")
+	}
+	return nil
 }
 
 func resolveWindowsClaudeManagedHookRuntime(

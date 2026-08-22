@@ -198,6 +198,9 @@ type WatchOwnership struct {
 // tampering with it won't fire a repair (guarded by the reconciler
 // test that installs + tampers + expects repair).
 func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
+	if ownership, handled, err := platformWatchOwnedFiles(opts); handled {
+		return ownership, err
+	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
 		return WatchOwnership{}, err

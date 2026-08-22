@@ -38,6 +38,10 @@ func syncEnterpriseHookManagedEnrollments(
 	if err != nil {
 		return err
 	}
+	desiredCursor, err := windowsEnterpriseDesiredCursorEnrollments(manifest)
+	if err != nil {
+		return err
+	}
 	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
 	if err != nil {
 		if publishExact || len(desiredClaude) == 0 {
@@ -79,15 +83,15 @@ func syncEnterpriseHookManagedEnrollments(
 	currentCodex, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(
 		codexOpts.HookBinary,
 	)
+	var deferredCodexErr error
 	if err != nil {
 		if publishExact || len(desiredCodex) == 0 {
-			return err
+			deferredCodexErr = err
 		}
 		// As above, defer only to the trusted machine-policy reconciler. The
-		// target stays unregistered/fail-closed until final exact publication.
-		return nil
-	}
-	if len(desiredCodex) == 0 {
+		// target stays unregistered/fail-closed until final exact publication,
+		// but still revoke an independent stale Cursor enrollment below.
+	} else if len(desiredCodex) == 0 {
 		if currentCodex.Active {
 			report, err := connector.RemoveWindowsCodexMachineRequirements(codexOpts)
 			if err != nil {
@@ -98,29 +102,109 @@ func syncEnterpriseHookManagedEnrollments(
 				return fmt.Errorf("Codex machine requirements removal was not reference-clean")
 			}
 		}
-		return nil
-	}
-	if publishExact {
+	} else if publishExact {
 		if !currentCodex.Active {
 			return fmt.Errorf("Codex managed policy is absent after target runtime installation")
 		}
-		return connector.PublishWindowsCodexManagedRuntimeTargets(codexOpts, desiredCodex)
-	}
-	if !currentCodex.Active {
-		return nil
-	}
-	desired := make(map[string]string, len(desiredCodex))
-	for _, target := range desiredCodex {
-		desired[strings.ToUpper(target.SID)] = target.DataDir
-	}
-	retained := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(currentCodex.Targets))
-	for _, target := range currentCodex.Targets {
-		dataDir, ok := desired[strings.ToUpper(target.SID)]
-		if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
-			retained = append(retained, target)
+		if err := connector.PublishWindowsCodexManagedRuntimeTargets(codexOpts, desiredCodex); err != nil {
+			return err
+		}
+	} else if currentCodex.Active {
+		desired := make(map[string]string, len(desiredCodex))
+		for _, target := range desiredCodex {
+			desired[strings.ToUpper(target.SID)] = target.DataDir
+		}
+		retained := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(currentCodex.Targets))
+		for _, target := range currentCodex.Targets {
+			dataDir, ok := desired[strings.ToUpper(target.SID)]
+			if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
+				retained = append(retained, target)
+			}
+		}
+		if err := connector.PublishWindowsCodexManagedRuntimeTargets(codexOpts, retained); err != nil {
+			return err
 		}
 	}
-	return connector.PublishWindowsCodexManagedRuntimeTargets(codexOpts, retained)
+
+	currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+	if err != nil {
+		if publishExact || len(desiredCursor) == 0 {
+			return err
+		}
+		currentCursor = nil
+		cursorActive = false
+	}
+	if publishExact {
+		if len(desiredCursor) > 0 && !cursorActive {
+			return fmt.Errorf("Cursor enterprise policy is absent after target runtime installation")
+		}
+		if cursorActive || len(desiredCursor) == 0 {
+			if err := enterprisehooks.PublishWindowsCursorManagedPolicyTargets(desiredCursor); err != nil {
+				return err
+			}
+		}
+		return deferredCodexErr
+	}
+	if !cursorActive {
+		return deferredCodexErr
+	}
+	desiredCursorBySID := make(map[string]string, len(desiredCursor))
+	for _, target := range desiredCursor {
+		desiredCursorBySID[strings.ToUpper(target.SID)] = target.DataDir
+	}
+	retainedCursor := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(currentCursor))
+	for _, target := range currentCursor {
+		dataDir, ok := desiredCursorBySID[strings.ToUpper(target.SID)]
+		if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
+			retainedCursor = append(retainedCursor, target)
+		}
+	}
+	if err := enterprisehooks.PublishWindowsCursorManagedPolicyTargets(retainedCursor); err != nil {
+		return err
+	}
+	return deferredCodexErr
+}
+
+func windowsEnterpriseDesiredCursorEnrollments(
+	manifest enterprisehooks.Manifest,
+) ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, error) {
+	desired := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(manifest.Targets))
+	for _, target := range manifest.Targets {
+		if !target.IsEnabled() || !strings.EqualFold(strings.TrimSpace(target.Connector), "cursor") {
+			continue
+		}
+		resolved, err := resolveEnterpriseHookTargetValues(
+			target.User,
+			target.UserHome,
+			intPtrValue(target.UID),
+			intPtrValue(target.GID),
+			target.SID,
+			target.DataDir,
+		)
+		if err != nil {
+			return nil, err
+		}
+		sid, err := windows.StringToSid(strings.TrimSpace(resolved.sid))
+		if err != nil || sid == nil {
+			return nil, fmt.Errorf("invalid Windows Cursor enrollment SID %q", resolved.sid)
+		}
+		dataDir := filepath.Join(filepath.Clean(resolved.home), ".defenseclaw")
+		if configured := strings.TrimSpace(target.DataDir); configured != "" {
+			configured, err = filepath.Abs(configured)
+			if err != nil {
+				return nil, err
+			}
+			configured = filepath.Clean(configured)
+			if !sameWindowsEnterprisePathCLI(configured, dataDir) {
+				return nil, fmt.Errorf("Cursor target %s data_dir does not equal canonical %s", sid, dataDir)
+			}
+		}
+		desired = append(desired, enterprisehooks.WindowsCursorManagedRuntimeTarget{
+			SID: sid.String(), DataDir: dataDir,
+		})
+	}
+	sort.Slice(desired, func(i, j int) bool { return desired[i].SID < desired[j].SID })
+	return desired, nil
 }
 
 func windowsEnterpriseDesiredEnrollments(
@@ -190,6 +274,10 @@ func verifyEnterpriseHookManagedEnrollments(
 	if err != nil {
 		return err
 	}
+	desiredCursor, err := windowsEnterpriseDesiredCursorEnrollments(manifest)
+	if err != nil {
+		return err
+	}
 	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
 	if err != nil {
 		return err
@@ -220,6 +308,19 @@ func verifyEnterpriseHookManagedEnrollments(
 				desiredCodex[index].DataDir,
 			) {
 			return fmt.Errorf("Codex protected SID enrollment does not match the enabled manifest")
+		}
+	}
+	currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+	if err != nil {
+		return err
+	}
+	if cursorActive != (len(desiredCursor) > 0) || len(currentCursor) != len(desiredCursor) {
+		return fmt.Errorf("Cursor protected SID enrollment does not match the enabled manifest")
+	}
+	for index := range desiredCursor {
+		if !strings.EqualFold(currentCursor[index].SID, desiredCursor[index].SID) ||
+			!sameWindowsEnterprisePathCLI(currentCursor[index].DataDir, desiredCursor[index].DataDir) {
+			return fmt.Errorf("Cursor protected SID enrollment does not match the enabled manifest")
 		}
 	}
 	return nil

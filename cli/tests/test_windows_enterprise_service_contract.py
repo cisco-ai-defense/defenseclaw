@@ -97,6 +97,10 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$userHomeFull =" in discovery
     assert "$home =" not in discovery.casefold()
     assert "Get-DefenseClawClaudeWinGetMetadataVersion" in discovery
+    assert "Get-DefenseClawCodexWinGetMetadataVersion" in discovery
+    assert discovery.index("$machinePackage") < discovery.index(
+        "Get-DefenseClawCodexWinGetMetadataVersion"
+    )
     assert discovery.index("$machinePackage") < discovery.index(
         "Get-DefenseClawClaudeWinGetMetadataVersion"
     )
@@ -108,6 +112,10 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
         "Anthropic.ClaudeCode_Microsoft.Winget.Source_*"
         in winget_discovery
     )
+    assert "OpenAI.Codex_Microsoft.Winget.Source_*" in winget_discovery
+    assert "codex-x86_64-pc-windows-msvc.exe" in winget_discovery
+    assert "OpenAI OpCo, LLC" in winget_discovery
+    assert "Get-DefenseClawCodexWinGetEmbeddedVersion" in winget_discovery
     assert "[IO.SearchOption]::TopDirectoryOnly" in winget_discovery
     assert "[IO.SearchOption]::AllDirectories" not in winget_discovery
     assert (
@@ -122,10 +130,15 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$examined -gt 256" in winget_discovery
     assert "$matched -gt 32" in winget_discovery
     assert "Get-DefenseClawConnectorMetadataVersion" in renderer
+    assert "Resolve-DefenseClawConnectorMetadataVersion" in renderer
+    assert "-NativeCandidateObserved $nativeCandidateObserved" in renderer
+    assert "-DiscoveryFailed $metadataDiscoveryFailed" in renderer
     assert "$users = @(" in renderer
     assert "agent_version:" in renderer
     assert "enabled: false" in renderer
-    assert renderer.index("agent_version:") < renderer.index("enabled: true")
+    assert renderer.index('AppendLine("    agent_version:') < renderer.index(
+        "AppendLine('    enabled: true')"
+    )
     assert "@attacker/not-amp" in smoke
     assert "target renderer emitted an enabled/version contract mismatch" in smoke
     assert (
@@ -137,6 +150,14 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
         "eligible Claude user did not receive exactly one enabled target"
         in smoke
     )
+    assert (
+        "official WinGet Codex package was not discovered exactly once"
+        in smoke
+    )
+    assert "WinGet Codex owner identity did not reject a foreign owner" in smoke
+    assert "WinGet Codex discovery followed a package reparse point" in smoke
+    assert "below-minimum native Codex was replaced by fallback metadata" in smoke
+    assert "WinGet Codex fallback decision did not remain fail closed" in smoke
     assert "shorthand config did not explicitly select embedded rule-pack defaults" in smoke
 
 
@@ -409,6 +430,7 @@ def test_packaging_defaults_to_protected_scm_identities_and_roots() -> None:
     )
     assert (
         "    foreach ($path in @(\n"
+        "        $Layout.BrokerLogDirectory,\n"
         "        $Layout.GuardianDirectory,\n"
         "        $Layout.InstallStateDirectory,\n"
         "        $Layout.ManifestPath,\n"
@@ -1202,6 +1224,8 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "fixed_native_helper_spoof_ignored",
                 "command_line_empty_argument_round_trip",
                 "command_line_invalid_arguments_rejected",
+                "service_empty_environment_binding",
+                "service_missing_array_properties_normalized",
                 "certification_scope_rejections",
                 "lifecycle_file_lock_reuse_stable",
             ),
@@ -3305,6 +3329,48 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "lifecycle-snapshot:restore" in smoke
     assert "lifecycle-snapshot:retire" in smoke
     assert "purge_cases = @($purgeResults)" in smoke
+
+
+def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    helper_start = module.index(
+        "function Remove-DefenseClawInactiveDeploymentMetadataForInstall"
+    )
+    helper_end = module.index(
+        "function Assert-DefenseClawMetadataIdentity", helper_start
+    )
+    helper = module[helper_start:helper_end]
+    assert "transaction snapshot does not contain exactly one" in helper
+    assert "Get-FileHash" in helper
+    assert "changed after its transaction snapshot" in helper
+    assert "Remove-Item" in helper
+
+    lifecycle_start = module.index(
+        "function Invoke-DefenseClawInstallLikeLifecycle"
+    )
+    lifecycle_end = module.index(
+        "function Invoke-DefenseClawUninstallLifecycle", lifecycle_start
+    )
+    lifecycle = module[lifecycle_start:lifecycle_end]
+    transaction = lifecycle.index("$snapshot = New-DefenseClawTransaction")
+    adoption = lifecycle.index(
+        "Remove-DefenseClawInactiveDeploymentMetadataForInstall"
+    )
+    inspection = lifecycle.index(
+        "Invoke-DefenseClawCodexRequirementsCommand", adoption
+    )
+    active_metadata = lifecycle.index(
+        "Write-DefenseClawJsonAtomic -Value $newMetadata", inspection
+    )
+    assert transaction < adoption < inspection < active_metadata
+
+    assert "codex-requirements:inspect:metadata-absent" in smoke
+    assert (
+        "direct reinstall did not transactionally replace the inactive tombstone"
+        in smoke
+    )
 
 
 def test_certification_cleanup_handles_partial_profiles_and_empty_parents() -> None:

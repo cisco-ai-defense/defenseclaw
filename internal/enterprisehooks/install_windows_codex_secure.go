@@ -114,24 +114,21 @@ func installWindowsCodexManagedResult(
 			if err != nil {
 				return err
 			}
-			if _, statErr := os.Lstat(transaction.dataDir); errors.Is(statErr, os.ErrNotExist) {
-				transaction.createdDataDir = true
-			} else if statErr != nil {
-				return fmt.Errorf("enterprise hooks: inspect Codex data directory: %w", statErr)
-			}
-			if _, statErr := os.Lstat(transaction.hookDir); errors.Is(statErr, os.ErrNotExist) {
-				transaction.createdHookDir = true
-			} else if statErr != nil {
-				return fmt.Errorf("enterprise hooks: inspect Codex hook directory: %w", statErr)
-			}
 			fail := func(cause error) error {
 				if restoreErr := restoreWindowsCodexUserRuntime(transaction); restoreErr != nil {
 					return fmt.Errorf("%v (Codex runtime rollback failed: %v)", cause, restoreErr)
 				}
 				return cause
 			}
-			if err := os.MkdirAll(transaction.hookDir, 0o700); err != nil {
-				return fail(fmt.Errorf("enterprise hooks: create Codex managed runtime: %w", err))
+			creation, createErr := ensureWindowsTargetOwnedDirectoryTree(
+				transaction.home,
+				transaction.hookDir,
+				transaction.targetSID,
+			)
+			transaction.createdDataDir = creation.createdDataDir
+			transaction.createdHookDir = creation.createdHookDir
+			if createErr != nil {
+				return fail(fmt.Errorf("enterprise hooks: create Codex managed runtime: %w", createErr))
 			}
 			if err := connector.ReconcileManagedNativeHookRuntime(
 				target.dataDir,

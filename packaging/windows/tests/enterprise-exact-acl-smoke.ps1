@@ -34,10 +34,16 @@ $expected = [ordered]@{
     MachinePolicyFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)'
     RuntimeDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
     RuntimeFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;$serviceSID)"
+    RuntimeSecretFile = "O:$serviceSID" + "G:BAD:P(A;;RC;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$serviceSID)"
     AuthorizationDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSID)"
     AuthorizationFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$serviceSID)"
     LogDirectory = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
     GatewayLogDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
+    # FileSystemAccessRule adds Synchronize (0x100000) to explicit allow
+    # rules. ListDirectory | Traverse is therefore serialized as 0x100021.
+    # CommonAcl then canonicalizes equal-priority allow ACEs by SID, placing
+    # Authenticated Users before SYSTEM, Administrators, and the service SID.
+    ManagedIPCDirectory = "O:BAG:BAD:P(A;;0x100021;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$serviceSID)"
 }
 $directoryKinds = @(
     'InstallDirectory',
@@ -48,7 +54,8 @@ $directoryKinds = @(
     'RuntimeDirectory',
     'AuthorizationDirectory',
     'LogDirectory',
-    'GatewayLogDirectory'
+    'GatewayLogDirectory',
+    'ManagedIPCDirectory'
 )
 
 $observed = & $module {
@@ -71,7 +78,10 @@ $observed = & $module {
 foreach ($row in $observed) {
     if (-not [bool]$row.protected -or
         [string]$row.sddl -cne [string]$expected[[string]$row.kind]) {
-        throw "canonical ACL descriptor mismatch for $($row.kind)"
+        throw (
+            "canonical ACL descriptor mismatch for $($row.kind): " +
+            "expected=$($expected[[string]$row.kind]) observed=$($row.sddl)"
+        )
     }
 }
 if ($observed.Count -ne $expected.Count) {
@@ -131,10 +141,12 @@ $pairings = [ordered]@{
     MachinePolicyFile = 'MachinePolicy'
     RuntimeDirectory = 'Runtime'
     RuntimeFile = 'Runtime'
+    RuntimeSecretFile = 'RuntimeSecret'
     AuthorizationDirectory = 'AuthorizationDirectory'
     AuthorizationFile = 'AuthorizationFile'
     LogDirectory = 'Admin'
     GatewayLogDirectory = 'Runtime'
+    ManagedIPCDirectory = 'ManagedIPCDirectory'
 }
 if ($pairings.Count -ne $expected.Count) {
     throw 'installer/verifier pairing table does not cover every managed path kind'
@@ -175,6 +187,26 @@ $pairingsChecked = & $module {
                 "installer ACL kind {0} grants the gateway service {1}, " +
                 "short of the {2} required by verifier rights kind {3}"
             ) -f $aclKind, $granted, $expectedRights, $rightsKind
+        }
+        if ($aclKind -eq 'RuntimeSecretFile') {
+            $writeLikeRights = (
+                [Security.AccessControl.FileSystemRights]::WriteData -bor
+                [Security.AccessControl.FileSystemRights]::AppendData -bor
+                [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+                [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+                [Security.AccessControl.FileSystemRights]::Delete -bor
+                [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                [Security.AccessControl.FileSystemRights]::TakeOwnership
+            )
+            if (($granted -band $writeLikeRights) -ne 0 -or
+                $expectedRights -ne
+                    [Security.AccessControl.FileSystemRights]::Read) {
+                throw (
+                    'runtime secret grants the gateway write-like access or ' +
+                    'does not pair with the read-only verifier contract'
+                )
+            }
         }
         # The reverse direction: a grant the verifier does not model is read by
         # its administrator-only reader allow-list as an untrusted principal.
@@ -315,6 +347,169 @@ foreach ($property in $comparisonCases.psobject.Properties) {
     }
 }
 
+$runtimeAdoption = & $module {
+    param($GatewaySID)
+    $root = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        'DefenseClaw-RuntimeAcl-' + [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $root `
+            -Force)
+        $nested = Microsoft.PowerShell.Management\Join-Path $root 'nested'
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $nested `
+            -Force)
+        $audit = Microsoft.PowerShell.Management\Join-Path $root 'audit.db'
+        $sidecar = Microsoft.PowerShell.Management\Join-Path $nested 'audit.db-wal'
+        $redactionKey = Microsoft.PowerShell.Management\Join-Path `
+            $root `
+            'redaction-correlation.key'
+        [IO.File]::WriteAllText($audit, 'retained-audit')
+        [IO.File]::WriteAllText($sidecar, 'retained-sidecar')
+        # This is deterministic fixture material, never a production key. Keep
+        # it in memory and expose only boolean preservation results below.
+        [IO.File]::WriteAllBytes($redactionKey, [byte[]](0..31))
+
+        # Model the administrator-only tree left by non-purge uninstall.
+        foreach ($directory in @($root, $nested)) {
+            Set-DefenseClawPathAcl `
+                -Path $directory `
+                -Kind AdminDirectory `
+                -GatewayServiceSID $GatewaySID
+        }
+        foreach ($file in @($audit, $sidecar, $redactionKey)) {
+            Set-DefenseClawPathAcl `
+                -Path $file `
+                -Kind AdminFile `
+                -GatewayServiceSID $GatewaySID
+        }
+
+        $native = Initialize-DefenseClawNativeSecurity
+        $keyIdentityBefore = ([string]$native::GetFileIdentity(
+            $redactionKey
+        )).ToLowerInvariant()
+        $keyHashBefore = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $redactionKey `
+                -Algorithm SHA256
+        ).Hash
+        $keyBytesBefore = [IO.File]::ReadAllBytes($redactionKey)
+
+        Set-DefenseClawRetainedRuntimeAcls `
+            -RuntimeDirectory $root `
+            -GatewayServiceSID $GatewaySID
+        foreach ($directory in @($root, $nested)) {
+            $expectedDirectory = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory $true `
+                -Kind RuntimeDirectory `
+                -GatewayServiceSID $GatewaySID
+            Assert-DefenseClawCanonicalPathAcl `
+                -Path $directory `
+                -Expected $expectedDirectory
+        }
+        foreach ($file in @($audit, $sidecar)) {
+            $expectedFile = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory $false `
+                -Kind RuntimeFile `
+                -GatewayServiceSID $GatewaySID
+            Assert-DefenseClawCanonicalPathAcl `
+                -Path $file `
+                -Expected $expectedFile
+        }
+        $expectedSecret = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $false `
+            -Kind RuntimeSecretFile `
+            -GatewayServiceSID $GatewaySID
+        Assert-DefenseClawCanonicalPathAcl `
+            -Path $redactionKey `
+            -Expected $expectedSecret
+
+        $keyIdentityAfter = ([string]$native::GetFileIdentity(
+            $redactionKey
+        )).ToLowerInvariant()
+        $keyHashAfter = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $redactionKey `
+                -Algorithm SHA256
+        ).Hash
+        $keyBytesAfter = [IO.File]::ReadAllBytes($redactionKey)
+        $keyBytesPreserved = $keyBytesBefore.Length -eq $keyBytesAfter.Length
+        if ($keyBytesPreserved) {
+            for ($index = 0; $index -lt $keyBytesBefore.Length; $index++) {
+                if ($keyBytesBefore[$index] -ne $keyBytesAfter[$index]) {
+                    $keyBytesPreserved = $false
+                    break
+                }
+            }
+        }
+
+        $linked = Microsoft.PowerShell.Management\Join-Path $root 'linked.db'
+        $linkedAlias = Microsoft.PowerShell.Management\Join-Path $root 'linked-alias.db'
+        [IO.File]::WriteAllText($linked, 'linked-runtime')
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType HardLink `
+            -Path $linkedAlias `
+            -Target $linked `
+            -Force)
+        $descriptorBefore = [Convert]::ToBase64String(
+            $native::GetFileSecurityDescriptor($linked)
+        )
+        $hardLinkRejected = $false
+        try {
+            Set-DefenseClawRetainedRuntimeAcls `
+                -RuntimeDirectory $root `
+                -GatewayServiceSID $GatewaySID
+        }
+        catch {
+            $hardLinkRejected = $_.Exception.Message -match 'hard links'
+        }
+        $descriptorAfter = [Convert]::ToBase64String(
+            $native::GetFileSecurityDescriptor($linked)
+        )
+        return [pscustomobject]@{
+            retained_tree_adopted = $true
+            single_links_enforced = (
+                $native::GetRegularFileLinkCountNoFollow($audit) -eq 1 -and
+                $native::GetRegularFileLinkCountNoFollow($redactionKey) -eq 1
+            )
+            runtime_secret_acl_exact = $true
+            runtime_secret_bytes_preserved = $keyBytesPreserved
+            runtime_secret_hash_preserved = (
+                [string]::Equals(
+                    $keyHashBefore,
+                    $keyHashAfter,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            )
+            runtime_secret_identity_preserved = (
+                $keyIdentityBefore -ceq $keyIdentityAfter
+            )
+            hard_link_rejected = $hardLinkRejected
+            hard_link_preflight_preserved_acl = (
+                $descriptorBefore -ceq $descriptorAfter
+            )
+        }
+    }
+    finally {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root) {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $root `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+} $serviceSID
+foreach ($property in $runtimeAdoption.psobject.Properties) {
+    if (-not [bool]$property.Value) {
+        throw "retained runtime ACL adoption regression failed: $($property.Name)"
+    }
+}
+
 $nativeDescriptor = & $module {
     param($Path)
     $native = Initialize-DefenseClawNativeSecurity
@@ -340,4 +535,10 @@ if ($null -eq $nativeDescriptor.DiscretionaryAcl) {
     installer_verifier_pairings_checked = $pairingsChecked
     acl_kind_sets_agree = [bool]$kindSetsAgree
     state_ancestor_grant_is_additive = $true
+    retained_runtime_tree_adopted = $true
+    retained_runtime_hard_links_rejected = $true
+    retained_runtime_secret_acl_exact = $true
+    retained_runtime_secret_bytes_preserved = $true
+    retained_runtime_secret_hash_preserved = $true
+    retained_runtime_secret_identity_preserved = $true
 } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress

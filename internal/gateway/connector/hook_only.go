@@ -1623,29 +1623,7 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 	}
 	hooks := ensureJSONObject(cfg, "hooks")
 	cfg["version"] = 1
-	for _, event := range []string{
-		"sessionStart",
-		"sessionEnd",
-		"preToolUse",
-		"postToolUse",
-		"postToolUseFailure",
-		"subagentStart",
-		"subagentStop",
-		"beforeShellExecution",
-		"beforeMCPExecution",
-		"afterShellExecution",
-		"afterMCPExecution",
-		"beforeReadFile",
-		"beforeTabFileRead",
-		"afterFileEdit",
-		"afterTabFileEdit",
-		"beforeSubmitPrompt",
-		"afterAgentResponse",
-		"afterAgentThought",
-		"stop",
-		"preCompact",
-		"workspaceOpen",
-	} {
+	for _, event := range cursorHookEvents {
 		entry := map[string]interface{}{
 			"type":       "command",
 			"command":    shellWord(hookScript),

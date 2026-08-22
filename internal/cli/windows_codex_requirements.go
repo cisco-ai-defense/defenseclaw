@@ -220,7 +220,7 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, fmt.Errorf("resolve trusted ProgramData: %w", err)
 	}
 	requirementsPath := filepath.Join(programData, "OpenAI", "Codex", "requirements.toml")
-	enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, err :=
+	enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, cursorTargetEnabled, err :=
 		resolveWindowsCodexManifestApplicability(stateRoot)
 	if err != nil {
 		return opts, err
@@ -238,6 +238,7 @@ func resolveWindowsCodexRequirementsLayout(
 		ClaudeTargetEnabled:             claudeTargetEnabled,
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
 		CodexTargetEnabled:              codexTargetEnabled,
+		CursorTargetEnabled:             cursorTargetEnabled,
 	}
 
 	metadataPath := filepath.Join(stateRoot, "install", "deployment.json")
@@ -273,17 +274,17 @@ func resolveWindowsCodexRequirementsLayout(
 
 func resolveWindowsCodexManifestApplicability(
 	stateRoot string,
-) (enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled bool, err error) {
+) (enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, cursorTargetEnabled bool, err error) {
 	manifestPath := filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
 	if err := windowsCodexRequirementsManifestTrust(
 		manifestPath,
 		"Windows enterprise hook target manifest",
 	); err != nil {
-		return false, false, false, err
+		return false, false, false, false, err
 	}
 	manifest, err := windowsCodexRequirementsManifestLoader(manifestPath)
 	if err != nil {
-		return false, false, false, err
+		return false, false, false, false, err
 	}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
@@ -295,9 +296,11 @@ func resolveWindowsCodexManifestApplicability(
 			codexTargetEnabled = true
 		case "claudecode":
 			claudeTargetEnabled = true
+		case "cursor":
+			cursorTargetEnabled = true
 		}
 	}
-	return enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, nil
+	return enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, cursorTargetEnabled, nil
 }
 
 func exactWindowsCodexAttestationEnv(name string) (bool, error) {

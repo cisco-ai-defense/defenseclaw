@@ -134,7 +134,7 @@ func hookConnectorFromArgs(args []string) (string, error) {
 		}
 	}
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
-	if connectorName != "codex" && connectorName != "claudecode" {
+	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "cursor" {
 		return connectorName, fmt.Errorf(
 			"enterprise managed hook connector %q is not supported",
 			connectorName,

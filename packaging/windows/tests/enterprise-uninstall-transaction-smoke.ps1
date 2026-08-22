@@ -142,6 +142,15 @@ try {
             $codexMachinePolicyDirectory = Microsoft.PowerShell.Management\Join-Path `
                 $codexVendorDirectory `
                 'Codex'
+            $brokerStateDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $stateRoot `
+                'broker'
+            $brokerLogDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $stateRoot `
+                'logs\broker'
+            $managedIPCDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $Root `
+                'managed-ipc'
             foreach ($directory in @(
                 $installRoot,
                 $stateRoot,
@@ -165,6 +174,22 @@ try {
                 GatewayPath = (
                     Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-gateway.exe'
                 )
+                BrokerPath = (
+                    Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-cmid-broker.exe'
+                )
+                BrokerServiceName = 'DefenseClawCMIDBroker'
+                BrokerPipeName = '\\.\pipe\DefenseClawCMIDBroker'
+                BrokerStateDirectory = $brokerStateDirectory
+                BrokerAuthKeyPath = (
+                    Microsoft.PowerShell.Management\Join-Path $brokerStateDirectory 'broker-auth.key'
+                )
+                BrokerLogDirectory = $brokerLogDirectory
+                BrokerLogPath = (
+                    Microsoft.PowerShell.Management\Join-Path $brokerLogDirectory 'cmid-broker.log'
+                )
+                ProviderLibraryPath = (
+                    Microsoft.PowerShell.Management\Join-Path $Root 'provider-fixture.dll'
+                )
                 HookPath = (
                     Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-hook.exe'
                 )
@@ -185,6 +210,12 @@ try {
                 )
                 RuntimeDirectory = (
                     Microsoft.PowerShell.Management\Join-Path $stateRoot 'runtime'
+                )
+                ManagedIPCDirectory = $managedIPCDirectory
+                ManagedIPCSocketPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $managedIPCDirectory `
+                        'defenseclaw_ipc.sock'
                 )
                 AuthorizationDirectory = (
                     Microsoft.PowerShell.Management\Join-Path $stateRoot 'authorization'
@@ -253,6 +284,7 @@ try {
                 )
                 CodexTargetEnabled = $false
                 ClaudeTargetEnabled = $true
+                CursorTargetEnabled = $false
                 AgentApplicationControlAttested = $true
                 ClaudeEffectivePolicyVerified = $true
                 CoreHardeningCertification = $false
@@ -272,6 +304,24 @@ try {
                 [Parameter(Mandatory)][bool]$ServicesRunning,
                 [bool]$ServicesExisted = $true
             )
+            $files = @()
+            if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.MetadataPath `
+                -PathType Leaf) {
+                $metadataBackup = $SnapshotPath + '.metadata.bak'
+                Microsoft.PowerShell.Management\Copy-Item `
+                    -LiteralPath $Layout.MetadataPath `
+                    -Destination $metadataBackup `
+                    -Force
+                $files = @(
+                    [ordered]@{
+                        path = $Layout.MetadataPath
+                        existed = $true
+                        backup = $metadataBackup
+                        security_descriptor = ''
+                    }
+                )
+            }
             $snapshot = [ordered]@{
                 schema_version = 1
                 gateway_service = 'DefenseClawGateway'
@@ -288,7 +338,7 @@ try {
                 managed_hooks_teardown_journal_preserved = $true
                 managed_hooks_teardown_journal_preimage_existed = $PreimageExisted
                 managed_hooks_teardown_journal_preimage_sha256 = $PreimageSHA256
-                files = @()
+                files = $files
                 services = @(
                     [ordered]@{
                         name = 'DefenseClawGateway'
@@ -740,6 +790,13 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [switch]$Required
             )
+            if ($script:HarnessState.operation -eq 'install' -and
+                -not [bool]$script:HarnessState.installed -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.MetadataPath `
+                    -PathType Leaf)) {
+                return $null
+            }
             return [pscustomobject]@{
                 installed = [bool]$script:HarnessState.installed
                 codex_target_enabled = $false
@@ -787,6 +844,15 @@ try {
                 throw "refusing foreign service $Name"
             }
         }
+        function script:Assert-DefenseClawCMIDBrokerServiceOrAbsent {
+            param(
+                [Parameter(Mandatory)][string]$Name,
+                [Parameter(Mandatory)][string]$ExpectedImage,
+                [switch]$AllowArgumentUpgrade
+            )
+            $script:HarnessState.events.Add("owned:$Name")
+            $script:HarnessState.owned_checks++
+        }
         function script:Assert-DefenseClawManagedServiceConfigurations {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
@@ -812,7 +878,11 @@ try {
             else {
                 @(2)
             }
-            foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+            foreach ($name in @(
+                $GatewayServiceName,
+                $Layout.BrokerServiceName,
+                $GuardianServiceName
+            )) {
                 if ($script:HarnessState.service_start_modes[$name] -notin
                     $expectedModes) {
                     throw "service $name mode is $($script:HarnessState.service_start_modes[$name]), expected $($expectedModes -join ' or ')"
@@ -885,14 +955,30 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$PriorDeploymentActive,
                 [switch]$IncludeCodexMachineState,
                 [switch]$ManagedHooksTeardownPrepared,
                 [switch]$PreserveManagedHooksTeardownJournal
             )
+            if (-not $PSBoundParameters.ContainsKey(
+                    'PriorDeploymentActive'
+                )) {
+                throw 'transaction omitted the prior deployment activity contract'
+            }
+            if ([bool]$PriorDeploymentActive -ne
+                [bool]$script:HarnessState.installed) {
+                throw (
+                    'transaction prior deployment activity did not match ' +
+                    'the authenticated metadata fixture'
+                )
+            }
             $script:HarnessState.events.Add('transaction')
             $script:HarnessState.transaction_calls++
             $script:HarnessState.service_start_modes[
                 $GatewayServiceName
+            ] = 4
+            $script:HarnessState.service_start_modes[
+                $Layout.BrokerServiceName
             ] = 4
             $script:HarnessState.service_start_modes[
                 $GuardianServiceName
@@ -1199,20 +1285,18 @@ try {
                                 -Force
                         }
                     }
-                    # Spec 005 D1 (PR #766): third managed service.
-                    # The self-uninstall shortcut mock fakes removal of
-                    # all three services to stay consistent with the
-                    # full transactional path in the real code (which
-                    # removes enumerator + guardian + gateway).
+                    # The self-uninstall shortcut mock fakes removal of all
+                    # four services to stay consistent with the full path.
                     foreach ($name in @(
                         'DefenseClawGateway',
+                        'DefenseClawCMIDBroker',
                         'DefenseClawHookGuardian',
                         'DefenseClawHookEnumerator'
                     )) {
                         $script:HarnessState.service_exists[$name] = $false
                         $script:HarnessState.service_start_modes[$name] = 0
                     }
-                    $script:HarnessState.removed_services += 3
+                    $script:HarnessState.removed_services += 4
                     $script:HarnessState.installed = $false
                     $script:HarnessState.services_running = $false
                     return
@@ -1240,6 +1324,9 @@ try {
             $script:HarnessState.services_running = $false
             $script:HarnessState.service_start_modes[
                 'DefenseClawGateway'
+            ] = 4
+            $script:HarnessState.service_start_modes[
+                'DefenseClawCMIDBroker'
             ] = 4
             $script:HarnessState.service_start_modes[
                 'DefenseClawHookGuardian'
@@ -1408,6 +1495,12 @@ try {
             param(
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                [Parameter(Mandatory)][string]$BrokerServiceName,
+                [Parameter(Mandatory)][string]$BrokerPath,
+                [Parameter(Mandatory)][string]$BrokerPipeName,
+                [Parameter(Mandatory)][string]$BrokerAuthKeyPath,
+                [Parameter(Mandatory)][string]$ProviderLibraryPath,
+                [Parameter(Mandatory)][string]$BrokerLogPath,
                 [Parameter(Mandatory)][string]$GatewayPath,
                 [Parameter(Mandatory)][string]$ManifestPath,
                 [Parameter(Mandatory)][string]$RuntimeDirectory,
@@ -1423,10 +1516,13 @@ try {
             $mode = if ($DeferAutomaticStart) { 4 } else { 2 }
             $script:HarnessState.service_start_modes[$GatewayServiceName] =
                 $mode
+            $script:HarnessState.service_start_modes[$BrokerServiceName] =
+                $mode
             $script:HarnessState.service_start_modes[$GuardianServiceName] =
                 $mode
             if ($script:HarnessState.ContainsKey('service_exists')) {
                 $script:HarnessState.service_exists[$GatewayServiceName] = $true
+                $script:HarnessState.service_exists[$BrokerServiceName] = $true
                 $script:HarnessState.service_exists[$GuardianServiceName] = $true
             }
         }
@@ -1436,6 +1532,33 @@ try {
                 [Parameter(Mandatory)][string]$GatewayServiceName
             )
             $script:HarnessState.events.Add('managed-core-acls')
+        }
+        function script:Set-DefenseClawRetainedRuntimeAcls {
+            param(
+                [Parameter(Mandatory)][string]$RuntimeDirectory,
+                [Parameter(Mandatory)][string]$GatewayServiceSID
+            )
+            if (-not [string]::Equals(
+                    $RuntimeDirectory,
+                    [string]$script:HarnessState.layout.RuntimeDirectory,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or $GatewayServiceSID -cne 'S-1-5-80-1234') {
+                throw 'retained runtime ACL mock received the wrong identity'
+            }
+            $script:HarnessState.events.Add('retained-runtime-acls')
+        }
+        function script:Initialize-DefenseClawManagedIPCDirectory {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName
+            )
+            if ([string]::IsNullOrWhiteSpace(
+                    [string]$Layout.ManagedIPCDirectory
+                )) {
+                throw 'managed IPC mock received an empty contract path'
+            }
+            $null = $GatewayServiceName
+            $script:HarnessState.events.Add('managed-ipc-directory')
         }
         function script:Set-DefenseClawManagedAcls {
             param(
@@ -1450,6 +1573,20 @@ try {
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$Action
             )
+            if ($script:HarnessState.ContainsKey(
+                    'require_inactive_tombstone_adoption'
+                ) -and
+                [bool]$script:HarnessState.require_inactive_tombstone_adoption -and
+                $Action -in @('inspect', 'reconcile')) {
+                if (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.MetadataPath `
+                    -PathType Leaf) {
+                    throw 'protected deployment metadata marks this installation inactive'
+                }
+                $script:HarnessState.events.Add(
+                    "codex-requirements:$Action`:metadata-absent"
+                )
+            }
             return [pscustomobject]@{
                 ok = $true
                 codex_target_enabled = $false
@@ -1471,6 +1608,9 @@ try {
                 [Parameter(Mandatory)][string]$AuthorizationDirectory,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$LogPath,
+                [string]$BrokerPipeName,
+                [string]$BrokerServiceName,
+                [string]$BrokerAuthKeyPath,
                 [switch]$AgentApplicationControlAttested,
                 [switch]$ClaudeEffectivePolicyVerified
             )
@@ -1809,10 +1949,12 @@ try {
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 2
+                    DefenseClawCMIDBroker = 2
                     DefenseClawHookGuardian = 2
                 }
                 service_exists = @{
                     DefenseClawGateway = -not $AlreadyUninstalled
+                    DefenseClawCMIDBroker = -not $AlreadyUninstalled
                     DefenseClawHookGuardian = -not $AlreadyUninstalled
                 }
                 guardian_fresh = $ServicesRunning
@@ -1890,14 +2032,12 @@ try {
                         $script:HarnessState.service_contract_checks -eq 2
                     ) `
                     -Message "$Name did not verify the full service contract twice"
-                # Spec 005 D1 (PR #766): the full uninstall path now
-                # removes enumerator + guardian + gateway (three
-                # services). Each `Remove-DefenseClawService` mock
-                # invocation increments `removed_services`, so the
-                # expected count is 3 not 2.
+                # The full uninstall path removes enumerator, guardian,
+                # gateway, and credential broker. Each mocked removal is
+                # preceded by its corresponding ownership recheck.
                 Assert-Harness `
-                    -Condition ($script:HarnessState.removed_services -eq 3) `
-                    -Message "$Name did not delete all three exactly rechecked services"
+                    -Condition ($script:HarnessState.removed_services -eq 4) `
+                    -Message "$Name did not delete all four exactly rechecked services"
                 Assert-Harness `
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.ManagedHooksTeardownJournalPath)) `
@@ -2018,12 +2158,16 @@ targets:
     enabled: true
 '@
             $sources = @{
+                broker = 'fresh-broker'
                 gateway = 'fresh-gateway'
                 hook = 'fresh-hook'
                 installer = 'fresh-installer'
                 module = 'fresh-module'
                 config = 'listen_addr: 127.0.0.1:18970'
                 manifest = $manifest
+                provider_library = [pscustomobject]@{
+                    path = $layout.ProviderLibraryPath
+                }
             }
             $script:HarnessState = @{
                 operation = 'install'
@@ -2057,10 +2201,12 @@ targets:
                 fail_fresh_install_capture = $true
                 service_start_modes = @{
                     DefenseClawGateway = 0
+                    DefenseClawCMIDBroker = 0
                     DefenseClawHookGuardian = 0
                 }
                 service_exists = @{
                     DefenseClawGateway = $false
+                    DefenseClawCMIDBroker = $false
                     DefenseClawHookGuardian = $false
                 }
                 guardian_fresh = $false
@@ -2093,6 +2239,12 @@ targets:
                 $services = $script:HarnessState.events.IndexOf(
                     'managed-services'
                 )
+                $managedIPC = $script:HarnessState.events.IndexOf(
+                    'managed-ipc-directory'
+                )
+                $retainedRuntimeAcls = $script:HarnessState.events.IndexOf(
+                    'retained-runtime-acls'
+                )
                 $coreAcls = $script:HarnessState.events.IndexOf(
                     'managed-core-acls'
                 )
@@ -2107,14 +2259,18 @@ targets:
                     -Condition (
                         $transaction -ge 0 -and
                         $services -gt $transaction -and
-                        $coreAcls -gt $services -and
+                        $managedIPC -gt $services -and
+                        $retainedRuntimeAcls -gt $managedIPC -and
+                        $coreAcls -gt $retainedRuntimeAcls -and
                         $capture -gt $coreAcls
                     ) `
                     -Message (
                         "fresh install attempt $attempt violated " +
-                        'transaction/service/ACL/snapshot ordering ' +
+                        'transaction/service/IPC/ACL/snapshot ordering ' +
                         "(transaction=$transaction services=$services " +
-                        "core_acls=$coreAcls capture=$capture; " +
+                        "managed_ipc=$managedIPC core_acls=$coreAcls " +
+                        "retained_runtime_acls=$retainedRuntimeAcls " +
+                        "capture=$capture; " +
                         "failure=$failure; events=[$eventTrace])"
                     )
 
@@ -2128,10 +2284,16 @@ targets:
                                 'DefenseClawGateway'
                             ] -and
                             -not [bool]$script:HarnessState.service_exists[
+                                'DefenseClawCMIDBroker'
+                            ] -and
+                            -not [bool]$script:HarnessState.service_exists[
                                 'DefenseClawHookGuardian'
                             ] -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawGateway'
+                            ] -eq 0 -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawCMIDBroker'
                             ] -eq 0 -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawHookGuardian'
@@ -2159,26 +2321,31 @@ targets:
                                 'DefenseClawGateway'
                             ] -and
                             [bool]$script:HarnessState.service_exists[
+                                'DefenseClawCMIDBroker'
+                            ] -and
+                            [bool]$script:HarnessState.service_exists[
                                 'DefenseClawHookGuardian'
                             ] -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawGateway'
                             ] -eq 4 -and
                             $script:HarnessState.service_start_modes[
+                                'DefenseClawCMIDBroker'
+                            ] -eq 4 -and
+                            $script:HarnessState.service_start_modes[
                                 'DefenseClawHookGuardian'
                             ] -eq 4
                         ) `
-                        -Message 'fresh Install -NoStart retry did not leave both services disabled'
+                        -Message 'fresh Install -NoStart retry did not leave the broker-backed service set disabled'
                 }
             }
-            # Spec 005 D1 (PR #766): rollback removes all three managed
-            # services (Set-DefenseClawManagedServices creates the
-            # enumerator alongside gateway + guardian).
+            # Rollback removes all four transaction-created services:
+            # broker, gateway, guardian, and enumerator.
             Assert-Harness `
                 -Condition (
                     $script:HarnessState.transaction_calls -eq 2 -and
                     $script:HarnessState.restore_calls -eq 1 -and
-                    $script:HarnessState.removed_services -eq 3
+                    $script:HarnessState.removed_services -eq 4
                 ) `
                 -Message 'fresh install fault/retry did not use exact transactional rollback'
             $uninstallResults.Add([pscustomobject]@{
@@ -2195,6 +2362,11 @@ targets:
                 -Parent $TestRoot `
                 -Label 'direct-reinstall-after-committed-crash'
             $layout = New-HarnessLayout -Root $root
+            [IO.File]::WriteAllText(
+                $layout.MetadataPath,
+                '{"schema_version":1,"installed":false}',
+                [Text.UTF8Encoding]::new($false)
+            )
             $oldJournal = [ordered]@{
                 schema_version = 1
                 phase = 'prepared'
@@ -2243,9 +2415,11 @@ targets:
                 removed_services = 0
                 purged_state = $false
                 install_saw_retired_journal = $false
+                require_inactive_tombstone_adoption = $true
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 2
+                    DefenseClawCMIDBroker = 2
                     DefenseClawHookGuardian = 2
                 }
                 guardian_fresh = $false
@@ -2266,12 +2440,16 @@ targets:
     enabled: true
 '@
             $sources = @{
+                broker = 'new-broker'
                 gateway = 'new-gateway'
                 hook = 'new-hook'
                 installer = 'new-installer'
                 module = 'new-module'
                 config = 'listen_addr: 127.0.0.1:18970'
                 manifest = $newManifest
+                provider_library = [pscustomobject]@{
+                    path = $layout.ProviderLibraryPath
+                }
             }
             [void](Invoke-DefenseClawInstallLikeLifecycle `
                 -Action 'Install' `
@@ -2279,9 +2457,25 @@ targets:
                 -Sources $sources `
                 -GatewayServiceName 'DefenseClawGateway' `
                 -GuardianServiceName 'DefenseClawHookGuardian')
+            $reinstalledMetadata =
+                Microsoft.PowerShell.Management\Get-Content `
+                    -LiteralPath $layout.MetadataPath `
+                    -Raw |
+                    Microsoft.PowerShell.Utility\ConvertFrom-Json
             Assert-Harness `
                 -Condition ([bool]$script:HarnessState.install_saw_retired_journal) `
                 -Message 'direct reinstall did not retire changed-identity journal before transaction'
+            Assert-Harness `
+                -Condition (
+                    $script:HarnessState.events.IndexOf(
+                        'codex-requirements:inspect:metadata-absent'
+                    ) -ge 0 -and
+                    (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $layout.MetadataPath `
+                        -PathType Leaf) -and
+                    [bool]$reinstalledMetadata.installed
+                ) `
+                -Message 'direct reinstall did not transactionally replace the inactive tombstone with active metadata'
             Assert-Harness `
                 -Condition (
                     [bool]$script:HarnessState.queued_restart_blocked -and
@@ -2358,12 +2552,16 @@ targets:
     enabled: true
 '@
             $sources = @{
+                broker = 'activation-broker'
                 gateway = 'activation-gateway'
                 hook = 'activation-hook'
                 installer = 'activation-installer'
                 module = 'activation-module'
                 config = 'listen_addr: 127.0.0.1:18970'
                 manifest = $manifest
+                provider_library = [pscustomobject]@{
+                    path = $layout.ProviderLibraryPath
+                }
             }
             foreach ($entry in @(
                 @($layout.ConfigPath, 'listen_addr: 127.0.0.1:18969'),
@@ -2413,6 +2611,7 @@ targets:
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 4
+                    DefenseClawCMIDBroker = 4
                     DefenseClawHookGuardian = 4
                 }
                 guardian_fresh = $false
@@ -2528,10 +2727,12 @@ targets:
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 4
+                    DefenseClawCMIDBroker = 4
                     DefenseClawHookGuardian = 4
                 }
                 service_exists = @{
                     DefenseClawGateway = $false
+                    DefenseClawCMIDBroker = $false
                     DefenseClawHookGuardian = $false
                 }
                 guardian_fresh = $false
@@ -3112,6 +3313,7 @@ targets:
                     } else {
                         0
                     })
+                    DefenseClawCMIDBroker = 0
                     DefenseClawHookGuardian = $(
                         if ($PriorGuardianExisted) { 4 } else { 0 }
                     )

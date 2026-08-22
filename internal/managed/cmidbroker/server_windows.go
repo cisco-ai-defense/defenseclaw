@@ -1,0 +1,187 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package cmidbroker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"runtime"
+	"sync"
+	"time"
+	"unsafe"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"golang.org/x/sys/windows"
+)
+
+const brokerShutdownTimeout = 20 * time.Second
+
+func (server *Server) Serve(ctx context.Context) error {
+	return server.ServeWithReady(ctx, nil)
+}
+
+func (server *Server) ServeWithReady(ctx context.Context, ready chan<- struct{}) error {
+	if server == nil {
+		return errors.New("cmid broker server is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	security, err := pipeSecurityAttributes(server.config.GatewayServiceName)
+	if err != nil {
+		return err
+	}
+	semaphore := make(chan struct{}, server.config.MaximumClients)
+	var active sync.WaitGroup
+	firstInstance := true
+	readySignaled := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			return waitForActiveClients(&active)
+		case semaphore <- struct{}{}:
+		}
+
+		pipe, err := createServerPipe(server.config.PipeName, security, firstInstance)
+		if err != nil {
+			<-semaphore
+			return fmt.Errorf("create protected CMID broker pipe: %w", err)
+		}
+		firstInstance = false
+		if !readySignaled {
+			readySignaled = true
+			if ready != nil {
+				close(ready)
+			}
+		}
+		if err := connectServerPipe(ctx, pipe); err != nil {
+			_ = windows.CloseHandle(pipe)
+			<-semaphore
+			if ctx.Err() != nil {
+				return waitForActiveClients(&active)
+			}
+			continue
+		}
+		clientPID, err := authenticatePipeClient(pipe, server.config.GatewayServiceName)
+		if err != nil {
+			_ = windows.DisconnectNamedPipe(pipe)
+			_ = windows.CloseHandle(pipe)
+			<-semaphore
+			if server.log != nil {
+				server.log(Event{Stage: "client-auth", ClientPID: clientPID})
+			}
+			continue
+		}
+
+		active.Add(1)
+		go func(handle windows.Handle, pid uint32) {
+			defer active.Done()
+			defer func() { <-semaphore }()
+			defer windows.CloseHandle(handle)
+			defer windows.DisconnectNamedPipe(handle)
+			server.handleConnection(ctx, handle, pid)
+		}(pipe, clientPID)
+	}
+}
+
+func (server *Server) handleConnection(ctx context.Context, pipe windows.Handle, clientPID uint32) {
+	message := make([]byte, MaxMessageBytes)
+	count, err := readOverlapped(ctx, pipe, message)
+	if err != nil || count == 0 || count > MaxMessageBytes {
+		if server.log != nil {
+			server.log(Event{Stage: "read", ClientPID: clientPID})
+		}
+		return
+	}
+	response, err := server.processMessageForClient(ctx, message[:count], clientPID)
+	if err != nil {
+		return
+	}
+	if _, err := writeOverlapped(ctx, pipe, response); err != nil && server.log != nil {
+		server.log(Event{Stage: "write", ClientPID: clientPID})
+	}
+}
+
+func createServerPipe(
+	pipeName string,
+	security *pipeSecurity,
+	first bool,
+) (windows.Handle, error) {
+	pointer, err := windows.UTF16PtrFromString(pipeName)
+	if err != nil {
+		return 0, err
+	}
+	flags := uint32(windows.PIPE_ACCESS_DUPLEX | windows.FILE_FLAG_OVERLAPPED)
+	if first {
+		flags |= windows.FILE_FLAG_FIRST_PIPE_INSTANCE
+	}
+	handle, err := windows.CreateNamedPipe(
+		pointer,
+		flags,
+		windows.PIPE_TYPE_MESSAGE|windows.PIPE_READMODE_MESSAGE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
+		windows.PIPE_UNLIMITED_INSTANCES,
+		MaxMessageBytes,
+		MaxMessageBytes,
+		uint32(defaultOperationTimeout/time.Millisecond),
+		&security.attributes,
+	)
+	runtime.KeepAlive(security.descriptor)
+	return handle, err
+}
+
+func connectServerPipe(ctx context.Context, pipe windows.Handle) error {
+	_, err := runOverlapped(ctx, pipe, func(_ *uint32, overlapped *windows.Overlapped) error {
+		err := windows.ConnectNamedPipe(pipe, overlapped)
+		if errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
+			return nil
+		}
+		return err
+	})
+	return err
+}
+
+type pipeSecurity struct {
+	descriptor *windows.SECURITY_DESCRIPTOR
+	attributes windows.SecurityAttributes
+}
+
+func pipeSecurityAttributes(gatewayServiceName string) (*pipeSecurity, error) {
+	sid, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + gatewayServiceName)
+	if err != nil || sid == nil {
+		return nil, errors.New("resolve CMID broker gateway service SID")
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"O:SYD:P(A;;GA;;;SY)(A;;GRGW;;;" + sid.String() + ")",
+	)
+	if err != nil {
+		return nil, errors.New("build CMID broker pipe security descriptor")
+	}
+	return &pipeSecurity{
+		descriptor: descriptor,
+		attributes: windows.SecurityAttributes{
+			Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+			SecurityDescriptor: descriptor,
+		},
+	}, nil
+}
+
+func waitForActiveClients(active *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		active.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(brokerShutdownTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return errors.New("CMID broker shutdown timed out")
+	}
+}

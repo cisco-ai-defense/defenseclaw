@@ -103,9 +103,10 @@ Two modes:
     fresh-install path to seed targets.yaml before the enumerator
     service is up.
 
-The DACL discipline on targets.yaml is unchanged from spec 003 —
-the enumerator writes as LocalSystem via SYSTEM's inherited
-FullControl, matching the guardian's account model.
+The enumerator validates the protected AdminDirectory parent, stages each
+update under the exact AdminFile owner/group/DACL contract, and publishes it
+with an ACL-preserving atomic replacement. Unsafe reparse points, hard links,
+or noncanonical access rules fail closed before replacing a known-good file.
 
 Managed-enterprise Windows only. macOS's LaunchDaemon-based
 'hook-enumerator' + render-targets.sh already covers the darwin
