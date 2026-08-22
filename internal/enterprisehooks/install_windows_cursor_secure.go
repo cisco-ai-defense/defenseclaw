@@ -10,7 +10,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -86,28 +85,21 @@ func installWindowsCursorManagedResult(
 			if err != nil {
 				return err
 			}
-			if _, statErr := os.Lstat(transaction.dataDir); errors.Is(statErr, os.ErrNotExist) {
-				transaction.createdDataDir = true
-			} else if statErr != nil {
-				return fmt.Errorf("enterprise hooks: inspect Cursor data directory: %w", statErr)
-			}
-			if _, statErr := os.Lstat(transaction.hookDir); errors.Is(statErr, os.ErrNotExist) {
-				transaction.createdHookDir = true
-			} else if statErr != nil {
-				return fmt.Errorf("enterprise hooks: inspect Cursor hook directory: %w", statErr)
-			}
 			fail := func(cause error) error {
 				if restoreErr := restoreWindowsCursorUserRuntime(transaction); restoreErr != nil {
 					return fmt.Errorf("%v (Cursor runtime rollback failed: %v)", cause, restoreErr)
 				}
 				return cause
 			}
-			if err := ensureWindowsTargetOwnedDirectoryTree(
+			creation, createErr := ensureWindowsTargetOwnedDirectoryTree(
 				transaction.home,
 				transaction.hookDir,
 				transaction.targetSID,
-			); err != nil {
-				return fail(fmt.Errorf("enterprise hooks: create Cursor managed runtime: %w", err))
+			)
+			transaction.createdDataDir = creation.createdDataDir
+			transaction.createdHookDir = creation.createdHookDir
+			if createErr != nil {
+				return fail(fmt.Errorf("enterprise hooks: create Cursor managed runtime: %w", createErr))
 			}
 			if err := connector.ReconcileManagedNativeHookRuntime(
 				target.dataDir,

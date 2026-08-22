@@ -42,8 +42,12 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 	); err != nil {
 		return InstallResult{}, true, err
 	}
+	unlockRuntime, err := lockWindowsUserRuntimeTransaction(opts.OwnerSID)
+	if err != nil {
+		return InstallResult{}, true, err
+	}
+	defer unlockRuntime()
 	var result InstallResult
-	var err error
 	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
 	case "claudecode":
 		result, err = installWindowsClaudeManagedResult(ctx, opts)
@@ -664,7 +668,10 @@ func prepareWindowsGenericPath(home, raw string, target *windows.SID, wantDir, r
 			info, statErr = os.Lstat(current)
 		}
 		if errors.Is(statErr, os.ErrNotExist) {
-			if final && required {
+			// If any component is absent, the requested final path is absent as
+			// well. Required callers must fail here instead of treating a missing
+			// intermediate managed directory as an acceptable optional suffix.
+			if required {
 				return fmt.Errorf("enterprise hooks: %s is missing: %s", label, current)
 			}
 			return nil
@@ -1952,9 +1959,10 @@ func windowsSIDString(sid *windows.SID) string {
 }
 
 type windowsRuntimeFileSnapshot struct {
-	path    string
-	existed bool
-	data    []byte
+	path          string
+	parentExisted bool
+	existed       bool
+	data          []byte
 }
 
 func windowsClaudeRuntimePaths(opts connector.SetupOpts, conn connector.Connector) []string {
@@ -1979,6 +1987,23 @@ func snapshotWindowsRuntimeFiles(paths []string) ([]windowsRuntimeFileSnapshot, 
 	snapshots := make([]windowsRuntimeFileSnapshot, 0, len(paths))
 	for _, path := range paths {
 		snapshot := windowsRuntimeFileSnapshot{path: path}
+		parent := filepath.Dir(path)
+		parentInfo, parentErr := os.Lstat(parent)
+		if parentErr != nil && !errors.Is(parentErr, os.ErrNotExist) {
+			return nil, fmt.Errorf(
+				"enterprise hooks: snapshot runtime parent %s: %w",
+				parent,
+				parentErr,
+			)
+		} else if parentErr == nil &&
+			(!parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0) {
+			return nil, fmt.Errorf(
+				"enterprise hooks: refusing unsafe runtime parent during snapshot: %s",
+				parent,
+			)
+		} else if parentErr == nil {
+			snapshot.parentExisted = true
+		}
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			snapshots = append(snapshots, snapshot)
@@ -2062,12 +2087,17 @@ func restoreWindowsRuntimeFiles(
 ) error {
 	var failures []string
 	for _, snapshot := range snapshots {
+		// An absent file beneath an originally absent parent is already restored
+		// to its exact preimage. A parent that existed at snapshot time remains
+		// mandatory even when this particular file did not exist, so rollback
+		// cannot hide cross-connector damage to the shared runtime directory.
+		parentRequired := snapshot.existed || snapshot.parentExisted
 		if err := prepareWindowsGenericPath(
 			home,
 			filepath.Dir(snapshot.path),
 			target,
 			true,
-			true,
+			parentRequired,
 			true,
 			"runtime rollback parent",
 		); err != nil {

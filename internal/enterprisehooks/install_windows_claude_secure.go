@@ -8,7 +8,6 @@ package enterprisehooks
 import (
 	"context"
 	"crypto/subtle"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -198,28 +197,21 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		if err != nil {
 			return err
 		}
-		if _, statErr := os.Lstat(transaction.dataDir); errors.Is(statErr, os.ErrNotExist) {
-			transaction.createdDataDir = true
-		} else if statErr != nil {
-			return fmt.Errorf("enterprise hooks: inspect per-user data directory: %w", statErr)
-		}
-		if _, statErr := os.Lstat(transaction.hookDir); errors.Is(statErr, os.ErrNotExist) {
-			transaction.createdHookDir = true
-		} else if statErr != nil {
-			return fmt.Errorf("enterprise hooks: inspect per-user hook directory: %w", statErr)
-		}
 		fail := func(cause error) error {
 			if restoreErr := restoreWindowsClaudeUserRuntime(transaction); restoreErr != nil {
 				return fmt.Errorf("%v (per-user runtime rollback failed: %v)", cause, restoreErr)
 			}
 			return cause
 		}
-		if err := ensureWindowsTargetOwnedDirectoryTree(
+		creation, createErr := ensureWindowsTargetOwnedDirectoryTree(
 			transaction.home,
 			transaction.hookDir,
 			transaction.targetSID,
-		); err != nil {
-			return fail(fmt.Errorf("enterprise hooks: create per-user hook runtime: %w", err))
+		)
+		transaction.createdDataDir = creation.createdDataDir
+		transaction.createdHookDir = creation.createdHookDir
+		if createErr != nil {
+			return fail(fmt.Errorf("enterprise hooks: create per-user hook runtime: %w", createErr))
 		}
 		if err := connector.WriteHookScriptsForConnectorObjectWithOpts(transaction.hookDir, setup, conn); err != nil {
 			return fail(fmt.Errorf("enterprise hooks: write managed Claude Code hook runtime: %w", err))
