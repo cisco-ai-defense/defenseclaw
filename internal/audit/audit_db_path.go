@@ -193,6 +193,57 @@ func prepareAuditDatabasePath(path string, hooks auditDBPathHooks) (*preparedAud
 		if err := hooks.securePlatformFile(pinned, false); err != nil {
 			return fail(err)
 		}
+		if auditDBPlatformHardeningNeedsCapabilityReopen() {
+			ordinary, err := reopenPinnedAuditDBLeaf(absolute, pinned, false)
+			if err != nil {
+				return fail(fmt.Errorf("audit: reopen newly secured database file without ACL-changing access: %w", err))
+			}
+			if err := pinned.Close(); err != nil {
+				_ = ordinary.Close()
+				return fail(fmt.Errorf("audit: close database hardening handle: %w", err))
+			}
+			pinned = ordinary
+			prepared.pinned = pinned
+			if needsHardening, err := auditDBPlatformFileNeedsHardening(pinned); err != nil {
+				return fail(err)
+			} else if needsHardening {
+				return fail(errors.New("audit: newly secured database DACL remains noncanonical"))
+			}
+		}
+	} else {
+		needsHardening, err := auditDBPlatformFileNeedsHardening(pinned)
+		if err != nil {
+			return fail(err)
+		}
+		if needsHardening {
+			hardening := pinned
+			closeHardening := false
+			if auditDBPlatformHardeningNeedsCapabilityReopen() {
+				hardening, err = reopenPinnedAuditDBLeaf(absolute, pinned, true)
+				if err != nil {
+					return fail(fmt.Errorf("audit: reopen existing database file for ACL hardening: %w", err))
+				}
+				closeHardening = true
+			}
+			secureErr := hooks.securePlatformFile(hardening, false)
+			var closeErr error
+			if closeHardening {
+				closeErr = hardening.Close()
+			}
+			if secureErr != nil {
+				return fail(secureErr)
+			}
+			if closeErr != nil {
+				return fail(fmt.Errorf("audit: close database ACL-hardening handle: %w", closeErr))
+			}
+			if auditDBPlatformHardeningNeedsCapabilityReopen() {
+				if stillNeedsHardening, err := auditDBPlatformFileNeedsHardening(pinned); err != nil {
+					return fail(err)
+				} else if stillNeedsHardening {
+					return fail(errors.New("audit: existing database DACL remains noncanonical after hardening"))
+				}
+			}
+		}
 	}
 
 	info, err := pinned.Stat()
@@ -283,7 +334,7 @@ func pinAndSecureAuditDBSQLiteSidecars(
 		}
 		pinned := retained[suffix]
 		if pinned == nil {
-			pinned, err = openAuditDBFileNoFollow(path, false)
+			pinned, err = openAuditDBFileNoFollow(path, false, false)
 			if err != nil {
 				return retained, fmt.Errorf("audit: open SQLite sidecar %s safely: %w", suffix, err)
 			}
@@ -306,8 +357,38 @@ func pinAndSecureAuditDBSQLiteSidecars(
 				return retained, fmt.Errorf("audit: secure SQLite sidecar %s permissions: %w", suffix, err)
 			}
 		}
-		if err := hooks.securePlatformFile(pinned, false); err != nil {
-			return retained, fmt.Errorf("audit: secure SQLite sidecar %s platform ACL: %w", suffix, err)
+		needsHardening, err := auditDBPlatformSidecarNeedsHardening(pinned)
+		if err != nil {
+			return retained, fmt.Errorf("audit: inspect SQLite sidecar %s platform ACL: %w", suffix, err)
+		}
+		if needsHardening {
+			hardening := pinned
+			closeHardening := false
+			if auditDBPlatformHardeningNeedsCapabilityReopen() {
+				hardening, err = reopenPinnedAuditDBLeaf(path, pinned, true)
+				if err != nil {
+					return retained, fmt.Errorf("audit: reopen SQLite sidecar %s for ACL hardening: %w", suffix, err)
+				}
+				closeHardening = true
+			}
+			secureErr := hooks.securePlatformFile(hardening, false)
+			var closeErr error
+			if closeHardening {
+				closeErr = hardening.Close()
+			}
+			if secureErr != nil {
+				return retained, fmt.Errorf("audit: secure SQLite sidecar %s platform ACL: %w", suffix, secureErr)
+			}
+			if closeErr != nil {
+				return retained, fmt.Errorf("audit: close SQLite sidecar %s ACL-hardening handle: %w", suffix, closeErr)
+			}
+			if auditDBPlatformHardeningNeedsCapabilityReopen() {
+				if stillNeedsHardening, err := auditDBPlatformFileNeedsHardening(pinned); err != nil {
+					return retained, fmt.Errorf("audit: verify SQLite sidecar %s platform ACL: %w", suffix, err)
+				} else if stillNeedsHardening {
+					return retained, fmt.Errorf("audit: SQLite sidecar %s DACL remains noncanonical after hardening", suffix)
+				}
+			}
 		}
 		pinnedAfter, err := pinned.Stat()
 		if err != nil {
@@ -336,7 +417,7 @@ func openPinnedAuditDBLeaf(path string) (*os.File, bool, error) {
 		if err := validateAuditDBLeaf(path, info); err != nil {
 			return nil, false, err
 		}
-		file, openErr := openAuditDBFileNoFollow(path, false)
+		file, openErr := openAuditDBFileNoFollow(path, false, false)
 		if openErr != nil {
 			return nil, false, fmt.Errorf("audit: open existing database file safely: %w", openErr)
 		}
@@ -346,7 +427,7 @@ func openPinnedAuditDBLeaf(path string) (*os.File, bool, error) {
 		return nil, false, fmt.Errorf("audit: inspect database file: %w", err)
 	}
 
-	file, err := openAuditDBFileNoFollow(path, true)
+	file, err := openAuditDBFileNoFollow(path, true, true)
 	if err == nil {
 		return file, true, nil
 	}
@@ -362,11 +443,39 @@ func openPinnedAuditDBLeaf(path string) (*os.File, bool, error) {
 	if err := validateAuditDBLeaf(path, info); err != nil {
 		return nil, false, err
 	}
-	file, err = openAuditDBFileNoFollow(path, false)
+	file, err = openAuditDBFileNoFollow(path, false, false)
 	if err != nil {
 		return nil, false, fmt.Errorf("audit: open raced database file safely: %w", err)
 	}
 	return file, false, nil
+}
+
+// reopenPinnedAuditDBLeaf opens the same pathname with the requested
+// short-lived hardening capability and proves that it still identifies the
+// already pinned file. The original pin remains live throughout, so a rename
+// or replacement cannot silently redirect ACL work to a different object.
+func reopenPinnedAuditDBLeaf(path string, pinned *os.File, harden bool) (*os.File, error) {
+	if pinned == nil {
+		return nil, errors.New("audit: database file pin is unavailable")
+	}
+	before, err := pinned.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("audit: inspect pinned database file before reopen: %w", err)
+	}
+	reopened, err := openAuditDBFileNoFollow(path, false, harden)
+	if err != nil {
+		return nil, err
+	}
+	after, err := reopened.Stat()
+	if err != nil {
+		_ = reopened.Close()
+		return nil, fmt.Errorf("audit: inspect reopened database file: %w", err)
+	}
+	if !os.SameFile(before, after) {
+		_ = reopened.Close()
+		return nil, errors.New("audit: database file changed during secure open capability reopen")
+	}
+	return reopened, nil
 }
 
 func ensureTrustedAuditDBParents(parent string, hooks auditDBPathHooks, allowCreate bool) error {

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -131,6 +133,122 @@ func TestJudgeBodyWindowsRejectsStaleWALReadACL(t *testing.T) {
 	}
 }
 
+func TestJudgeBodyWindowsProtectedSidecarSkipsACLHardening(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "judge_bodies.db-wal")
+	if err := os.WriteFile(path, []byte("retained pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureJudgeBodyPlatformPath(path, false); err != nil {
+		t.Fatal(err)
+	}
+	needsHardening, err := judgeBodyPlatformPathNeedsHardening(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needsHardening {
+		t.Fatal("protected judge-body sidecar was marked for redundant ACL hardening")
+	}
+}
+
+func TestJudgeBodyWindowsManagedLegacySidecarIsCanonicalized(t *testing.T) {
+	serviceSID := pinJudgeBodyWindowsGatewayToCurrentUser(t)
+	path := filepath.Join(t.TempDir(), "judge_bodies.db-wal")
+	if err := os.WriteFile(path, []byte("retained pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setJudgeBodyWindowsLegacyProtectedServiceDACL(t, path, serviceSID)
+
+	needsHardening, err := judgeBodyPlatformPathNeedsHardening(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !needsHardening {
+		t.Fatal("legacy protected service-GENERIC_ALL sidecar was accepted as canonical")
+	}
+	if err := secureJudgeBodyPlatformPath(path, false); err != nil {
+		t.Fatal(err)
+	}
+	needsHardening, err = judgeBodyPlatformPathNeedsHardening(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needsHardening {
+		t.Fatal("managed judge-body sidecar remained noncanonical after hardening")
+	}
+}
+
+func TestJudgeBodyWindowsManagedLegacyMainDatabaseIsCanonicalized(t *testing.T) {
+	serviceSID := pinJudgeBodyWindowsGatewayToCurrentUser(t)
+	path := filepath.Join(t.TempDir(), "judge_bodies.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setJudgeBodyWindowsLegacyProtectedServiceDACL(t, path, serviceSID)
+
+	store, err := NewJudgeBodyStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	needsHardening, err := judgeBodyPlatformPathNeedsHardening(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needsHardening {
+		t.Fatal("managed judge-body main database remained noncanonical after open")
+	}
+}
+
+func TestJudgeBodyWindowsManagedInstallerOwnedSidecarUsesInstallerForm(t *testing.T) {
+	serviceSID := pinJudgeBodyWindowsGatewayToCurrentUser(t)
+	path := filepath.Join(t.TempDir(), "judge_bodies.db-wal")
+	if err := os.WriteFile(path, []byte("retained pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		administrators,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Skipf("setting installer owner requires unavailable privilege: %v", err)
+	}
+	if err := secureJudgeBodyPlatformPath(path, false); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(sd, serviceSID)
+	if err != nil || !canonical {
+		t.Fatalf("installer-owned judge-body descriptor canonical = %v, %v", canonical, err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dacl == nil {
+		t.Fatal("installer-owned judge-body DACL is nil")
+	}
+	if dacl.AceCount != 3 {
+		t.Fatalf("installer-owned judge-body DACL ACE count = %d, want 3", dacl.AceCount)
+	}
+}
+
 func TestJudgeBodyWindowsRejectsLeafReparsePoint(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "target.db")
@@ -211,6 +329,55 @@ func TestJudgeBodyWindowsTrustRejectsWorldOwner(t *testing.T) {
 	}
 	if judgeBodyWindowsTrustedPrincipal(everyone) {
 		t.Fatal("Everyone SID must never be a trusted judge-body owner")
+	}
+}
+
+func pinJudgeBodyWindowsGatewayToCurrentUser(t *testing.T) *windows.SID {
+	t.Helper()
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatalf("resolve current user SID: %v", err)
+	}
+	const serviceName = "DefenseClawCertGateway_JudgeBodyFixture"
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, serviceName)
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\`+serviceName)
+	previous := auditDBWindowsServiceAccountSID
+	auditDBWindowsServiceAccountSID = func(string) (*windows.SID, error) {
+		return current.User.Sid, nil
+	}
+	t.Cleanup(func() { auditDBWindowsServiceAccountSID = previous })
+	return current.User.Sid
+}
+
+func setJudgeBodyWindowsLegacyProtectedServiceDACL(t *testing.T, path string, serviceSID *windows.SID) {
+	t.Helper()
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fileAllAccess windows.ACCESS_MASK = 0x001f01ff
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		auditDBWindowsExplicitAccess(serviceSID, fileAllAccess, windows.NO_INHERITANCE),
+		auditDBWindowsExplicitAccess(administrators, fileAllAccess, windows.NO_INHERITANCE),
+		auditDBWindowsExplicitAccess(localSystem, fileAllAccess, windows.NO_INHERITANCE),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -94,36 +94,31 @@ func validateJudgeBodyPlatformTrust(path string, _ os.FileInfo, directory, prote
 }
 
 func secureJudgeBodyPlatformPath(path string, directory bool) error {
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
-		return fmt.Errorf("judge_body: resolve current Windows user: %w", err)
-	}
-	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	// Share the audit runtime DACL contract. In managed mode this grants the
+	// exact gateway service only Modify and uses OWNER RIGHTS to suppress a
+	// service-owned file's implicit WRITE_DAC. Build from the authenticated
+	// object's actual owner so an installer-owned file receives the three-ACE
+	// installer form while a service-owned file receives the four-ACE runtime
+	// form; standalone behavior is unchanged.
+	sd, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
 	if err != nil {
-		return fmt.Errorf("judge_body: resolve Windows Administrators SID: %w", err)
+		return fmt.Errorf("judge_body: inspect Windows security descriptor before hardening: %w", err)
 	}
-	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if sd == nil {
+		return errors.New("judge_body: missing Windows security descriptor before hardening")
+	}
+	owner, _, err := sd.Owner()
 	if err != nil {
-		return fmt.Errorf("judge_body: resolve Windows LocalSystem SID: %w", err)
+		return fmt.Errorf("judge_body: resolve Windows owner before hardening: %w", err)
 	}
-	inheritance := uint32(windows.NO_INHERITANCE)
-	if directory {
-		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	if owner == nil {
+		return errors.New("judge_body: Windows owner is missing before hardening")
 	}
-	entries := make([]windows.EXPLICIT_ACCESS, 0, 3)
-	for _, sid := range []*windows.SID{currentUser.User.Sid, administrators, localSystem} {
-		entries = append(entries, windows.EXPLICIT_ACCESS{
-			AccessPermissions: windows.GENERIC_ALL,
-			AccessMode:        windows.GRANT_ACCESS,
-			Inheritance:       inheritance,
-			Trustee: windows.TRUSTEE{
-				TrusteeForm:  windows.TRUSTEE_IS_SID,
-				TrusteeType:  windows.TRUSTEE_IS_USER,
-				TrusteeValue: windows.TrusteeValueFromSID(sid),
-			},
-		})
-	}
-	dacl, err := windows.ACLFromEntries(entries, nil)
+	dacl, err := auditDBWindowsProtectedDACLForOwner(directory, owner)
 	if err != nil {
 		return fmt.Errorf("judge_body: build protected Windows DACL: %w", err)
 	}
@@ -138,7 +133,90 @@ func secureJudgeBodyPlatformPath(path string, directory bool) error {
 	); err != nil {
 		return fmt.Errorf("judge_body: apply protected Windows DACL: %w", err)
 	}
+	if directory {
+		return nil
+	}
+	// In managed mode, verify that the exact object just hardened now matches
+	// one of the two canonical file forms. A merely protected trusted DACL is
+	// insufficient because a legacy service-GENERIC_ALL ACE retains WRITE_DAC.
+	gatewayServiceSID, err := auditDBWindowsPinnedGatewayServiceSID()
+	if err != nil {
+		return err
+	}
+	if gatewayServiceSID == nil {
+		return nil
+	}
+	hardened, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return fmt.Errorf("judge_body: inspect Windows security descriptor after hardening: %w", err)
+	}
+	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(hardened, gatewayServiceSID)
+	if err != nil {
+		return fmt.Errorf("judge_body: verify managed Windows DACL after hardening: %w", err)
+	}
+	if !canonical {
+		return errors.New("judge_body: managed Windows DACL remains noncanonical after hardening")
+	}
 	return nil
+}
+
+func judgeBodyPlatformPathNeedsHardening(path string) (bool, error) {
+	sd, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return false, fmt.Errorf("judge_body: inspect Windows security descriptor before hardening: %w", err)
+	}
+	if sd == nil {
+		return false, errors.New("judge_body: missing Windows security descriptor")
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || !judgeBodyWindowsTrustedPrincipal(owner) {
+		return false, fmt.Errorf("judge_body: Windows owner %s is not trusted", judgeBodyWindowsSID(owner))
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return false, errors.New("judge_body: null or unreadable Windows DACL is not trusted")
+	}
+	if err := rejectUntrustedJudgeBodyWindowsWriteACEs(path, dacl, false, true); err != nil {
+		return false, err
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return false, fmt.Errorf("judge_body: inspect Windows DACL control: %w", err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return true, nil
+	}
+	gatewayServiceSID, err := auditDBWindowsPinnedGatewayServiceSID()
+	if err != nil {
+		return false, err
+	}
+	if gatewayServiceSID == nil {
+		return false, nil
+	}
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
+		return false, fmt.Errorf("judge_body: resolve current Windows user for managed DACL validation: %w", err)
+	}
+	if !currentUser.User.Sid.Equals(gatewayServiceSID) {
+		return false, fmt.Errorf(
+			"judge_body: managed gateway token SID %s does not match pinned service SID %s",
+			judgeBodyWindowsSID(currentUser.User.Sid),
+			judgeBodyWindowsSID(gatewayServiceSID),
+		)
+	}
+	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(sd, gatewayServiceSID)
+	if err != nil {
+		return false, fmt.Errorf("judge_body: inspect managed Windows DACL canonical form: %w", err)
+	}
+	return !canonical, nil
 }
 
 func rejectUntrustedJudgeBodyWindowsWriteACEs(path string, dacl *windows.ACL, directory, protectChildren bool) error {

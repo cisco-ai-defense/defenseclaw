@@ -19,10 +19,11 @@ import (
 )
 
 func TestAuditDBWindowsAllowsOnlyExactPinnedGatewayServiceSID(t *testing.T) {
-	serviceSID, err := windows.StringToSid("S-1-5-80-111-222-333-444-555")
-	if err != nil {
-		t.Fatal(err)
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatalf("resolve current user SID: %v", err)
 	}
+	serviceSID := current.User.Sid
 	foreignSID, err := windows.StringToSid("S-1-5-80-555-444-333-222-111")
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +71,52 @@ func TestAuditDBWindowsAllowsOnlyExactPinnedGatewayServiceSID(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("protected audit DACL omitted exact pinned gateway service SID")
+	}
+}
+
+func TestAuditDBWindowsManagedRuntimeFileCanonicalForms(t *testing.T) {
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatalf("resolve current user SID: %v", err)
+	}
+	const serviceName = "DefenseClawCertGateway_AuditCanonical"
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, serviceName)
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\`+serviceName)
+	previous := auditDBWindowsServiceAccountSID
+	auditDBWindowsServiceAccountSID = func(string) (*windows.SID, error) {
+		return current.User.Sid, nil
+	}
+	t.Cleanup(func() { auditDBWindowsServiceAccountSID = previous })
+
+	runtimeDACL, err := auditDBWindowsProtectedDACLForOwner(false, current.User.Sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimeDACL.AceCount != 4 {
+		t.Fatalf("runtime-managed audit DACL has %d ACEs, want 4", runtimeDACL.AceCount)
+	}
+	runtimeDescriptor := newAuditDBWindowsTestDescriptor(t, current.User.Sid, runtimeDACL)
+	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(runtimeDescriptor, current.User.Sid)
+	if err != nil || !canonical {
+		t.Fatalf("runtime-managed audit descriptor canonical = %v, %v", canonical, err)
+	}
+
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical, err := auditDBWindowsManagedRuntimeFileCanonical(
+		newAuditDBWindowsTestDescriptor(t, administrators, runtimeDACL),
+		current.User.Sid,
+	); err != nil || canonical {
+		t.Fatalf("BA-owned descriptor with OWNER RIGHTS canonical = %v, %v", canonical, err)
+	}
+	installerDACL := setAuditDBWindowsInstallerRuntimeFileACLValue(t, current.User.Sid)
+	if canonical, err := auditDBWindowsManagedRuntimeFileCanonical(
+		newAuditDBWindowsTestDescriptor(t, administrators, installerDACL),
+		current.User.Sid,
+	); err != nil || !canonical {
+		t.Fatalf("installer-managed audit descriptor canonical = %v, %v", canonical, err)
 	}
 }
 
@@ -150,6 +197,177 @@ func TestAuditDBWindowsCreatesProtectedPath(t *testing.T) {
 		); err != nil {
 			t.Fatalf("protected path %s failed trust validation: %v", candidate.path, err)
 		}
+	}
+}
+
+func TestAuditDBWindowsInstallerRuntimeFileReopensWithoutWriteDAC(t *testing.T) {
+	if access := auditDBWindowsFileAccess(false); access&windows.WRITE_DAC != 0 {
+		t.Fatalf("ordinary audit open access 0x%x includes WRITE_DAC", access)
+	}
+	if access := auditDBWindowsFileAccess(true); access&windows.WRITE_DAC == 0 {
+		t.Fatalf("hardening audit open access 0x%x omits WRITE_DAC", access)
+	}
+
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatalf("resolve current user SID: %v", err)
+	}
+	const serviceName = "DefenseClawCertGateway_AuditReopen"
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, serviceName)
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\`+serviceName)
+	previous := auditDBWindowsServiceAccountSID
+	auditDBWindowsServiceAccountSID = func(string) (*windows.SID, error) {
+		return current.User.Sid, nil
+	}
+	t.Cleanup(func() { auditDBWindowsServiceAccountSID = previous })
+
+	path := filepath.Join(t.TempDir(), "runtime", "audit.db")
+	prepared, err := prepareAuditDatabasePath(path, auditDBPathHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.close()
+	setAuditDBWindowsInstallerRuntimeFileACL(t, path, current.User.Sid)
+
+	secureCalls := 0
+	prepared, err = prepareAuditDatabasePath(path, auditDBPathHooks{
+		securePlatformFile: func(*os.File, bool) error {
+			secureCalls++
+			return errors.New("canonical installer ACL must not be rewritten")
+		},
+	})
+	if err != nil {
+		t.Fatalf("reopen installer-hardened audit database: %v", err)
+	}
+	defer prepared.close()
+	if secureCalls != 0 {
+		t.Fatalf("installer-hardened audit database triggered %d ACL rewrites", secureCalls)
+	}
+	needsHardening, err := auditDBPlatformFileNeedsHardening(prepared.pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needsHardening {
+		t.Fatal("installer-hardened audit database still requires ACL hardening")
+	}
+}
+
+func TestAuditDBWindowsProtectedSidecarReopensWithoutWriteDACOrACLRewrite(t *testing.T) {
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatalf("resolve current user SID: %v", err)
+	}
+	const serviceName = "DefenseClawCertGateway_AuditSidecar"
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, serviceName)
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\`+serviceName)
+	previous := auditDBWindowsServiceAccountSID
+	auditDBWindowsServiceAccountSID = func(string) (*windows.SID, error) {
+		return current.User.Sid, nil
+	}
+	t.Cleanup(func() { auditDBWindowsServiceAccountSID = previous })
+
+	path := filepath.Join(t.TempDir(), "runtime", "audit.db")
+	prepared, err := prepareAuditDatabasePath(path, auditDBPathHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.close()
+	sidecar := path + "-wal"
+	if err := os.WriteFile(sidecar, []byte("retained pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setAuditDBWindowsInstallerRuntimeFileACL(t, sidecar, current.User.Sid)
+
+	secureCalls := 0
+	err = secureAuditDBSQLiteSidecars(path, auditDBPathHooks{
+		securePlatformFile: func(*os.File, bool) error {
+			secureCalls++
+			return errors.New("canonical installer sidecar ACL must not be rewritten")
+		},
+	})
+	if err != nil {
+		t.Fatalf("reopen installer-hardened SQLite sidecar: %v", err)
+	}
+	if secureCalls != 0 {
+		t.Fatalf("installer-hardened SQLite sidecar triggered %d ACL rewrites", secureCalls)
+	}
+}
+
+func TestAuditDBWindowsUnprotectedSidecarHardeningCannotFollowReplacement(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "protected")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureAuditDBPlatformPath(directory, true); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "audit.db")
+	prepared, err := prepareAuditDatabasePath(path, auditDBPathHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.close()
+	sidecar := path + "-journal"
+	displaced := sidecar + ".validated"
+	if err := os.WriteFile(sidecar, []byte("validated pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureAuditDBPlatformPath(sidecar, false); err != nil {
+		t.Fatal(err)
+	}
+	setAuditDBWindowsDACLProtection(t, sidecar, false)
+
+	replaced := false
+	prepared, err = prepareAuditDatabasePath(path, auditDBPathHooks{
+		securePlatformFile: func(pinned *os.File, directory bool) error {
+			if !strings.HasSuffix(pinned.Name(), "-journal") || replaced {
+				return secureAuditDBPlatformFile(pinned, directory)
+			}
+			replaced = true
+			if err := os.Rename(sidecar, displaced); err != nil {
+				return err
+			}
+			if err := os.WriteFile(sidecar, []byte("replacement pages"), 0o600); err != nil {
+				return err
+			}
+			return secureAuditDBPlatformFile(pinned, directory)
+		},
+	})
+	if prepared != nil {
+		prepared.close()
+	}
+	if !replaced {
+		t.Fatal("unprotected sidecar did not enter the ACL-hardening race fixture")
+	}
+	if err == nil || !strings.Contains(err.Error(), "changed during secure open") {
+		t.Fatalf("sidecar replacement error = %v", err)
+	}
+	replacement, readErr := os.ReadFile(sidecar)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(replacement) != "replacement pages" {
+		t.Fatalf("replacement content changed through ACL hardening: %q", replacement)
+	}
+}
+
+func TestAuditDBWindowsRejectsHardLinkedLeafOnReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	prepared, err := prepareAuditDatabasePath(path, auditDBPathHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.close()
+	alias := path + ".alias"
+	if err := os.Link(path, alias); err != nil {
+		t.Skipf("create Windows hard-link fixture: %v", err)
+	}
+	prepared, err = prepareAuditDatabasePath(path, auditDBPathHooks{})
+	if prepared != nil {
+		prepared.close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "hard links") {
+		t.Fatalf("hard-linked audit database reopen error = %v", err)
 	}
 }
 
@@ -389,6 +607,133 @@ func grantEveryoneAuditDBWindowsAccess(
 		nil,
 		nil,
 		acl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setAuditDBWindowsInstallerRuntimeFileACL(
+	t *testing.T,
+	path string,
+	gatewaySID *windows.SID,
+) {
+	t.Helper()
+	dacl := setAuditDBWindowsInstallerRuntimeFileACLValue(t, gatewaySID)
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|
+			windows.DACL_SECURITY_INFORMATION|
+			windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		administrators,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Skipf("apply installer RuntimeFile ACL fixture: %v", err)
+	}
+}
+
+func setAuditDBWindowsInstallerRuntimeFileACLValue(
+	t *testing.T,
+	gatewaySID *windows.SID,
+) *windows.ACL {
+	t.Helper()
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 3)
+	for _, item := range []struct {
+		sid  *windows.SID
+		mask windows.ACCESS_MASK
+	}{
+		{sid: localSystem, mask: windows.ACCESS_MASK(0x001f01ff)},
+		{sid: administrators, mask: windows.ACCESS_MASK(0x001f01ff)},
+		{sid: gatewaySID, mask: windows.ACCESS_MASK(0x001301bf)},
+	} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: item.mask,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.NO_INHERITANCE,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(item.sid),
+			},
+		})
+	}
+	dacl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dacl
+}
+
+func newAuditDBWindowsTestDescriptor(
+	t *testing.T,
+	owner *windows.SID,
+	dacl *windows.ACL,
+) *windows.SECURITY_DESCRIPTOR {
+	t.Helper()
+	descriptor, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := descriptor.SetOwner(owner, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := descriptor.SetDACL(dacl, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := descriptor.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		t.Fatal(err)
+	}
+	selfRelative, err := descriptor.ToSelfRelative()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selfRelative
+}
+
+func setAuditDBWindowsDACLProtection(t *testing.T, path string, protected bool) {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("read fixture DACL: %v", err)
+	}
+	information := windows.SECURITY_INFORMATION(
+		windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+	)
+	if protected {
+		information = windows.SECURITY_INFORMATION(
+			windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		information,
+		nil,
+		nil,
+		dacl,
 		nil,
 	); err != nil {
 		t.Fatal(err)

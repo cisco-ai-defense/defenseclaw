@@ -74,6 +74,8 @@ func trustedJudgeBodySystemDirectoryAlias(path string, info os.FileInfo) bool {
 
 func secureJudgeBodyPlatformPath(string, bool) error { return nil }
 
+func judgeBodyPlatformPathNeedsHardening(string) (bool, error) { return false, nil }
+
 func judgeBodyModeMatches(info os.FileInfo, want os.FileMode) bool {
 	return info.Mode().Perm() == want.Perm()
 }
