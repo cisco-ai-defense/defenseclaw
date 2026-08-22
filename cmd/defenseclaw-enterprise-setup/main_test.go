@@ -88,15 +88,15 @@ func TestParseEnterpriseSetupShorthandAcceptsModeAndConnector(t *testing.T) {
 // mutual-exclusion and pairing invariants the shorthand enforces.
 func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
 	tests := map[string][]string{
-		"mode without connector": {"/install", "MODE=action"},
-		"connector without mode": {"/install", "CONNECTOR=codex"},
-		"mode + config":          {"/install", "MODE=action", "CONNECTOR=codex", "CONFIG=x.yaml"},
-		"mode + manifest":        {"/install", "MODE=action", "CONNECTOR=codex", "MANIFEST=x.yaml"},
-		"invalid mode":           {"/install", "MODE=paranoid", "CONNECTOR=codex"},
-		"shorthand on status":    {"/status", "MODE=action", "CONNECTOR=codex"},
-		"cursor on windows":      {"/install", "MODE=action", "CONNECTOR=cursor"},
+		"mode without connector":   {"/install", "MODE=action"},
+		"connector without mode":   {"/install", "CONNECTOR=codex"},
+		"mode + config":            {"/install", "MODE=action", "CONNECTOR=codex", "CONFIG=x.yaml"},
+		"mode + manifest":          {"/install", "MODE=action", "CONNECTOR=codex", "MANIFEST=x.yaml"},
+		"invalid mode":             {"/install", "MODE=paranoid", "CONNECTOR=codex"},
+		"shorthand on status":      {"/status", "MODE=action", "CONNECTOR=codex"},
+		"cursor on windows":        {"/install", "MODE=action", "CONNECTOR=cursor"},
 		"cursor mixed with claude": {"/install", "MODE=action", "CONNECTOR=cursor,claudecode"},
-		"amp on windows":          {"/install", "MODE=action", "CONNECTOR=amp"},
+		"amp on windows":           {"/install", "MODE=action", "CONNECTOR=amp"},
 	}
 	for name, arguments := range tests {
 		if _, _, err := parseEnterpriseSetupOptions(arguments); err == nil {

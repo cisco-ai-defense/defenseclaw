@@ -2053,15 +2053,21 @@ function Get-DefenseClawRenderedEnterpriseTargets {
             }
             $version = ConvertTo-DefenseClawConnectorMetadataVersion `
                 -Value $version
-            if ([string]::IsNullOrWhiteSpace($version)) {
+            if ([string]::IsNullOrWhiteSpace($version) -and
+                $script:DefenseClawWindowsAgentVersionMinimum.ContainsKey($c)) {
                 $version = $script:DefenseClawWindowsAgentVersionMinimum[$c]
             }
             [void]$sb.AppendLine("  - user: `"$($u.UserName -replace '"','\"')`"")
             [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
             [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
             [void]$sb.AppendLine("    connector: `"$c`"")
-            [void]$sb.AppendLine("    agent_version: `"$version`"")
-            [void]$sb.AppendLine('    enabled: true')
+            if ([string]::IsNullOrWhiteSpace($version)) {
+                [void]$sb.AppendLine('    enabled: false')
+            }
+            else {
+                [void]$sb.AppendLine("    agent_version: `"$version`"")
+                [void]$sb.AppendLine('    enabled: true')
+            }
         }
     }
     return $sb.ToString()

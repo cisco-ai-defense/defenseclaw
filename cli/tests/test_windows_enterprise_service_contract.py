@@ -125,7 +125,9 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$users = @(" in renderer
     assert "agent_version:" in renderer
     assert "enabled: false" in renderer
-    assert renderer.index("agent_version:") < renderer.index("enabled: true")
+    assert renderer.index('AppendLine("    agent_version:') < renderer.index(
+        "AppendLine('    enabled: true')"
+    )
     assert "@attacker/not-amp" in smoke
     assert "target renderer emitted an enabled/version contract mismatch" in smoke
     assert (
@@ -409,6 +411,7 @@ def test_packaging_defaults_to_protected_scm_identities_and_roots() -> None:
     )
     assert (
         "    foreach ($path in @(\n"
+        "        $Layout.BrokerLogDirectory,\n"
         "        $Layout.GuardianDirectory,\n"
         "        $Layout.InstallStateDirectory,\n"
         "        $Layout.ManifestPath,\n"
