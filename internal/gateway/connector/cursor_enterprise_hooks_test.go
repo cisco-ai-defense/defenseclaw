@@ -40,10 +40,14 @@ func TestRenderWindowsCursorEnterpriseAdapterUsesSharedLauncherStdinAndClosedMod
 		`$startInfo.RedirectStandardInput = $true`,
 		`$process.StandardInput.BaseStream`,
 		`$stdinStream.WriteAsync($payloadBytes, 0, $payloadBytes.Length)`,
+		`[void]$stdinTask.GetAwaiter().GetResult()`,
 		`$deadline = [System.Diagnostics.Stopwatch]::StartNew()`,
 		`$remainingMs = $timeoutMs - [int]$deadline.ElapsedMilliseconds`,
 		`{"continue":false,"permission":"deny"`,
 		`$exitCode = 2`,
+		`[Console]::Out.Flush()`,
+		`[Console]::Error.Flush()`,
+		`[System.Environment]::Exit([int]$exitCode)`,
 	} {
 		if !strings.Contains(text, marker) {
 			t.Errorf("managed Cursor adapter missing %q:\n%s", marker, text)

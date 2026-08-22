@@ -7,6 +7,7 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -111,7 +112,9 @@ func TestWindowsCursorPublicStateExcludesRollbackPreimage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(stateBody, secretMarker) || !bytes.Contains(receiptBody, secretMarker) {
+	encodedMarker := []byte(base64.StdEncoding.EncodeToString(secretMarker))
+	if bytes.Contains(stateBody, secretMarker) || bytes.Contains(stateBody, encodedMarker) ||
+		!bytes.Contains(receiptBody, encodedMarker) {
 		t.Fatal("Cursor rollback preimage crossed into the user-readable SID registry")
 	}
 }
@@ -247,12 +250,11 @@ func TestWindowsCursorLifecycleRestoreAcceptsExactActivationPrefixes(t *testing.
 		t.Fatal(err)
 	}
 	base := windowsCursorManagedArtifacts{
-		hooks:           windowsManagedFileSnapshot{path: hooksPath, existed: true, data: foreignHooks},
-		hooksMetadata:   metadata,
-		adapter:         windowsManagedFileSnapshot{path: adapterPath},
-		state:           windowsManagedFileSnapshot{path: statePath},
-		receipt:         windowsManagedFileSnapshot{path: receiptPath},
-		receiptMetadata: privateMetadata,
+		hooks:         windowsManagedFileSnapshot{path: hooksPath, existed: true, data: foreignHooks},
+		hooksMetadata: metadata,
+		adapter:       windowsManagedFileSnapshot{path: adapterPath},
+		state:         windowsManagedFileSnapshot{path: statePath},
+		receipt:       windowsManagedFileSnapshot{path: receiptPath},
 	}
 	for name, mutate := range map[string]func(*windowsCursorManagedArtifacts){
 		"unchanged inactive preimage": func(*windowsCursorManagedArtifacts) {},
@@ -262,16 +264,19 @@ func TestWindowsCursorLifecycleRestoreAcceptsExactActivationPrefixes(t *testing.
 		"adapter and receipt": func(value *windowsCursorManagedArtifacts) {
 			value.adapter.existed, value.adapter.data = true, adapter
 			value.receipt.existed, value.receipt.data = true, receipt
+			value.receiptMetadata = privateMetadata
 		},
 		"adapter receipt and state": func(value *windowsCursorManagedArtifacts) {
 			value.adapter.existed, value.adapter.data = true, adapter
 			value.receipt.existed, value.receipt.data = true, receipt
+			value.receiptMetadata = privateMetadata
 			value.state.existed, value.state.data = true, state
 		},
 		"fully active": func(value *windowsCursorManagedArtifacts) {
 			value.hooks.data = activeHooks
 			value.adapter.existed, value.adapter.data = true, adapter
 			value.receipt.existed, value.receipt.data = true, receipt
+			value.receiptMetadata = privateMetadata
 			value.state.existed, value.state.data = true, state
 		},
 	} {

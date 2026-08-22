@@ -66,7 +66,11 @@ end {
             if ($remainingMs -le 0 -or -not $stdinTask.Wait($remainingMs)) {
                 throw "DefenseClaw hook launcher timed out after ${timeoutMs}ms while receiving input"
             }
-            $stdinTask.GetAwaiter().GetResult()
+            # Windows PowerShell writes non-void .NET return values to the
+            # success stream. Task[VoidTaskResult].GetResult() must therefore
+            # be discarded explicitly or it precedes and corrupts the JSON
+            # response Cursor expects on stdout.
+            [void]$stdinTask.GetAwaiter().GetResult()
             $process.StandardInput.Close()
             $stdinClosed = $true
 
@@ -135,5 +139,11 @@ end {
         $exitCode = 2
 {{end}}
     }
-    exit $exitCode
+    # powershell.exe -Command reduces a non-zero exit from an invoked script
+    # to the generic process code 1. Cursor distinguishes the adapter's exact
+    # fail-closed code, so flush the direct console writes and terminate this
+    # dedicated hook host with the intended code.
+    [Console]::Out.Flush()
+    [Console]::Error.Flush()
+    [System.Environment]::Exit([int]$exitCode)
 }

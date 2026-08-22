@@ -101,7 +101,9 @@ func TestResolveWindowsCodexManagedRuntimeRegistryWaitsForMachinePolicyLock(t *t
 		return nil
 	}
 	resolved := make(chan error, 1)
+	resolverDone := make(chan struct{})
 	go func() {
+		defer close(resolverDone)
 		_, resolveErr := ResolveWindowsCodexManagedRuntimeRegistry(
 			filepath.Join(programData, "DefenseClaw", "bin", "defenseclaw-hook.exe"),
 		)
@@ -119,7 +121,7 @@ func TestResolveWindowsCodexManagedRuntimeRegistryWaitsForMachinePolicyLock(t *t
 		// the extra budget is purely runner-scheduling slack, not a
 		// signal that a real deadlock is being tolerated.
 		select {
-		case <-resolved:
+		case <-resolverDone:
 		case <-time.After(30 * time.Second):
 			t.Error("resolver goroutine did not finish; it still holds windowsCodexMachineProcessMu")
 		}

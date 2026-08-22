@@ -321,8 +321,11 @@ func restoreWindowsCursorManagedFileMetadata(
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect Cursor snapshot group: %w", err)
 	}
-	dacl, present, err := descriptor.DACL()
-	if err != nil || !present || dacl == nil {
+	// DACL's boolean result reports whether the ACL was defaulted; a missing
+	// DACL is reported through err. Do not mistake an explicit (non-defaulted)
+	// DACL for an absent one.
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
 		return errors.New("enterprise hooks: Cursor file snapshot has no trusted DACL")
 	}
 	control, _, err := descriptor.Control()
@@ -596,8 +599,11 @@ func validateWindowsCursorPrivateReceiptMetadata(
 	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
 		return errors.New("enterprise hooks: Cursor rollback receipt DACL is not protected")
 	}
-	dacl, present, err := descriptor.DACL()
-	if err != nil || !present || dacl == nil {
+	// DACL's boolean result is "defaulted", not "present". A missing DACL is
+	// returned as an error, while a nil DACL remains fully permissive and must
+	// still be rejected here.
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
 		return errors.New("enterprise hooks: Cursor rollback receipt has no protected DACL")
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)

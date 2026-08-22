@@ -467,8 +467,8 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 			t.Fatalf("guardian failure diagnostic missing safety contract %q", contract)
 		}
 	}
-	if strings.Count(services, "Assert-DefenseClawServiceImagePath `") != 2 {
-		t.Fatal("service creation does not immediately verify both ImagePath values")
+	if strings.Count(services, "Assert-DefenseClawServiceImagePath") != 4 {
+		t.Fatal("service creation does not immediately verify all four ImagePath values")
 	}
 	failureCheck := strings.Index(requirements, "if ([int]$probe.exit_code -ne 0")
 	firstSuccessPath := strings.Index(requirements, "@('requirements_path'")

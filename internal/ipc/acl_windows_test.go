@@ -17,12 +17,8 @@ import (
 // traverse+list (CR spec-004:PRRT_kwDORuAK-s6ankzk — refuses
 // FILE_ADD_FILE / FILE_ADD_SUBDIRECTORY leakage).
 //
-// Windows' LookupSID on "NT SERVICE\<name>" returns the correct SID
-// for ANY syntactically-valid service name — virtual-service SIDs
-// under NT SERVICE authority (S-1-5-80-...) are computed from the
-// service name hash, not read from an installed-service registry.
-// So this test works whether or not DefenseClawGateway is actually
-// registered on the CI runner.
+// The ACL-shape test supplies a syntactically valid NT SERVICE SID directly so
+// it does not depend on DefenseClawGateway being registered on the CI runner.
 func TestBaselineIPCACEsShapeDirectory(t *testing.T) {
 	assertBaselineIPCACEs(t, aclObjectDirectory,
 		windows.FILE_TRAVERSE|windows.FILE_LIST_DIRECTORY)
@@ -39,7 +35,8 @@ func TestBaselineIPCACEsShapeSocketFile(t *testing.T) {
 
 func assertBaselineIPCACEs(t *testing.T, class aclObjectClass, wantAuthUsersMask windows.ACCESS_MASK) {
 	t.Helper()
-	entries, err := baselineIPCACEs(class)
+	gatewaySID := testGatewayServiceSID(t)
+	entries, err := baselineIPCACEsForGatewaySID(class, gatewaySID)
 	if err != nil {
 		t.Fatalf("baselineIPCACEs(%v): %v", class, err)
 	}
@@ -58,17 +55,6 @@ func assertBaselineIPCACEs(t *testing.T, class aclObjectClass, wantAuthUsersMask
 	authUsers, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
 	if err != nil {
 		t.Fatalf("resolve Authenticated Users SID: %v", err)
-	}
-	// Slot 2's expected trustee: resolve via the same helper the
-	// production code uses so the test tracks a possible env
-	// override (managed.WindowsServiceAccountEnv) consistently. The
-	// helper enforces NT SERVICE authority — a resolved SID under
-	// any other authority makes this call fail, which is exactly
-	// the guard the DACL path needs. See CR
-	// spec-004:PRRT_kwDORuAK-s6ankzg + PRRT_kwDORuAK-s6ankzl.
-	gatewaySID, err := resolveGatewayServiceSID()
-	if err != nil {
-		t.Fatalf("resolveGatewayServiceSID: %v", err)
 	}
 	if !sidIsNTService(gatewaySID) {
 		t.Fatalf("gateway SID does not live under NT SERVICE authority — spec 004 refuses this in the DACL")
@@ -106,8 +92,8 @@ func assertBaselineIPCACEs(t *testing.T, class aclObjectClass, wantAuthUsersMask
 		}
 		// The trustee value is a uintptr embedding the SID pointer;
 		// compare via TrusteeValueFromSID against the expected SID
-		// (which for slot 2 came through resolveGatewayServiceSID,
-		// so this asserts BOTH identity AND authority).
+		// (which for slot 2 is the explicit fixture supplied to the ACL
+		// builder, so this asserts both identity and authority).
 		wantTV := windows.TrusteeValueFromSID(tc.want)
 		if got.Trustee.TrusteeValue != wantTV {
 			t.Errorf("entry %d (%s): trustee SID mismatch", i, tc.name)
@@ -145,16 +131,20 @@ func TestSIDIsNTServiceRejectsNonServicePrincipals(t *testing.T) {
 	}
 }
 
-// TestSIDIsNTServiceAcceptsNTServiceSIDs asserts a real NT SERVICE
-// virtual account SID passes. Uses resolveGatewayServiceSID() to
-// avoid duplicating the LookupSID call; the helper's own
-// authority-check guarantees the returned SID is under NT SERVICE.
+// TestSIDIsNTServiceAcceptsNTServiceSIDs asserts a syntactically valid NT
+// SERVICE virtual account SID passes without requiring an installed service.
 func TestSIDIsNTServiceAcceptsNTServiceSIDs(t *testing.T) {
-	sid, err := resolveGatewayServiceSID()
-	if err != nil {
-		t.Fatalf("resolveGatewayServiceSID: %v", err)
-	}
+	sid := testGatewayServiceSID(t)
 	if !sidIsNTService(sid) {
-		t.Fatalf("sidIsNTService rejected a legitimately-resolved NT SERVICE SID")
+		t.Fatalf("sidIsNTService rejected a legitimate NT SERVICE SID")
 	}
+}
+
+func testGatewayServiceSID(t *testing.T) *windows.SID {
+	t.Helper()
+	sid, err := windows.StringToSid("S-1-5-80-111-222-333-444-555")
+	if err != nil {
+		t.Fatalf("build test NT SERVICE SID: %v", err)
+	}
+	return sid
 }
