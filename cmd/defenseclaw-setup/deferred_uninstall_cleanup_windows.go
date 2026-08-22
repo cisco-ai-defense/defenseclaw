@@ -557,10 +557,29 @@ func buildDeferredUninstallCleanupRecord(
 }
 
 func verifyRemovedConnectorsAfterUninstall(transaction setupTransaction) error {
+	return verifyRemovedConnectorsAfterUninstallWith(
+		transaction,
+		prepareConnectorMaintenanceGateway,
+		runDeferredUninstallConnectorVerifyWithEnv,
+	)
+}
+
+type deferredUninstallConnectorVerifyRunner func(
+	setupTransaction,
+	string,
+	string,
+	[]string,
+) error
+
+func verifyRemovedConnectorsAfterUninstallWith(
+	transaction setupTransaction,
+	prepare connectorMaintenanceGatewayProvider,
+	run deferredUninstallConnectorVerifyRunner,
+) error {
 	if len(transaction.PreviousConnectors) == 0 {
 		return nil
 	}
-	maintenance, err := prepareConnectorMaintenanceGateway()
+	maintenance, err := prepare()
 	if err != nil {
 		return err
 	}
@@ -571,11 +590,10 @@ func verifyRemovedConnectorsAfterUninstall(transaction setupTransaction) error {
 	for _, connectorName := range transaction.PreviousConnectors {
 		for _, configHome := range connectorCleanupHomes(transaction, connectorName) {
 			env := connectorLifecycleEnvForHome(transaction, connectorName, configHome)
-			if err := runConnectorLifecycleWithEnv(
+			if err := run(
+				transaction,
 				maintenance.path,
-				transaction.DataRoot,
 				connectorName,
-				"verify",
 				env,
 			); err != nil {
 				return fmt.Errorf(

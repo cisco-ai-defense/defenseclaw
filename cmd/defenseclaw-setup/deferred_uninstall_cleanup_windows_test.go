@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1247,5 +1248,87 @@ func TestDeferredCleanupFinalizerPowerShellParses(t *testing.T) {
 	parser.Stdin = strings.NewReader(script)
 	if output, err := parser.CombinedOutput(); err != nil {
 		t.Fatalf("deferred cleanup finalizer PowerShell parse failed: %v: %s", err, output)
+	}
+}
+
+func TestDeferredCleanupVerifiesEntireRecordedRosterWithoutRuntimeConfig(t *testing.T) {
+	transaction := setupTransaction{
+		ID:                      "0123456789abcdef0123456789abcdef",
+		Action:                  "uninstall",
+		DataRoot:                `C:\Users\tester\.defenseclaw`,
+		PreviousConnectors:      []string{"claudecode", "codex", "amp"},
+		PreviousClaudeConfigDir: `C:\Users\tester\.claude`,
+		PreviousCodexHome:       `C:\Users\tester\.codex`,
+	}
+	cleanupCalls := 0
+	var verified []string
+	err := verifyRemovedConnectorsAfterUninstallWith(
+		transaction,
+		func() (connectorMaintenanceGateway, error) {
+			return connectorMaintenanceGateway{
+				path: `D:\private\maintenance\bin\defenseclaw-gateway.exe`,
+				cleanup: func() {
+					cleanupCalls++
+				},
+			}, nil
+		},
+		func(got setupTransaction, gatewayPath, connectorName string, env []string) error {
+			if got.ID != transaction.ID || got.DataRoot != transaction.DataRoot {
+				t.Fatalf("verify transaction = %#v, want exact %s", got, transaction.ID)
+			}
+			if gatewayPath != `D:\private\maintenance\bin\defenseclaw-gateway.exe` {
+				t.Fatalf("maintenance gateway = %q", gatewayPath)
+			}
+			home, homeErr := connectorLifecycleConfigHome(env, connectorName)
+			if homeErr != nil {
+				t.Fatalf("%s config home: %v", connectorName, homeErr)
+			}
+			verified = append(verified, connectorName+"="+home)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("verify removed connectors: %v", err)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("maintenance cleanup calls = %d, want 1", cleanupCalls)
+	}
+	want := []string{
+		`claudecode=C:\Users\tester\.claude`,
+		`codex=C:\Users\tester\.codex`,
+		`amp=C:\Users\tester\.config\amp`,
+	}
+	if !slices.Equal(verified, want) {
+		t.Fatalf("verified roster = %v, want %v", verified, want)
+	}
+}
+
+func TestDeferredCleanupAlwaysCleansMaintenancePayloadAfterVerifyFailure(t *testing.T) {
+	transaction := setupTransaction{
+		ID:                 "0123456789abcdef0123456789abcdef",
+		Action:             "uninstall",
+		DataRoot:           `C:\Users\tester\.defenseclaw`,
+		PreviousConnectors: []string{"amp"},
+	}
+	cleanupCalls := 0
+	err := verifyRemovedConnectorsAfterUninstallWith(
+		transaction,
+		func() (connectorMaintenanceGateway, error) {
+			return connectorMaintenanceGateway{
+				path: `D:\private\maintenance\bin\defenseclaw-gateway.exe`,
+				cleanup: func() {
+					cleanupCalls++
+				},
+			}, nil
+		},
+		func(setupTransaction, string, string, []string) error {
+			return errors.New("connector residue")
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "connector residue") {
+		t.Fatalf("verify failure = %v, want connector residue", err)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("maintenance cleanup calls = %d, want 1", cleanupCalls)
 	}
 }

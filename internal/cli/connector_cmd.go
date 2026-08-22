@@ -66,16 +66,20 @@ active connector is resolved in this order:
 }
 
 var (
-	connectorFlagName       string
-	connectorFlagJSON       bool
-	connectorFlagDataDir    string
-	connectorFlagConfigHome string
+	connectorFlagName                 string
+	connectorFlagJSON                 bool
+	connectorFlagDataDir              string
+	connectorFlagConfigHome           string
+	connectorVerifySetupParent        string
+	connectorVerifyCleanupRecord      string
+	connectorVerifyCleanupTransaction string
 )
 
 // connectorExit is the indirection used in place of os.Exit so tests can
 // observe the exit code without terminating the test binary. Production
 // code paths leave this at the default (real os.Exit).
 var connectorExit = os.Exit
+var connectorVerifyRootPersistentPreRun = rootPersistentPreRunE
 
 var connectorTeardownCmd = &cobra.Command{
 	Use:   "teardown",
@@ -110,7 +114,8 @@ Exit codes:
   0   connector is clean
   1   connector has residual state (details printed to stderr)
   2   connector unknown / config error`,
-	RunE: runConnectorVerify,
+	PersistentPreRunE: runConnectorVerifyPersistentPreRunE,
+	RunE:              runConnectorVerify,
 }
 
 var connectorReconcileCmd = &cobra.Command{
@@ -155,6 +160,27 @@ func init() {
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagConfigHome, "config-home", "",
 		"Bind native connector maintenance to an installer-validated configuration home")
 	_ = connectorCmd.PersistentFlags().MarkHidden("config-home")
+	connectorVerifyCmd.Flags().StringVar(
+		&connectorVerifySetupParent,
+		"internal-setup-parent",
+		"",
+		"internal authenticated Setup parent binding",
+	)
+	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-parent")
+	connectorVerifyCmd.Flags().StringVar(
+		&connectorVerifyCleanupRecord,
+		"internal-deferred-cleanup-record",
+		"",
+		"internal authenticated deferred-cleanup record binding",
+	)
+	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-record")
+	connectorVerifyCmd.Flags().StringVar(
+		&connectorVerifyCleanupTransaction,
+		"internal-deferred-cleanup-transaction",
+		"",
+		"internal authenticated deferred-cleanup transaction binding",
+	)
+	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-transaction")
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
@@ -162,6 +188,24 @@ func init() {
 	connectorCmd.AddCommand(connectorListBackupsCmd)
 
 	rootCmd.AddCommand(connectorCmd)
+}
+
+func runConnectorVerifyPersistentPreRunE(cmd *cobra.Command, args []string) error {
+	if connectorVerifySetupParent == "" &&
+		connectorVerifyCleanupRecord == "" &&
+		connectorVerifyCleanupTransaction == "" {
+		return connectorVerifyRootPersistentPreRun(cmd, args)
+	}
+	if err := validateDeferredUninstallConnectorVerify(cmd); err != nil {
+		return fmt.Errorf("connector verify deferred-uninstall authorization: %w", err)
+	}
+	// The authenticated deferred-uninstall child is deliberately configless:
+	// DELETEUSERDATA has already removed the runtime v8 source. VerifyClean uses
+	// only the transaction-bound data/config homes validated above.
+	cfg = nil
+	activeObservabilityV8Startup = nil
+	version.SetBinaryVersion(appVersion)
+	return nil
 }
 
 // resolveActiveConnectorName returns the connector name to operate on for

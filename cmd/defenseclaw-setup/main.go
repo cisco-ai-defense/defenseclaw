@@ -1166,6 +1166,85 @@ func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action s
 	return nil
 }
 
+func runDeferredUninstallConnectorVerifyWithEnv(
+	transaction setupTransaction,
+	gatewayPath, connectorName string,
+	env []string,
+) error {
+	if transaction.Action != "uninstall" || !validSetupTransactionID(transaction.ID) {
+		return errors.New("deferred connector verification requires an exact uninstall transaction")
+	}
+	if !pathExists(gatewayPath) {
+		return fmt.Errorf("connector %s verify requires the selected trusted gateway binary", connectorName)
+	}
+	setupExecutable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve deferred cleanup Setup parent: %w", err)
+	}
+	setupExecutable, err = filepath.Abs(setupExecutable)
+	if err != nil || !samePath(setupExecutable, transaction.MaintenancePath) ||
+		!strings.EqualFold(filepath.Base(setupExecutable), setupArtifactName) {
+		return errors.New("deferred connector verification is not running from the transaction-owned Setup executable")
+	}
+	transactionRoot, err := defaultTransactionRoot()
+	if err != nil {
+		return fmt.Errorf("resolve deferred cleanup transaction root: %w", err)
+	}
+	recordPath := deferredUninstallCleanupPath(transactionRoot)
+	args, err := deferredUninstallConnectorVerifyCommandArgs(
+		transaction,
+		setupExecutable,
+		recordPath,
+		connectorName,
+		env,
+	)
+	if err != nil {
+		return err
+	}
+	output, err := runCapturedSetupCommand(
+		setupControlCommandTimeout,
+		env,
+		gatewayPath,
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"connector %s verify failed: %w: %s",
+			connectorName,
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	return nil
+}
+
+func deferredUninstallConnectorVerifyCommandArgs(
+	transaction setupTransaction,
+	setupExecutable, recordPath, connectorName string,
+	env []string,
+) ([]string, error) {
+	if transaction.Action != "uninstall" || !validSetupTransactionID(transaction.ID) ||
+		!samePath(setupExecutable, transaction.MaintenancePath) {
+		return nil, errors.New("deferred connector verification arguments are not bound to the uninstall transaction")
+	}
+	args, err := connectorLifecycleCommandArgs(
+		transaction.DataRoot,
+		connectorName,
+		"verify",
+		env,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connector %s verify config home: %w", connectorName, err)
+	}
+	args = append(
+		args,
+		"--internal-setup-parent", setupExecutable,
+		"--internal-deferred-cleanup-record", recordPath,
+		"--internal-deferred-cleanup-transaction", transaction.ID,
+	)
+	return args, nil
+}
+
 func connectorLifecycleCommandArgs(dataRoot, connectorName, action string, env []string) ([]string, error) {
 	configHome, err := connectorLifecycleConfigHome(env, connectorName)
 	if err != nil {
