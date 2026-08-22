@@ -1978,10 +1978,10 @@ function Get-DefenseClawCodexWinGetEmbeddedVersion {
         $sections = [Collections.Generic.List[object]]::new()
         $totalSectionBytes = [uint64]0
         for ($index = 0; $index -lt $sectionCount; $index++) {
-            [byte[]]$section = Read-DefenseClawCodexPEBytes `
+            [byte[]]$sectionHeader = Read-DefenseClawCodexPEBytes `
                 -Stream $Stream -Count 40
-            $rawSize = [uint64][BitConverter]::ToUInt32($section, 16)
-            $rawOffset = [uint64][BitConverter]::ToUInt32($section, 20)
+            $rawSize = [uint64][BitConverter]::ToUInt32($sectionHeader, 16)
+            $rawOffset = [uint64][BitConverter]::ToUInt32($sectionHeader, 20)
             if ($rawSize -eq 0) { continue }
             $rawEnd = $rawOffset + $rawSize
             if ($rawEnd -lt $rawOffset -or
@@ -1999,9 +1999,12 @@ function Get-DefenseClawCodexWinGetEmbeddedVersion {
         if ($sections.Count -eq 0) { return '' }
         $ordered = @($sections | Sort-Object -Property Offset)
         $previousEnd = [uint64]0
-        foreach ($section in $ordered) {
-            if ([uint64]$section.Offset -lt $previousEnd) { return '' }
-            $previousEnd = [uint64]$section.Offset + [uint64]$section.Length
+        foreach ($signedSection in $ordered) {
+            if ([uint64]$signedSection.Offset -lt $previousEnd) { return '' }
+            $previousEnd = (
+                [uint64]$signedSection.Offset +
+                [uint64]$signedSection.Length
+            )
         }
 
         $buffer = [byte[]]::new(1MB)
@@ -2010,12 +2013,12 @@ function Get-DefenseClawCodexWinGetEmbeddedVersion {
         $versions = [Collections.Generic.HashSet[string]]::new(
             [StringComparer]::Ordinal
         )
-        foreach ($section in $ordered) {
+        foreach ($signedSection in $ordered) {
             [void]$Stream.Seek(
-                [int64][uint64]$section.Offset,
+                [int64][uint64]$signedSection.Offset,
                 [IO.SeekOrigin]::Begin
             )
-            $remaining = [uint64]$section.Length
+            $remaining = [uint64]$signedSection.Length
             $carry = ''
             while ($remaining -gt 0) {
                 $readLength = if ($remaining -gt $buffer.Length) {

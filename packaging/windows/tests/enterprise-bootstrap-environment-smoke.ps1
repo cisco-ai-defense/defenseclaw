@@ -728,11 +728,13 @@ function New-TestCodexSignedPEFixture {
     )
 
     $ascii = [Text.Encoding]::ASCII
+    $prefixBody = $ascii.GetBytes('signed codex bootstrap section')
     $sectionBody = $ascii.GetBytes($SectionText)
     $gapBody = $ascii.GetBytes($GapText)
     $certificateBody = $ascii.GetBytes($CertificateText)
     $tailBody = $ascii.GetBytes($UnsignedTail)
     $headersSize = 0x200
+    $prefixSectionSize = 0x200
     $sectionSize = [Math]::Max(
         0x200,
         [int]([Math]::Ceiling($sectionBody.Length / 512.0) * 512)
@@ -742,7 +744,9 @@ function New-TestCodexSignedPEFixture {
         8,
         [int]([Math]::Ceiling((8 + $certificateBody.Length) / 8.0) * 8)
     )
-    $certificateOffset = $headersSize + $sectionSize + $gapSize
+    $certificateOffset = (
+        $headersSize + $prefixSectionSize + $sectionSize + $gapSize
+    )
     $bytes = [byte[]]::new(
         $certificateOffset + $certificateSize + $tailBody.Length
     )
@@ -753,7 +757,7 @@ function New-TestCodexSignedPEFixture {
     $bytes[0x80] = 0x50
     $bytes[0x81] = 0x45
     [BitConverter]::GetBytes([uint16]0x8664).CopyTo($bytes, 0x84)
-    [BitConverter]::GetBytes([uint16]1).CopyTo($bytes, 0x86)
+    [BitConverter]::GetBytes([uint16]2).CopyTo($bytes, 0x86)
     [BitConverter]::GetBytes([uint16]0xf0).CopyTo($bytes, 0x94)
     [BitConverter]::GetBytes([uint16]0x2022).CopyTo($bytes, 0x96)
     $optionalOffset = 0x98
@@ -775,8 +779,8 @@ function New-TestCodexSignedPEFixture {
         $optionalOffset + 148
     )
     $sectionOffset = $optionalOffset + 0xf0
-    $ascii.GetBytes('.rdata').CopyTo($bytes, $sectionOffset)
-    [BitConverter]::GetBytes([uint32]$sectionBody.Length).CopyTo(
+    $ascii.GetBytes('.text').CopyTo($bytes, $sectionOffset)
+    [BitConverter]::GetBytes([uint32]$prefixBody.Length).CopyTo(
         $bytes,
         $sectionOffset + 8
     )
@@ -784,7 +788,7 @@ function New-TestCodexSignedPEFixture {
         $bytes,
         $sectionOffset + 12
     )
-    [BitConverter]::GetBytes([uint32]$sectionSize).CopyTo(
+    [BitConverter]::GetBytes([uint32]$prefixSectionSize).CopyTo(
         $bytes,
         $sectionOffset + 16
     )
@@ -792,13 +796,44 @@ function New-TestCodexSignedPEFixture {
         $bytes,
         $sectionOffset + 20
     )
-    [BitConverter]::GetBytes([uint32]0x40000040).CopyTo(
+    [BitConverter]::GetBytes([uint32]0x60000020).CopyTo(
         $bytes,
         $sectionOffset + 36
     )
-    $sectionBody.CopyTo($bytes, $headersSize)
+    $metadataSectionOffset = $sectionOffset + 40
+    $ascii.GetBytes('.rdata').CopyTo($bytes, $metadataSectionOffset)
+    [BitConverter]::GetBytes([uint32]$sectionBody.Length).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 8
+    )
+    [BitConverter]::GetBytes([uint32]0x2000).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 12
+    )
+    [BitConverter]::GetBytes([uint32]$sectionSize).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 16
+    )
+    [BitConverter]::GetBytes(
+        [uint32]($headersSize + $prefixSectionSize)
+    ).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 20
+    )
+    [BitConverter]::GetBytes([uint32]0x40000040).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 36
+    )
+    $prefixBody.CopyTo($bytes, $headersSize)
+    $sectionBody.CopyTo(
+        $bytes,
+        $headersSize + $prefixSectionSize
+    )
     if ($gapBody.Length -gt 0) {
-        $gapBody.CopyTo($bytes, $headersSize + $sectionSize)
+        $gapBody.CopyTo(
+            $bytes,
+            $headersSize + $prefixSectionSize + $sectionSize
+        )
     }
     [BitConverter]::GetBytes([uint32]$certificateSize).CopyTo(
         $bytes,
