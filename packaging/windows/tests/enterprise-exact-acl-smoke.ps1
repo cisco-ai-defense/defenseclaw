@@ -40,7 +40,9 @@ $expected = [ordered]@{
     GatewayLogDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
     # FileSystemAccessRule adds Synchronize (0x100000) to explicit allow
     # rules. ListDirectory | Traverse is therefore serialized as 0x100021.
-    ManagedIPCDirectory = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$serviceSID)(A;;0x100021;;;AU)"
+    # CommonAcl then canonicalizes equal-priority allow ACEs by SID, placing
+    # Authenticated Users before SYSTEM, Administrators, and the service SID.
+    ManagedIPCDirectory = "O:BAG:BAD:P(A;;0x100021;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$serviceSID)"
 }
 $directoryKinds = @(
     'InstallDirectory',
@@ -75,7 +77,10 @@ $observed = & $module {
 foreach ($row in $observed) {
     if (-not [bool]$row.protected -or
         [string]$row.sddl -cne [string]$expected[[string]$row.kind]) {
-        throw "canonical ACL descriptor mismatch for $($row.kind)"
+        throw (
+            "canonical ACL descriptor mismatch for $($row.kind): " +
+            "expected=$($expected[[string]$row.kind]) observed=$($row.sddl)"
+        )
     }
 }
 if ($observed.Count -ne $expected.Count) {
