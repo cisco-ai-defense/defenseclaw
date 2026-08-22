@@ -273,11 +273,8 @@ def _replace_between(
     )
     if not pattern.search(text):
         return text, False
-    new_text = pattern.sub(
-        f"{begin}\n{payload}\n{end}",
-        text,
-        count=1,
-    )
+    replacement = f"{begin}\n{payload}\n{end}"
+    new_text = pattern.sub(lambda _match: replacement, text, count=1)
     return new_text, True
 
 
