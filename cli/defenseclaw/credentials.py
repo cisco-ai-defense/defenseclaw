@@ -215,7 +215,7 @@ _HOOK_POLICY_ONLY_CONNECTORS = frozenset(
         "claudecode",
         "hermes",
         "cursor",
-        "windsurf",
+        "devin",
         "geminicli",
         "copilot",
         "openhands",

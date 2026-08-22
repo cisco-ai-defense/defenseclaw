@@ -1,4 +1,4 @@
-﻿# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
 <#
@@ -22,7 +22,7 @@ param(
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-wizard-smoke-$PID"),
     [ValidateRange(1, 60)]
     [int]$TimeoutSeconds = 15,
-    [ValidateSet('none', 'codex', 'claudecode', 'amp')]
+    [ValidateSet('none', 'codex', 'claudecode', 'amp', 'antigravity', 'copilot', 'cursor', 'hermes', 'devin', 'omnigent', 'opencode')]
     [string]$Connector = 'claudecode',
     [ValidateSet('observe', 'action')]
     [string]$Mode = 'observe',
@@ -265,6 +265,26 @@ function Set-AndAssertComboSelection([IntPtr]$Control, [int]$Index, [string]$Lab
     }
 }
 
+function Get-BoundedComboItemText([IntPtr]$Control, [int]$Index, [string]$Label) {
+    $length = Invoke-BoundedWindowMessage -Window $Control -Message 0x0149 `
+        -WParam ([UIntPtr]$Index) # CB_GETLBTEXTLEN
+    if ($length -gt 32767) {
+        throw "$Label item $Index returned an invalid text length $length."
+    }
+    $characters = [int]$length + 1
+    $buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal($characters * 2)
+    try {
+        $copied = Invoke-BoundedWindowMessage -Window $Control -Message 0x0148 `
+            -WParam ([UIntPtr]$Index) -LParam $buffer # CB_GETLBTEXT
+        if ($copied -ne $length) {
+            throw "$Label item $Index copied $copied characters; expected $length."
+        }
+        return [Runtime.InteropServices.Marshal]::PtrToStringUni($buffer)
+    } finally {
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer)
+    }
+}
+
 function Set-AndAssertCheckState([IntPtr]$Control, [bool]$Checked) {
     $expected = if ($Checked) { 1 } else { 0 }
     $null = Invoke-BoundedWindowMessage -Window $Control -Message 0x00F1 -WParam ([UIntPtr]$expected)
@@ -364,7 +384,35 @@ function Get-WizardObservation(
     }
 }
 
-$connectorIndices = @{ none = 0; codex = 1; claudecode = 2; amp = 3 }
+$connectorIndices = @{
+    none = 0
+    codex = 1
+    claudecode = 2
+    amp = 3
+    antigravity = 4
+    copilot = 5
+    cursor = 6
+    hermes = 7
+    devin = 8
+    omnigent = 9
+    opencode = 10
+}
+$connectorLabels = @(
+    'Configure later',
+    'Codex CLI',
+    'Claude Code',
+    'Amp',
+    'Google Antigravity',
+    'GitHub Copilot CLI',
+    'Cursor Agent',
+    'Hermes Agent',
+    'Devin CLI',
+    'OmniGent (native degraded)',
+    'OpenCode'
+)
+if ($connectorLabels.Count -ne $connectorIndices.Count) {
+    throw 'Wizard connector label and index contracts have different lengths.'
+}
 $modeIndices = @{ observe = 0; action = 1 }
 $process = $null
 $finished = $false
@@ -452,8 +500,16 @@ try {
     $headingControl = Get-WizardControl $window 1011 'heading'
 
     $control = [Diagnostics.Stopwatch]::StartNew()
-    foreach ($index in 0..3) {
+    foreach ($index in 0..($connectorIndices.Count - 1)) {
         Set-AndAssertComboSelection $connectorControl $index 'Connector'
+        $observedLabel = Get-BoundedComboItemText $connectorControl $index 'Connector'
+        if (-not [string]::Equals(
+            $observedLabel,
+            $connectorLabels[$index],
+            [StringComparison]::Ordinal
+        )) {
+            throw "Connector item $index was '$observedLabel'; expected '$($connectorLabels[$index])'."
+        }
     }
     foreach ($index in 0..1) {
         Set-AndAssertComboSelection $modeControl $index 'Mode'

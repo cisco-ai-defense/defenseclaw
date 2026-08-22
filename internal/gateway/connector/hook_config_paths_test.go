@@ -146,6 +146,85 @@ func TestOwnedHooksPresent_TrueAfterSetup_FalseAfterRemoval(t *testing.T) {
 	}
 }
 
+func TestOwnedHooksPresent_CursorRequiresExactObserveContract(t *testing.T) {
+	mutations := map[string]func(map[string]interface{}){
+		"missing event": func(hooks map[string]interface{}) { delete(hooks, "subagentStart") },
+		"wrong type": func(hooks map[string]interface{}) {
+			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["type"] = "prompt"
+		},
+		"millisecond timeout": func(hooks map[string]interface{}) {
+			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["timeout"] = json.Number("30000")
+		},
+		"fail closed": func(hooks map[string]interface{}) {
+			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["failClosed"] = true
+		},
+		"duplicate": func(hooks map[string]interface{}) {
+			entry := hooks["preToolUse"].([]interface{})[0]
+			hooks["preToolUse"] = append(hooks["preToolUse"].([]interface{}), entry)
+		},
+		"unexpected event": func(hooks map[string]interface{}) {
+			hooks["beforeVendorExtension"] = []interface{}{hooks["preToolUse"].([]interface{})[0]}
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			conn, opts, cfgPath := cursorTestSetup(t)
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			cfg, err := readJSONObject(cfgPath)
+			if err != nil {
+				t.Fatalf("read hooks: %v", err)
+			}
+			hooks := cfg["hooks"].(map[string]interface{})
+			mutate(hooks)
+			if err := writeJSONObject(cfgPath, cfg); err != nil {
+				t.Fatalf("write mutated hooks: %v", err)
+			}
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil {
+				t.Fatalf("OwnedHooksPresent: %v", err)
+			}
+			if present {
+				t.Fatal("OwnedHooksPresent=true for malformed Cursor registration")
+			}
+		})
+	}
+}
+
+func TestOwnedHooksPresent_CursorAcceptsExactActionContract(t *testing.T) {
+	conn, opts, cfgPath := cursorTestSetup(t)
+	opts.GuardrailMode = "action"
+	// The connector derives Cursor failure behavior from the selected mode;
+	// an inherited fail-open value must not weaken action registration.
+	opts.HookFailMode = "open"
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	cfg, err := readJSONObject(cfgPath)
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	for event, rawEntries := range hooks {
+		entries := rawEntries.([]interface{})
+		if len(entries) != 1 {
+			t.Fatalf("event %s entries=%d, want exactly one", event, len(entries))
+		}
+		if failClosed, ok := entries[0].(map[string]interface{})["failClosed"].(bool); !ok || !failClosed {
+			t.Fatalf("event %s failClosed=%v, want true", event, entries[0].(map[string]interface{})["failClosed"])
+		}
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if !present {
+		t.Fatal("OwnedHooksPresent=false for exact Cursor action registration")
+	}
+}
+
 func TestOwnedHooksPresent_FalseWhenFileMissing(t *testing.T) {
 	conn, opts, cfgPath := cursorTestSetup(t)
 
@@ -162,6 +241,24 @@ func TestOwnedHooksPresent_FalseWhenFileMissing(t *testing.T) {
 	}
 	if present {
 		t.Fatal("OwnedHooksPresent=true for a deleted config file; want false")
+	}
+}
+
+func TestOwnedHooksPresent_CursorRejectsMissingManagedRuntime(t *testing.T) {
+	conn, opts, _ := cursorTestSetup(t)
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	runtimePath := conn.(*hookOnlyConnector).cursorRuntimePath(opts)
+	if err := os.Remove(runtimePath); err != nil {
+		t.Fatalf("remove Cursor runtime: %v", err)
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if present {
+		t.Fatal("OwnedHooksPresent=true after removing Cursor's managed runtime")
 	}
 }
 
@@ -559,6 +656,64 @@ func TestOwnedHookNeedles_WindowsSurvivesConfigEscaping(t *testing.T) {
 	}
 }
 
+func TestEventBoundOwnedHookNeedlesMatchRegisteredCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		connector *hookOnlyConnector
+	}{
+		{
+			name:      "copilot",
+			connector: NewCopilotConnector(),
+		},
+		{
+			name:      "antigravity",
+			connector: NewAntigravityConnector(),
+		},
+	} {
+		for _, goos := range []string{"linux", "windows"} {
+			t.Run(tc.name+"/"+goos, func(t *testing.T) {
+				root := t.TempDir()
+				opts := SetupOpts{DataDir: filepath.Join(root, "defenseclaw")}
+				hookScript := filepath.Join(opts.DataDir, "hooks", tc.connector.scriptName)
+				path := filepath.Join(root, "hooks.json")
+				hooks := make(map[string]interface{})
+				if tc.name == "copilot" {
+					for _, event := range copilotCurrentHookEvents {
+						key := "bash"
+						if goos == "windows" {
+							key = "powershell"
+						}
+						hooks[event] = []interface{}{map[string]interface{}{
+							key: copilotHookInvocationCommandForEvent(goos, event, hookScript),
+						}}
+					}
+				} else {
+					for _, event := range antigravityLifecycleEvents {
+						hooks[event] = map[string]interface{}{
+							"command": antigravityHookInvocationCommandForEvent(goos, event, hookScript),
+						}
+					}
+				}
+				data, err := json.Marshal(map[string]interface{}{"hooks": hooks})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				needles := ownedHookCommandNeedlesFor(goos, opts, tc.connector)
+				present, err := configFileReferencesHook(path, needles)
+				if err != nil {
+					t.Fatalf("configFileReferencesHook: %v", err)
+				}
+				if !present {
+					t.Fatalf("event-bound %s config did not match owned needles: %v", tc.name, needles)
+				}
+			})
+		}
+	}
+}
+
 func TestConfigFileReferencesHookIgnoresDecoyPathOutsideCommandField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hooks.json")
 	needle := "/home/alice/.defenseclaw/hooks/cursor-hook.sh"
@@ -604,6 +759,48 @@ func TestConfigFileReferencesHookAcceptsManagedCommandField(t *testing.T) {
 	}
 	if !present {
 		t.Fatal("managed command field was not detected")
+	}
+}
+
+func TestConfigFileReferencesCopilotPowerShellRequiresCanonicalCommand(t *testing.T) {
+	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, hookBinary)
+	needle := nativeHookFlag + "copilot"
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	write := func(command string) {
+		t.Helper()
+		data, err := json.Marshal(map[string]interface{}{
+			"version": 1,
+			"hooks": map[string]interface{}{
+				"preToolUse": []interface{}{
+					map[string]interface{}{"type": "command", "powershell": command, "timeoutSec": 30},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal config: %v", err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	write(windowsCopilotPowerShellHookCommandForBinary(hookBinary))
+	present, err := configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("canonical configFileReferencesHook: %v", err)
+	}
+	if !present {
+		t.Fatal("canonical Copilot powershell hook was not detected")
+	}
+
+	write(legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary))
+	present, err = configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("legacy configFileReferencesHook: %v", err)
+	}
+	if present {
+		t.Fatal("broken legacy Copilot hook was considered healthy instead of requiring repair")
 	}
 }
 

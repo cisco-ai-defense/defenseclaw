@@ -142,6 +142,17 @@ func TestBuildHookOptionsDefaultAPIAddr(t *testing.T) {
 	}
 }
 
+func TestHookCommandExposesOnlyHiddenContractBinding(t *testing.T) {
+	cmd := newHookCmd()
+	flag := cmd.Flags().Lookup("hook-contract")
+	if flag == nil {
+		t.Fatal("hook command is missing installer-bound contract flag")
+	}
+	if !flag.Hidden {
+		t.Fatal("hook-contract must remain a hidden machine-facing flag")
+	}
+}
+
 func TestBuildHookOptionsSidecarFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)

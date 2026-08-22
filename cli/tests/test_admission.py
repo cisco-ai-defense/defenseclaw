@@ -673,6 +673,39 @@ class TestBundledPolicyProvenance(unittest.TestCase):
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")
 
+    def test_codex_personal_codeguard_path_requires_scan_without_stronger_provenance(self):
+        d = evaluate_admission(
+            self._pe(),
+            policy_dir=self._bundled_policies(),
+            target_type="skill",
+            name="codeguard",
+            source_path="/home/u/.agents/skills/codeguard",
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
+    def test_codex_project_codeguard_spoof_requires_scan(self):
+        d = evaluate_admission(
+            self._pe(),
+            policy_dir=self._bundled_policies(),
+            target_type="skill",
+            name="codeguard",
+            source_path="/work/repo/.agents/skills/codeguard",
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
+    def test_codex_legacy_skill_home_requires_scan(self):
+        d = evaluate_admission(
+            self._pe(),
+            policy_dir=self._bundled_policies(),
+            target_type="skill",
+            name="codeguard",
+            source_path="/home/u/.codex/skills/codeguard",
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
 
 class TestEvaluateAssetPolicyPerConnector(unittest.TestCase):
     """OTHER-7: per-connector asset_policy resolution through the real

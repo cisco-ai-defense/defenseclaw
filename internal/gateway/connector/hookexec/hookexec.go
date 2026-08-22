@@ -42,8 +42,9 @@ import (
 	"time"
 )
 
-// blockExit is the POSIX exit code every supported agent treats as "this hook
-// blocked the action" (Claude Code, Codex, Cursor, Windsurf, OpenHands, ...).
+// blockExit is the failure/block exit used by connectors whose upstream hook
+// contracts interpret process status. Hermes is explicitly excluded: it only
+// blocks through valid synchronous JSON written to stdout.
 const blockExit = 2
 
 // defaultMaxBody caps how many bytes of the agent's hook payload we read from
@@ -59,6 +60,11 @@ const (
 
 var errInvalidHookRequest = errors.New("invalid hook request")
 
+const (
+	codexBoundEventHeader    = "X-DefenseClaw-Hook-Event"
+	codexBoundContractHeader = "X-DefenseClaw-Hook-Contract"
+)
+
 // Options configures a single hook invocation. The CLI entrypoint fills these
 // from flags + environment; tests construct them directly so the full decision
 // matrix can be exercised without a real gateway or agent.
@@ -68,6 +74,10 @@ type Options struct {
 	// Event is the agent hook event used for deadlines and failure logs. Claude
 	// Code supplies it in the payload when the CLI flag is omitted.
 	Event string
+	// HookContractID is the finite Setup-selected connector contract bound into
+	// the protected native Windows command. Codex uses it to prevent local
+	// failure paths from backfilling newer lifecycle controls into legacy tiers.
+	HookContractID string
 	// APIAddr is the gateway "host:port" the hook posts to.
 	APIAddr string
 	// FailMode is "open" or "closed"; it governs invalid responses
@@ -117,9 +127,11 @@ type Options struct {
 	Now func() time.Time
 }
 
-// Run executes the hook described by opts and returns the process exit code
-// (0 = allow / no-op, 2 = block / fail-closed). It never returns other codes
-// so callers can pass the result straight to os.Exit.
+// Run executes the hook described by opts and returns the process exit code.
+// Connector-native stdout is the enforcement surface when the upstream
+// contract defines one. In particular, Antigravity blocking is expressed only
+// by synchronous PreToolUse stdout {"decision":"deny"}; no Antigravity
+// behavior relies on a non-zero process exit code.
 func Run(ctx context.Context, opts Options) int {
 	startedAt := time.Now()
 	opts = withDefaults(opts)
@@ -155,16 +167,45 @@ func Run(ctx context.Context, opts Options) int {
 	if overflow {
 		return handleOversized(opts, sp, failMode)
 	}
-	opts.Event = resolveHookEvent(opts.Event, payload)
-	if opts.HTTPClient == nil {
-		requestTimeout := hookRequestTimeout(opts.Connector, opts.Event) - time.Since(startedAt)
-		if requestTimeout <= 0 {
-			return failUnreachable(opts, sp, failMode, "hook request budget exhausted before gateway contact")
+	if strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
+		event, bindingErr := validateCodexInvocationBinding(
+			opts.Event,
+			opts.HookContractID,
+			payload,
+		)
+		opts.Event = strings.TrimSpace(opts.Event)
+		if bindingErr != nil {
+			return failResponse(opts, sp, failMode, bindingErr.Error())
 		}
+		opts.Event = event
+	} else if strings.EqualFold(strings.TrimSpace(opts.Connector), "antigravity") {
+		opts.Event = strings.TrimSpace(opts.Event)
+		if !validAntigravityEvent(opts.Event) {
+			// Antigravity's official stdin schemas do not carry event identity.
+			// Setup binds a reviewed event into each protected command; never
+			// accept a payload-selected substitute when that binding is absent.
+			return failResponse(opts, sp, "open", "missing or unsupported Antigravity hook event binding")
+		}
+	} else {
+		opts.Event = resolveHookEvent(opts.Event, payload)
+	}
+	if opts.Connector == "copilot" && !validCopilotEvent(opts.Event) {
+		// Copilot's official camelCase stdin bodies do not identify the
+		// event. Setup supplies the reviewed event through an exact --event
+		// binding; never infer it from a body field or forward an untrusted
+		// registration. This is a local integration failure, so Copilot must
+		// receive its documented fail-open result.
+		return failResponse(opts, sp, failMode, "missing or unsupported Copilot hook event binding")
+	}
+	requestTimeout := hookRequestTimeout(opts.Connector, opts.Event) - time.Since(startedAt)
+	if requestTimeout <= 0 {
+		return failUnreachable(opts, sp, failMode, "hook request budget exhausted before gateway contact")
+	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	if opts.HTTPClient == nil {
 		opts.HTTPClient = defaultHTTPClient(requestTimeout)
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
-		defer cancel()
 	}
 
 	// Cursor 2.4+ imports Claude Code hooks while also running its native
@@ -301,6 +342,26 @@ func sendHookRequest(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
+	if opts.Connector == "codex" {
+		// These values come from Setup's protected, event-specific command.
+		// The bearer-authenticated gateway compares them with both the official
+		// stdin event and its persisted contract lock before policy evaluation.
+		req.Header.Set(codexBoundEventHeader, opts.Event)
+		req.Header.Set(codexBoundContractHeader, opts.HookContractID)
+	}
+	if opts.Connector == "antigravity" && validAntigravityEvent(opts.Event) {
+		// The official Antigravity stdin body has no event-name field. Carry
+		// Setup's event-specific registration metadata separately so the
+		// gateway can decode the body without rewriting it here.
+		req.Header.Set("X-DefenseClaw-Antigravity-Event", opts.Event)
+	}
+	if opts.Connector == "copilot" && validCopilotEvent(opts.Event) {
+		// Native camelCase Copilot bodies likewise omit event identity. Keep
+		// the official stdin bytes intact and forward only the reviewed
+		// event-specific registration argument through an authenticated
+		// DefenseClaw header.
+		req.Header.Set("X-DefenseClaw-Copilot-Event", opts.Event)
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -314,12 +375,36 @@ func sendHookRequest(
 	return opts.HTTPClient.Do(req)
 }
 
+func validAntigravityEvent(event string) bool {
+	switch strings.TrimSpace(event) {
+	case "PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop":
+		return true
+	default:
+		return false
+	}
+}
+
+func validCopilotEvent(event string) bool {
+	switch strings.TrimSpace(event) {
+	case "sessionStart", "sessionEnd", "userPromptSubmitted", "userPromptTransformed",
+		"preToolUse", "postToolUse", "permissionRequest", "agentStop",
+		"subagentStart", "subagentStop", "postToolUseFailure", "errorOccurred",
+		"preCompact", "notification":
+		return true
+	default:
+		return false
+	}
+}
+
 // decide shapes the connector-native stdout + exit code from a 2xx gateway
 // response body, returning a fail_response result if the body is not JSON.
 func (sp spec) decide(opts Options, body []byte) int {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
+	}
+	if sp.connector == "hermes" {
+		return decideHermes(opts, sp, fields)
 	}
 
 	action, ok := rawString(fields, "action")
@@ -350,6 +435,18 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return 0
 
 	case styleCodex:
+		if strings.EqualFold(strings.TrimSpace(opts.Event), "SessionEnd") {
+			// SessionEnd is advisory and Codex ignores its output. Discard even
+			// a malformed gateway block/ask response so teardown can never be
+			// turned into an enforcement surface.
+			return 0
+		}
+		if action == "block" && !codexEventCanControl(opts.HookContractID, opts.Event) {
+			// Advisory, unknown, and legacy-tier lifecycle events have no
+			// certified control shape. Do not synthesize one from a generic
+			// policy action.
+			return 0
+		}
 		if output != "" {
 			fmt.Fprintln(opts.Stdout, output)
 		}
@@ -360,19 +457,20 @@ func (sp spec) decide(opts Options, body []byte) int {
 			if reason == "" {
 				reason = sp.defaultBlockReason
 			}
-			// Emit minimal structured block JSON with exit 0: newer Codex
-			// versions treat exit 2 on UserPromptSubmit as "hook failed",
-			// not "hook blocked".
-			fmt.Fprintf(opts.Stdout, "{\"decision\":\"block\",\"reason\":%s}\n", mustJSONString(reason))
-			return 0
+			return emitCodexBlock(opts, reason)
 		}
 		return 0
 
 	case styleHookEcho:
 		if output != "" {
 			fmt.Fprintln(opts.Stdout, output)
+		} else if sp.connector == "cursor" && (action == "block" || action == "confirm") {
+			if reason == "" {
+				reason = sp.defaultBlockReason
+			}
+			fmt.Fprintln(opts.Stdout, cursorActionOutput(opts.Event, action, reason))
 		} else {
-			return emit(opts.Stdout, sp.openAllow)
+			return emitHookResult(opts, sp, sp.openAllow)
 		}
 		return 0
 
@@ -400,36 +498,110 @@ func (sp spec) decide(opts Options, body []byte) int {
 	}
 }
 
+func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int {
+	action, ok := rawString(fields, "action")
+	if !ok {
+		return failResponse(opts, sp, "open", "invalid or missing action in Hermes gateway response")
+	}
+	rawOutput, present := fields[sp.outputField]
+	if !present || strings.TrimSpace(string(rawOutput)) == "null" {
+		return 0
+	}
+	var output map[string]json.RawMessage
+	if err := json.Unmarshal(rawOutput, &output); err != nil || output == nil {
+		return failResponse(opts, sp, "open", "invalid Hermes hook_output object")
+	}
+
+	valid := false
+	switch strings.ToLower(strings.TrimSpace(opts.Event)) {
+	case "pre_tool_call":
+		valid = action == "block" && (validHermesBlockOutput(output, "decision", "reason") ||
+			validHermesBlockOutput(output, "action", "message"))
+	case "pre_llm_call":
+		valid = (action == "allow" || action == "alert") &&
+			exactJSONKeys(output, "context") &&
+			nonEmptyJSONString(output, "context")
+	case "pre_verify":
+		outputAction, outputActionOK := rawString(output, "action")
+		valid = action == "continue" &&
+			exactJSONKeys(output, "action", "message") &&
+			outputActionOK && outputAction == "continue" &&
+			nonEmptyJSONString(output, "message")
+	}
+	if !valid {
+		return failResponse(opts, sp, "open", "unsupported or contradictory Hermes gateway response")
+	}
+	fmt.Fprintln(opts.Stdout, compactField(fields, sp.outputField))
+	return 0
+}
+
+func validHermesBlockOutput(output map[string]json.RawMessage, decisionKey, reasonKey string) bool {
+	decision, ok := rawString(output, decisionKey)
+	return exactJSONKeys(output, decisionKey, reasonKey) &&
+		ok && decision == "block" &&
+		nonEmptyJSONString(output, reasonKey)
+}
+
+func nonEmptyJSONString(fields map[string]json.RawMessage, key string) bool {
+	raw, ok := fields[key]
+	if !ok {
+		return false
+	}
+	var value string
+	return json.Unmarshal(raw, &value) == nil && strings.TrimSpace(value) != ""
+}
+
+func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
+	if len(fields) != len(keys) {
+		return false
+	}
+	for _, key := range keys {
+		if _, ok := fields[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // handleMissingToken mirrors defenseclaw_handle_missing_token: log the bypass,
 // then allow (exit 0) by default or block (exit 2) under strict availability.
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.StrictAvailability || failMode == "closed" {
-		fmt.Fprintf(opts.Stderr,
-			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
-		return emit(opts.Stdout, sp.unreachableStrict)
+	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") {
+		if sp.connector == "antigravity" {
+			fmt.Fprintf(opts.Stderr,
+				"defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
+		} else {
+			fmt.Fprintf(opts.Stderr,
+				"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
+		}
+		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	return emit(opts.Stdout, sp.openAllow)
+	return emitHookResult(opts, sp, sp.openAllow)
 }
 
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
-	if opts.StrictAvailability || opts.ManagedEnterprise {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
-		return emit(opts.Stdout, sp.unreachableStrict)
+	if !sp.failOpenOnly && (opts.StrictAvailability || opts.ManagedEnterprise) {
+		if sp.connector == "antigravity" {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
+		} else {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
+		}
+		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	return emit(opts.Stdout, sp.openAllow)
+	return emitHookResult(opts, sp, sp.openAllow)
 }
 
 // handleOversized mirrors the per-connector oversized-payload branch.
 func handleOversized(opts Options, sp spec, failMode string) int {
 	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode)
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
-	if failMode == "closed" {
-		return emit(opts.Stdout, sp.oversizedClosed)
+	if !sp.failOpenOnly && failMode == "closed" {
+		return emitHookResult(opts, sp, sp.oversizedClosed)
 	}
-	return emit(opts.Stdout, sp.openAllow)
+	return emitHookResult(opts, sp, sp.openAllow)
 }
 
 // failUnreachable applies the connector's effective fail mode to native hook
@@ -437,13 +609,18 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 // override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.StrictAvailability || failMode == "closed" {
-		fmt.Fprintf(opts.Stderr,
-			"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
-		return emit(opts.Stdout, sp.unreachableStrict)
+	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") {
+		if sp.connector == "antigravity" {
+			fmt.Fprintf(opts.Stderr,
+				"defenseclaw: gateway unreachable, applying Antigravity's event-specific failure response: %s\n", reason)
+		} else {
+			fmt.Fprintf(opts.Stderr,
+				"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
+		}
+		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
-	return emit(opts.Stdout, sp.openAllow)
+	return emitHookResult(opts, sp, sp.openAllow)
 }
 
 func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
@@ -463,10 +640,10 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	reason = responseFailureReason(reason)
 	logHookFailure(opts, sp, reason, "response", failMode)
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
-	if failMode == "open" {
-		return emit(opts.Stdout, sp.openAllow)
+	if sp.failOpenOnly || failMode == "open" {
+		return emitHookResult(opts, sp, sp.openAllow)
 	}
-	return emit(opts.Stdout, sp.responseClosed)
+	return emitHookResult(opts, sp, sp.responseClosed)
 }
 
 func responseFailureReason(reason string) string {
@@ -476,12 +653,113 @@ func responseFailureReason(reason string) string {
 	return reason
 }
 
-// emit writes a fail-closed JSON body (if any) and returns its exit code.
+// emit writes the connector-native failure body (if any) and returns its exit
+// code. Hermes failure results are always empty exit-0 allows.
 func emit(out io.Writer, r failResult) int {
 	if r.body != "" {
 		fmt.Fprintln(out, r.body)
 	}
 	return r.exit
+}
+
+// emitHookResult supplies event-specific stdout contracts on local, transport,
+// and response fallbacks. Cursor accepts different fields per event and treats
+// exit 2 as a generic block. Antigravity only documents structured PreToolUse
+// blocking, so its native bridge exits successfully after emitting that body.
+func emitHookResult(opts Options, sp spec, result failResult) int {
+	if sp.connector == "codex" {
+		if result.exit == 0 {
+			return emit(opts.Stdout, result)
+		}
+		reason := failedClosed
+		if strings.Contains(result.body, tooLarge) {
+			reason = tooLarge
+		}
+		return emitCodexBlock(opts, reason)
+	}
+	if sp.connector == "cursor" {
+		fmt.Fprintln(opts.Stdout, cursorFallbackOutput(
+			opts.Event,
+			result.closed || result.exit != 0,
+			result.body,
+		))
+		return result.exit
+	}
+	if sp.connector != "antigravity" {
+		return emit(opts.Stdout, result)
+	}
+	closed := result.closed || result.exit != 0
+	var body string
+	switch strings.TrimSpace(opts.Event) {
+	case "PreToolUse":
+		if closed {
+			body = `{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}`
+		} else {
+			body = `{"decision":"allow"}`
+		}
+	case "Stop":
+		body = `{"decision":"allow"}`
+	default:
+		body = `{}`
+	}
+	fmt.Fprintln(opts.Stdout, body)
+	return 0
+}
+
+func codexEventCanControl(contractID, event string) bool {
+	switch strings.TrimSpace(event) {
+	case "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop":
+		// These controls predate the protected contract flag. Preserve exact
+		// failure behavior for upgraded legacy registrations whose command has
+		// not yet been reconciled.
+		return true
+	case "SessionStart", "SubagentStop", "PreCompact", "PostCompact":
+		return contractID == "codex-hooks-v3" || contractID == "codex-hooks-v4"
+	default:
+		return false
+	}
+}
+
+// emitCodexBlock translates local fail-closed and missing structured gateway
+// responses into the exact event-specific Codex control schema. Structured
+// stdout exits successfully because current Codex treats a non-zero
+// UserPromptSubmit status as hook failure rather than a policy decision.
+func emitCodexBlock(opts Options, reason string) int {
+	if !codexEventCanControl(opts.HookContractID, opts.Event) {
+		switch strings.TrimSpace(opts.Event) {
+		case "SessionEnd", "SubagentStart":
+			return 0
+		default:
+			// Fail loud without inventing a control schema for a legacy,
+			// missing, invalid, or future contract.
+			return blockExit
+		}
+	}
+	if reason == "" {
+		reason = failedClosed
+	}
+	encodedReason := mustJSONString(reason)
+	switch strings.TrimSpace(opts.Event) {
+	case "SessionStart", "PreCompact", "PostCompact":
+		fmt.Fprintf(opts.Stdout, "{\"continue\":false,\"stopReason\":%s}\n", encodedReason)
+	case "PermissionRequest":
+		fmt.Fprintf(opts.Stdout,
+			"{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":%s}}}\n",
+			encodedReason,
+		)
+	case "UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop":
+		fmt.Fprintf(opts.Stdout, "{\"decision\":\"block\",\"reason\":%s}\n", encodedReason)
+	case "PreToolUse":
+		fmt.Fprintf(opts.Stdout,
+			"{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":%s}}\n",
+			encodedReason,
+		)
+	default:
+		// An unknown event cannot safely receive a guessed JSON shape. Preserve
+		// the old non-zero failure signal so Codex reports the hook failure.
+		return blockExit
+	}
+	return 0
 }
 
 func withDefaults(o Options) Options {
@@ -533,14 +811,104 @@ func resolveHookEvent(explicit string, payload []byte) string {
 	}
 	var envelope struct {
 		HookEventName string `json:"hook_event_name"`
+		Event         string `json:"event"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(envelope.HookEventName)
+	hookEventName := strings.TrimSpace(envelope.HookEventName)
+	event := strings.TrimSpace(envelope.Event)
+	if hookEventName != "" && event != "" && !strings.EqualFold(hookEventName, event) {
+		return ""
+	}
+	if hookEventName != "" {
+		return hookEventName
+	}
+	return event
+}
+
+func validateCodexInvocationBinding(
+	explicitEvent string,
+	contractID string,
+	payload []byte,
+) (string, error) {
+	event := strings.TrimSpace(explicitEvent)
+	if event == "" {
+		return "", errors.New("Codex hook command is missing its installer-bound event")
+	}
+	contractID = strings.TrimSpace(contractID)
+	if contractID == "" {
+		return "", errors.New("Codex hook command is missing its installer-bound contract")
+	}
+	var envelope struct {
+		HookEventName string `json:"hook_event_name"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return "", errors.New("Codex hook stdin is not valid JSON")
+	}
+	stdinEvent := strings.TrimSpace(envelope.HookEventName)
+	if stdinEvent == "" {
+		return "", errors.New("Codex hook stdin is missing hook_event_name")
+	}
+	if stdinEvent != event {
+		return "", fmt.Errorf(
+			"Codex hook stdin event %q does not match installer-bound event %q",
+			stdinEvent,
+			event,
+		)
+	}
+	if !codexContractAllowsEvent(contractID, event) {
+		return "", fmt.Errorf(
+			"Codex hook event %q is not registered by installer-bound contract %q",
+			event,
+			contractID,
+		)
+	}
+	return event, nil
+}
+
+func codexContractAllowsEvent(contractID, event string) bool {
+	switch strings.TrimSpace(contractID) {
+	case "codex-hooks-v1":
+		switch event {
+		case "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop":
+			return true
+		}
+	case "codex-hooks-v2":
+		switch event {
+		case "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "Stop":
+			return true
+		}
+	case "codex-hooks-v3":
+		switch event {
+		case "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact", "Stop":
+			return true
+		}
+	case "codex-hooks-v4":
+		switch event {
+		case "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact", "Stop", "SessionEnd":
+			return true
+		}
+	}
+	return false
 }
 
 func hookRequestTimeout(connector, event string) time.Duration {
+	if strings.EqualFold(strings.TrimSpace(connector), "codex") &&
+		strings.EqualFold(strings.TrimSpace(event), "SessionEnd") {
+		// Codex caps SessionEnd command hooks at three seconds. Finish the
+		// gateway round-trip with one second left for stdout flushing and the
+		// native Windows PowerShell Start-Process -Wait wrapper to observe the
+		// hook executable's exit, preventing the child from outliving the host.
+		return 3*time.Second - hookResponseGrace
+	}
+	if strings.EqualFold(strings.TrimSpace(connector), "antigravity") ||
+		strings.EqualFold(strings.TrimSpace(connector), "copilot") {
+		// Setup registers every official Antigravity and Copilot handler with
+		// timeout=30.
+		// Keep one second for the parent runtime to receive and parse stdout.
+		return 29 * time.Second
+	}
 	if !strings.EqualFold(strings.TrimSpace(connector), "claudecode") {
 		return defaultHookRequestTimeout
 	}

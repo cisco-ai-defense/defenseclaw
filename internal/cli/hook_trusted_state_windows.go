@@ -27,12 +27,14 @@ const (
 	nativeHookGatewayName   = "defenseclaw-gateway.exe"
 	powerShellHookStateName = "defenseclaw-hook-state.json"
 	nativeHookStateMaxBytes = 64 << 10
+	hermesDirectStateName   = "hermes-direct-native-state.json"
 )
 
 // hookExecutableOverride is a test seam for an immutable packaged layout.
 var (
 	hookExecutableOverride           string
 	nativeHookRuntimeReader          = hookruntime.ReadTrustedForExecutable
+	nativeDelegatedHookRuntimeReader = hookruntime.ReadTrustedDelegatedForExecutable
 	enterpriseManagedRuntimeResolver = enterprisehooks.ResolveWindowsClaudeManagedHookRuntime
 )
 
@@ -52,6 +54,23 @@ var nativeEnterpriseHookRuntimeSnapshot struct {
 	home       string
 	registered bool
 	err        error
+}
+
+// preparedNativeHookRuntime returns the exact process-local admission result
+// already established by NativeHookRuntimeNoop. The stable/full-hook identity
+// and executable path must match; callers that do not enter through the native
+// launcher receive prepared=false and must perform their own trusted read.
+func preparedNativeHookRuntime(executable string) (hookruntime.State, bool, error, bool) {
+	nativeHookRuntimeSnapshot.Lock()
+	defer nativeHookRuntimeSnapshot.Unlock()
+	if !nativeHookRuntimeSnapshot.prepared ||
+		!sameWindowsHookPath(nativeHookRuntimeSnapshot.executable, executable) {
+		return hookruntime.State{}, false, nil, false
+	}
+	return nativeHookRuntimeSnapshot.state,
+		nativeHookRuntimeSnapshot.recognized,
+		nativeHookRuntimeSnapshot.err,
+		true
 }
 
 func nativeHookExecutable() string {
@@ -76,7 +95,10 @@ func NativeHookRuntimeNoop() bool {
 		return enterpriseManagedHookRuntimeNoop()
 	}
 	executable := nativeHookExecutable()
-	state, recognized, err := nativeHookRuntimeReader(executable)
+	state, recognized, err := nativeDelegatedHookRuntimeReader(executable)
+	if !recognized {
+		state, recognized, err = nativeHookRuntimeReader(executable)
+	}
 	nativeHookRuntimeSnapshot.Lock()
 	nativeHookRuntimeSnapshot.prepared = true
 	nativeHookRuntimeSnapshot.executable = executable
@@ -94,6 +116,52 @@ func NativeHookRuntimeNoop() bool {
 		return true
 	}
 	return false
+}
+
+// NativeConnectorHookNoop applies connector-scoped disabled state after the
+// global installer runtime has been trusted. Hermes keeps shell-hook callbacks
+// in memory until its CLI/gateway process restarts; this exact-command marker
+// makes only the cached direct Hermes invocation a no-op after teardown.
+// Missing, malformed, reparse-point, or mismatched state does not silently
+// disable a hook.
+func NativeConnectorHookNoop(args []string) bool {
+	if len(args) != 3 || args[0] != "hook" || args[1] != "--connector" || args[2] != "hermes" {
+		return false
+	}
+	home, trusted := trustedNativeHookHome()
+	if !trusted || !filepath.IsAbs(strings.TrimSpace(home)) {
+		return false
+	}
+	path := filepath.Join(home, "hooks", hermesDirectStateName)
+	if !windowsHookPathHasNoReparsePoints(path) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeHookStateMaxBytes {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var state struct {
+		SchemaVersion  int    `json:"schema_version"`
+		Connector      string `json:"connector"`
+		Status         string `json:"status"`
+		Command        string `json:"command"`
+		ReloadRequired bool   `json:"reload_required"`
+	}
+	if json.Unmarshal(data, &state) != nil || state.SchemaVersion != 1 ||
+		state.Connector != "hermes" || state.Status != "disabled_pending_reload" ||
+		!state.ReloadRequired {
+		return false
+	}
+	executable := strings.TrimSpace(nativeHookExecutable())
+	if executable == "" || strings.ContainsAny(executable, "\"\x00\r\n") || !filepath.IsAbs(executable) {
+		return false
+	}
+	expected := `"` + strings.ReplaceAll(executable, `\`, "/") + `" hook --connector hermes`
+	return state.Command == expected
 }
 
 func hookArgsContainEnterpriseManaged(args []string) bool {

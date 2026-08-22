@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "dc-e2e-devin",
+  "prompt_id": "dc-e2e-turn",
+  "tool_name": "exec",
+  "tool_input": {
+    "command": "cat /etc/shadow"
+  }
+}

@@ -61,17 +61,16 @@ from defenseclaw.models import Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context
 
-# Supported connector names — keep in lockstep with connector_paths.KNOWN_CONNECTORS
-# and cmd_doctor._CONNECTOR_LABELS.
-SUPPORTED_CONNECTORS = (
+# Active scan-capable connector names. Retired Windsurf and Gemini CLI remain
+# known only so authenticated lifecycle cleanup can resolve their old state;
+# they must not participate in new scan-command matrices.
+ACTIVE_SCAN_CONNECTORS = (
     "openclaw",
     "codex",
     "claudecode",
     "zeptoclaw",
     "hermes",
     "cursor",
-    "windsurf",
-    "geminicli",
     "copilot",
     "openhands",
     "antigravity",
@@ -135,7 +134,7 @@ class TestPluginScanConnectorMatrix(_MatrixBase):
     def test_preamble_shows_connector_for_every_supported_value(self, mock_scan) -> None:
         mock_scan.return_value = self._clean_result()
 
-        for connector in SUPPORTED_CONNECTORS:
+        for connector in ACTIVE_SCAN_CONNECTORS:
             with self.subTest(connector=connector):
                 self._force_connector(connector)
                 result = self.runner.invoke(
@@ -183,7 +182,7 @@ class TestSkillScanConnectorMatrix(_MatrixBase):
         mock_scanner.scan.return_value = self._clean_result(self.skill_dir)
         mock_cls.return_value = mock_scanner
 
-        for connector in SUPPORTED_CONNECTORS:
+        for connector in ACTIVE_SCAN_CONNECTORS:
             with self.subTest(connector=connector):
                 self._force_connector(connector)
                 result = self.runner.invoke(
@@ -219,7 +218,7 @@ class TestMCPScanConnectorMatrix(_MatrixBase):
     ) -> None:
         mock_scan.return_value = self._clean_result("http://localhost:3000")
 
-        for connector in SUPPORTED_CONNECTORS:
+        for connector in ACTIVE_SCAN_CONNECTORS:
             with self.subTest(connector=connector):
                 self._force_connector(connector)
                 result = self.runner.invoke(
@@ -244,7 +243,7 @@ class TestMCPScanConnectorMatrix(_MatrixBase):
         self.app.cfg.mcp_servers = lambda connector=None: servers
         mock_scan.return_value = self._clean_result("http://a.example/mcp")
 
-        for connector in SUPPORTED_CONNECTORS:
+        for connector in ACTIVE_SCAN_CONNECTORS:
             with self.subTest(connector=connector):
                 self._force_connector(connector)
                 result = self.runner.invoke(
@@ -294,7 +293,7 @@ class TestSummaryAcrossConnectorsAlwaysRendersV1Schema(_MatrixBase):
         )
 
         summaries: list[str] = []
-        for connector in SUPPORTED_CONNECTORS:
+        for connector in ACTIVE_SCAN_CONNECTORS:
             self._force_connector(connector)
             result = self.runner.invoke(
                 plugin,
@@ -309,7 +308,7 @@ class TestSummaryAcrossConnectorsAlwaysRendersV1Schema(_MatrixBase):
                     break
 
         # Every connector renders the *same* summary template.
-        self.assertEqual(len(summaries), len(SUPPORTED_CONNECTORS))
+        self.assertEqual(len(summaries), len(ACTIVE_SCAN_CONNECTORS))
         # Strip duration to compare the invariant skeleton.
         skeletons = {s.split(", in ")[0] for s in summaries}
         self.assertEqual(

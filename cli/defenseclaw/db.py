@@ -239,6 +239,15 @@ _VALID_FIELDS: dict[str, set[str]] = {
     "runtime": {"", "disable", "enable"},
 }
 _SUMMARY_DETAILS_BYTES = 4096
+_ALERT_EVENT_ELIGIBILITY_SQL = """(
+    bucket IS NULL
+    OR (bucket = 'security.finding' AND event_name = 'finding.observed')
+    OR (
+        action = 'connector-hook'
+        AND COALESCE(enforced, 0) = 1
+        AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
+    )
+)"""
 
 
 def _validate(field: str, value: str) -> None:
@@ -813,6 +822,20 @@ class Store:
             OR {legacy_decision} = 'block'
         )"""
 
+    def _connector_hook_alert_clause(self, columns: frozenset[str]) -> str:
+        """Keep attributed, enforced connector decisions visible in v8 rows."""
+
+        if not {"connector", "enforced"}.issubset(columns):
+            return "0 = 1"
+        structured = "structured_json" if "structured_json" in columns else "NULL"
+        details = "COALESCE(details, '')" if "details" in columns else "''"
+        decision = f"dc_hook_decision({details}, {structured}, enforced)"
+        return f"""(
+            LOWER(COALESCE(action, '')) = 'connector-hook'
+            AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
+            AND {decision} = 'block'
+        )"""
+
     def _canonical_alert_outcome_expression(
         self,
         columns: frozenset[str],
@@ -839,6 +862,7 @@ class Store:
 
         columns, _tables = self._audit_projection_schema()
         legacy_explicit = self._legacy_explicit_alert_clause(columns)
+        connector_hook = self._connector_hook_alert_clause(columns)
         if {"bucket", "event_name"}.issubset(columns):
             outcomes = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
             canonical_outcome = self._canonical_alert_outcome_expression(columns)
@@ -848,6 +872,7 @@ class Store:
                  AND {canonical_outcome} IN ({outcomes}) THEN 'WARNING'
                 WHEN bucket = 'enforcement.action'
                  AND {canonical_outcome} IN ({outcomes}) THEN 'HIGH'
+                WHEN {connector_hook} THEN 'HIGH'
                 WHEN bucket IS NULL AND {legacy_explicit} THEN 'HIGH'
                 ELSE COALESCE(severity, 'INFO')
             END"""
@@ -873,6 +898,7 @@ class Store:
         severity_clause = f"UPPER(COALESCE(severity, '')) IN ({severity_values})"
 
         legacy_explicit = self._legacy_explicit_alert_clause(columns)
+        connector_hook = self._connector_hook_alert_clause(columns)
         legacy_actions = self._sql_string_values(ALERT_LEGACY_FINDING_ACTIONS)
         legacy_finding = f"""(
             {severity_clause}
@@ -911,7 +937,10 @@ class Store:
                 bucket IS NULL
                 AND ({legacy_finding} OR {legacy_explicit})
             )"""
-            eligible = f"({finding} OR {canonical_action} OR {health_failure} OR {legacy})"
+            eligible = (
+                f"({finding} OR {canonical_action} OR {connector_hook} "
+                f"OR {health_failure} OR {legacy})"
+            )
         else:
             eligible = f"({legacy_finding} OR {legacy_explicit})"
 

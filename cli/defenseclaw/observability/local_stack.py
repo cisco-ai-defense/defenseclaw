@@ -92,6 +92,35 @@ class CommandResult:
     stderr: str = ""
 
 
+class CommandTimeoutError(LocalStackError):
+    """A native command exceeded its deadline after bounded output capture."""
+
+    def __init__(self, message: str, result: CommandResult) -> None:
+        super().__init__(message)
+        self.result = result
+
+
+def native_command_environment(
+    *,
+    overrides: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a deterministic UTF-8 environment for native argv execution.
+
+    Packaged Python runtime selectors must not leak into native child
+    processes. The remaining environment, including PATH, is preserved.
+    """
+
+    environment = dict(os.environ)
+    for name in ("PYTHONHOME", "PYTHONPATH"):
+        environment.pop(name, None)
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
+
+    if overrides:
+        environment.update(overrides)
+    return environment
+
+
 @dataclass(frozen=True)
 class UpResult:
     """Successful Compose start plus whether readiness was verified."""
@@ -151,6 +180,7 @@ class CommandRunner:
         timeout: float,
         capture: bool = True,
         env: Mapping[str, str] | None = None,
+        allow_breakaway: bool = False,
     ) -> CommandResult:
         if not argv or not all(isinstance(item, str) and item for item in argv):
             raise ValueError("command argv must contain non-empty strings")
@@ -184,7 +214,10 @@ class CommandRunner:
                 from defenseclaw.tui.windows_process import WindowsJob
 
                 try:
-                    windows_job = WindowsJob(process.pid, allow_breakaway=False)
+                    windows_job = WindowsJob(
+                        process.pid,
+                        allow_breakaway=allow_breakaway,
+                    )
                 except OSError as exc:
                     process.kill()
                     process.wait(timeout=2)
@@ -210,12 +243,22 @@ class CommandRunner:
                     thread.start()
             try:
                 returncode = process.wait(timeout=timeout)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            except KeyboardInterrupt:
                 self._terminate(process, windows_job=windows_job)
-                if isinstance(sys.exc_info()[1], KeyboardInterrupt):
-                    raise
-                raise LocalStackError(
-                    f"command timed out after {timeout:g}s: {command[0]}"
+                raise
+            except subprocess.TimeoutExpired:
+                self._terminate(process, windows_job=windows_job)
+                for thread in drain_threads:
+                    thread.join(timeout=2)
+                result = CommandResult(
+                    command,
+                    process.returncode if process.returncode is not None else -1,
+                    stdout_capture.text() if stdout_capture else "",
+                    stderr_capture.text() if stderr_capture else "",
+                )
+                raise CommandTimeoutError(
+                    f"command timed out after {timeout:g}s: {command[0]}",
+                    result,
                 ) from None
 
             for thread in drain_threads:

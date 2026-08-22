@@ -108,7 +108,8 @@ def scan_plugin(
                 "Plugin directory lacks a recognised manifest "
                 "(package.json, manifest.json, plugin.json, "
                 "openclaw.plugin.json, .codex-plugin/plugin.json, "
-                "or .claude-plugin/plugin.json). Cannot verify plugin "
+                ".claude-plugin/plugin.json, or .cursor-plugin/plugin.json). "
+                "Cannot verify plugin "
                 "identity, version, or declared permissions. Source "
                 "scanning will still run."
             ),
@@ -237,6 +238,7 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
     ("openclaw.plugin.json", "openclaw.plugin.json"),
     (os.path.join(".claude-plugin", "plugin.json"), "claude.plugin.json"),
     (os.path.join(".codex-plugin", "plugin.json"), "codex.plugin.json"),
+    (os.path.join(".cursor-plugin", "plugin.json"), "cursor.plugin.json"),
 )
 
 
@@ -244,7 +246,7 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
     """Read and JSON-parse a manifest candidate without following symlinks.
 
     A third-party plugin can ship a manifest-named path (``package.json``,
-    ``.codex-plugin/plugin.json`` …) that is actually a link to an
+    ``.codex-plugin/plugin.json`` or ``.cursor-plugin/plugin.json``) that is actually a link to an
     arbitrary host file. A plain ``open()`` follows it and copies outside
     file contents into manifest metadata (and downstream finding
     evidence) — arbitrary file read (F-0361). We:

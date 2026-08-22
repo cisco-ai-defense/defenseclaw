@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 MANIFEST_FILES = (
+    os.path.join(".cursor-plugin", "plugin.json"),
     os.path.join(".codex-plugin", "plugin.json"),
     os.path.join(".claude-plugin", "plugin.json"),
     "plugin.json",

@@ -213,6 +213,13 @@ var (
 		{Label: "Codex CLI", Value: "codex"},
 		{Label: "Claude Code", Value: "claudecode"},
 		{Label: "Amp", Value: "amp"},
+		{Label: "Google Antigravity", Value: "antigravity"},
+		{Label: "GitHub Copilot CLI", Value: "copilot"},
+		{Label: "Cursor Agent", Value: "cursor"},
+		{Label: "Hermes Agent", Value: "hermes"},
+		{Label: "Devin CLI", Value: "devin"},
+		{Label: "OmniGent (native degraded)", Value: "omnigent"},
+		{Label: "OpenCode", Value: "opencode"},
 	}
 	wizardModeChoices = []wizardChoice{
 		{Label: "Observe", Value: "observe"},
@@ -735,8 +742,22 @@ func wizardCompletionDescription(connector string) string {
 		return "Claude Code is configured and its native Windows hooks are ready." + installed
 	case "amp":
 		return "Amp is configured with the DefenseClaw system policy plugin under %USERPROFILE%\\.config\\amp\\plugins. Use --plugin-ready-timeout 30 with amp -x." + installed
+	case "copilot":
+		return "GitHub Copilot CLI is configured and its native Windows hooks are ready." + installed
+	case "cursor":
+		return "Cursor Agent is configured with the native Windows PowerShell hook adapter." + installed
+	case "hermes":
+		return "Hermes hooks are configured through the direct native launcher. Valid synchronous JSON can block pre-tool calls; hook failures remain open and no native ask surface exists." + installed
+	case "devin":
+		return "Devin CLI is configured with native lifecycle hooks. Exit code 2 blocks; other hook failures remain open, and Restricted Mode disables hooks." + installed
+	case "antigravity":
+		return "Google Antigravity is configured with its native Windows hooks." + installed
+	case "opencode":
+		return "OpenCode is configured with the native Windows bridge plugin. Restart OpenCode to load it." + installed
+	case "omnigent":
+		return "OmniGent's native degraded policy integration is configured; terminal and sandbox parity are not included." + installed
 	default:
-		return "Open a terminal and run defenseclaw init when you are ready to configure Codex, Claude Code, Amp, or another connector." + installed
+		return "Open a terminal and run defenseclaw init when you are ready to configure a connector." + installed
 	}
 }
 
@@ -863,6 +884,10 @@ func writeWizardLog(action string, code int, resultErr error) (string, error) {
 	return path, nil
 }
 
+func writeQuietSetupLog(action string, code int, resultErr error) (string, error) {
+	return writeWizardLog(action, code, resultErr)
+}
+
 func wizardFailureDescription(code int, resultErr error, logPath string, logErr error) string {
 	state := "Any committed file transition is recorded in the durable setup journal and will be recovered automatically when Setup runs again."
 	if strings.Contains(resultErr.Error(), "core installation completed") || strings.Contains(resultErr.Error(), "core uninstall completed") {
@@ -974,7 +999,11 @@ func applyInteractiveInstallDefaults(opts options, state *installState, autoStar
 		}
 		return opts
 	}
-	if !opts.ConnectorSet && validConnector(state.Connector) {
+	if !opts.ConnectorSet && state.Connector == "geminicli" {
+		// Retired Gemini CLI installs default to Configure later. The install
+		// transaction retains the previous state for exact teardown.
+		opts.Connector = "none"
+	} else if !opts.ConnectorSet && validConnector(state.Connector) {
 		opts.Connector = state.Connector
 	}
 	if !opts.ModeSet && validMode(state.Mode) {

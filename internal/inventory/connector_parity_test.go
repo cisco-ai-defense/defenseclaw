@@ -154,7 +154,7 @@ func TestSupportedConnectorCountMatchesRegistry(t *testing.T) {
 			seen[s] = true
 		}
 	}
-	const expected = 14
+	const expected = 13
 	if len(seen) != expected {
 		names := make([]string, 0, len(seen))
 		for n := range seen {

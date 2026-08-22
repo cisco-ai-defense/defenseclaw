@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import shutil
@@ -28,9 +29,11 @@ from defenseclaw.observability.local_stack import (
     SERVICE_CONTAINERS,
     CommandResult,
     CommandRunner,
+    CommandTimeoutError,
     LocalStackController,
     LocalStackError,
     ProbeResult,
+    native_command_environment,
 )
 
 
@@ -514,12 +517,43 @@ def test_command_runner_decodes_utf8_replacement_and_bounds_output() -> None:
     assert "�" in invalid.stdout
 
 
-def test_command_runner_timeout_reaps_child() -> None:
-    runner = CommandRunner()
-    with pytest.raises(LocalStackError, match="timed out"):
-        runner.run(
-            [sys.executable, "-c", "import time;time.sleep(30)"], timeout=0.05
-        )
+def test_command_runner_timeout_preserves_bounded_diagnostics() -> None:
+    process = MagicMock(pid=4242, returncode=-1)
+    process.poll.return_value = None
+    process.wait.side_effect = [subprocess.TimeoutExpired("native", 1), 0]
+    process.stdout = io.BytesIO(b"")
+    process.stderr = io.BytesIO(b"partial-\x90")
+    with (
+        patch("defenseclaw.observability.local_stack.os.name", "posix"),
+        patch(
+            "defenseclaw.observability.local_stack.subprocess.Popen",
+            return_value=process,
+        ),
+        patch("defenseclaw.observability.local_stack.os.killpg", create=True),
+        pytest.raises(CommandTimeoutError, match="timed out") as raised,
+    ):
+        CommandRunner().run(["native-client", "--version"], timeout=1)
+    assert "partial-\ufffd" in raised.value.result.stderr
+
+
+def test_native_environment_is_utf8_and_removes_packaged_python_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    retained = tmp_path / "Hermes" / "bin"
+    monkeypatch.setenv("PATH", str(retained))
+    monkeypatch.setenv("PYTHONHOME", "packaged")
+    monkeypatch.setenv("PYTHONPATH", "packaged")
+    monkeypatch.setenv("VIRTUAL_ENV", "packaged")
+
+    environment = native_command_environment()
+
+    assert environment["PATH"] == str(retained)
+    assert environment["PYTHONUTF8"] == "1"
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    assert "PYTHONHOME" not in environment
+    assert "PYTHONPATH" not in environment
+    assert environment["VIRTUAL_ENV"] == "packaged"
 
 
 def test_command_runner_keyboard_interrupt_cancels_process_group() -> None:

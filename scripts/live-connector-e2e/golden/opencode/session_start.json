@@ -1,0 +1,7 @@
+{
+  "hook_event_name": "session.created",
+  "event_type": "session.created",
+  "session_id": "dc-e2e-opencode",
+  "agent_name": "opencode e2e agent",
+  "status": "created"
+}

@@ -21,7 +21,7 @@ import Foundation
 /// source of truth.
 enum TUIWizards {
     static let connectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes",
-                             "cursor", "windsurf", "geminicli", "copilot", "openhands",
+                             "cursor", "devin", "copilot", "openhands",
                              "antigravity", "opencode", "amp", "omnigent"]
     static let proxyConnectors = ["openclaw", "zeptoclaw"]
     static let hookConnectors = connectors.filter { !proxyConnectors.contains($0) }

@@ -24,8 +24,9 @@ import (
 )
 
 func TestIsBundledSkillPath(t *testing.T) {
-	t.Parallel()
-	sep := string(filepath.Separator)
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	systemRoot := filepath.Join(codexHome, "skills", ".system")
 	// Table drives both positive and negative cases; each row asserts
 	// exactly one boolean so a regression here points at one case, not
 	// a matrix cell in a subtable.
@@ -36,21 +37,14 @@ func TestIsBundledSkillPath(t *testing.T) {
 	}{
 		{"empty", "", false},
 		{"whitespace", "   ", false},
-		{"user skill", "/Users/me/.codex/skills/hello", false},
-		{"bundled container itself",
-			"/Users/me/.codex/skills/.system", true},
-		{"bundled child",
-			"/Users/me/.codex/skills/.system/hello", true},
-		{"bundled grandchild",
-			"/Users/me/.codex/skills/.system/hello/README.md", true},
-		{"basename contains .system substring only",
-			"/Users/me/.codex/skills/hello.system.md", false},
-		{"middle .system segment",
-			"/some" + sep + ".system" + sep + "elsewhere", true},
-		{"relative path bundled child",
-			".codex/skills/.system/foo", true},
-		{"cleaned trailing separator",
-			"/Users/me/.codex/skills/.system" + sep, true},
+		{"user skill", filepath.Join(codexHome, "skills", "hello"), false},
+		{"bundled container itself", systemRoot, true},
+		{"bundled child", filepath.Join(systemRoot, "hello"), true},
+		{"bundled grandchild", filepath.Join(systemRoot, "hello", "README.md"), true},
+		{"basename contains .system substring only", filepath.Join(codexHome, "skills", "hello.system.md"), false},
+		{"unrelated .system segment", filepath.Join(t.TempDir(), ".system", "elsewhere"), false},
+		{"cross-agent .system segment", filepath.Join(t.TempDir(), ".agents", "skills", ".system", "elsewhere"), false},
+		{"cleaned trailing separator", systemRoot + string(filepath.Separator), true},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -86,9 +80,10 @@ func TestIsBundledSkillContainerName(t *testing.T) {
 // afterward so a caller retrying with a different (non-bundled)
 // target sees an untouched tree.
 func TestPluginEnforcerQuarantineRefusesBundledSkill(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
-	bundledDir := filepath.Join(root, ".codex", "skills", ".system", "hello")
+	codexHome := filepath.Join(root, ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	bundledDir := filepath.Join(codexHome, "skills", ".system", "hello")
 	if err := os.MkdirAll(bundledDir, 0o755); err != nil {
 		t.Fatalf("prepare bundled skill: %v", err)
 	}
@@ -125,8 +120,8 @@ func TestPluginEnforcerQuarantineRefusesBundledSkill(t *testing.T) {
 // Guards a regression where the .system check falsely matches a
 // sibling directory.
 func TestPluginEnforcerQuarantineAcceptsUserSkill(t *testing.T) {
-	t.Parallel()
 	root := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(root, ".codex"))
 	userDir := filepath.Join(root, ".codex", "skills", "hello")
 	if err := os.MkdirAll(userDir, 0o755); err != nil {
 		t.Fatalf("prepare user skill: %v", err)

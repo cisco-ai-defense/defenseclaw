@@ -149,6 +149,38 @@ func TestWindowsDaemonStartWaitsForChildOwnedPIDRegistration(t *testing.T) {
 	stopped = true
 }
 
+func TestWindowsStopStartedDrainsAcceptedTerminationBeforeReportingSecondKill(t *testing.T) {
+	if IsDaemonChild() {
+		if err := RegisterCurrentProcess(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	t.Setenv(EnvDaemon, "")
+	d := New(t.TempDir())
+	pid, err := d.Start([]string{"-test.run=^TestWindowsStopStartedDrainsAcceptedTerminationBeforeReportingSecondKill$"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = d.StopStarted(pid, 5*time.Second)
+		}
+	})
+
+	// A zero first wait forces StopStarted through its second-kill boundary.
+	// Windows can reject that redundant TerminateProcess while the first
+	// accepted termination is still draining. The retained original handle is
+	// the authoritative completion signal in that race.
+	if err := d.StopStarted(pid, 0); err != nil {
+		t.Fatalf("StopStarted() after accepted termination = %v", err)
+	}
+	stopped = true
+}
+
 func TestWindowsConditionalPIDRemovalSerializesReplacement(t *testing.T) {
 	dataDir := t.TempDir()
 	d := New(dataDir)

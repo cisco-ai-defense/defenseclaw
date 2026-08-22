@@ -61,8 +61,12 @@ func windowsCommandFindingsWithOptions(
 		name := windowsExecutableName(tokens[0])
 		args := tokens[1:]
 
-		if isPowerShellRemoveItem(name) && hasPowerShellSwitch(args, "recurse", "r") && hasPowerShellSwitch(args, "force", "fo") {
-			add("CMD-WIN-REMOVE-ITEM-RF", "PowerShell recursive forced deletion", "CRITICAL", 0.98, "destructive", "windows")
+		if isPowerShellRemoveItem(name) && hasPowerShellSwitch(args, "force", "fo") {
+			if hasPowerShellSwitch(args, "recurse", "r") {
+				add("CMD-WIN-REMOVE-ITEM-RF", "PowerShell recursive forced deletion", "CRITICAL", 0.98, "destructive", "windows")
+			} else {
+				add("CMD-WIN-RM-FORCE", "PowerShell forced deletion", "CRITICAL", 0.98, "destructive", "windows")
+			}
 		}
 		if (name == "rmdir" || name == "rd") && hasWindowsSwitch(args, "s") && hasWindowsSwitch(args, "q") {
 			add("CMD-WIN-RMDIR-SQ", "cmd recursive quiet directory deletion", "CRITICAL", 0.98, "destructive", "windows")
@@ -128,7 +132,7 @@ func windowsCommandText(text, toolName string) (string, windowsShellDialect, boo
 
 	var object map[string]interface{}
 	if json.Unmarshal([]byte(text), &object) == nil {
-		for _, key := range []string{"command", "cmd", "script", "input"} {
+		for _, key := range []string{"command", "CommandLine", "commandLine", "cmd", "script", "input"} {
 			if value, ok := object[key].(string); ok && strings.TrimSpace(value) != "" {
 				return value, dialect, true
 			}

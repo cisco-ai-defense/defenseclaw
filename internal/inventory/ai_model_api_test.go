@@ -912,56 +912,61 @@ func TestLocalModelAPILifecycleCompletesPagedInventoryBeforeMarkingRemoval(t *te
 }
 
 func TestRunScanCancellationDoesNotPersistPartialModelInventory(t *testing.T) {
-	var block atomic.Bool
-	started := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodHead {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		if block.Load() {
-			select {
-			case <-started:
-			default:
-				close(started)
-			}
-			<-r.Context().Done()
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"durable-model"}]}`))
-	}))
-	defer server.Close()
-
-	sig := openAIAPITestSignature(server.URL)
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled: true, Mode: "enhanced", IncludeNetworkDomains: true,
+		Enabled: true, Mode: "enhanced",
 		HomeDir: t.TempDir(), ScanRoots: []string{t.TempDir()}, DataDir: t.TempDir(),
 		MaxFilesPerScan: 20, MaxFileBytes: 64 << 10,
-	}, []AISignature{sig})
+	}, []AISignature{testAISignature()})
 	cleanupPreparedDiscoveryService(t, svc)
-	first, err := svc.runScan(context.Background(), true, "test")
-	if err != nil {
-		t.Fatalf("first scan: %v", err)
+	durable := AISignal{
+		Fingerprint: "durable-model-fingerprint",
+		SignalID:    "durable-model-signal",
+		SignatureID: "durable-provider",
+		Category:    SignalLocalModel,
+		Detector:    "model_api",
+		State:       AIStateSeen,
+		Model:       &LocalModelInfo{ID: "durable-model"},
 	}
-	durable := findModelSignal(t, first.Signals, "model_api", "durable-model")
+	if err := svc.store.Save(aiStateFile{Signals: map[string]aiStoredSignal{
+		durable.Fingerprint: {AISignal: durable},
+	}}); err != nil {
+		t.Fatalf("seed durable state: %v", err)
+	}
 
 	observability := &captureAIDiscoveryV8{}
 	svc.BindObservabilityV8(observability)
-	block.Store(true)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		started <- struct{}{}
+		<-release
+		return nil, nil
+	})
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, runErr := svc.runScan(ctx, true, "test-cancel")
+		_, runErr := svc.runScan(ctx, false, "test-cancel")
 		done <- runErr
 	}()
+	timedOut := false
 	select {
 	case <-started:
-		cancel()
-	case <-time.After(time.Second):
-		t.Fatal("cancelled scan did not reach model endpoint")
+	case <-time.After(5 * time.Second):
+		timedOut = true
 	}
-	if err := <-done; !errors.Is(err, context.Canceled) {
+	cancel()
+	close(release)
+	var runErr error
+	select {
+	case runErr = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled scan did not stop after its detector was released")
+	}
+	if timedOut {
+		t.Fatal("cancelled scan did not reach the deterministic process detector")
+	}
+	if err := runErr; !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled scan err = %v, want context.Canceled", err)
 	}
 	if observability.trace == nil || observability.trace.abortCall != 1 || len(observability.trace.ended) != 0 {

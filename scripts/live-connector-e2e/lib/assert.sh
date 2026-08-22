@@ -280,7 +280,7 @@ PY
 }
 
 # dc_assert_otlp <connector> <since_rowid> — for native_otlp connectors
-# (codex/claudecode/geminicli) assert telemetry tagged with the connector
+# Native-telemetry connectors assert telemetry tagged with the connector
 # reached the sink. We look for tool_invocation / llm_prompt / llm_response
 # events (the OTLP ingest path emits these) attributed to the connector.
 dc_assert_otlp() {

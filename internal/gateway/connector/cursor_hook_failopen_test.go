@@ -32,8 +32,9 @@ import (
 // failClosed:true hook that produces EMPTY stdout as a hook failure and
 // blocks the tool. So every fail-OPEN path in cursor-hook.sh (gateway
 // unreachable, missing token, disabled/absent install, observe-mode
-// response with no hook_output) must emit an explicit allow envelope on
-// stdout — never a silent exit 0. These tests pin that contract; a
+// response with no hook_output) must emit an event-native success object (or
+// {} when the event cannot be decoded) on stdout — never a silent exit 0.
+// These tests pin that contract; a
 // regression would silently invert a deliberate fail-open into a
 // fail-closed lockout with no self-recovery path for the agent.
 
@@ -101,6 +102,9 @@ func assertAllowEnvelope(t *testing.T, out string) {
 	if obj["permission"] != "allow" {
 		t.Fatalf(`stdout permission = %v, want "allow"; got: %q`, obj["permission"], trimmed)
 	}
+	if _, ok := obj["continue"]; ok {
+		t.Fatalf("permission event must not carry continue; got: %q", trimmed)
+	}
 }
 
 func assertDenyEnvelope(t *testing.T, out string) {
@@ -116,8 +120,20 @@ func assertDenyEnvelope(t *testing.T, out string) {
 	if obj["permission"] != "deny" {
 		t.Fatalf(`stdout permission = %v, want "deny"; got: %q`, obj["permission"], trimmed)
 	}
-	if continued, ok := obj["continue"].(bool); !ok || continued {
-		t.Fatalf(`stdout continue = %v, want false; got: %q`, obj["continue"], trimmed)
+	if _, ok := obj["continue"]; ok {
+		t.Fatalf("permission event must not carry continue; got: %q", trimmed)
+	}
+}
+
+func assertJSONEnvelope(t *testing.T, out string) {
+	t.Helper()
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		t.Fatal("stdout is empty; Cursor command hooks require one JSON object")
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\ngot: %q", err, trimmed)
 	}
 }
 
@@ -171,7 +187,9 @@ func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("expected exit 0 when .disabled present, got %v; stderr=%s", err, stderr.String())
 	}
-	assertAllowEnvelope(t, stdout.String())
+	// The disabled guard deliberately does not parse or retain the event body;
+	// it still emits Cursor's exact no-fields success object.
+	assertJSONEnvelope(t, stdout.String())
 }
 
 func TestCursorHook_MissingTokenFailsOpenWithAllow(t *testing.T) {

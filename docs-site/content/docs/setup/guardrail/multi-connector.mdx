@@ -13,7 +13,7 @@ A single DefenseClaw gateway can enforce guardrail policy for **several hook con
 
 <Video
   src="multi-connector"
-  caption="One gateway governing Claude Code and Antigravity at once. The same three actions run against each agent: a benign `echo` flows through (action=allow / severity=NONE); a `chmod 777` HIGH-severity hit triggers a human-in-the-loop approval prompt via each connector's native ask surface; and reading a credential file matches a CRITICAL rule → decision=deny. Every verdict is attributed per connector in the Splunk pane. The demo closes by deleting each agent's hook config and watching DefenseClaw's self-heal detect the tamper and reinstall the hooks automatically (connector-hook-tampered → connector-hook-repaired)."
+  caption="One gateway governing Claude Code and Antigravity at once. These examples are tool calls, so each reaches its connector's documented synchronous PreToolUse gate: a benign `echo` flows through, a HIGH-severity `chmod 777` finding can request native confirmation, and a CRITICAL credential-read finding can return deny. Antigravity ask/deny authority does not extend to its other four lifecycle events. Every verdict is attributed per connector in the Splunk pane. The demo closes by deleting each agent's hook config and watching DefenseClaw's self-heal detect the tamper and reinstall the hooks automatically (connector-hook-tampered → connector-hook-repaired)."
 />
 
 <Callout type="info">

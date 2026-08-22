@@ -336,43 +336,68 @@ func (tracker *requestWriteTracker) mayHaveReachedPeer() bool {
 	return tracker != nil && tracker.wrote.Load()
 }
 
-func classifyTransportError(err error, mayHaveReachedPeer bool) delivery.DeliveryOutcome {
+func classifyTransportResult(err error, mayHaveReachedPeer bool) delivery.DeliveryResult {
 	var networkError net.Error
 	switch {
 	case err == nil:
-		return delivery.OutcomeDelivered
+		return delivery.DeliveryResult{Outcome: delivery.OutcomeDelivered}
 	case errors.Is(err, netguard.ErrV8AddressProhibited),
 		errors.Is(err, netguard.ErrV8EndpointInvalid),
 		errors.Is(err, netguard.ErrV8RedirectBlocked):
-		return delivery.OutcomeUnsafeEndpoint
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeUnsafeEndpoint, FailureCode: delivery.FailureCodeEndpointProhibited,
+		}
 	case mayHaveReachedPeer:
 		// Request bytes may have reached the collector. Retrying is allowed,
 		// but downstream record identity must be used for deduplication.
-		return delivery.OutcomeAmbiguous
-	case errors.Is(err, netguard.ErrV8ResolutionFailed),
-		errors.Is(err, netguard.ErrV8ConnectionFailed),
-		errors.Is(err, context.Canceled),
-		errors.Is(err, context.DeadlineExceeded):
-		return delivery.OutcomeTransient
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeAmbiguous, FailureCode: delivery.FailureCodeAcknowledgementLost,
+		}
+	case errors.Is(err, netguard.ErrV8ResolutionFailed):
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeResolutionFailed,
+		}
+	case errors.Is(err, netguard.ErrV8ConnectionFailed):
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeConnectionFailed,
+		}
+	case errors.Is(err, context.Canceled):
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeRequestCanceled,
+		}
+	case errors.Is(err, context.DeadlineExceeded):
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeRequestTimeout,
+		}
 	case errors.As(err, &networkError):
-		return delivery.OutcomeTransient
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeTransportFailed,
+		}
 	default:
 		// A generic RoundTrip error can happen after request bytes reached the
 		// peer but before its acknowledgement arrived.
-		return delivery.OutcomeAmbiguous
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeAmbiguous, FailureCode: delivery.FailureCodeAcknowledgementLost,
+		}
 	}
 }
 
-func classifyHTTPStatus(status int) delivery.DeliveryOutcome {
+func classifyHTTPResult(status int) delivery.DeliveryResult {
 	switch {
 	case status >= 200 && status <= 299:
-		return delivery.OutcomeDelivered
+		return delivery.DeliveryResult{Outcome: delivery.OutcomeDelivered}
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return delivery.OutcomeAuthentication
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeAuthentication, FailureCode: delivery.FailureCodeHTTPAuthentication,
+		}
 	case status == http.StatusRequestTimeout || status == http.StatusTooEarly ||
 		status == http.StatusTooManyRequests || (status >= 500 && status <= 599):
-		return delivery.OutcomeTransient
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomeTransient, FailureCode: delivery.FailureCodeHTTPRetryable,
+		}
 	default:
-		return delivery.OutcomePermanentPayload
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeHTTPRejected,
+		}
 	}
 }

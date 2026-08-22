@@ -76,10 +76,10 @@ readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 VERIFIED_CHECKSUM=""
 COSIGN_BIN=""
 
-# Supported connectors. Keep in sync with cli/defenseclaw/connector_paths.py
-# KNOWN_CONNECTORS. The "none" pseudo-value means "lay binaries only — pick
-# a connector later with `defenseclaw init --connector ...`".
-readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor windsurf geminicli copilot openhands antigravity opencode amp omnigent none)
+# Selectable connectors. Retired names may remain recognized by lifecycle
+# cleanup code but must not appear here. The "none" pseudo-value means "lay
+# binaries only — pick a connector later with `defenseclaw init --connector ...`".
+readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent none)
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -740,8 +740,7 @@ connector_display_name() {
         openclaw) echo "OpenClaw" ;;
         hermes) echo "Hermes Agent" ;;
         cursor) echo "Cursor" ;;
-        windsurf) echo "Windsurf" ;;
-        geminicli) echo "Gemini CLI" ;;
+        devin) echo "Devin" ;;
         copilot) echo "GitHub Copilot CLI" ;;
         openhands) echo "OpenHands" ;;
         antigravity) echo "Antigravity" ;;
@@ -1850,6 +1849,9 @@ while [[ $# -gt 0 ]]; do
         --connector)
             [[ $# -lt 2 ]] && die "--connector requires a value (${CONNECTOR_CHOICES[*]})"
             CONNECTOR="$2"
+            if [[ "${CONNECTOR}" == "geminicli" || "${CONNECTOR}" == "gemini-cli" || "${CONNECTOR}" == "gemini" ]]; then
+                die "Gemini CLI integration is deprecated; use --connector antigravity"
+            fi
             is_valid_connector "${CONNECTOR}" \
                 || die "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES[*]}"
             shift 2

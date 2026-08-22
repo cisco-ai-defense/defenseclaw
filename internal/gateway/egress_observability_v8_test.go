@@ -82,6 +82,9 @@ func TestGatewayEgressV8EmitsGeneratedLogAndMetricWithoutLegacyPath(t *testing.T
 	if !ok || owner == nil {
 		t.Fatalf("owned runtime=%T", fixture.sidecar.observabilityV8)
 	}
+	if err := owner.runtime.FlushReports(t.Context()); err != nil {
+		t.Fatalf("flush bootstrap report: %v", err)
+	}
 	runtime := &recordingGatewayEgressRuntime{gatewayEgressV8Runtime: owner}
 	proxy := &GuardrailProxy{}
 	proxy.observabilityV8Mu.Lock()

@@ -63,7 +63,7 @@
       {
         "name": "connector",
         "label": "Connector",
-        "description": "Connector to deep-dive on. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) appear — defenseclaw_otel_ingest_records_total{source} only covers connectors that push native OTLP and would silently exclude every hook-only connector.",
+        "description": "Connector to deep-dive on. Sourced from defenseclaw_connector_hook_invocations_total{connector} so hook-only connectors (cursor, hermes, copilot, devin) appear — defenseclaw_otel_ingest_records_total{source} only covers connectors that push native OTLP and would silently exclude every hook-only connector.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -103,7 +103,7 @@
     {
       "type": "stat",
       "title": "Activity / min",
-      "description": "OTLP records/min when the connector pushes native OTLP, otherwise falls back to hook invocations/min. Hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) populate the second branch.",
+      "description": "OTLP records/min when the connector pushes native OTLP, otherwise falls back to hook invocations/min. Hook-only connectors (cursor, hermes, copilot, devin) populate the second branch.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"

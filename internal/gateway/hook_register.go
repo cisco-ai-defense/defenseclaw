@@ -53,7 +53,7 @@ func init() {
 	registerHookHandler("codex", func(a *APIServer) http.HandlerFunc {
 		return a.handleUnifiedConnectorHook("codex")
 	})
-	for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent"} {
+	for _, name := range []string{"hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent"} {
 		connectorName := name
 		registerHookHandler(connectorName, func(a *APIServer) http.HandlerFunc {
 			return a.handleUnifiedConnectorHook(connectorName)

@@ -17,7 +17,7 @@ TEST_RUNTIME="${TEST_SUPPORT}/runtime"
 # Stub discover_agent_version so these tests are hermetic. Without a stub
 # the render policy "skip a target row when the connector is not
 # installed" would make row counts depend on whether the dev machine
-# happens to have amp / codex / claudecode / cursor installed under the
+# happens to have amp / codex / claudecode / cursor / opencode installed under the
 # fake /Users/alice, /Users/bob homes the tests pass in (which they
 # don't — every probe would return empty and every row would be dropped).
 #
@@ -32,6 +32,7 @@ _reset_discover_stub() {
       codex)      printf '0.130.0' ;;
       claudecode) printf '2.5.0'   ;;
       cursor)     printf '3.14.27' ;;
+      opencode)   printf '1.18.19' ;;
       *)          printf ''        ;;
     esac
   }
@@ -44,11 +45,11 @@ t_multi_user_multi_connector_produces_cross_product() {
   users="alice:501:20:/Users/alice
 bob:502:20:/Users/bob"
   local out
-  out="$(render_targets_manifest "${TEST_SUPPORT}" "amp,codex,claudecode" "${users}")"
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "amp,codex,claudecode,opencode" "${users}")"
 
   assert_contains "${out}" "version: 1"          "version header"
   assert_contains "${out}" "targets:"            "targets: block"
-  # alice × 3 connectors, bob × 3 connectors = 6 rows
+  # alice × 4 connectors, bob × 4 connectors = 8 rows
   assert_contains "${out}" 'user: "alice"'       "alice row"
   assert_contains "${out}" 'user: "bob"'         "bob row"
   assert_contains "${out}" 'user_home: "/Users/alice"' "alice home"
@@ -56,15 +57,16 @@ bob:502:20:/Users/bob"
   assert_contains "${out}" 'connector: "amp"'        "amp connector"
   assert_contains "${out}" 'connector: "codex"'      "codex connector"
   assert_contains "${out}" 'connector: "claudecode"' "claudecode connector"
+  assert_contains "${out}" 'connector: "opencode"'   "opencode connector"
   # data_dir is deliberately NOT emitted per-target: the guardian's
   # validateUserDataDir requires data_dir to be inside the target user's
   # home, but SUPPORT_DIR/runtime is machine-wide root storage. Letting
   # Install() default per-user to ~/.defenseclaw is correct.
   assert_not_contains "${out}" "data_dir:" "data_dir intentionally absent (per-user Install default is used)"
-  # Rough sanity: expect 6 `- user:` block markers.
+  # Rough sanity: expect 8 `- user:` block markers.
   local count
   count="$(printf '%s\n' "${out}" | grep -c "^  - user:" || true)"
-  assert_eq "${count}" "6" "expected 6 target rows (2 users × 3 supported connectors)"
+  assert_eq "${count}" "8" "expected 8 target rows (2 users × 4 supported connectors)"
 }
 
 t_unsupported_connector_skipped() {

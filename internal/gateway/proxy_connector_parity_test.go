@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -218,9 +219,12 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
+			if target == "hermes" && runtime.GOOS == "windows" {
+				t.Skip("native Windows Hermes setup requires a fresh protected executable-selection receipt; dedicated admission tests cover that authority path")
+			}
 			dir := t.TempDir()
 			// Copilot's Setup refuses any WorkspaceDir nested inside
 			// DataDir (audit DB / gateway config / secrets must not
@@ -323,8 +327,11 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		t.Run(target, func(t *testing.T) {
+			if target == "hermes" && runtime.GOOS == "windows" {
+				t.Skip("native Windows Hermes setup requires a fresh protected executable-selection receipt; dedicated admission tests cover that authority path")
+			}
 			dir := t.TempDir()
 			// See note in TestSwitchConnector_PerConnectorPersistsState:
 			// keep WorkspaceDir outside DataDir so copilot's Setup

@@ -41,6 +41,13 @@ func stubNativeHookRuntimeReader(t *testing.T, read func(string) (hookruntime.St
 	})
 }
 
+func stubNativeDelegatedHookRuntimeReader(t *testing.T, read func(string) (hookruntime.State, bool, error)) {
+	t.Helper()
+	previous := nativeDelegatedHookRuntimeReader
+	nativeDelegatedHookRuntimeReader = read
+	t.Cleanup(func() { nativeDelegatedHookRuntimeReader = previous })
+}
+
 func stubEnterpriseManagedRuntimeResolver(t *testing.T, resolve func(string) (string, bool, error)) {
 	t.Helper()
 	previous := enterpriseManagedRuntimeResolver
@@ -369,5 +376,43 @@ func TestTrustedNativeHookHomeUsesPowerShellInstallState(t *testing.T) {
 	home, ok := trustedNativeHookHome()
 	if !ok || !sameWindowsHookPath(home, dataRoot) {
 		t.Fatalf("PowerShell state resolved home=%q native=%v, want %q", home, ok, dataRoot)
+	}
+}
+
+func TestNativeConnectorHookNoopRequiresExactDisabledHermesTombstone(t *testing.T) {
+	executable, dataRoot := stageTrustedNativeHookForTest(t, "open")
+	expectedCommand := `"` + filepath.ToSlash(executable) + `" hook --connector hermes`
+	statePath := filepath.Join(dataRoot, "hooks", hermesDirectStateName)
+	writeState := func(status, command string) {
+		t.Helper()
+		body, err := json.Marshal(map[string]interface{}{
+			"schema_version":  1,
+			"connector":       "hermes",
+			"status":          status,
+			"command":         command,
+			"reload_required": true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(statePath, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeState("disabled_pending_reload", expectedCommand)
+	if !NativeConnectorHookNoop([]string{"hook", "--connector", "hermes"}) {
+		t.Fatal("exact disabled Hermes tombstone did not no-op the cached command")
+	}
+	if NativeConnectorHookNoop([]string{"hook", "--connector", "cursor"}) {
+		t.Fatal("Hermes tombstone disabled another connector")
+	}
+	writeState("pending_reload", expectedCommand)
+	if NativeConnectorHookNoop([]string{"hook", "--connector", "hermes"}) {
+		t.Fatal("pending setup state disabled Hermes before teardown")
+	}
+	writeState("disabled_pending_reload", expectedCommand+" --tampered")
+	if NativeConnectorHookNoop([]string{"hook", "--connector", "hermes"}) {
+		t.Fatal("mismatched tombstone command disabled Hermes")
 	}
 }

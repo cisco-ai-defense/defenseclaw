@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -310,7 +311,7 @@ func toolCallStateCorpusApplies(corpusCase toolCallStateCorpusCase, goos string)
 
 func runToolCallStateCorpusCase(t *testing.T, handler http.Handler, queryDB *sql.DB, corpusCase toolCallStateCorpusCase, targetRule string) (targetSeen, targetBlocked bool) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := toolCallStateArtifactDir(t)
 	chainTarget := strings.HasPrefix(targetRule, "chain.")
 	receiptsBefore := 0
 	if chainTarget {
@@ -348,6 +349,13 @@ func runToolCallStateCorpusCase(t *testing.T, handler http.Handler, queryDB *sql
 			t.Fatalf("unsupported stateful corpus event %q", step.Event)
 		}
 		response := callAgentHookForTest(t, handler, payload)
+		t.Logf(
+			"step=%d event=%s action=%s rules=%v",
+			index,
+			step.Event,
+			response.Action,
+			response.RuleIDs,
+		)
 		if slices.Contains(response.RuleIDs, targetRule) {
 			targetSeen = true
 			targetBlocked = targetBlocked || !chainTarget && response.Action == guardrailActionBlock
@@ -357,6 +365,27 @@ func runToolCallStateCorpusCase(t *testing.T, handler http.Handler, queryDB *sql
 		targetBlocked = toolCallStateReceiptCount(t, queryDB, targetRule) > receiptsBefore
 	}
 	return targetSeen, targetBlocked
+}
+
+func toolCallStateArtifactDir(t *testing.T) string {
+	t.Helper()
+	var entropy [20]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		t.Fatal(err)
+	}
+	for index := range entropy {
+		entropy[index] = 'a' + entropy[index]%26
+	}
+	dir := filepath.Join(os.TempDir(), "dc-state-"+string(entropy[:]))
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove stateful corpus artifact directory: %v", err)
+		}
+	})
+	return dir
 }
 
 func toolCallStateReceiptCount(t *testing.T, db *sql.DB, rule string) int {
