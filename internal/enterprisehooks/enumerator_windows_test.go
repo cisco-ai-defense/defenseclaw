@@ -233,6 +233,81 @@ func windowsTargetsManifestDescriptor(t *testing.T, path string) string {
 	return descriptor.String()
 }
 
+func TestProtectWindowsTargetsManifestObjectAppliesExactInstallerContract(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "targets.yaml")
+	if err := os.WriteFile(file, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		path      string
+		directory bool
+	}{
+		{name: "AdminFile", path: file},
+		{name: "AdminDirectory", path: dir, directory: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := protectWindowsTargetsManifestObject(test.path, test.directory); err != nil {
+				t.Fatalf("protect %s: %v", test.name, err)
+			}
+			if err := validateWindowsTargetsManifestObject(test.path, test.directory); err != nil {
+				t.Fatalf("validate exact %s contract: %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestValidateWindowsTargetsManifestObjectRejectsGenericSplitDirectoryDACL(t *testing.T) {
+	dir := t.TempDir()
+	// This is the four-ACE representation produced when inheritable
+	// GENERIC_ALL entries are materialized by NTFS: concrete effective access
+	// plus generic inherit-only access for each trusted principal. It is not the
+	// installer's exact two-ACE AdminDirectory contract.
+	split, err := windows.SecurityDescriptorFromString(
+		"O:BAG:BAD:P" +
+			"(A;;FA;;;SY)(A;OICIIO;GA;;;SY)" +
+			"(A;;FA;;;BA)(A;OICIIO;GA;;;BA)",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := split.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, _, err := split.Group()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := split.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("resolve split DACL: %v", err)
+	}
+	extended, err := winpath.Extended(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|
+			windows.GROUP_SECURITY_INFORMATION|
+			windows.DACL_SECURITY_INFORMATION|
+			windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner,
+		group,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatalf("apply split DACL fixture: %v", err)
+	}
+	if err := validateWindowsTargetsManifestObject(dir, true); err == nil ||
+		!strings.Contains(err.Error(), "has 4 ACEs, want 2") {
+		t.Fatalf("split DACL validation error = %v, want exact four-vs-two rejection", err)
+	}
+}
+
 // TestWriteTargetsManifestAtomicNoOpNoWrite pins spec 005 REQ-05: a
 // byte-identical manifest must not touch the on-disk file. This is
 // the CORE property that prevents guardian fsnotify wakes every 5-min

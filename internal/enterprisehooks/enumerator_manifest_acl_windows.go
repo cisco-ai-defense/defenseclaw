@@ -24,6 +24,11 @@ var (
 	windowsTargetsManifestReplace = safefile.ReplaceFile
 )
 
+const (
+	windowsTargetsManifestAdminDirectorySDDL = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	windowsTargetsManifestAdminFileSDDL      = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+)
+
 // protectWindowsTargetsManifestObject applies the installer AdminDirectory or
 // AdminFile contract: Administrators owns the object and is its primary group,
 // while only SYSTEM and Administrators receive FullControl through a protected
@@ -33,34 +38,24 @@ func protectWindowsTargetsManifestObject(path string, directory bool) error {
 	if err := validateWindowsTargetsManifestObjectShape(path, directory); err != nil {
 		return err
 	}
-	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	descriptor, err := windowsTargetsManifestCanonicalDescriptor(directory)
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: resolve Administrators SID: %w", err)
+		return err
 	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	administrators, _, err := descriptor.Owner()
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: resolve LocalSystem SID: %w", err)
+		return fmt.Errorf("enterprise hooks: resolve hook guardian manifest owner: %w", err)
 	}
-	inheritance := uint32(windows.NO_INHERITANCE)
-	if directory {
-		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
-	}
-	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
-	for _, sid := range []*windows.SID{system, administrators} {
-		entries = append(entries, windows.EXPLICIT_ACCESS{
-			AccessPermissions: windows.GENERIC_ALL,
-			AccessMode:        windows.GRANT_ACCESS,
-			Inheritance:       inheritance,
-			Trustee: windows.TRUSTEE{
-				TrusteeForm:  windows.TRUSTEE_IS_SID,
-				TrusteeType:  windows.TRUSTEE_IS_USER,
-				TrusteeValue: windows.TrusteeValueFromSID(sid),
-			},
-		})
-	}
-	acl, err := windows.ACLFromEntries(entries, nil)
+	group, _, err := descriptor.Group()
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: build hook guardian manifest DACL: %w", err)
+		return fmt.Errorf("enterprise hooks: resolve hook guardian manifest group: %w", err)
+	}
+	acl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: resolve hook guardian manifest DACL: %w", err)
+	}
+	if acl == nil {
+		return fmt.Errorf("enterprise hooks: canonical hook guardian manifest DACL is missing")
 	}
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -77,13 +72,30 @@ func protectWindowsTargetsManifestObject(path string, directory bool) error {
 		windows.SE_FILE_OBJECT,
 		securityInformation,
 		administrators,
-		administrators,
+		group,
 		acl,
 		nil,
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: protect hook guardian manifest object %s: %w", path, err)
 	}
 	return validateWindowsTargetsManifestObject(path, directory)
+}
+
+// windowsTargetsManifestCanonicalDescriptor is deliberately derived from the
+// same SDDL contract as the installer's AdminDirectory/AdminFile ACLs. In
+// particular, FA is the concrete FILE_ALL_ACCESS mask: using inheritable
+// GENERIC_ALL here makes NTFS split each rule into an effective mapped ACE and
+// a generic inherit-only ACE, publishing a different four-ACE DACL.
+func windowsTargetsManifestCanonicalDescriptor(directory bool) (*windows.SECURITY_DESCRIPTOR, error) {
+	sddl := windowsTargetsManifestAdminFileSDDL
+	if directory {
+		sddl = windowsTargetsManifestAdminDirectorySDDL
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: build canonical hook guardian manifest descriptor: %w", err)
+	}
+	return descriptor, nil
 }
 
 func validateWindowsTargetsManifestObject(path string, directory bool) error {
@@ -105,20 +117,24 @@ func validateWindowsTargetsManifestObject(path string, directory bool) error {
 	if descriptor == nil {
 		return fmt.Errorf("enterprise hooks: hook guardian manifest security descriptor is missing: %s", path)
 	}
-	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	expected, err := windowsTargetsManifestCanonicalDescriptor(directory)
 	if err != nil {
 		return err
 	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	expectedOwner, _, err := expected.Owner()
 	if err != nil {
-		return err
+		return fmt.Errorf("enterprise hooks: inspect canonical hook guardian manifest owner: %w", err)
+	}
+	expectedGroup, _, err := expected.Group()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect canonical hook guardian manifest group: %w", err)
 	}
 	owner, _, err := descriptor.Owner()
-	if err != nil || owner == nil || !owner.Equals(administrators) {
+	if err != nil || owner == nil || expectedOwner == nil || !owner.Equals(expectedOwner) {
 		return fmt.Errorf("enterprise hooks: hook guardian manifest object has noncanonical owner: %s", path)
 	}
 	group, _, err := descriptor.Group()
-	if err != nil || group == nil || !group.Equals(administrators) {
+	if err != nil || group == nil || expectedGroup == nil || !group.Equals(expectedGroup) {
 		return fmt.Errorf("enterprise hooks: hook guardian manifest object has noncanonical group: %s", path)
 	}
 	control, _, err := descriptor.Control()
@@ -132,44 +148,45 @@ func validateWindowsTargetsManifestObject(path string, directory bool) error {
 	if err != nil || dacl == nil {
 		return fmt.Errorf("enterprise hooks: hook guardian manifest has no canonical DACL: %s", path)
 	}
-	if dacl.AceCount != 2 {
-		return fmt.Errorf("enterprise hooks: hook guardian manifest DACL has %d ACEs, want 2: %s", dacl.AceCount, path)
+	expectedDACL, _, err := expected.DACL()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: canonical hook guardian manifest DACL is unavailable: %w", err)
 	}
-	wantFlags := uint8(0)
-	if directory {
-		wantFlags = uint8(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	if expectedDACL == nil {
+		return fmt.Errorf("enterprise hooks: canonical hook guardian manifest DACL is missing")
 	}
-	coverage := map[string]bool{
-		system.String():         false,
-		administrators.String(): false,
-	}
-	fullAccess := map[windows.ACCESS_MASK]bool{
-		windows.GENERIC_ALL:                                true,
-		windows.ACCESS_MASK(0x001f01ff):                    true, // FILE_ALL_ACCESS
-		mapWindowsUserPathGenericMask(windows.GENERIC_ALL): true,
+	if dacl.AceCount != expectedDACL.AceCount {
+		return fmt.Errorf(
+			"enterprise hooks: hook guardian manifest DACL has %d ACEs, want %d: %s",
+			dacl.AceCount,
+			expectedDACL.AceCount,
+			path,
+		)
 	}
 	for index := uint16(0); index < dacl.AceCount; index++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+		var actualACE *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &actualACE); err != nil {
 			return fmt.Errorf("enterprise hooks: inspect hook guardian manifest ACE %d for %s: %w", index, path, err)
 		}
-		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
-			ace.Header.AceFlags != wantFlags || !fullAccess[ace.Mask] {
-			return fmt.Errorf("enterprise hooks: hook guardian manifest has a noncanonical access rule: %s", path)
+		var expectedACE *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(expectedDACL, uint32(index), &expectedACE); err != nil {
+			return fmt.Errorf("enterprise hooks: inspect canonical hook guardian manifest ACE %d: %w", index, err)
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if sid == nil || !sid.IsValid() {
+		if actualACE == nil || expectedACE == nil ||
+			actualACE.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			actualACE.Header.AceType != expectedACE.Header.AceType ||
+			actualACE.Header.AceFlags != expectedACE.Header.AceFlags ||
+			actualACE.Header.AceSize != expectedACE.Header.AceSize ||
+			actualACE.Mask != expectedACE.Mask {
+			return fmt.Errorf("enterprise hooks: hook guardian manifest has a noncanonical access rule at index %d: %s", index, path)
+		}
+		actualSID := (*windows.SID)(unsafe.Pointer(&actualACE.SidStart))
+		expectedSID := (*windows.SID)(unsafe.Pointer(&expectedACE.SidStart))
+		if actualSID == nil || expectedSID == nil || !actualSID.IsValid() || !expectedSID.IsValid() {
 			return fmt.Errorf("enterprise hooks: hook guardian manifest has an invalid access principal: %s", path)
 		}
-		seen, ok := coverage[sid.String()]
-		if !ok || seen {
-			return fmt.Errorf("enterprise hooks: hook guardian manifest grants an unexpected or duplicate principal: %s", path)
-		}
-		coverage[sid.String()] = true
-	}
-	for sid, seen := range coverage {
-		if !seen {
-			return fmt.Errorf("enterprise hooks: hook guardian manifest DACL omits %s: %s", sid, path)
+		if !actualSID.Equals(expectedSID) {
+			return fmt.Errorf("enterprise hooks: hook guardian manifest has a noncanonical principal at index %d: %s", index, path)
 		}
 	}
 	return nil

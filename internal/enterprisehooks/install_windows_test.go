@@ -1374,8 +1374,12 @@ func TestWindowsEnterpriseRejectsUncertifiedConnectorBeforeImpersonation(t *test
 	setupCalls := 0
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(&windowsGenericCodexTestConnector{name: "codex", setupCalls: &setupCalls})
+	targetSID := currentWindowsTestSID(t)
+	home := newWindowsTargetOwnedTestHome(t, targetSID)
 	_, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerSID:      targetSID.String(),
 		AgentVersion:  "codex-cli 0.142.0",
 		Registry:      registry,
 	})
