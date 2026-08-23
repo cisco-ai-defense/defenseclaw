@@ -3335,6 +3335,7 @@ def test_normal_mode_timeout_and_acl_cleanup_are_bounded_and_exact() -> None:
 
 
 def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatible() -> None:
+    module = read(MODULE)
     smoke = read(UNINSTALL_TRANSACTION_SMOKE)
 
     assert "failed-teardown-self-restored" in smoke
@@ -3350,6 +3351,16 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "snapshot capture ran before both service identities existed" in smoke
     assert "repeated-first-activation-failure-exact-rollback" in smoke
     assert "-IsDirectory $true `" in smoke
+    bare_directory_argument = re.compile(
+        r"(?m)^[ \t]*-IsDirectory[ \t]+`[ \t]*$"
+    )
+    assert bare_directory_argument.search(module) is None
+    assert bare_directory_argument.search(smoke) is None
+    rollback_descriptor = module[
+        module.index("function Assert-DefenseClawInstallRollbackRootDescriptor") :
+        module.index("function Complete-DefenseClawInstallRollbackIntent")
+    ]
+    assert "-IsDirectory $true `" in rollback_descriptor
     assert "lifecycle-snapshot:capture" in smoke
     assert "lifecycle-snapshot:restore" in smoke
     assert "lifecycle-snapshot:retire" in smoke

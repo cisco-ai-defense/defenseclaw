@@ -9626,7 +9626,7 @@ function Assert-DefenseClawInstallRollbackRootDescriptor {
         }
     }
     $expectedAcl = New-DefenseClawCanonicalPathAcl `
-        -IsDirectory `
+        -IsDirectory $true `
         -Kind $ExpectedKind `
         -GatewayServiceSID $script:AdministratorsSID
     Assert-DefenseClawCanonicalRawPathAcl `
