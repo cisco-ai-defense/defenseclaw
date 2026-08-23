@@ -4818,7 +4818,7 @@ targets:
             [Collections.Generic.List[object]]::new()
 
         $canonicalRootAcl = New-DefenseClawCanonicalPathAcl `
-            -IsDirectory `
+            -IsDirectory $true `
             -Kind AdminDirectory `
             -GatewayServiceSID $script:AdministratorsSID
         $canonicalRootSnapshot = [pscustomobject]@{

@@ -3349,6 +3349,7 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "fresh-install-service-bootstrap-rollback-retry" in smoke
     assert "snapshot capture ran before both service identities existed" in smoke
     assert "repeated-first-activation-failure-exact-rollback" in smoke
+    assert "-IsDirectory $true `" in smoke
     assert "lifecycle-snapshot:capture" in smoke
     assert "lifecycle-snapshot:restore" in smoke
     assert "lifecycle-snapshot:retire" in smoke
