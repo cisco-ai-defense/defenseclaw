@@ -430,7 +430,7 @@ function Invoke-RenderedEnterpriseTargetsVersionProbe {
 function Invoke-ClaudeWinGetMetadataVersionProbe {
     $fixtureRoot = [IO.Path]::Combine(
         [IO.Path]::GetTempPath(),
-        "DefenseClaw-ClaudeWinGet-$([Guid]::NewGuid().ToString('N'))"
+        "aw-$([Guid]::NewGuid().ToString('N'))"
     )
     [void][IO.Directory]::CreateDirectory($fixtureRoot)
     $junctionPath = $null
@@ -494,7 +494,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
 
         $officialLeaf =
             'Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe'
-        $validUserHome = [IO.Path]::Combine($fixtureRoot, 'valid-user')
+        $validUserHome = [IO.Path]::Combine($fixtureRoot, 'v')
         $validPackageRoot = [IO.Path]::Combine(
             $validUserHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -532,7 +532,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
             throw 'official WinGet Claude package was not discovered exactly once'
         }
 
-        $missingUserHome = [IO.Path]::Combine($fixtureRoot, 'missing-user')
+        $missingUserHome = [IO.Path]::Combine($fixtureRoot, 'n')
         [void][IO.Directory]::CreateDirectory([IO.Path]::Combine(
             $missingUserHome,
             'AppData\Local\Microsoft\WinGet\Packages',
@@ -553,7 +553,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
             throw 'WinGet Claude discovery accepted a missing executable'
         }
 
-        $hostileUserHome = [IO.Path]::Combine($fixtureRoot, 'hostile-user')
+        $hostileUserHome = [IO.Path]::Combine($fixtureRoot, 'h')
         $hostilePackage = [IO.Path]::Combine(
             $hostileUserHome,
             'AppData\Local\Microsoft\WinGet\Packages',
@@ -579,7 +579,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
             throw 'WinGet Claude discovery accepted a similarly named package'
         }
 
-        $multipleUserHome = [IO.Path]::Combine($fixtureRoot, 'multiple-user')
+        $multipleUserHome = [IO.Path]::Combine($fixtureRoot, 'm')
         $multiplePackageRoot = [IO.Path]::Combine(
             $multipleUserHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -610,7 +610,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
             throw "multiple WinGet Claude packages selected '$highest'"
         }
 
-        $escapeUserHome = [IO.Path]::Combine($fixtureRoot, 'escape-user')
+        $escapeUserHome = [IO.Path]::Combine($fixtureRoot, 'e')
         $escapePackageRoot = [IO.Path]::Combine(
             $escapeUserHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -648,10 +648,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
         [IO.Directory]::Delete($junctionPath, $false)
         $junctionPath = $null
 
-        $precedenceUserHome = [IO.Path]::Combine(
-            $fixtureRoot,
-            'precedence-user'
-        )
+        $precedenceUserHome = [IO.Path]::Combine($fixtureRoot, 'p')
         $npmMetadata = [IO.Path]::Combine(
             $precedenceUserHome,
             'AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\package.json'
@@ -859,7 +856,7 @@ function New-TestCodexSignedPEFixture {
 function Invoke-CodexWinGetMetadataVersionProbe {
     $fixtureRoot = [IO.Path]::Combine(
         [IO.Path]::GetTempPath(),
-        "DefenseClaw-CodexWinGet-$([Guid]::NewGuid().ToString('N'))"
+        "cw-$([Guid]::NewGuid().ToString('N'))"
     )
     [void][IO.Directory]::CreateDirectory($fixtureRoot)
     $ownerSID = 'S-1-5-21-3000-3000-3000-3001'
@@ -993,7 +990,7 @@ function Invoke-CodexWinGetMetadataVersionProbe {
         }
 
         $officialLeaf = 'OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe'
-        $validUserHome = [IO.Path]::Combine($fixtureRoot, 'valid-user')
+        $validUserHome = [IO.Path]::Combine($fixtureRoot, 'v')
         $validPackageRoot = [IO.Path]::Combine(
             $validUserHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -1070,10 +1067,13 @@ function Invoke-CodexWinGetMetadataVersionProbe {
                 ReaderVersion = '9.9.9'
             }
         )
-        foreach ($invalidCase in $invalidCases) {
+        for ($invalidCaseIndex = 0;
+            $invalidCaseIndex -lt $invalidCases.Count;
+            $invalidCaseIndex++) {
+            $invalidCase = $invalidCases[$invalidCaseIndex]
             $caseHome = [IO.Path]::Combine(
                 $fixtureRoot,
-                "invalid-$([Guid]::NewGuid().ToString('N'))"
+                "i$invalidCaseIndex"
             )
             $casePackage = [IO.Path]::Combine(
                 $caseHome,
@@ -1154,7 +1154,7 @@ function Invoke-CodexWinGetMetadataVersionProbe {
             throw 'WinGet Codex fallback decision did not remain fail closed'
         }
 
-        $multipleHome = [IO.Path]::Combine($fixtureRoot, 'multiple-user')
+        $multipleHome = [IO.Path]::Combine($fixtureRoot, 'm')
         $multipleRoot = [IO.Path]::Combine(
             $multipleHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -1201,10 +1201,7 @@ function Invoke-CodexWinGetMetadataVersionProbe {
             throw "multiple WinGet Codex packages selected '$highest'"
         }
 
-        $rootEscapeHome = [IO.Path]::Combine(
-            $fixtureRoot,
-            'root-escape-user'
-        )
+        $rootEscapeHome = [IO.Path]::Combine($fixtureRoot, 'r')
         $rootEscapeParent = [IO.Path]::Combine(
             $rootEscapeHome,
             'AppData\Local\Microsoft\WinGet'
@@ -1235,7 +1232,7 @@ function Invoke-CodexWinGetMetadataVersionProbe {
         [IO.Directory]::Delete($junctionPath, $false)
         $junctionPath = $null
 
-        $escapeHome = [IO.Path]::Combine($fixtureRoot, 'escape-user')
+        $escapeHome = [IO.Path]::Combine($fixtureRoot, 'e')
         $escapeRoot = [IO.Path]::Combine(
             $escapeHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -1273,7 +1270,7 @@ function Invoke-CodexWinGetMetadataVersionProbe {
         [IO.Directory]::Delete($junctionPath, $false)
         $junctionPath = $null
 
-        $precedenceHome = [IO.Path]::Combine($fixtureRoot, 'precedence-user')
+        $precedenceHome = [IO.Path]::Combine($fixtureRoot, 'p')
         $npmMetadata = [IO.Path]::Combine(
             $precedenceHome,
             'AppData\Roaming\npm\node_modules\@openai\codex\package.json'

@@ -1368,13 +1368,37 @@ def test_windows_packaging_smokes_run_on_every_available_engine(
     assert not repository_cache.exists(), (
         f"PowerShell smoke started with repository cache residue: {repository_cache}"
     )
+    profile_prefix = (
+        "dc-ps-"
+        if script == BOOTSTRAP_ENVIRONMENT_SMOKE
+        else "DefenseClaw-PowerShellSmoke-"
+    )
     with tempfile.TemporaryDirectory(
-        prefix="DefenseClaw-PowerShellSmoke-",
+        prefix=profile_prefix,
         dir=os.environ.get("TEMP"),
     ) as temporary_profile:
         profile_root = str(Path(temporary_profile).resolve())
         volume, home_path = os.path.splitdrive(profile_root)
         if script == BOOTSTRAP_ENVIRONMENT_SMOKE:
+            # Windows PowerShell 5.1 still exercises legacy MAX_PATH behavior.
+            # Keep the real WinGet package/executable leaves while bounding the
+            # disposable prefixes that precede them.
+            longest_codex_fixture = (
+                Path(profile_root)
+                / ("cw-" + "0" * 32)
+                / "i3"
+                / "AppData"
+                / "Local"
+                / "Microsoft"
+                / "WinGet"
+                / "Packages"
+                / "OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe_hostile"
+                / "codex-x86_64-pc-windows-msvc.exe"
+            )
+            assert len(str(longest_codex_fixture)) < 260, (
+                "bootstrap metadata fixture exceeds the PowerShell 5.1 "
+                f"MAX_PATH boundary: {longest_codex_fixture}"
+            )
             smoke_environment = restricted_windows_bootstrap_environment(
                 profile_root
             )
@@ -3371,6 +3395,21 @@ def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
         "direct reinstall did not transactionally replace the inactive tombstone"
         in smoke
     )
+    direct_reinstall = smoke[
+        smoke.index("function Invoke-HarnessDirectReinstallSequence") : smoke.index(
+            "function Invoke-HarnessFirstActivationFailureSequence"
+        )
+    ]
+    assert "service_exists = @{" in direct_reinstall
+    assert "ipc_service_sids = @('S-1-5-80-1234')" in direct_reinstall
+    assert "second uninstall retained its shared IPC service SID" in direct_reinstall
+    revoke_mock = smoke[
+        smoke.index("function script:Revoke-DefenseClawManagedIPCServiceAccess") : smoke.index(
+            "function script:Set-DefenseClawManagedAcls"
+        )
+    ]
+    assert "Test-DefenseClawServiceExists -Name $GatewayServiceName" in revoke_mock
+    assert ".service_exists.ContainsKey" not in revoke_mock
 
 
 def test_certification_cleanup_handles_partial_profiles_and_empty_parents() -> None:

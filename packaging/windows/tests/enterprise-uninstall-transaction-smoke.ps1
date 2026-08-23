@@ -1590,10 +1590,7 @@ try {
                 [string]$GatewayServiceSID
             )
             $null = $Layout
-            if ($script:HarnessState.service_exists.ContainsKey(
-                    $GatewayServiceName
-                ) -and
-                [bool]$script:HarnessState.service_exists[$GatewayServiceName]) {
+            if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
                 throw 'managed IPC cleanup mock observed a live service'
             }
             $resolvedSID = Get-DefenseClawServiceSIDForRecovery `
@@ -2512,6 +2509,12 @@ targets:
                     DefenseClawCMIDBroker = 2
                     DefenseClawHookGuardian = 2
                 }
+                service_exists = @{
+                    DefenseClawGateway = $false
+                    DefenseClawCMIDBroker = $false
+                    DefenseClawHookGuardian = $false
+                }
+                ipc_service_sids = @('S-1-5-80-1234')
                 guardian_fresh = $false
                 queued_gateway_restart = $true
                 queued_restart_blocked = $false
@@ -2613,6 +2616,12 @@ targets:
                 -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $layout.ManagedHooksTeardownJournalPath)) `
                 -Message 'second uninstall retained a prepared journal'
+            Assert-Harness `
+                -Condition (
+                    'S-1-5-80-1234' -notin
+                        @($script:HarnessState.ipc_service_sids)
+                ) `
+                -Message 'second uninstall retained its shared IPC service SID'
             $uninstallResults.Add([pscustomobject]@{
                 name = 'crash-direct-reinstall-changed-identity-second-uninstall'
                 failed = $false
