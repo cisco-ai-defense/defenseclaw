@@ -3417,6 +3417,30 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
     ]
     assert "committed_at = ''" in preparation_intent
     assert "committed_at = ''" in rollback_intent
+    runtime_claims = rollback_intent.index(
+        "$runtimeRootsProperty = $Snapshot.PSObject.Properties["
+    )
+    existing_receipt = rollback_intent.index(
+        "$existing = Get-DefenseClawInstallRollbackIntent `", runtime_claims
+    )
+    no_cleanup_authority = rollback_intent.index(
+        "if (-not $createdAny -and $null -eq $existing)", existing_receipt
+    )
+    service_absence_gate = rollback_intent.index(
+        "Get-DefenseClawManagedServiceNames `", no_cleanup_authority
+    )
+    service_sid = rollback_intent.index(
+        "Get-DefenseClawServiceSIDForRecovery `", service_absence_gate
+    )
+    rollback_receipt = rollback_intent.index("$intent = [ordered]@{", service_sid)
+    assert (
+        runtime_claims
+        < existing_receipt
+        < no_cleanup_authority
+        < service_absence_gate
+        < service_sid
+        < rollback_receipt
+    )
 
     commit_state = module[
         module.index("function Set-DefenseClawInstallRollbackIntentCommitState") : module.index(
@@ -3512,6 +3536,7 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
     assert "-AllowPostManagedAcl:($creationState -ceq 'canonical' -and" in cleanup
     assert "$transactionAuthorityBound -and $serviceSIDBound)" in cleanup
 
+    service_absence = cleanup.index("Assert-DefenseClawServicesAbsentChecked `")
     current_snapshot = cleanup.index(
         "$current = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists("
     )
@@ -3534,7 +3559,8 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
     removal = cleanup.index("Remove-DefenseClawManagedTree `", post_quarantine_no_reparse)
     absence_requery = cleanup.index("GetDirectorySecuritySnapshotNoFollowIfExists(", removal)
     assert (
-        current_snapshot
+        service_absence
+        < current_snapshot
         < identity_check
         < descriptor_check
         < pre_quarantine_no_reparse
@@ -3557,6 +3583,9 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
         "fresh-install-service-bootstrap-rollback-retry",
         "legacy-v2-commit-timestamp-migration",
         "phase-bound-live-root-descriptor-matrix",
+        "same-path-manifest-remains-validation-only",
+        "existing-deployment-rollback-skips-fresh-root-absence-gate",
+        "fresh-root-authority-still-requires-service-absence",
     ):
         assert f"name = '{case_name}'" in smoke
     for event in (
@@ -3580,7 +3609,7 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
     assert "'O:BAG:BA(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'" not in smoke
 
 
-def test_fresh_install_hardens_manifest_before_target_runtime_planning() -> None:
+def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -> None:
     module = read(MODULE)
     smoke = read(UNINSTALL_TRANSACTION_SMOKE)
 
@@ -3591,16 +3620,52 @@ def test_fresh_install_hardens_manifest_before_target_runtime_planning() -> None
     ]
     transaction = lifecycle.index("$snapshot = New-DefenseClawTransaction")
     source_publish = lifecycle.index("Install-DefenseClawSourceDescriptor `")
-    manifest_only = lifecycle.index(
-        "if ($Action -eq 'Install' -and $name -ceq 'manifest')", source_publish
+    manifest_replacement = lifecycle.index(
+        "$publishedManifestReplacement = [bool](", source_publish
     )
-    manifest_acl = lifecycle.index("Set-DefenseClawPathAcl `", manifest_only)
+    manifest_acl = lifecycle.index("Set-DefenseClawPathAcl `", manifest_replacement)
+    capture = lifecycle.index(
+        "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `", manifest_acl
+    )
+    deferred_source_publish = lifecycle.index(
+        "Install-DefenseClawSourceDescriptor `", capture
+    )
+    deferred_manifest_replacement = lifecycle.index(
+        "$publishedManifestReplacement = [bool](", deferred_source_publish
+    )
+    deferred_manifest_acl = lifecycle.index(
+        "Set-DefenseClawPathAcl `", deferred_manifest_replacement
+    )
     target_plan = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
-    assert transaction < source_publish < manifest_only < manifest_acl < target_plan
-    manifest_acl_contract = lifecycle[manifest_only:target_plan]
-    assert "-Path $destination `" in manifest_acl_contract
-    assert "-Kind AdminFile `" in manifest_acl_contract
-    assert "-GatewayServiceSID $script:AdministratorsSID" in manifest_acl_contract
+    assert (
+        transaction
+        < source_publish
+        < manifest_replacement
+        < manifest_acl
+        < capture
+        < deferred_source_publish
+        < deferred_manifest_replacement
+        < deferred_manifest_acl
+        < target_plan
+    )
+    for acl_contract in (
+        lifecycle[manifest_replacement:capture],
+        lifecycle[deferred_manifest_replacement:target_plan],
+    ):
+        assert "$name -ceq 'manifest'" in acl_contract
+        assert "Test-DefenseClawSourceDescriptorPublishesReplacement `" in acl_contract
+        assert "-Path $destination `" in acl_contract
+        assert "-Kind AdminFile `" in acl_contract
+        assert "-GatewayServiceSID $script:AdministratorsSID" in acl_contract
+
+    replacement_helper = module[
+        module.index("function Test-DefenseClawSourceDescriptorPublishesReplacement") :
+        module.index("function ConvertTo-DefenseClawWindowsCommandLineArgument")
+    ]
+    assert "$Source.ContainsKey('path')" in replacement_helper
+    assert "[IO.Path]::GetFullPath([string]$Source.path)" in replacement_helper
+    assert "[IO.Path]::GetFullPath($Destination)" in replacement_helper
+    assert "[StringComparison]::OrdinalIgnoreCase" in replacement_helper
 
     preparation_mode = module[
         module.index("function Get-DefenseClawTargetRuntimePreparationMode") :
@@ -3627,6 +3692,7 @@ def test_fresh_install_hardens_manifest_before_target_runtime_planning() -> None
     for event in (
         "manifest-published",
         "manifest-admin-acl",
+        "target-runtime:plan-enter",
         "target-runtime:plan",
         "target-runtime:stage",
         "target-runtime:finalize",
@@ -3634,7 +3700,27 @@ def test_fresh_install_hardens_manifest_before_target_runtime_planning() -> None
         assert event in smoke
     assert "& $script:HarnessRealSetPathAcl @PSBoundParameters" in smoke
     assert "Assert-DefenseClawCanonicalPathAcl `" in smoke
-    assert "target-runtime plan preceded the fresh manifest ACL" in smoke
+    assert "target-runtime plan preceded the replacement manifest ACL" in smoke
+    assert "'Repair'" in smoke
+    assert "'Upgrade'" in smoke
+    assert "$manifestPublished -gt $capture" in smoke
+    assert "$manifestAcl -gt $manifestPublished" in smoke
+    assert "$targetPlan -gt $manifestAcl" in smoke
+    assert "'O:BAG:BAD:(A;;FA;;;SY)(A;;FA;;;BA)'" in smoke
+    assert "$samePathSources['manifest']" in smoke
+    assert "path = $layout.ManifestPath" in smoke
+    assert "name = 'no-source'" in smoke
+    assert "sources = $noManifestSources" in smoke
+    assert "'managed DACL is not protected'" in smoke
+    assert "same_path_manifest_drift_rejected" in smoke
+    assert "no_source_manifest_drift_rejected" in smoke
+    plan_enter = smoke.index("'target-runtime:plan-enter'")
+    manifest_validation = smoke.index(
+        "Assert-DefenseClawCanonicalPathAcl `",
+        smoke.index("$manifestWasReplaced = [bool]("),
+    )
+    plan_event = smoke.index("$script:HarnessState.events.Add('target-runtime:plan')")
+    assert plan_enter < manifest_validation < plan_event
     assert "lowercase Install action skipped target preparation" in smoke
     assert "bounded-redacted-target-runtime-diagnostic" in smoke
     assert "diagnostic-secret" in smoke

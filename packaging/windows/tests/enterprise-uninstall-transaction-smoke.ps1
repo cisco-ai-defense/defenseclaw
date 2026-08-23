@@ -63,6 +63,11 @@ try {
                 -Name Set-DefenseClawPathAcl `
                 -CommandType Function
         ).ScriptBlock
+        $script:HarnessRealSourceReplacementDecision = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Test-DefenseClawSourceDescriptorPublishesReplacement `
+                -CommandType Function
+        ).ScriptBlock
 
         function Assert-Harness {
             param(
@@ -446,20 +451,22 @@ try {
                 [Parameter(Mandatory)][string]$Kind,
                 [Parameter(Mandatory)][string]$GatewayServiceSID
             )
-            $isFreshInstallManifest = [bool](
-                $script:HarnessState.ContainsKey('operation') -and
-                [string]$script:HarnessState.operation -ceq 'install' -and
+            $isManagedReplacementManifest = [bool](
                 $script:HarnessState.ContainsKey('layout') -and
+                $script:HarnessState.ContainsKey('events') -and
                 [string]::Equals(
                     $Path,
                     [string]$script:HarnessState.layout.ManifestPath,
                     [StringComparison]::OrdinalIgnoreCase
-                )
+                ) -and
+                $script:HarnessState.events.IndexOf(
+                    'manifest-published'
+                ) -ge 0
             )
-            if ($isFreshInstallManifest) {
+            if ($isManagedReplacementManifest) {
                 if ($Kind -cne 'AdminFile' -or
                     $GatewayServiceSID -cne $script:AdministratorsSID) {
-                    throw 'fresh Install used a noncanonical manifest ACL contract'
+                    throw 'install-like lifecycle used a noncanonical manifest ACL contract'
                 }
                 & $script:HarnessRealSetPathAcl @PSBoundParameters
                 $script:HarnessState.manifest_admin_acl = $true
@@ -1882,6 +1889,31 @@ try {
                 [Parameter(Mandatory)]$Source,
                 [Parameter(Mandatory)][string]$Destination
             )
+            $sourcePath = if ($Source -is [Collections.IDictionary] -and
+                $Source.Contains('path')) {
+                [string]$Source['path']
+            }
+            else {
+                ''
+            }
+            $samePathManifest = [bool](
+                -not [string]::IsNullOrWhiteSpace($sourcePath) -and
+                [string]::Equals(
+                    [IO.Path]::GetFullPath($sourcePath),
+                    $Destination,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and
+                [string]::Equals(
+                    $Destination,
+                    [string]$script:HarnessState.layout.ManifestPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            )
+            if ($samePathManifest) {
+                # The real installer validates the in-place source digest but
+                # publishes no replacement inode and must not heal its ACL.
+                return
+            }
             $parent = [IO.Path]::GetDirectoryName($Destination)
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $parent)) {
                 Microsoft.PowerShell.Management\New-Item `
@@ -1908,6 +1940,20 @@ try {
             )) {
                 $script:HarnessState.events.Add('manifest-published')
             }
+        }
+        function script:Test-DefenseClawSourceDescriptorPublishesReplacement {
+            param(
+                [Parameter(Mandatory)]$Source,
+                [Parameter(Mandatory)][string]$Destination
+            )
+            if ($Source -is [hashtable] -and $Source.ContainsKey('path')) {
+                return [bool](
+                    & $script:HarnessRealSourceReplacementDecision `
+                        -Source $Source `
+                        -Destination $Destination
+                )
+            }
+            return $true
         }
         function script:Remove-DefenseClawManagedTree {
             param(
@@ -2556,20 +2602,31 @@ try {
                         )) {
                         throw 'target-runtime plan mock received the wrong manifest'
                     }
-                    if ([string]$script:HarnessState.operation -ceq 'install' -and
-                        -not [bool]$script:HarnessState.installed) {
+                    $script:HarnessState.events.Add(
+                        'target-runtime:plan-enter'
+                    )
+                    $manifestWasReplaced = [bool](
+                        $script:HarnessState.events.IndexOf(
+                            'manifest-published'
+                        ) -ge 0
+                    )
+                    if ($manifestWasReplaced) {
                         if (-not [bool]$script:HarnessState.manifest_admin_acl) {
-                            throw 'target-runtime plan preceded the fresh manifest ACL'
+                            throw 'target-runtime plan preceded the replacement manifest ACL'
                         }
-                        $expectedManifestAcl =
-                            New-DefenseClawCanonicalPathAcl `
-                                -IsDirectory $false `
-                                -Kind AdminFile `
-                                -GatewayServiceSID $script:AdministratorsSID
-                        Assert-DefenseClawCanonicalPathAcl `
-                            -Path $manifestPath `
-                            -Expected $expectedManifestAcl
                     }
+                    # Validation-only Repair/Upgrade must check the same exact
+                    # contract without using publication as an ACL-healing
+                    # opportunity. This also proves no-source and same-path
+                    # drift fail closed in both PowerShell engines.
+                    $expectedManifestAcl =
+                        New-DefenseClawCanonicalPathAcl `
+                            -IsDirectory $false `
+                            -Kind AdminFile `
+                            -GatewayServiceSID $script:AdministratorsSID
+                    Assert-DefenseClawCanonicalPathAcl `
+                        -Path $manifestPath `
+                        -Expected $expectedManifestAcl
                     $baseline = if ([bool]$script:HarnessState.installed) {
                         'canonical'
                     }
@@ -3299,6 +3356,17 @@ targets:
                     [Text.UTF8Encoding]::new($false)
                 )
             }
+            $setManifestAclDrift = {
+                $driftedManifestAcl =
+                    [Security.AccessControl.FileSecurity]::new()
+                $driftedManifestAcl.SetSecurityDescriptorSddlForm(
+                    'O:BAG:BAD:(A;;FA;;;SY)(A;;FA;;;BA)',
+                    [Security.AccessControl.AccessControlSections]::All
+                )
+                Microsoft.PowerShell.Security\Set-Acl `
+                    -LiteralPath $layout.ManifestPath `
+                    -AclObject $driftedManifestAcl
+            }
             $script:HarnessState = @{
                 operation = 'install'
                 crash_at = ''
@@ -3338,15 +3406,115 @@ targets:
                 gateway_started_before_guardian = $false
                 barrier_required = $true
                 barrier_complete = $false
+                manifest_admin_acl = $false
             }
-            for ($attempt = 1; $attempt -le 2; $attempt++) {
+
+            $samePathSources = @{}
+            $noManifestSources = @{}
+            foreach ($name in @($sources.Keys)) {
+                $samePathSources[$name] = $sources[$name]
+                if ($name -cne 'manifest') {
+                    $noManifestSources[$name] = $sources[$name]
+                }
+            }
+            $samePathSources['manifest'] = @{
+                path = $layout.ManifestPath
+            }
+            $validationOnlyManifestDriftRejected = @{}
+            foreach ($validationCase in @(
+                [pscustomobject]@{
+                    name = 'same-path'
+                    action = 'Repair'
+                    sources = $samePathSources
+                },
+                [pscustomobject]@{
+                    name = 'no-source'
+                    action = 'Upgrade'
+                    sources = $noManifestSources
+                }
+            )) {
+                & $setManifestAclDrift
                 $script:HarnessState.events.Clear()
                 $script:HarnessState.barrier_complete = $false
                 $script:HarnessState.active_references = $false
+                $script:HarnessState.manifest_admin_acl = $false
+                $validationFailure = ''
+                try {
+                    [void](Invoke-DefenseClawInstallLikeLifecycle `
+                        -Action ([string]$validationCase.action) `
+                        -Layout $layout `
+                        -Sources ([hashtable]$validationCase.sources) `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -GuardianServiceName 'DefenseClawHookGuardian')
+                }
+                catch {
+                    $validationFailure = [string]$_.Exception.Message
+                }
+                Assert-Harness `
+                    -Condition (
+                        $validationFailure -match
+                            'managed DACL is not protected'
+                    ) `
+                    -Message (
+                        [string]$validationCase.action + ' ' +
+                        [string]$validationCase.name +
+                        ' manifest drift was not rejected exactly: ' +
+                        $validationFailure
+                    )
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.events.IndexOf(
+                            'lifecycle-snapshot:capture'
+                        ) -ge 0 -and
+                        $script:HarnessState.events.IndexOf(
+                            'manifest-published'
+                        ) -lt 0 -and
+                        $script:HarnessState.events.IndexOf(
+                            'manifest-admin-acl'
+                        ) -lt 0 -and
+                        $script:HarnessState.events.IndexOf(
+                            'target-runtime:plan-enter'
+                        ) -ge 0 -and
+                        $script:HarnessState.events.IndexOf(
+                            'target-runtime:plan'
+                        ) -lt 0
+                    ) `
+                    -Message (
+                        [string]$validationCase.action + ' ' +
+                        [string]$validationCase.name +
+                        ' manifest drift crossed the validation-only boundary'
+                    )
+                Assert-Harness `
+                    -Condition (
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $layout.ManagedHooksLifecycleJournalPath) -and
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $layout.PendingPath)
+                    ) `
+                    -Message (
+                        [string]$validationCase.action + ' ' +
+                        [string]$validationCase.name +
+                        ' manifest rejection retained recovery residue'
+                    )
+                $validationOnlyManifestDriftRejected[
+                    [string]$validationCase.name
+                ] = $true
+            }
+            for ($attempt = 1; $attempt -le 2; $attempt++) {
+                $installLikeAction = if ($attempt -eq 1) {
+                    'Repair'
+                }
+                else {
+                    'Upgrade'
+                }
+                $script:HarnessState.events.Clear()
+                $script:HarnessState.barrier_complete = $false
+                $script:HarnessState.active_references = $false
+                $script:HarnessState.manifest_admin_acl = $false
                 $failure = ''
                 try {
                     [void](Invoke-DefenseClawInstallLikeLifecycle `
-                        -Action 'Repair' `
+                        -Action $installLikeAction `
                         -Layout $layout `
                         -Sources $sources `
                         -GatewayServiceName 'DefenseClawGateway' `
@@ -3357,21 +3525,41 @@ targets:
                 }
                 Assert-Harness `
                     -Condition ($failure -match 'injected stale guardian generation') `
-                    -Message "first activation attempt $attempt lost its causal failure: $failure"
+                    -Message "$installLikeAction activation attempt lost its causal failure: $failure"
                 Assert-Harness `
                     -Condition (-not [bool]$script:HarnessState.active_references) `
-                    -Message "first activation attempt $attempt retained partial machine enrollment"
+                    -Message "$installLikeAction activation attempt retained partial machine enrollment"
                 Assert-Harness `
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.ManagedHooksLifecycleJournalPath)) `
-                    -Message "first activation attempt $attempt retained its completed lifecycle journal"
+                    -Message "$installLikeAction activation attempt retained its completed lifecycle journal"
                 Assert-Harness `
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.PendingPath)) `
-                    -Message "first activation attempt $attempt retained pending recovery after exact rollback"
+                    -Message "$installLikeAction activation attempt retained pending recovery after exact rollback"
+                $manifestPublished = $script:HarnessState.events.IndexOf(
+                    'manifest-published'
+                )
+                $manifestAcl = $script:HarnessState.events.IndexOf(
+                    'manifest-admin-acl'
+                )
+                $targetPlan = $script:HarnessState.events.IndexOf(
+                    'target-runtime:plan'
+                )
                 $capture = $script:HarnessState.events.IndexOf(
                     'lifecycle-snapshot:capture'
                 )
+                Assert-Harness `
+                    -Condition (
+                        $capture -ge 0 -and
+                        $manifestPublished -gt $capture -and
+                        $manifestAcl -gt $manifestPublished -and
+                        $targetPlan -gt $manifestAcl
+                    ) `
+                    -Message (
+                        "$installLikeAction validated its replacement " +
+                        'manifest before the exact AdminFile ACL was applied'
+                    )
                 $restore = $script:HarnessState.events.IndexOf(
                     'lifecycle-snapshot:restore'
                 )
@@ -3386,7 +3574,7 @@ targets:
                         $retire -gt $restore -and
                         $complete -gt $retire
                     ) `
-                    -Message "first activation attempt $attempt violated capture/restore/retire ordering"
+                    -Message "$installLikeAction activation attempt violated capture/restore/retire ordering"
             }
             $uninstallResults.Add([pscustomobject]@{
                 name = 'repeated-first-activation-failure-exact-rollback'
@@ -3396,6 +3584,12 @@ targets:
                     $script:HarnessState.service_contract_checks
                 )
                 no_surviving_reference_before_delete = $true
+                same_path_manifest_drift_rejected = [bool](
+                    $validationOnlyManifestDriftRejected['same-path']
+                )
+                no_source_manifest_drift_rejected = [bool](
+                    $validationOnlyManifestDriftRejected['no-source']
+                )
             })
         }
 
@@ -4947,6 +5141,33 @@ targets:
         $installRollbackContractResults =
             [Collections.Generic.List[object]]::new()
 
+        $replacementProbe = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'manifest-replacement-probe.yaml'
+        $samePathIsReplacement = [bool](
+            & $script:HarnessRealSourceReplacementDecision `
+                -Source @{path = $replacementProbe} `
+                -Destination $replacementProbe
+        )
+        $distinctPathIsReplacement = [bool](
+            & $script:HarnessRealSourceReplacementDecision `
+                -Source @{path = $replacementProbe} `
+                -Destination (Microsoft.PowerShell.Management\Join-Path `
+                    $TestRoot `
+                    'manifest-replacement-target.yaml')
+        )
+        Assert-Harness `
+            -Condition (
+                -not $samePathIsReplacement -and
+                $distinctPathIsReplacement
+            ) `
+            -Message 'same-path manifest source can bypass validation-only ACL drift checks'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'same-path-manifest-remains-validation-only'
+            same_path_replacement = $samePathIsReplacement
+            distinct_path_replacement = $distinctPathIsReplacement
+        })
+
         $legacyTimestampIntent = (
             [ordered]@{phase = 'rollback'} |
                 Microsoft.PowerShell.Utility\ConvertTo-Json -Compress |
@@ -5570,6 +5791,69 @@ targets:
             param([Parameter(Mandatory)][string]$Name)
             throw "injected SCM access failure for $Name"
         }
+        $noFreshCleanupSnapshot = [pscustomobject]@{
+            gateway_service = 'DefenseClawGateway'
+            guardian_service = 'DefenseClawHookGuardian'
+            install_root_created = $false
+            install_root_identity = '00000001:0000000000000001'
+            state_root_created = $false
+            state_root_identity = '00000002:0000000000000002'
+            created_target_runtime_roots = @()
+        }
+        $noFreshCleanupIntent = Publish-DefenseClawInstallRollbackIntent `
+            -Snapshot $noFreshCleanupSnapshot `
+            -Layout $legacySchemaLayout
+        Assert-Harness `
+            -Condition (
+                $null -eq $noFreshCleanupIntent -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $legacySchemaLayout.InstallRollbackIntentPath)
+            ) `
+            -Message (
+                'Repair/Upgrade rollback queried restored services without ' +
+                'fresh-install cleanup authority'
+            )
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'existing-deployment-rollback-skips-fresh-root-absence-gate'
+            fresh_cleanup_authority = $false
+            service_absence_queried = $false
+            receipt_published = $false
+        })
+
+        $freshCleanupSnapshot = [pscustomobject]@{
+            gateway_service = 'DefenseClawGateway'
+            guardian_service = 'DefenseClawHookGuardian'
+            install_root_created = $true
+            install_root_identity = '00000001:0000000000000001'
+            state_root_created = $false
+            state_root_identity = '00000002:0000000000000002'
+            created_target_runtime_roots = @()
+        }
+        $freshCleanupServiceGateClosed = $false
+        try {
+            $null = Publish-DefenseClawInstallRollbackIntent `
+                -Snapshot $freshCleanupSnapshot `
+                -Layout $legacySchemaLayout
+        }
+        catch {
+            $freshCleanupServiceGateClosed = [bool](
+                $_.Exception.Message -like '*injected SCM access failure*'
+            )
+        }
+        Assert-Harness `
+            -Condition (
+                $freshCleanupServiceGateClosed -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $legacySchemaLayout.InstallRollbackIntentPath)
+            ) `
+            -Message 'fresh-install cleanup authority bypassed the service-absence gate'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'fresh-root-authority-still-requires-service-absence'
+            fresh_cleanup_authority = $true
+            service_query_failure_propagated = $freshCleanupServiceGateClosed
+            receipt_published = $false
+        })
+
         $scmFailureClosed = $false
         try {
             Assert-DefenseClawServicesAbsentChecked `
@@ -5588,6 +5872,10 @@ targets:
             'Assert-DefenseClawServicesAbsentChecked',
             [StringComparison]::Ordinal
         )
+        $quarantineIndex = $rootCleanupSource.IndexOf(
+            'SetDirectoryDaclNoFollow',
+            [StringComparison]::Ordinal
+        )
         $rootMutationIndex = $rootCleanupSource.IndexOf(
             'Remove-DefenseClawManagedTree',
             [StringComparison]::Ordinal
@@ -5596,7 +5884,8 @@ targets:
             -Condition (
                 $scmFailureClosed -and
                 $checkedAbsenceIndex -ge 0 -and
-                $rootMutationIndex -gt $checkedAbsenceIndex
+                $quarantineIndex -gt $checkedAbsenceIndex -and
+                $rootMutationIndex -gt $quarantineIndex
             ) `
             -Message 'SCM query failure can reach destructive root cleanup'
         $installRollbackContractResults.Add([pscustomobject]@{

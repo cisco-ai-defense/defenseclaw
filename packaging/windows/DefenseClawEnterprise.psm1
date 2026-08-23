@@ -2468,6 +2468,22 @@ function Install-DefenseClawSourceDescriptor {
     }
 }
 
+function Test-DefenseClawSourceDescriptorPublishesReplacement {
+    param(
+        [Parameter(Mandatory)][hashtable]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    if (-not $Source.ContainsKey('path') -or
+        [string]::IsNullOrWhiteSpace([string]$Source.path)) {
+        throw 'lifecycle source descriptor is missing its replacement path'
+    }
+    return -not [string]::Equals(
+        [IO.Path]::GetFullPath([string]$Source.path),
+        [IO.Path]::GetFullPath($Destination),
+        [StringComparison]::OrdinalIgnoreCase
+    )
+}
+
 function ConvertTo-DefenseClawWindowsCommandLineArgument {
     param([AllowEmptyString()][string]$Argument)
     if ($null -eq $Argument -or $Argument.IndexOf([char]0) -ge 0) {
@@ -9559,13 +9575,6 @@ function Publish-DefenseClawInstallRollbackIntent {
         $claims["${prefix}_identity"] = [string]$identity.Value
         $createdAny = $createdAny -or [bool]$created.Value
     }
-    foreach ($name in @(Get-DefenseClawManagedServiceNames `
-            -GatewayServiceName ([string]$Snapshot.gateway_service) `
-            -GuardianServiceName ([string]$Snapshot.guardian_service))) {
-        if (Test-DefenseClawServiceExists -Name $name) {
-            throw "refusing fresh-install root cleanup while service exists: $name"
-        }
-    }
     $runtimeRootsProperty = $Snapshot.PSObject.Properties[
         'created_target_runtime_roots'
     ]
@@ -9582,6 +9591,17 @@ function Publish-DefenseClawInstallRollbackIntent {
         -GuardianServiceName ([string]$Snapshot.guardian_service)
     if (-not $createdAny -and $null -eq $existing) {
         return $null
+    }
+    # Upgrade and Repair restore their pre-existing services before completing
+    # rollback and own no absent-baseline roots. Query service absence only
+    # after the transaction claims or an authenticated external receipt prove
+    # that fresh-install cleanup authority actually exists.
+    foreach ($name in @(Get-DefenseClawManagedServiceNames `
+            -GatewayServiceName ([string]$Snapshot.gateway_service) `
+            -GuardianServiceName ([string]$Snapshot.guardian_service))) {
+        if (Test-DefenseClawServiceExists -Name $name) {
+            throw "refusing fresh-install root cleanup while service exists: $name"
+        }
     }
     $resolvedGatewaySID = Get-DefenseClawServiceSIDForRecovery `
         -ServiceName ([string]$Snapshot.gateway_service)
@@ -16615,10 +16635,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Install-DefenseClawSourceDescriptor `
                 -Source $Sources[$name] `
                 -Destination $destination
-            if ($Action -eq 'Install' -and $name -ceq 'manifest') {
-                # A fresh copy inherits the elevated caller's descriptor.
-                # Publish the exact AdminFile contract before the gateway
-                # authenticates the manifest or derives target-runtime paths.
+            $publishedManifestReplacement = [bool](
+                $name -ceq 'manifest' -and
+                (Test-DefenseClawSourceDescriptorPublishesReplacement `
+                    -Source $Sources[$name] `
+                    -Destination $destination)
+            )
+            if ($publishedManifestReplacement) {
+                # A published copy can inherit the elevated caller's descriptor
+                # or retain replacement-file metadata. Apply the exact
+                # AdminFile contract immediately after the authenticated atomic
+                # copy and before target-runtime validation reads the manifest.
                 Set-DefenseClawPathAcl `
                     -Path $destination `
                     -Kind AdminFile `
@@ -16651,6 +16678,22 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Install-DefenseClawSourceDescriptor `
                 -Source $Sources[$name] `
                 -Destination $destination
+            $publishedManifestReplacement = [bool](
+                $name -ceq 'manifest' -and
+                (Test-DefenseClawSourceDescriptorPublishesReplacement `
+                    -Source $Sources[$name] `
+                    -Destination $destination)
+            )
+            if ($publishedManifestReplacement) {
+                # Upgrade/Repair authenticate the old manifest in the captured
+                # preimage, then replace it. Secure that authenticated
+                # replacement before validation; an unreplaced installed
+                # manifest remains validation-only and ACL drift still fails.
+                Set-DefenseClawPathAcl `
+                    -Path $destination `
+                    -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID
+            }
         }
         # Upgrade and Repair may reuse the installed config and manifest when
         # no replacement source was supplied. Install always supplies both;
