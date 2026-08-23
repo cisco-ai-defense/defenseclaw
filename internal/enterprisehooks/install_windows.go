@@ -294,6 +294,29 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
+	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
+		dataDir,
+		conn.Name(),
+	)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf(
+			"enterprise hooks: load protected Claude Code runtime generation timestamps: %w",
+			err,
+		)
+	}
+	if err := verifyWindowsManagedRuntimeGenerationForInstall(
+		conn.Name(),
+		targetSID,
+		dataDir,
+		hookExecutable,
+		setupOpts.APIAddr,
+		setupOpts.HookAPIToken,
+		lock.ContractID,
+		lockUpdatedAt,
+		entryUpdatedAt,
+	); err != nil {
+		return InstallResult{}, err
+	}
 	_ = ctx
 	hookScripts := []string{}
 	if scriptProvider, ok := conn.(connector.HookScriptProvider); ok {

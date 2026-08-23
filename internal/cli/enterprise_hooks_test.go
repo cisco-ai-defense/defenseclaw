@@ -7,6 +7,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"os"
@@ -26,6 +27,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+var testEnterpriseHookManifestSHA256 = strings.Repeat("a", sha256.Size*2)
+
 func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
@@ -38,7 +41,14 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 		{User: "alice", Connector: "codex", OK: true},
 		{User: "bob", Connector: "claudecode", OK: false, Error: "hook config file missing"},
 	}
-	if err := writeEnterpriseHookGuardianState(dir, "/etc/defenseclaw/hook-guardian/targets.yaml", rows, 1); err != nil {
+	if err := writeEnterpriseHookGuardianState(
+		dir,
+		"/etc/defenseclaw/hook-guardian/targets.yaml",
+		testEnterpriseHookManifestSHA256,
+		rows,
+		1,
+		true,
+	); err != nil {
 		t.Fatalf("writeEnterpriseHookGuardianState: %v", err)
 	}
 	path := filepath.Join(dir, hookGuardianStateFile)
@@ -52,6 +62,9 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	}
 	if state.OK {
 		t.Fatalf("state.OK = %v, want false", state.OK)
+	}
+	if state.Version != 1 {
+		t.Fatalf("state version = %d, want rollback-compatible v1", state.Version)
 	}
 	if state.TargetCount != 2 || state.SuccessCount != 1 || state.FailureCount != 1 {
 		t.Fatalf("counts = target %d success %d failure %d, want 2/1/1", state.TargetCount, state.SuccessCount, state.FailureCount)
@@ -69,6 +82,44 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 		t.Fatalf("stat authorization file: %v", statErr)
 	} else if got := info.Mode().Perm(); got != 0o640 {
 		t.Fatalf("authorization file mode = %o, want 640", got)
+	}
+	var authorization enterpriseHookGuardianAuthorization
+	authorizationData, err := os.ReadFile(authorizationPath)
+	if err != nil {
+		t.Fatalf("read authorization: %v", err)
+	}
+	if err := json.Unmarshal(authorizationData, &authorization); err != nil {
+		t.Fatalf("unmarshal authorization: %v", err)
+	}
+	if authorization.Version != 1 || authorization.UpdatedAt != state.UpdatedAt {
+		t.Fatalf("authorization = %+v, want rollback-compatible matching v1 state %+v", authorization, state)
+	}
+	activation, exists, err := loadEnterpriseHookGuardianActivation(dir)
+	if err != nil || !exists {
+		t.Fatalf("load activation: exists=%t err=%v", exists, err)
+	}
+	if activation.UpdatedAt != state.UpdatedAt ||
+		activation.ManifestSHA256 != testEnterpriseHookManifestSHA256 ||
+		!validEnterpriseHookHex(activation.ReconcileID, 16) {
+		t.Fatalf("activation identity = %+v, want exact manifest-bound receipt", activation)
+	}
+	firstReconcileID := activation.ReconcileID
+	if err := writeEnterpriseHookGuardianState(
+		dir,
+		"/etc/defenseclaw/hook-guardian/targets.yaml",
+		testEnterpriseHookManifestSHA256,
+		rows,
+		1,
+		true,
+	); err != nil {
+		t.Fatalf("write second Guardian state: %v", err)
+	}
+	second, exists, err := loadEnterpriseHookGuardianActivation(dir)
+	if err != nil || !exists {
+		t.Fatalf("load second Guardian state: exists=%t err=%v", exists, err)
+	}
+	if second.ReconcileID == firstReconcileID {
+		t.Fatalf("two reconciles reused identity %q", second.ReconcileID)
 	}
 }
 
@@ -106,18 +157,73 @@ func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 	}
 }
 
+func TestWriteEnterpriseHookGuardianStateDoesNotAuthorizeFailedEnrollmentPublication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
+	}
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	dataDir := t.TempDir()
+	authorizationDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
+	rows := []enterpriseHookReconcileRow{{
+		SID:       "S-1-5-21-111-222-333-1001",
+		Connector: "codex",
+		OK:        true,
+	}}
+	if err := writeEnterpriseHookGuardianState(
+		dataDir,
+		"manifest.yaml",
+		testEnterpriseHookManifestSHA256,
+		rows,
+		0,
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, stateExists, stateErr := loadEnterpriseHookGuardianState(dataDir)
+	authorization, authorizationExists, authorizationErr := loadEnterpriseHookGuardianAuthorization(dataDir)
+	activation, activationExists, activationErr := loadEnterpriseHookGuardianActivation(dataDir)
+	if stateErr != nil || authorizationErr != nil || activationErr != nil ||
+		!stateExists || !authorizationExists || !activationExists {
+		t.Fatalf(
+			"persisted records: state=%t/%v authorization=%t/%v activation=%t/%v",
+			stateExists,
+			stateErr,
+			authorizationExists,
+			authorizationErr,
+			activationExists,
+			activationErr,
+		)
+	}
+	if state.OK || authorization.OK || activation.OK {
+		t.Fatalf("failed enrollment publication produced healthy records: state=%t authorization=%t activation=%t", state.OK, authorization.OK, activation.OK)
+	}
+	issues := compareEnterpriseHookGuardianRecords(
+		state,
+		authorization,
+		activation,
+		"manifest.yaml",
+		testEnterpriseHookManifestSHA256,
+	)
+	if len(issues) == 0 {
+		t.Fatal("failed enrollment publication produced acceptable activation coverage")
+	}
+}
+
 func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t *testing.T) {
 	originalCfg := cfg
 	originalManifest := enterpriseHookManifest
 	originalJSON := enterpriseHookJSON
 	originalStateTrust := enterpriseHookGuardianStateFileTrustCheck
 	originalAuthorizationTrust := enterpriseHookAuthorizationFileTrustCheck
+	originalManifestTrust := enterpriseHookManifestFileTrustCheck
 	t.Cleanup(func() {
 		cfg = originalCfg
 		enterpriseHookManifest = originalManifest
 		enterpriseHookJSON = originalJSON
 		enterpriseHookGuardianStateFileTrustCheck = originalStateTrust
 		enterpriseHookAuthorizationFileTrustCheck = originalAuthorizationTrust
+		enterpriseHookManifestFileTrustCheck = originalManifestTrust
 	})
 
 	scope := t.TempDir()
@@ -132,9 +238,21 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
 	enterpriseHookGuardianStateFileTrustCheck = func(string) error { return nil }
 	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	enterpriseHookManifestFileTrustCheck = func(string) error { return nil }
 
 	manifest := filepath.Join(scope, "hook-guardian", "targets.yaml")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	reconcileID := strings.Repeat("b", 32)
 	rows := []enterpriseHookReconcileRow{
 		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "claudecode", OK: true},
 		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "codex", OK: true},
@@ -157,9 +275,21 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 		SuccessCount:     len(rows),
 		ProtectedTargets: rows,
 	}
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        updatedAt,
+		ReconcileID:      reconcileID,
+		Manifest:         manifest,
+		ManifestSHA256:   manifestSHA256,
+		OK:               true,
+		TargetCount:      len(rows),
+		SuccessCount:     len(rows),
+		ProtectedTargets: rows,
+	}
 	for path, value := range map[string]any{
 		filepath.Join(dataDir, hookGuardianStateFile):                  state,
 		filepath.Join(authorizationDir, hookGuardianAuthorizationFile): authorization,
+		filepath.Join(authorizationDir, hookGuardianActivationFile):    activation,
 	} {
 		body, err := json.Marshal(value)
 		if err != nil {
@@ -177,7 +307,7 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 	cmd := &cobra.Command{}
 	cmd.SetOut(&stdout)
 	if err := runEnterpriseHooksStatus(cmd, nil); err != nil {
-		t.Fatalf("status from fresh LocalSystem records: %v", err)
+		t.Fatalf("status from fresh LocalSystem records: %v; report=%s", err, stdout.String())
 	}
 	var report enterpriseHookStatusReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
@@ -195,6 +325,19 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 	}
 	if _, err := os.Lstat(rows[0].UserHome); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("status touched protected target path: %v", err)
+	}
+
+	// The same path and a fresh record are insufficient after the manifest is
+	// replaced. Status must bind coverage to the exact currently parsed bytes.
+	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n# changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := runEnterpriseHooksStatus(cmd, nil); err == nil {
+		t.Fatal("status accepted Guardian coverage for replaced manifest bytes")
+	}
+	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	// A readable pair is not enough: if the protected authorization record no
@@ -244,11 +387,96 @@ func TestCompareEnterpriseHookGuardianRecordsRejectsStaleOrFutureReconcile(t *te
 		t.Run(tc.name, func(t *testing.T) {
 			state := enterpriseHookGuardianState{Version: 1, UpdatedAt: tc.updatedAt, OK: true}
 			authorization := enterpriseHookGuardianAuthorization{Version: 1, UpdatedAt: tc.updatedAt, OK: true}
-			issues := compareEnterpriseHookGuardianRecords(state, authorization, "")
+			activation := enterpriseHookGuardianActivation{
+				Version:        enterpriseHookGuardianActivationVersion,
+				UpdatedAt:      tc.updatedAt,
+				ReconcileID:    strings.Repeat("b", 32),
+				Manifest:       "manifest.yaml",
+				ManifestSHA256: testEnterpriseHookManifestSHA256,
+				OK:             true,
+			}
+			issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, "", "")
 			if !strings.Contains(strings.Join(issues, "\n"), tc.want) {
 				t.Fatalf("issues = %v, want %q", issues, tc.want)
 			}
 		})
+	}
+}
+
+func TestCompareEnterpriseHookGuardianRecordsRequiresExactActivationIdentity(t *testing.T) {
+	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	baseState := enterpriseHookGuardianState{
+		Version:   1,
+		UpdatedAt: updatedAt,
+		Manifest:  `C:\ProgramData\DefenseClaw\targets.yaml`,
+		OK:        true,
+	}
+	baseAuthorization := enterpriseHookGuardianAuthorization{
+		Version:   1,
+		UpdatedAt: updatedAt,
+		OK:        true,
+	}
+	baseActivation := enterpriseHookGuardianActivation{
+		Version:        enterpriseHookGuardianActivationVersion,
+		UpdatedAt:      updatedAt,
+		ReconcileID:    strings.Repeat("b", 32),
+		Manifest:       baseState.Manifest,
+		ManifestSHA256: testEnterpriseHookManifestSHA256,
+		OK:             true,
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*enterpriseHookGuardianActivation)
+		want   string
+	}{
+		{
+			name: "invalid activation version",
+			mutate: func(activation *enterpriseHookGuardianActivation) {
+				activation.Version = 2
+			},
+			want: "invalid identity",
+		},
+		{
+			name: "invalid reconcile ID",
+			mutate: func(activation *enterpriseHookGuardianActivation) {
+				activation.ReconcileID = "short"
+			},
+			want: "invalid identity",
+		},
+		{
+			name: "different record generation",
+			mutate: func(activation *enterpriseHookGuardianActivation) {
+				activation.UpdatedAt = time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
+			},
+			want: "does not identify the legacy record pair",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := baseState
+			authorization := baseAuthorization
+			activation := baseActivation
+			tc.mutate(&activation)
+			issues := compareEnterpriseHookGuardianRecords(
+				state,
+				authorization,
+				activation,
+				baseState.Manifest,
+				testEnterpriseHookManifestSHA256,
+			)
+			if got := strings.Join(issues, "\n"); !strings.Contains(got, tc.want) {
+				t.Fatalf("issues = %v, want %q", issues, tc.want)
+			}
+		})
+	}
+	issues := compareEnterpriseHookGuardianRecords(
+		baseState,
+		baseAuthorization,
+		baseActivation,
+		baseState.Manifest,
+		strings.Repeat("e", sha256.Size*2),
+	)
+	if got := strings.Join(issues, "\n"); !strings.Contains(got, "expected") {
+		t.Fatalf("issues = %v, want current-manifest digest mismatch", issues)
 	}
 }
 
@@ -266,7 +494,14 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, hookGuardianStateFile)); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", nil, 0)
+	err := writeEnterpriseHookGuardianState(
+		dir,
+		"manifest.yaml",
+		testEnterpriseHookManifestSHA256,
+		nil,
+		0,
+		true,
+	)
 	if err == nil || !strings.Contains(err.Error(), "refusing to write through symlink") {
 		t.Fatalf("writeEnterpriseHookGuardianState error = %v, want symlink refusal", err)
 	}
@@ -314,7 +549,14 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 			HookContractEntryUpdatedAt: "2026-08-16T12:34:55.123456789Z",
 		},
 	}}
-	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", successRows, 0); err != nil {
+	if err := writeEnterpriseHookGuardianState(
+		dir,
+		"manifest.yaml",
+		testEnterpriseHookManifestSHA256,
+		successRows,
+		0,
+		true,
+	); err != nil {
 		t.Fatalf("write initial state: %v", err)
 	}
 	protected, err := previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "", "codex")
@@ -347,7 +589,14 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 		OK:        false,
 		Error:     "temporary tamper failure",
 	}}
-	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", failureRows, 1); err != nil {
+	if err := writeEnterpriseHookGuardianState(
+		dir,
+		"manifest.yaml",
+		testEnterpriseHookManifestSHA256,
+		failureRows,
+		1,
+		true,
+	); err != nil {
 		t.Fatalf("write failure state: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(authorizationDir, hookGuardianAuthorizationFile))
@@ -444,7 +693,18 @@ func TestCompareEnterpriseHookGuardianRecordsRejectsExtraStaleProtectedTarget(t 
 		SuccessCount:     1,
 		ProtectedTargets: []enterpriseHookReconcileRow{alice, bob},
 	}
-	issues := compareEnterpriseHookGuardianRecords(state, authorization, "")
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        updatedAt,
+		ReconcileID:      strings.Repeat("b", 32),
+		Manifest:         "manifest.yaml",
+		ManifestSHA256:   testEnterpriseHookManifestSHA256,
+		OK:               true,
+		TargetCount:      1,
+		SuccessCount:     1,
+		ProtectedTargets: []enterpriseHookReconcileRow{alice},
+	}
+	issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, "", "")
 	if got := strings.Join(issues, "\n"); !strings.Contains(got, "extra or stale target codex@"+bob.SID) {
 		t.Fatalf("issues = %v, want stale protected-target rejection", issues)
 	}
@@ -492,10 +752,24 @@ func TestWriteEnterpriseHookGuardianStateRevokesRemovedManifestTarget(t *testing
 		Connector: "codex",
 		OK:        true,
 	}}
-	if err := writeEnterpriseHookGuardianState(dataDir, "manifest.yaml", rows, 0); err != nil {
+	if err := writeEnterpriseHookGuardianState(
+		dataDir,
+		"manifest.yaml",
+		testEnterpriseHookManifestSHA256,
+		rows,
+		0,
+		true,
+	); err != nil {
 		t.Fatalf("write initial authorization: %v", err)
 	}
-	if err := writeEnterpriseHookGuardianState(dataDir, "manifest.yaml", nil, 0); err != nil {
+	if err := writeEnterpriseHookGuardianState(
+		dataDir,
+		"manifest.yaml",
+		testEnterpriseHookManifestSHA256,
+		nil,
+		0,
+		true,
+	); err != nil {
 		t.Fatalf("write authorization after manifest removal: %v", err)
 	}
 

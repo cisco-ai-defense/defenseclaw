@@ -562,6 +562,21 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 	}
 	spec := specs[windowsManagedRuntimeRootKey(plan.Roots[0].SID, plan.Roots[0].UserHome)]
 	known := writeWindowsManagedRuntimeCleanupFixture(t, plan.Roots[0], target, spec)
+	for index, connectorName := range []string{"codex", "claudecode", "cursor"} {
+		leaf, err := windowsManagedRuntimeBundleLeaf(
+			connectorName,
+			fmt.Sprintf("%032x", index+1),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(plan.Roots[0].DataDir, "hooks", leaf)
+		if err := os.WriteFile(path, []byte("immutable managed runtime generation"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+		known = append(known, path)
+	}
 
 	// An unknown nested file must reject the entire tree before even one exact
 	// root/lock/token/script artifact is deleted.

@@ -980,7 +980,7 @@ $teardownFailurePreserved = & $module {
         return [pscustomobject]@{
             exit_code = 1
             output = @(
-                '{"schema_version":3,"action":"prepare","ok":false,"error":"resolve trusted ProgramData: restricted fixture"}'
+                '{"schema_version":4,"action":"prepare","ok":false,"error":"resolve trusted ProgramData: restricted fixture"}'
             )
         }
     }

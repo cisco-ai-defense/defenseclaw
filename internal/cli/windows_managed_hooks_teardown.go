@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	windowsManagedHooksTeardownSchema      = 3
+	windowsManagedHooksTeardownSchema      = 4
 	windowsManagedHooksTeardownJournalMax  = 32 << 20
 	windowsManagedHooksTeardownJournalFile = "managed-hooks-teardown-journal.json"
 )
@@ -40,18 +40,19 @@ type windowsManagedHooksTeardownTarget struct {
 }
 
 type windowsManagedHooksTeardownJournal struct {
-	SchemaVersion       int                                                        `json:"schema_version"`
-	Phase               string                                                     `json:"phase"`
-	ManifestPath        string                                                     `json:"manifest_path"`
-	ManifestFingerprint string                                                     `json:"manifest_fingerprint"`
-	HookBinary          string                                                     `json:"hook_binary"`
-	GatewayAddr         string                                                     `json:"gateway_addr"`
-	GatewayServiceName  string                                                     `json:"gateway_service_name"`
-	Targets             []windowsManagedHooksTeardownTarget                        `json:"targets"`
-	ClaudeTargetSIDs    []string                                                   `json:"claude_target_sids"`
-	Claude              enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot `json:"claude"`
-	CursorTargets       []enterprisehooks.WindowsCursorManagedRuntimeTarget        `json:"cursor_targets"`
-	Cursor              enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot `json:"cursor"`
+	SchemaVersion       int                                                           `json:"schema_version"`
+	Phase               string                                                        `json:"phase"`
+	ManifestPath        string                                                        `json:"manifest_path"`
+	ManifestFingerprint string                                                        `json:"manifest_fingerprint"`
+	HookBinary          string                                                        `json:"hook_binary"`
+	GatewayAddr         string                                                        `json:"gateway_addr"`
+	GatewayServiceName  string                                                        `json:"gateway_service_name"`
+	Targets             []windowsManagedHooksTeardownTarget                           `json:"targets"`
+	ClaudeTargetSIDs    []string                                                      `json:"claude_target_sids"`
+	Claude              enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot    `json:"claude"`
+	CursorTargets       []enterprisehooks.WindowsCursorManagedRuntimeTarget           `json:"cursor_targets"`
+	Cursor              enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot    `json:"cursor"`
+	SelectorTargets     []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot `json:"selector_targets"`
 }
 
 type windowsManagedHooksTeardownMachineCapture struct {
@@ -84,6 +85,8 @@ type windowsManagedHooksTeardownReport struct {
 	RollbackReady                bool                                `json:"rollback_ready"`
 	SafeToRemoveBinary           bool                                `json:"safe_to_remove_binary"`
 	RollbackCompleted            bool                                `json:"rollback_completed"`
+	FinalizationCompleted        bool                                `json:"finalization_completed"`
+	CollectedGenerationCount     int                                 `json:"collected_generation_count"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
 }
@@ -94,7 +97,7 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 		Short:  "Transactionally revoke managed hook machine wiring",
 		Hidden: true,
 	}
-	for _, action := range []string{"prepare", "verify", "rollback"} {
+	for _, action := range []string{"prepare", "verify", "rollback", "finalize"} {
 		action := action
 		var jsonOutput bool
 		child := &cobra.Command{
@@ -159,7 +162,8 @@ func runWindowsManagedHooksTeardown(
 		}
 		return report, err
 	}
-	if action != "prepare" && action != "verify" && action != "rollback" {
+	if action != "prepare" && action != "verify" && action != "rollback" &&
+		action != "finalize" {
 		return fail(fmt.Errorf("unsupported managed-hook teardown action %q", action))
 	}
 	// Authorization intentionally precedes protected layout discovery.
@@ -293,7 +297,7 @@ func runWindowsManagedHooksTeardown(
 		}
 		if err == nil {
 			report.RollbackReady = true
-			report.SafeToRemoveBinary = true
+			report.SafeToRemoveBinary = false
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
 		}
@@ -315,12 +319,12 @@ func runWindowsManagedHooksTeardown(
 		}
 		if err == nil {
 			var surviving int
-			surviving, err = verifyWindowsManagedHooksTeardownClean(opts)
+			surviving, err = verifyWindowsManagedHooksTeardownClean(opts, journal.Targets)
 			report.SurvivingOwnedPathReferences = surviving
 		}
 		if err == nil {
 			report.RollbackReady = true
-			report.SafeToRemoveBinary = true
+			report.SafeToRemoveBinary = false
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
 		}
@@ -356,6 +360,35 @@ func runWindowsManagedHooksTeardown(
 			report.VerifiedInstalledCount = report.EnrollmentTargetCount
 			report.SucceededCount = report.TargetCount
 		}
+	case "finalize":
+		var journal windowsManagedHooksTeardownJournal
+		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
+		if err == nil {
+			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
+		}
+		if err == nil && journal.Phase != "prepared" && journal.Phase != "finalized" {
+			err = fmt.Errorf(
+				"managed-hook teardown journal phase %q cannot be finalized",
+				journal.Phase,
+			)
+		}
+		if err == nil {
+			var surviving int
+			surviving, err = verifyWindowsManagedHooksTeardownClean(opts, journal.Targets)
+			report.SurvivingOwnedPathReferences = surviving
+		}
+		if err == nil {
+			report.CollectedGenerationCount, err = finalizeWindowsManagedHooksTeardown(
+				journal,
+				report.JournalPath,
+			)
+		}
+		if err == nil {
+			report.FinalizationCompleted = true
+			report.SafeToRemoveBinary = true
+			report.VerifiedCleanCount = report.TargetCount
+			report.SucceededCount = report.TargetCount
+		}
 	}
 	if err != nil {
 		return fail(err)
@@ -383,7 +416,10 @@ func prepareWindowsManagedHooksTeardown(
 		}
 		switch existing.Phase {
 		case "prepared":
-			surviving, verifyErr := verifyWindowsManagedHooksTeardownClean(opts)
+			surviving, verifyErr := verifyWindowsManagedHooksTeardownClean(
+				opts,
+				existing.Targets,
+			)
 			if verifyErr == nil {
 				return false, surviving, nil
 			}
@@ -397,7 +433,7 @@ func prepareWindowsManagedHooksTeardown(
 			return false, 0, errors.New(
 				"managed-hook teardown has an incomplete captured transaction; rollback is required",
 			)
-		case "rolled_back":
+		case "rolled_back", "finalized":
 			// A subsequent lifecycle attempt may safely replace a completed
 			// journal after the active set is verified below.
 		default:
@@ -408,9 +444,29 @@ func prepareWindowsManagedHooksTeardown(
 	}
 	if err := verifyWindowsManagedHooksTeardownInstalled(
 		opts,
+		identity.Targets,
 		claudeOpts.TargetSIDs,
 		codexTargets,
 		cursorOpts.Targets,
+		nil,
+	); err != nil {
+		return false, 0, err
+	}
+	selectorTargets, err := captureWindowsManagedHooksRuntimeSelectors(
+		identity.Targets,
+		identity.HookBinary,
+	)
+	if err != nil {
+		return false, 0, err
+	}
+	identity.SelectorTargets = selectorTargets
+	if err := verifyWindowsManagedHooksTeardownInstalled(
+		opts,
+		identity.Targets,
+		claudeOpts.TargetSIDs,
+		codexTargets,
+		cursorOpts.Targets,
+		identity.SelectorTargets,
 	); err != nil {
 		return false, 0, err
 	}
@@ -418,7 +474,6 @@ func prepareWindowsManagedHooksTeardown(
 	var captured enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
 	var capturedCursor enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot
 	persisted := false
-	var err error
 	captured, err = enterprisehooks.PrepareWindowsClaudeManagedPolicyTeardown(
 		claudeOpts,
 		func(snapshot enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot) error {
@@ -482,7 +537,13 @@ func prepareWindowsManagedHooksTeardown(
 			removeReport.SurvivingOwnedPathReferences,
 		)
 	}
-	surviving, err := verifyWindowsManagedHooksTeardownClean(opts)
+	if err := removeWindowsManagedHooksRuntimeSelectors(
+		identity.Targets,
+		identity.HookBinary,
+	); err != nil {
+		return restoreOnFailure(err, 0)
+	}
+	surviving, err := verifyWindowsManagedHooksTeardownClean(opts, identity.Targets)
 	if err != nil {
 		return restoreOnFailure(err, surviving)
 	}
@@ -542,6 +603,13 @@ func rollbackWindowsManagedHooksTeardown(
 	return completeWindowsManagedHooksTeardownRollback(
 		journal,
 		func() error {
+			if err := restoreWindowsManagedHooksRuntimeSelectors(
+				journal.Targets,
+				journal.HookBinary,
+				journal.SelectorTargets,
+			); err != nil {
+				return err
+			}
 			current, err := captureWindowsManagedHooksTeardownMachineState(
 				claudeOpts,
 				cursorOpts,
@@ -605,9 +673,11 @@ func rollbackWindowsManagedHooksTeardown(
 		func() error {
 			return verifyWindowsManagedHooksTeardownInstalled(
 				opts,
+				journal.Targets,
 				claudeOpts.TargetSIDs,
 				codexTargets,
 				cursorOpts.Targets,
+				journal.SelectorTargets,
 			)
 		},
 		func(updated windowsManagedHooksTeardownJournal) error {
@@ -791,8 +861,175 @@ func restoreWindowsCodexManagedHooks(
 	return nil
 }
 
+func windowsManagedHooksRuntimeSelectorOptions(
+	target windowsManagedHooksTeardownTarget,
+	hookBinary string,
+) enterprisehooks.WindowsManagedRuntimeSelectorSnapshotOptions {
+	return enterprisehooks.WindowsManagedRuntimeSelectorSnapshotOptions{
+		Connector:      target.Connector,
+		TargetSID:      target.SID,
+		DataDir:        target.DataDir,
+		HookExecutable: hookBinary,
+	}
+}
+
+func captureWindowsManagedHooksRuntimeSelectors(
+	targets []windowsManagedHooksTeardownTarget,
+	hookBinary string,
+) ([]enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot, error) {
+	snapshots := make(
+		[]enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot,
+		0,
+		len(targets),
+	)
+	for _, target := range targets {
+		snapshot, err := enterprisehooks.CaptureWindowsManagedRuntimeSelectorTarget(
+			windowsManagedHooksRuntimeSelectorOptions(target, hookBinary),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"capture %s managed runtime selector target %s: %w",
+				target.Connector,
+				target.SID,
+				err,
+			)
+		}
+		if !snapshot.Existed || !snapshot.CAS.Exists {
+			return nil, fmt.Errorf(
+				"managed runtime selector is missing enrolled %s target %s",
+				target.Connector,
+				target.SID,
+			)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
+}
+
+func removeWindowsManagedHooksRuntimeSelectors(
+	targets []windowsManagedHooksTeardownTarget,
+	hookBinary string,
+) error {
+	for _, target := range targets {
+		_, err := enterprisehooks.RemoveWindowsManagedRuntimeGenerationEnrollment(
+			enterprisehooks.WindowsManagedRuntimeGenerationRemovalOptions{
+				Connector:                target.Connector,
+				TargetSID:                target.SID,
+				DataDir:                  target.DataDir,
+				HookExecutable:           hookBinary,
+				PrimaryEnrollmentRemoved: true,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"remove %s managed runtime selector target %s: %w",
+				target.Connector,
+				target.SID,
+				err,
+			)
+		}
+		current, err := enterprisehooks.CaptureWindowsManagedRuntimeSelectorTarget(
+			windowsManagedHooksRuntimeSelectorOptions(target, hookBinary),
+		)
+		if err != nil {
+			return err
+		}
+		if current.Existed || current.CAS.Exists {
+			return fmt.Errorf(
+				"%s managed runtime selector target %s survived removal",
+				target.Connector,
+				target.SID,
+			)
+		}
+	}
+	return nil
+}
+
+func restoreWindowsManagedHooksRuntimeSelectors(
+	targets []windowsManagedHooksTeardownTarget,
+	hookBinary string,
+	snapshots []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot,
+) error {
+	if len(snapshots) != len(targets) {
+		return errors.New("managed runtime selector snapshot count does not match the teardown manifest")
+	}
+	for _, snapshot := range snapshots {
+		target, ok := windowsManagedHooksTeardownTargetForSelector(snapshot, targets)
+		if !ok {
+			return errors.New("managed runtime selector snapshot does not match the teardown manifest")
+		}
+		current, err := enterprisehooks.CaptureWindowsManagedRuntimeSelectorTarget(
+			windowsManagedHooksRuntimeSelectorOptions(target, hookBinary),
+		)
+		if err != nil {
+			return err
+		}
+		if current.CAS != snapshot.CAS && current.CAS.Exists {
+			return enterprisehooks.ErrWindowsManagedRuntimeGenerationConflict
+		}
+		if err := enterprisehooks.RestoreWindowsManagedRuntimeSelectorTargetCAS(
+			enterprisehooks.WindowsManagedRuntimeSelectorRestoreOptions{
+				Snapshot:        snapshot,
+				ExpectedCurrent: current.CAS,
+			},
+		); err != nil {
+			return fmt.Errorf(
+				"restore %s managed runtime selector target %s: %w",
+				target.Connector,
+				target.SID,
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+func finalizeWindowsManagedHooksTeardown(
+	journal windowsManagedHooksTeardownJournal,
+	journalPath string,
+) (int, error) {
+	collected := 0
+	for _, target := range journal.Targets {
+		removed, err := enterprisehooks.GarbageCollectWindowsManagedRuntimeGenerations(
+			enterprisehooks.WindowsManagedRuntimeGenerationGCOptions{
+				Connector:      target.Connector,
+				TargetSID:      target.SID,
+				DataDir:        target.DataDir,
+				HookExecutable: journal.HookBinary,
+			},
+		)
+		if err != nil {
+			return collected, fmt.Errorf(
+				"finalize %s managed runtime generations for %s: %w",
+				target.Connector,
+				target.SID,
+				err,
+			)
+		}
+		collected += removed
+	}
+	journal.Phase = "finalized"
+	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
+		return collected, err
+	}
+	return collected, nil
+}
+
+func windowsManagedHooksTeardownTargetForSelector(
+	snapshot enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot,
+	targets []windowsManagedHooksTeardownTarget,
+) (windowsManagedHooksTeardownTarget, bool) {
+	for _, target := range targets {
+		if target.Connector == snapshot.Connector && target.SID == snapshot.TargetSID {
+			return target, true
+		}
+	}
+	return windowsManagedHooksTeardownTarget{}, false
+}
+
 func verifyWindowsManagedHooksTeardownClean(
 	opts connector.WindowsCodexMachineRequirementsOptions,
+	targets []windowsManagedHooksTeardownTarget,
 ) (int, error) {
 	if err := enterprisehooks.VerifyWindowsClaudeManagedPolicyTeardown(); err != nil {
 		return 0, err
@@ -812,14 +1049,36 @@ func verifyWindowsManagedHooksTeardownClean(
 			"Codex machine requirements are not clean after managed-hook teardown",
 		)
 	}
+	for _, target := range targets {
+		snapshot, err := enterprisehooks.CaptureWindowsManagedRuntimeSelectorTarget(
+			windowsManagedHooksRuntimeSelectorOptions(target, opts.HookBinary),
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"verify %s selector teardown for %s: %w",
+				target.Connector,
+				target.SID,
+				err,
+			)
+		}
+		if snapshot.Existed || snapshot.CAS.Exists {
+			return 0, fmt.Errorf(
+				"managed runtime selector still enrolls %s target %s",
+				target.Connector,
+				target.SID,
+			)
+		}
+	}
 	return 0, nil
 }
 
 func verifyWindowsManagedHooksTeardownInstalled(
 	opts connector.WindowsCodexMachineRequirementsOptions,
+	targets []windowsManagedHooksTeardownTarget,
 	claudeTargets []string,
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
 	cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
+	selectorTargets []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot,
 ) error {
 	currentClaude, claudeActive, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
 	if err != nil {
@@ -856,6 +1115,40 @@ func verifyWindowsManagedHooksTeardownInstalled(
 		if !strings.EqualFold(currentCursor[index].SID, cursorTargets[index].SID) ||
 			!sameWindowsEnterprisePathCLI(currentCursor[index].DataDir, cursorTargets[index].DataDir) {
 			return errors.New("Cursor machine enrollment does not match the teardown manifest")
+		}
+	}
+	if selectorTargets != nil {
+		if len(selectorTargets) != len(targets) {
+			return errors.New("managed runtime selector snapshot count does not match the teardown manifest")
+		}
+		for _, expected := range selectorTargets {
+			if !expected.Existed || !expected.CAS.Exists {
+				return fmt.Errorf(
+					"managed runtime selector did not enroll %s target %s before teardown",
+					expected.Connector,
+					expected.TargetSID,
+				)
+			}
+			target, ok := windowsManagedHooksTeardownTargetForSelector(expected, targets)
+			if !ok {
+				return errors.New("managed runtime selector snapshot does not match the teardown manifest")
+			}
+			current, err := enterprisehooks.CaptureWindowsManagedRuntimeSelectorTarget(
+				windowsManagedHooksRuntimeSelectorOptions(target, opts.HookBinary),
+			)
+			if err != nil {
+				return err
+			}
+			if current.CAS != expected.CAS ||
+				current.Existed != expected.Existed ||
+				current.TargetSHA256 != expected.TargetSHA256 ||
+				!bytes.Equal(current.Target, expected.Target) {
+				return fmt.Errorf(
+					"managed runtime selector changed for %s target %s",
+					expected.Connector,
+					expected.TargetSID,
+				)
+			}
 		}
 	}
 	return nil
@@ -965,6 +1258,26 @@ func validateWindowsManagedHooksTeardownJournal(
 			return errors.New("managed-hook teardown journal target set changed")
 		}
 	}
+	if len(journal.SelectorTargets) != len(identity.Targets) {
+		return errors.New("managed-hook teardown journal selector target set changed")
+	}
+	for index, target := range identity.Targets {
+		snapshot := journal.SelectorTargets[index]
+		digest := sha256.Sum256(snapshot.Target)
+		targetDigest := "sha256:" + hex.EncodeToString(digest[:])
+		if snapshot.SchemaVersion != 1 ||
+			snapshot.Connector != target.Connector ||
+			snapshot.TargetSID != target.SID ||
+			!snapshot.Existed || !snapshot.CAS.Exists ||
+			len(snapshot.Target) == 0 ||
+			len(snapshot.Target) > windowsManagedHooksTeardownJournalMax ||
+			snapshot.TargetSHA256 != targetDigest ||
+			snapshot.CAS.TargetSHA256 != targetDigest ||
+			!windowsManagedHooksValidGenerationID(snapshot.CAS.GenerationID) ||
+			!windowsManagedHooksValidSHA256(snapshot.CAS.BundleSHA256) {
+			return errors.New("managed-hook teardown journal contains an invalid selector snapshot")
+		}
+	}
 	allowedClaudeTargets := make([]string, 0, len(identity.Targets))
 	for _, target := range identity.Targets {
 		if target.Connector == "claudecode" {
@@ -1015,6 +1328,24 @@ func validateWindowsManagedHooksTeardownJournal(
 		return errors.New("managed-hook teardown journal contains an invalid Cursor snapshot")
 	}
 	return nil
+}
+
+func windowsManagedHooksValidGenerationID(value string) bool {
+	if len(value) != 32 || value != strings.ToLower(value) {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 16
+}
+
+func windowsManagedHooksValidSHA256(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 ||
+		!strings.HasPrefix(value, "sha256:") ||
+		value != strings.ToLower(value) {
+		return false
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil && len(decoded) == sha256.Size
 }
 
 func readWindowsManagedHooksTeardownJournal(

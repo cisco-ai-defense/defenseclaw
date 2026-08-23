@@ -5,11 +5,32 @@
 package enterprisehooks
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadManifestWithSHA256BindsExactParsedBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	data := []byte("version: 1\ntargets:\n  - user: alice\n    connector: codex\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, digest, err := LoadManifestWithSHA256(path)
+	if err != nil {
+		t.Fatalf("LoadManifestWithSHA256: %v", err)
+	}
+	want := sha256.Sum256(data)
+	if digest != hex.EncodeToString(want[:]) {
+		t.Fatalf("digest = %q, want exact-byte digest %x", digest, want)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].Connector != "codex" {
+		t.Fatalf("manifest = %+v, want parsed Codex target", manifest)
+	}
+}
 
 func TestLoadManifestRejectsUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")

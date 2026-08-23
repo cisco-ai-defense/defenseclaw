@@ -23,13 +23,32 @@ const WindowsManagedSIDUnregisteredReason = "enterprise_managed_sid_unregistered
 // for the current process token. PolicyActive distinguishes a clean
 // post-uninstall absence from a damaged or unregistered active global policy.
 type WindowsManagedHookRuntime struct {
-	Connector          string
-	DataDir            string
-	PolicyActive       bool
-	Registered         bool
-	GatewayAddr        string
-	GatewayServiceName string
+	Connector          string `json:"connector"`
+	DataDir            string `json:"data_dir"`
+	PolicyActive       bool   `json:"policy_active"`
+	Registered         bool   `json:"registered"`
+	GatewayAddr        string `json:"gateway_addr"`
+	GatewayServiceName string `json:"gateway_service_name"`
+	ScopedToken        string `json:"-"`
+	GenerationID       string `json:"generation_id"`
 }
+
+// String deliberately omits ScopedToken so diagnostic formatting cannot
+// disclose the per-target gateway credential.
+func (r WindowsManagedHookRuntime) String() string {
+	return fmt.Sprintf(
+		"WindowsManagedHookRuntime{Connector:%q DataDir:%q PolicyActive:%t Registered:%t GatewayAddr:%q GatewayServiceName:%q GenerationID:%q}",
+		r.Connector,
+		r.DataDir,
+		r.PolicyActive,
+		r.Registered,
+		r.GatewayAddr,
+		r.GatewayServiceName,
+		r.GenerationID,
+	)
+}
+
+func (r WindowsManagedHookRuntime) GoString() string { return r.String() }
 
 // ResolveWindowsManagedHookRuntime performs connector-aware machine-policy
 // resolution before any target-owned configuration is trusted.
@@ -68,8 +87,6 @@ func resolveWindowsCursorManagedHookRuntime(
 		return result, nil
 	}
 	result.PolicyActive = true
-	result.GatewayAddr = target.gatewayAddr
-	result.GatewayServiceName = target.gatewayServiceName
 	if !sameWindowsEnterprisePath(target.hookExecutable, hookExecutable) {
 		return result, fmt.Errorf(
 			"enterprise hooks: invoking hook executable %s does not match active Cursor policy executable %s",
@@ -88,9 +105,22 @@ func resolveWindowsCursorManagedHookRuntime(
 			sid,
 		)
 	}
-	if err := validateWindowsCursorManagedRuntime(target); err != nil {
+	generation, err := windowsManagedRuntimeGenerationResolve(
+		WindowsManagedRuntimeGenerationResolveOptions{
+			Connector:               "cursor",
+			TargetSID:               target.targetSID.String(),
+			DataDir:                 target.dataDir,
+			HookExecutable:          hookExecutable,
+			MachinePolicyRegistered: true,
+		},
+	)
+	if err != nil {
 		return result, err
 	}
+	result.GatewayAddr = generation.GatewayAddr
+	result.GatewayServiceName = generation.GatewayServiceName
+	result.ScopedToken = generation.ScopedToken()
+	result.GenerationID = generation.GenerationID
 	result.Registered = true
 	return result, nil
 }
@@ -182,8 +212,6 @@ func resolveWindowsClaudeManagedHookRuntime(
 		return result, nil
 	}
 	result.PolicyActive = true
-	result.GatewayAddr = target.gatewayAddr
-	result.GatewayServiceName = target.gatewayServiceName
 	gatewayAddr, gatewayErr := connector.NormalizeWindowsManagedGatewayAddr(target.gatewayAddr)
 	if gatewayErr != nil || gatewayAddr != target.gatewayAddr {
 		return result, errors.New("enterprise hooks: active Claude policy has no valid protected gateway address")
@@ -209,9 +237,22 @@ func resolveWindowsClaudeManagedHookRuntime(
 			sid,
 		)
 	}
-	if err := validateWindowsClaudeManagedRuntime(target); err != nil {
+	generation, err := windowsManagedRuntimeGenerationResolve(
+		WindowsManagedRuntimeGenerationResolveOptions{
+			Connector:               "claudecode",
+			TargetSID:               target.targetSID.String(),
+			DataDir:                 target.dataDir,
+			HookExecutable:          hookExecutable,
+			MachinePolicyRegistered: true,
+		},
+	)
+	if err != nil {
 		return result, err
 	}
+	result.GatewayAddr = generation.GatewayAddr
+	result.GatewayServiceName = generation.GatewayServiceName
+	result.ScopedToken = generation.ScopedToken()
+	result.GenerationID = generation.GenerationID
 	result.Registered = true
 	return result, nil
 }
@@ -231,8 +272,6 @@ func resolveWindowsCodexManagedHookRuntime(
 		return result, nil
 	}
 	result.PolicyActive = true
-	result.GatewayAddr = registry.GatewayAddr
-	result.GatewayServiceName = registry.GatewayServiceName
 	targets := registry.Targets
 	tokenUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -257,13 +296,22 @@ func resolveWindowsCodexManagedHookRuntime(
 		)
 	}
 	result.DataDir = selected.DataDir
-	if err := validateWindowsCodexManagedRuntime(
-		selected.DataDir,
-		currentSID,
-		hookExecutable,
-	); err != nil {
+	generation, err := windowsManagedRuntimeGenerationResolve(
+		WindowsManagedRuntimeGenerationResolveOptions{
+			Connector:               "codex",
+			TargetSID:               currentSID.String(),
+			DataDir:                 selected.DataDir,
+			HookExecutable:          hookExecutable,
+			MachinePolicyRegistered: true,
+		},
+	)
+	if err != nil {
 		return result, err
 	}
+	result.GatewayAddr = generation.GatewayAddr
+	result.GatewayServiceName = generation.GatewayServiceName
+	result.ScopedToken = generation.ScopedToken()
+	result.GenerationID = generation.GenerationID
 	result.Registered = true
 	return result, nil
 }

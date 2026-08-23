@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	windowsManagedHooksLifecycleSchema      = 2
+	windowsManagedHooksLifecycleSchema      = 3
 	windowsManagedHooksLifecycleJournalMax  = 32 << 20
 	windowsManagedHooksLifecycleJournalFile = "managed-hooks-lifecycle-journal.json"
 )
@@ -43,6 +43,7 @@ type windowsManagedHooksLifecycleJournal struct {
 	Claude                enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot `json:"claude"`
 	PriorCursorTargets    []enterprisehooks.WindowsCursorManagedRuntimeTarget        `json:"prior_cursor_targets"`
 	Cursor                enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot `json:"cursor"`
+	RuntimeSelectors      []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot    `json:"runtime_selectors"`
 }
 
 type windowsManagedHooksLifecycleReport struct {
@@ -201,12 +202,17 @@ func runWindowsManagedHooksLifecycle(
 		if err != nil {
 			return fail(err)
 		}
+		runtimeSelectors, err := captureWindowsManagedHooksLifecycleSelectors()
+		if err != nil {
+			return fail(err)
+		}
 		journal := identity
 		journal.Phase = "captured"
 		journal.PriorClaudeTargetSIDs = prior
 		journal.Claude = snapshot
 		journal.PriorCursorTargets = priorCursor
 		journal.Cursor = cursorSnapshot
+		journal.RuntimeSelectors = runtimeSelectors
 		if err := writeWindowsManagedHooksLifecycleJournal(ctx.journalPath, journal); err != nil {
 			return fail(err)
 		}
@@ -226,9 +232,23 @@ func runWindowsManagedHooksLifecycle(
 			))
 		}
 		priorClaudeOpts := windowsManagedHooksPriorClaudeOptions(journal)
-		currentClaude, err := captureWindowsManagedHooksLifecycleClaude(ctx, journal)
+		currentSelectors, err := captureWindowsManagedHooksLifecycleSelectors()
 		if err != nil {
 			return fail(err)
+		}
+		if err := restoreWindowsManagedHooksLifecycleSelectors(
+			journal.RuntimeSelectors,
+			currentSelectors,
+		); err != nil {
+			return fail(err)
+		}
+		currentClaude, err := captureWindowsManagedHooksLifecycleClaude(ctx, journal)
+		if err != nil {
+			selectorErr := restoreWindowsManagedHooksLifecycleSelectors(
+				currentSelectors,
+				journal.RuntimeSelectors,
+			)
+			return fail(errors.Join(err, selectorErr))
 		}
 		if err := restoreWindowsManagedHooksLifecycleComposite(
 			func() error {
@@ -253,7 +273,11 @@ func runWindowsManagedHooksLifecycle(
 				)
 			},
 		); err != nil {
-			return fail(err)
+			selectorErr := restoreWindowsManagedHooksLifecycleSelectors(
+				currentSelectors,
+				journal.RuntimeSelectors,
+			)
+			return fail(errors.Join(err, selectorErr))
 		}
 		journal.Phase = "restored"
 		if err := writeWindowsManagedHooksLifecycleJournal(ctx.journalPath, journal); err != nil {
@@ -284,6 +308,12 @@ func runWindowsManagedHooksLifecycle(
 		); err != nil {
 			return fail(err)
 		}
+		if err := garbageCollectWindowsManagedHooksLifecycleGenerations(
+			journal,
+			ctx,
+		); err != nil {
+			return fail(err)
+		}
 		if err := os.Remove(ctx.journalPath); err != nil {
 			return fail(err)
 		}
@@ -310,6 +340,12 @@ func validateWindowsManagedHooksLifecycleRetirement(
 			)
 		}
 		return nil
+	}
+	if journal.Phase != "captured" && journal.Phase != "restored" {
+		return fmt.Errorf(
+			"refusing to retire managed-hook lifecycle snapshot in invalid phase %q",
+			journal.Phase,
+		)
 	}
 	if pending && journal.Phase != "restored" {
 		return fmt.Errorf(
@@ -410,6 +446,189 @@ func windowsManagedHooksLifecyclePendingExists(path string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+var windowsManagedHooksLifecycleSelectorConnectors = [...]string{
+	"claudecode",
+	"codex",
+	"cursor",
+}
+
+var (
+	windowsManagedHooksLifecycleSelectorCapture = enterprisehooks.CaptureWindowsManagedRuntimeSelector
+	windowsManagedHooksLifecycleSelectorRestore = enterprisehooks.RestoreWindowsManagedRuntimeSelectorCAS
+)
+
+func captureWindowsManagedHooksLifecycleSelectors() (
+	[]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+	error,
+) {
+	snapshots := make(
+		[]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+		0,
+		len(windowsManagedHooksLifecycleSelectorConnectors),
+	)
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		snapshot, err := windowsManagedHooksLifecycleSelectorCapture(
+			connectorName,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"capture %s managed runtime selector: %w",
+				connectorName,
+				err,
+			)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
+}
+
+func validateWindowsManagedHooksLifecycleSelectors(
+	snapshots []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+) error {
+	if len(snapshots) != len(windowsManagedHooksLifecycleSelectorConnectors) {
+		return fmt.Errorf(
+			"managed-hook lifecycle journal contains %d runtime selectors; expected %d",
+			len(snapshots),
+			len(windowsManagedHooksLifecycleSelectorConnectors),
+		)
+	}
+	for index, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		snapshot := snapshots[index]
+		if snapshot.SchemaVersion != 1 || snapshot.Connector != connectorName ||
+			snapshot.Existed != snapshot.CAS.Exists ||
+			len(snapshot.Selector) > windowsManagedHooksLifecycleJournalMax {
+			return fmt.Errorf(
+				"managed-hook lifecycle journal contains an invalid %s runtime selector snapshot",
+				connectorName,
+			)
+		}
+		if snapshot.Existed {
+			if len(snapshot.Selector) == 0 || snapshot.SelectorSHA256 == "" ||
+				snapshot.CAS.SHA256 != snapshot.SelectorSHA256 {
+				return fmt.Errorf(
+					"managed-hook lifecycle journal contains an incomplete %s runtime selector snapshot",
+					connectorName,
+				)
+			}
+		} else if len(snapshot.Selector) != 0 || snapshot.SelectorSHA256 != "" ||
+			snapshot.CAS.SHA256 != "" {
+			return fmt.Errorf(
+				"managed-hook lifecycle journal contains contradictory absent %s runtime selector state",
+				connectorName,
+			)
+		}
+	}
+	return nil
+}
+
+func restoreWindowsManagedHooksLifecycleSelectors(
+	desired []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+	current []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+) error {
+	if err := validateWindowsManagedHooksLifecycleSelectors(desired); err != nil {
+		return err
+	}
+	if err := validateWindowsManagedHooksLifecycleSelectors(current); err != nil {
+		return err
+	}
+	restored := 0
+	for index := range desired {
+		err := windowsManagedHooksLifecycleSelectorRestore(
+			enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions{
+				Snapshot:        desired[index],
+				ExpectedCurrent: current[index].CAS,
+			},
+		)
+		if err == nil {
+			restored++
+			continue
+		}
+		failures := []error{fmt.Errorf(
+			"restore %s managed runtime selector: %w",
+			desired[index].Connector,
+			err,
+		)}
+		for rollbackIndex := restored - 1; rollbackIndex >= 0; rollbackIndex-- {
+			rollbackErr := windowsManagedHooksLifecycleSelectorRestore(
+				enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions{
+					Snapshot:        current[rollbackIndex],
+					ExpectedCurrent: desired[rollbackIndex].CAS,
+				},
+			)
+			if rollbackErr != nil {
+				failures = append(failures, fmt.Errorf(
+					"restore current %s selector after composite failure: %w",
+					current[rollbackIndex].Connector,
+					rollbackErr,
+				))
+			}
+		}
+		return errors.Join(failures...)
+	}
+	return nil
+}
+
+func garbageCollectWindowsManagedHooksLifecycleGenerations(
+	journal windowsManagedHooksLifecycleJournal,
+	ctx windowsManagedHooksLifecycleContext,
+) error {
+	type cleanupTarget struct {
+		connector      string
+		sid            string
+		dataDir        string
+		hookExecutable string
+	}
+	targets := make(map[string]cleanupTarget, len(journal.Targets)+len(ctx.targets))
+	add := func(target windowsManagedHooksTeardownTarget, hookExecutable string) {
+		key := target.Connector + "\x00" + strings.ToUpper(target.SID)
+		targets[key] = cleanupTarget{
+			connector:      target.Connector,
+			sid:            target.SID,
+			dataDir:        target.DataDir,
+			hookExecutable: hookExecutable,
+		}
+	}
+	if journal.Phase == "restored" {
+		for _, target := range ctx.targets {
+			add(target, ctx.opts.HookBinary)
+		}
+		for _, target := range journal.Targets {
+			add(target, journal.HookBinary)
+		}
+	} else {
+		for _, target := range journal.Targets {
+			add(target, journal.HookBinary)
+		}
+		for _, target := range ctx.targets {
+			add(target, ctx.opts.HookBinary)
+		}
+	}
+	keys := make([]string, 0, len(targets))
+	for key := range targets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		target := targets[key]
+		if _, err := enterprisehooks.GarbageCollectWindowsManagedRuntimeGenerations(
+			enterprisehooks.WindowsManagedRuntimeGenerationGCOptions{
+				Connector:      target.connector,
+				TargetSID:      target.sid,
+				DataDir:        target.dataDir,
+				HookExecutable: target.hookExecutable,
+			},
+		); err != nil {
+			return fmt.Errorf(
+				"retire %s managed runtime generations for SID %s: %w",
+				target.connector,
+				target.sid,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 func windowsManagedHooksClaudeOptions(
@@ -663,6 +882,11 @@ func validateWindowsManagedHooksLifecycleJournal(
 		(journal.Cursor.ReceiptExisted != (journal.Cursor.ReceiptSecurityDescriptor != "" && journal.Cursor.ReceiptAttributes != 0)) ||
 		(cursorActive != (len(journal.PriorCursorTargets) != 0)) {
 		return errors.New("managed-hook lifecycle journal contains an invalid Cursor snapshot")
+	}
+	if err := validateWindowsManagedHooksLifecycleSelectors(
+		journal.RuntimeSelectors,
+	); err != nil {
+		return err
 	}
 	return nil
 }

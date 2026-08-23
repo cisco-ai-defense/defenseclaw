@@ -1804,6 +1804,11 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     ]
     lifecycle_status = module[
         module.index("function Get-DefenseClawLifecycleStatus") : module.index(
+            "function Test-DefenseClawGuardianCoverageReport"
+        )
+    ]
+    coverage = module[
+        module.index("function Test-DefenseClawGuardianCoverageReport") : module.index(
             "function Wait-DefenseClawFreshGuardianReconcile"
         )
     ]
@@ -1815,7 +1820,19 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "without a valid JSON report" in report
     assert "guardianReport.PSObject.Properties['errors']" in lifecycle_status
     assert '"guardian status: $(ConvertTo-DefenseClawBoundedDiagnostic' in lifecycle_status
-    assert "PSObject.Properties['errors']" in wait
+    assert "PSObject.Properties['errors']" in coverage
+    assert "guardian status is missing protected activation coverage" in coverage
+    assert "Rollback may have restored the prior strict v1 binary" in coverage
+    assert "reconcile_id" in coverage
+    assert "manifest_sha256" in coverage
+    assert "$PriorReconcileID" in coverage
+    assert "$PriorGeneration" in coverage
+    assert "$PriorStateIdentity" in coverage
+    assert "$CurrentStateIdentity" in coverage
+    assert "$ExpectedManifestSHA256" in coverage
+    assert "Test-DefenseClawGuardianCoverageReport `" in wait
+    assert "boundaryDeadline" not in wait
+    assert "Get-DefenseClawGuardianStateIdentity" in wait
     assert "last_status=$lastStatus" in wait
 
     install_like = module[
@@ -1851,6 +1868,19 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
         fresh_service_registration,
     )
     assert transaction < fresh_service_registration < fresh_snapshot
+
+    enumerator_refresh = install_like.index("Invoke-DefenseClawEnumeratorRefresh `")
+    target_plan = install_like.index("Invoke-DefenseClawTargetRuntimePreparation `")
+    guardian_wait = install_like.index("Wait-DefenseClawFreshGuardianReconcile `")
+    gateway_demand_start = install_like.index(
+        "Set-DefenseClawServiceStartMode `\n"
+        "                -Name $GatewayServiceName `\n"
+        "                -StartMode 3",
+        guardian_wait,
+    )
+    assert enumerator_refresh < target_plan < guardian_wait < gateway_demand_start
+    assert "$expectedGuardianManifestSHA256" in install_like
+    assert "-ExpectedManifestSHA256 $expectedGuardianManifestSHA256" in install_like
 
     upgrade_snapshot = install_like.index(
         "if ($Action -ne 'Install') {\n"
@@ -3638,6 +3668,7 @@ def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -
     deferred_manifest_acl = lifecycle.index(
         "Set-DefenseClawPathAcl `", deferred_manifest_replacement
     )
+    enumerator_refresh = lifecycle.index("Invoke-DefenseClawEnumeratorRefresh `")
     target_plan = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
     assert (
         transaction
@@ -3648,6 +3679,7 @@ def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -
         < deferred_source_publish
         < deferred_manifest_replacement
         < deferred_manifest_acl
+        < enumerator_refresh
         < target_plan
     )
     for acl_contract in (
@@ -3694,6 +3726,7 @@ def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -
     for event in (
         "manifest-published",
         "manifest-admin-acl",
+        "enumerator-refresh",
         "target-runtime:plan-enter",
         "target-runtime:plan",
         "target-runtime:stage",
@@ -3703,6 +3736,7 @@ def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -
     assert "& $script:HarnessRealSetPathAcl @PSBoundParameters" in smoke
     assert "Assert-DefenseClawCanonicalPathAcl `" in smoke
     assert "target-runtime plan preceded the replacement manifest ACL" in smoke
+    assert "target-runtime planning preceded synchronous enumeration" in smoke
     assert "'Repair'" in smoke
     assert "'Upgrade'" in smoke
     assert "$manifestPublished -gt $capture" in smoke

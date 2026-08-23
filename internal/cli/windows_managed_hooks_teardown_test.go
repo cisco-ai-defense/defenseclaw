@@ -6,6 +6,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -34,7 +36,7 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		}
 		actions = append(actions, child.Name())
 	}
-	if !slices.Equal(actions, []string{"prepare", "rollback", "verify"}) {
+	if !slices.Equal(actions, []string{"finalize", "prepare", "rollback", "verify"}) {
 		t.Fatalf("actions = %v", actions)
 	}
 }
@@ -170,6 +172,23 @@ func TestValidateWindowsManagedHooksTeardownJournalRejectsIdentityChanges(t *tes
 		GatewayServiceName:  "DefenseClawGateway",
 		Targets:             targets,
 	}
+	selectorBody := []byte("canonical-secretless-selector-target\n")
+	selectorDigestBytes := sha256.Sum256(selectorBody)
+	selectorDigest := "sha256:" + hex.EncodeToString(selectorDigestBytes[:])
+	identity.SelectorTargets = []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot{{
+		SchemaVersion: 1,
+		Connector:     "codex",
+		TargetSID:     targets[0].SID,
+		Existed:       true,
+		Target:        selectorBody,
+		TargetSHA256:  selectorDigest,
+		CAS: enterprisehooks.WindowsManagedRuntimeSelectorTargetCAS{
+			Exists:       true,
+			GenerationID: strings.Repeat("1", 32),
+			BundleSHA256: "sha256:" + strings.Repeat("2", 64),
+			TargetSHA256: selectorDigest,
+		},
+	}}
 	if err := validateWindowsManagedHooksTeardownJournal(identity, identity); err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +248,7 @@ func TestWindowsManagedHooksTeardownReportJSONContract(t *testing.T) {
 		"verified_installed_count",
 		"failed_count",
 		"surviving_owned_path_references",
+		"collected_generation_count",
 	} {
 		if _, ok := decoded[numeric].(float64); !ok {
 			t.Fatalf("%s = %#v, want JSON number", numeric, decoded[numeric])

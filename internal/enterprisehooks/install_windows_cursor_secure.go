@@ -66,6 +66,7 @@ func installWindowsCursorManagedResult(
 	}
 	var lockEntry connector.HookContractLockEntry
 	var lockUpdatedAt, entryUpdatedAt string
+	var generation WindowsManagedRuntimeGenerationPublication
 	err = connector.WithUserHomeDir(target.home, func() error {
 		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
 			verifiedHome, verifiedSID, err := validateWindowsEnterpriseHome(
@@ -146,11 +147,38 @@ func installWindowsCursorManagedResult(
 			if err := verifyWindowsCursorUserRuntime(target, hooksPath, adapterPath); err != nil {
 				return fail(err)
 			}
+			generation, err = prepareWindowsManagedRuntimeGenerationForInstall(
+				"cursor",
+				target.sid,
+				target.dataDir,
+				target.hookExecutable,
+				target.setup.APIAddr,
+				target.setup.HookAPIToken,
+				lockEntry.ContractID,
+				lockUpdatedAt,
+				entryUpdatedAt,
+			)
+			if err != nil {
+				return fail(fmt.Errorf(
+					"enterprise hooks: prepare immutable Cursor runtime generation: %w",
+					err,
+				))
+			}
 			return nil
 		})
 	})
 	if err != nil {
 		return InstallResult{}, err
+	}
+	generationCommit, err := windowsManagedRuntimeGenerationCommit(generation)
+	if err != nil {
+		return InstallResult{}, errors.Join(
+			fmt.Errorf("enterprise hooks: select immutable Cursor runtime generation: %w", err),
+			discardWindowsManagedRuntimeGeneration(generation),
+			windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
+				return restoreWindowsCursorUserRuntime(transaction)
+			}),
+		)
 	}
 	rollbackMachine, err := installWindowsCursorManagedPolicy(
 		target.setup,
@@ -158,26 +186,40 @@ func installWindowsCursorManagedResult(
 		target.dataDir,
 	)
 	if err != nil {
-		rollbackErr := windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
-			return restoreWindowsCursorUserRuntime(transaction)
-		})
-		if rollbackErr != nil {
-			return InstallResult{}, fmt.Errorf("%v (Cursor target runtime rollback failed: %v)", err, rollbackErr)
-		}
-		return InstallResult{}, err
+		return InstallResult{}, errors.Join(
+			err,
+			rollbackWindowsManagedRuntimeGeneration(generationCommit, generation),
+			windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
+				return restoreWindowsCursorUserRuntime(transaction)
+			}),
+		)
 	}
 	if err := verifyWindowsCursorMachineTarget(target); err != nil {
 		var rollbackErrors []error
 		machineRollbackSucceeded := true
+		generationRollbackSucceeded := false
 		if rollbackMachine != nil {
 			if rollbackErr := rollbackMachine(); rollbackErr != nil {
 				machineRollbackSucceeded = false
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("machine policy: %w", rollbackErr))
 			}
 		}
+		if machineRollbackSucceeded {
+			if rollbackErr := rollbackWindowsManagedRuntimeGeneration(
+				generationCommit,
+				generation,
+			); rollbackErr != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf(
+					"runtime generation: %w",
+					rollbackErr,
+				))
+			} else {
+				generationRollbackSucceeded = true
+			}
+		}
 		// If the global policy could not be rolled back, retain the matching
 		// protected runtime instead of leaving a live SID enrollment dangling.
-		if machineRollbackSucceeded {
+		if machineRollbackSucceeded && generationRollbackSucceeded {
 			if rollbackErr := windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
 				return restoreWindowsCursorUserRuntime(transaction)
 			}); rollbackErr != nil {
@@ -234,6 +276,29 @@ func verifyWindowsCursorManagedResult(
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)
 	if err != nil {
+		return InstallResult{}, err
+	}
+	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
+		target.dataDir,
+		"cursor",
+	)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf(
+			"enterprise hooks: load protected Cursor runtime generation timestamps: %w",
+			err,
+		)
+	}
+	if err := verifyWindowsManagedRuntimeGenerationForInstall(
+		"cursor",
+		target.sid,
+		target.dataDir,
+		target.hookExecutable,
+		target.setup.APIAddr,
+		target.setup.HookAPIToken,
+		lock.ContractID,
+		lockUpdatedAt,
+		entryUpdatedAt,
+	); err != nil {
 		return InstallResult{}, err
 	}
 	return InstallResult{

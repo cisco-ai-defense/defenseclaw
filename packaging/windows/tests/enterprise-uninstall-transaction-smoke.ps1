@@ -129,7 +129,7 @@ try {
                     -Force | Microsoft.PowerShell.Core\Out-Null
             }
             $body = [Text.Encoding]::UTF8.GetBytes(
-                ('{{"schema_version":1,"phase":"{0}","nonce":"fixed"}}' -f $Phase)
+                ('{{"schema_version":4,"phase":"{0}","nonce":"fixed"}}' -f $Phase)
             )
             [IO.File]::WriteAllBytes($Path, $body)
         }
@@ -515,7 +515,7 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)]
-                [ValidateSet('prepare', 'verify', 'rollback')]
+                [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
                 [string]$Action
             )
             if ($Action -ne 'rollback') {
@@ -1139,7 +1139,7 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)]
-                [ValidateSet('prepare', 'verify', 'rollback')]
+                [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
                 [string]$Action
             )
             $script:HarnessState.events.Add("teardown:$Action")
@@ -1229,7 +1229,36 @@ try {
                     }
                     return [pscustomobject]@{ ok = $true }
                 }
+                'finalize' {
+                    if ([bool]$script:HarnessState.active_references) {
+                        throw 'finalize observed a surviving machine reference'
+                    }
+                    if (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $Layout.PendingPath) {
+                        throw 'finalize ran before transaction commit'
+                    }
+                    $phase = Get-HarnessJournalPhase `
+                        -Path $Layout.ManagedHooksTeardownJournalPath
+                    if ($phase -notin @('prepared', 'finalized')) {
+                        throw "finalize received invalid journal phase: $phase"
+                    }
+                    Write-HarnessJournal `
+                        -Path $Layout.ManagedHooksTeardownJournalPath `
+                        -Phase 'finalized'
+                    return [pscustomobject]@{ ok = $true }
+                }
             }
+        }
+        function script:Complete-DefenseClawCommittedManagedHooksFinalization {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string]$GuardianServiceName
+            )
+            return Invoke-DefenseClawManagedHooksTeardownCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action finalize
         }
         function script:Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
             param(
@@ -1747,6 +1776,21 @@ try {
                 [switch]$SkipCodexMachineState
             )
         }
+        function script:Invoke-DefenseClawEnumeratorRefresh {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName
+            )
+            $null = $GatewayServiceName
+            $expectedManifestAcl = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory $false `
+                -Kind AdminFile `
+                -GatewayServiceSID $script:AdministratorsSID
+            Assert-DefenseClawCanonicalPathAcl `
+                -Path $Layout.ManifestPath `
+                -Expected $expectedManifestAcl
+            $script:HarnessState.events.Add('enumerator-refresh')
+        }
         function script:Invoke-DefenseClawCodexRequirementsCommand {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
@@ -1815,12 +1859,21 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                [string]$ExpectedManifestSHA256,
                 [int]$TimeoutSeconds = 90
             )
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
                 ] -ne 4) {
                 throw 'fresh guardian reconcile began after gateway became startable'
+            }
+            if ($ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                -not $script:HarnessState.ContainsKey(
+                    'target_runtime_manifest_sha256'
+                ) -or
+                $ExpectedManifestSHA256 -cne
+                    [string]$script:HarnessState.target_runtime_manifest_sha256) {
+                throw 'fresh guardian reconcile was not bound to the target-runtime manifest digest'
             }
             Start-DefenseClawService -Name $GuardianServiceName
             if ($script:HarnessState.ContainsKey('fail_fresh_guardian') -and
@@ -2441,6 +2494,9 @@ try {
                 $completeIndex = $script:HarnessState.events.IndexOf(
                     'complete'
                 )
+                $finalizeIndex = $script:HarnessState.events.IndexOf(
+                    'teardown:finalize'
+                )
                 $commitReceiptIndex = $script:HarnessState.events.IndexOf(
                     'self-receipt-committed'
                 )
@@ -2452,9 +2508,10 @@ try {
                         $verifyIndex -ge 0 -and
                         $stripIndex -gt $verifyIndex -and
                         $prepareReceiptIndex -gt $stripIndex -and
-                        $retiredIndex -gt $prepareReceiptIndex -and
-                        $completeIndex -gt $retiredIndex -and
-                        $commitReceiptIndex -gt $completeIndex -and
+                        $completeIndex -gt $prepareReceiptIndex -and
+                        $finalizeIndex -gt $completeIndex -and
+                        $retiredIndex -gt $finalizeIndex -and
+                        $commitReceiptIndex -gt $retiredIndex -and
                         $helperIndex -gt $commitReceiptIndex
                     ) `
                     -Message "$Name violated reference-clean retirement/commit/helper ordering"
@@ -2605,6 +2662,11 @@ try {
                     $script:HarnessState.events.Add(
                         'target-runtime:plan-enter'
                     )
+                    if ($script:HarnessState.events.IndexOf(
+                            'enumerator-refresh'
+                        ) -lt 0) {
+                        throw 'target-runtime planning preceded synchronous enumeration'
+                    }
                     $manifestWasReplaced = [bool](
                         $script:HarnessState.events.IndexOf(
                             'manifest-published'
@@ -2656,6 +2718,8 @@ try {
                         )
                         roots = @([pscustomobject]$root)
                     }
+                    $script:HarnessState.target_runtime_manifest_sha256 =
+                        [string]$plan.manifest_sha256
                     $outputPath = [string]$Arguments[7]
                     $script:HarnessState.events.Add('target-runtime:plan')
                     Write-HarnessTargetRuntimeExchange `
@@ -6133,6 +6197,116 @@ targets:
             receipt_bytes = $boundedIntentBytes
             expanded_bound_exercised = $expandedBoundExercised
         })
+
+        $coverageStartedAfter = [DateTime]::UtcNow.AddMinutes(-1)
+        $coverageGeneration = [DateTime]::UtcNow.ToString('o')
+        $coverageDigest = ('a' * 64) -join ''
+        $coveragePriorID = ('b' * 32) -join ''
+        $coverageFreshID = ('c' * 32) -join ''
+        $coveragePriorStateIdentity = '00000001:0000000000000001'
+        $coverageFreshStateIdentity = '00000001:0000000000000002'
+        $coverageState = [pscustomobject][ordered]@{
+            version = 1
+            updated_at = $coverageGeneration
+        }
+        $coverageAuthorization = [pscustomobject][ordered]@{
+            version = 1
+            updated_at = $coverageGeneration
+        }
+        $coverageActivation = [pscustomobject][ordered]@{
+            version = 1
+            updated_at = $coverageGeneration
+            reconcile_id = $coverageFreshID
+            manifest_sha256 = $coverageDigest
+        }
+        $coverageReport = [pscustomobject][ordered]@{
+            ok = $true
+            state = $coverageState
+            authorization = $coverageAuthorization
+            activation = $coverageActivation
+            errors = @()
+        }
+        $acceptedCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $coverageReport `
+            -PriorReconcileID $coveragePriorID `
+            -ExpectedManifestSHA256 $coverageDigest `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition ([bool]$acceptedCoverage.ok) `
+            -Message 'fresh exact Guardian coverage was rejected'
+
+        $coverageReport.activation.reconcile_id = $coveragePriorID
+        $staleCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $coverageReport `
+            -PriorReconcileID $coveragePriorID `
+            -ExpectedManifestSHA256 $coverageDigest `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$staleCoverage.ok) `
+            -Message 'stale Guardian reconcile ID was accepted'
+
+        $coverageReport.activation.reconcile_id = $coverageFreshID
+        $wrongDigestCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $coverageReport `
+            -PriorReconcileID $coveragePriorID `
+            -ExpectedManifestSHA256 (('d' * 64) -join '') `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$wrongDigestCoverage.ok) `
+            -Message 'wrong Guardian manifest digest was accepted'
+
+        $missingActivationReport = [pscustomobject][ordered]@{
+            ok = $true
+            state = $coverageState
+            authorization = $coverageAuthorization
+            errors = @()
+        }
+        $missingActivationCoverage =
+            Test-DefenseClawGuardianCoverageReport `
+                -Report $missingActivationReport `
+                -PriorReconcileID $coveragePriorID `
+                -ExpectedManifestSHA256 $coverageDigest `
+                -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$missingActivationCoverage.ok) `
+            -Message 'missing exact Guardian activation was accepted'
+
+        $legacyReport = [pscustomobject][ordered]@{
+            ok = $true
+            state = $coverageState
+            authorization = $coverageAuthorization
+            errors = @()
+        }
+        $legacyCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $legacyReport `
+            -PriorGeneration ([DateTime]::UtcNow.AddMinutes(-2).ToString('o')) `
+            -PriorStateIdentity $coveragePriorStateIdentity `
+            -CurrentStateIdentity $coverageFreshStateIdentity `
+            -ExpectedManifestSHA256 '' `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition ([bool]$legacyCoverage.ok) `
+            -Message 'rollback-compatible fresh v1 Guardian coverage was rejected'
+        $staleLegacyCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $legacyReport `
+            -PriorGeneration $coverageGeneration `
+            -PriorStateIdentity $coveragePriorStateIdentity `
+            -CurrentStateIdentity $coverageFreshStateIdentity `
+            -ExpectedManifestSHA256 '' `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$staleLegacyCoverage.ok) `
+            -Message 'stale rollback-compatible v1 Guardian coverage was accepted'
+        $sameInodeLegacyCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $legacyReport `
+            -PriorGeneration ([DateTime]::UtcNow.AddMinutes(-2).ToString('o')) `
+            -PriorStateIdentity $coveragePriorStateIdentity `
+            -CurrentStateIdentity $coveragePriorStateIdentity `
+            -ExpectedManifestSHA256 '' `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$sameInodeLegacyCoverage.ok) `
+            -Message 'same-inode rollback-compatible v1 Guardian coverage was accepted'
 
         return [pscustomobject]@{
             schema_version = 1

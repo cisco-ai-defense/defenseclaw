@@ -131,8 +131,9 @@ const (
 )
 
 type windowsManagedRuntimeCleanupSpec struct {
-	rootFiles map[string]windowsManagedRuntimeCleanupFileContract
-	hookFiles map[string]windowsManagedRuntimeCleanupFileContract
+	rootFiles            map[string]windowsManagedRuntimeCleanupFileContract
+	hookFiles            map[string]windowsManagedRuntimeCleanupFileContract
+	generationConnectors map[string]struct{}
 }
 
 var (
@@ -387,6 +388,7 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 				// inherited or otherwise noncanonical legacy file is refused.
 				".token": windowsManagedRuntimeCleanupCanonicalFile,
 			},
+			generationConnectors: make(map[string]struct{}),
 		}
 	}
 	for index, row := range manifest.Targets {
@@ -407,6 +409,7 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 		case "codex", "cursor", "claudecode":
 			spec.hookFiles[".hookcfg."+name] = windowsManagedRuntimeCleanupCanonicalFile
 			spec.hookFiles[".hook-"+name+".token"] = windowsManagedRuntimeCleanupCanonicalFile
+			spec.generationConnectors[name] = struct{}{}
 		case "":
 			return nil, fmt.Errorf("enterprise hooks: absent-baseline cleanup target %d has no connector", index)
 		default:
@@ -1349,6 +1352,9 @@ func validateWindowsManagedRuntimeLeaf(value string) error {
 	if value == ".defenseclaw" || validWindowsManagedRuntimeStageLeaf(value) {
 		return nil
 	}
+	if _, _, ok := parseWindowsManagedRuntimeBundleLeaf(value); ok {
+		return nil
+	}
 	for _, leaf := range []string{
 		"hooks",
 		"inventory.db", "inventory.db-journal", "inventory.db-shm", "inventory.db-wal",
@@ -1655,6 +1661,15 @@ func pinWindowsManagedRuntimeCleanupTree(
 	for _, name := range hookNames {
 		tree.hookNames[name] = struct{}{}
 		contract, allowed := spec.hookFiles[name]
+		if !allowed {
+			connectorName, _, parsed := parseWindowsManagedRuntimeBundleLeaf(name)
+			_, allowed = spec.generationConnectors[connectorName]
+			if parsed && allowed {
+				contract = windowsManagedRuntimeCleanupCanonicalFile
+			} else {
+				allowed = false
+			}
+		}
 		if !allowed {
 			return fail(fmt.Errorf("enterprise hooks: refuse managed hooks cleanup with unexpected entry %q", name))
 		}

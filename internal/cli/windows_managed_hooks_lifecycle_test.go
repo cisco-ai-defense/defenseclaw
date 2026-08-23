@@ -194,6 +194,18 @@ func windowsManagedHooksLifecycleJournalTestIdentity(t *testing.T) (
 	journal.Claude.StateExisted = true
 	journal.Claude.Policy = []byte("policy")
 	journal.Claude.State = []byte("state")
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		journal.RuntimeSelectors = append(
+			journal.RuntimeSelectors,
+			enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+				SchemaVersion: 1,
+				Connector:     connectorName,
+				CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+					Exists: false,
+				},
+			},
+		)
+	}
 	return identity, journal, allowed
 }
 
@@ -274,6 +286,62 @@ func TestValidateWindowsManagedHooksLifecycleJournalRejectsExpandedEnrollment(t 
 	}
 }
 
+func TestValidateWindowsManagedHooksLifecycleJournalRejectsMissingRuntimeSelectorSnapshot(t *testing.T) {
+	identity, journal, _ := windowsManagedHooksLifecycleJournalTestIdentity(t)
+	journal.RuntimeSelectors = journal.RuntimeSelectors[:2]
+	if err := validateWindowsManagedHooksLifecycleJournal(journal, identity); err == nil ||
+		!strings.Contains(err.Error(), "runtime selectors") {
+		t.Fatalf("missing runtime selector snapshot error = %v", err)
+	}
+}
+
+func TestRestoreWindowsManagedHooksLifecycleSelectorsCompensatesPartialRestore(t *testing.T) {
+	prior := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	current := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		prior = append(prior, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1,
+			Connector:     connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+				Exists: false,
+			},
+		})
+		current = append(current, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion:  1,
+			Connector:      connectorName,
+			Existed:        true,
+			Selector:       []byte("current-" + connectorName),
+			SelectorSHA256: "sha256:current-" + connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+				Exists: true,
+				SHA256: "sha256:current-" + connectorName,
+			},
+		})
+	}
+
+	originalRestore := windowsManagedHooksLifecycleSelectorRestore
+	t.Cleanup(func() { windowsManagedHooksLifecycleSelectorRestore = originalRestore })
+	var calls []string
+	injected := errors.New("injected Cursor selector restore failure")
+	windowsManagedHooksLifecycleSelectorRestore = func(
+		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
+	) error {
+		calls = append(calls, opts.Snapshot.Connector)
+		if len(calls) == 3 {
+			return injected
+		}
+		return nil
+	}
+	err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
+	if !errors.Is(err, injected) {
+		t.Fatalf("selector restore error = %v, want injected failure", err)
+	}
+	wantCalls := []string{"claudecode", "codex", "cursor", "codex", "claudecode"}
+	if !slices.Equal(calls, wantCalls) {
+		t.Fatalf("selector restore calls = %v, want %v", calls, wantCalls)
+	}
+}
+
 // validateWindowsManagedHooksLifecycleJournal must reject journals whose
 // HookBinary or GatewayServiceName no longer matches the current identity —
 // those fields remain part of the identity gate even though GatewayAddr
@@ -323,6 +391,10 @@ func TestWindowsManagedHooksLifecycleRetirementAllowsOnlyRestoredPendingJournal(
 			pending: true,
 			journal: &windowsManagedHooksLifecycleJournal{Phase: "captured"},
 			match:   "phase",
+		},
+		"committed invalid phase": {
+			journal: &windowsManagedHooksLifecycleJournal{Phase: "finalized"},
+			match:   "invalid phase",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -6,6 +6,8 @@ package enterprisehooks
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -35,18 +37,26 @@ type ManifestTarget struct {
 const enterpriseHookManifestMaxBytes int64 = 4 << 20
 
 func LoadManifest(path string) (Manifest, error) {
+	manifest, _, err := LoadManifestWithSHA256(path)
+	return manifest, err
+}
+
+// LoadManifestWithSHA256 returns the digest of the exact bounded bytes parsed
+// from the identity-stable manifest handle. Callers can therefore bind a
+// reconcile receipt to the same file generation they actually processed.
+func LoadManifestWithSHA256(path string) (Manifest, string, error) {
 	if strings.TrimSpace(path) == "" {
-		return Manifest{}, fmt.Errorf("enterprise hooks: manifest path is required")
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest path is required")
 	}
 	expected, err := os.Lstat(path)
 	if err != nil {
-		return Manifest{}, fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
 	}
 	if expected.Mode()&os.ModeSymlink != 0 || !expected.Mode().IsRegular() {
-		return Manifest{}, fmt.Errorf("enterprise hooks: manifest is not a regular non-link file: %s", path)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest is not a regular non-link file: %s", path)
 	}
 	if expected.Size() > enterpriseHookManifestMaxBytes {
-		return Manifest{}, fmt.Errorf(
+		return Manifest{}, "", fmt.Errorf(
 			"enterprise hooks: manifest %s exceeds %d-byte limit",
 			path,
 			enterpriseHookManifestMaxBytes,
@@ -54,18 +64,18 @@ func LoadManifest(path string) (Manifest, error) {
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return Manifest{}, fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return Manifest{}, fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() || !os.SameFile(expected, info) {
-		return Manifest{}, fmt.Errorf("enterprise hooks: manifest changed identity before open: %s", path)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest changed identity before open: %s", path)
 	}
 	if info.Size() > enterpriseHookManifestMaxBytes {
-		return Manifest{}, fmt.Errorf(
+		return Manifest{}, "", fmt.Errorf(
 			"enterprise hooks: manifest %s exceeds %d-byte limit",
 			path,
 			enterpriseHookManifestMaxBytes,
@@ -74,16 +84,16 @@ func LoadManifest(path string) (Manifest, error) {
 	current, err := os.Lstat(path)
 	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() || !os.SameFile(info, current) {
 		if err != nil {
-			return Manifest{}, fmt.Errorf("enterprise hooks: re-inspect manifest %s: %w", path, err)
+			return Manifest{}, "", fmt.Errorf("enterprise hooks: re-inspect manifest %s: %w", path, err)
 		}
-		return Manifest{}, fmt.Errorf("enterprise hooks: manifest changed identity before read: %s", path)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest changed identity before read: %s", path)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, enterpriseHookManifestMaxBytes+1))
 	if err != nil {
-		return Manifest{}, fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
 	}
 	if int64(len(data)) > enterpriseHookManifestMaxBytes {
-		return Manifest{}, fmt.Errorf(
+		return Manifest{}, "", fmt.Errorf(
 			"enterprise hooks: manifest %s exceeds %d-byte limit",
 			path,
 			enterpriseHookManifestMaxBytes,
@@ -94,7 +104,7 @@ func LoadManifest(path string) (Manifest, error) {
 	decoder.KnownFields(true)
 	decodeErr := decoder.Decode(&manifest)
 	if decodeErr != nil && decodeErr != io.EOF {
-		return Manifest{}, fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, decodeErr)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, decodeErr)
 	}
 	if decodeErr == nil {
 		var trailing any
@@ -102,14 +112,14 @@ func LoadManifest(path string) (Manifest, error) {
 			if err == nil {
 				err = fmt.Errorf("multiple YAML documents are not allowed")
 			}
-			return Manifest{}, fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
+			return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
 		}
 	}
 	if manifest.Version == 0 {
 		manifest.Version = 1
 	}
 	if manifest.Version != 1 {
-		return Manifest{}, fmt.Errorf("enterprise hooks: manifest version %d is not supported", manifest.Version)
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest version %d is not supported", manifest.Version)
 	}
 	seen := map[string]int{}
 	for i, target := range manifest.Targets {
@@ -117,21 +127,22 @@ func LoadManifest(path string) (Manifest, error) {
 			continue
 		}
 		if strings.TrimSpace(target.User) == "" && strings.TrimSpace(target.UserHome) == "" && strings.TrimSpace(target.SID) == "" {
-			return Manifest{}, fmt.Errorf("enterprise hooks: target %d requires user, user_home, or sid", i)
+			return Manifest{}, "", fmt.Errorf("enterprise hooks: target %d requires user, user_home, or sid", i)
 		}
 		if strings.TrimSpace(target.Connector) == "" {
-			return Manifest{}, fmt.Errorf("enterprise hooks: target %d requires connector", i)
+			return Manifest{}, "", fmt.Errorf("enterprise hooks: target %d requires connector", i)
 		}
 		if err := validateManifestPlatformTarget(i, target); err != nil {
-			return Manifest{}, err
+			return Manifest{}, "", err
 		}
 		key := manifestTargetKey(target)
 		if previous, duplicate := seen[key]; duplicate {
-			return Manifest{}, fmt.Errorf("enterprise hooks: target %d duplicates enabled target %d", i, previous)
+			return Manifest{}, "", fmt.Errorf("enterprise hooks: target %d duplicates enabled target %d", i, previous)
 		}
 		seen[key] = i
 	}
-	return manifest, nil
+	digest := sha256.Sum256(data)
+	return manifest, hex.EncodeToString(digest[:]), nil
 }
 
 func manifestTargetKey(target ManifestTarget) string {

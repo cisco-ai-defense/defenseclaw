@@ -4751,6 +4751,35 @@ function Get-DefenseClawGuardianGeneration {
     return [string]$value
 }
 
+function Get-DefenseClawGuardianReconcileID {
+    param($Report)
+    if ($null -eq $Report -or
+        $null -eq $Report.PSObject.Properties['activation'] -or
+        $null -eq $Report.activation -or
+        $null -eq $Report.activation.PSObject.Properties['reconcile_id']) {
+        return $null
+    }
+    return [string]$Report.activation.reconcile_id
+}
+
+function Get-DefenseClawGuardianStateIdentity {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $path = Microsoft.PowerShell.Management\Join-Path `
+        $Layout.StateRoot `
+        'hook_guardian_state.json'
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path `
+            -PathType Leaf)) {
+        return $null
+    }
+    [void](Assert-DefenseClawDescendant `
+        -Path $path `
+        -Root $Layout.StateRoot `
+        -Label 'hook guardian state')
+    Assert-DefenseClawNoReparsePath -Path $path
+    return Get-DefenseClawFileIdentity -Path $path
+}
+
 function Wait-DefenseClawServiceFailureRestartQuiescence {
     param(
         [Parameter(Mandatory)][string]$ServicesQuiescedAt,
@@ -5449,8 +5478,20 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.BrokerStateDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.AuthorizationDirectory -Kind AuthorizationDirectory -GatewayServiceSID $gatewaySID
-    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.AuthorizationLedgerPath -PathType Leaf) {
-        Set-DefenseClawPathAcl -Path $Layout.AuthorizationLedgerPath -Kind AuthorizationFile -GatewayServiceSID $gatewaySID
+    foreach ($authorizationFile in @(
+        $Layout.AuthorizationLedgerPath,
+        (Microsoft.PowerShell.Management\Join-Path `
+            $Layout.AuthorizationDirectory `
+            'activation.json')
+    )) {
+        if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $authorizationFile `
+                -PathType Leaf) {
+            Set-DefenseClawPathAcl `
+                -Path $authorizationFile `
+                -Kind AuthorizationFile `
+                -GatewayServiceSID $gatewaySID
+        }
     }
     Set-DefenseClawPathAcl -Path $Layout.LogDirectory -Kind LogDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GatewayLogDirectory -Kind GatewayLogDirectory -GatewayServiceSID $gatewaySID
@@ -10314,6 +10355,62 @@ function Complete-DefenseClawTransaction {
     }
 }
 
+function Get-DefenseClawManagedHooksTeardownJournalPhase {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
+            -PathType Leaf)) {
+        throw 'managed-hook teardown journal is missing or is not a regular file'
+    }
+    Assert-DefenseClawDescendant `
+        -Path $Layout.ManagedHooksTeardownJournalPath `
+        -Root $Layout.StateRoot `
+        -Label 'managed-hook teardown journal' |
+        Microsoft.PowerShell.Core\Out-Null
+    Assert-DefenseClawNoReparsePath `
+        -Path $Layout.ManagedHooksTeardownJournalPath
+    $item = Microsoft.PowerShell.Management\Get-Item `
+        -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
+        -Force
+    if ([int64]$item.Length -gt 4194304) {
+        throw 'managed-hook teardown journal exceeds the 4194304-byte limit'
+    }
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.ManagedHooksTeardownJournalPath `
+        -AllowedWriterSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -AllowedReaderSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+        -AllowInheritance `
+        -RejectUntrustedRead
+    try {
+        $journal = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    }
+    catch {
+        throw "cannot parse managed-hook teardown journal: $($_.Exception.Message)"
+    }
+    if ($null -eq $journal.PSObject.Properties['schema_version'] -or
+        [Convert]::ToInt64($journal.schema_version) -ne 4 -or
+        [string]$journal.phase -notin @(
+            'captured',
+            'prepared',
+            'rolled_back',
+            'finalized'
+        )) {
+        throw 'managed-hook teardown journal has an invalid schema or phase'
+    }
+    return [string]$journal.phase
+}
+
 function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -10337,42 +10434,13 @@ function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
         throw 'refusing to retire the managed-hook teardown journal while the owned hook binary still exists'
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.ManagedHooksTeardownJournalPath)) {
+            -LiteralPath $Layout.ManagedHooksTeardownJournalPath)) {
         return $false
     }
-    if (-not (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
-        -PathType Leaf)) {
-        throw 'managed-hook teardown journal is not a regular file'
+    if ((Get-DefenseClawManagedHooksTeardownJournalPhase `
+            -Layout $Layout) -cne 'finalized') {
+        throw 'refusing to retire a managed-hook teardown journal before finalization'
     }
-    Assert-DefenseClawDescendant `
-        -Path $Layout.ManagedHooksTeardownJournalPath `
-        -Root $Layout.StateRoot `
-        -Label 'committed managed-hook teardown journal' |
-        Microsoft.PowerShell.Core\Out-Null
-    Assert-DefenseClawNoReparsePath `
-        -Path $Layout.ManagedHooksTeardownJournalPath
-    $journal = Microsoft.PowerShell.Management\Get-Item `
-        -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
-        -Force
-    if ([int64]$journal.Length -gt 4194304) {
-        throw 'managed-hook teardown journal exceeds the 4194304-byte retirement limit'
-    }
-    Assert-DefenseClawPathAcl `
-        -Path $Layout.ManagedHooksTeardownJournalPath `
-        -AllowedWriterSIDs @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        ) `
-        -AllowedReaderSIDs @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        ) `
-        -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
-        -AllowInheritance `
-        -RejectUntrustedRead
     Microsoft.PowerShell.Management\Remove-Item `
         -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
         -Force
@@ -10792,6 +10860,34 @@ function Invoke-DefenseClawGatewayCommand {
             }
         }
     }
+}
+
+function Invoke-DefenseClawEnumeratorRefresh {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $probe = Invoke-DefenseClawGatewayCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Arguments @(
+            'enterprise', 'windows', 'enumerate',
+            '--manifest', [string]$Layout.ManifestPath,
+            '--once'
+        ) `
+        -Capture `
+        -AllowFailure
+    if ([int]$probe.exit_code -ne 0) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
+        throw "synchronous target enumeration failed with exit $($probe.exit_code): $detail"
+    }
+    $expected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory:$false `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    Assert-DefenseClawCanonicalPathAcl `
+        -Path $Layout.ManifestPath `
+        -Expected $expected
 }
 
 function New-DefenseClawTargetRuntimeExchangeFile {
@@ -11539,7 +11635,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         -GuardianServiceName $GuardianServiceName `
         -FinalReport $final `
         -FinalReportPath $finalPath)
-    return $final
+    return $plan
 }
 
 function Assert-DefenseClawTargetRuntimeProductionChildrenExclusive {
@@ -12210,7 +12306,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)]
-        [ValidateSet('prepare', 'verify', 'rollback')]
+        [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
         [string]$Action
     )
     Assert-DefenseClawAdministrator
@@ -12245,7 +12341,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         throw "managed-hook teardown command emitted $($reports.Count) JSON reports; expected exactly one"
     }
     $report = $reports[0]
-    if ([int]$report.schema_version -ne 3) {
+    if ([int]$report.schema_version -ne 4) {
         throw "unsupported managed-hook teardown report schema: $($report.schema_version)"
     }
     if ([string]$report.action -cne $Action) {
@@ -12295,7 +12391,8 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         'verified_clean_count',
         'verified_installed_count',
         'failed_count',
-        'surviving_owned_path_references'
+        'surviving_owned_path_references',
+        'collected_generation_count'
     )) {
         $property = $report.PSObject.Properties[$name]
         if ($null -eq $property -or
@@ -12349,20 +12446,24 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         throw "managed-hook teardown $Action did not complete every manifest target"
     }
     if ($Action -in @('prepare', 'verify')) {
-        foreach ($booleanName in @('rollback_ready', 'safe_to_remove_binary')) {
-            $property = $report.PSObject.Properties[$booleanName]
-            if ($null -eq $property -or
-                $property.Value -isnot [bool] -or
-                -not [bool]$property.Value) {
-                throw "managed-hook teardown $Action did not attest $booleanName"
-            }
+        $rollbackReady = $report.PSObject.Properties['rollback_ready']
+        $safeToRemove = $report.PSObject.Properties['safe_to_remove_binary']
+        if ($null -eq $rollbackReady -or
+            $rollbackReady.Value -isnot [bool] -or
+            -not [bool]$rollbackReady.Value) {
+            throw "managed-hook teardown $Action did not attest rollback_ready"
+        }
+        if ($null -eq $safeToRemove -or
+            $safeToRemove.Value -isnot [bool] -or
+            [bool]$safeToRemove.Value) {
+            throw "managed-hook teardown $Action prematurely attested safe_to_remove_binary"
         }
         if ($counts.verified_clean_count -ne $counts.target_count -or
             $counts.surviving_owned_path_references -ne 0) {
             throw "managed-hook teardown $Action left an unverified target or owned binary reference"
         }
     }
-    else {
+    elseif ($Action -eq 'rollback') {
         $rollbackCompleted = $report.PSObject.Properties[
             'rollback_completed'
         ]
@@ -12376,6 +12477,20 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
             [int64]$counts.verified_installed_count -ne
                 $counts.enrollment_target_count) {
             throw 'managed-hook teardown rollback did not restore and verify the exact pre-teardown enrollment'
+        }
+    }
+    else {
+        $finalized = $report.PSObject.Properties['finalization_completed']
+        $safeToRemove = $report.PSObject.Properties['safe_to_remove_binary']
+        if ($null -eq $finalized -or
+            $finalized.Value -isnot [bool] -or
+            -not [bool]$finalized.Value -or
+            $null -eq $safeToRemove -or
+            $safeToRemove.Value -isnot [bool] -or
+            -not [bool]$safeToRemove.Value -or
+            $counts.verified_clean_count -ne $counts.target_count -or
+            $counts.surviving_owned_path_references -ne 0) {
+            throw 'managed-hook teardown finalization did not retire every inactive runtime generation'
         }
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path `
@@ -12449,7 +12564,7 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         throw "managed-hook lifecycle snapshot emitted $($reports.Count) JSON reports; expected exactly one"
     }
     $report = $reports[0]
-    if ([int]$report.schema_version -ne 2) {
+    if ([int]$report.schema_version -ne 3) {
         throw "unsupported managed-hook lifecycle snapshot schema: $($report.schema_version)"
     }
     if ([string]$report.action -cne $Action) {
@@ -13270,13 +13385,22 @@ function Assert-DefenseClawEnterpriseDeployment {
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $authorizationDirectoryRights `
         -RejectUntrustedRead
-    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.AuthorizationLedgerPath -PathType Leaf) {
-        Assert-DefenseClawPathAcl `
-            -Path $Layout.AuthorizationLedgerPath `
-            -AllowedWriterSIDs $adminWriters `
-            -AllowedReaderSIDs $gatewayReaders `
-            -RequiredRights $authorizationFileRights `
-            -RejectUntrustedRead
+    foreach ($authorizationFile in @(
+        $Layout.AuthorizationLedgerPath,
+        (Microsoft.PowerShell.Management\Join-Path `
+            $Layout.AuthorizationDirectory `
+            'activation.json')
+    )) {
+        if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $authorizationFile `
+                -PathType Leaf) {
+            Assert-DefenseClawPathAcl `
+                -Path $authorizationFile `
+                -AllowedWriterSIDs $adminWriters `
+                -AllowedReaderSIDs $gatewayReaders `
+                -RequiredRights $authorizationFileRights `
+                -RejectUntrustedRead
+        }
     }
     foreach ($path in @($Layout.RuntimeDirectory, $Layout.GatewayLogDirectory)) {
         Assert-DefenseClawPathAcl `
@@ -13891,27 +14015,155 @@ function Get-DefenseClawLifecycleStatus {
     }
 }
 
+function Test-DefenseClawGuardianCoverageReport {
+    param(
+        $Report,
+        [AllowEmptyString()][string]$PriorReconcileID,
+        [AllowEmptyString()][string]$PriorGeneration,
+        [AllowEmptyString()][string]$PriorStateIdentity,
+        [AllowEmptyString()][string]$CurrentStateIdentity,
+        [AllowEmptyString()][string]$ExpectedManifestSHA256,
+        [Parameter(Mandatory)][DateTime]$StartedAfter
+    )
+    $reject = {
+        param([string]$Reason)
+        return [pscustomobject][ordered]@{
+            ok = $false
+            generation = $null
+            reconcile_id = $null
+            reason = $Reason
+        }
+    }
+    if ($null -eq $Report -or
+        $null -eq $Report.PSObject.Properties['ok'] -or
+        -not [bool]$Report.ok) {
+        $issues = [Collections.Generic.List[string]]::new()
+        if ($null -ne $Report -and
+            $null -ne $Report.PSObject.Properties['errors']) {
+            foreach ($issue in @($Report.PSObject.Properties['errors'].Value)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$issue)) {
+                    $issues.Add([string]$issue)
+                }
+            }
+        }
+        if ($issues.Count -eq 0) {
+            $issues.Add('guardian status reported ok=false without an error')
+        }
+        return & $reject ($issues -join '; ')
+    }
+    $generation = Get-DefenseClawGuardianGeneration -Report $Report
+    if ([string]::IsNullOrWhiteSpace([string]$generation)) {
+        return & $reject 'guardian status has no generation timestamp'
+    }
+    try {
+        $generationTime = [DateTime]::Parse(
+            [string]$generation,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+    }
+    catch {
+        return & $reject "guardian generation '$generation' is invalid"
+    }
+    if ($generationTime -lt $StartedAfter.ToUniversalTime()) {
+        return & $reject "guardian generation '$generation' predates activation"
+    }
+    $reconcileID = $null
+    if ([string]::IsNullOrWhiteSpace($ExpectedManifestSHA256)) {
+        # Rollback may have restored the prior strict v1 binary. Its fresh,
+        # healthy status is sufficient only for this no-digest recovery lane;
+        # normal Install/Repair/Upgrade activation always supplies a digest.
+        if (-not [string]::IsNullOrWhiteSpace($PriorGeneration) -and
+            [string]$generation -ceq $PriorGeneration) {
+            return & $reject "legacy guardian generation '$generation' is not fresh"
+        }
+        if ([string]::IsNullOrWhiteSpace($CurrentStateIdentity) -or
+            (-not [string]::IsNullOrWhiteSpace($PriorStateIdentity) -and
+                $CurrentStateIdentity -ceq $PriorStateIdentity)) {
+            return & $reject 'legacy guardian state inode is not fresh'
+        }
+    }
+    else {
+        if ($null -eq $Report.PSObject.Properties['activation'] -or
+            $null -eq $Report.activation) {
+            return & $reject 'guardian status is missing protected activation coverage'
+        }
+        $activation = $Report.activation
+        foreach ($name in @(
+            'version',
+            'updated_at',
+            'reconcile_id',
+            'manifest_sha256'
+        )) {
+            if ($null -eq $activation.PSObject.Properties[$name]) {
+                return & $reject "guardian activation is missing $name"
+            }
+        }
+        try {
+            if ([Convert]::ToInt64($activation.version) -ne 1) {
+                return & $reject 'guardian activation has an unsupported version'
+            }
+        }
+        catch {
+            return & $reject 'guardian activation has an invalid version'
+        }
+        $reconcileID = [string]$activation.reconcile_id
+        $manifestSHA256 = [string]$activation.manifest_sha256
+        if ($reconcileID -cnotmatch '^[0-9a-f]{32}$' -or
+            $manifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            return & $reject 'guardian activation has an invalid reconcile identity'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($PriorReconcileID) -and
+            $reconcileID -ceq $PriorReconcileID) {
+            return & $reject "guardian reconcile ID '$reconcileID' is not fresh"
+        }
+        $activationGeneration = if ($activation.updated_at -is [DateTime]) {
+            ([DateTime]$activation.updated_at).ToUniversalTime().ToString(
+                'yyyy-MM-ddTHH:mm:ssZ'
+            )
+        }
+        else {
+            [string]$activation.updated_at
+        }
+        if ($activationGeneration -cne [string]$generation) {
+            return & $reject 'guardian activation does not identify the reported generation'
+        }
+        if ($manifestSHA256 -cne $ExpectedManifestSHA256) {
+            return & $reject (
+                "guardian manifest SHA-256 '$manifestSHA256' does not match " +
+                "expected '$ExpectedManifestSHA256'"
+            )
+        }
+    }
+    return [pscustomobject][ordered]@{
+        ok = $true
+        generation = [string]$generation
+        reconcile_id = $reconcileID
+        reason = ''
+    }
+}
+
 function Wait-DefenseClawFreshGuardianReconcile {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
+        [string]$ExpectedManifestSHA256,
         [int]$TimeoutSeconds = 90
     )
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
+        $ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'expected Guardian manifest SHA-256 is invalid'
+    }
     $priorReport = Get-DefenseClawGuardianStatusReport `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
-    $priorGeneration = [string](Get-DefenseClawGuardianGeneration -Report $priorReport)
-    # Guardian generation timestamps have one-second precision. Avoid
-    # restarting in the same encoded second, which would make a genuinely new
-    # LocalSystem reconcile look stale.
-    if (-not [string]::IsNullOrWhiteSpace($priorGeneration)) {
-        $boundaryDeadline = [DateTime]::UtcNow.AddSeconds(2)
-        while ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') -eq $priorGeneration -and
-            [DateTime]::UtcNow -lt $boundaryDeadline) {
-            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 100
-        }
-    }
+    $priorReconcileID = [string](Get-DefenseClawGuardianReconcileID `
+        -Report $priorReport)
+    $priorGeneration = [string](Get-DefenseClawGuardianGeneration `
+        -Report $priorReport)
+    $priorStateIdentity = [string](Get-DefenseClawGuardianStateIdentity `
+        -Layout $Layout)
     $startedAfter = [DateTime]::UtcNow.AddSeconds(-1)
     Stop-DefenseClawService -Name $GuardianServiceName
     Start-DefenseClawService -Name $GuardianServiceName
@@ -13922,51 +14174,25 @@ function Wait-DefenseClawFreshGuardianReconcile {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
-        $reportOK = $null -ne $report -and
-            $null -ne $report.PSObject.Properties['ok'] -and
-            [bool]$report.ok
-        $generation = if ($reportOK) { Get-DefenseClawGuardianGeneration -Report $report } else { $null }
-        if (-not $reportOK) {
-            $issues = [Collections.Generic.List[string]]::new()
-            if ($null -ne $report -and $null -ne $report.PSObject.Properties['errors']) {
-                foreach ($issue in @($report.PSObject.Properties['errors'].Value)) {
-                    if (-not [string]::IsNullOrWhiteSpace([string]$issue)) {
-                        $issues.Add([string]$issue)
-                    }
-                }
-            }
-            if ($issues.Count -eq 0) {
-                $issues.Add('guardian status reported ok=false without an error')
-            }
-            $lastStatus = ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')
+        $currentStateIdentity = [string](
+            Get-DefenseClawGuardianStateIdentity -Layout $Layout
+        )
+        $coverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $report `
+            -PriorReconcileID $priorReconcileID `
+            -PriorGeneration $priorGeneration `
+            -PriorStateIdentity $priorStateIdentity `
+            -CurrentStateIdentity $currentStateIdentity `
+            -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
+            -StartedAfter $startedAfter
+        if ([bool]$coverage.ok) {
+            return [string]$coverage.generation
         }
-        elseif ($null -eq $generation) {
-            $lastStatus = 'guardian status reported ok=true without a generation'
-        }
-        else {
-            $lastStatus = "guardian status generation '$generation' is not fresh"
-        }
-        if ($null -ne $generation) {
-            try {
-                $generationTime = [DateTime]::Parse(
-                    $generation,
-                    [Globalization.CultureInfo]::InvariantCulture,
-                    [Globalization.DateTimeStyles]::RoundtripKind
-                ).ToUniversalTime()
-                if (($generation -ne $priorGeneration -or [string]::IsNullOrWhiteSpace($priorGeneration)) -and
-                    $generationTime -ge $startedAfter) {
-                    return $generation
-                }
-            }
-            catch {
-                # Keep waiting for a complete, parseable guardian record.
-                $lastStatus = ConvertTo-DefenseClawBoundedDiagnostic `
-                    -Value "guardian status generation '$generation' is invalid: $($_.Exception.Message)"
-            }
-        }
+        $lastStatus = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $coverage.reason
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "LocalSystem guardian restarted but did not publish a fresh reconcile within $TimeoutSeconds seconds; last_status=$lastStatus"
+    throw "LocalSystem guardian restarted but did not publish fresh required coverage within $TimeoutSeconds seconds; last_status=$lastStatus"
 }
 
 function Assert-DefenseClawManagedInstallTree {
@@ -14330,6 +14556,96 @@ function Set-DefenseClawInstallTreeRetirementAcls {
             -Kind $kind `
             -GatewayServiceSID $script:AdministratorsSID
     }
+}
+
+function Assert-DefenseClawInstallTreeRetirementState {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.InstallRoot `
+            -PathType Container)) {
+        throw 'committed managed-hook finalization requires the canonical InstallRoot'
+    }
+    $root = [IO.Path]::GetFullPath($Layout.InstallRoot).TrimEnd('\')
+    $allowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
+        -Layout $Layout `
+        -RetiredRoot $root
+    Assert-DefenseClawManagedTreeNoReparse -Root $root
+    $objects = @(
+        Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $root `
+            -Force
+    ) + @(
+        Microsoft.PowerShell.Management\Get-ChildItem `
+            -LiteralPath $root `
+            -Recurse `
+            -Force
+    )
+    foreach ($item in $objects) {
+        $full = [IO.Path]::GetFullPath($item.FullName).TrimEnd('\')
+        if (-not [string]::Equals(
+                $full,
+                $root,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            if (($item.PSIsContainer -and $full -notin $allowlist.directories) -or
+                (-not $item.PSIsContainer -and $full -notin $allowlist.files)) {
+                throw "committed InstallRoot contains unexpected content: $full"
+            }
+        }
+        Assert-DefenseClawPathAcl `
+            -Path $full `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -AllowedReaderSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+            -AllowInheritance `
+            -RejectUntrustedRead
+    }
+}
+
+function Complete-DefenseClawCommittedManagedHooksFinalization {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.PendingPath) {
+        throw 'managed-hook finalization requires a committed transaction'
+    }
+    $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+    Assert-DefenseClawMetadataIdentity `
+        -Metadata $metadata `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
+    if (Test-DefenseClawMetadataInstalled -Metadata $metadata) {
+        throw 'managed-hook finalization requires an uninstall tombstone'
+    }
+    foreach ($name in @(
+        Get-DefenseClawManagedServiceNames `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+    )) {
+        if (Test-DefenseClawServiceExists -Name $name) {
+            throw "managed-hook finalization refused while service exists: $name"
+        }
+    }
+    Assert-DefenseClawInstallTreeRetirementState -Layout $Layout
+    Assert-DefenseClawRecordedArtifactHashes `
+        -Metadata $metadata `
+        -Layout $Layout `
+        -Action 'Committed Uninstall finalization'
+    return Invoke-DefenseClawManagedHooksTeardownCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Action finalize
 }
 
 function Write-DefenseClawProtectedTextAtomic {
@@ -15503,7 +15819,45 @@ function Invoke-DefenseClawSelfUninstallRecovery {
     }
     if ([string]$receipt.phase -ceq 'prepared_install_retirement') {
         if ($canonicalExists) {
-            throw 'prepared self-uninstall receipt without pending state found canonical InstallRoot'
+            if ($retiredExists) {
+                throw 'prepared self-uninstall recovery found both canonical and retired InstallRoot'
+            }
+            $metadata = Get-DefenseClawDeploymentMetadata `
+                -Layout $Layout `
+                -Required
+            Assert-DefenseClawMetadataIdentity `
+                -Metadata $metadata `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+            if (Test-DefenseClawMetadataInstalled -Metadata $metadata) {
+                throw 'prepared self-uninstall recovery found installed metadata after transaction commit'
+            }
+            $actualTombstoneHash = (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $Layout.MetadataPath `
+                    -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($actualTombstoneHash -cne [string]$receipt.tombstone_sha256) {
+                throw 'prepared self-uninstall recovery found changed tombstone'
+            }
+            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
+            $retiredRoot = [string]$receipt.retired_install_root
+            [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
+            if ((Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.InstallRoot) -or
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $retiredRoot `
+                    -PathType Container)) {
+                throw 'self-uninstall recovery could not retire canonical InstallRoot'
+            }
+            Set-DefenseClawRetiredInstallTreeAcls `
+                -Layout $Layout `
+                -RetiredRoot $retiredRoot
+            $canonicalExists = $false
+            $retiredExists = $true
         }
         Assert-DefenseClawSelfUninstallCommittedState `
             -Layout $Layout `
@@ -16166,7 +16520,31 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     $cleanupGatewaySID = Resolve-DefenseClawRetiredGatewayServiceSID `
         -GatewayServiceName $GatewayServiceName `
         -GatewayServiceSID $GatewayServiceSID
-    Remove-DefenseClawCommittedEmptyInstallRoot -Layout $Layout
+    if (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.InstallRoot `
+            -PathType Container) {
+        $teardownPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+            -Layout $Layout
+        if ($teardownPhase -ceq 'prepared') {
+            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
+        }
+        elseif ($teardownPhase -ceq 'finalized') {
+            # Finalization no longer needs the executable tree. Validate the
+            # bounded Admin-only remainder so a crash during recursive delete
+            # can resume without accepting foreign content.
+            Assert-DefenseClawInstallTreeRetirementState -Layout $Layout
+        }
+        else {
+            throw "committed uninstall has non-finalizable teardown phase: $teardownPhase"
+        }
+        Remove-DefenseClawManagedTree `
+            -Path $Layout.InstallRoot `
+            -RequiredBase $script:ProgramFiles `
+            -Label 'InstallRoot'
+    }
     [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
@@ -16729,6 +17107,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Get-DefenseClawTargetRuntimePreparationMode `
                 -Action $Action `
                 -ManifestPresent $targetRuntimeManifestPresent
+        # Freeze the profile-derived target set while Enumerator and Guardian
+        # are stopped. The protected target-runtime plan below then hashes the
+        # exact manifest generation Guardian must prove before activation.
+        Invoke-DefenseClawEnumeratorRefresh `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
         # Resolve and publish every target root before SCM activation or any
         # gateway/guardian process can write user state. Only a fresh Install
         # may create an absent root; Upgrade/Repair authenticate every
@@ -16737,12 +17121,16 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         # journaled before staging; exact created identities are journaled
         # before final publication, and canonical final state is journaled
         # before services become startable.
-        [void](Invoke-DefenseClawTargetRuntimePreparation `
+        $targetRuntimePlan = Invoke-DefenseClawTargetRuntimePreparation `
             -SnapshotPath $snapshot `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
-            -ValidationOnly:($targetRuntimePreparationMode -ceq 'validate'))
+            -ValidationOnly:($targetRuntimePreparationMode -ceq 'validate')
+        $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
+        if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'target runtime plan did not bind an exact manifest SHA-256'
+        }
         if ($Action -eq 'Install') {
             # A clean install has no NT SERVICE identities until SCM creates
             # the transaction-owned service pair. The snapshot subprocess
@@ -16956,7 +17344,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             [void](Wait-DefenseClawFreshGuardianReconcile `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName)
+                -GuardianServiceName $GuardianServiceName `
+                -ExpectedManifestSHA256 $expectedGuardianManifestSHA256)
             # Only a freshly reconciling guardian authorizes gateway demand
             # start. A queued gateway failure restart is now safe to run.
             Set-DefenseClawServiceStartMode `
@@ -17221,13 +17610,12 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -Installed:$false
-        $tombstone.hashes = [ordered]@{}
         Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath
         Set-DefenseClawPreservedStateAcls `
             -Layout $Layout `
             -GatewayServiceSID $gatewaySID
+        Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout
         if ($null -ne $selfUninstallCallerIdentity) {
-            Set-DefenseClawInstallTreeRetirementAcls -Layout $Layout
             $selfUninstallReceipt =
                 Publish-DefenseClawSelfUninstallReceipt `
                     -Layout $Layout `
@@ -17240,27 +17628,6 @@ function Invoke-DefenseClawUninstallLifecycle {
                 -LiteralPath $retiredRoot) {
                 throw 'fresh self-uninstall retirement sibling unexpectedly exists'
             }
-            [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
-            if ((Microsoft.PowerShell.Management\Test-Path `
-                    -LiteralPath $Layout.InstallRoot) -or
-                -not (Microsoft.PowerShell.Management\Test-Path `
-                    -LiteralPath $retiredRoot `
-                    -PathType Container)) {
-                throw 'atomic self-uninstall InstallRoot retirement did not complete exactly'
-            }
-            # Re-assert the Admin-only retirement ACLs after the rename.
-            # Traversal was already removed from the canonical root before
-            # receipt publication, so the sibling name is never a new
-            # standard-user execution surface.
-            Set-DefenseClawRetiredInstallTreeAcls `
-                -Layout $Layout `
-                -RetiredRoot $retiredRoot
-        }
-        else {
-            Remove-DefenseClawManagedTree `
-                -Path $Layout.InstallRoot `
-                -RequiredBase $script:ProgramFiles `
-                -Label 'InstallRoot'
         }
         Complete-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout
     }
@@ -17356,6 +17723,38 @@ function Invoke-DefenseClawUninstallLifecycle {
             )
         }
         throw $operationError
+    }
+    try {
+        [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName)
+        if ($null -ne $selfUninstallReceipt) {
+            $retiredRoot = [string]$selfUninstallReceipt.retired_install_root
+            [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
+            if ((Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.InstallRoot) -or
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $retiredRoot `
+                    -PathType Container)) {
+                throw 'atomic self-uninstall InstallRoot retirement did not complete exactly'
+            }
+            Set-DefenseClawRetiredInstallTreeAcls `
+                -Layout $Layout `
+                -RetiredRoot $retiredRoot
+        }
+        else {
+            Remove-DefenseClawManagedTree `
+                -Path $Layout.InstallRoot `
+                -RequiredBase $script:ProgramFiles `
+                -Label 'InstallRoot'
+        }
+    }
+    catch {
+        throw (
+            'Uninstall committed, but managed runtime finalization or binary ' +
+            "retirement failed; retry Uninstall to finish cleanup: $($_.Exception.Message)"
+        )
     }
     try {
         # The authenticated rollback journal remains live through transaction
