@@ -4155,6 +4155,10 @@ targets:
 
         $nonPurgeLayout = New-HarnessCommittedPurgeCase `
             -Name 'nonpurge-no-install-root'
+        [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+            -Layout $nonPurgeLayout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian')
         Remove-DefenseClawCommittedEmptyInstallRoot -Layout $nonPurgeLayout
         $nonPurge = Invoke-DefenseClawPreLayoutRecovery `
             -Action 'Uninstall' `
