@@ -911,7 +911,14 @@ try {
         }
         function script:Get-DefenseClawServiceSID {
             param([Parameter(Mandatory)][string]$ServiceName)
+            if ($ServiceName -ceq 'DefenseClawGatewayScopeB') {
+                return 'S-1-5-80-5678'
+            }
             return 'S-1-5-80-1234'
+        }
+        function script:Get-DefenseClawServiceSIDForRecovery {
+            param([Parameter(Mandatory)][string]$ServiceName)
+            return Get-DefenseClawServiceSID -ServiceName $ServiceName
         }
         function script:Write-DefenseClawJsonAtomic {
             param(
@@ -1557,8 +1564,64 @@ try {
                 )) {
                 throw 'managed IPC mock received an empty contract path'
             }
-            $null = $GatewayServiceName
+            if ($script:HarnessState.ContainsKey('ipc_service_sids')) {
+                $gatewaySID = Get-DefenseClawServiceSID `
+                    -ServiceName $GatewayServiceName
+                $foreignSIDs = @(
+                    $script:HarnessState.ipc_service_sids |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]$_ -cne $gatewaySID
+                        }
+                )
+                if ($foreignSIDs.Count -gt 0) {
+                    throw (
+                        'managed IPC mock rejected a stale writable service ' +
+                        "SID: $($foreignSIDs -join ',')"
+                    )
+                }
+                $script:HarnessState.ipc_service_sids = @($gatewaySID)
+            }
             $script:HarnessState.events.Add('managed-ipc-directory')
+        }
+        function script:Revoke-DefenseClawManagedIPCServiceAccess {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [string]$GatewayServiceSID
+            )
+            $null = $Layout
+            if ($script:HarnessState.service_exists.ContainsKey(
+                    $GatewayServiceName
+                ) -and
+                [bool]$script:HarnessState.service_exists[$GatewayServiceName]) {
+                throw 'managed IPC cleanup mock observed a live service'
+            }
+            $resolvedSID = Get-DefenseClawServiceSIDForRecovery `
+                -ServiceName $GatewayServiceName
+            if (-not [string]::IsNullOrWhiteSpace($GatewayServiceSID) -and
+                $GatewayServiceSID -cne $resolvedSID) {
+                throw 'managed IPC cleanup mock received a mismatched SID'
+            }
+            $removed = $false
+            if ($script:HarnessState.ContainsKey('ipc_service_sids')) {
+                $beforeCount = @(
+                    $script:HarnessState.ipc_service_sids
+                ).Count
+                $script:HarnessState.ipc_service_sids = @(
+                    $script:HarnessState.ipc_service_sids |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]$_ -cne $resolvedSID
+                        }
+                )
+                $removed = (
+                    @($script:HarnessState.ipc_service_sids).Count -lt
+                    $beforeCount
+                )
+            }
+            $script:HarnessState.events.Add(
+                "managed-ipc-revoke:$resolvedSID"
+            )
+            return $removed
         }
         function script:Set-DefenseClawManagedAcls {
             param(
@@ -1957,6 +2020,7 @@ try {
                     DefenseClawCMIDBroker = -not $AlreadyUninstalled
                     DefenseClawHookGuardian = -not $AlreadyUninstalled
                 }
+                ipc_service_sids = @('S-1-5-80-1234')
                 guardian_fresh = $ServicesRunning
                 queued_gateway_restart = $true
                 queued_restart_blocked = $false
@@ -1988,6 +2052,22 @@ try {
             Assert-Harness `
                 -Condition ($failed -ne $ExpectSuccess) `
                 -Message "$Name success result did not match expectation"
+
+            if ($ExpectSuccess) {
+                Assert-Harness `
+                    -Condition (
+                        'S-1-5-80-1234' -notin
+                            @($script:HarnessState.ipc_service_sids)
+                    ) `
+                    -Message "$Name retained its gateway SID on the shared IPC path"
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.events.IndexOf(
+                            'managed-ipc-revoke:S-1-5-80-1234'
+                        ) -ge 0
+                    ) `
+                    -Message "$Name did not run managed IPC permission cleanup"
+            }
 
             if ($AlreadyUninstalled) {
                 Assert-Harness `
@@ -2038,6 +2118,16 @@ try {
                 Assert-Harness `
                     -Condition ($script:HarnessState.removed_services -eq 4) `
                     -Message "$Name did not delete all four exactly rechecked services"
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.events.IndexOf(
+                            'managed-ipc-revoke:S-1-5-80-1234'
+                        ) -gt
+                        $script:HarnessState.events.IndexOf(
+                            'remove-service:DefenseClawGateway'
+                        )
+                    ) `
+                    -Message "$Name revoked IPC access before gateway deletion"
                 Assert-Harness `
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.ManagedHooksTeardownJournalPath)) `
@@ -2735,6 +2825,7 @@ targets:
                     DefenseClawCMIDBroker = $false
                     DefenseClawHookGuardian = $false
                 }
+                ipc_service_sids = @('S-1-5-80-1234')
                 guardian_fresh = $false
                 queued_gateway_restart = $false
                 queued_restart_blocked = $true
@@ -2802,10 +2893,30 @@ targets:
                     -LiteralPath $orderedLayout.PurgeIntentPath)
             ) `
             -Message 'purge did not publish its authenticated receipt before first StateRoot deletion'
+        Assert-Harness `
+            -Condition (
+                'S-1-5-80-1234' -notin
+                    @($script:HarnessState.ipc_service_sids)
+            ) `
+            -Message 'scope A purge retained its shared IPC service SID'
+        Initialize-DefenseClawManagedIPCDirectory `
+            -Layout $orderedLayout `
+            -GatewayServiceName 'DefenseClawGatewayScopeB'
+        Assert-Harness `
+            -Condition (
+                @($script:HarnessState.ipc_service_sids).Count -eq 1 -and
+                [string]$script:HarnessState.ipc_service_sids[0] -ceq
+                    'S-1-5-80-5678'
+            ) `
+            -Message 'scope B could not claim the shared IPC contract after scope A purge'
         Add-HarnessPurgeResult `
             -Name 'receipt-before-state-delete' `
             -FailedClosed:$false `
             -Retried:$false
+        Add-HarnessPurgeResult `
+            -Name 'scope-a-purge-allows-scope-b-install' `
+            -FailedClosed:$false `
+            -Retried:$true
 
         foreach ($crashCase in @(
             'purge-after-receipt-publication',
@@ -2845,6 +2956,16 @@ targets:
                         -LiteralPath $layout.PurgeIntentPath)
                 ) `
                 -Message "$crashCase did not resume before layout creation"
+            Assert-Harness `
+                -Condition (
+                    'S-1-5-80-1234' -notin
+                        @($script:HarnessState.ipc_service_sids) -and
+                    @($script:HarnessState.events |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            $_ -ceq 'managed-ipc-revoke:S-1-5-80-1234'
+                        }).Count -ge 2
+                ) `
+                -Message "$crashCase did not idempotently resume IPC SID cleanup"
             Add-HarnessPurgeResult `
                 -Name $crashCase `
                 -FailedClosed:$true `

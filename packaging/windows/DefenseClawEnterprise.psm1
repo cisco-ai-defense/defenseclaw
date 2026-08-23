@@ -227,6 +227,20 @@ namespace $nativeNamespace
             }
         }
 
+        public sealed class PathSecuritySnapshot
+        {
+            public string Identity { get; private set; }
+            public byte[] SecurityDescriptor { get; private set; }
+
+            internal PathSecuritySnapshot(
+                string identity,
+                byte[] securityDescriptor)
+            {
+                Identity = identity;
+                SecurityDescriptor = securityDescriptor;
+            }
+        }
+
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct STARTUPINFO
         {
@@ -1037,6 +1051,205 @@ namespace $nativeNamespace
             finally
             {
                 CloseHandle(handle);
+            }
+        }
+
+        private static IntPtr OpenDirectorySecurity(
+            string path,
+            uint desiredAccess,
+            bool shareDelete,
+            out BY_HANDLE_FILE_INFORMATION information)
+        {
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+            IntPtr handle = CreateFileW(
+                path,
+                desiredAccess,
+                FILE_SHARE_READ | FILE_SHARE_WRITE |
+                    (shareDelete ? FILE_SHARE_DELETE : 0),
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "open managed directory metadata failed: " + path);
+            try
+            {
+                if (!GetFileInformationByHandle(handle, out information))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query managed directory identity failed: " + path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                    throw new InvalidOperationException(
+                        "refusing managed directory metadata through a reparse point: " +
+                        path);
+                if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                    throw new InvalidOperationException(
+                        "managed directory metadata requires a directory: " + path);
+                return handle;
+            }
+            catch
+            {
+                CloseHandle(handle);
+                throw;
+            }
+        }
+
+        public static PathSecuritySnapshot
+            GetDirectorySecuritySnapshotNoFollow(string path)
+        {
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint READ_CONTROL = 0x00020000;
+            BY_HANDLE_FILE_INFORMATION information;
+            IntPtr handle = OpenDirectorySecurity(
+                path,
+                FILE_READ_ATTRIBUTES | READ_CONTROL,
+                true,
+                out information);
+            try
+            {
+                return new PathSecuritySnapshot(
+                    FileIdentity(information),
+                    GetFileSecurityDescriptorFromHandle(handle, path));
+            }
+            finally
+            {
+                CloseHandle(handle);
+            }
+        }
+
+        public static PathSecuritySnapshot
+            GetDirectorySecuritySnapshotNoFollowIfExists(string path)
+        {
+            const int ERROR_FILE_NOT_FOUND = 2;
+            const int ERROR_PATH_NOT_FOUND = 3;
+            try
+            {
+                return GetDirectorySecuritySnapshotNoFollow(path);
+            }
+            catch (Win32Exception error)
+            {
+                if (error.NativeErrorCode == ERROR_FILE_NOT_FOUND ||
+                    error.NativeErrorCode == ERROR_PATH_NOT_FOUND)
+                    return null;
+                throw;
+            }
+        }
+
+        public static PathSecuritySnapshot SetDirectoryDaclNoFollow(
+            string path,
+            byte[] securityDescriptor,
+            string expectedIdentity)
+        {
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint READ_CONTROL = 0x00020000;
+            const uint WRITE_DAC = 0x00040000;
+            const int SE_FILE_OBJECT = 1;
+            const uint DACL_SECURITY_INFORMATION = 0x00000004;
+            const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+            const ushort SE_SELF_RELATIVE = 0x8000;
+
+            if (securityDescriptor == null ||
+                securityDescriptor.Length == 0 ||
+                securityDescriptor.Length > 1048576)
+                throw new InvalidOperationException(
+                    "managed directory descriptor length is invalid");
+            GCHandle descriptorHandle = GCHandle.Alloc(
+                securityDescriptor,
+                GCHandleType.Pinned);
+            try
+            {
+                IntPtr descriptor = descriptorHandle.AddrOfPinnedObject();
+                ushort control;
+                uint revision;
+                if (!GetSecurityDescriptorControl(
+                        descriptor,
+                        out control,
+                        out revision))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "query managed directory descriptor control failed");
+                if ((control & SE_SELF_RELATIVE) == 0)
+                    throw new InvalidOperationException(
+                        "managed directory descriptor is not self-relative");
+                IntPtr dacl;
+                bool daclPresent;
+                bool daclDefaulted;
+                if (!GetSecurityDescriptorDacl(
+                        descriptor,
+                        out daclPresent,
+                        out dacl,
+                        out daclDefaulted) ||
+                    !daclPresent ||
+                    dacl == IntPtr.Zero)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "managed directory descriptor has no DACL");
+
+                BY_HANDLE_FILE_INFORMATION before;
+                IntPtr handle = OpenDirectorySecurity(
+                    path,
+                    FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC,
+                    false,
+                    out before);
+                try
+                {
+                    string beforeIdentity = FileIdentity(before);
+                    if (!String.Equals(
+                            beforeIdentity,
+                            expectedIdentity,
+                            StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            "managed directory identity changed before DACL update: " +
+                            path);
+
+                    uint result = SetSecurityInfo(
+                        handle,
+                        SE_FILE_OBJECT,
+                        DACL_SECURITY_INFORMATION |
+                            PROTECTED_DACL_SECURITY_INFORMATION,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        dacl,
+                        IntPtr.Zero);
+                    if (result != 0)
+                        throw new Win32Exception(
+                            checked((int)result),
+                            "set managed directory DACL failed: " + path);
+
+                    BY_HANDLE_FILE_INFORMATION after;
+                    if (!GetFileInformationByHandle(handle, out after))
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "recheck managed directory identity failed: " + path);
+                    string afterIdentity = FileIdentity(after);
+                    if (!String.Equals(
+                            beforeIdentity,
+                            afterIdentity,
+                            StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            "managed directory identity changed during DACL update: " +
+                            path);
+                    return new PathSecuritySnapshot(
+                        afterIdentity,
+                        GetFileSecurityDescriptorFromHandle(handle, path));
+                }
+                finally
+                {
+                    CloseHandle(handle);
+                }
+            }
+            finally
+            {
+                descriptorHandle.Free();
             }
         }
 
@@ -2309,7 +2522,9 @@ function Get-DefenseClawDeterministicServiceSID {
     # `sc.exe showsid` computes the S-1-5-80 virtual-service SID from the
     # service name even when the SCM row is missing. This lets authenticated
     # active-deployment repair validate a service-owned secret before safely
-    # recreating the service; fresh/inactive installs never use this path.
+    # recreating the service, and lets committed uninstall recovery retire the
+    # exact SID grant after the service row is gone. Fresh installs never use
+    # this path.
     $lines = @(Invoke-DefenseClawNative `
         -File $script:ScExe `
         -Arguments @('showsid', $ServiceName) `
@@ -4503,6 +4718,260 @@ function Initialize-DefenseClawManagedIPCDirectory {
         -Path $ipcDirectory `
         -Kind ManagedIPCDirectory `
         -GatewayServiceSID $gatewaySID
+}
+
+# Remove only ACEs that name the retired gateway SID. The shared IPC path can
+# carry permissions owned by another product or deployment, so reconstructing
+# it from this installation's canonical ACL would incorrectly discard foreign
+# state. Work on a raw descriptor to preserve every non-matching ACE byte for
+# byte, including ACE types that FileSystemSecurity does not project cleanly.
+function Remove-DefenseClawSIDFromRawDACL {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Descriptor,
+        [Parameter(Mandatory)][string]$SID
+    )
+    try {
+        $targetSID = [Security.Principal.SecurityIdentifier]::new($SID)
+    }
+    catch {
+        throw "managed IPC cleanup received an invalid service SID: $SID"
+    }
+    if (-not $targetSID.Value.StartsWith(
+            'S-1-5-80-',
+            [StringComparison]::Ordinal
+        )) {
+        throw "managed IPC cleanup SID is outside the NT SERVICE authority: $SID"
+    }
+    if ($null -eq $Descriptor.DiscretionaryAcl) {
+        throw 'managed IPC directory has an absent or null DACL'
+    }
+    $bytes = [byte[]]::new($Descriptor.BinaryLength)
+    $Descriptor.GetBinaryForm($bytes, 0)
+    $updated = [Security.AccessControl.RawSecurityDescriptor]::new($bytes, 0)
+    $matchingIndexes = [Collections.Generic.List[int]]::new()
+    for ($index = 0; $index -lt $updated.DiscretionaryAcl.Count; $index++) {
+        $ace = $updated.DiscretionaryAcl[$index]
+        if ($ace -isnot [Security.AccessControl.KnownAce] -or
+            $null -eq $ace.SecurityIdentifier -or
+            $ace.SecurityIdentifier.Value -cne $targetSID.Value) {
+            continue
+        }
+        $matchingIndexes.Add($index)
+    }
+    if ($matchingIndexes.Count -eq 0) {
+        return [pscustomobject]@{
+            descriptor = $updated
+            removed = 0
+        }
+    }
+    if ($matchingIndexes.Count -ne 1) {
+        throw "managed IPC directory has duplicate ACEs for the retired gateway SID: $SID"
+    }
+    $matchingAce = $updated.DiscretionaryAcl[$matchingIndexes[0]]
+    $fullControlMask = [int](
+        [Security.AccessControl.FileSystemRights]::FullControl
+    )
+    if ($matchingAce -isnot [Security.AccessControl.CommonAce] -or
+        $matchingAce.AceQualifier -ne
+            [Security.AccessControl.AceQualifier]::AccessAllowed -or
+        $matchingAce.AceFlags -ne [Security.AccessControl.AceFlags]::None -or
+        [int]$matchingAce.AccessMask -ne $fullControlMask -or
+        [bool]$matchingAce.IsCallback -or
+        [int]$matchingAce.OpaqueLength -ne 0) {
+        throw (
+            'managed IPC directory has a non-canonical ACE for the retired ' +
+            "gateway SID: $SID"
+        )
+    }
+    $updated.DiscretionaryAcl.RemoveAce($matchingIndexes[0])
+    return [pscustomobject]@{
+        descriptor = $updated
+        removed = 1
+    }
+}
+
+function Resolve-DefenseClawRetiredGatewayServiceSID {
+    param(
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [string]$GatewayServiceSID
+    )
+    Assert-DefenseClawServiceName -Name $GatewayServiceName
+    if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
+        throw (
+            'refusing retired gateway SID resolution while the matching ' +
+            "service exists: $GatewayServiceName"
+        )
+    }
+    $resolvedSID = Get-DefenseClawServiceSIDForRecovery `
+        -ServiceName $GatewayServiceName
+    if (-not [string]::IsNullOrWhiteSpace($GatewayServiceSID) -and
+        $GatewayServiceSID -cne $resolvedSID) {
+        throw (
+            'captured and deterministic gateway service SIDs disagree during ' +
+            "committed cleanup for $GatewayServiceName"
+        )
+    }
+    return $resolvedSID
+}
+
+function Assert-DefenseClawManagedIPCRetirementDescriptor {
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Descriptor,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $protectedFlag = [int](
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+    )
+    if (([int]$Descriptor.ControlFlags -band $protectedFlag) -eq 0) {
+        throw "managed IPC cleanup refused an inherited DACL: $Path"
+    }
+    $allowedOwners = @(
+        $script:SystemSID,
+        $script:AdministratorsSID,
+        $script:TrustedInstallerSID
+    )
+    if ($null -eq $Descriptor.Owner -or
+        $Descriptor.Owner.Value -notin $allowedOwners) {
+        throw "managed IPC cleanup refused an untrusted owner: $Path"
+    }
+    if ($null -eq $Descriptor.Group -or
+        $Descriptor.Group.Value -notin $allowedOwners) {
+        throw "managed IPC cleanup refused an untrusted group: $Path"
+    }
+}
+
+function Revoke-DefenseClawManagedIPCServiceAccess {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [string]$GatewayServiceSID
+    )
+    $resolvedSID = Resolve-DefenseClawRetiredGatewayServiceSID `
+        -GatewayServiceName $GatewayServiceName `
+        -GatewayServiceSID $GatewayServiceSID
+
+    $expectedIPCDirectory = [IO.Path]::Combine(
+        $script:ProgramData,
+        'Cisco',
+        'Cisco Secure Client',
+        'DefenseClaw',
+        'ipc'
+    ).TrimEnd('\')
+    $ipcDirectory = Assert-DefenseClawCanonicalVolumePath `
+        -Path ([IO.Path]::GetFullPath(
+            [string]$Layout.ManagedIPCDirectory
+        ).TrimEnd('\')) `
+        -Label 'managed IPC directory cleanup'
+    if (-not [string]::Equals(
+            $ipcDirectory,
+            $expectedIPCDirectory,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "managed IPC cleanup requires the fixed AVC contract path: $expectedIPCDirectory"
+    }
+    Assert-DefenseClawNoReparsePath -Path $ipcDirectory -AllowMissingLeaf
+    Assert-DefenseClawTrustedAncestors `
+        -Path ([IO.Path]::GetDirectoryName($ipcDirectory)) `
+        -RequiredBase $script:ProgramData
+
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    # This final-component OPEN_REPARSE_POINT call is the sole absence proof.
+    # A dangling reparse point opens as an object and is rejected by the native
+    # directory validator instead of being mistaken for a missing path.
+    $before = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
+        $ipcDirectory
+    )
+    if ($null -eq $before) {
+        if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
+            throw (
+                'refusing managed IPC permission cleanup because the matching ' +
+                "gateway service reappeared: $GatewayServiceName"
+            )
+        }
+        return $false
+    }
+    $beforeDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$before.SecurityDescriptor,
+        0
+    )
+    Assert-DefenseClawManagedIPCRetirementDescriptor `
+        -Descriptor $beforeDescriptor `
+        -Path $ipcDirectory
+
+    $filtered = Remove-DefenseClawSIDFromRawDACL `
+        -Descriptor $beforeDescriptor `
+        -SID $resolvedSID
+    # Resolve the service boundary again immediately before the pinned-handle
+    # update or idempotent return. Normal lifecycle operations are serialized
+    # by the global lock; this second check fails closed on an out-of-band SCM
+    # recreation.
+    if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
+        throw (
+            'refusing managed IPC permission cleanup because the matching ' +
+            "gateway service reappeared: $GatewayServiceName"
+        )
+    }
+    if ([int]$filtered.removed -eq 0) {
+        return $false
+    }
+    $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor](
+        $filtered.descriptor
+    )
+    $expectedBytes = [byte[]]::new($expectedDescriptor.BinaryLength)
+    $expectedDescriptor.GetBinaryForm($expectedBytes, 0)
+    $after = $nativeSecurity::SetDirectoryDaclNoFollow(
+        $ipcDirectory,
+        $expectedBytes,
+        [string]$before.Identity
+    )
+    if ([string]$after.Identity -cne [string]$before.Identity) {
+        throw "managed IPC directory identity changed during cleanup: $ipcDirectory"
+    }
+    $afterDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$after.SecurityDescriptor,
+        0
+    )
+    if ($null -eq $afterDescriptor.Owner -or
+        $null -eq $afterDescriptor.Group -or
+        $afterDescriptor.Owner.Value -cne $expectedDescriptor.Owner.Value -or
+        $afterDescriptor.Group.Value -cne $expectedDescriptor.Group.Value -or
+        -not (Test-DefenseClawExactRawDACL `
+            -Actual $afterDescriptor `
+            -Expected $expectedDescriptor)) {
+        throw "managed IPC directory did not retain the exact filtered descriptor: $ipcDirectory"
+    }
+
+    # Rebind the path once after releasing the mutation handle. This cannot
+    # prevent an administrator from changing it later, but it ensures this
+    # successful cleanup result still names the exact inode that was updated.
+    $published = $nativeSecurity::GetDirectorySecuritySnapshotNoFollow(
+        $ipcDirectory
+    )
+    if ([string]$published.Identity -cne [string]$before.Identity) {
+        throw "managed IPC directory changed after cleanup: $ipcDirectory"
+    }
+    $publishedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$published.SecurityDescriptor,
+        0
+    )
+    if ($null -eq $publishedDescriptor.Owner -or
+        $null -eq $publishedDescriptor.Group -or
+        $publishedDescriptor.Owner.Value -cne $expectedDescriptor.Owner.Value -or
+        $publishedDescriptor.Group.Value -cne $expectedDescriptor.Group.Value -or
+        -not (Test-DefenseClawExactRawDACL `
+            -Actual $publishedDescriptor `
+            -Expected $expectedDescriptor)) {
+        throw "managed IPC directory descriptor changed after cleanup: $ipcDirectory"
+    }
+    if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
+        throw (
+            'managed IPC permission cleanup completed while the matching ' +
+            "gateway service reappeared: $GatewayServiceName"
+        )
+    }
+    return $true
 }
 
 function Set-DefenseClawManagedAcls {
@@ -12573,7 +13042,8 @@ function Complete-DefenseClawStatePurge {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [string]$GatewayServiceSID
     )
     $intent = Get-DefenseClawStatePurgeIntent `
         -Layout $Layout `
@@ -12612,6 +13082,15 @@ function Complete-DefenseClawStatePurge {
             throw 'state-purge tombstone changed after intent publication'
         }
     }
+    [void](Revoke-DefenseClawManagedIPCServiceAccess `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GatewayServiceSID $GatewayServiceSID)
+    foreach ($name in @(Get-DefenseClawManagedServiceNames -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
+        if (Test-DefenseClawServiceExists -Name $name) {
+            throw "refusing authenticated state purge because service reappeared: $name"
+        }
+    }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.StateRoot) {
         Remove-DefenseClawManagedTree `
             -Path $Layout.StateRoot `
@@ -12647,9 +13126,9 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$Purge,
-        # Only the caller that deleted the services can still resolve the virtual
-        # account SID. A resumed cleanup omits it, leaving a grant to a principal
-        # that no longer exists.
+        # The deleting caller supplies its captured SID. Crash-resumed cleanup
+        # recomputes it from the authenticated service name and requires an
+        # exact match whenever both forms are available.
         [string]$GatewayServiceSID
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
@@ -12668,18 +13147,19 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             throw "committed-uninstall cleanup refused while service exists: $name"
         }
     }
+    $cleanupGatewaySID = Resolve-DefenseClawRetiredGatewayServiceSID `
+        -GatewayServiceName $GatewayServiceName `
+        -GatewayServiceSID $GatewayServiceSID
     Remove-DefenseClawCommittedEmptyInstallRoot -Layout $Layout
     [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName)
     Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout
-    if (-not [string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
-        foreach ($ancestor in @($Layout.StateRootAncestors)) {
-            Revoke-DefenseClawStateAncestorTraverse `
-                -Path $ancestor `
-                -GatewayServiceSID $GatewayServiceSID
-        }
+    foreach ($ancestor in @($Layout.StateRootAncestors)) {
+        Revoke-DefenseClawStateAncestorTraverse `
+            -Path $ancestor `
+            -GatewayServiceSID $cleanupGatewaySID
     }
     if ($Purge) {
         [void](Publish-DefenseClawStatePurgeIntent `
@@ -12689,7 +13169,8 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
         $result = Complete-DefenseClawStatePurge `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -GatewayServiceSID $cleanupGatewaySID
         $result |
             Microsoft.PowerShell.Utility\Add-Member `
                 -MemberType NoteProperty `
@@ -12698,6 +13179,10 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
                 -Force
         return $result
     }
+    [void](Revoke-DefenseClawManagedIPCServiceAccess `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GatewayServiceSID $cleanupGatewaySID)
     $result = Get-DefenseClawLifecycleStatus `
         -Action 'Uninstall' `
         -Layout $Layout `

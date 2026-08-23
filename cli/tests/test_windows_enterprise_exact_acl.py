@@ -213,6 +213,95 @@ def test_fixed_managed_ipc_path_is_provisioned_for_the_exact_gateway_sid() -> No
     assert "$script:AuthenticatedUsersSID" in verifier
 
 
+def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    matcher = _extract_function_body(
+        source,
+        "function Remove-DefenseClawSIDFromRawDACL",
+        "function Resolve-DefenseClawRetiredGatewayServiceSID",
+    )
+    resolver = _extract_function_body(
+        source,
+        "function Resolve-DefenseClawRetiredGatewayServiceSID",
+        "function Revoke-DefenseClawManagedIPCServiceAccess",
+    )
+    cleanup = _extract_function_body(
+        source,
+        "function Revoke-DefenseClawManagedIPCServiceAccess",
+        "function Set-DefenseClawManagedAcls",
+    )
+    descriptor_guard = _extract_function_body(
+        source,
+        "function Assert-DefenseClawManagedIPCRetirementDescriptor",
+        "function Revoke-DefenseClawManagedIPCServiceAccess",
+    )
+    assert "[Security.AccessControl.CommonAce]" in matcher
+    assert "[Security.AccessControl.AceQualifier]::AccessAllowed" in matcher
+    assert "[Security.AccessControl.AceFlags]::None" in matcher
+    assert "[Security.AccessControl.FileSystemRights]::FullControl" in matcher
+    assert "$matchingIndexes.Count -ne 1" in matcher
+    assert "duplicate ACEs" in matcher
+    assert "non-canonical ACE" in matcher
+    assert "Get-DefenseClawServiceSIDForRecovery" in resolver
+    assert "Resolve-DefenseClawRetiredGatewayServiceSID" in cleanup
+    assert "Remove-DefenseClawSIDFromRawDACL" in cleanup
+    assert "GetDirectorySecuritySnapshotNoFollowIfExists" in cleanup
+    assert "SetDirectoryDaclNoFollow" in cleanup
+    assert "$expectedDescriptor.GetBinaryForm($expectedBytes, 0)" in cleanup
+    assert "$expectedDescriptor.GetSddlForm" not in cleanup
+    assert "Microsoft.PowerShell.Management\\Test-Path" not in cleanup
+    assert "$resolvedSID" not in descriptor_guard
+    assert "$script:SystemSID" in descriptor_guard
+    assert "$script:AdministratorsSID" in descriptor_guard
+    assert "$script:TrustedInstallerSID" in descriptor_guard
+    assert "[string]$before.Identity" in cleanup
+    assert "Test-DefenseClawExactRawDACL" in cleanup
+    assert "PurgeAccessRules" not in cleanup
+    assert "Set-DefenseClawPathAcl" not in cleanup
+    assert "Remove-Item" not in cleanup
+    zero_match = cleanup.index("if ([int]$filtered.removed -eq 0)")
+    assert cleanup.rfind(
+        "Test-DefenseClawServiceExists",
+        0,
+        zero_match,
+    ) >= cleanup.index("$filtered = Remove-DefenseClawSIDFromRawDACL")
+    assert cleanup.rfind("Test-DefenseClawServiceExists") > cleanup.index(
+        "$publishedDescriptor =",
+    )
+
+    native_open = source[
+        source.index("private static IntPtr OpenDirectorySecurity") : source.index(
+            "public static PathSecuritySnapshot\n            GetDirectorySecuritySnapshotNoFollow",
+        )
+    ]
+    native_set = source[
+        source.index("public static PathSecuritySnapshot SetDirectoryDaclNoFollow") : source.index(
+            "public static RegularFileSecuritySnapshot\n            SetRegularFileSecurityDescriptorNoFollow",
+        )
+    ]
+    assert "bool shareDelete" in native_open
+    assert "(shareDelete ? FILE_SHARE_DELETE : 0)" in native_open
+    assert "false,\n                    out before" in native_set
+
+    purge = _extract_function_body(
+        source,
+        "function Complete-DefenseClawStatePurge",
+        "function Invoke-DefenseClawCommittedUninstallCleanup",
+    )
+    committed = _extract_function_body(
+        source,
+        "function Invoke-DefenseClawCommittedUninstallCleanup",
+        "function Invoke-DefenseClawPreLayoutRecovery",
+    )
+    assert "Revoke-DefenseClawManagedIPCServiceAccess" in purge
+    assert "-GatewayServiceSID $GatewayServiceSID" in purge
+    assert purge.count("Get-DefenseClawManagedServiceNames") >= 2
+    assert purge.rfind("Get-DefenseClawManagedServiceNames") > purge.index(
+        "Revoke-DefenseClawManagedIPCServiceAccess",
+    )
+    assert "Revoke-DefenseClawManagedIPCServiceAccess" in committed
+
+
 def test_retained_runtime_acl_adoption_precedes_gateway_startup() -> None:
     source = MODULE.read_text(encoding="utf-8")
     adoption = _extract_function_body(
@@ -371,6 +460,13 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         "installer_verifier_pairings_checked": 18,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
+        "managed_ipc_scope_cleanup_exact": True,
+        "managed_ipc_other_service_ace_preserved": True,
+        "managed_ipc_cleanup_idempotent": True,
+        "managed_ipc_next_scope_canonical": True,
+        "managed_ipc_native_handle_cleanup": True,
+        "managed_ipc_noncanonical_target_aces_rejected": True,
+        "managed_ipc_retired_sid_owner_group_rejected": True,
         "retained_runtime_tree_adopted": True,
         "retained_runtime_hard_links_rejected": True,
         "retained_runtime_secret_acl_exact": True,

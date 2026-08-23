@@ -3734,3 +3734,12 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "function Revoke-DefenseClawStateAncestorTraverse" in module
     assert "Revoke-DefenseClawStateAncestorTraverse `" in module
     assert "-GatewayServiceSID $gatewaySID" in module
+
+    # The fixed AVC IPC directory is also shared. Retire only the exact
+    # deleted gateway's service-SID ACE, including when purge resumes after
+    # the SCM row and captured SID are gone.
+    assert "function Revoke-DefenseClawManagedIPCServiceAccess" in module
+    assert "Remove-DefenseClawSIDFromRawDACL" in module
+    assert "Get-DefenseClawServiceSIDForRecovery" in module
+    assert "GetDirectorySecuritySnapshotNoFollow" in module
+    assert "SetDirectoryDaclNoFollow" in module

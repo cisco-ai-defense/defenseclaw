@@ -315,6 +315,182 @@ foreach ($property in $ancestorCases.psobject.Properties) {
     }
 }
 
+# The fixed AVC IPC directory outlives a certification scope. Purge removes
+# only scope A's virtual-service SID; every ACE for another active installation
+# and every shared baseline ACE must survive byte-for-byte before scope B
+# installs its own canonical descriptor.
+$ipcCleanupCases = & $module {
+    param($ScopeASID, $ScopeBSID)
+    $source = [Security.AccessControl.RawSecurityDescriptor]::new(
+        (
+            'O:BAG:BAD:P(A;;0x100021;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)' +
+            "(A;;FA;;;$ScopeASID)(A;;0x1200a9;;;$ScopeBSID)"
+        )
+    )
+    $scopeBBefore = $null
+    foreach ($ace in $source.DiscretionaryAcl) {
+        if ($ace -is [Security.AccessControl.KnownAce] -and
+            $null -ne $ace.SecurityIdentifier -and
+            $ace.SecurityIdentifier.Value -ceq $ScopeBSID) {
+            $aceBytes = [byte[]]::new($ace.BinaryLength)
+            $ace.GetBinaryForm($aceBytes, 0)
+            $scopeBBefore = [Convert]::ToBase64String($aceBytes)
+        }
+    }
+
+    $first = Remove-DefenseClawSIDFromRawDACL `
+        -Descriptor $source `
+        -SID $ScopeASID
+    $scopeAStillPresent = $false
+    $scopeBAfter = $null
+    foreach ($ace in $first.descriptor.DiscretionaryAcl) {
+        if ($ace -isnot [Security.AccessControl.KnownAce] -or
+            $null -eq $ace.SecurityIdentifier) {
+            continue
+        }
+        if ($ace.SecurityIdentifier.Value -ceq $ScopeASID) {
+            $scopeAStillPresent = $true
+        }
+        if ($ace.SecurityIdentifier.Value -ceq $ScopeBSID) {
+            $aceBytes = [byte[]]::new($ace.BinaryLength)
+            $ace.GetBinaryForm($aceBytes, 0)
+            $scopeBAfter = [Convert]::ToBase64String($aceBytes)
+        }
+    }
+    $second = Remove-DefenseClawSIDFromRawDACL `
+        -Descriptor $first.descriptor `
+        -SID $ScopeASID
+
+    $scopeBCanonical = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $true `
+        -Kind ManagedIPCDirectory `
+        -GatewayServiceSID $ScopeBSID
+    $scopeBCanonicalSDDL = $scopeBCanonical.GetSecurityDescriptorSddlForm(
+        [Security.AccessControl.AccessControlSections]::All
+    )
+
+    $callbackDACL = [Security.AccessControl.RawAcl]::new(2, 1)
+    $callbackDACL.InsertAce(
+        0,
+        [Security.AccessControl.CommonAce]::new(
+            [Security.AccessControl.AceFlags]::None,
+            [Security.AccessControl.AceQualifier]::AccessAllowed,
+            [int][Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.Principal.SecurityIdentifier]::new($ScopeASID),
+            $true,
+            [byte[]]@(1, 2, 3, 4)
+        )
+    )
+    $callbackDescriptor =
+        [Security.AccessControl.RawSecurityDescriptor]::new(
+            (
+                [Security.AccessControl.ControlFlags](
+                    [int][Security.AccessControl.ControlFlags]::DiscretionaryAclPresent -bor
+                    [int][Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
+                )
+            ),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            $null,
+            $callbackDACL
+        )
+    $invalidTargetCases = [ordered]@{
+        inherited = [Security.AccessControl.RawSecurityDescriptor]::new(
+            "O:BAG:BAD:P(A;ID;FA;;;$ScopeASID)"
+        )
+        deny = [Security.AccessControl.RawSecurityDescriptor]::new(
+            "O:BAG:BAD:P(D;;FA;;;$ScopeASID)"
+        )
+        narrow = [Security.AccessControl.RawSecurityDescriptor]::new(
+            "O:BAG:BAD:P(A;;FR;;;$ScopeASID)"
+        )
+        duplicate = [Security.AccessControl.RawSecurityDescriptor]::new(
+            "O:BAG:BAD:P(A;;FA;;;$ScopeASID)(A;;FA;;;$ScopeASID)"
+        )
+        callback = $callbackDescriptor
+    }
+    $invalidTargetRejected = @{}
+    foreach ($invalidCase in $invalidTargetCases.GetEnumerator()) {
+        $rejected = $false
+        try {
+            [void](Remove-DefenseClawSIDFromRawDACL `
+                -Descriptor $invalidCase.Value `
+                -SID $ScopeASID)
+        }
+        catch {
+            $expectedFailure = if ([string]$invalidCase.Key -ceq 'duplicate') {
+                'duplicate ACEs'
+            }
+            else {
+                'non-canonical ACE'
+            }
+            $rejected = $_.Exception.Message -match $expectedFailure
+        }
+        $invalidTargetRejected[[string]$invalidCase.Key] = $rejected
+    }
+
+    $retiredOwnerRejected = $false
+    $retiredGroupRejected = $false
+    try {
+        Assert-DefenseClawManagedIPCRetirementDescriptor `
+            -Descriptor ([Security.AccessControl.RawSecurityDescriptor]::new(
+                ("O:{0}G:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)" -f $ScopeASID)
+            )) `
+            -Path 'ipc-owner-fixture'
+    }
+    catch {
+        $retiredOwnerRejected = $_.Exception.Message -match 'untrusted owner'
+    }
+    try {
+        Assert-DefenseClawManagedIPCRetirementDescriptor `
+            -Descriptor ([Security.AccessControl.RawSecurityDescriptor]::new(
+                ("O:BAG:{0}D:P(A;;FA;;;SY)(A;;FA;;;BA)" -f $ScopeASID)
+            )) `
+            -Path 'ipc-group-fixture'
+    }
+    catch {
+        $retiredGroupRejected = $_.Exception.Message -match 'untrusted group'
+    }
+
+    [pscustomobject]@{
+        exact_scope_ace_removed = (
+            [int]$first.removed -eq 1 -and -not $scopeAStillPresent
+        )
+        unrelated_service_ace_preserved = (
+            -not [string]::IsNullOrWhiteSpace($scopeBBefore) -and
+            $scopeBBefore -ceq $scopeBAfter
+        )
+        shared_baseline_aces_preserved = (
+            $first.descriptor.GetSddlForm(
+                [Security.AccessControl.AccessControlSections]::All
+            ) -match ';;;AU\)' -and
+            $first.descriptor.GetSddlForm(
+                [Security.AccessControl.AccessControlSections]::All
+            ) -match ';;;SY\)' -and
+            $first.descriptor.GetSddlForm(
+                [Security.AccessControl.AccessControlSections]::All
+            ) -match ';;;BA\)'
+        )
+        repeated_cleanup_is_idempotent = ([int]$second.removed -eq 0)
+        inherited_target_ace_rejected = [bool]$invalidTargetRejected.inherited
+        deny_target_ace_rejected = [bool]$invalidTargetRejected.deny
+        narrow_target_ace_rejected = [bool]$invalidTargetRejected.narrow
+        duplicate_target_aces_rejected = [bool]$invalidTargetRejected.duplicate
+        callback_target_ace_rejected = [bool]$invalidTargetRejected.callback
+        retired_sid_owner_rejected = $retiredOwnerRejected
+        retired_sid_group_rejected = $retiredGroupRejected
+        next_scope_can_be_canonical = (
+            $scopeBCanonicalSDDL -match [regex]::Escape(";;;$ScopeBSID)") -and
+            -not ($scopeBCanonicalSDDL -match [regex]::Escape(";;;$ScopeASID)"))
+        )
+    }
+} $serviceSID 'S-1-5-80-6-7-8-9-10'
+foreach ($property in $ipcCleanupCases.psobject.Properties) {
+    if (-not [bool]$property.Value) {
+        throw "managed IPC service-SID cleanup regression failed: $($property.Name)"
+    }
+}
+
 $comparisonCases = & $module {
     $expectedRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
         'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
@@ -510,6 +686,105 @@ foreach ($property in $runtimeAdoption.psobject.Properties) {
     }
 }
 
+$nativeIPCCleanup = & $module {
+    param($ScopeASID, $ScopeBSID)
+    $root = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        'DefenseClaw-IPCAcl-' + [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $root `
+            -Force)
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm(
+            (
+                'O:BAG:BAD:P(A;;0x100021;;;AU)(A;;FA;;;SY)' +
+                "(A;;FA;;;BA)(A;;FA;;;$ScopeASID)" +
+                "(A;;0x1200a9;;;$ScopeBSID)"
+            ),
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        Microsoft.PowerShell.Security\Set-Acl `
+            -LiteralPath $root `
+            -AclObject $security `
+            -ErrorAction Stop
+
+        $native = Initialize-DefenseClawNativeSecurity
+        $missingPath = Microsoft.PowerShell.Management\Join-Path `
+            $root `
+            'missing-ipc-directory'
+        $nativeAbsenceIsNull = (
+            $null -eq $native::GetDirectorySecuritySnapshotNoFollowIfExists(
+                $missingPath
+            )
+        )
+        $before = $native::GetDirectorySecuritySnapshotNoFollow($root)
+        $beforeDescriptor =
+            [Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$before.SecurityDescriptor,
+                0
+            )
+        $filtered = Remove-DefenseClawSIDFromRawDACL `
+            -Descriptor $beforeDescriptor `
+            -SID $ScopeASID
+        $expected = [Security.AccessControl.RawSecurityDescriptor](
+            $filtered.descriptor
+        )
+        $expectedBytes = [byte[]]::new($expected.BinaryLength)
+        $expected.GetBinaryForm($expectedBytes, 0)
+        $after = $native::SetDirectoryDaclNoFollow(
+            $root,
+            $expectedBytes,
+            [string]$before.Identity
+        )
+        $actual = [Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$after.SecurityDescriptor,
+            0
+        )
+        $scopeAPresent = $false
+        $scopeBPresent = $false
+        foreach ($ace in $actual.DiscretionaryAcl) {
+            if ($ace -isnot [Security.AccessControl.KnownAce] -or
+                $null -eq $ace.SecurityIdentifier) {
+                continue
+            }
+            if ($ace.SecurityIdentifier.Value -ceq $ScopeASID) {
+                $scopeAPresent = $true
+            }
+            if ($ace.SecurityIdentifier.Value -ceq $ScopeBSID) {
+                $scopeBPresent = $true
+            }
+        }
+        return [pscustomobject]@{
+            identity_preserved = (
+                [string]$before.Identity -ceq [string]$after.Identity
+            )
+            exact_filtered_dacl = Test-DefenseClawExactRawDACL `
+                -Actual $actual `
+                -Expected $expected
+            target_removed = -not $scopeAPresent
+            other_service_preserved = $scopeBPresent
+            native_absence_is_null = $nativeAbsenceIsNull
+        }
+    }
+    finally {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root) {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $root `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+} $serviceSID 'S-1-5-80-6-7-8-9-10'
+foreach ($property in $nativeIPCCleanup.psobject.Properties) {
+    if (-not [bool]$property.Value) {
+        throw "native managed IPC cleanup regression failed: $($property.Name)"
+    }
+}
+
 $nativeDescriptor = & $module {
     param($Path)
     $native = Initialize-DefenseClawNativeSecurity
@@ -535,6 +810,13 @@ if ($null -eq $nativeDescriptor.DiscretionaryAcl) {
     installer_verifier_pairings_checked = $pairingsChecked
     acl_kind_sets_agree = [bool]$kindSetsAgree
     state_ancestor_grant_is_additive = $true
+    managed_ipc_scope_cleanup_exact = $true
+    managed_ipc_other_service_ace_preserved = $true
+    managed_ipc_cleanup_idempotent = $true
+    managed_ipc_next_scope_canonical = $true
+    managed_ipc_native_handle_cleanup = $true
+    managed_ipc_noncanonical_target_aces_rejected = $true
+    managed_ipc_retired_sid_owner_group_rejected = $true
     retained_runtime_tree_adopted = $true
     retained_runtime_hard_links_rejected = $true
     retained_runtime_secret_acl_exact = $true
