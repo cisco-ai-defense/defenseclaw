@@ -5210,7 +5210,7 @@ targets:
                 -GatewayServiceSID $rollbackGatewaySID
         $inheritedAcl = [Security.AccessControl.DirectorySecurity]::new()
         $inheritedAcl.SetSecurityDescriptorSddlForm(
-            'O:BAG:BA(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)',
+            'O:BAG:BAD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)',
             [Security.AccessControl.AccessControlSections]::All
         )
         $inheritedAclRejected =

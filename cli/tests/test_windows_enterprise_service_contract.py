@@ -3576,6 +3576,8 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
         "inherited_acl_rejected",
     ):
         assert rejected_case in smoke
+    assert "'O:BAG:BAD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'" in smoke
+    assert "'O:BAG:BA(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'" not in smoke
 
 
 def test_fresh_install_hardens_manifest_before_target_runtime_planning() -> None:
