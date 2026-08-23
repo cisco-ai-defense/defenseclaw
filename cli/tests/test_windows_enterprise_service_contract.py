@@ -3374,6 +3374,68 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "purge_cases = @($purgeResults)" in smoke
 
 
+def test_fresh_install_hardens_manifest_before_target_runtime_planning() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    lifecycle = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    transaction = lifecycle.index("$snapshot = New-DefenseClawTransaction")
+    source_publish = lifecycle.index("Install-DefenseClawSourceDescriptor `")
+    manifest_only = lifecycle.index(
+        "if ($Action -eq 'Install' -and $name -ceq 'manifest')", source_publish
+    )
+    manifest_acl = lifecycle.index("Set-DefenseClawPathAcl `", manifest_only)
+    target_plan = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
+    assert transaction < source_publish < manifest_only < manifest_acl < target_plan
+    manifest_acl_contract = lifecycle[manifest_only:target_plan]
+    assert "-Path $destination `" in manifest_acl_contract
+    assert "-Kind AdminFile `" in manifest_acl_contract
+    assert "-GatewayServiceSID $script:AdministratorsSID" in manifest_acl_contract
+
+    preparation_mode = module[
+        module.index("function Get-DefenseClawTargetRuntimePreparationMode") :
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle")
+    ]
+    assert "if ($Action -eq 'Install') { return 'prepare' }" in preparation_mode
+    assert "return 'validate'" in preparation_mode
+
+    failure_message = module[
+        module.index("function Get-DefenseClawTargetRuntimeProbeFailureMessage") :
+        module.index("function Invoke-DefenseClawTargetRuntimePreparation")
+    ]
+    assert "ConvertTo-DefenseClawBoundedDiagnostic -Value $Probe.output" in failure_message
+    target_runtime = module[
+        module.index("function Invoke-DefenseClawTargetRuntimePreparation") :
+        module.index("function Assert-DefenseClawTargetRuntimeProductionChildrenExclusive")
+    ]
+    for phase in ("planning", "staging", "finalization"):
+        assert f"-Phase {phase} `" in target_runtime
+    stage_journal = target_runtime.index("-StageReport $stage `")
+    stage_failure = target_runtime.index("-Phase staging `")
+    assert stage_journal < stage_failure
+
+    for event in (
+        "manifest-published",
+        "manifest-admin-acl",
+        "target-runtime:plan",
+        "target-runtime:stage",
+        "target-runtime:finalize",
+    ):
+        assert event in smoke
+    assert "& $script:HarnessRealSetPathAcl @PSBoundParameters" in smoke
+    assert "Assert-DefenseClawCanonicalPathAcl `" in smoke
+    assert "target-runtime plan preceded the fresh manifest ACL" in smoke
+    assert "lowercase Install action skipped target preparation" in smoke
+    assert "bounded-redacted-target-runtime-diagnostic" in smoke
+    assert "diagnostic-secret" in smoke
+    assert "$targetRuntimeDiagnostic -notlike '*diagnostic-secret*'" in smoke
+    assert "target runtime finalization failed with exit 7: unavailable" in smoke
+
+
 def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
     module = read(MODULE)
     smoke = read(UNINSTALL_TRANSACTION_SMOKE)

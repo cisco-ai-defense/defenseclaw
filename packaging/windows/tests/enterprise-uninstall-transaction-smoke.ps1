@@ -446,6 +446,26 @@ try {
                 [Parameter(Mandatory)][string]$Kind,
                 [Parameter(Mandatory)][string]$GatewayServiceSID
             )
+            $isFreshInstallManifest = [bool](
+                $script:HarnessState.ContainsKey('operation') -and
+                [string]$script:HarnessState.operation -ceq 'install' -and
+                $script:HarnessState.ContainsKey('layout') -and
+                [string]::Equals(
+                    $Path,
+                    [string]$script:HarnessState.layout.ManifestPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            )
+            if ($isFreshInstallManifest) {
+                if ($Kind -cne 'AdminFile' -or
+                    $GatewayServiceSID -cne $script:AdministratorsSID) {
+                    throw 'fresh Install used a noncanonical manifest ACL contract'
+                }
+                & $script:HarnessRealSetPathAcl @PSBoundParameters
+                $script:HarnessState.manifest_admin_acl = $true
+                $script:HarnessState.events.Add('manifest-admin-acl')
+                return
+            }
             if ($script:HarnessState.ContainsKey('layout') -and
                 [string]::Equals(
                     $Path,
@@ -1868,6 +1888,13 @@ try {
             )) {
                 $script:HarnessState.binary_present = $true
             }
+            if ([string]::Equals(
+                $Destination,
+                [string]$script:HarnessState.layout.ManifestPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                $script:HarnessState.events.Add('manifest-published')
+            }
         }
         function script:Remove-DefenseClawManagedTree {
             param(
@@ -2469,6 +2496,20 @@ try {
                         )) {
                         throw 'target-runtime plan mock received the wrong manifest'
                     }
+                    if ([string]$script:HarnessState.operation -ceq 'install' -and
+                        -not [bool]$script:HarnessState.installed) {
+                        if (-not [bool]$script:HarnessState.manifest_admin_acl) {
+                            throw 'target-runtime plan preceded the fresh manifest ACL'
+                        }
+                        $expectedManifestAcl =
+                            New-DefenseClawCanonicalPathAcl `
+                                -IsDirectory $false `
+                                -Kind AdminFile `
+                                -GatewayServiceSID $script:AdministratorsSID
+                        Assert-DefenseClawCanonicalPathAcl `
+                            -Path $manifestPath `
+                            -Expected $expectedManifestAcl
+                    }
                     $baseline = if ([bool]$script:HarnessState.installed) {
                         'canonical'
                     }
@@ -2721,10 +2762,12 @@ targets:
                 gateway_started_before_guardian = $false
                 barrier_required = $true
                 barrier_complete = $false
+                manifest_admin_acl = $false
             }
 
             for ($attempt = 1; $attempt -le 2; $attempt++) {
                 $script:HarnessState.events.Clear()
+                $script:HarnessState.manifest_admin_acl = $false
                 $failure = ''
                 try {
                     [void](Invoke-DefenseClawInstallLikeLifecycle `
@@ -2741,6 +2784,12 @@ targets:
 
                 $transaction = $script:HarnessState.events.IndexOf(
                     'transaction'
+                )
+                $manifestPublished = $script:HarnessState.events.IndexOf(
+                    'manifest-published'
+                )
+                $manifestAcl = $script:HarnessState.events.IndexOf(
+                    'manifest-admin-acl'
                 )
                 $targetPlan = $script:HarnessState.events.IndexOf(
                     'target-runtime:plan'
@@ -2776,7 +2825,9 @@ targets:
                 Assert-Harness `
                     -Condition (
                         $transaction -ge 0 -and
-                        $targetPlan -gt $transaction -and
+                        $manifestPublished -gt $transaction -and
+                        $manifestAcl -gt $manifestPublished -and
+                        $targetPlan -gt $manifestAcl -and
                         $targetPlanAuthority -gt $targetPlan -and
                         $targetStage -gt $targetPlanAuthority -and
                         $targetFinalize -gt $targetStage -and
@@ -2790,6 +2841,8 @@ targets:
                         "fresh install attempt $attempt violated " +
                         'transaction/target/service/IPC/ACL/snapshot ordering ' +
                         "(transaction=$transaction services=$services " +
+                        "manifest_published=$manifestPublished " +
+                        "manifest_acl=$manifestAcl " +
                         "target_plan=$targetPlan " +
                         "target_authority=$targetPlanAuthority " +
                         "target_stage=$targetStage " +
@@ -4945,6 +4998,13 @@ targets:
                     [string]$targetPreparationModes[$installLikeAction]
                 )
         }
+        $lowercaseInstallPreparationMode =
+            Get-DefenseClawTargetRuntimePreparationMode `
+                -Action install `
+                -ManifestPresent $true
+        Assert-Harness `
+            -Condition ($lowercaseInstallPreparationMode -ceq 'prepare') `
+            -Message 'lowercase Install action skipped target preparation'
         $missingManifestRejected = $false
         try {
             $null = Get-DefenseClawTargetRuntimePreparationMode `
@@ -4965,7 +5025,48 @@ targets:
             install = 'prepare'
             upgrade = 'validate'
             repair = 'validate'
+            lowercase_install = 'prepare'
             missing_manifest = 'rejected'
+        })
+
+        $targetRuntimeDiagnostic =
+            Get-DefenseClawTargetRuntimeProbeFailureMessage `
+                -Phase planning `
+                -Probe ([pscustomobject]@{
+                    exit_code = 1
+                    output = @(
+                        'manifest ACL rejected token=diagnostic-secret ' +
+                        [Environment]::NewLine +
+                        '{"client_secret":"json-secret"} ' +
+                        ('x' * 5000)
+                    )
+                })
+        Assert-Harness `
+            -Condition (
+                $targetRuntimeDiagnostic -like
+                    '*manifest ACL rejected token=<redacted>*' -and
+                $targetRuntimeDiagnostic -notlike '*diagnostic-secret*' -and
+                $targetRuntimeDiagnostic -notlike '*json-secret*' -and
+                $targetRuntimeDiagnostic -notmatch '[\r\n]' -and
+                $targetRuntimeDiagnostic.Length -le 2150
+            ) `
+            -Message 'target runtime failure diagnostic was hidden, unbounded, or unsafe'
+        $emptyTargetRuntimeDiagnostic =
+            Get-DefenseClawTargetRuntimeProbeFailureMessage `
+                -Phase finalization `
+                -Probe ([pscustomobject]@{
+                    exit_code = 7
+                    output = @()
+                })
+        Assert-Harness `
+            -Condition ($emptyTargetRuntimeDiagnostic -ceq
+                'target runtime finalization failed with exit 7: unavailable') `
+            -Message 'empty target runtime output did not produce a safe diagnostic'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'bounded-redacted-target-runtime-diagnostic'
+            captured_error_visible = $true
+            credential_redacted = $true
+            bounded = $true
         })
 
         # ConvertFrom-Json yields a fixed PSCustomObject shape on both Windows

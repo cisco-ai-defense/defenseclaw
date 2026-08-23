@@ -11053,6 +11053,20 @@ function Set-DefenseClawTargetRuntimeTransactionState {
     return $snapshot
 }
 
+function Get-DefenseClawTargetRuntimeProbeFailureMessage {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('planning', 'staging', 'finalization', 'rollback cleanup')]
+        [string]$Phase,
+        [Parameter(Mandatory)]$Probe
+    )
+    $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $Probe.output
+    return (
+        "target runtime $Phase failed with exit " +
+        "$([int]$Probe.exit_code): $detail"
+    )
+}
+
 function Invoke-DefenseClawTargetRuntimePreparation {
     param(
         [Parameter(Mandatory)][string]$SnapshotPath,
@@ -11078,7 +11092,9 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         -Capture `
         -AllowFailure
     if ([int]$planProbe.exit_code -ne 0) {
-        throw "target runtime planning failed with exit $($planProbe.exit_code)"
+        throw (Get-DefenseClawTargetRuntimeProbeFailureMessage `
+            -Phase planning `
+            -Probe $planProbe)
     }
     $plan = Assert-DefenseClawTargetRuntimePlan `
         -Plan (Get-DefenseClawTargetRuntimeExchangeValue `
@@ -11144,8 +11160,12 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             throw
         }
     }
-    if ([int]$stageProbe.exit_code -ne 0 -or
-        $null -eq $stage -or -not [bool]$stage.ok) {
+    if ([int]$stageProbe.exit_code -ne 0) {
+        throw (Get-DefenseClawTargetRuntimeProbeFailureMessage `
+            -Phase staging `
+            -Probe $stageProbe)
+    }
+    if ($null -eq $stage -or -not [bool]$stage.ok) {
         throw "target runtime staging failed with exit $($stageProbe.exit_code)"
     }
 
@@ -11179,8 +11199,12 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             throw
         }
     }
-    if ([int]$finalProbe.exit_code -ne 0 -or
-        $null -eq $final -or
+    if ([int]$finalProbe.exit_code -ne 0) {
+        throw (Get-DefenseClawTargetRuntimeProbeFailureMessage `
+            -Phase finalization `
+            -Probe $finalProbe)
+    }
+    if ($null -eq $final -or
         -not (Test-DefenseClawTargetRuntimeReportComplete `
             -Plan $plan `
             -Report $final)) {
@@ -11529,8 +11553,12 @@ function Invoke-DefenseClawTargetRuntimeRollbackCleanup {
             throw
         }
     }
-    if ([int]$probe.exit_code -ne 0 -or
-        $null -eq $cleanup -or
+    if ([int]$probe.exit_code -ne 0) {
+        throw (Get-DefenseClawTargetRuntimeProbeFailureMessage `
+            -Phase 'rollback cleanup' `
+            -Probe $probe)
+    }
+    if ($null -eq $cleanup -or
         -not (Test-DefenseClawTargetRuntimeReportComplete `
             -Plan $plan `
             -Report $cleanup)) {
@@ -13336,7 +13364,7 @@ function ConvertTo-DefenseClawBoundedDiagnostic {
     }
     $text = $text -replace '[\x00-\x1f\x7f]+', ' '
     $text = $text -replace '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer <redacted>'
-    $text = $text -replace '(?i)\b(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*(?:"[^"]*"|''[^'']*''|[^,;\s]+)', '$1=<redacted>'
+    $text = $text -replace '(?i)(?<![A-Za-z0-9_])["'']?(password|passwd|secret|token|access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key)\b["'']?\s*[:=]\s*(?:"[^"]*"|''[^'']*''|[^,;\s}\]]+)', '$1=<redacted>'
     $text = $text.Trim()
     if ($text.Length -gt $MaxLength) {
         return $text.Substring(0, $MaxLength - 3) + '...'
@@ -16127,7 +16155,7 @@ function Get-DefenseClawTargetRuntimePreparationMode {
             'before target runtime preparation'
         )
     }
-    if ($Action -ceq 'Install') { return 'prepare' }
+    if ($Action -eq 'Install') { return 'prepare' }
     return 'validate'
 }
 
@@ -16294,6 +16322,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Install-DefenseClawSourceDescriptor `
                 -Source $Sources[$name] `
                 -Destination $destination
+            if ($Action -eq 'Install' -and $name -ceq 'manifest') {
+                # A fresh copy inherits the elevated caller's descriptor.
+                # Publish the exact AdminFile contract before the gateway
+                # authenticates the manifest or derives target-runtime paths.
+                Set-DefenseClawPathAcl `
+                    -Path $destination `
+                    -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID
+            }
         }
         foreach ($requiredPath in @(
             $Layout.GatewayPath,
