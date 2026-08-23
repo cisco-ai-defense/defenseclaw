@@ -1867,7 +1867,24 @@ try {
                 ] -ne 4) {
                 throw 'fresh guardian reconcile began after gateway became startable'
             }
-            if ($ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $legacyRecovery = [bool](
+                $script:HarnessState.ContainsKey('operation') -and
+                [string]$script:HarnessState.operation -ceq
+                    'quiescing-recovery'
+            )
+            if ([string]::IsNullOrWhiteSpace($ExpectedManifestSHA256)) {
+                if (-not $legacyRecovery) {
+                    throw 'fresh guardian reconcile was not bound to the target-runtime manifest digest'
+                }
+                # Production deliberately supports transactions written by a
+                # prior strict-v1 build before activation digests existed. It
+                # still requires a fresh healthy generation and a newly
+                # published protected Guardian state inode.
+                $script:HarnessState.events.Add(
+                    'guardian-legacy-fresh-state'
+                )
+            }
+            elseif ($ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
                 -not $script:HarnessState.ContainsKey(
                     'target_runtime_manifest_sha256'
                 ) -or
@@ -4496,6 +4513,15 @@ targets:
                         -not [bool]$script:HarnessState.gateway_started_before_guardian
                     ) `
                     -Message "$Name let a queued gateway restart beat fresh guardian reconciliation"
+                if ($guardianTemporarilyRequired) {
+                    Assert-Harness `
+                        -Condition (
+                            $script:HarnessState.events.IndexOf(
+                                'guardian-legacy-fresh-state'
+                            ) -ge 0
+                        ) `
+                        -Message "$Name did not exercise legacy fresh-state Guardian coverage"
+                }
                 if ($PriorGatewayExisted) {
                     Assert-Harness `
                         -Condition (
