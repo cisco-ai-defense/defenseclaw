@@ -16523,27 +16523,38 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     if (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.InstallRoot `
             -PathType Container) {
-        $teardownPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
-            -Layout $Layout
-        if ($teardownPhase -ceq 'prepared') {
-            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName)
-        }
-        elseif ($teardownPhase -ceq 'finalized') {
-            # Finalization no longer needs the executable tree. Validate the
-            # bounded Admin-only remainder so a crash during recursive delete
-            # can resume without accepting foreign content.
-            Assert-DefenseClawInstallTreeRetirementState -Layout $Layout
+        if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.ManagedHooksTeardownJournalPath) {
+            $teardownPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+                -Layout $Layout
+            if ($teardownPhase -ceq 'prepared') {
+                [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName)
+            }
+            elseif ($teardownPhase -ceq 'finalized') {
+                # Finalization no longer needs the executable tree. Validate
+                # the bounded Admin-only remainder so a crash during recursive
+                # delete can resume without accepting foreign content.
+                Assert-DefenseClawInstallTreeRetirementState -Layout $Layout
+            }
+            else {
+                throw "committed uninstall has non-finalizable teardown phase: $teardownPhase"
+            }
+            Remove-DefenseClawManagedTree `
+                -Path $Layout.InstallRoot `
+                -RequiredBase $script:ProgramFiles `
+                -Label 'InstallRoot'
         }
         else {
-            throw "committed uninstall has non-finalizable teardown phase: $teardownPhase"
+            # A tombstone created by the pre-generation lifecycle can retain
+            # only the empty authenticated bin/libexec directory shell after
+            # its teardown journal has already been retired. Preserve that
+            # recovery lane without accepting a missing journal for any
+            # executable, file, reparse point, or unexpected directory.
+            Remove-DefenseClawCommittedEmptyInstallRoot -Layout $Layout
         }
-        Remove-DefenseClawManagedTree `
-            -Path $Layout.InstallRoot `
-            -RequiredBase $script:ProgramFiles `
-            -Label 'InstallRoot'
     }
     [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
         -Layout $Layout `
