@@ -120,10 +120,12 @@ func openWindowsCorrelationKeyDirectory(path string, publicationRoot bool) (wind
 	// redirected by renaming any component after validation.
 	access := uint32(windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL)
 	if publicationRoot {
-		// FILE_RENAME_INFO resolves the fixed destination name relative to this
-		// pinned final directory handle. Request enumeration only on that leaf,
-		// never on ancestors that are held solely to prevent path replacement.
-		access |= windows.FILE_LIST_DIRECTORY
+		// FileRenameInformation resolves the fixed destination name relative to
+		// this pinned final directory handle. FILE_WRITE_DATA is FILE_ADD_FILE on
+		// a directory; FILE_TRAVERSE and SYNCHRONIZE complete the documented
+		// relative rename contract. Never request those mutation rights on
+		// ancestors that are held solely to prevent path replacement.
+		access |= windows.FILE_TRAVERSE | windows.FILE_WRITE_DATA | windows.SYNCHRONIZE
 	}
 	handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
 		return windows.CreateFile(
@@ -709,14 +711,30 @@ func renameWindowsCorrelationKeyHandle(
 		(*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&information.FileName[0]))[:len(name):len(name)],
 		name,
 	)
-	err = windows.SetFileInformationByHandle(
+	var status windows.IO_STATUS_BLOCK
+	err = windows.NtSetInformationFile(
 		handle,
-		windows.FileRenameInfo,
+		&status,
 		&buffer[0],
 		uint32(len(buffer)),
+		windows.FileRenameInformation,
 	)
 	runtime.KeepAlive(buffer)
-	return err
+	if err != nil {
+		if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) ||
+			errors.Is(err, windows.STATUS_OBJECT_NAME_EXISTS) {
+			return windows.ERROR_ALREADY_EXISTS
+		}
+		var ntStatus windows.NTStatus
+		if errors.As(err, &ntStatus) {
+			return ntStatus.Errno()
+		}
+		return err
+	}
+	// The staging handle was opened write-through. Flush its remaining data and
+	// metadata after the handle-bound rename before publication is reported as
+	// successful.
+	return windows.FlushFileBuffers(handle)
 }
 
 // validatePublishedWindowsCorrelationKeyHandle proves that the no-replace

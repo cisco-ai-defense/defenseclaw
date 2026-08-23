@@ -235,6 +235,74 @@ func TestWindowsCorrelationKeyCrashAfterPublicationLeavesCanonicalInode(t *testi
 	assertNoWindowsCorrelationTemps(t, dir)
 }
 
+func TestWindowsCorrelationKeyHandleRenamePublishesNoReplace(t *testing.T) {
+	dir := t.TempDir()
+	directories, err := openWindowsCorrelationKeyDirectoryChain(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWindowsCorrelationKeyDirectories(directories)
+	directory := directories[len(directories)-1]
+
+	createHardenedTemp := func(name string, fill byte) *os.File {
+		t.Helper()
+		path := filepath.Join(dir, correlationKeyTempPrefix+name)
+		file, err := createWindowsCorrelationTemp(path)
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			handle := windows.Handle(file.Fd())
+			if handle != windows.InvalidHandle {
+				_ = markWindowsCorrelationKeyForDeletion(handle)
+				_ = file.Close()
+			}
+		})
+		if err := writeAll(file, bytes.Repeat([]byte{fill}, hashV1KeySize)); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		if err := file.Sync(); err != nil {
+			t.Fatalf("sync %s: %v", name, err)
+		}
+		if err := protectWindowsCorrelationSecurity(windows.Handle(file.Fd())); err != nil {
+			t.Fatalf("harden %s: %v", name, err)
+		}
+		if err := validateWindowsCorrelationKeyHandle(windows.Handle(file.Fd())); err != nil {
+			t.Fatalf("validate %s: %v", name, err)
+		}
+		return file
+	}
+
+	winner := createHardenedTemp("native-winner", 0x31)
+	winnerBefore, err := windowsCorrelationHandleInformation(windows.Handle(winner.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := renameWindowsCorrelationKeyHandle(windows.Handle(winner.Fd()), directory); err != nil {
+		t.Fatalf("handle-bound NtSetInformationFile publish error (%T): %v", err, err)
+	}
+	winnerAfter, err := windowsCorrelationHandleInformation(windows.Handle(winner.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !windowsCorrelationSameFile(winnerBefore, winnerAfter) {
+		t.Fatal("handle-bound publication changed the winning inode")
+	}
+
+	loser := createHardenedTemp("native-loser", 0x32)
+	if err := renameWindowsCorrelationKeyHandle(windows.Handle(loser.Fd()), directory); !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		t.Fatalf("handle-bound no-replace collision error (%T) = %v, want ERROR_ALREADY_EXISTS", err, err)
+	}
+	winnerFinal, err := windowsCorrelationHandleInformation(windows.Handle(winner.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !windowsCorrelationSameFile(winnerBefore, winnerFinal) {
+		t.Fatal("no-replace collision replaced the winning inode")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, filepath.Join(dir, correlationKeyFilename))
+}
+
 func TestWindowsCorrelationKeyConcurrentCreatorsConverge(t *testing.T) {
 	dir := t.TempDir()
 	const creators = 24
