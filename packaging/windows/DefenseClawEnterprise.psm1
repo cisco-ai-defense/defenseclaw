@@ -11006,7 +11006,15 @@ function Set-DefenseClawTargetRuntimeTransactionState {
             Microsoft.PowerShell.Core\Where-Object {
                 [bool]$_.created -and [string]$_.state -cne 'absent'
             })
-        $snapshot.created_target_runtime_roots = @($created)
+        # JSON-restored legacy and lifecycle-test snapshots can predate this
+        # field. Upsert it through the same schema-safe writer used for the
+        # plan/report bindings instead of assigning a missing NoteProperty.
+        $snapshot |
+            Microsoft.PowerShell.Utility\Add-Member `
+                -MemberType NoteProperty `
+                -Name created_target_runtime_roots `
+                -Value @($created) `
+                -Force
     }
     Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
     $intent = Get-DefenseClawInstallRollbackIntent `

@@ -380,6 +380,7 @@ try {
                     }
                 )
                 created_shared_directories = @()
+                created_target_runtime_roots = @()
             }
             [IO.File]::WriteAllText(
                 $SnapshotPath,
@@ -4965,6 +4966,128 @@ targets:
             upgrade = 'validate'
             repair = 'validate'
             missing_manifest = 'rejected'
+        })
+
+        # ConvertFrom-Json yields a fixed PSCustomObject shape on both Windows
+        # PowerShell 5.1 and PowerShell 7. Model a legacy/restored transaction
+        # that predates created_target_runtime_roots, then exercise both the
+        # first live-claim publication and terminal cleanup replacement.
+        $legacySchemaRoot = New-HarnessCaseRoot `
+            -Parent $TestRoot `
+            -Label 'legacy-target-runtime-schema'
+        $legacySchemaLayout = New-HarnessLayout -Root $legacySchemaRoot
+        Assert-Harness `
+            -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $legacySchemaLayout.InstallRollbackIntentPath)) `
+            -Message 'legacy schema fixture unexpectedly has rollback intent'
+        $legacySchemaSnapshot = Microsoft.PowerShell.Management\Join-Path `
+            $legacySchemaLayout.StateRoot `
+            'legacy-target-runtime-snapshot.json'
+        [IO.File]::WriteAllText(
+            $legacySchemaSnapshot,
+            (
+                [ordered]@{
+                    schema_version = 1
+                    gateway_service = 'DefenseClawGateway'
+                    guardian_service = 'DefenseClawHookGuardian'
+                    created_shared_directories = @()
+                } |
+                    Microsoft.PowerShell.Utility\ConvertTo-Json `
+                        -Depth 6 `
+                        -Compress
+            ),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $legacyOriginal = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $legacySchemaSnapshot `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        Assert-Harness `
+            -Condition (
+                $null -eq $legacyOriginal.PSObject.Properties[
+                    'created_target_runtime_roots'
+                ]
+            ) `
+            -Message 'legacy transaction fixture unexpectedly has runtime claims'
+        $legacyLiveClaim = [pscustomobject]@{
+            user_home = 'C:\Users\Alice'
+            data_dir = 'C:\Users\Alice\.defenseclaw'
+            sid = 'S-1-5-21-111-222-333-1001'
+            identity = '00000001:0000000000000001'
+            created = $true
+            state = 'staged'
+        }
+        $legacyStageReport = Assert-DefenseClawTargetRuntimeReport `
+            -Report ([pscustomobject]@{
+                schema_version = 1
+                action = 'stage'
+                ok = $true
+                claims = @($legacyLiveClaim)
+            }) `
+            -Action stage `
+            -JournalProjection
+        [void](Set-DefenseClawTargetRuntimeTransactionState `
+            -SnapshotPath $legacySchemaSnapshot `
+            -Layout $legacySchemaLayout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian' `
+            -StageReport $legacyStageReport)
+        $legacyStaged = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $legacySchemaSnapshot `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $legacyClaimsProperty = $legacyStaged.PSObject.Properties[
+            'created_target_runtime_roots'
+        ]
+        Assert-Harness `
+            -Condition ($null -ne $legacyClaimsProperty) `
+            -Message 'legacy transaction did not add its runtime-claim property'
+        $legacyClaims = @($legacyClaimsProperty.Value)
+        Assert-Harness `
+            -Condition (
+                $legacyClaims.Count -eq 1 -and
+                [string]$legacyClaims[0].state -ceq 'staged'
+            ) `
+            -Message 'legacy transaction could not add its first runtime claim'
+        $legacyCleanupReport = Assert-DefenseClawTargetRuntimeReport `
+            -Report ([pscustomobject]@{
+                schema_version = 1
+                action = 'cleanup'
+                ok = $true
+                claims = @([pscustomobject]@{
+                    user_home = 'C:\Users\Alice'
+                    data_dir = 'C:\Users\Alice\.defenseclaw'
+                    sid = 'S-1-5-21-111-222-333-1001'
+                    created = $false
+                    state = 'absent'
+                })
+            }) `
+            -Action cleanup
+        [void](Set-DefenseClawTargetRuntimeTransactionState `
+            -SnapshotPath $legacySchemaSnapshot `
+            -Layout $legacySchemaLayout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian' `
+            -CleanupReport $legacyCleanupReport)
+        $legacyCleaned = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $legacySchemaSnapshot `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $legacyCleanedProperty = $legacyCleaned.PSObject.Properties[
+            'created_target_runtime_roots'
+        ]
+        Assert-Harness `
+            -Condition ($null -ne $legacyCleanedProperty) `
+            -Message 'cleanup removed the runtime-claim property'
+        Assert-Harness `
+            -Condition (@($legacyCleanedProperty.Value).Count -eq 0) `
+            -Message 'legacy transaction retained claims after exact cleanup'
+        Assert-Harness `
+            -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $legacySchemaLayout.InstallRollbackIntentPath)) `
+            -Message 'schema upsert accidentally published rollback intent'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'legacy-restored-target-runtime-schema-upsert'
+            missing_property_added = $true
+            live_claim_replaced_by_cleanup = $true
+            json_round_trip = $true
         })
 
         $twoRootPlan = [pscustomobject]@{

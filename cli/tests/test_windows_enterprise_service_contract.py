@@ -3345,7 +3345,7 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "function New-HarnessCaseRoot" in smoke
     assert "$receiptProbe.Length -ge 240" in smoke
     assert "legacy MAX_PATH boundary" in smoke
-    assert smoke.count("New-HarnessCaseRoot") == 11
+    assert smoke.count("New-HarnessCaseRoot") == 12
     assert "fresh-install-service-bootstrap-rollback-retry" in smoke
     assert "snapshot capture ran before both service identities existed" in smoke
     assert "repeated-first-activation-failure-exact-rollback" in smoke
