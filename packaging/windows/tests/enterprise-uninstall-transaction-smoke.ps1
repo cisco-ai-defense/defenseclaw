@@ -2275,6 +2275,11 @@ try {
                     '{"installed":false}',
                     [Text.UTF8Encoding]::new($false)
                 )
+                if (-not $PreexistingPrepared) {
+                    Write-HarnessJournal `
+                        -Path $layout.ManagedHooksTeardownJournalPath `
+                        -Phase 'finalized'
+                }
             }
             $events = [Collections.Generic.List[string]]::new()
             $script:HarnessState = @{
@@ -3661,7 +3666,8 @@ targets:
         function New-HarnessCommittedPurgeCase {
             param(
                 [Parameter(Mandatory)][string]$Name,
-                [string]$CrashAt = ''
+                [string]$CrashAt = '',
+                [switch]$OmitTeardownJournal
             )
             $root = New-HarnessCaseRoot `
                 -Parent $TestRoot `
@@ -3672,6 +3678,11 @@ targets:
                 '{"schema_version":1,"installed":false}',
                 [Text.UTF8Encoding]::new($false)
             )
+            if (-not $OmitTeardownJournal) {
+                Write-HarnessJournal `
+                    -Path $layout.ManagedHooksTeardownJournalPath `
+                    -Phase 'prepared'
+            }
             $events = [Collections.Generic.List[string]]::new()
             $script:HarnessState = @{
                 operation = 'purge'
@@ -3723,7 +3734,15 @@ targets:
 
         function Publish-HarnessPurgeReceipt {
             param([Parameter(Mandatory)][hashtable]$Layout)
+            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                -Layout $Layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian')
             Remove-DefenseClawCommittedEmptyInstallRoot -Layout $Layout
+            [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
+                -Layout $Layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian')
             [void](Publish-DefenseClawStatePurgeIntent `
                 -Layout $Layout `
                 -GatewayServiceName 'DefenseClawGateway' `
@@ -3755,6 +3774,61 @@ targets:
                 retried = $Retried
             })
         }
+
+        $missingJournalExecutableLayout = New-HarnessCommittedPurgeCase `
+            -Name 'missing-journal-executable' `
+            -OmitTeardownJournal
+        Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $missingJournalExecutableLayout.BinDirectory `
+            -Force | Microsoft.PowerShell.Core\Out-Null
+        [IO.File]::WriteAllText(
+            $missingJournalExecutableLayout.HookPath,
+            'unexpected managed hook executable',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $missingJournalPath = [string](
+            $missingJournalExecutableLayout.ManagedHooksTeardownJournalPath
+        )
+        $missingJournalExecutableFailed = $false
+        try {
+            [void](Invoke-DefenseClawCommittedUninstallCleanup `
+                -Layout $missingJournalExecutableLayout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian' `
+                -Purge)
+        }
+        catch {
+            $missingJournalExecutableFailed = $true
+        }
+        Assert-Harness `
+            -Condition (
+                $missingJournalExecutableFailed -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalExecutableLayout.InstallRoot `
+                    -PathType Container) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalExecutableLayout.HookPath `
+                    -PathType Leaf) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalExecutableLayout.StateRoot `
+                    -PathType Container) -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalPath) -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalExecutableLayout.PurgeIntentPath) -and
+                'S-1-5-80-1-2-3-4-5' -in
+                    @($script:HarnessState.ipc_service_sids) -and
+                $script:HarnessState.events.IndexOf(
+                    'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                ) -lt 0 -and
+                $script:HarnessState.events.IndexOf('purge-intent-write') -lt 0
+            ) `
+            -Message 'missing teardown journal authorized executable or purge cleanup'
+        Add-HarnessPurgeResult `
+            -Name 'missing-journal-executable-fails-closed' `
+            -FailedClosed:$true `
+            -Retried:$false
 
         $orderedLayout = New-HarnessCommittedPurgeCase -Name 'ordered'
         [void](Invoke-DefenseClawCommittedUninstallCleanup `
