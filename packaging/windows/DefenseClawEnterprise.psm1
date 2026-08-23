@@ -6120,7 +6120,8 @@ function Set-DefenseClawManagedServicesForTransaction {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$BindInstallPreparationSID
     )
     Set-DefenseClawManagedServices `
         -GatewayServiceName $GatewayServiceName `
@@ -6141,6 +6142,16 @@ function Set-DefenseClawManagedServicesForTransaction {
         -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
         -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
         -DeferAutomaticStart
+    # Persist the exact live service SID before any root receives an ACE for
+    # it. Rollback can then authenticate the post-managed-ACL descriptor even
+    # after SCM service deletion; legacy receipts use the deterministic SID
+    # migration path under the same protected service-name binding.
+    if ($BindInstallPreparationSID) {
+        [void](Set-DefenseClawInstallPreparationGatewayServiceSID `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName)
+    }
     Initialize-DefenseClawManagedIPCDirectory `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
@@ -8943,6 +8954,62 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
     return $snapshot
 }
 
+function Assert-DefenseClawInstallRollbackIntentCommitTimestamp {
+    param([Parameter(Mandatory)]$Intent)
+    $committedAt = $Intent.PSObject.Properties['committed_at']
+    if ($null -eq $committedAt) {
+        if ([string]$Intent.phase -ceq 'committed') {
+            throw 'committed install receipt is missing its commit timestamp'
+        }
+        # Schema-v2 receipts written before committed_at was introduced are
+        # valid recovery authority only while still pre-commit. Normalize the
+        # authenticated in-memory object so its next protected write migrates
+        # the schema without trusting caller-supplied replacement authority.
+        $Intent |
+            Microsoft.PowerShell.Utility\Add-Member `
+                -MemberType NoteProperty `
+                -Name committed_at `
+                -Value '' `
+                -Force
+        $committedAt = $Intent.PSObject.Properties['committed_at']
+    }
+    if ([string]$Intent.phase -ceq 'committed') {
+        if ([string]::IsNullOrWhiteSpace([string]$committedAt.Value)) {
+            throw 'committed install receipt has an empty commit timestamp'
+        }
+        try {
+            if ($committedAt.Value -is [DateTime]) {
+                $committedTimestamp = [DateTime]$committedAt.Value
+                if ($committedTimestamp.Kind -eq
+                    [DateTimeKind]::Unspecified) {
+                    throw 'commit timestamp has no timezone'
+                }
+            }
+            else {
+                $committedTimestamp =
+                    [DateTime]::ParseExact(
+                        [string]$committedAt.Value,
+                        'o',
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::RoundtripKind
+                    )
+                if ($committedTimestamp.Kind -eq
+                    [DateTimeKind]::Unspecified) {
+                    throw 'commit timestamp has no timezone'
+                }
+            }
+        }
+        catch {
+            throw 'committed install receipt has an invalid commit timestamp'
+        }
+    }
+    elseif ($committedAt.Value -isnot [string] -or
+        [string]$committedAt.Value -cne '') {
+        throw 'uncommitted install receipt contains a commit timestamp'
+    }
+    return $Intent
+}
+
 function Get-DefenseClawInstallRollbackIntent {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -9052,6 +9119,7 @@ function Get-DefenseClawInstallRollbackIntent {
                 'planned',
                 'staged',
                 'canonical',
+                'quarantined',
                 'existing'
             ) -or
             $null -eq $identity -or
@@ -9061,7 +9129,11 @@ function Get-DefenseClawInstallRollbackIntent {
             throw "authenticated fresh-install rollback intent has invalid $prefix state"
         }
         if ([bool]$created.Value -ne
-            ([string]$creationState.Value -in @('staged', 'canonical')) -or
+            ([string]$creationState.Value -in @(
+                'staged',
+                'canonical',
+                'quarantined'
+            )) -or
             ([string]$creationState.Value -ceq 'planned' -and
                 -not [bool]$baselineAbsent.Value) -or
             ([string]$creationState.Value -ceq 'existing' -and
@@ -9158,6 +9230,8 @@ function Get-DefenseClawInstallRollbackIntent {
             [string]$gatewaySID.Value -cnotmatch '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$')) {
         throw 'authenticated fresh-install rollback intent has invalid gateway service SID'
     }
+    $intent = Assert-DefenseClawInstallRollbackIntentCommitTimestamp `
+        -Intent $intent
     if ([string]$intent.phase -ceq 'committed' -and
         ([string]::IsNullOrWhiteSpace([string]$intent.snapshot_identity) -or
             [string]::IsNullOrWhiteSpace([string]$intent.snapshot_sha256) -or
@@ -9292,6 +9366,7 @@ function New-DefenseClawInstallPreparationIntent {
         gateway_service_sid = ''
         created_target_runtime_roots = @()
         created_at = [DateTime]::UtcNow.ToString('o')
+        committed_at = ''
     }
     return Write-DefenseClawInstallRollbackIntent `
         -Intent $intent `
@@ -9413,6 +9488,37 @@ function Set-DefenseClawInstallPreparationTransactionBinding {
         -GuardianServiceName $GuardianServiceName
 }
 
+function Set-DefenseClawInstallPreparationGatewayServiceSID {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $intent = Get-DefenseClawInstallRollbackIntent `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Required
+    if ([string]$intent.phase -cne 'preparing_layout' -or
+        [string]::IsNullOrWhiteSpace([string]$intent.snapshot_path) -or
+        [string]::IsNullOrWhiteSpace([string]$intent.snapshot_identity) -or
+        [string]::IsNullOrWhiteSpace([string]$intent.snapshot_sha256)) {
+        throw 'gateway service SID cannot bind an unprepared install receipt'
+    }
+    $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    if (-not [string]::IsNullOrWhiteSpace(
+            [string]$intent.gateway_service_sid
+        ) -and [string]$intent.gateway_service_sid -cne $gatewaySID) {
+        throw 'install preparation gateway service SID changed'
+    }
+    $intent.gateway_service_sid = $gatewaySID
+    return Write-DefenseClawInstallRollbackIntent `
+        -Intent $intent `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
+}
+
 function Publish-DefenseClawInstallRollbackIntent {
     param(
         [Parameter(Mandatory)]$Snapshot,
@@ -9476,6 +9582,15 @@ function Publish-DefenseClawInstallRollbackIntent {
         -GuardianServiceName ([string]$Snapshot.guardian_service)
     if (-not $createdAny -and $null -eq $existing) {
         return $null
+    }
+    $resolvedGatewaySID = Get-DefenseClawServiceSIDForRecovery `
+        -ServiceName ([string]$Snapshot.gateway_service)
+    if ($null -ne $existing -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$existing.gateway_service_sid
+        ) -and [string]$existing.gateway_service_sid -cne
+            $resolvedGatewaySID) {
+        throw 'existing fresh-install rollback intent disagrees on gateway service SID'
     }
     $snapshotPath = if ($null -ne $existing -and
         -not [string]::IsNullOrWhiteSpace([string]$existing.snapshot_path)) {
@@ -9553,9 +9668,10 @@ function Publish-DefenseClawInstallRollbackIntent {
         else {
             ''
         })
-        gateway_service_sid = ''
+        gateway_service_sid = $resolvedGatewaySID
         created_target_runtime_roots = @($runtimeRoots)
         created_at = [DateTime]::UtcNow.ToString('o')
+        committed_at = ''
     }
     if ($null -ne $existing) {
         if ([string]$existing.phase -ceq 'committed') {
@@ -9598,13 +9714,19 @@ function Assert-DefenseClawInstallRollbackRootDescriptor {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]$Current,
         [Parameter(Mandatory)]
-        [ValidateSet('planned', 'staged', 'canonical')]
+        [ValidateSet('planned', 'staged', 'canonical', 'quarantined')]
         [string]$CreationState,
         [Parameter(Mandatory)][string]$MarkerSID,
         [Parameter(Mandatory)]
         [ValidateSet('InstallDirectory', 'AdminDirectory')]
-        [string]$ExpectedKind
+        [string]$ExpectedKind,
+        [Parameter(Mandatory)][string]$GatewayServiceSID,
+        [switch]$AllowPostManagedAcl
     )
+    if ($GatewayServiceSID -cnotmatch
+        '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
+        throw 'rollback root descriptor received an invalid gateway service SID'
+    }
     if ($CreationState -ceq 'planned') {
         [void](Assert-DefenseClawManagedRootStagingAcl `
             -Path $Path `
@@ -9625,17 +9747,61 @@ function Assert-DefenseClawInstallRollbackRootDescriptor {
             # final root descriptor as the alternate crash state.
         }
     }
+    $actualDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [byte[]]$Current.SecurityDescriptor,
+        0
+    )
     $expectedAcl = New-DefenseClawCanonicalPathAcl `
         -IsDirectory $true `
         -Kind $ExpectedKind `
         -GatewayServiceSID $script:AdministratorsSID
+    $quarantineAcl = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $true `
+        -Kind AdminDirectory `
+        -GatewayServiceSID $script:AdministratorsSID
+    if ($CreationState -ceq 'quarantined') {
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $Path `
+            -Actual $actualDescriptor `
+            -Expected $quarantineAcl
+        return
+    }
+    if (Test-DefenseClawCanonicalRawPathAcl `
+            -Actual $actualDescriptor `
+            -Expected $expectedAcl) {
+        return
+    }
+    # The no-follow quarantine and protected receipt update cannot be one
+    # atomic operation. Once a transaction-created inode has a durable
+    # identity (`staged` or later), its exact AdminDirectory quarantine is the
+    # only additional crash state accepted before the receipt advances.
+    if ($CreationState -in @('staged', 'canonical') -and
+        (Test-DefenseClawCanonicalRawPathAcl `
+            -Actual $actualDescriptor `
+            -Expected $quarantineAcl)) {
+        return
+    }
+    if ($CreationState -cne 'canonical' -or -not $AllowPostManagedAcl) {
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $Path `
+            -Actual $actualDescriptor `
+            -Expected $expectedAcl
+        return
+    }
+    $liveKind = if ($ExpectedKind -ceq 'InstallDirectory') {
+        'ServiceInstallDirectory'
+    }
+    else {
+        'StateDirectory'
+    }
+    $liveAcl = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $true `
+        -Kind $liveKind `
+        -GatewayServiceSID $GatewayServiceSID
     Assert-DefenseClawCanonicalRawPathAcl `
         -Path $Path `
-        -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
-            [byte[]]$Current.SecurityDescriptor,
-            0
-        )) `
-        -Expected $expectedAcl
+        -Actual $actualDescriptor `
+        -Expected $liveAcl
 }
 
 function Complete-DefenseClawInstallRollbackIntent {
@@ -9667,6 +9833,55 @@ function Complete-DefenseClawInstallRollbackIntent {
     Assert-DefenseClawServicesAbsentChecked `
         -Names $managedServiceNames `
         -Operation 'refusing fresh-install root cleanup'
+    $rollbackGatewaySID = Get-DefenseClawServiceSIDForRecovery `
+        -ServiceName $GatewayServiceName
+    Assert-DefenseClawServicesAbsentChecked `
+        -Names $managedServiceNames `
+        -Operation 'refusing fresh-install root cleanup after SID resolution'
+    $transactionBound = -not [string]::IsNullOrWhiteSpace(
+        [string]$intent.snapshot_path
+    )
+    if ($transactionBound) {
+        [void](Assert-DefenseClawDescendant `
+            -Path ([string]$intent.snapshot_path) `
+            -Root ([string]$Layout.TransactionsDirectory) `
+            -Label 'fresh-install rollback transaction binding')
+    }
+    $transactionAuthorityBound = (
+        $transactionBound -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$intent.snapshot_identity
+        ) -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$intent.snapshot_sha256
+        )
+    )
+    $serviceSIDBound = -not [string]::IsNullOrWhiteSpace(
+        [string]$intent.gateway_service_sid
+    )
+    if (-not [string]::IsNullOrWhiteSpace(
+            [string]$intent.gateway_service_sid
+        ) -and [string]$intent.gateway_service_sid -cne
+            $rollbackGatewaySID) {
+        throw 'fresh-install rollback gateway service SID changed'
+    }
+    if (-not $serviceSIDBound -and
+        [string]$intent.phase -ceq 'rollback') {
+        if (-not $transactionAuthorityBound) {
+            throw 'legacy install rollback SID migration requires a transaction binding'
+        }
+        # Authenticated schema-v2 receipts from the affected release predate
+        # the durable SID binding. Persist only the deterministic SID derived
+        # from their already-bound service name and rollback transaction,
+        # before any root mutation.
+        $intent.gateway_service_sid = $rollbackGatewaySID
+        $intent = Write-DefenseClawInstallRollbackIntent `
+            -Intent $intent `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        $serviceSIDBound = $true
+    }
     $nativeSecurity = Initialize-DefenseClawNativeSecurity
     foreach ($claim in @(
         @(
@@ -9682,9 +9897,11 @@ function Complete-DefenseClawInstallRollbackIntent {
             $script:ProgramData
         )
     )) {
-        $creationState = [string]$intent.(
-            ([string]$claim[1]).Replace('_created', '_creation_state')
+        $creationStateName = ([string]$claim[1]).Replace(
+            '_created',
+            '_creation_state'
         )
+        $creationState = [string]$intent.$creationStateName
         if ($creationState -ceq 'planned') {
             $plannedPath = [string]$Layout[[string]$claim[0]]
             $planned =
@@ -9704,6 +9921,13 @@ function Complete-DefenseClawInstallRollbackIntent {
                 )))
             $intent.([string]$claim[1]) = $true
             $intent.([string]$claim[2]) = [string]$planned.Identity
+            $intent.$creationStateName = 'staged'
+            $intent = Write-DefenseClawInstallRollbackIntent `
+                -Intent $intent `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+            $creationState = 'staged'
         }
         if (-not [bool]$intent.([string]$claim[1])) {
             continue
@@ -9735,7 +9959,53 @@ function Complete-DefenseClawInstallRollbackIntent {
                     '_marker_sid'
                 )
             )) `
-            -ExpectedKind $expectedKind
+            -ExpectedKind $expectedKind `
+            -GatewayServiceSID $rollbackGatewaySID `
+            -AllowPostManagedAcl:($creationState -ceq 'canonical' -and
+                $transactionAuthorityBound -and $serviceSIDBound)
+        Assert-DefenseClawManagedTreeNoReparse -Root $path
+        $quarantineAcl = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $true `
+            -Kind AdminDirectory `
+            -GatewayServiceSID $script:AdministratorsSID
+        $quarantineBytes = $quarantineAcl.GetSecurityDescriptorBinaryForm()
+        $quarantined = $nativeSecurity::SetDirectoryDaclNoFollow(
+            $path,
+            [byte[]]$quarantineBytes,
+            [string]$current.Identity
+        )
+        if ([string]$quarantined.Identity -cne
+            [string]$current.Identity) {
+            throw "transaction-created $($claim[0]) identity changed during quarantine"
+        }
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$quarantined.SecurityDescriptor,
+                0
+            )) `
+            -Expected $quarantineAcl
+        $intent.$creationStateName = 'quarantined'
+        $intent = Write-DefenseClawInstallRollbackIntent `
+            -Intent $intent `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        $rechecked =
+            $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
+                $path
+            )
+        if ($null -eq $rechecked -or
+            [string]$rechecked.Identity -cne [string]$current.Identity) {
+            throw "transaction-created $($claim[0]) identity changed after quarantine"
+        }
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$rechecked.SecurityDescriptor,
+                0
+            )) `
+            -Expected $quarantineAcl
         Assert-DefenseClawManagedTreeNoReparse -Root $path
         Remove-DefenseClawManagedTree `
             -Path $path `
@@ -9760,6 +10030,29 @@ function Complete-DefenseClawInstallRollbackIntent {
         )) {
         throw 'fresh-install rollback intent survived completed cleanup'
     }
+}
+
+function Set-DefenseClawInstallRollbackIntentCommitState {
+    param(
+        [Parameter(Mandatory)]$Intent,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    if ([string]$Intent.phase -cne 'preparing_layout') {
+        throw 'install preparation receipt cannot enter committed phase'
+    }
+    if ($GatewayServiceSID -cnotmatch
+        '^S-1-5-80-(?:[0-9]+-){4}[0-9]+$') {
+        throw 'install commit received an invalid gateway service SID'
+    }
+    $Intent.gateway_service_sid = $GatewayServiceSID
+    $Intent.phase = 'committed'
+    $Intent |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name committed_at `
+            -Value ([DateTime]::UtcNow.ToString('o')) `
+            -Force
+    return $Intent
 }
 
 function Set-DefenseClawInstallRollbackIntentCommitted {
@@ -9832,9 +10125,9 @@ function Set-DefenseClawInstallRollbackIntentCommitted {
     else {
         throw 'install commit requires either verified auto-start or disabled servicing state'
     }
-    $intent.gateway_service_sid = $gatewaySID
-    $intent.phase = 'committed'
-    $intent.committed_at = [DateTime]::UtcNow.ToString('o')
+    $intent = Set-DefenseClawInstallRollbackIntentCommitState `
+        -Intent $intent `
+        -GatewayServiceSID $gatewaySID
     return Write-DefenseClawInstallRollbackIntent `
         -Intent $intent `
         -Layout $Layout `
@@ -16418,7 +16711,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawManagedServicesForTransaction `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName
+                -GuardianServiceName $GuardianServiceName `
+                -BindInstallPreparationSID
             [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `

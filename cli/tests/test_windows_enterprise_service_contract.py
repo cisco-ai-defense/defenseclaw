@@ -3374,6 +3374,210 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "purge_cases = @($purgeResults)" in smoke
 
 
+def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    timestamp_validator = module[
+        module.index("function Assert-DefenseClawInstallRollbackIntentCommitTimestamp") : module.index(
+            "function Get-DefenseClawInstallRollbackIntent"
+        )
+    ]
+    assert "$Intent.PSObject.Properties['committed_at']" in timestamp_validator
+    assert "committed install receipt is missing its commit timestamp" in timestamp_validator
+    assert "Microsoft.PowerShell.Utility\\Add-Member `" in timestamp_validator
+    assert "-Name committed_at `" in timestamp_validator
+    assert "-Value '' `" in timestamp_validator
+    assert "-Force" in timestamp_validator
+    assert "[DateTime]::ParseExact(" in timestamp_validator
+    assert "[DateTimeKind]::Unspecified" in timestamp_validator
+    assert "uncommitted install receipt contains a commit timestamp" in timestamp_validator
+
+    intent_reader = module[
+        module.index("function Get-DefenseClawInstallRollbackIntent") : module.index(
+            "function ConvertTo-DefenseClawInstallRollbackIntentJson"
+        )
+    ]
+    first_authentication = intent_reader.index("Assert-DefenseClawCanonicalRawPathAcl `")
+    authenticated_again = intent_reader.index(
+        "Assert-DefenseClawCanonicalRawPathAcl `", first_authentication + 1
+    )
+    timestamp_check = intent_reader.index("Assert-DefenseClawInstallRollbackIntentCommitTimestamp `")
+    assert authenticated_again < timestamp_check
+
+    preparation_intent = module[
+        module.index("function New-DefenseClawInstallPreparationIntent") : module.index(
+            "function Set-DefenseClawInstallPreparationRootIdentity"
+        )
+    ]
+    rollback_intent = module[
+        module.index("function Publish-DefenseClawInstallRollbackIntent") : module.index(
+            "function Assert-DefenseClawInstallRollbackRootDescriptor"
+        )
+    ]
+    assert "committed_at = ''" in preparation_intent
+    assert "committed_at = ''" in rollback_intent
+
+    commit_state = module[
+        module.index("function Set-DefenseClawInstallRollbackIntentCommitState") : module.index(
+            "function Set-DefenseClawInstallRollbackIntentCommitted"
+        )
+    ]
+    assert "[string]$Intent.phase -cne 'preparing_layout'" in commit_state
+    assert "'^S-1-5-80-(?:[0-9]+-){4}[0-9]+$'" in commit_state
+    assert "$Intent.gateway_service_sid = $GatewayServiceSID" in commit_state
+    assert "$Intent.phase = 'committed'" in commit_state
+    assert "Microsoft.PowerShell.Utility\\Add-Member `" in commit_state
+    assert "-Name committed_at `" in commit_state
+    assert "-Force" in commit_state
+    assert "$Intent.committed_at =" not in commit_state
+
+    commit = module[
+        module.index("function Set-DefenseClawInstallRollbackIntentCommitted") : module.index(
+            "function Complete-DefenseClawCommittedInstallIntent"
+        )
+    ]
+    set_commit_state = commit.index("Set-DefenseClawInstallRollbackIntentCommitState `")
+    write_committed_intent = commit.index("Write-DefenseClawInstallRollbackIntent `", set_commit_state)
+    assert set_commit_state < write_committed_intent
+
+    service_setup = module[
+        module.index("function Set-DefenseClawManagedServicesForTransaction") : module.index(
+            "function Get-DefenseClawLayout"
+        )
+    ]
+    create_services = service_setup.index("Set-DefenseClawManagedServices `")
+    bind_service_sid = service_setup.index("Set-DefenseClawInstallPreparationGatewayServiceSID `")
+    initialize_ipc = service_setup.index("Initialize-DefenseClawManagedIPCDirectory `")
+    apply_runtime_acls = service_setup.index("Set-DefenseClawRetainedRuntimeAcls `")
+    apply_core_acls = service_setup.index("Set-DefenseClawManagedCoreAcls `")
+    assert "if ($BindInstallPreparationSID)" in service_setup
+    assert create_services < bind_service_sid < initialize_ipc < apply_runtime_acls < apply_core_acls
+
+    lifecycle = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    target_preparation = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
+    fresh_service_gate = lifecycle.index("if ($Action -eq 'Install') {", target_preparation)
+    fresh_service_end = lifecycle.index("$attestationNeedsRefresh", fresh_service_gate)
+    fresh_service_setup = lifecycle[fresh_service_gate:fresh_service_end]
+    assert "Set-DefenseClawManagedServicesForTransaction `" in fresh_service_setup
+    assert "-BindInstallPreparationSID" in fresh_service_setup
+    assert fresh_service_setup.index("Set-DefenseClawManagedServicesForTransaction `") < fresh_service_setup.index(
+        "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `"
+    )
+
+    existing_service_gate = lifecycle.index("if ($Action -ne 'Install') {", fresh_service_end)
+    existing_service_end = lifecycle.index("$targetReport =", existing_service_gate)
+    existing_service_setup = lifecycle[existing_service_gate:existing_service_end]
+    assert "Set-DefenseClawManagedServicesForTransaction `" in existing_service_setup
+    assert "-BindInstallPreparationSID" not in existing_service_setup
+
+    descriptor = module[
+        module.index("function Assert-DefenseClawInstallRollbackRootDescriptor") : module.index(
+            "function Complete-DefenseClawInstallRollbackIntent"
+        )
+    ]
+    assert "[ValidateSet('planned', 'staged', 'canonical', 'quarantined')]" in descriptor
+    assert "[ValidateSet('InstallDirectory', 'AdminDirectory')]" in descriptor
+    assert "rollback root descriptor received an invalid gateway service SID" in descriptor
+    assert "if ($CreationState -ceq 'planned')" in descriptor
+    assert "if ($CreationState -ceq 'staged')" in descriptor
+    assert "if ($CreationState -ceq 'quarantined')" in descriptor
+    assert "$CreationState -cne 'canonical' -or -not $AllowPostManagedAcl" in descriptor
+    assert "$liveKind = if ($ExpectedKind -ceq 'InstallDirectory')" in descriptor
+    assert descriptor.count("'ServiceInstallDirectory'") == 1
+    assert descriptor.count("'StateDirectory'") == 1
+    assert "-GatewayServiceSID $GatewayServiceSID" in descriptor
+    assert descriptor.count("Assert-DefenseClawCanonicalRawPathAcl `") >= 3
+    assert descriptor.count("Test-DefenseClawCanonicalRawPathAcl `") == 2
+    bootstrap_match = descriptor.index("Test-DefenseClawCanonicalRawPathAcl `")
+    post_managed_gate = descriptor.index("$CreationState -cne 'canonical' -or -not $AllowPostManagedAcl")
+    quarantine_match = descriptor.index("Test-DefenseClawCanonicalRawPathAcl `", bootstrap_match + 1)
+    live_kind = descriptor.index("$liveKind = if ($ExpectedKind -ceq 'InstallDirectory')")
+    live_exact_match = descriptor.index("Assert-DefenseClawCanonicalRawPathAcl `", live_kind)
+    assert bootstrap_match < quarantine_match < post_managed_gate < live_kind < live_exact_match
+
+    cleanup = module[
+        module.index("function Complete-DefenseClawInstallRollbackIntent") : module.index(
+            "function Set-DefenseClawInstallRollbackIntentCommitState"
+        )
+    ]
+    assert "Get-DefenseClawServiceSIDForRecovery `" in cleanup
+    assert "fresh-install rollback gateway service SID changed" in cleanup
+    assert "legacy install rollback SID migration requires a transaction binding" in cleanup
+    assert "$transactionAuthorityBound = (" in cleanup
+    assert "-AllowPostManagedAcl:($creationState -ceq 'canonical' -and" in cleanup
+    assert "$transactionAuthorityBound -and $serviceSIDBound)" in cleanup
+
+    current_snapshot = cleanup.index(
+        "$current = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists("
+    )
+    identity_check = cleanup.index("identity changed before rollback cleanup", current_snapshot)
+    descriptor_check = cleanup.index("Assert-DefenseClawInstallRollbackRootDescriptor `", identity_check)
+    pre_quarantine_no_reparse = cleanup.index(
+        "Assert-DefenseClawManagedTreeNoReparse -Root $path", descriptor_check
+    )
+    quarantine = cleanup.index("SetDirectoryDaclNoFollow(", pre_quarantine_no_reparse)
+    quarantine_identity = cleanup.index("identity changed during quarantine", quarantine)
+    quarantine_acl_check = cleanup.index("Assert-DefenseClawCanonicalRawPathAcl `", quarantine_identity)
+    quarantine_journal = cleanup.index("$intent.$creationStateName = 'quarantined'", quarantine_acl_check)
+    quarantine_receipt = cleanup.index("Write-DefenseClawInstallRollbackIntent `", quarantine_journal)
+    requery = cleanup.index("$rechecked =", quarantine_receipt)
+    requery_identity = cleanup.index("identity changed after quarantine", requery)
+    requery_acl_check = cleanup.index("Assert-DefenseClawCanonicalRawPathAcl `", requery_identity)
+    post_quarantine_no_reparse = cleanup.index(
+        "Assert-DefenseClawManagedTreeNoReparse -Root $path", requery_acl_check
+    )
+    removal = cleanup.index("Remove-DefenseClawManagedTree `", post_quarantine_no_reparse)
+    absence_requery = cleanup.index("GetDirectorySecuritySnapshotNoFollowIfExists(", removal)
+    assert (
+        current_snapshot
+        < identity_check
+        < descriptor_check
+        < pre_quarantine_no_reparse
+        < quarantine
+        < quarantine_identity
+        < quarantine_acl_check
+        < quarantine_journal
+        < quarantine_receipt
+        < requery
+        < requery_identity
+        < requery_acl_check
+        < post_quarantine_no_reparse
+        < removal
+        < absence_requery
+    )
+    quarantine_call = cleanup[quarantine:quarantine_identity]
+    assert "[string]$current.Identity" in quarantine_call
+
+    for case_name in (
+        "fresh-install-service-bootstrap-rollback-retry",
+        "legacy-v2-commit-timestamp-migration",
+        "phase-bound-live-root-descriptor-matrix",
+    ):
+        assert f"name = '{case_name}'" in smoke
+    for event in (
+        "install-service-sid-bound",
+        "install-receipt:committed",
+    ):
+        assert event in smoke
+    for rejected_case in (
+        "planned_staging_only",
+        "staged_live_rejected",
+        "unbound_live_rejected",
+        "wrong_sid_rejected",
+        "swapped_kind_rejected",
+        "staged_quarantine_reentry_exact",
+        "canonical_quarantine_reentry_exact",
+        "quarantined_live_rejected",
+        "inherited_acl_rejected",
+    ):
+        assert rejected_case in smoke
+
+
 def test_fresh_install_hardens_manifest_before_target_runtime_planning() -> None:
     module = read(MODULE)
     smoke = read(UNINSTALL_TRANSACTION_SMOKE)
@@ -3482,7 +3686,7 @@ def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
         )
     ]
     assert "service_exists = @{" in direct_reinstall
-    assert "ipc_service_sids = @('S-1-5-80-1234')" in direct_reinstall
+    assert "ipc_service_sids = @('S-1-5-80-1-2-3-4-5')" in direct_reinstall
     assert "second uninstall retained its shared IPC service SID" in direct_reinstall
     revoke_mock = smoke[
         smoke.index("function script:Revoke-DefenseClawManagedIPCServiceAccess") : smoke.index(
