@@ -300,20 +300,22 @@ The unit also pins `StateDirectoryMode=0750`, `RuntimeDirectoryMode=0750`, and `
 
 ## Windows system-service layout
 
-Windows managed deployment uses two Service Control Manager (SCM) services and
+Windows managed deployment uses four Service Control Manager (SCM) services and
 three privilege domains:
 
 | Component | Identity | Writable scope | Purpose |
 | --- | --- | --- | --- |
 | `DefenseClawGateway` | `NT SERVICE\DefenseClawGateway` virtual service account | Managed runtime and logs only | Inspection, policy, audit, hook API, health, and least-privilege service-token access. |
+| `DefenseClawCMIDBroker` | LocalSystem with only `SeChangeNotifyPrivilege` | Broker authentication key, named pipe, broker log, and the pinned Cisco provider DLL | Isolate access to the machine credential provider behind an authenticated gateway-only IPC boundary. |
 | `DefenseClawHookGuardian` | LocalSystem | Allow-listed user hook footprints plus guardian state | Impersonate each declared interactive user, install or repair that user's files with the user's ownership, and return to LocalSystem for protected state. |
-| AI agent | Interactive standard user at medium integrity | Its normal profile | Invoke native hooks; cannot stop or reconfigure either service or modify administrator assets. |
+| `DefenseClawHookEnumerator` | LocalSystem | Protected target manifest and allow-listed profile discovery | Refresh the declared connector inventory without granting the gateway broad profile traversal. |
+| AI agent | Interactive standard user at medium integrity | Its normal profile | Invoke native hooks; cannot stop or reconfigure any managed service or modify administrator assets. |
 
 The default managed layout is:
 
 | Surface | Default path | Authority |
 | --- | --- | --- |
-| Gateway, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
+| Broker, gateway/guardian/enumerator host, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
 | Managed config | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
 | Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
@@ -495,6 +497,8 @@ or a causal client block may the administrator run:
 ```powershell
 & $PowerShell -NoLogo -NoProfile -NonInteractive -File $Installer `
   -Action Repair `
+  -BrokerBinary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
+  -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
@@ -508,6 +512,7 @@ The equivalent post-proof CLI transaction is:
 ```powershell
 & $DefenseClaw enterprise windows repair `
   --installer $Installer `
+  --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
   --cli-binary $DefenseClaw `
@@ -526,7 +531,7 @@ binds the live Claude proof to the protected manifest hash. A manifest change
 invalidates it. Application-control evidence, a healthy Program Files policy,
 or a prior run against another manifest is never substituted for this gate.
 
-`-NoStart` stages and verifies the transaction with both services disabled and
+`-NoStart` stages and verifies the transaction with all managed services disabled and
 stopped. Use it when endpoint management has a separate activation phase, then
 activate only by running the same complete public `Repair` transaction without
 `-NoStart`. Do not call `Start-Service` directly: that bypasses the queue-drain,
@@ -551,7 +556,7 @@ the exact non-production scope marker, including both the full and
 `-ClaudeOnly` profiles. The `-ClaudeOnly` profile still forbids
 application-control attestation. Only the disposable actual-Codex
 child may additionally receive the path as `CODEX_HOME`; it is never written
-to the machine environment or either service. Signed production lifecycle
+to the machine environment or any managed service. Signed production lifecycle
 calls omit it. Production and certification service environments both omit
 `CODEX_HOME`; install, upgrade, repair, status, verify, rollback, and uninstall
 verify that absence.
@@ -574,8 +579,8 @@ Before SCM starts the services, the installer:
   machine-policy prerequisite. Secure creation supplies the protected DACL to
   `CreateDirectoryW`; an unsafe owner, DACL, file obstruction, or reparse point
   fails without ownership or ACL takeover;
-- creates `DefenseClawGateway` under its virtual service account and
-  `DefenseClawHookGuardian` under LocalSystem;
+- creates `DefenseClawGateway` under its virtual service account and the
+  credential broker, hook guardian, and hook enumerator under LocalSystem;
 - pins `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise`,
   `DEFENSECLAW_CONFIG`, `DEFENSECLAW_HOME`,
   `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`, and the service role in the
@@ -606,15 +611,16 @@ The deployment-mode environment pin is part of the security boundary. A user
 setting `DEFENSECLAW_DEPLOYMENT_MODE=unmanaged_byod`, replacing a user config,
 or launching another copy cannot downgrade either installed service.
 
-Both services use exactly three SCM failure actions: restart after 5 seconds,
+All managed services use exactly three SCM failure actions: restart after 5 seconds,
 15 seconds, then 60 seconds, with a one-day failure-count reset period and
 non-crash failure handling enabled. Windows repeats the last configured action
 for subsequent failures, so the 60-second restart is the indefinite backstop;
-there is no terminal `NONE` action. Certification force-terminates each exact
-service PID four times and observes all four replacements, then issues a normal
-administrator `Stop` and requires the service to remain stopped for longer
-than 60 seconds. Because an already queued SCM restart cannot be canceled,
-servicing first persists its intent, disables both services, stops them, and
+there is no terminal `NONE` action. The current broker-focused certification
+force-terminates the exact gateway, broker, and guardian PIDs four times and
+observes all four replacements, then issues a normal administrator `Stop` and
+requires each of those services to remain stopped for longer than 60 seconds.
+Because an already queued SCM restart cannot be canceled,
+servicing first persists its intent, disables all managed services, stops them, and
 holds the disabled state through a bounded 65-second drain. Activation then
 makes only the guardian demand-startable, requires a fresh successful
 reconcile while the gateway remains disabled, starts the gateway, proves live
@@ -711,17 +717,28 @@ Run these checks from an elevated support shell:
 
 ```powershell
 $GatewayService = 'DefenseClawGateway'
+$BrokerService = 'DefenseClawCMIDBroker'
 $GuardianService = 'DefenseClawHookGuardian'
+$EnumeratorService = 'DefenseClawHookEnumerator'
 
-Get-CimInstance Win32_Service -Filter "Name='$GatewayService' OR Name='$GuardianService'" |
+Get-CimInstance Win32_Service -Filter "Name='$GatewayService' OR Name='$BrokerService' OR Name='$GuardianService' OR Name='$EnumeratorService'" |
   Select-Object Name, State, StartMode, StartName, PathName
 
 sc.exe qc $GatewayService
+sc.exe qc $BrokerService
 sc.exe qc $GuardianService
+sc.exe qc $EnumeratorService
 sc.exe qfailure $GatewayService
+sc.exe qfailure $BrokerService
+sc.exe qfailure $GuardianService
+sc.exe qfailure $EnumeratorService
 sc.exe sdshow $GatewayService
+sc.exe sdshow $BrokerService
 sc.exe sdshow $GuardianService
+sc.exe sdshow $EnumeratorService
 
+Get-Acl 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-cmid-broker.exe' |
+  Format-List Owner, Sddl
 Get-Acl 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe' |
   Format-List Owner, Sddl
 Get-Acl 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml' |
@@ -736,11 +753,14 @@ Acceptance requires the exact virtual-account/LocalSystem identities, automatic
 start, approved absolute image paths and arguments, the managed-mode
 environment pin, protected DACLs with no standard-user write ACE, and a healthy
 JSON `verify`. Do not stop at the configured SCM `RequiredPrivileges` values:
-the certification opens each live service process token read-only and records
+the current broker-focused certification opens the gateway, broker, and
+guardian live process tokens read-only and records
 `TokenUser`, integrity, privileges, groups, and restricted SIDs. The gateway
-must have the exact `NT SERVICE\<gateway>` TokenUser, system integrity, a
+must have the exact `NT SERVICE\<gateway>` TokenUser, high integrity, a
 restricted token containing its service SID, World, service-logon, and
-write-restricted SIDs, and only `SeChangeNotifyPrivilege`. The guardian must
+write-restricted SIDs, and only `SeChangeNotifyPrivilege`. The broker must have
+the LocalSystem TokenUser, system integrity, an unrestricted token with its
+service SID group, and only `SeChangeNotifyPrivilege`. The guardian must
 have the LocalSystem TokenUser, system integrity, an unrestricted token with
 its service SID group, and exactly `SeTcbPrivilege`,
 `SeImpersonatePrivilege`, `SeChangeNotifyPrivilege`, `SeBackupPrivilege`, and
@@ -756,8 +776,11 @@ changes, and all-access handles. Dangerous service-token duplicate,
 impersonate, assign-primary, privilege/group/default adjustment, DACL, and
 owner handles must also be denied. Direct `taskkill`, protected-file
 write/DELETE handles, SCM mutation, and service-registry write attempts must
-fail; both original service PIDs must remain Running and installer verification
-must show both services responsive. Query-limited process access may remain
+fail; the original gateway, broker, and guardian PIDs must remain Running and
+installer verification must show those three services responsive. The
+Enumerator is still subject to exact-name collision refusal and uninstall/
+fallback-cleanup absence checks, but its full token and recovery matrix is not
+claimed by this broker-focused run. Query-limited process access may remain
 available for diagnostics. The same user must be able to read/traverse
 the shared `OpenAI\Codex` parent but must be denied child creation, directory
 DELETE handles, and ACL changes. Do not infer safety from a service merely
@@ -768,6 +791,8 @@ only on a disposable Windows validation endpoint:
 
 ```powershell
 .\scripts\test-windows-enterprise-hardening.ps1 `
+  -BrokerBinary .\defenseclaw-cmid-broker.exe `
+  -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
   -HookBinary .\defenseclaw-hook.exe `
   -CLIBinary .\defenseclaw.exe `
@@ -777,6 +802,10 @@ only on a disposable Windows validation endpoint:
   -ClaudeBinary C:\cert\claude-2.1.207.exe `
   -RejectedCodexBinary C:\cert\codex-0.130.0.exe `
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
+  -UpgradeBrokerBinary .\v2\defenseclaw-cmid-broker.exe `
+  -UpgradeGatewayBinary .\v2\defenseclaw-gateway.exe `
+  -UpgradeHookBinary .\v2\defenseclaw-hook.exe `
+  -UpgradeCLIBinary .\v2\defenseclaw.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `
   -Execute `
@@ -810,10 +839,12 @@ root was created and neither user tree changed. It later runs a disposable
 normal-mode setup, removes its owned hook registration, and requires the
 existing normal-mode auto-heal to restore the exact event/trusted-hash contract
 without changing unrelated settings. It cleans that fixture and
-proves enterprise-protected machine state did not change. All
-installer/module/binary
-inputs are copied byte-stably into the administrator/System-only staging tree;
-`-AllowUnsigned` does not relax this source-path boundary. It proves the
+proves enterprise-protected machine state did not change. All DefenseClaw-owned
+installer, module, and executable inputs are copied byte-stably into the
+administrator/System-only staging tree. The signed Cisco `cmidapi.dll` remains
+at its trusted Secure Client path; the harness requires that exact path to match
+the public CLI resolver and pins its signer and digest before lifecycle mutation.
+`-AllowUnsigned` does not relax either source-path boundary. It proves the
 standard-user denial and repair
 scenarios, including whole-root deletion, a previously authorized target-owned
 junction that must be repaired without touching its outside target, and a
@@ -866,9 +897,12 @@ $Windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $PowerShell = Join-Path $Windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Staging\<release-id>'
 $Installer = Join-Path $Stage 'install-enterprise.ps1'
+$ProviderLibrary = 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll'
 
 & $PowerShell -NoLogo -NoProfile -NonInteractive -File $Installer `
   -Action Repair `
+  -BrokerBinary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
+  -ProviderLibrary $ProviderLibrary `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
@@ -897,6 +931,7 @@ driver. The command rejects an installed-CLI self-replacement before mutation:
 $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
 & $ReleaseCLI enterprise windows upgrade `
   --installer $Installer `
+  --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
   --cli-binary $ReleaseCLI `
@@ -905,7 +940,7 @@ $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
   --json
 ```
 
-Running the installed CLI is still valid for a gateway/hook-only upgrade when
+Running the installed CLI is still valid for a broker/gateway/hook-only upgrade when
 `--cli-binary` is omitted.
 
 Only an administrator can remove the service registration:
@@ -1545,10 +1580,10 @@ sudo env DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml \
   --json
 ```
 
-On Windows, use the matching service and guardian checks:
+On Windows, use the matching managed-service and guardian checks:
 
 ```powershell
-Get-Service DefenseClawGateway, DefenseClawHookGuardian
+Get-Service DefenseClawGateway, DefenseClawCMIDBroker, DefenseClawHookGuardian, DefenseClawHookEnumerator
 
 # Define $PowerShell and $Installer alongside the block-local $Gateway and
 # $Manifest so this section can be copied on its own without depending on
@@ -1595,7 +1630,7 @@ Treat this evidence as a release gate for the managed endpoint image. Run destru
 ## Production checklist
 
 - [ ] AI agent users are standard users without passwordless sudo/admin rights.
-- [ ] Gateway and guardian binaries come from the approved build and are administrator-owned.
+- [ ] Broker, gateway/guardian/enumerator host, and native hook binaries come from the approved build and are administrator-owned; the broker is bound to the approved signed Cisco provider library.
 - [ ] Managed config, policy, units/plists/SCM definitions, manifest, and authorization directory have trusted path chains.
 - [ ] Gateway service runs as the dedicated service identity (or the documented root identity on macOS), not the AI user.
 - [ ] Linux gateway sandbox properties match the packaged unit or a reviewed stricter override.

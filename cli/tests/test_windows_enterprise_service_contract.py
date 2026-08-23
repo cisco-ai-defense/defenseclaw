@@ -663,6 +663,8 @@ def test_poisoned_program_root_environment_cannot_redirect_defaults(
                 f"$env:ProgramFiles='{poison_files_ps}';"
                 f"$env:ProgramData='{poison_data_ps}';"
                 f"& '{harness_ps}' "
+                f"-BrokerBinary '{payload_binary_ps}' "
+                f"-ProviderLibrary '{payload_binary_ps}' "
                 f"-GatewayBinary '{payload_binary_ps}' "
                 f"-HookBinary '{payload_binary_ps}' "
                 f"-CLIBinary '{payload_binary_ps}' "
@@ -1834,7 +1836,6 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "boundaryDeadline" not in wait
     assert "Get-DefenseClawGuardianStateIdentity" in wait
     assert "last_status=$lastStatus" in wait
-
     install_like = module[
         module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
             "function Invoke-DefenseClawUninstallLifecycle"
@@ -1921,14 +1922,18 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     assert "IsTokenRestricted" in harness
     assert "'S-1-16-12288'" in token_probe
     assert "'S-1-16-16384'" in token_probe
+    assert "$broker = $serviceName -eq $script:BrokerServiceName" in token_probe
+    assert "$expectedPrivileges = if ($gateway -or $broker)" in token_probe
     assert "$expectedIntegritySID = if ($gateway)" in token_probe
     assert "integrity $($token.IntegritySid), want $expectedIntegrityName" in token_probe
     assert "expected_integrity_sid = $expectedIntegritySID" in token_probe
     assert "if (-not $gateway -and" in token_probe
+    assert "if (-not $gateway -and -not $broker)" in token_probe
     assert "service_sid_group_required = -not $gateway" in token_probe
     assert "service_sid_group_count = $serviceGroups.Count" in token_probe
     assert "foreach ($requiredSID in @($serviceSID, 'S-1-1-0', 'S-1-5-33'))" in token_probe
     assert "restricted SID list lacks one exact service-logon SID" in token_probe
+    assert "'broker'" in token_probe
     for privilege in (
         "SeChangeNotifyPrivilege",
         "SeTcbPrivilege",
@@ -1942,7 +1947,7 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     ):
         assert privilege in harness
     assert "live-service-token-least-privilege" in harness
-    assert "High gateway/System guardian integrity" in harness
+    assert "High gateway/System broker and guardian integrity" in harness
     assert "service-SID identity/group semantics" in harness
     assert "service_tokens = @($serviceTokenSnapshot)" in harness
 
@@ -1999,14 +2004,15 @@ def test_execute_requires_a_separately_built_successful_upgrade() -> None:
         harness.index("function Get-ManagedUserPathSecurityFingerprint")
     ]
 
-    assert "full execution requires -UpgradeGatewayBinary" in harness
-    assert "full execution requires all three -Upgrade*Binary inputs" in upgrade
+    assert "full execution requires -UpgradeBrokerBinary" in harness
+    assert "-UpgradeGatewayBinary" in harness
+    assert "full execution requires all four -Upgrade*Binary inputs" in upgrade
     assert "Add-SkippedResult" not in upgrade
     assert "external-release-public-cli-versioned-upgrade" in upgrade
     assert "Invoke-PublicEnterpriseLifecycleCLIJSON" in upgrade
     assert "-FilePath $script:UpgradeCLISource" in upgrade
     assert "separately version-stamped upgrade $name bytes do not" in upgrade
-    for name in ("gateway", "hook", "cli"):
+    for name in ("broker", "gateway", "hook", "cli"):
         assert f"{name} = [string]$script:SourceDigests['upgrade_{name}']" in upgrade
         assert f"exact_{name}_sha256 = $true" in upgrade
     assert "versioned public Upgrade installed the wrong $name bytes" in upgrade
@@ -2028,6 +2034,447 @@ def test_execute_requires_a_separately_built_successful_upgrade() -> None:
     assert "expected = [pscustomobject]$expected" in upgrade
     assert "after = $after" in upgrade
     assert "upgrade-activation-and-rollback" in upgrade
+
+
+def test_certification_threads_broker_and_vendor_provider_through_lifecycle() -> None:
+    harness = read(HARNESS)
+    lifecycle_cli = read(WINDOWS_LIFECYCLE_CLI)
+    module = read(MODULE)
+
+    assert "@('BrokerBinary', $BrokerBinary)" in module
+    assert "@('ProviderLibrary', $ProviderLibrary)" in module
+    assert (
+        "Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, and "
+        "-HookBinary" in module
+    )
+    assert "@('provider_library', $ProviderLibrary" in module
+    assert "$Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path" in (
+        module
+    )
+    assert "$metadata.PSObject.Properties['provider_library_path']" in module
+
+    parameter_block = harness[: harness.index("Set-StrictMode -Version Latest")]
+    for parameter in (
+        "[string]$BrokerBinary",
+        "[string]$ProviderLibrary",
+        "[string]$UpgradeBrokerBinary",
+    ):
+        assert parameter in parameter_block
+
+    source_initialization = harness[
+        harness.index("$script:OriginalGatewaySource") : harness.index(
+            "$script:RunToken ="
+        )
+    ]
+    assert (
+        "$script:OriginalBrokerSource = ConvertTo-CanonicalPath $BrokerBinary"
+        in source_initialization
+    )
+    assert (
+        "$script:OriginalProviderLibrarySource = ConvertTo-CanonicalPath "
+        "$ProviderLibrary" in source_initialization
+    )
+    assert "broker = Get-FileDigest $script:OriginalBrokerSource" in source_initialization
+    assert (
+        "provider_library = Get-FileDigest "
+        "$script:OriginalProviderLibrarySource" in source_initialization
+    )
+    provider_validation = harness[
+        harness.index("function Assert-CertificationProviderLibraryCurrent") :
+        harness.index("function Test-PublicCLIProviderLibrarySelection")
+    ]
+    assert "Get-AuthenticodeSignature -LiteralPath $full" in provider_validation
+    assert "[Management.Automation.SignatureStatus]::Valid" in provider_validation
+    assert "[Security.Cryptography.X509Certificates.X509NameType]::SimpleName" in (
+        provider_validation
+    )
+    assert "$signerName -cne 'Cisco Systems, Inc.'" in provider_validation
+    assert "signer is not the exact Cisco Systems, Inc. identity" in provider_validation
+
+    resolver_probe = harness[
+        harness.index("function Test-PublicCLIProviderLibrarySelection") : harness.index(
+            "function Copy-CertificationSourceToProtectedStaging"
+        )
+    ]
+    assert "'enterprise', 'windows', 'repair'" in resolver_probe
+    assert "'--broker-binary', $script:BrokerSource" in resolver_probe
+    assert "Win32_Process" in resolver_probe
+    assert '"ParentProcessId=$($RunningProcess.Id)"' in resolver_probe
+    assert "-ProviderLibrary" in resolver_probe
+    assert "-AllowedExitCodes @(1)" in resolver_probe
+    assert "-AllowedExitCodes @(1, 1603)" not in resolver_probe
+    assert (
+        "certification-scoped Install, Upgrade, or Repair requires -AllowUnsigned"
+        in resolver_probe
+    )
+    assert "ConvertFrom-SingleJSONDocument" in resolver_probe
+    assert "$probeJSON.action -cne 'repair'" in resolver_probe
+    assert "$probeJSON.error -cne $expectedFailure" in resolver_probe
+    assert "$observedChildPIDs.Count -ne 1" in resolver_probe
+    assert "$selectedPaths.Count -ne 1" in resolver_probe
+    assert "supplied ProviderLibrary does not match the exact public CLI" in resolver_probe
+    assert "post-probe managed credential provider library" in resolver_probe
+    assert "identity changed during resolver probe" in resolver_probe
+    assert "Assert-SameObjectJSON" in resolver_probe
+    assert "Get-NormalModeEnterpriseMachineSnapshot" in resolver_probe
+    assert "machine_state_unchanged = $true" in resolver_probe
+    assert "Deliberately omit --allow-unsigned" in resolver_probe
+    assert "'--allow-unsigned'" not in resolver_probe
+    provider_preflight_call = "Invoke-Check 'public-cli-provider-discovery-preflight'"
+    assert provider_preflight_call in harness
+    assert harness.index(provider_preflight_call) < harness.index(
+        "$script:Phase = 'normal-mode-noop'"
+    )
+    assert harness.index(provider_preflight_call) < harness.index(
+        "Invoke-Check 'enterprise-installer-install'"
+    )
+
+    protected_staging = harness[
+        harness.index("function Initialize-ProtectedCertificationSources") :
+        harness.index("function Get-AgentBinaryTrustIdentity")
+    ]
+    assert "$script:BrokerSource = Copy-CertificationSourceToProtectedStaging" in (
+        protected_staging
+    )
+    assert "$script:OriginalBrokerSource" in protected_staging
+    assert "$script:UpgradeBrokerSource = Copy-CertificationSourceToProtectedStaging" in (
+        protected_staging
+    )
+    # The Cisco provider DLL remains bound to its trusted vendor installation
+    # path. Copying it into certification staging would test a different path
+    # than the public CLI's trusted discovery and the broker's final image.
+    assert "Copy-CertificationSourceToProtectedStaging `\n            $script:OriginalProviderLibrarySource" not in (
+        protected_staging
+    )
+
+    direct_arguments = harness[
+        harness.index("function Get-InstallerArguments") : harness.index(
+            "function Get-EnterpriseLifecycleCLIArguments"
+        )
+    ]
+    for parameter in ("[string]$BrokerSource", "[string]$ProviderLibrarySource"):
+        assert parameter in direct_arguments
+    assert "if ($Action -in @('Install', 'Upgrade'))" in direct_arguments
+    for required in ("BrokerBinary", "ProviderLibrary", "GatewayBinary", "HookBinary"):
+        assert f"@('{required}'," in direct_arguments
+    assert "$arguments.Add('-BrokerBinary')" in direct_arguments
+    assert "$arguments.Add('-ProviderLibrary')" in direct_arguments
+    assert "if ($Action -eq 'Install'" in direct_arguments
+    assert "throw 'Install requires -Config and -Manifest'" in direct_arguments
+    assert "@('-Config', $ConfigSource)" in direct_arguments
+    assert "@('-Manifest', $ManifestSource)" in direct_arguments
+
+    public_arguments = harness[
+        harness.index("function Get-EnterpriseLifecycleCLIArguments") : harness.index(
+            "function Test-AllowUnsignedHarnessContract"
+        )
+    ]
+    assert "[string]$BrokerSource" in public_arguments
+    assert "if ($Action -in @('Install', 'Upgrade'))" in public_arguments
+    for required in ("--broker-binary", "--gateway-binary", "--hook-binary"):
+        assert f"@('{required}'," in public_arguments
+    assert "@('--broker-binary', $BrokerSource)" in public_arguments
+    assert "if ($Action -eq 'Install'" in public_arguments
+    assert "throw 'public Install requires --config and --manifest'" in public_arguments
+    assert "@('--config', $ConfigSource)" in public_arguments
+    assert "@('--manifest', $ManifestSource)" in public_arguments
+    assert "--provider-library" not in public_arguments
+    assert '"provider-library"' not in lifecycle_cli
+    assert '"broker-binary"' in lifecycle_cli
+    assert "windowsEnterpriseProviderLibraryResolver()" in lifecycle_cli
+
+    initial_install = harness[
+        harness.index("Invoke-Check 'enterprise-installer-install'") : harness.index(
+            "Invoke-Check 'windows-service-contract'"
+        )
+    ]
+    assert "-BrokerSource $script:BrokerSource" in initial_install
+    assert "'initial public Install' `" in initial_install
+    assert "([string]$script:SourceDigests['broker'])" in initial_install
+
+    upgrade = harness[
+        harness.index("function Test-UpgradeTransaction") : harness.index(
+            "function Get-ManagedUserPathSecurityFingerprint"
+        )
+    ]
+    assert "-BrokerSource $script:UpgradeBrokerSource" in upgrade
+    assert "broker = [string]$script:SourceDigests['upgrade_broker']" in upgrade
+    assert "exact_broker_sha256 = $true" in upgrade
+    assert "'versioned public Upgrade' `" in upgrade
+    assert "([string]$script:SourceDigests['upgrade_broker'])" in upgrade
+
+    source_free_repair = harness[
+        harness.index("function Invoke-CertificationActivationRepairAfterIsolationProof") :
+        harness.index("function Get-CertificationServiceProcessSnapshot")
+    ]
+    assert "--broker-binary" not in source_free_repair
+    assert "-BrokerBinary" not in source_free_repair
+    assert "-ProviderLibrary" not in source_free_repair
+    assert "Deliberately omit every artifact replacement" in source_free_repair
+    assert "'source-free installed public Repair' `" in source_free_repair
+    assert "([string]$script:SourceDigests['broker'])" in source_free_repair
+
+    installed_provider = harness[
+        harness.index("function Assert-InstalledProviderLibraryIdentity") :
+        harness.index("function Assert-SameDigests")
+    ]
+    for contract in (
+        "[string]$ExpectedBrokerSHA256 = ''",
+        "$brokerSHA256 = Get-FileDigest $brokerBinary",
+        "$ExpectedBrokerSHA256 -cnotmatch '^[0-9a-f]{64}$'",
+        "exact protected source digest",
+        "expected_broker_sha256 = $ExpectedBrokerSHA256",
+        "exact_broker_sha256 = $brokerDigestVerified",
+    ):
+        assert contract in installed_provider
+
+    direct_wrapper = harness[
+        harness.index("function Invoke-EnterpriseInstaller") : harness.index(
+            "function Get-ManagedCLIEnvironment"
+        )
+    ]
+    for source in (
+        "BrokerSource",
+        "ProviderLibrarySource",
+        "GatewaySource",
+        "HookSource",
+        "CLISource",
+        "ConfigSource",
+        "ManifestSource",
+    ):
+        assert f"[string]${source} = ''" in direct_wrapper
+
+
+def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None:
+    harness = read(HARNESS)
+    deployment_doc = read(DEPLOYMENT_DOC)
+
+    assert (
+        '$script:BrokerServiceName = "DefenseClawCMIDBroker_$($script:RunToken)"'
+        in harness
+    )
+    service_name_guard = harness[
+        harness.index("function Assert-CertificationServiceName") : harness.index(
+            "function Assert-CertificationUserName"
+        )
+    ]
+    assert "'broker' { \"DefenseClawCMIDBroker_$($script:RunToken)\" }" in (
+        service_name_guard
+    )
+    assert "Assert-CertificationServiceName $script:BrokerServiceName 'broker'" in (
+        harness
+    )
+    assert (
+        '$script:EnumeratorServiceName = '
+        '"DefenseClawCertEnumerator_$($script:RunToken)"' in harness
+    )
+    assert (
+        "'enumerator' { \"DefenseClawCertEnumerator_$($script:RunToken)\" }"
+        in service_name_guard
+    )
+    assert (
+        "Assert-CertificationServiceName "
+        "$script:EnumeratorServiceName 'enumerator'" in harness
+    )
+
+    execution_preflight_start = harness.index(
+        "if (-not (Test-IsElevatedAdministrator))"
+    )
+    execution_preflight = harness[
+        execution_preflight_start : harness.index(
+            "$failure = ''", execution_preflight_start
+        )
+    ]
+    assert "$script:BrokerServiceName" in execution_preflight
+    assert "$script:EnumeratorServiceName" in execution_preflight
+    assert "refusing pre-existing certification service" in execution_preflight
+
+    bounded_cleanup = harness[
+        harness.index("function Invoke-BoundedCleanup") : harness.index(
+            "function Write-FinalEvidence"
+        )
+    ]
+    assert bounded_cleanup.count("$script:BrokerServiceName") >= 5
+    assert bounded_cleanup.count("$script:EnumeratorServiceName") >= 5
+    assert "'broker'" in bounded_cleanup
+    assert "'enumerator'" in bounded_cleanup
+    assert "Assert-CertificationServiceName $serviceName $serviceRole" in bounded_cleanup
+    assert "@('delete', $serviceName)" in bounded_cleanup
+
+    certification_invocation = deployment_doc[
+        deployment_doc.index(
+            ".\\scripts\\test-windows-enterprise-hardening.ps1"
+        ) : deployment_doc.index("Without `-Execute -DisposableHost`")
+    ]
+    for parameter in (
+        "-BrokerBinary",
+        "-ProviderLibrary",
+        "-UpgradeBrokerBinary",
+    ):
+        assert parameter in certification_invocation
+    public_upgrade = deployment_doc[
+        deployment_doc.index("& $ReleaseCLI enterprise windows upgrade") :
+        deployment_doc.index("Running the installed CLI is still valid")
+    ]
+    assert "--broker-binary" in public_upgrade
+    repair = deployment_doc[
+        deployment_doc.index("-Action Repair") : deployment_doc.index(
+            "Use `-Action Upgrade`"
+        )
+    ]
+    assert "-BrokerBinary" in repair
+    assert "-ProviderLibrary" in repair
+
+
+def test_certification_treats_broker_as_a_first_class_service_boundary() -> None:
+    harness = read(HARNESS)
+
+    service_contract = harness[
+        harness.index("function Assert-ServiceContract") : harness.index(
+            "function Assert-CertificationServiceCodexHomeAbsent"
+        )
+    ]
+    for contract in (
+        "$broker = Get-CimInstance Win32_Service",
+        "$null -eq $gateway -or $null -eq $broker -or $null -eq $guardian",
+        "$broker.StartName",
+        "want LocalSystem",
+        "foreach ($service in @($gateway, $broker, $guardian))",
+        "bin\\defenseclaw-cmid-broker.exe",
+        "Assert-InstalledProviderLibraryIdentity 'service contract'",
+        "broker=$($broker.State)/$($broker.StartName)",
+    ):
+        assert contract in service_contract
+
+    environment_contract = harness[
+        harness.index("function Assert-CertificationServiceCodexHomeAbsent") :
+        harness.index("function Assert-CertificationServicesStoppedAndIndependent")
+    ]
+    assert "role = 'broker'" in environment_contract
+    assert "if ($role -eq 'broker' -and $null -ne $environmentProperty)" in (
+        environment_contract
+    )
+    assert "if ($role -ne 'broker' -and $null -eq $environmentProperty)" in (
+        environment_contract
+    )
+
+    stopped_contract = harness[
+        harness.index("function Assert-CertificationServicesStoppedAndIndependent") :
+        harness.index("function Invoke-EnterpriseLifecycleCLIJSON")
+    ]
+    assert "$script:BrokerServiceName" in stopped_contract
+    assert "State -ne 'Stopped'" in stopped_contract
+    assert "StartMode -ne 'Disabled'" in stopped_contract
+
+    control_snapshot = harness[
+        harness.index("function Get-ServiceControlSnapshot") : harness.index(
+            "function Get-CertificationServiceProcessSnapshot"
+        )
+    ]
+    process_snapshot = harness[
+        harness.index("function Get-CertificationServiceProcessSnapshot") :
+        harness.index("function Initialize-ServiceTokenProbeType")
+    ]
+    for snapshot in (control_snapshot, process_snapshot):
+        assert "$script:BrokerServiceName" in snapshot
+
+    failure_contract = harness[
+        harness.index("function Get-CertificationFailureActionContract") :
+        harness.index("function Wait-ForEnterpriseServiceReadiness")
+    ]
+    readiness = harness[
+        harness.index("function Wait-ForEnterpriseServiceReadiness") :
+        harness.index("function Invoke-ControlledServiceFailure")
+    ]
+    controlled_failure = harness[
+        harness.index("function Invoke-ControlledServiceFailure") : harness.index(
+            "function Assert-ExplicitServiceStopDoesNotRecover"
+        )
+    ]
+    recovery = harness[
+        harness.index("function Test-ServiceFailureRecovery") : harness.index(
+            "function Test-QueuedFailureRestartDuringServicing"
+        )
+    ]
+    queued = harness[
+        harness.index("function Test-QueuedFailureRestartDuringServicing") :
+        harness.index("function Assert-SameServiceControlSnapshot")
+    ]
+    for section in (failure_contract, recovery, queued):
+        assert "$script:BrokerServiceName" in section
+    assert "broker_service_state" in readiness
+    assert "'broker'" in controlled_failure
+    assert "'controlled-failure'" not in controlled_failure
+    assert "bin\\defenseclaw-cmid-broker.exe" in controlled_failure
+    assert "$dependentGatewayStopped = $true" in recovery
+    assert "dependent_gateway_quiesced = $dependentGatewayStopped" in recovery
+    assert "broker_service_state -cne 'stopped'" in queued
+    assert "broker_service_state -cne 'running'" in queued
+
+    wait = harness[
+        harness.index("function Wait-ForServicesRunning") : harness.index(
+            "function Get-AccessRules"
+        )
+    ]
+    assert "$broker = Get-Service -Name $script:BrokerServiceName" in wait
+    assert "$broker.Status -eq" in wait
+
+    standard_user_probe = harness[
+        harness.index("function Invoke-StandardUserControlProbe") : harness.index(
+            "function Assert-ProtectedUserTamperToken"
+        )
+    ]
+    for contract in (
+        "broker_service = $script:BrokerServiceName",
+        "broker_binary = Join-Path $script:InstallRoot",
+        "cmid-broker\\broker-auth.key",
+        "broker_pid = [uint32]$brokerProcess[0].process_id",
+        "write_broker_binary",
+        "[string]$input.broker_service",
+        "[uint32]$input.broker_pid",
+    ):
+        assert contract in standard_user_probe
+
+    normal_snapshot = harness[
+        harness.index("function Get-NormalModeEnterpriseMachineSnapshot") :
+        harness.index("function Get-NormalModeEnterpriseAttributionSnapshot")
+    ]
+    assert "bin\\defenseclaw-cmid-broker.exe" in normal_snapshot
+
+    public_json_checks = (
+        "function Test-CodexSharedDirectoriesPersistThroughPurge",
+        "function Invoke-CertificationActivationRepairAfterIsolationProof",
+        "function Test-QueuedFailureRestartDuringServicing",
+        "function Test-PublicLifecycleInspectionAndReconcile",
+        "function Test-UpgradeTransaction",
+        "function Test-PublicDefaultUninstallAndReinstall",
+    )
+    for function_name in public_json_checks:
+        start = harness.index(function_name)
+        next_function = harness.find("\nfunction ", start + len(function_name))
+        section = harness[start:] if next_function < 0 else harness[start:next_function]
+        assert "gateway_service_state" in section
+        assert "broker_service_state" in section
+
+    default_retention = harness[
+        harness.index("function Get-DefaultUninstallRetainedEvidenceSnapshot") :
+        harness.index("function Test-PublicDefaultUninstallAndReinstall")
+    ]
+    for retained in (
+        "broker_auth_key",
+        "broker_log",
+        "cmid-broker\\broker-auth.key",
+        "logs\\cmid-broker\\cmid-broker.log",
+    ):
+        assert retained in default_retention
+    assert "'broker_auth_key'" in default_retention
+    assert "'broker_log'" in default_retention
+
+    # PowerShell 5.1 has no String.Contains(value, comparisonType) overload.
+    assert not re.search(
+        r"\.Contains\(\s*[^\n,]+,\s*\[StringComparison\]::",
+        harness,
+    )
 
 
 def test_certification_manually_drives_every_public_windows_lifecycle_verb() -> None:
@@ -2067,6 +2514,7 @@ def test_certification_manually_drives_every_public_windows_lifecycle_verb() -> 
     assert "Invoke-PublicEnterpriseLifecycleCLIJSON" in initial_install
     assert "-FilePath $script:CLISource" in initial_install
     assert "-InstallerPath $script:Installer" in initial_install
+    assert "-BrokerSource $script:BrokerSource" in initial_install
     assert "-GatewaySource $script:GatewaySource" in initial_install
     assert "-HookSource $script:HookSource" in initial_install
     assert "-CLISource $script:CLISource" in initial_install
@@ -2106,6 +2554,8 @@ def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -
 
     for role_path in (
         "runtime\\audit.db",
+        "cmid-broker\\broker-auth.key",
+        "logs\\cmid-broker\\cmid-broker.log",
         "logs\\gateway\\gateway.log",
         "logs\\guardian\\hook-guardian.log",
         "runtime\\hook_guardian_state.json",
@@ -2130,6 +2580,8 @@ def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -
     assert "[uint32]0x00010000" in proof
     assert "($errorCode -eq 5)" in proof
     assert "services_absent" in proof
+    assert "enumerator_service = $script:EnumeratorServiceName" in proof
+    assert "$null -eq $enumerator" in proof
     assert "secret_material_recorded = $false" in proof
 
     assert "Assert-EnterpriseMachinePolicyAbsent" in default_uninstall
@@ -2137,6 +2589,8 @@ def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -
     assert "machine_policy_absent_before_fresh_clients" in default_uninstall
     assert "machine_policy_absent_after_fresh_clients" in default_uninstall
     assert "fresh_clients_without_enterprise_hook" in default_uninstall
+    assert "'public reinstall' `" in default_uninstall
+    assert "([string]$script:SourceDigests['upgrade_broker'])" in default_uninstall
     assert default_uninstall.index(
         "after public default Uninstall and before fresh client processes"
     ) < default_uninstall.index(
@@ -3403,6 +3857,32 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "lifecycle-snapshot:retire" in smoke
     assert "purge_cases = @($purgeResults)" in smoke
 
+    uninstall_case = smoke[
+        smoke.index("function Invoke-HarnessUninstallCase") : smoke.index(
+            "function Invoke-HarnessDirectReinstallSequence"
+        )
+    ]
+    committed_cleanup = uninstall_case[
+        uninstall_case.index("elseif ($CrashAt -ceq 'post-binary-delete')") :
+        uninstall_case.index("elseif ($ExpectSuccess)", uninstall_case.index(
+            "elseif ($CrashAt -ceq 'post-binary-delete')"
+        ))
+    ]
+    assert "$script:HarnessState.rollback_calls -eq 0" in committed_cleanup
+    assert "$script:HarnessState.complete_calls -eq 1" in committed_cleanup
+    assert "retry Uninstall to finish cleanup" in committed_cleanup
+
+    dispatch_start = smoke.index(
+        "# Quiescing recovery exercises the production disabled"
+    )
+    dispatch = smoke[dispatch_start : smoke.index(
+        "$quiescingResults =", dispatch_start
+    )]
+    assert "$script:HarnessState.ContainsKey('operation')" in dispatch
+    assert "if (-not $hasOperation)" in dispatch
+    assert "operation -ceq 'uninstall'" in dispatch
+    assert "& $script:HarnessRealStartTransactionServices `" in dispatch
+
 
 def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> None:
     module = read(MODULE)
@@ -3750,13 +4230,32 @@ def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -
     assert "'managed DACL is not protected'" in smoke
     assert "same_path_manifest_drift_rejected" in smoke
     assert "no_source_manifest_drift_rejected" in smoke
-    plan_enter = smoke.index("'target-runtime:plan-enter'")
-    manifest_validation = smoke.index(
+    target_runtime_mock = smoke[
+        smoke.index("function Invoke-HarnessTargetRuntimeGatewayCommand") :
+        smoke.index("function Assert-HarnessTargetRuntimeCleanupScopeExclusive")
+    ]
+    plan_enter = target_runtime_mock.index("'target-runtime:plan-enter'")
+    manifest_validation = target_runtime_mock.index(
         "Assert-DefenseClawCanonicalPathAcl `",
-        smoke.index("$manifestWasReplaced = [bool]("),
+        target_runtime_mock.index("$manifestWasReplaced = [bool]("),
     )
-    plan_event = smoke.index("$script:HarnessState.events.Add('target-runtime:plan')")
+    plan_event = target_runtime_mock.index(
+        "$script:HarnessState.events.Add('target-runtime:plan')"
+    )
     assert plan_enter < manifest_validation < plan_event
+    activation_failure = smoke[
+        smoke.index("function Invoke-HarnessFirstActivationFailureSequence") :
+        smoke.index("Invoke-HarnessUninstallCase `", smoke.index(
+            "function Invoke-HarnessFirstActivationFailureSequence"
+        ))
+    ]
+    drift_boundary = activation_failure[
+        activation_failure.index("$validationOnlyManifestDriftRejected") :
+        activation_failure.index("for ($attempt = 1; $attempt -le 2; $attempt++)")
+    ]
+    assert "'target-runtime:plan-enter'" in drift_boundary
+    assert ") -lt 0 -and" in drift_boundary
+    assert "'target-runtime:plan'" in drift_boundary
     assert "lowercase Install action skipped target preparation" in smoke
     assert "bounded-redacted-target-runtime-diagnostic" in smoke
     assert "diagnostic-secret" in smoke
@@ -3809,6 +4308,14 @@ def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
             "function Invoke-HarnessFirstActivationFailureSequence"
         )
     ]
+    old_journal = direct_reinstall[
+        direct_reinstall.index("$oldJournal = [ordered]@{") :
+        direct_reinstall.index("[IO.File]::WriteAllText(", direct_reinstall.index(
+            "$oldJournal = [ordered]@{"
+        ))
+    ]
+    assert "schema_version = 4" in old_journal
+    assert "phase = 'finalized'" in old_journal
     assert "service_exists = @{" in direct_reinstall
     assert "ipc_service_sids = @('S-1-5-80-1-2-3-4-5')" in direct_reinstall
     assert "second uninstall retained its shared IPC service SID" in direct_reinstall
