@@ -12,6 +12,9 @@ $ErrorActionPreference = 'Stop'
 $modulePath = [IO.Path]::GetFullPath(
     (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')
 )
+$installerPath = [IO.Path]::GetFullPath(
+    (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\install-enterprise.ps1')
+)
 $testRoot = Microsoft.PowerShell.Management\Join-Path `
     ([IO.Path]::GetTempPath()) `
     ('dcut-' + [Guid]::NewGuid().ToString('N'))
@@ -28,7 +31,10 @@ try {
     }
 
     $result = & $module {
-        param([Parameter(Mandatory)][string]$TestRoot)
+        param(
+            [Parameter(Mandatory)][string]$TestRoot,
+            [Parameter(Mandatory)][string]$InstallerPath
+        )
 
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
@@ -244,6 +250,11 @@ try {
                     Microsoft.PowerShell.Management\Join-Path `
                         $lifecycleDirectory `
                         "purge-$purgeScope.json"
+                )
+                InstallRollbackIntentPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $lifecycleDirectory `
+                        "install-rollback-$purgeScope.json"
                 )
                 SelfUninstallReceiptPath = (
                     Microsoft.PowerShell.Management\Join-Path `
@@ -965,7 +976,9 @@ try {
                 [switch]$PriorDeploymentActive,
                 [switch]$IncludeCodexMachineState,
                 [switch]$ManagedHooksTeardownPrepared,
-                [switch]$PreserveManagedHooksTeardownJournal
+                [switch]$PreserveManagedHooksTeardownJournal,
+                [switch]$InstallRootCreatedForTransaction,
+                [switch]$StateRootCreatedForTransaction
             )
             if (-not $PSBoundParameters.ContainsKey(
                     'PriorDeploymentActive'
@@ -1300,6 +1313,16 @@ try {
                         'DefenseClawHookGuardian',
                         'DefenseClawHookEnumerator'
                     )) {
+                        if ($name -eq 'DefenseClawGateway') {
+                            [void](Revoke-DefenseClawManagedIPCServiceAccess `
+                                -Layout $Layout `
+                                -GatewayServiceName $name `
+                                -GatewayServiceSID 'S-1-5-80-1234' `
+                                -TransactionCreatedServicePresent)
+                        }
+                        $script:HarnessState.events.Add(
+                            "remove-service:$name"
+                        )
                         $script:HarnessState.service_exists[$name] = $false
                         $script:HarnessState.service_start_modes[$name] = 0
                     }
@@ -1587,10 +1610,15 @@ try {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [string]$GatewayServiceSID
+                [string]$GatewayServiceSID,
+                [switch]$TransactionCreatedServicePresent
             )
             $null = $Layout
-            if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
+            $serviceExists = Test-DefenseClawServiceExists -Name $GatewayServiceName
+            if ($TransactionCreatedServicePresent -and -not $serviceExists) {
+                throw 'transaction IPC cleanup mock lost its live service'
+            }
+            if (-not $TransactionCreatedServicePresent -and $serviceExists) {
                 throw 'managed IPC cleanup mock observed a live service'
             }
             $resolvedSID = Get-DefenseClawServiceSIDForRecovery `
@@ -1841,7 +1869,8 @@ try {
         function script:Complete-DefenseClawTransaction {
             param(
                 [Parameter(Mandatory)][string]$SnapshotPath,
-                [Parameter(Mandatory)][hashtable]$Layout
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [switch]$Rollback
             )
             $script:HarnessState.events.Add('complete')
             $script:HarnessState.complete_calls++
@@ -2296,6 +2325,7 @@ targets:
                     DefenseClawCMIDBroker = $false
                     DefenseClawHookGuardian = $false
                 }
+                ipc_service_sids = @()
                 guardian_fresh = $false
                 queued_gateway_restart = $false
                 queued_restart_blocked = $true
@@ -2387,6 +2417,20 @@ targets:
                             ] -eq 0
                         ) `
                         -Message 'fresh install rollback retained a transaction-created service'
+                    Assert-Harness `
+                        -Condition (
+                            'S-1-5-80-1234' -notin
+                                @($script:HarnessState.ipc_service_sids) -and
+                            $script:HarnessState.events.IndexOf(
+                                'managed-ipc-revoke:S-1-5-80-1234'
+                            ) -ge 0 -and
+                            $script:HarnessState.events.IndexOf(
+                                'managed-ipc-revoke:S-1-5-80-1234'
+                            ) -lt $script:HarnessState.events.IndexOf(
+                                'remove-service:DefenseClawGateway'
+                            )
+                        ) `
+                        -Message 'fresh install rollback retained its shared IPC gateway grant'
                     Assert-Harness `
                         -Condition (
                             -not (Microsoft.PowerShell.Management\Test-Path `
@@ -4285,6 +4329,497 @@ targets:
             -ForeignFile 'requirements.toml' `
             -ExpectFailure:$true
 
+        # Blockers 039/040: exercise the pure crash-boundary decisions behind
+        # the external fresh-install receipt and shared target-root rollback.
+        # Native create/delete coverage remains in the focused Windows package;
+        # these cases keep the lifecycle ordering and fail-closed transitions
+        # visible in the complete PS 5.1/7 uninstall matrix.
+        $installRollbackContractResults =
+            [Collections.Generic.List[object]]::new()
+
+        $canonicalRootAcl = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory `
+            -Kind AdminDirectory `
+            -GatewayServiceSID $script:AdministratorsSID
+        $canonicalRootSnapshot = [pscustomobject]@{
+            SecurityDescriptor =
+                $canonicalRootAcl.GetSecurityDescriptorBinaryForm()
+        }
+        function script:Assert-DefenseClawManagedRootStagingAcl {
+            param(
+                [Parameter(Mandatory)][string]$Path,
+                [Parameter(Mandatory)][string]$MarkerSID
+            )
+            $null = $Path
+            $null = $MarkerSID
+            throw 'injected crash after canonical ACL publication'
+        }
+        Assert-DefenseClawInstallRollbackRootDescriptor `
+            -Path (Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'post-canonical-crash') `
+            -Current $canonicalRootSnapshot `
+            -CreationState staged `
+            -MarkerSID 'S-1-5-21-1-2-3-4' `
+            -ExpectedKind AdminDirectory
+        $unsafeRootAcl = [Security.AccessControl.DirectorySecurity]::new()
+        $unsafeRootAcl.SetSecurityDescriptorSddlForm(
+            'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)',
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        $unsafeCrashRejected = $false
+        try {
+            Assert-DefenseClawInstallRollbackRootDescriptor `
+                -Path (Microsoft.PowerShell.Management\Join-Path `
+                    $TestRoot `
+                    'post-unsafe-crash') `
+                -Current ([pscustomobject]@{
+                    SecurityDescriptor =
+                        $unsafeRootAcl.GetSecurityDescriptorBinaryForm()
+                }) `
+                -CreationState staged `
+                -MarkerSID 'S-1-5-21-1-2-3-4' `
+                -ExpectedKind AdminDirectory
+        }
+        catch {
+            $unsafeCrashRejected = $true
+        }
+        Assert-Harness `
+            -Condition $unsafeCrashRejected `
+            -Message 'staged receipt accepted a noncanonical post-publication DACL'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'staged-to-canonical-crash-window'
+            canonical_inode_accepted = $true
+            noncanonical_inode_rejected = $unsafeCrashRejected
+        })
+
+        $productionState = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'production-state'
+        $productionIPC = Microsoft.PowerShell.Management\Join-Path `
+            $productionState `
+            'ipc'
+        Assert-DefenseClawTargetRuntimeProductionChildrenExclusive `
+            -ProductionState $productionState `
+            -Children @([pscustomobject]@{FullName = $productionIPC})
+        $productionChildRejected = $false
+        try {
+            Assert-DefenseClawTargetRuntimeProductionChildrenExclusive `
+                -ProductionState $productionState `
+                -Children @(
+                    [pscustomobject]@{FullName = $productionIPC},
+                    [pscustomobject]@{
+                        FullName = (
+                            Microsoft.PowerShell.Management\Join-Path `
+                                $productionState `
+                                'install'
+                        )
+                    }
+                )
+        }
+        catch {
+            $productionChildRejected = $true
+        }
+        Assert-Harness `
+            -Condition $productionChildRejected `
+            -Message 'shared target cleanup accepted non-IPC production state'
+        $allCanonicalPlan = [pscustomobject]@{
+            roots = @([pscustomobject]@{baseline = 'canonical'})
+        }
+        $absentPlan = [pscustomobject]@{
+            roots = @([pscustomobject]@{baseline = 'absent'})
+        }
+        Assert-Harness `
+            -Condition (
+                -not (Test-DefenseClawTargetRuntimePlanRequiresExclusiveCleanup `
+                    -Plan $allCanonicalPlan) -and
+                (Test-DefenseClawTargetRuntimePlanRequiresExclusiveCleanup `
+                    -Plan $absentPlan)
+            ) `
+            -Message 'target runtime cleanup coexistence gate ignored baseline ownership'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'production-root-coexistence-gate'
+            ipc_only_allowed = $true
+            foreign_child_rejected = $productionChildRejected
+            canonical_only_plan_is_validation_only = $true
+        })
+
+        $targetPreparationModes = [ordered]@{
+            Install = 'prepare'
+            Upgrade = 'validate'
+            Repair = 'validate'
+        }
+        foreach ($installLikeAction in $targetPreparationModes.Keys) {
+            $actualPreparationMode =
+                Get-DefenseClawTargetRuntimePreparationMode `
+                    -Action $installLikeAction `
+                    -ManifestPresent $true
+            Assert-Harness `
+                -Condition (
+                    $actualPreparationMode -ceq
+                        [string]$targetPreparationModes[$installLikeAction]
+                ) `
+                -Message (
+                    "$installLikeAction target runtime mode was " +
+                    "$actualPreparationMode, expected " +
+                    [string]$targetPreparationModes[$installLikeAction]
+                )
+        }
+        $missingManifestRejected = $false
+        try {
+            $null = Get-DefenseClawTargetRuntimePreparationMode `
+                -Action Install `
+                -ManifestPresent $false
+        }
+        catch {
+            $missingManifestRejected = [bool](
+                $_.Exception.Message -like
+                    '*requires an authenticated installed targets.yaml*'
+            )
+        }
+        Assert-Harness `
+            -Condition $missingManifestRejected `
+            -Message 'manifest-free Install skipped target preparation'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'bounded-install-like-target-preparation'
+            install = 'prepare'
+            upgrade = 'validate'
+            repair = 'validate'
+            missing_manifest = 'rejected'
+        })
+
+        $twoRootPlan = [pscustomobject]@{
+            roots = @(
+                [pscustomobject]@{baseline = 'absent'},
+                [pscustomobject]@{baseline = 'absent'}
+            )
+        }
+        $partialCleanup = [pscustomobject]@{
+            ok = $false
+            claims = @([pscustomobject]@{state = 'absent'})
+        }
+        $completeCleanup = [pscustomobject]@{
+            ok = $true
+            claims = @(
+                [pscustomobject]@{state = 'absent'},
+                [pscustomobject]@{state = 'absent'}
+            )
+        }
+        Assert-Harness `
+            -Condition (
+                -not (Test-DefenseClawTargetRuntimeReportComplete `
+                    -Plan $twoRootPlan `
+                    -Report $partialCleanup) -and
+                (Test-DefenseClawTargetRuntimeReportComplete `
+                    -Plan $twoRootPlan `
+                    -Report $completeCleanup)
+            ) `
+            -Message 'partial target cleanup became terminal before successful retry'
+        $cleanupSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawTargetRuntimeRollbackCleanup `
+                -CommandType Function
+        ).ScriptBlock
+        $cleanupFailureGate = $cleanupSource.IndexOf(
+            'target runtime rollback cleanup failed',
+            [StringComparison]::Ordinal
+        )
+        $cleanupJournalUpdate = $cleanupSource.IndexOf(
+            'Set-DefenseClawTargetRuntimeTransactionState',
+            [StringComparison]::Ordinal
+        )
+        Assert-Harness `
+            -Condition (
+                $cleanupFailureGate -ge 0 -and
+                $cleanupJournalUpdate -gt $cleanupFailureGate
+            ) `
+            -Message 'partial target cleanup can replace live rollback claims'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'multi-root-cleanup-failure-retries'
+            partial_report_terminal = $false
+            full_retry_terminal = $true
+            prior_live_claims_retained = $true
+        })
+
+        function script:Test-DefenseClawServiceExists {
+            param([Parameter(Mandatory)][string]$Name)
+            throw "injected SCM access failure for $Name"
+        }
+        $scmFailureClosed = $false
+        try {
+            Assert-DefenseClawServicesAbsentChecked `
+                -Names @('DefenseClawGateway') `
+                -Operation 'injected destructive cleanup'
+        }
+        catch {
+            $scmFailureClosed = $true
+        }
+        $rootCleanupSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Complete-DefenseClawInstallRollbackIntent `
+                -CommandType Function
+        ).ScriptBlock
+        $checkedAbsenceIndex = $rootCleanupSource.IndexOf(
+            'Assert-DefenseClawServicesAbsentChecked',
+            [StringComparison]::Ordinal
+        )
+        $rootMutationIndex = $rootCleanupSource.IndexOf(
+            'Remove-DefenseClawManagedTree',
+            [StringComparison]::Ordinal
+        )
+        Assert-Harness `
+            -Condition (
+                $scmFailureClosed -and
+                $checkedAbsenceIndex -ge 0 -and
+                $rootMutationIndex -gt $checkedAbsenceIndex
+            ) `
+            -Message 'SCM query failure can reach destructive root cleanup'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'scm-query-failure-before-root-mutation'
+            query_failure_propagated = $scmFailureClosed
+            root_mutation_reached = $false
+        })
+
+        $preLayoutSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawPreLayoutRecovery `
+                -CommandType Function
+        ).ScriptBlock
+        $enterpriseSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawEnterpriseLifecycle `
+                -CommandType Function
+        ).ScriptBlock
+        $pendingMarker = $preLayoutSource.IndexOf(
+            'Repair and Upgrade transactions predate',
+            [StringComparison]::Ordinal
+        )
+        $pendingRecoveryIndex = if ($pendingMarker -ge 0) {
+            $preLayoutSource.IndexOf(
+                'Recover-DefenseClawPendingTransaction',
+                $pendingMarker,
+                [StringComparison]::Ordinal
+            )
+        }
+        else {
+            -1
+        }
+        $preLayoutIndex = $enterpriseSource.IndexOf(
+            'Invoke-DefenseClawPreLayoutRecovery',
+            [StringComparison]::Ordinal
+        )
+        $newReceiptIndex = $enterpriseSource.IndexOf(
+            'New-DefenseClawInstallPreparationIntent',
+            [StringComparison]::Ordinal
+        )
+        Assert-Harness `
+            -Condition (
+                $pendingMarker -ge 0 -and
+                $pendingRecoveryIndex -gt $pendingMarker -and
+                $preLayoutIndex -ge 0 -and
+                $newReceiptIndex -gt $preLayoutIndex
+            ) `
+            -Message 'old pending transaction is not recovered before new Install authority'
+        foreach ($priorAction in @('Repair', 'Upgrade')) {
+            $installRollbackContractResults.Add([pscustomobject]@{
+                name = ($priorAction.ToLowerInvariant() + '-crash-then-install')
+                old_pending_recovered_before_new_receipt = $true
+            })
+        }
+
+        $deferredModuleGate = $enterpriseSource.IndexOf(
+            '-DeferredConfig is temporarily unavailable',
+            [StringComparison]::Ordinal
+        )
+        $deferredModuleInvocationRejected = $false
+        try {
+            $null = Invoke-DefenseClawEnterpriseLifecycle `
+                -Action Install `
+                -DeferredConfig
+        }
+        catch {
+            $deferredModuleInvocationRejected = [bool](
+                $_.Exception.Message -like
+                    '*-DeferredConfig is temporarily unavailable*'
+            )
+        }
+        Assert-Harness `
+            -Condition $deferredModuleInvocationRejected `
+            -Message 'module invocation did not reject deferred config at entry'
+        $moduleLayoutResolution = $enterpriseSource.IndexOf(
+            'Resolve-DefenseClawCertificationCodexHome',
+            [StringComparison]::Ordinal
+        )
+        $bootstrapInstallerSource = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $InstallerPath `
+            -Raw
+        $deferredBootstrapGate = $bootstrapInstallerSource.IndexOf(
+            '-DeferredConfig is temporarily unavailable',
+            [StringComparison]::Ordinal
+        )
+        $bootstrapEnvironmentCreation = $bootstrapInstallerSource.IndexOf(
+            '$bootstrapEnvironment = New-DefenseClawBootstrapEnvironment',
+            [StringComparison]::Ordinal
+        )
+        Assert-Harness `
+            -Condition (
+                $deferredModuleGate -ge 0 -and
+                $moduleLayoutResolution -gt $deferredModuleGate -and
+                $deferredBootstrapGate -ge 0 -and
+                $bootstrapEnvironmentCreation -gt $deferredBootstrapGate
+            ) `
+            -Message 'deferred config can reach layout or bootstrap mutation'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'deferred-config-rejected-before-mutation'
+            bootstrap_gate_precedes_environment = $true
+            module_gate_precedes_layout = $true
+            module_invocation_rejected = $deferredModuleInvocationRejected
+        })
+
+        $boundedFixtureRoot = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'c999'
+        $boundedLayout = New-HarnessLayout -Root $boundedFixtureRoot
+        # Keep every Windows component below 255 characters. PowerShell 7 can
+        # validate a nested long-path payload large enough to prove the raised
+        # receipt bound; Windows PowerShell 5.1 uses one identical valid
+        # component so its legacy MAX_PATH implementation can run the same
+        # schema/uniqueness assertions authoritatively.
+        $longProfileStem = ('a' * 180) -join ''
+        $longPathComponentCount = if (
+            $PSVersionTable.PSVersion.Major -ge 7
+        ) {
+            5
+        }
+        else {
+            1
+        }
+        $boundedRoots = [Collections.Generic.List[object]]::new()
+        $boundedClaims = [Collections.Generic.List[object]]::new()
+        for ($index = 0; $index -lt 128; $index++) {
+            $suffix = '{0:d3}' -f $index
+            $profileComponents = [Collections.Generic.List[string]]::new()
+            for (
+                $componentIndex = 0;
+                $componentIndex -lt $longPathComponentCount;
+                $componentIndex++
+            ) {
+                $componentPrefix = if ($componentIndex -eq 0) {
+                    'u' + $suffix + '-'
+                }
+                else {
+                    'p' + $componentIndex + '-'
+                }
+                $profileComponents.Add(
+                    $componentPrefix + $longProfileStem
+                )
+            }
+            $home = 'C:\Users\' + ($profileComponents -join '\')
+            $data = $home + '\.defenseclaw'
+            $sid = 'S-1-5-21-100-200-300-' + (1000 + $index)
+            $boundedRoots.Add([ordered]@{
+                user_home = $home
+                data_dir = $data
+                sid = $sid
+                baseline = 'absent'
+                staging_leaf =
+                    '.defenseclaw.setup-' + ('{0:x32}' -f ($index + 1))
+                marker_sid = 'S-1-5-21-1-2-3-4-5-6-7-' + (10 + $index)
+            })
+            $boundedClaims.Add([ordered]@{
+                user_home = $home
+                data_dir = $data
+                sid = $sid
+                identity = ('00000001:{0:x16}' -f ($index + 1))
+                created = $true
+                state = 'canonical'
+            })
+        }
+        $boundedPlan = [ordered]@{
+            schema_version = 1
+            manifest_path = [string]$boundedLayout.ManifestPath
+            manifest_sha256 = (('a' * 64) -join '')
+            roots = @($boundedRoots)
+        }
+        $boundedReport = [ordered]@{
+            schema_version = 1
+            action = 'finalize'
+            ok = $true
+            claims = @($boundedClaims)
+        }
+        $boundedPlan = (
+            $boundedPlan |
+                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                    -Depth 12 `
+                    -Compress |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+        )
+        $boundedReport = (
+            $boundedReport |
+                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                    -Depth 12 `
+                    -Compress |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+        )
+        $boundedPlan = Assert-DefenseClawTargetRuntimePlan `
+            -Plan $boundedPlan `
+            -Layout $boundedLayout
+        $boundedReport = Assert-DefenseClawTargetRuntimeReport `
+            -Report $boundedReport `
+            -Action finalize `
+            -Plan $boundedPlan `
+            -JournalProjection
+        $planBytes = [Text.Encoding]::UTF8.GetByteCount(
+            ($boundedPlan |
+                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                    -Depth 12 `
+                    -Compress)
+        )
+        $reportBytes = [Text.Encoding]::UTF8.GetByteCount(
+            ($boundedReport |
+                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                    -Depth 12 `
+                    -Compress)
+        )
+        Assert-Harness `
+            -Condition ($planBytes -le 1048576 -and $reportBytes -le 1048576) `
+            -Message 'max-root long-path fixture exceeds CLI exchange bounds'
+        $boundedIntent = [ordered]@{
+            schema_version = 2
+            phase = 'preparing_layout'
+            target_runtime_plan = $boundedPlan
+            created_target_runtime_roots = @($boundedReport.claims)
+        }
+        $boundedIntentJson = ConvertTo-DefenseClawInstallRollbackIntentJson `
+            -Intent $boundedIntent
+        $roundTrippedIntent = $boundedIntentJson |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $boundedIntentBytes =
+            [Text.Encoding]::UTF8.GetByteCount($boundedIntentJson)
+        $expandedBoundExercised = [bool](
+            $PSVersionTable.PSVersion.Major -lt 7 -or
+            $boundedIntentBytes -gt 262144
+        )
+        Assert-Harness `
+            -Condition (
+                $boundedIntentBytes -le 3145728 -and
+                $expandedBoundExercised -and
+                @($roundTrippedIntent.target_runtime_plan.roots).Count -eq
+                    128 -and
+                @($roundTrippedIntent.created_target_runtime_roots).Count -eq
+                    128
+            ) `
+            -Message 'bounded max-root install receipt does not round-trip'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'max-root-long-path-receipt-roundtrip'
+            roots = 128
+            path_components = $longPathComponentCount
+            plan_bytes = $planBytes
+            report_bytes = $reportBytes
+            receipt_bytes = $boundedIntentBytes
+            expanded_bound_exercised = $expandedBoundExercised
+        })
+
         return [pscustomobject]@{
             schema_version = 1
             ok = $true
@@ -4296,8 +4831,11 @@ targets:
             self_uninstall_recovery_cases = @(
                 $selfUninstallRecoveryResults
             )
+            install_rollback_contract_cases = @(
+                $installRollbackContractResults
+            )
         }
-    } $testRoot
+    } $testRoot $installerPath
 
     $result | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8 -Compress
 }

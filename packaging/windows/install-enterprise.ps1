@@ -57,14 +57,9 @@ param(
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
-    # Spec 003 (docs/specs/003-windows-deferred-config/): opt in to
-    # the UCB-friendly late-config install. When set, -Config and
-    # -Manifest may be omitted; the module's Get-DefenseClawLifecycleSources
-    # + post-copy existence check both accept a missing source, the
-    # canonical drop-point directories are provisioned with ACLs but
-    # no file bodies, and both services are registered stopped so the
-    # gateway daemon's and hook-guardian's fsnotify wait loops can
-    # pick the files up when UCB atomically drops them.
+    # Retained for command-line compatibility, but rejected before bootstrap
+    # creation until late config publication can authenticate and prepare all
+    # enrolled user runtimes before any service activation.
     [switch]$DeferredConfig,
     [int]$SelfUninstallCallerPID,
     [switch]$Json
@@ -2592,6 +2587,16 @@ $result = $null
 $failureMessage = $null
 $exitCode = 0
 try {
+    # Deferred installation cannot authenticate or precreate per-user target
+    # runtimes because targets.yaml does not exist yet. Fail before the
+    # bootstrap environment creates its first protected staging directory;
+    # the module repeats this check as defense in depth for direct callers.
+    if ($DeferredConfig) {
+        throw (
+            '-DeferredConfig is temporarily unavailable: secure target ' +
+            'runtime preparation requires authenticated targets.yaml during Install'
+        )
+    }
     $bootstrapEnvironment = New-DefenseClawBootstrapEnvironment
     $modulePath = [IO.Path]::GetFullPath(
         [IO.Path]::Combine($PSScriptRoot, 'DefenseClawEnterprise.psm1')
@@ -2720,11 +2725,9 @@ try {
         # The exact service/root/CODEX_HOME grammar scopes this relaxation for
         # every certification lifecycle action, including pre-install Status.
         AllowUnsigned = [bool]$AllowUnsigned
-        # Spec 003 Workstream B — see the [switch]$DeferredConfig
-        # param block above for the rationale. Only meaningful for
-        # Install actions in managed-enterprise deployments; the
-        # module's Get-DefenseClawLifecycleSources call ignores it
-        # for other actions.
+        # Retained in the module invocation shape for CLI compatibility. The
+        # entry gate above rejects it before bootstrap creation, and the module
+        # repeats that rejection for direct callers.
         DeferredConfig = [bool]$DeferredConfig
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath
