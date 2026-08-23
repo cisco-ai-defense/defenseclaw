@@ -895,6 +895,11 @@ func openWindowsManagedRuntimeChildWithShare(parent windows.Handle, leaf string,
 	if err := validateWindowsManagedRuntimeLeaf(leaf); err != nil {
 		return 0, err
 	}
+	// Every open below uses FILE_SYNCHRONOUS_IO_NONALERT. NtCreateFile requires
+	// SYNCHRONIZE in DesiredAccess for either synchronous I/O option; enforce the
+	// pairing here so read-only absence probes cannot accidentally become invalid
+	// native calls.
+	access |= windows.SYNCHRONIZE
 	name, err := windows.NewNTUnicodeString(leaf)
 	if err != nil {
 		return 0, err
@@ -960,7 +965,11 @@ func validateWindowsManagedRuntimeStagingHandle(handle windows.Handle, target, m
 	if _, err := windowsManagedRuntimeHandleIdentity(handle, true); err != nil {
 		return err
 	}
-	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	descriptor, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
 	if err != nil {
 		return err
 	}

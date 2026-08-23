@@ -48,6 +48,16 @@ try {
                 -Name Restore-DefenseClawTransaction `
                 -CommandType Function
         ).ScriptBlock
+        $script:HarnessRealGatewayCommand = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawGatewayCommand `
+                -CommandType Function
+        ).ScriptBlock
+        $script:HarnessRealTargetRuntimeCleanupScope = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Assert-DefenseClawTargetRuntimeCleanupScopeExclusive `
+                -CommandType Function
+        ).ScriptBlock
 
         function Assert-Harness {
             param(
@@ -1280,6 +1290,42 @@ try {
                     -Layout $Layout `
                     -GatewayServiceName 'DefenseClawGateway' `
                     -Action retire)
+                $targetRuntimeSnapshot =
+                    Get-HarnessTargetRuntimeRequest -Path $SnapshotPath
+                if ($null -ne $targetRuntimeSnapshot.PSObject.Properties[
+                        'target_runtime_plan'
+                    ]) {
+                    # Exercise the real rollback orchestrator while the
+                    # target-runtime gateway boundary is case-scoped below.
+                    # The pending journal and protected plan/report files must
+                    # remain live until the helper proves every created root
+                    # absent; generic restore may then retire the staged binary.
+                    [void](Invoke-DefenseClawTargetRuntimeRollbackCleanup `
+                        -SnapshotPath $SnapshotPath `
+                        -Layout $Layout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -GuardianServiceName 'DefenseClawHookGuardian')
+                    $targetRuntimeSnapshot =
+                        Get-HarnessTargetRuntimeRequest -Path $SnapshotPath
+                    $cleanupReportProperty =
+                        $targetRuntimeSnapshot.PSObject.Properties[
+                            'target_runtime_cleanup_report'
+                        ]
+                    if ($null -eq $cleanupReportProperty -or
+                        -not [bool]$cleanupReportProperty.Value.ok -or
+                        @(
+                            $targetRuntimeSnapshot.created_target_runtime_roots
+                        ).Count -ne 0 -or
+                        [bool]$script:HarnessState.target_runtime_root_live -or
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $Layout.PendingPath `
+                            -PathType Leaf)) {
+                        throw 'target-runtime cleanup was not durably journaled'
+                    }
+                    $script:HarnessState.events.Add(
+                        'target-runtime:cleanup-authority-persisted'
+                    )
+                }
                 if ($script:HarnessState.ContainsKey(
                         'track_fresh_install_services'
                     ) -and
@@ -1872,14 +1918,44 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [switch]$Rollback
             )
-            $script:HarnessState.events.Add('complete')
             $script:HarnessState.complete_calls++
+            if ($Rollback -and
+                $script:HarnessState.ContainsKey(
+                    'target_runtime_cleanup_required'
+                ) -and
+                [bool]$script:HarnessState.target_runtime_cleanup_required) {
+                $rollbackSnapshot =
+                    Get-HarnessTargetRuntimeRequest -Path $SnapshotPath
+                $cleanupProperty = $rollbackSnapshot.PSObject.Properties[
+                    'target_runtime_cleanup_report'
+                ]
+                if ($null -eq $cleanupProperty -or
+                    -not [bool]$cleanupProperty.Value.ok -or
+                    [bool]$script:HarnessState.target_runtime_root_live -or
+                    'S-1-5-80-1234' -in
+                        @($script:HarnessState.ipc_service_sids) -or
+                    [bool]$script:HarnessState.service_exists[
+                        'DefenseClawGateway'
+                    ] -or
+                    -not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.PendingPath `
+                        -PathType Leaf)) {
+                    throw (
+                        'rollback retired authenticated authority before ' +
+                        'target-runtime and IPC cleanup completed'
+                    )
+                }
+                $script:HarnessState.events.Add(
+                    'target-runtime:rollback-authority-retired'
+                )
+            }
             if (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.PendingPath) {
                 Microsoft.PowerShell.Management\Remove-Item `
                     -LiteralPath $Layout.PendingPath `
                     -Force
             }
+            $script:HarnessState.events.Add('complete')
         }
         function script:Get-DefenseClawLifecycleStatus {
             param(
@@ -2258,6 +2334,304 @@ try {
             })
         }
 
+        function Write-HarnessTargetRuntimeExchange {
+            param(
+                [Parameter(Mandatory)]$Value,
+                [Parameter(Mandatory)][string]$Path
+            )
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Path `
+                    -PathType Leaf)) {
+                throw 'target-runtime mock received an unpublished exchange file'
+            }
+            [IO.File]::WriteAllText(
+                $Path,
+                ($Value |
+                    Microsoft.PowerShell.Utility\ConvertTo-Json `
+                        -Depth 12 `
+                        -Compress),
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+
+        function Get-HarnessTargetRuntimeRequest {
+            param([Parameter(Mandatory)][string]$Path)
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Path `
+                    -PathType Leaf)) {
+                throw 'target-runtime mock request is missing'
+            }
+            return Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $Path `
+                -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        }
+
+        function New-HarnessTargetRuntimeReport {
+            param(
+                [Parameter(Mandatory)]$Plan,
+                [Parameter(Mandatory)]
+                [ValidateSet('stage', 'finalize', 'cleanup')]
+                [string]$Action
+            )
+            $claims = [Collections.Generic.List[object]]::new()
+            foreach ($root in @($Plan.roots)) {
+                $absentBaseline = [string]$root.baseline -ceq 'absent'
+                $state = switch ($Action) {
+                    'stage' {
+                        if ($absentBaseline) { 'staged' } else { 'canonical' }
+                    }
+                    'finalize' { 'canonical' }
+                    'cleanup' {
+                        if ($absentBaseline) { 'absent' } else { 'canonical' }
+                    }
+                }
+                $claim = [ordered]@{
+                    user_home = [string]$root.user_home
+                    data_dir = [string]$root.data_dir
+                    sid = [string]$root.sid
+                    created = [bool]($absentBaseline -and
+                        $Action -cne 'cleanup')
+                    state = $state
+                }
+                if ($state -cne 'absent') {
+                    $claim['identity'] = if ($absentBaseline) {
+                        '00000001:0000000000000001'
+                    }
+                    else {
+                        [string]$root.baseline_identity
+                    }
+                }
+                $claims.Add([pscustomobject]$claim)
+            }
+            return [ordered]@{
+                schema_version = 1
+                action = $Action
+                ok = $true
+                claims = @($claims)
+            }
+        }
+
+        function Invoke-HarnessTargetRuntimeGatewayCommand {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string[]]$Arguments,
+                [switch]$Capture,
+                [switch]$AllowFailure
+            )
+            $isTargetRuntime = [bool](
+                $Arguments.Count -ge 4 -and
+                [string]$Arguments[0] -ceq 'enterprise' -and
+                [string]$Arguments[1] -ceq 'windows' -and
+                [string]$Arguments[2] -ceq 'target-runtime'
+            )
+            if (-not $isTargetRuntime) {
+                return & $script:HarnessRealGatewayCommand @PSBoundParameters
+            }
+            if (-not $Capture -or -not $AllowFailure -or
+                $GatewayServiceName -cne 'DefenseClawGateway') {
+                throw 'target-runtime mock received an unexpected invocation contract'
+            }
+            $action = [string]$Arguments[3]
+            $plan = $null
+            $outputPath = ''
+            switch ($action) {
+                'plan' {
+                    if ($Arguments.Count -ne 8 -or
+                        [string]$Arguments[4] -cne '--manifest' -or
+                        [string]$Arguments[6] -cne '--output') {
+                        throw 'target-runtime plan mock received unexpected arguments'
+                    }
+                    $manifestPath = [IO.Path]::GetFullPath(
+                        [string]$Arguments[5]
+                    )
+                    if (-not [string]::Equals(
+                            $manifestPath,
+                            [IO.Path]::GetFullPath(
+                                [string]$Layout.ManifestPath
+                            ),
+                            [StringComparison]::OrdinalIgnoreCase
+                        )) {
+                        throw 'target-runtime plan mock received the wrong manifest'
+                    }
+                    $baseline = if ([bool]$script:HarnessState.installed) {
+                        'canonical'
+                    }
+                    else {
+                        'absent'
+                    }
+                    $root = [ordered]@{
+                        user_home = 'C:\Users\Alice'
+                        data_dir = 'C:\Users\Alice\.defenseclaw'
+                        sid = 'S-1-5-21-111-222-333-1001'
+                        baseline = $baseline
+                        staging_leaf = (
+                            '.defenseclaw.setup-' + ('1' * 32)
+                        )
+                        marker_sid = 'S-1-5-21-1-2-3-4-5-6-7-8'
+                    }
+                    if ($baseline -ceq 'canonical') {
+                        $root['baseline_identity'] =
+                            '00000001:0000000000000001'
+                    }
+                    $plan = [ordered]@{
+                        schema_version = 1
+                        manifest_path = $manifestPath
+                        manifest_sha256 = (
+                            Get-HarnessSHA256 `
+                                -Bytes ([IO.File]::ReadAllBytes($manifestPath))
+                        )
+                        roots = @([pscustomobject]$root)
+                    }
+                    $outputPath = [string]$Arguments[7]
+                    $script:HarnessState.events.Add('target-runtime:plan')
+                    Write-HarnessTargetRuntimeExchange `
+                        -Value $plan `
+                        -Path $outputPath
+                }
+                'stage' {
+                    if ($Arguments.Count -ne 8 -or
+                        [string]$Arguments[4] -cne '--request' -or
+                        [string]$Arguments[6] -cne '--output') {
+                        throw 'target-runtime stage mock received unexpected arguments'
+                    }
+                    $requestPath = [string]$Arguments[5]
+                    $plan = Get-HarnessTargetRuntimeRequest `
+                        -Path $requestPath
+                    $snapshot = Get-HarnessTargetRuntimeRequest `
+                        -Path ([string]$script:HarnessState.snapshot_path)
+                    if ($null -eq $snapshot.PSObject.Properties[
+                            'target_runtime_plan'
+                        ] -or
+                        [string]$snapshot.target_runtime_plan_path -cne
+                            $requestPath -or
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $Layout.PendingPath `
+                            -PathType Leaf)) {
+                        throw 'target-runtime mutation preceded durable plan authority'
+                    }
+                    $script:HarnessState.events.Add(
+                        'target-runtime:plan-authority-persisted'
+                    )
+                    $script:HarnessState.events.Add('target-runtime:stage')
+                    $script:HarnessState.target_runtime_cleanup_required =
+                        [bool](@($plan.roots |
+                            Microsoft.PowerShell.Core\Where-Object {
+                                [string]$_.baseline -ceq 'absent'
+                            }).Count -gt 0)
+                    $script:HarnessState.target_runtime_root_live =
+                        [bool]$script:HarnessState.target_runtime_cleanup_required
+                    $outputPath = [string]$Arguments[7]
+                    Write-HarnessTargetRuntimeExchange `
+                        -Value (New-HarnessTargetRuntimeReport `
+                            -Plan $plan `
+                            -Action stage) `
+                        -Path $outputPath
+                }
+                'finalize' {
+                    if ($Arguments.Count -ne 10 -or
+                        [string]$Arguments[4] -cne '--request' -or
+                        [string]$Arguments[6] -cne '--claims' -or
+                        [string]$Arguments[8] -cne '--output') {
+                        throw 'target-runtime finalize mock received unexpected arguments'
+                    }
+                    $plan = Get-HarnessTargetRuntimeRequest `
+                        -Path ([string]$Arguments[5])
+                    $snapshot = Get-HarnessTargetRuntimeRequest `
+                        -Path ([string]$script:HarnessState.snapshot_path)
+                    if ($null -eq $snapshot.PSObject.Properties[
+                            'target_runtime_stage_report'
+                        ] -or
+                        [string]$snapshot.target_runtime_stage_report_path -cne
+                            [string]$Arguments[7]) {
+                        throw 'target-runtime finalize preceded durable stage authority'
+                    }
+                    $script:HarnessState.events.Add(
+                        'target-runtime:stage-authority-persisted'
+                    )
+                    $script:HarnessState.events.Add('target-runtime:finalize')
+                    $outputPath = [string]$Arguments[9]
+                    Write-HarnessTargetRuntimeExchange `
+                        -Value (New-HarnessTargetRuntimeReport `
+                            -Plan $plan `
+                            -Action finalize) `
+                        -Path $outputPath
+                }
+                'cleanup' {
+                    $hasClaims = $Arguments.Count -eq 10
+                    if (($Arguments.Count -notin @(8, 10)) -or
+                        [string]$Arguments[4] -cne '--request' -or
+                        ($hasClaims -and
+                            [string]$Arguments[6] -cne '--claims') -or
+                        [string]$Arguments[$Arguments.Count - 2] -cne
+                            '--output') {
+                        throw 'target-runtime cleanup mock received unexpected arguments'
+                    }
+                    $requestPath = [string]$Arguments[5]
+                    $plan = Get-HarnessTargetRuntimeRequest `
+                        -Path $requestPath
+                    $snapshot = Get-HarnessTargetRuntimeRequest `
+                        -Path ([string]$script:HarnessState.snapshot_path)
+                    if ($null -eq $snapshot.PSObject.Properties[
+                            'target_runtime_plan'
+                        ] -or
+                        [string]$snapshot.target_runtime_plan_path -cne
+                            $requestPath -or
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $Layout.PendingPath `
+                            -PathType Leaf) -or
+                        ([bool]$script:HarnessState.target_runtime_cleanup_required -and
+                            -not [bool]$script:HarnessState.target_runtime_root_live)) {
+                        throw 'target-runtime cleanup lost its authenticated authority'
+                    }
+                    if ($hasClaims) {
+                        $claimsPath = [string]$Arguments[7]
+                        if ($claimsPath -cne
+                                [string]$snapshot.target_runtime_final_report_path -and
+                            $claimsPath -cne
+                                [string]$snapshot.target_runtime_stage_report_path) {
+                            throw 'target-runtime cleanup received unjournaled claims'
+                        }
+                    }
+                    $script:HarnessState.events.Add('target-runtime:cleanup')
+                    $outputPath = [string]$Arguments[$Arguments.Count - 1]
+                    Write-HarnessTargetRuntimeExchange `
+                        -Value (New-HarnessTargetRuntimeReport `
+                            -Plan $plan `
+                            -Action cleanup) `
+                        -Path $outputPath
+                    $script:HarnessState.target_runtime_root_live = $false
+                }
+                default {
+                    throw "target-runtime mock rejected action: $action"
+                }
+            }
+            return [ordered]@{
+                exit_code = 0
+                output = @()
+            }
+        }
+
+        function Assert-HarnessTargetRuntimeCleanupScopeExclusive {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string]$GuardianServiceName
+            )
+            $null = $GatewayServiceName
+            $null = $GuardianServiceName
+            if ([bool]$script:HarnessState.gateway_running -or
+                [bool]$script:HarnessState.guardian_running -or
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.PendingPath `
+                    -PathType Leaf)) {
+                throw 'target-runtime cleanup scope was not quiesced and journaled'
+            }
+            $script:HarnessState.events.Add(
+                'target-runtime:exclusive-cleanup'
+            )
+        }
+
         function Invoke-HarnessFreshInstallServiceBootstrapSequence {
             $root = New-HarnessCaseRoot `
                 -Parent $TestRoot `
@@ -2353,6 +2727,18 @@ targets:
                 $transaction = $script:HarnessState.events.IndexOf(
                     'transaction'
                 )
+                $targetPlan = $script:HarnessState.events.IndexOf(
+                    'target-runtime:plan'
+                )
+                $targetPlanAuthority = $script:HarnessState.events.IndexOf(
+                    'target-runtime:plan-authority-persisted'
+                )
+                $targetStage = $script:HarnessState.events.IndexOf(
+                    'target-runtime:stage'
+                )
+                $targetFinalize = $script:HarnessState.events.IndexOf(
+                    'target-runtime:finalize'
+                )
                 $services = $script:HarnessState.events.IndexOf(
                     'managed-services'
                 )
@@ -2375,7 +2761,11 @@ targets:
                 Assert-Harness `
                     -Condition (
                         $transaction -ge 0 -and
-                        $services -gt $transaction -and
+                        $targetPlan -gt $transaction -and
+                        $targetPlanAuthority -gt $targetPlan -and
+                        $targetStage -gt $targetPlanAuthority -and
+                        $targetFinalize -gt $targetStage -and
+                        $services -gt $targetFinalize -and
                         $managedIPC -gt $services -and
                         $retainedRuntimeAcls -gt $managedIPC -and
                         $coreAcls -gt $retainedRuntimeAcls -and
@@ -2383,8 +2773,12 @@ targets:
                     ) `
                     -Message (
                         "fresh install attempt $attempt violated " +
-                        'transaction/service/IPC/ACL/snapshot ordering ' +
+                        'transaction/target/service/IPC/ACL/snapshot ordering ' +
                         "(transaction=$transaction services=$services " +
+                        "target_plan=$targetPlan " +
+                        "target_authority=$targetPlanAuthority " +
+                        "target_stage=$targetStage " +
+                        "target_finalize=$targetFinalize " +
                         "managed_ipc=$managedIPC core_acls=$coreAcls " +
                         "retained_runtime_acls=$retainedRuntimeAcls " +
                         "capture=$capture; " +
@@ -2395,6 +2789,41 @@ targets:
                     Assert-Harness `
                         -Condition ($failure -match 'injected fresh-install snapshot failure') `
                         -Message "fresh install fault lost its causal failure: $failure"
+                    $exclusiveCleanup = $script:HarnessState.events.IndexOf(
+                        'target-runtime:exclusive-cleanup'
+                    )
+                    $targetCleanup = $script:HarnessState.events.IndexOf(
+                        'target-runtime:cleanup'
+                    )
+                    $cleanupAuthority = $script:HarnessState.events.IndexOf(
+                        'target-runtime:cleanup-authority-persisted'
+                    )
+                    $ipcRevoke = $script:HarnessState.events.IndexOf(
+                        'managed-ipc-revoke:S-1-5-80-1234'
+                    )
+                    $gatewayDelete = $script:HarnessState.events.IndexOf(
+                        'remove-service:DefenseClawGateway'
+                    )
+                    $authorityRetired = $script:HarnessState.events.IndexOf(
+                        'target-runtime:rollback-authority-retired'
+                    )
+                    $transactionComplete = $script:HarnessState.events.IndexOf(
+                        'complete'
+                    )
+                    Assert-Harness `
+                        -Condition (
+                            $exclusiveCleanup -gt $capture -and
+                            $targetCleanup -gt $exclusiveCleanup -and
+                            $cleanupAuthority -gt $targetCleanup -and
+                            $ipcRevoke -gt $cleanupAuthority -and
+                            $gatewayDelete -gt $ipcRevoke -and
+                            $authorityRetired -gt $gatewayDelete -and
+                            $transactionComplete -gt $authorityRetired
+                        ) `
+                        -Message (
+                            'fresh install rollback retired authenticated ' +
+                            'authority before exact target/IPC cleanup'
+                        )
                     Assert-Harness `
                         -Condition (
                             -not [bool]$script:HarnessState.service_exists[
@@ -3799,9 +4228,45 @@ targets:
             -ExpectSuccess:$true `
             -SelfUninstall:$true `
             -Purge:$true
-        Invoke-HarnessFreshInstallServiceBootstrapSequence
-        Invoke-HarnessDirectReinstallSequence
-        Invoke-HarnessFirstActivationFailureSequence
+        $targetRuntimeGatewayMock = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-HarnessTargetRuntimeGatewayCommand `
+                -CommandType Function
+        ).ScriptBlock
+        $targetRuntimeCleanupScopeMock = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Assert-HarnessTargetRuntimeCleanupScopeExclusive `
+                -CommandType Function
+        ).ScriptBlock
+        Microsoft.PowerShell.Management\Set-Item `
+            -LiteralPath (
+                'Function:script:Invoke-DefenseClawGatewayCommand'
+            ) `
+            -Value $targetRuntimeGatewayMock
+        Microsoft.PowerShell.Management\Set-Item `
+            -LiteralPath (
+                'Function:script:' +
+                'Assert-DefenseClawTargetRuntimeCleanupScopeExclusive'
+            ) `
+            -Value $targetRuntimeCleanupScopeMock
+        try {
+            Invoke-HarnessFreshInstallServiceBootstrapSequence
+            Invoke-HarnessDirectReinstallSequence
+            Invoke-HarnessFirstActivationFailureSequence
+        }
+        finally {
+            Microsoft.PowerShell.Management\Set-Item `
+                -LiteralPath (
+                    'Function:script:Invoke-DefenseClawGatewayCommand'
+                ) `
+                -Value $script:HarnessRealGatewayCommand
+            Microsoft.PowerShell.Management\Set-Item `
+                -LiteralPath (
+                    'Function:script:' +
+                    'Assert-DefenseClawTargetRuntimeCleanupScopeExclusive'
+                ) `
+                -Value $script:HarnessRealTargetRuntimeCleanupScope
+        }
 
         # Exercise the authenticated pre-layout self-uninstall state machine
         # directly. These cases cover the rename/transaction crash windows

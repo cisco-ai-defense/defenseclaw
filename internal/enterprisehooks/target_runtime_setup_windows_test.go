@@ -19,6 +19,29 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestWindowsManagedRuntimeMissingChildProbeUsesValidSynchronousOpen(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
+	targetInfo, err := resolveWindowsManagedRuntimeTarget(home, target.String(), filepath.Join(home, ".defenseclaw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = windowsManagedRuntimeSetupPrivilege(func() error {
+		parent, err := openWindowsManagedRuntimeProfile(targetInfo)
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(parent)
+		return requireWindowsManagedRuntimeChildAbsent(parent, ".defenseclaw")
+	})
+	if err != nil {
+		t.Fatalf("probe absent managed runtime child: %v", err)
+	}
+	if _, err := os.Lstat(targetInfo.data); !os.IsNotExist(err) {
+		t.Fatalf("absence probe created or exposed a managed runtime root: %v", err)
+	}
+}
+
 func TestWindowsManagedRuntimeStagesJournalsAndPublishesExactTargetRoot(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
@@ -280,7 +303,8 @@ func TestWindowsManagedRuntimeCleanupValidatesCanonicalBaselineWithoutDeletingIt
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
-	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, dataDir, target); err != nil {
+	hookDir := filepath.Join(dataDir, "hooks")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, hookDir, target); err != nil {
 		t.Fatal(err)
 	}
 	manifest := windowsManagedRuntimeTestManifest(home, target)
@@ -306,7 +330,7 @@ func TestWindowsManagedRuntimeCleanupValidatesCanonicalBaselineWithoutDeletingIt
 	if err := os.Rename(dataDir, preserved); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, dataDir, target); err != nil {
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, hookDir, target); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err == nil {
@@ -320,7 +344,8 @@ func TestWindowsManagedRuntimeCleanupRejectsCanonicalBaselineDACLDrift(t *testin
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
-	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, dataDir, target); err != nil {
+	hookDir := filepath.Join(dataDir, "hooks")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, hookDir, target); err != nil {
 		t.Fatal(err)
 	}
 	manifest := windowsManagedRuntimeTestManifest(home, target)
