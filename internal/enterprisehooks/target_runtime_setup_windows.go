@@ -39,6 +39,17 @@ const (
 	windowsManagedRuntimeMarkerSubAuths    = 8
 	windowsManagedRuntimeMaxRoots          = 128
 	windowsManagedRuntimeOwnerMetadataMask = windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+
+	// NtCreateFile persists a fresh protected marker descriptor as 0x9004.
+	// SetSecurityInfo preserves NTFS' auto-inherited provenance on an existing
+	// directory, so cleanup quarantine has the distinct exact form 0x9404.
+	windowsManagedRuntimeStagingControl = windows.SECURITY_DESCRIPTOR_CONTROL(
+		windows.SE_DACL_PRESENT | windows.SE_DACL_PROTECTED | windows.SE_SELF_RELATIVE,
+	)
+	windowsManagedRuntimeQuarantineControl = windows.SECURITY_DESCRIPTOR_CONTROL(
+		windows.SE_DACL_PRESENT | windows.SE_DACL_AUTO_INHERITED |
+			windows.SE_DACL_PROTECTED | windows.SE_SELF_RELATIVE,
+	)
 )
 
 // WindowsManagedRuntimePlan is non-mutating authority for a later Setup
@@ -296,7 +307,9 @@ func CleanupWindowsManagedRuntimeRoots(
 		for _, rootPlan := range request.Plan.Roots {
 			key := windowsManagedRuntimeRootKey(rootPlan.SID, rootPlan.UserHome)
 			claim, cleanupErr := cleanupWindowsManagedRuntimeRoot(rootPlan, claimsByRoot[key], cleanupSpecs[key])
-			claims = append(claims, claim)
+			if windowsManagedRuntimeCleanupClaimReportable(claim) {
+				claims = append(claims, claim)
+			}
 			if cleanupErr != nil {
 				return cleanupErr
 			}
@@ -304,6 +317,15 @@ func CleanupWindowsManagedRuntimeRoots(
 		return nil
 	})
 	return claims, err
+}
+
+func windowsManagedRuntimeCleanupClaimReportable(claim WindowsManagedRuntimeClaim) bool {
+	switch claim.State {
+	case windowsManagedRuntimeStateStaged, windowsManagedRuntimeStateCanonical, windowsManagedRuntimeStateAbsent:
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveWindowsManagedRuntimeTargets(manifest Manifest) ([]windowsManagedRuntimeTarget, error) {
@@ -699,7 +721,7 @@ func cleanupWindowsManagedRuntimeRoot(
 			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of changed managed runtime root identity")
 		}
 		canonical := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid) == nil
-		staging := validateWindowsManagedRuntimeStagingHandle(final, target.sid, marker) == nil
+		staging := validateWindowsManagedRuntimeCleanupMarkerHandle(final, target.sid, marker) == nil
 		claim.Identity = identity
 		claim.Created = true
 		if canonical {
@@ -728,6 +750,7 @@ func cleanupWindowsManagedRuntimeRoot(
 			err = removeWindowsManagedRuntimeRootContents(final, target, marker, spec, staging)
 		}
 		if err != nil {
+			claim = refreshWindowsManagedRuntimeFailedCleanupClaim(claim, final, target, marker)
 			_ = windows.CloseHandle(final)
 			return claim, err
 		}
@@ -794,6 +817,26 @@ func cleanupWindowsManagedRuntimeRoot(
 	claim.Created = false
 	claim.State = windowsManagedRuntimeStateAbsent
 	return claim, nil
+}
+
+func refreshWindowsManagedRuntimeFailedCleanupClaim(
+	claim WindowsManagedRuntimeClaim,
+	handle windows.Handle,
+	target windowsManagedRuntimeTarget,
+	marker *windows.SID,
+) WindowsManagedRuntimeClaim {
+	switch {
+	case validateWindowsManagedRuntimeCleanupMarkerHandle(handle, target.sid, marker) == nil:
+		claim.State = windowsManagedRuntimeStateStaged
+	case validateWindowsTargetOwnedDirectoryHandle(handle, target.data, target.sid) == nil:
+		claim.State = windowsManagedRuntimeStateCanonical
+	default:
+		// A failed report is diagnostic only. Omitting a claim whose live handle
+		// matches neither exact descriptor keeps the prior protected journal as
+		// recovery authority instead of asserting an unauthenticated state.
+		claim.State = ""
+	}
+	return claim
 }
 
 func openWindowsManagedRuntimeProfile(target windowsManagedRuntimeTarget) (windows.Handle, error) {
@@ -962,6 +1005,28 @@ func windowsManagedRuntimeStagingSecurityDescriptor(target, marker *windows.SID)
 }
 
 func validateWindowsManagedRuntimeStagingHandle(handle windows.Handle, target, marker *windows.SID) error {
+	return validateWindowsManagedRuntimeMarkerHandle(handle, target, marker, windowsManagedRuntimeStagingControl)
+}
+
+func validateWindowsManagedRuntimeQuarantineHandle(handle windows.Handle, target, marker *windows.SID) error {
+	return validateWindowsManagedRuntimeMarkerHandle(handle, target, marker, windowsManagedRuntimeQuarantineControl)
+}
+
+func validateWindowsManagedRuntimeCleanupMarkerHandle(handle windows.Handle, target, marker *windows.SID) error {
+	return validateWindowsManagedRuntimeMarkerHandle(
+		handle,
+		target,
+		marker,
+		windowsManagedRuntimeStagingControl,
+		windowsManagedRuntimeQuarantineControl,
+	)
+}
+
+func validateWindowsManagedRuntimeMarkerHandle(
+	handle windows.Handle,
+	target, marker *windows.SID,
+	expectedControls ...windows.SECURITY_DESCRIPTOR_CONTROL,
+) error {
 	if _, err := windowsManagedRuntimeHandleIdentity(handle, true); err != nil {
 		return err
 	}
@@ -973,10 +1038,18 @@ func validateWindowsManagedRuntimeStagingHandle(handle windows.Handle, target, m
 	if err != nil {
 		return err
 	}
-	return validateWindowsManagedRuntimeStagingDescriptor(descriptor, target, marker)
+	return validateWindowsManagedRuntimeMarkerDescriptor(descriptor, target, marker, expectedControls...)
 }
 
 func validateWindowsManagedRuntimeStagingDescriptor(descriptor *windows.SECURITY_DESCRIPTOR, target, marker *windows.SID) error {
+	return validateWindowsManagedRuntimeMarkerDescriptor(descriptor, target, marker, windowsManagedRuntimeStagingControl)
+}
+
+func validateWindowsManagedRuntimeMarkerDescriptor(
+	descriptor *windows.SECURITY_DESCRIPTOR,
+	target, marker *windows.SID,
+	expectedControls ...windows.SECURITY_DESCRIPTOR_CONTROL,
+) error {
 	owner, ownerDefaulted, err := descriptor.Owner()
 	if err != nil || ownerDefaulted || owner == nil || !owner.Equals(marker) || owner.Equals(target) {
 		return fmt.Errorf("enterprise hooks: managed runtime staging owner is not the exact random marker SID")
@@ -987,9 +1060,8 @@ func validateWindowsManagedRuntimeStagingDescriptor(descriptor *windows.SECURITY
 		return fmt.Errorf("enterprise hooks: managed runtime staging group is noncanonical")
 	}
 	control, revision, err := descriptor.Control()
-	wantControl := windows.SECURITY_DESCRIPTOR_CONTROL(windows.SE_DACL_PRESENT | windows.SE_DACL_PROTECTED | windows.SE_SELF_RELATIVE)
-	if err != nil || revision != 1 || control != wantControl {
-		return fmt.Errorf("enterprise hooks: managed runtime staging descriptor control is noncanonical")
+	if err != nil || revision != 1 || !windowsManagedRuntimeMarkerControlMatches(control, expectedControls...) {
+		return fmt.Errorf("enterprise hooks: managed runtime marker descriptor control 0x%04x is noncanonical", uint16(control))
 	}
 	dacl, daclDefaulted, err := descriptor.DACL()
 	if err != nil || daclDefaulted || dacl == nil || dacl.AceCount != 4 {
@@ -1021,6 +1093,18 @@ func validateWindowsManagedRuntimeStagingDescriptor(descriptor *windows.SECURITY
 		return fmt.Errorf("enterprise hooks: managed runtime staging ACL size is noncanonical")
 	}
 	return nil
+}
+
+func windowsManagedRuntimeMarkerControlMatches(
+	control windows.SECURITY_DESCRIPTOR_CONTROL,
+	expectedControls ...windows.SECURITY_DESCRIPTOR_CONTROL,
+) bool {
+	for _, expected := range expectedControls {
+		if control == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func deleteRejectedWindowsManagedRuntimeStage(handle windows.Handle) error {
@@ -1084,7 +1168,7 @@ func setWindowsManagedRuntimeMarkerSecurity(handle windows.Handle, target, marke
 		return fmt.Errorf("enterprise hooks: quarantine managed runtime directory: %w", err)
 	}
 	runtime.KeepAlive(descriptor)
-	if err := validateWindowsManagedRuntimeStagingHandle(handle, target, marker); err != nil {
+	if err := validateWindowsManagedRuntimeQuarantineHandle(handle, target, marker); err != nil {
 		return fmt.Errorf("enterprise hooks: verify managed runtime quarantine descriptor: %w", err)
 	}
 	return nil
@@ -1459,7 +1543,7 @@ func removeWindowsManagedRuntimeRootContents(
 		}
 		rootMarker = true
 	}
-	if err := validateWindowsManagedRuntimeStagingHandle(root, target.sid, marker); err != nil {
+	if err := validateWindowsManagedRuntimeCleanupMarkerHandle(root, target.sid, marker); err != nil {
 		return fmt.Errorf("enterprise hooks: managed runtime root quarantine changed: %w", err)
 	}
 	if windowsManagedRuntimeCleanupPostPreflight != nil {
@@ -1590,7 +1674,7 @@ func validateWindowsManagedRuntimeCleanupDirectoryHandle(
 	markerOwned bool,
 ) error {
 	if markerOwned {
-		return validateWindowsManagedRuntimeStagingHandle(handle, target, marker)
+		return validateWindowsManagedRuntimeCleanupMarkerHandle(handle, target, marker)
 	}
 	return validateWindowsTargetOwnedDirectoryHandle(handle, path, target)
 }

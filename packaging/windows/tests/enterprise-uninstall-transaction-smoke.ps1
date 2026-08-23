@@ -58,6 +58,11 @@ try {
                 -Name Assert-DefenseClawTargetRuntimeCleanupScopeExclusive `
                 -CommandType Function
         ).ScriptBlock
+        $script:HarnessRealSetPathAcl = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Set-DefenseClawPathAcl `
+                -CommandType Function
+        ).ScriptBlock
 
         function Assert-Harness {
             param(
@@ -2344,6 +2349,15 @@ try {
                     -PathType Leaf)) {
                 throw 'target-runtime mock received an unpublished exchange file'
             }
+            # The general lifecycle harness replaces Set-DefenseClawPathAcl
+            # with an event-only mock. Authenticate and harden the pre-created
+            # exchange before the synthetic CLI truncates it, matching the real
+            # helper; the unchanged production reader then proves that the
+            # write preserved the protected AdminFile contract.
+            & $script:HarnessRealSetPathAcl `
+                -Path $Path `
+                -Kind AdminFile `
+                -GatewayServiceSID $script:AdministratorsSID
             [IO.File]::WriteAllText(
                 $Path,
                 ($Value |

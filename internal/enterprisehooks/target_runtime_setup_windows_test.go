@@ -42,6 +42,104 @@ func TestWindowsManagedRuntimeMissingChildProbeUsesValidSynchronousOpen(t *testi
 	}
 }
 
+func TestWindowsManagedRuntimeMarkerControlContractsArePhaseExact(t *testing.T) {
+	for raw := 0; raw <= 0xffff; raw++ {
+		control := windows.SECURITY_DESCRIPTOR_CONTROL(raw)
+		staging := windowsManagedRuntimeMarkerControlMatches(control, windowsManagedRuntimeStagingControl)
+		quarantine := windowsManagedRuntimeMarkerControlMatches(control, windowsManagedRuntimeQuarantineControl)
+		cleanup := windowsManagedRuntimeMarkerControlMatches(
+			control,
+			windowsManagedRuntimeStagingControl,
+			windowsManagedRuntimeQuarantineControl,
+		)
+		if staging != (control == windowsManagedRuntimeStagingControl) {
+			t.Fatalf("staging control contract accepted 0x%04x", raw)
+		}
+		if quarantine != (control == windowsManagedRuntimeQuarantineControl) {
+			t.Fatalf("quarantine control contract accepted 0x%04x", raw)
+		}
+		wantCleanup := control == windowsManagedRuntimeStagingControl || control == windowsManagedRuntimeQuarantineControl
+		if cleanup != wantCleanup {
+			t.Fatalf("cleanup control contract mismatch for 0x%04x", raw)
+		}
+	}
+}
+
+func TestWindowsManagedRuntimeMarkerDescriptorValidatorsKeepPhaseSeparation(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	marker, err := windows.StringToSid("S-1-5-21-101-102-103-104-105-106-107-108")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging, err := windowsManagedRuntimeStagingSecurityDescriptor(target, marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWindowsManagedRuntimeMarkerDescriptor(staging, target, marker, windowsManagedRuntimeStagingControl); err != nil {
+		t.Fatalf("reject exact fresh-staging descriptor: %v", err)
+	}
+	if err := validateWindowsManagedRuntimeMarkerDescriptor(staging, target, marker, windowsManagedRuntimeQuarantineControl); err == nil {
+		t.Fatal("quarantine validator accepted fresh-staging control 0x9004")
+	}
+
+	quarantine := windowsManagedRuntimeTestDescriptorWithControl(
+		t,
+		staging,
+		windows.SE_DACL_AUTO_INHERITED,
+		windows.SE_DACL_AUTO_INHERITED,
+	)
+	if err := validateWindowsManagedRuntimeMarkerDescriptor(quarantine, target, marker, windowsManagedRuntimeQuarantineControl); err != nil {
+		t.Fatalf("reject exact quarantine descriptor: %v", err)
+	}
+	if err := validateWindowsManagedRuntimeStagingDescriptor(quarantine, target, marker); err == nil {
+		t.Fatal("fresh-staging validator accepted quarantine control 0x9404")
+	}
+	for label, descriptor := range map[string]*windows.SECURITY_DESCRIPTOR{
+		"auto-inherit-request": windowsManagedRuntimeTestDescriptorWithControl(
+			t,
+			staging,
+			windows.SE_DACL_AUTO_INHERIT_REQ,
+			windows.SE_DACL_AUTO_INHERIT_REQ,
+		),
+		"unprotected": windowsManagedRuntimeTestDescriptorWithControl(
+			t,
+			staging,
+			windows.SE_DACL_PROTECTED,
+			0,
+		),
+	} {
+		if err := validateWindowsManagedRuntimeMarkerDescriptor(
+			descriptor,
+			target,
+			marker,
+			windowsManagedRuntimeStagingControl,
+			windowsManagedRuntimeQuarantineControl,
+		); err == nil {
+			t.Fatalf("cleanup validator accepted %s descriptor", label)
+		}
+	}
+}
+
+func windowsManagedRuntimeTestDescriptorWithControl(
+	t *testing.T,
+	descriptor *windows.SECURITY_DESCRIPTOR,
+	bitsOfInterest, bitsToSet windows.SECURITY_DESCRIPTOR_CONTROL,
+) *windows.SECURITY_DESCRIPTOR {
+	t.Helper()
+	absolute, err := descriptor.ToAbsolute()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := absolute.SetControl(bitsOfInterest, bitsToSet); err != nil {
+		t.Fatal(err)
+	}
+	selfRelative, err := absolute.ToSelfRelative()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selfRelative
+}
+
 func TestWindowsManagedRuntimeStagesJournalsAndPublishesExactTargetRoot(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
@@ -638,8 +736,13 @@ func TestWindowsManagedRuntimeCleanupQuarantineBlocksPostPreflightPathMutation(t
 		})
 	}
 	defer func() { windowsManagedRuntimeCleanupPostPreflight = nil }()
-	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); !errors.Is(err, injected) {
+	partial, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
+	if !errors.Is(err, injected) {
 		t.Fatalf("cleanup quarantine synchronization result = %v, want injected stop after denied mutations", err)
+	}
+	if len(partial) != 1 || partial[0].State != windowsManagedRuntimeStateStaged ||
+		partial[0].Identity != final[0].Identity || !partial[0].Created {
+		t.Fatalf("failed quarantined cleanup report = %+v, want authenticated staged identity %s", partial, final[0].Identity)
 	}
 	if !called {
 		t.Fatal("cleanup did not reach synchronized post-preflight seam")
@@ -657,7 +760,7 @@ func TestWindowsManagedRuntimeCleanupQuarantineBlocksPostPreflightPathMutation(t
 	if err != nil {
 		t.Fatalf("reopen quarantined root after injected stop: %v", err)
 	}
-	if err := validateWindowsManagedRuntimeStagingHandle(quarantined, target, marker); err != nil {
+	if err := validateWindowsManagedRuntimeQuarantineHandle(quarantined, target, marker); err != nil {
 		_ = windows.CloseHandle(quarantined)
 		t.Fatalf("injected stop did not preserve authenticated marker quarantine: %v", err)
 	}
@@ -670,6 +773,127 @@ func TestWindowsManagedRuntimeCleanupQuarantineBlocksPostPreflightPathMutation(t
 	}
 	if _, err := os.Lstat(plan.Roots[0].DataDir); !os.IsNotExist(err) {
 		t.Fatalf("quarantined exact footprint survived cleanup: %v", err)
+	}
+}
+
+func TestWindowsManagedRuntimeFailedCleanupOmitsUnverifiedLiveState(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
+	manifest := windowsManagedRuntimeTestManifest(home, target)
+	digest := strings.Repeat("b", 64)
+	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := StageWindowsManagedRuntimeRoots(plan, manifest, digest, func([]WindowsManagedRuntimeClaim) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := WindowsManagedRuntimeRequest{SchemaVersion: WindowsManagedRuntimeRequestSchemaVersion, Plan: plan, Claims: staged}
+	final, err := FinalizeWindowsManagedRuntimeRoots(request, manifest, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Claims = final
+	specs, err := windowsManagedRuntimeCleanupSpecs(plan, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := specs[windowsManagedRuntimeRootKey(plan.Roots[0].SID, plan.Roots[0].UserHome)]
+	known := writeWindowsManagedRuntimeCleanupFixture(t, plan.Roots[0], target, spec)
+	marker, err := windows.StringToSid(plan.Roots[0].MarkerSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noncanonical, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsManagedRuntimeTestAccess(administrators, 0x001f01ff),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	injected := errors.New("inject stop after installing unverified managed runtime DACL")
+	windowsManagedRuntimeCleanupPostPreflight = func(rootPath, _ string) error {
+		called = true
+		handle, err := openWindowsTestDirectoryNoFollowAccess(
+			rootPath,
+			windows.WRITE_DAC|windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+		)
+		if err != nil {
+			return fmt.Errorf("open quarantined root for trusted test mutation: %w", err)
+		}
+		defer windows.CloseHandle(handle)
+		if err := windows.SetSecurityInfo(
+			handle,
+			windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil,
+			nil,
+			noncanonical,
+			nil,
+		); err != nil {
+			return fmt.Errorf("install deliberately noncanonical protected DACL: %w", err)
+		}
+		runtime.KeepAlive(noncanonical)
+		return injected
+	}
+	defer func() { windowsManagedRuntimeCleanupPostPreflight = nil }()
+	partial, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
+	if !errors.Is(err, injected) {
+		t.Fatalf("cleanup result = %v, want injected failure after DACL mutation", err)
+	}
+	if !called {
+		t.Fatal("cleanup did not reach synchronized post-preflight seam")
+	}
+	if len(partial) != 0 {
+		t.Fatalf("failed cleanup reported unauthenticated live state: %+v", partial)
+	}
+	for _, path := range known {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("unverified failed cleanup removed evidence %s: %v", path, err)
+		}
+	}
+
+	unverified, err := openWindowsTestDirectoryNoFollow(plan.Roots[0].DataDir)
+	if err != nil {
+		t.Fatalf("reopen unverified managed runtime root: %v", err)
+	}
+	if err := validateWindowsManagedRuntimeCleanupMarkerHandle(unverified, target, marker); err == nil {
+		_ = windows.CloseHandle(unverified)
+		t.Fatal("deliberately noncanonical DACL passed cleanup marker validation")
+	}
+	if err := validateWindowsTargetOwnedDirectoryHandle(unverified, plan.Roots[0].DataDir, target); err == nil {
+		_ = windows.CloseHandle(unverified)
+		t.Fatal("marker-owned root with deliberately noncanonical DACL passed canonical validation")
+	}
+	if err := windows.CloseHandle(unverified); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := windowsManagedRuntimeSetupPrivilege(func() error {
+		handle, err := openWindowsTestDirectoryNoFollowAccess(
+			plan.Roots[0].DataDir,
+			windowsManagedRuntimeCleanupRootAccess(),
+		)
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(handle)
+		return setWindowsManagedRuntimeMarkerSecurity(handle, target, marker)
+	}); err != nil {
+		t.Fatalf("restore exact managed runtime quarantine descriptor: %v", err)
+	}
+	windowsManagedRuntimeCleanupPostPreflight = nil
+	if _, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
+		t.Fatalf("cleanup after restoring authenticated quarantine: %v", err)
+	}
+	if _, err := os.Lstat(plan.Roots[0].DataDir); !os.IsNotExist(err) {
+		t.Fatalf("restored quarantined root survived cleanup: %v", err)
 	}
 }
 
