@@ -2410,6 +2410,26 @@ try {
                     -Condition ([bool]$script:HarnessState.binary_present) `
                     -Message "$Name removed a binary after service drift"
             }
+            elseif ($CrashAt -ceq 'post-binary-delete') {
+                Assert-Harness `
+                    -Condition (
+                        -not [bool]$script:HarnessState.binary_present -and
+                        -not [bool]$script:HarnessState.installed
+                    ) `
+                    -Message "$Name restored a committed, retired installation"
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.rollback_calls -eq 0 -and
+                        $script:HarnessState.complete_calls -eq 1
+                    ) `
+                    -Message "$Name crossed the commit boundary with rollback semantics"
+                Assert-Harness `
+                    -Condition (
+                        $failureMessage -like
+                            '*retry Uninstall to finish cleanup*'
+                    ) `
+                    -Message "$Name did not report retryable committed cleanup: $failureMessage"
+            }
             elseif ($ExpectSuccess) {
                 Assert-Harness `
                     -Condition (
@@ -3216,8 +3236,8 @@ targets:
                 [Text.UTF8Encoding]::new($false)
             )
             $oldJournal = [ordered]@{
-                schema_version = 1
-                phase = 'prepared'
+                schema_version = 4
+                phase = 'finalized'
                 manifest_fingerprint = ('a' * 64)
                 gateway_service_name = 'DEFENSECLAWGATEWAY'
                 targets = @(
@@ -3560,7 +3580,7 @@ targets:
                         ) -lt 0 -and
                         $script:HarnessState.events.IndexOf(
                             'target-runtime:plan-enter'
-                        ) -ge 0 -and
+                        ) -lt 0 -and
                         $script:HarnessState.events.IndexOf(
                             'target-runtime:plan'
                         ) -lt 0
@@ -4243,6 +4263,43 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName
             )
+            $hasOperation = $script:HarnessState.ContainsKey('operation')
+            if (-not $hasOperation) {
+                $script:HarnessState.start_calls++
+                if ($script:HarnessState.expect_rollback -and
+                    $script:HarnessState.rollback_calls -ne 1) {
+                    throw 'services restarted before exactly one managed-hook rollback'
+                }
+                $script:HarnessState.services_running = [bool](
+                    @(
+                        $Services |
+                            Microsoft.PowerShell.Core\Where-Object {
+                                [bool]$_.existed -and [bool]$_.running
+                            }
+                    ).Count -gt 0
+                )
+                return
+            }
+
+            if ([string]$script:HarnessState.operation -ceq 'uninstall') {
+                $script:HarnessState.events.Add('restart-services')
+                if ($script:HarnessState.rollback_calls -ne 1) {
+                    throw 'services restarted before managed-hook rollback completed'
+                }
+                $script:HarnessState.services_running = [bool](
+                    @(
+                        $Services |
+                            Microsoft.PowerShell.Core\Where-Object {
+                                [bool]$_.existed -and [bool]$_.running
+                            }
+                    ).Count -gt 0
+                )
+                return
+            }
+
+            # Quiescing recovery intentionally exercises the real production
+            # activation ordering. Other explicitly modeled operations retain
+            # the same real-helper behavior this final fixture previously used.
             & $script:HarnessRealStartTransactionServices `
                 -Services $Services `
                 -Layout $Layout `
