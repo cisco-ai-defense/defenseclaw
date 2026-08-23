@@ -9584,7 +9584,7 @@ function Publish-DefenseClawInstallRollbackIntent {
     else {
         @($runtimeRootsProperty.Value)
     }
-    $createdAny = $createdAny -or $runtimeRoots.Count -gt 0
+    $createdAny = $createdAny -or @($runtimeRoots).Count -gt 0
     $existing = Get-DefenseClawInstallRollbackIntent `
         -Layout $Layout `
         -GatewayServiceName ([string]$Snapshot.gateway_service) `

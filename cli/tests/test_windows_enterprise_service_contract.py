@@ -3420,6 +3420,8 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
     runtime_claims = rollback_intent.index(
         "$runtimeRootsProperty = $Snapshot.PSObject.Properties["
     )
+    assert "$createdAny = $createdAny -or @($runtimeRoots).Count -gt 0" in rollback_intent
+    assert "$runtimeRoots.Count" not in rollback_intent
     existing_receipt = rollback_intent.index(
         "$existing = Get-DefenseClawInstallRollbackIntent `", runtime_claims
     )
