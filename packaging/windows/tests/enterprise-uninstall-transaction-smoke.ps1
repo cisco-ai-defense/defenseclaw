@@ -1276,21 +1276,22 @@ try {
                             'track_fresh_install_services'
                         ) -and
                         [bool]$script:HarnessState.track_fresh_install_services) {
-                        if (-not [bool]$script:HarnessState.service_exists[
-                                $GatewayServiceName
-                            ] -or
-                            -not [bool]$script:HarnessState.service_exists[
-                                'DefenseClawHookGuardian'
-                            ]) {
-                            throw 'snapshot capture ran before both service identities existed'
-                        }
-                        if ($script:HarnessState.service_start_modes[
-                                $GatewayServiceName
-                            ] -ne 4 -or
-                            $script:HarnessState.service_start_modes[
-                                'DefenseClawHookGuardian'
-                            ] -ne 4) {
-                            throw 'snapshot capture observed a startable fresh service'
+                        foreach ($serviceName in @(
+                            $GatewayServiceName,
+                            'DefenseClawCMIDBroker',
+                            'DefenseClawHookGuardian',
+                            [string]$script:HarnessState.enumerator_service_name
+                        )) {
+                            if (-not [bool]$script:HarnessState.service_exists[
+                                    $serviceName
+                                ]) {
+                                throw 'snapshot capture ran before all four service identities existed'
+                            }
+                            if ($script:HarnessState.service_start_modes[
+                                    $serviceName
+                                ] -ne 4) {
+                                throw 'snapshot capture observed a startable fresh service'
+                            }
                         }
                         if ($script:HarnessState.events.IndexOf(
                                 'managed-core-acls'
@@ -1344,14 +1345,18 @@ try {
             $script:HarnessState.events.Add('restore')
             $script:HarnessState.restore_calls++
             if ($script:HarnessState.operation -eq 'install') {
-                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
-                    -Layout $Layout `
-                    -GatewayServiceName 'DefenseClawGateway' `
-                    -Action restore)
-                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
-                    -Layout $Layout `
-                    -GatewayServiceName 'DefenseClawGateway' `
-                    -Action retire)
+                if (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+                        -PathType Leaf) {
+                    [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                        -Layout $Layout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -Action restore)
+                    [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                        -Layout $Layout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -Action retire)
+                }
                 $targetRuntimeSnapshot =
                     Get-HarnessTargetRuntimeRequest -Path $SnapshotPath
                 if ($null -ne $targetRuntimeSnapshot.PSObject.Properties[
@@ -1437,6 +1442,12 @@ try {
                     $script:HarnessState.removed_services += 4
                     $script:HarnessState.installed = $false
                     $script:HarnessState.services_running = $false
+                    $retainedGatewaySID =
+                        Get-DefenseClawServiceSIDForRecovery `
+                            -ServiceName 'DefenseClawGateway'
+                    Set-DefenseClawPreservedStateAcls `
+                        -Layout $Layout `
+                        -GatewayServiceSID $retainedGatewaySID
                     return
                 }
                 $script:HarnessState.installed = $true
@@ -1551,6 +1562,27 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceSID
             )
+            if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
+                throw 'preserved-state ACL restoration lost its gateway SID'
+            }
+            if ($script:HarnessState.ContainsKey(
+                    'track_fresh_install_services'
+                ) -and
+                [bool]$script:HarnessState.track_fresh_install_services) {
+                if (-not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.PendingPath `
+                        -PathType Leaf)) {
+                    throw 'preserved-state ACL restoration lost its recovery authority'
+                }
+                if ([bool]$script:HarnessState.service_exists[
+                        'DefenseClawGateway'
+                    ]) {
+                    throw 'preserved-state ACL restoration preceded service rollback'
+                }
+            }
+            $script:HarnessState.events.Add(
+                "preserved-state-acls:$GatewayServiceSID"
+            )
         }
         function script:Stop-DefenseClawService {
             param([Parameter(Mandatory)][string]$Name)
@@ -1658,10 +1690,20 @@ try {
                 $mode
             $script:HarnessState.service_start_modes[$GuardianServiceName] =
                 $mode
+            $enumeratorServiceName =
+                Get-DefenseClawEnumeratorServiceName `
+                    -GuardianServiceName $GuardianServiceName
+            $script:HarnessState.enumerator_service_name =
+                $enumeratorServiceName
+            $script:HarnessState.service_start_modes[$enumeratorServiceName] =
+                $mode
             if ($script:HarnessState.ContainsKey('service_exists')) {
                 $script:HarnessState.service_exists[$GatewayServiceName] = $true
                 $script:HarnessState.service_exists[$BrokerServiceName] = $true
                 $script:HarnessState.service_exists[$GuardianServiceName] = $true
+                $script:HarnessState.service_exists[
+                    $enumeratorServiceName
+                ] = $true
             }
         }
         function script:Set-DefenseClawInstallPreparationGatewayServiceSID {
@@ -1781,7 +1823,6 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName
             )
-            $null = $GatewayServiceName
             $expectedManifestAcl = New-DefenseClawCanonicalPathAcl `
                 -IsDirectory $false `
                 -Kind AdminFile `
@@ -1789,6 +1830,53 @@ try {
             Assert-DefenseClawCanonicalPathAcl `
                 -Path $Layout.ManifestPath `
                 -Expected $expectedManifestAcl
+            if ($script:HarnessState.ContainsKey(
+                    'track_fresh_install_services'
+                ) -and
+                [bool]$script:HarnessState.track_fresh_install_services) {
+                $enumeratorServiceName = [string](
+                    $script:HarnessState.enumerator_service_name
+                )
+                if ([string]::IsNullOrWhiteSpace($enumeratorServiceName)) {
+                    throw 'fresh Install did not record its Enumerator identity'
+                }
+                foreach ($serviceName in @(
+                    $GatewayServiceName,
+                    'DefenseClawCMIDBroker',
+                    'DefenseClawHookGuardian',
+                    $enumeratorServiceName
+                )) {
+                    if (-not [bool]$script:HarnessState.service_exists[
+                            $serviceName
+                        ] -or
+                        $script:HarnessState.service_start_modes[
+                            $serviceName
+                        ] -ne 4) {
+                        throw (
+                            'fresh Install enumerated before every managed ' +
+                            'service was created disabled'
+                        )
+                    }
+                }
+                if ([bool]$script:HarnessState.services_running -or
+                    $script:HarnessState.events.IndexOf(
+                        'install-service-sid-bound'
+                    ) -lt 0) {
+                    throw (
+                        'fresh Install enumerated before its disabled gateway ' +
+                        'service identity and SID binding existed'
+                    )
+                }
+                $script:HarnessState.events.Add(
+                    'enumerator-refresh-enter'
+                )
+                if ($script:HarnessState.ContainsKey(
+                        'fail_fresh_install_enumeration'
+                    ) -and
+                    [bool]$script:HarnessState.fail_fresh_install_enumeration) {
+                    throw 'injected fresh-install enumeration failure'
+                }
+            }
             $script:HarnessState.events.Add('enumerator-refresh')
         }
         function script:Invoke-DefenseClawCodexRequirementsCommand {
@@ -2967,16 +3055,19 @@ targets:
                 snapshot_path = ''
                 track_fresh_install_services = $true
                 fresh_services_existed = $false
-                fail_fresh_install_capture = $true
+                fail_fresh_install_enumeration = $true
+                fail_fresh_install_capture = $false
                 service_start_modes = @{
                     DefenseClawGateway = 0
                     DefenseClawCMIDBroker = 0
                     DefenseClawHookGuardian = 0
+                    DefenseClawHookEnumerator = 0
                 }
                 service_exists = @{
                     DefenseClawGateway = $false
                     DefenseClawCMIDBroker = $false
                     DefenseClawHookGuardian = $false
+                    DefenseClawHookEnumerator = $false
                 }
                 ipc_service_sids = @()
                 guardian_fresh = $false
@@ -2988,7 +3079,7 @@ targets:
                 manifest_admin_acl = $false
             }
 
-            for ($attempt = 1; $attempt -le 2; $attempt++) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
                 $script:HarnessState.events.Clear()
                 $script:HarnessState.manifest_admin_acl = $false
                 $failure = ''
@@ -3014,6 +3105,13 @@ targets:
                 $manifestAcl = $script:HarnessState.events.IndexOf(
                     'manifest-admin-acl'
                 )
+                $enumeratorRefresh = $script:HarnessState.events.IndexOf(
+                    'enumerator-refresh'
+                )
+                $enumeratorRefreshEnter =
+                    $script:HarnessState.events.IndexOf(
+                        'enumerator-refresh-enter'
+                    )
                 $targetPlan = $script:HarnessState.events.IndexOf(
                     'target-runtime:plan'
                 )
@@ -3029,6 +3127,12 @@ targets:
                 $services = $script:HarnessState.events.IndexOf(
                     'managed-services'
                 )
+                $managedServicesCount = @(
+                    $script:HarnessState.events |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]$_ -ceq 'managed-services'
+                        }
+                ).Count
                 $serviceSIDBound = $script:HarnessState.events.IndexOf(
                     'install-service-sid-bound'
                 )
@@ -3044,25 +3148,44 @@ targets:
                 $capture = $script:HarnessState.events.IndexOf(
                     'lifecycle-snapshot:capture'
                 )
+                $preservedStateAcls = $script:HarnessState.events.IndexOf(
+                    'preserved-state-acls:S-1-5-80-1-2-3-4-5'
+                )
+                $preservedStateAclCount = @(
+                    $script:HarnessState.events |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]$_ -ceq
+                                'preserved-state-acls:S-1-5-80-1-2-3-4-5'
+                        }
+                ).Count
                 $eventTrace = [string]::Join(
                     ', ',
                     @($script:HarnessState.events)
                 )
+                $preEnumerationOrder = [bool](
+                    $transaction -ge 0 -and
+                    $manifestPublished -gt $transaction -and
+                    $manifestAcl -gt $manifestPublished -and
+                    $services -gt $manifestAcl -and
+                    $managedServicesCount -eq 1 -and
+                    $serviceSIDBound -gt $services -and
+                    $managedIPC -gt $serviceSIDBound -and
+                    $retainedRuntimeAcls -gt $managedIPC -and
+                    $coreAcls -gt $retainedRuntimeAcls -and
+                    $enumeratorRefreshEnter -gt $coreAcls
+                )
+                $postEnumerationOrder = [bool](
+                    $enumeratorRefresh -gt $enumeratorRefreshEnter -and
+                    $targetPlan -gt $enumeratorRefresh -and
+                    $targetPlanAuthority -gt $targetPlan -and
+                    $targetStage -gt $targetPlanAuthority -and
+                    $targetFinalize -gt $targetStage -and
+                    $capture -gt $targetFinalize
+                )
                 Assert-Harness `
                     -Condition (
-                        $transaction -ge 0 -and
-                        $manifestPublished -gt $transaction -and
-                        $manifestAcl -gt $manifestPublished -and
-                        $targetPlan -gt $manifestAcl -and
-                        $targetPlanAuthority -gt $targetPlan -and
-                        $targetStage -gt $targetPlanAuthority -and
-                        $targetFinalize -gt $targetStage -and
-                        $services -gt $targetFinalize -and
-                        $serviceSIDBound -gt $services -and
-                        $managedIPC -gt $serviceSIDBound -and
-                        $retainedRuntimeAcls -gt $managedIPC -and
-                        $coreAcls -gt $retainedRuntimeAcls -and
-                        $capture -gt $coreAcls
+                        $preEnumerationOrder -and
+                        ($attempt -eq 1 -or $postEnumerationOrder)
                     ) `
                     -Message (
                         "fresh install attempt $attempt violated " +
@@ -3070,6 +3193,8 @@ targets:
                         "(transaction=$transaction services=$services " +
                         "manifest_published=$manifestPublished " +
                         "manifest_acl=$manifestAcl " +
+                        "enumerator_refresh_enter=$enumeratorRefreshEnter " +
+                        "enumerator_refresh=$enumeratorRefresh " +
                         "target_plan=$targetPlan " +
                         "target_authority=$targetPlanAuthority " +
                         "target_stage=$targetStage " +
@@ -3077,11 +3202,75 @@ targets:
                         "service_sid_bound=$serviceSIDBound " +
                         "managed_ipc=$managedIPC core_acls=$coreAcls " +
                         "retained_runtime_acls=$retainedRuntimeAcls " +
+                        "managed_services_count=$managedServicesCount " +
                         "capture=$capture; " +
                         "failure=$failure; events=[$eventTrace])"
                     )
 
                 if ($attempt -eq 1) {
+                    Assert-Harness `
+                        -Condition (
+                            $failure -match
+                                'injected fresh-install enumeration failure' -and
+                            $enumeratorRefresh -lt 0 -and
+                            $targetPlan -lt 0 -and
+                            $capture -lt 0
+                        ) `
+                        -Message (
+                            'fresh install enumeration fault crossed the ' +
+                            "target-runtime boundary: $failure"
+                        )
+                    $ipcRevoke = $script:HarnessState.events.IndexOf(
+                        'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                    )
+                    $gatewayDelete = $script:HarnessState.events.IndexOf(
+                        'remove-service:DefenseClawGateway'
+                    )
+                    $finalServiceDelete = $script:HarnessState.events.IndexOf(
+                        'remove-service:DefenseClawHookEnumerator'
+                    )
+                    $transactionComplete = $script:HarnessState.events.IndexOf(
+                        'complete'
+                    )
+                    Assert-Harness `
+                        -Condition (
+                            $ipcRevoke -gt $enumeratorRefreshEnter -and
+                            $gatewayDelete -gt $ipcRevoke -and
+                            $finalServiceDelete -gt $gatewayDelete -and
+                            $preservedStateAclCount -eq 1 -and
+                            $preservedStateAcls -gt $finalServiceDelete -and
+                            $transactionComplete -gt $preservedStateAcls
+                        ) `
+                        -Message (
+                            'fresh enumeration rollback did not revoke IPC ' +
+                            'and restore retained-state ACLs before ' +
+                            'authority retirement'
+                        )
+                    foreach ($serviceName in @(
+                        'DefenseClawGateway',
+                        'DefenseClawCMIDBroker',
+                        'DefenseClawHookGuardian',
+                        'DefenseClawHookEnumerator'
+                    )) {
+                        Assert-Harness `
+                            -Condition (
+                                -not [bool]$script:HarnessState.service_exists[
+                                    $serviceName
+                                ] -and
+                                $script:HarnessState.service_start_modes[
+                                    $serviceName
+                                ] -eq 0
+                            ) `
+                            -Message (
+                                'fresh enumeration rollback retained ' +
+                                "transaction-created service $serviceName"
+                            )
+                    }
+                    $script:HarnessState.fail_fresh_install_enumeration =
+                        $false
+                    $script:HarnessState.fail_fresh_install_capture = $true
+                }
+                elseif ($attempt -eq 2) {
                     Assert-Harness `
                         -Condition ($failure -match 'injected fresh-install snapshot failure') `
                         -Message "fresh install fault lost its causal failure: $failure"
@@ -3100,6 +3289,9 @@ targets:
                     $gatewayDelete = $script:HarnessState.events.IndexOf(
                         'remove-service:DefenseClawGateway'
                     )
+                    $finalServiceDelete = $script:HarnessState.events.IndexOf(
+                        'remove-service:DefenseClawHookEnumerator'
+                    )
                     $authorityRetired = $script:HarnessState.events.IndexOf(
                         'target-runtime:rollback-authority-retired'
                     )
@@ -3113,7 +3305,10 @@ targets:
                             $cleanupAuthority -gt $targetCleanup -and
                             $ipcRevoke -gt $cleanupAuthority -and
                             $gatewayDelete -gt $ipcRevoke -and
-                            $authorityRetired -gt $gatewayDelete -and
+                            $finalServiceDelete -gt $gatewayDelete -and
+                            $preservedStateAclCount -eq 1 -and
+                            $preservedStateAcls -gt $finalServiceDelete -and
+                            $authorityRetired -gt $preservedStateAcls -and
                             $transactionComplete -gt $authorityRetired
                         ) `
                         -Message (
@@ -3131,6 +3326,9 @@ targets:
                             -not [bool]$script:HarnessState.service_exists[
                                 'DefenseClawHookGuardian'
                             ] -and
+                            -not [bool]$script:HarnessState.service_exists[
+                                'DefenseClawHookEnumerator'
+                            ] -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawGateway'
                             ] -eq 0 -and
@@ -3139,6 +3337,9 @@ targets:
                             ] -eq 0 -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawHookGuardian'
+                            ] -eq 0 -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawHookEnumerator'
                             ] -eq 0
                         ) `
                         -Message 'fresh install rollback retained a transaction-created service'
@@ -3168,7 +3369,11 @@ targets:
                 }
                 else {
                     Assert-Harness `
-                        -Condition ([string]::IsNullOrWhiteSpace($failure)) `
+                        -Condition (
+                            [string]::IsNullOrWhiteSpace($failure) -and
+                            $preservedStateAcls -lt 0 -and
+                            $preservedStateAclCount -eq 0
+                        ) `
                         -Message "fresh install retry failed: $failure"
                     $receiptCommit = $script:HarnessState.events.IndexOf(
                         'install-receipt:committed'
@@ -3194,6 +3399,9 @@ targets:
                             [bool]$script:HarnessState.service_exists[
                                 'DefenseClawHookGuardian'
                             ] -and
+                            [bool]$script:HarnessState.service_exists[
+                                'DefenseClawHookEnumerator'
+                            ] -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawGateway'
                             ] -eq 4 -and
@@ -3202,6 +3410,9 @@ targets:
                             ] -eq 4 -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawHookGuardian'
+                            ] -eq 4 -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawHookEnumerator'
                             ] -eq 4
                         ) `
                         -Message 'fresh Install -NoStart retry did not leave the broker-backed service set disabled'
@@ -3211,9 +3422,9 @@ targets:
             # broker, gateway, guardian, and enumerator.
             Assert-Harness `
                 -Condition (
-                    $script:HarnessState.transaction_calls -eq 2 -and
-                    $script:HarnessState.restore_calls -eq 1 -and
-                    $script:HarnessState.removed_services -eq 4
+                    $script:HarnessState.transaction_calls -eq 3 -and
+                    $script:HarnessState.restore_calls -eq 2 -and
+                    $script:HarnessState.removed_services -eq 8
                 ) `
                 -Message 'fresh install fault/retry did not use exact transactional rollback'
             $uninstallResults.Add([pscustomobject]@{

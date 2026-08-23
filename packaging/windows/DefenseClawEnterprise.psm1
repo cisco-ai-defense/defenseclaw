@@ -8666,6 +8666,14 @@ function Restore-DefenseClawTransaction {
     Remove-DefenseClawTransactionCreatedSharedDirectories `
         -Snapshot $snapshot `
         -Layout $Layout
+    # Fresh Install over a retained non-purge StateRoot temporarily grants the
+    # new gateway SID access before enumeration. Restore that exact inactive
+    # Admin boundary inside the idempotent recovery state machine, after every
+    # transaction-created service is gone and before rollback authority can be
+    # retired. A crash before/during this call re-enters the same operation.
+    Restore-DefenseClawRetainedStateAclsFromTransaction `
+        -Snapshot $snapshot `
+        -Layout $Layout
     if (-not $DeferServiceRestart) {
         $activationRequired =
             Assert-DefenseClawRestoredTransactionReadyForActivation `
@@ -14257,6 +14265,128 @@ function Set-DefenseClawPreservedStateAcls {
     }
 }
 
+function Restore-DefenseClawRetainedStateAclsFromTransaction {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $stateRootCreatedProperty = $Snapshot.PSObject.Properties[
+        'state_root_created'
+    ]
+    $stateRootIdentityProperty = $Snapshot.PSObject.Properties[
+        'state_root_identity'
+    ]
+    if ($null -eq $stateRootCreatedProperty -and
+        $null -eq $stateRootIdentityProperty) {
+        # Transactions from before managed-root claims never ran the early
+        # fresh-Install SID/ACL binding and retain their historical recovery.
+        return
+    }
+    if ($null -eq $stateRootCreatedProperty -or
+        $stateRootCreatedProperty.Value -isnot [bool] -or
+        $null -eq $stateRootIdentityProperty -or
+        [string]$stateRootIdentityProperty.Value -cnotmatch
+            '^[0-9a-f]{8}:[0-9a-f]{16}$') {
+        throw 'pending transaction has invalid retained StateRoot baseline state'
+    }
+    $recordedStateRoot = [IO.Path]::GetFullPath(
+        [string]$Snapshot.state_root
+    ).TrimEnd('\')
+    $expectedStateRoot = [IO.Path]::GetFullPath(
+        [string]$Layout.StateRoot
+    ).TrimEnd('\')
+    if (-not [string]::Equals(
+            $recordedStateRoot,
+            $expectedStateRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'pending transaction retained StateRoot does not match this scope'
+    }
+
+    $gatewayServiceRows = @(
+        $Snapshot.services |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$_.name,
+                    [string]$Snapshot.gateway_service,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($gatewayServiceRows.Count -ne 1 -or
+        $null -eq $gatewayServiceRows[0].PSObject.Properties['existed'] -or
+        $gatewayServiceRows[0].existed -isnot [bool]) {
+        throw 'pending transaction has invalid retained-state gateway preimage'
+    }
+    $priorGatewayExisted = [bool]$gatewayServiceRows[0].existed
+    $priorDeploymentProperty = $Snapshot.PSObject.Properties[
+        'prior_deployment_active'
+    ]
+    $priorDeploymentActive = if ($null -eq $priorDeploymentProperty) {
+        # Compatibility for snapshots written before the explicit deployment
+        # marker; a surviving gateway was their only active-state evidence.
+        $priorGatewayExisted
+    }
+    elseif ($priorDeploymentProperty.Value -isnot [bool]) {
+        throw 'pending transaction has invalid prior deployment state'
+    }
+    else {
+        [bool]$priorDeploymentProperty.Value
+    }
+    if ($priorGatewayExisted -and -not $priorDeploymentActive) {
+        throw 'pending transaction has a gateway service without an active deployment'
+    }
+    if ($priorDeploymentActive -or
+        [bool]$stateRootCreatedProperty.Value) {
+        return
+    }
+
+    # Only an inactive retained root with an absent gateway preimage reaches
+    # this branch. Prove that rollback removed the complete managed service set
+    # before removing the deleted gateway SID from the retained tree.
+    $managedServiceNames = @(Get-DefenseClawManagedServiceNames `
+        -GatewayServiceName ([string]$Snapshot.gateway_service) `
+        -GuardianServiceName ([string]$Snapshot.guardian_service))
+    Assert-DefenseClawServicesAbsentChecked `
+        -Names $managedServiceNames `
+        -Operation 'refusing retained-state ACL rollback'
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $before = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
+        [string]$Layout.StateRoot
+    )
+    if ($null -eq $before -or
+        [string]$before.Identity -cne
+            [string]$stateRootIdentityProperty.Value) {
+        throw 'retained StateRoot identity changed before ACL rollback'
+    }
+    $gatewaySID = Get-DefenseClawServiceSIDForRecovery `
+        -ServiceName ([string]$Snapshot.gateway_service)
+    Assert-DefenseClawServicesAbsentChecked `
+        -Names $managedServiceNames `
+        -Operation 'refusing retained-state ACL rollback after SID resolution'
+    Set-DefenseClawPreservedStateAcls `
+        -Layout $Layout `
+        -GatewayServiceSID $gatewaySID
+    $after = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
+        [string]$Layout.StateRoot
+    )
+    if ($null -eq $after -or
+        [string]$after.Identity -cne [string]$before.Identity) {
+        throw 'retained StateRoot identity changed during ACL rollback'
+    }
+    $expected = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory $true `
+        -Kind AdminDirectory `
+        -GatewayServiceSID $script:AdministratorsSID
+    Assert-DefenseClawCanonicalRawPathAcl `
+        -Path ([string]$Layout.StateRoot) `
+        -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$after.SecurityDescriptor,
+            0
+        )) `
+        -Expected $expected
+}
+
 function Remove-DefenseClawManagedTree {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -17107,6 +17237,19 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Get-DefenseClawTargetRuntimePreparationMode `
                 -Action $Action `
                 -ManifestPresent $targetRuntimeManifestPresent
+        if ($Action -eq 'Install') {
+            # New-DefenseClawTransaction has durably recorded every managed
+            # service as absent and the install-preparation receipt is bound
+            # to that exact snapshot. Register the transaction-owned services
+            # disabled and bind the live gateway SID before Enumerator or any
+            # target-runtime helper loads the managed configuration. Rollback
+            # removes these services and revokes their exact shared-IPC ACE.
+            Set-DefenseClawManagedServicesForTransaction `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -BindInstallPreparationSID
+        }
         # Freeze the profile-derived target set while Enumerator and Guardian
         # are stopped. The protected target-runtime plan below then hashes the
         # exact manifest generation Guardian must prove before activation.
@@ -17132,18 +17275,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             throw 'target runtime plan did not bind an exact manifest SHA-256'
         }
         if ($Action -eq 'Install') {
-            # A clean install has no NT SERVICE identities until SCM creates
-            # the transaction-owned service pair. The snapshot subprocess
-            # loads the protected managed config and validates the gateway's
-            # virtual-service SID, so register both services disabled and
-            # establish the SID-dependent runtime ACL before capture. The
-            # transaction already recorded both services as absent and removes
-            # them if capture or any later step fails.
-            Set-DefenseClawManagedServicesForTransaction `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -BindInstallPreparationSID
+            # The service/SID boundary was established before enumeration.
+            # Capture the managed-hook lifecycle only after target-runtime
+            # planning/finalization has durably published its rollback claims.
             [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `

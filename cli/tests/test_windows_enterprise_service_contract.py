@@ -1856,22 +1856,18 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "-DeferAutomaticStart" in service_preparation
 
     transaction = install_like.index("$snapshot = New-DefenseClawTransaction `")
-    fresh_install = install_like.index(
-        "if ($Action -eq 'Install') {\n"
-        "            # A clean install has no NT SERVICE identities"
-    )
-    fresh_service_registration = install_like.index(
+    enumerator_refresh = install_like.index("Invoke-DefenseClawEnumeratorRefresh `")
+    target_plan = install_like.index("Invoke-DefenseClawTargetRuntimePreparation `")
+    fresh_bind = install_like.index("-BindInstallPreparationSID", transaction)
+    fresh_service_registration = install_like.rfind(
         "Set-DefenseClawManagedServicesForTransaction `",
-        fresh_install,
+        transaction,
+        fresh_bind,
     )
     fresh_snapshot = install_like.index(
         "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `",
-        fresh_service_registration,
+        target_plan,
     )
-    assert transaction < fresh_service_registration < fresh_snapshot
-
-    enumerator_refresh = install_like.index("Invoke-DefenseClawEnumeratorRefresh `")
-    target_plan = install_like.index("Invoke-DefenseClawTargetRuntimePreparation `")
     guardian_wait = install_like.index("Wait-DefenseClawFreshGuardianReconcile `")
     gateway_demand_start = install_like.index(
         "Set-DefenseClawServiceStartMode `\n"
@@ -1879,7 +1875,15 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
         "                -StartMode 3",
         guardian_wait,
     )
-    assert enumerator_refresh < target_plan < guardian_wait < gateway_demand_start
+    assert (
+        transaction
+        < fresh_service_registration
+        < enumerator_refresh
+        < target_plan
+        < fresh_snapshot
+        < guardian_wait
+        < gateway_demand_start
+    )
     assert "$expectedGuardianManifestSHA256" in install_like
     assert "-ExpectedManifestSHA256 $expectedGuardianManifestSHA256" in install_like
 
@@ -3832,7 +3836,7 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "legacy MAX_PATH boundary" in smoke
     assert smoke.count("New-HarnessCaseRoot") == 12
     assert "fresh-install-service-bootstrap-rollback-retry" in smoke
-    assert "snapshot capture ran before both service identities existed" in smoke
+    assert "snapshot capture ran before all four service identities existed" in smoke
     assert "repeated-first-activation-failure-exact-rollback" in smoke
     assert "-IsDirectory $true `" in smoke
     bare_directory_argument = re.compile(
@@ -3995,17 +3999,26 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
             "function Invoke-DefenseClawUninstallLifecycle"
         )
     ]
+    enumerator_refresh = lifecycle.index("Invoke-DefenseClawEnumeratorRefresh `")
     target_preparation = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
-    fresh_service_gate = lifecycle.index("if ($Action -eq 'Install') {", target_preparation)
-    fresh_service_end = lifecycle.index("$attestationNeedsRefresh", fresh_service_gate)
-    fresh_service_setup = lifecycle[fresh_service_gate:fresh_service_end]
+    fresh_bind = lifecycle.index("-BindInstallPreparationSID")
+    fresh_service_gate = lifecycle.rfind(
+        "if ($Action -eq 'Install') {", 0, fresh_bind
+    )
+    fresh_service_setup = lifecycle[fresh_service_gate:enumerator_refresh]
     assert "Set-DefenseClawManagedServicesForTransaction `" in fresh_service_setup
     assert "-BindInstallPreparationSID" in fresh_service_setup
-    assert fresh_service_setup.index("Set-DefenseClawManagedServicesForTransaction `") < fresh_service_setup.index(
-        "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `"
-    )
+    assert fresh_service_gate < fresh_bind < enumerator_refresh < target_preparation
 
-    existing_service_gate = lifecycle.index("if ($Action -ne 'Install') {", fresh_service_end)
+    fresh_snapshot_gate = lifecycle.index(
+        "if ($Action -eq 'Install') {", target_preparation
+    )
+    fresh_snapshot_end = lifecycle.index("$attestationNeedsRefresh", fresh_snapshot_gate)
+    fresh_snapshot = lifecycle[fresh_snapshot_gate:fresh_snapshot_end]
+    assert "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `" in fresh_snapshot
+    assert "Set-DefenseClawManagedServicesForTransaction `" not in fresh_snapshot
+
+    existing_service_gate = lifecycle.index("if ($Action -ne 'Install') {", fresh_snapshot_end)
     existing_service_end = lifecycle.index("$targetReport =", existing_service_gate)
     existing_service_setup = lifecycle[existing_service_gate:existing_service_end]
     assert "Set-DefenseClawManagedServicesForTransaction `" in existing_service_setup
@@ -4119,6 +4132,176 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
         assert rejected_case in smoke
     assert "'O:BAG:BAD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'" in smoke
     assert "'O:BAG:BA(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'" not in smoke
+
+
+def test_fresh_install_binds_service_identity_before_managed_config_loads() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    transaction_factory_start = module.index("function New-DefenseClawTransaction")
+    transaction_factory = module[
+        transaction_factory_start : module.index(
+            "function Restore-DefenseClawTransaction", transaction_factory_start
+        )
+    ]
+    service_inventory = transaction_factory.index(
+        "$services = [Collections.Generic.List[object]]::new()"
+    )
+    durable_intent = transaction_factory.index(
+        "Write-DefenseClawJsonAtomic `\n"
+        "            -Value $quiescingIntent `\n"
+        "            -Path $Layout.PendingPath",
+        service_inventory,
+    )
+    assert service_inventory < durable_intent
+    assert "services = $services" in transaction_factory[service_inventory:durable_intent]
+
+    lifecycle = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    transaction = lifecycle.index("$snapshot = New-DefenseClawTransaction `")
+    transaction_binding = lifecycle.index(
+        "Set-DefenseClawInstallPreparationTransactionBinding `", transaction
+    )
+    enumerator_refresh = lifecycle.index("Invoke-DefenseClawEnumeratorRefresh `")
+    target_preparation = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
+
+    service_setup_call = "Set-DefenseClawManagedServicesForTransaction `"
+    bind_argument = "-BindInstallPreparationSID"
+    fresh_bind = lifecycle.index(bind_argument, transaction_binding)
+    fresh_service_setup = lifecycle.rfind(
+        service_setup_call, transaction_binding, fresh_bind
+    )
+    fresh_gate = lifecycle.rfind(
+        "if ($Action -eq 'Install') {", transaction_binding, fresh_service_setup
+    )
+    assert (
+        transaction
+        < transaction_binding
+        < fresh_gate
+        < fresh_service_setup
+        < fresh_bind
+        < enumerator_refresh
+        < target_preparation
+    )
+
+    # Fresh Install has exactly one SID-binding service publication, and it is
+    # not repeated after a helper has loaded the managed configuration.
+    assert lifecycle.count(bind_argument) == 1
+    assert lifecycle.count(service_setup_call) == 2
+    assert service_setup_call not in lifecycle[fresh_bind:enumerator_refresh]
+    assert bind_argument not in lifecycle[enumerator_refresh:]
+
+    # Repair/Upgrade keep their existing ordering: capture the installed hook
+    # generation, validate the enumerated target runtime, then reconfigure the
+    # already-existing service identities without rebinding fresh-install SID
+    # authority.
+    existing_snapshot_gate = lifecycle.index(
+        "if ($Action -ne 'Install') {", transaction_binding
+    )
+    existing_snapshot = lifecycle.index(
+        "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `",
+        existing_snapshot_gate,
+    )
+    existing_service_setup = lifecycle.index(service_setup_call, enumerator_refresh)
+    existing_service_gate = lifecycle.rfind(
+        "if ($Action -ne 'Install') {", target_preparation, existing_service_setup
+    )
+    assert (
+        existing_snapshot_gate
+        < existing_snapshot
+        < enumerator_refresh
+        < target_preparation
+        < existing_service_gate
+        < existing_service_setup
+    )
+    existing_service_block = lifecycle[
+        existing_service_gate : lifecycle.index("$targetReport =", existing_service_setup)
+    ]
+    assert bind_argument not in existing_service_block
+
+    # Moving service/SID publication ahead of enumeration creates a new
+    # rollback boundary. Retained-state ACL restoration belongs to the shared
+    # idempotent restore path, so both synchronous rollback and reboot recovery
+    # complete it before authenticated transaction authority can be retired.
+    restore_body = module[
+        module.index("function Restore-DefenseClawTransaction {") : module.index(
+            "function Assert-DefenseClawRestoredTransactionReadyForActivation"
+        )
+    ]
+    ipc_revoke = restore_body.index("Revoke-DefenseClawManagedIPCServiceAccess `")
+    service_delete = restore_body.index(
+        "Remove-DefenseClawService -Name ([string]$service.name)", ipc_revoke
+    )
+    shared_cleanup = restore_body.index(
+        "Remove-DefenseClawTransactionCreatedSharedDirectories `", service_delete
+    )
+    retained_restore = restore_body.index(
+        "Restore-DefenseClawRetainedStateAclsFromTransaction `", shared_cleanup
+    )
+    restart_gate = restore_body.index("if (-not $DeferServiceRestart)", retained_restore)
+    assert ipc_revoke < service_delete < shared_cleanup < retained_restore < restart_gate
+
+    retained_helper = module[
+        module.index("function Restore-DefenseClawRetainedStateAclsFromTransaction") :
+        module.index("function Remove-DefenseClawManagedTree")
+    ]
+    for contract in (
+        "state_root_created",
+        "state_root_identity",
+        "prior_deployment_active",
+        "$gatewayServiceRows.Count -ne 1",
+        "$priorGatewayExisted -and -not $priorDeploymentActive",
+        "$priorDeploymentActive -or",
+        "[string]$Snapshot.state_root",
+        "[string]$Layout.StateRoot",
+        "Assert-DefenseClawServicesAbsentChecked `",
+        "Get-DefenseClawServiceSIDForRecovery `",
+        "Set-DefenseClawPreservedStateAcls `",
+        "retained StateRoot identity changed before ACL rollback",
+        "retained StateRoot identity changed during ACL rollback",
+        "-Kind AdminDirectory",
+    ):
+        assert contract in retained_helper
+    assert retained_helper.count("Assert-DefenseClawServicesAbsentChecked `") == 2
+    assert "$Action" not in retained_helper
+    assert "$StateRootCreatedForTransaction" not in retained_helper
+
+    lifecycle_rollback = lifecycle[
+        lifecycle.index("catch {\n        $operationError = $_", target_preparation) :
+    ]
+    restore = lifecycle_rollback.index("Restore-DefenseClawTransaction -SnapshotPath")
+    rollback_complete = lifecycle_rollback.index(
+        "Complete-DefenseClawTransaction `", restore
+    )
+    assert restore < rollback_complete
+    assert "Set-DefenseClawPreservedStateAcls" not in lifecycle_rollback[
+        :rollback_complete
+    ]
+
+    # The native smoke injects failure inside enumeration, before target
+    # planning or lifecycle capture, and proves exact rollback for gateway,
+    # broker, Guardian, and Enumerator before a successful retry.
+    for marker in (
+        "fail_fresh_install_enumeration = $true",
+        "injected fresh-install enumeration failure",
+        "enumerator-refresh-enter",
+        "DefenseClawGateway",
+        "DefenseClawCMIDBroker",
+        "DefenseClawHookGuardian",
+        "DefenseClawHookEnumerator",
+        "preserved-state-acls:S-1-5-80-1-2-3-4-5",
+    ):
+        assert marker in smoke
+    assert "$targetPlan -lt 0" in smoke
+    assert "$capture -lt 0" in smoke
+    assert "$preservedStateAcls -gt $finalServiceDelete" in smoke
+    assert "$transactionComplete -gt $preservedStateAcls" in smoke
+    assert "$script:HarnessState.transaction_calls -eq 3" in smoke
+    assert "$script:HarnessState.restore_calls -eq 2" in smoke
+    assert "$script:HarnessState.removed_services -eq 8" in smoke
 
 
 def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -> None:
