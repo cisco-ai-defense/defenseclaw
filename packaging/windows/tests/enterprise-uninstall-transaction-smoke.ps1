@@ -3950,10 +3950,10 @@ targets:
             }
             $failed = $false
             try {
-                Recover-DefenseClawPendingTransaction `
+                [void](Recover-DefenseClawPendingTransaction `
                     -Layout $layout `
                     -GatewayServiceName 'DefenseClawGateway' `
-                    -GuardianServiceName 'DefenseClawHookGuardian'
+                    -GuardianServiceName 'DefenseClawHookGuardian')
             }
             catch {
                 $failed = $true
@@ -5439,7 +5439,15 @@ targets:
         }
     } $testRoot $installerPath
 
-    $result | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8 -Compress
+    $resultItems = @($result)
+    if ($resultItems.Count -ne 1) {
+        throw (
+            'uninstall transaction smoke emitted ' +
+            "$($resultItems.Count) report objects, expected exactly one"
+        )
+    }
+    $resultItems[0] |
+        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8 -Compress
 }
 finally {
     Microsoft.PowerShell.Core\Remove-Module `

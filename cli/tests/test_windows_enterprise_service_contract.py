@@ -3361,6 +3361,13 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
         module.index("function Complete-DefenseClawInstallRollbackIntent")
     ]
     assert "-IsDirectory $true `" in rollback_descriptor
+    assert "[void](Recover-DefenseClawPendingTransaction `" in smoke
+    assert re.search(
+        r"(?m)^[ \t]*Recover-DefenseClawPendingTransaction[ \t]+`[ \t]*$",
+        smoke,
+    ) is None
+    assert "$resultItems = @($result)" in smoke
+    assert "$resultItems.Count -ne 1" in smoke
     assert "lifecycle-snapshot:capture" in smoke
     assert "lifecycle-snapshot:restore" in smoke
     assert "lifecycle-snapshot:retire" in smoke
