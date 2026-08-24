@@ -10,11 +10,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
+)
+
+// windows.ImpersonateNamedPipeClient is not exported by x/sys/windows;
+// bind it directly. Keeping the LazyProc at package scope avoids a
+// runtime resolution on every connection.
+var (
+	modAdvapi32                   = syscall.NewLazyDLL("advapi32.dll")
+	procImpersonateNamedPipeClient = modAdvapi32.NewProc("ImpersonateNamedPipeClient")
 )
 
 func ValidateBrokerServiceIdentity(config ServerConfig) error {
@@ -74,6 +84,26 @@ func authenticatePipeClient(pipe windows.Handle, gatewayServiceName string) (uin
 	if err := windows.GetNamedPipeClientProcessId(pipe, &clientPID); err != nil || clientPID == 0 {
 		return clientPID, errors.New("CMID broker pipe client PID is unavailable")
 	}
+	// Primary authentication: match the caller's token user SID to the
+	// gateway's virtual service SID. PID is not stable across
+	// re-use; between the peer's exit and SCM's next status refresh,
+	// another process could inherit the gateway PID and pass a
+	// PID-only check. Impersonation reads the token *of the actual
+	// connected pipe endpoint*, which the kernel binds to the caller
+	// at ConnectNamedPipe time.
+	expectedAccount := `NT SERVICE\` + gatewayServiceName
+	expectedSID, err := managed.WindowsServiceAccountSID(expectedAccount)
+	if err != nil || expectedSID == nil {
+		return clientPID, errors.New("DefenseClaw gateway virtual service SID is unavailable")
+	}
+	if err := verifyPipeClientTokenSID(pipe, expectedSID); err != nil {
+		return clientPID, err
+	}
+	// Defense in depth: keep the PID/service-status check so a
+	// non-Running gateway still fails, and so an unauthenticated caller
+	// impersonating some other SYSTEM token cannot slip past — the
+	// token check above already rejects that, but the double check is
+	// cheap.
 	gateway, err := queryService(gatewayServiceName, false)
 	if err != nil {
 		return clientPID, errors.New("DefenseClaw gateway status is unavailable")
@@ -82,6 +112,69 @@ func authenticatePipeClient(pipe windows.Handle, gatewayServiceName string) (uin
 		return clientPID, errors.New("CMID broker pipe client is not the active DefenseClaw gateway")
 	}
 	return clientPID, nil
+}
+
+// verifyPipeClientTokenSID impersonates the pipe client, reads its
+// token user SID, and compares it against expected. The impersonation
+// is scoped to this thread and reverted before return; if RevertToSelf
+// fails, the goroutine's OS thread is retired so no privileged callback
+// can ever run under the client's identity.
+func verifyPipeClientTokenSID(pipe windows.Handle, expected *windows.SID) error {
+	runtime.LockOSThread()
+	unlock := runtime.UnlockOSThread
+	// Impersonate the connected pipe client. Windows binds the
+	// impersonation token to the current thread only.
+	ret, _, errImpersonate := procImpersonateNamedPipeClient.Call(uintptr(pipe))
+	if ret == 0 {
+		unlock()
+		return fmt.Errorf("CMID broker impersonate pipe client failed: %v", errImpersonate)
+	}
+	var revertOK bool
+	defer func() {
+		if !revertOK {
+			// Retire this OS thread so no unrelated goroutine can
+			// run with a leaked impersonation token.
+			return
+		}
+		unlock()
+	}()
+
+	var threadToken windows.Token
+	if err := windows.OpenThreadToken(
+		windows.CurrentThread(),
+		windows.TOKEN_QUERY,
+		true,
+		&threadToken,
+	); err != nil {
+		if revertErr := windows.RevertToSelf(); revertErr == nil {
+			revertOK = true
+		}
+		return fmt.Errorf("CMID broker open pipe-client thread token: %w", err)
+	}
+	tokenUser, err := threadToken.GetTokenUser()
+	closeErr := threadToken.Close()
+	if err != nil || tokenUser == nil || tokenUser.User.Sid == nil {
+		if revertErr := windows.RevertToSelf(); revertErr == nil {
+			revertOK = true
+		}
+		if err == nil {
+			err = errors.New("token user was nil")
+		}
+		return fmt.Errorf("CMID broker inspect pipe-client token user: %w", err)
+	}
+	_ = closeErr
+	sid := tokenUser.User.Sid
+	if revertErr := windows.RevertToSelf(); revertErr != nil {
+		return fmt.Errorf("CMID broker revert impersonation: %w", revertErr)
+	}
+	revertOK = true
+	if !sid.Equals(expected) {
+		return fmt.Errorf(
+			"CMID broker pipe client token SID %s does not match gateway service SID %s",
+			sid, expected,
+		)
+	}
+	return nil
 }
 
 func requireLocalSystem() error {

@@ -84,6 +84,13 @@ func (server *Server) ServeWithReady(ctx context.Context, ready chan<- struct{})
 			defer func() { <-semaphore }()
 			defer windows.CloseHandle(handle)
 			defer windows.DisconnectNamedPipe(handle)
+			// Ensure any pending server->client bytes are drained
+			// before disconnect. DisconnectNamedPipe discards
+			// unread data, and the client only reads the response
+			// after its own write completes. Bound the flush by
+			// OperationTimeout so a hung reader cannot hold the
+			// active-client slot indefinitely.
+			defer flushPipeBounded(handle, server.config.OperationTimeout)
 			server.handleConnection(ctx, handle, pid)
 		}(pipe, clientPID)
 	}
@@ -104,6 +111,27 @@ func (server *Server) handleConnection(ctx context.Context, pipe windows.Handle,
 	}
 	if _, err := writeOverlapped(ctx, pipe, response); err != nil && server.log != nil {
 		server.log(Event{Stage: "write", ClientPID: clientPID})
+	}
+}
+
+// flushPipeBounded runs windows.FlushFileBuffers on handle without
+// blocking the caller past timeout. FlushFileBuffers on a pipe server
+// handle waits until the client has read every buffered byte; a client
+// that stops reading would otherwise pin the active-client semaphore.
+// Runs in its own goroutine and abandons the wait if the client is
+// slow — DisconnectNamedPipe then discards the tail as usual.
+func flushPipeBounded(handle windows.Handle, timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = defaultOperationTimeout
+	}
+	done := make(chan struct{}, 1)
+	go func() {
+		_ = windows.FlushFileBuffers(handle)
+		done <- struct{}{}
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
 	}
 }
 
