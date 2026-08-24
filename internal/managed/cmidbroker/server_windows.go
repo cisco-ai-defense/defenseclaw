@@ -20,6 +20,16 @@ import (
 
 const brokerShutdownTimeout = 20 * time.Second
 
+// CancelSynchronousIo is exposed by kernel32.dll but is not currently
+// exported by golang.org/x/sys/windows. Bind it via the system-only
+// lazy loader so a same-directory kernel32.dll plant can't hijack the
+// resolution (KnownDLLs already covers most cases; this is defense in
+// depth on par with the loader we use in service_identity_windows.go).
+var (
+	modKernel32             = windows.NewLazySystemDLL("kernel32.dll")
+	procCancelSynchronousIo = modKernel32.NewProc("CancelSynchronousIo")
+)
+
 func (server *Server) Serve(ctx context.Context) error {
 	return server.ServeWithReady(ctx, nil)
 }
@@ -118,37 +128,78 @@ func (server *Server) handleConnection(ctx context.Context, pipe windows.Handle,
 // blocking the caller past timeout. FlushFileBuffers on a pipe server
 // handle waits until the client has read every buffered byte; a client
 // that stops reading would otherwise pin the active-client semaphore.
-// Runs in its own goroutine. On timeout the flush is CANCELLED via
-// CancelIoEx and the caller waits for the goroutine to observe that
-// cancellation before returning, so the pipe handle is guaranteed to
-// still be valid at every point the goroutine references it. This
-// prevents a race where a slow flush would keep touching the handle
-// after the caller (via subsequent deferred CloseHandle) had already
-// released it.
+//
+// FlushFileBuffers is synchronous — CancelIoEx (which targets *pending*
+// overlapped I/O on a handle) cannot interrupt it. The correct primitive
+// is CancelSynchronousIo, which targets a specific *thread* whose
+// currently-executing synchronous kernel call should be aborted with
+// ERROR_OPERATION_ABORTED.
+//
+// To use CancelSynchronousIo we (a) pin the flush goroutine to a
+// dedicated OS thread via runtime.LockOSThread, (b) duplicate the
+// pseudo-handle from GetCurrentThread() into a real handle we hand to
+// the parent, (c) on timeout the parent calls CancelSynchronousIo on
+// that thread handle, and (d) the parent then waits on done — which is
+// guaranteed to close promptly because the kernel unwinds the aborted
+// FlushFileBuffers. The goroutine deliberately does NOT UnlockOSThread:
+// on timeout the Go runtime destroys the still-being-cancelled OS
+// thread rather than releasing a possibly-not-yet-unwound thread back
+// into the shared pool. Same pattern as
+// runWindowsEnterpriseImpersonatedCallback in internal/enterprisehooks.
 func flushPipeBounded(handle windows.Handle, timeout time.Duration) {
 	if timeout <= 0 {
 		timeout = defaultOperationTimeout
 	}
+	// threadCh carries the duplicated real thread handle from the
+	// flush goroutine to the parent. Buffered so the goroutine can send
+	// and proceed without waiting.
+	threadCh := make(chan windows.Handle, 1)
 	done := make(chan struct{})
 	go func() {
+		runtime.LockOSThread()
+		// Duplicate the pseudo-handle from GetCurrentThread() into a
+		// real handle. GetCurrentThread's return value only refers to
+		// the calling thread; DuplicateHandle produces a shareable
+		// real handle we can pass to CancelSynchronousIo from a
+		// different goroutine.
+		var realThread windows.Handle
+		proc := windows.CurrentProcess()
+		if err := windows.DuplicateHandle(
+			proc, windows.CurrentThread(),
+			proc, &realThread,
+			0, false, windows.DUPLICATE_SAME_ACCESS,
+		); err != nil {
+			// Signal that no cancel is possible so the parent can
+			// still time out cleanly. The flush will run to completion
+			// or return once the handle is closed by the parent.
+			threadCh <- 0
+		} else {
+			threadCh <- realThread
+		}
 		_ = windows.FlushFileBuffers(handle)
 		close(done)
+		// Intentionally NOT UnlockOSThread — see doc comment above.
 	}()
+
+	threadHandle := <-threadCh
+	defer func() {
+		if threadHandle != 0 {
+			_ = windows.CloseHandle(threadHandle)
+		}
+	}()
+
 	select {
 	case <-done:
 		return
 	case <-time.After(timeout):
 	}
-	// Cancel the outstanding I/O on this handle so the goroutine's
-	// FlushFileBuffers returns promptly. CancelIoEx targets any
-	// pending operation on the handle; on a pipe server that already
-	// wrote its response, the flush is what we're waiting on.
-	_ = windows.CancelIoEx(handle, nil)
-	// Wait for the goroutine to finish before returning so the caller
-	// may safely proceed to DisconnectNamedPipe / CloseHandle. The
-	// goroutine cannot block forever: CancelIoEx unblocks the pending
-	// flush; if the handle is somehow already closed, FlushFileBuffers
-	// returns immediately with an error we deliberately ignore.
+	// Timed out. Cancel the synchronous FlushFileBuffers on the flush
+	// goroutine's thread; it unwinds with ERROR_OPERATION_ABORTED and
+	// close(done) runs, so the subsequent <-done returns bounded even
+	// when the client never drained the pipe.
+	if threadHandle != 0 {
+		_, _, _ = procCancelSynchronousIo.Call(uintptr(threadHandle))
+	}
 	<-done
 }
 
