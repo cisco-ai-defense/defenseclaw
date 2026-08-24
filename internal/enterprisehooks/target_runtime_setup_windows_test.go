@@ -152,6 +152,9 @@ func TestWindowsManagedRuntimeStagesJournalsAndPublishesExactTargetRoot(t *testi
 	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineAbsent {
 		t.Fatalf("plan roots = %+v, want one absent de-duplicated root", plan.Roots)
 	}
+	if plan.TargetCount != 3 {
+		t.Fatalf("plan target count = %d, want all three enabled connector rows", plan.TargetCount)
+	}
 	if _, err := os.Lstat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(err) {
 		t.Fatalf("non-mutating plan published final root: %v", err)
 	}

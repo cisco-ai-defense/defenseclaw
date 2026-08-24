@@ -21,7 +21,6 @@ var (
 	windowsManagedRuntimeGenerationDiscard = DiscardWindowsManagedRuntimeGenerationPublication
 	windowsManagedRuntimeGenerationResolve = ResolveWindowsManagedRuntimeGeneration
 	windowsManagedRuntimeGenerationVerify  = VerifyWindowsManagedRuntimeGeneration
-	windowsManagedRuntimeGenerationRemove  = RemoveWindowsManagedRuntimeGenerationEnrollment
 )
 
 func prepareWindowsManagedRuntimeGenerationForInstall(

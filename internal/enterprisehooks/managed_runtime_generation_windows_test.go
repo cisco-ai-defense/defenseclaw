@@ -8,6 +8,7 @@ package enterprisehooks
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,6 +114,31 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	}
 	if err := VerifyWindowsManagedRuntimeGeneration(desired); err != nil {
 		t.Fatalf("privileged read-only generation verification: %v", err)
+	}
+	// A later connector reconciliation advances the shared lock timestamp,
+	// but does not change this connector's entry. The selected generation must
+	// remain reusable and verifiable against that stable entry identity.
+	globalLockAdvanced := desired
+	globalLockAdvanced.HookContractLockUpdatedAt = time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	if err := VerifyWindowsManagedRuntimeGeneration(globalLockAdvanced); err != nil {
+		t.Fatalf("shared lock timestamp invalidated unchanged connector generation: %v", err)
+	}
+	reused, err := PrepareWindowsManagedRuntimeGeneration(globalLockAdvanced)
+	if err != nil {
+		t.Fatalf("prepare unchanged connector after shared lock update: %v", err)
+	}
+	if !reused.Reused() || reused.GenerationID() != first.GenerationID() {
+		t.Fatalf(
+			"shared lock update republished unchanged connector generation: reused=%v generation=%q want=%q",
+			reused.Reused(),
+			reused.GenerationID(),
+			first.GenerationID(),
+		)
+	}
+	changedEntry := globalLockAdvanced
+	changedEntry.HookContractEntryUpdatedAt = globalLockAdvanced.HookContractLockUpdatedAt
+	if err := VerifyWindowsManagedRuntimeGeneration(changedEntry); err == nil {
+		t.Fatal("privileged generation verifier accepted a changed connector entry timestamp")
 	}
 	wrongToken := desired
 	wrongToken.ScopedToken = "wrong-scoped-test-token"
@@ -230,6 +256,163 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	}
 	if _, err := os.Lstat(third.BundlePath()); !os.IsNotExist(err) {
 		t.Fatalf("removed selector token bundle survived finalization: %v", err)
+	}
+}
+
+func TestWindowsManagedRuntimeGenerationGCAllowsAbsentHooksWithoutSelection(t *testing.T) {
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	if err := validateWindowsManagedRuntimeGenerationRoots(
+		fixture.options.DataDir,
+		fixture.target,
+	); err == nil {
+		t.Fatal("strict publication/verification root validator accepted absent hooks")
+	}
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     fixture.options.Connector,
+		Targets:       []windowsManagedRuntimeSelectorTarget{},
+	}); err != nil {
+		t.Fatalf("publish protected selector without target SID: %v", err)
+	}
+	before, err := os.Lstat(fixture.options.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+	if err != nil || removed != 0 {
+		t.Fatalf("collect empty pre-activation runtime: removed=%d err=%v", removed, err)
+	}
+	after, err := os.Lstat(fixture.options.DataDir)
+	if err != nil {
+		t.Fatalf("authenticated data root disappeared during empty GC: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("empty GC replaced the authenticated data root")
+	}
+	if err := validateWindowsUserPathElement(
+		fixture.options.DataDir,
+		fixture.target,
+		true,
+		true,
+		true,
+	); err != nil {
+		t.Fatalf("empty GC changed the authenticated data root: %v", err)
+	}
+	entries, err := os.ReadDir(fixture.options.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("empty GC created user-runtime children: %+v", entries)
+	}
+	if _, err := os.Lstat(filepath.Join(fixture.options.DataDir, "hooks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty GC created or substituted the absent hooks directory: %v", err)
+	}
+}
+
+func TestWindowsManagedRuntimeGenerationGCFailsClosedWhenSelectedHooksAreAbsent(t *testing.T) {
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	selector := windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     fixture.options.Connector,
+		Targets: []windowsManagedRuntimeSelectorTarget{
+			{
+				Connector:          fixture.options.Connector,
+				SID:                fixture.options.TargetSID,
+				DataDir:            fixture.options.DataDir,
+				HookExecutable:     fixture.options.HookExecutable,
+				GatewayAddr:        "127.0.0.1:18970",
+				GatewayServiceName: "DefenseClawGateway",
+				GenerationID:       strings.Repeat("a", 32),
+				BundleSHA256:       "sha256:" + strings.Repeat("b", 64),
+			},
+		},
+	}
+	if err := publishWindowsManagedRuntimeSelector(selector); err != nil {
+		t.Fatalf("publish protected selected-generation fixture: %v", err)
+	}
+
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+	if err == nil || !errors.Is(err, os.ErrNotExist) || removed != 0 {
+		t.Fatalf("selected generation with absent hooks did not fail closed: removed=%d err=%v", removed, err)
+	}
+	if !strings.Contains(err.Error(), "selected managed runtime generation directory is absent") {
+		t.Fatalf("selected absent-hooks failure lost its security boundary: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(fixture.options.DataDir, "hooks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed closed GC created or substituted the absent hooks directory: %v", err)
+	}
+	if err := validateWindowsUserPathElement(
+		fixture.options.DataDir,
+		fixture.target,
+		true,
+		true,
+		true,
+	); err != nil {
+		t.Fatalf("failed closed GC changed the authenticated data root: %v", err)
+	}
+}
+
+type windowsManagedRuntimeGenerationMissingHooksGCFixture struct {
+	options WindowsManagedRuntimeGenerationGCOptions
+	target  *windows.SID
+}
+
+func newWindowsManagedRuntimeGenerationMissingHooksGCFixture(
+	t *testing.T,
+) windowsManagedRuntimeGenerationMissingHooksGCFixture {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("resolve test SID: %v", err)
+	}
+	target := user.User.Sid
+	home := newWindowsTargetOwnedTestHome(t, target)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, dataDir, target); err != nil {
+		t.Fatalf("create protected data root without hooks: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "hooks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing-hooks fixture unexpectedly has a hooks child: %v", err)
+	}
+
+	policyDir := filepath.Join(t.TempDir(), "managed-policy")
+	selectorPath := filepath.Join(policyDir, windowsManagedRuntimeSelectorFile)
+	originalPath := windowsManagedRuntimeSelectorPathResolver
+	originalOwner := windowsManagedPolicyOwnerSID
+	originalDirTrust := windowsManagedPolicyDirTrustCheck
+	originalAncestorTrust := windowsManagedPolicyAncestorTrustCheck
+	originalFileTrust := windowsManagedPolicyFileTrustCheck
+	originalMutation := windowsManagedRuntimeSelectorMutationAuthorize
+	windowsManagedRuntimeSelectorPathResolver = func(string) (string, error) {
+		return selectorPath, nil
+	}
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return target, nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error { return nil }
+	t.Cleanup(func() {
+		windowsManagedRuntimeSelectorPathResolver = originalPath
+		windowsManagedPolicyOwnerSID = originalOwner
+		windowsManagedPolicyDirTrustCheck = originalDirTrust
+		windowsManagedPolicyAncestorTrustCheck = originalAncestorTrust
+		windowsManagedPolicyFileTrustCheck = originalFileTrust
+		windowsManagedRuntimeSelectorMutationAuthorize = originalMutation
+	})
+	if err := ensureWindowsManagedPolicyDirectory(policyDir); err != nil {
+		t.Fatalf("create protected selector fixture directory: %v", err)
+	}
+
+	return windowsManagedRuntimeGenerationMissingHooksGCFixture{
+		target: target,
+		options: WindowsManagedRuntimeGenerationGCOptions{
+			Connector:      "codex",
+			TargetSID:      target.String(),
+			DataDir:        dataDir,
+			HookExecutable: filepath.Join(home, "defenseclaw-hook.exe"),
+		},
 	}
 }
 
@@ -354,5 +537,139 @@ func TestWindowsManagedRuntimeGenerationPrimaryEnrollmentRemainsAuthoritative(t 
 	)
 	if err == nil || !strings.Contains(err.Error(), WindowsManagedSIDUnregisteredReason) {
 		t.Fatalf("unregistered primary policy was not rejected: %v", err)
+	}
+}
+
+func TestWindowsManagedRuntimeGenerationEqualityUsesConnectorScopedContractIdentity(t *testing.T) {
+	const (
+		targetSID   = "S-1-5-21-1000-1000-1000-1001"
+		dataDir     = `C:\Users\developer\.defenseclaw`
+		hookPath    = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+		gatewayAddr = "127.0.0.1:18970"
+		gatewayName = "DefenseClawGateway-Test"
+		finalLock   = "2026-08-24T10:00:03Z"
+	)
+	tests := []struct {
+		connector    string
+		contractID   string
+		entryUpdated string
+		lockUpdated  string
+	}{
+		{
+			connector:    "claudecode",
+			contractID:   "claudecode-hooks-v1",
+			entryUpdated: "2026-08-24T10:00:01Z",
+			lockUpdated:  "2026-08-24T10:00:01Z",
+		},
+		{
+			connector:    "codex",
+			contractID:   "codex-hooks-v1",
+			entryUpdated: "2026-08-24T10:00:02Z",
+			lockUpdated:  "2026-08-24T10:00:02Z",
+		},
+		{
+			connector:    "cursor",
+			contractID:   "cursor-hooks-v1",
+			entryUpdated: finalLock,
+			lockUpdated:  finalLock,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.connector, func(t *testing.T) {
+			published := WindowsManagedRuntimeGenerationDesired{
+				Connector:                  test.connector,
+				TargetSID:                  targetSID,
+				DataDir:                    dataDir,
+				HookExecutable:             hookPath,
+				GatewayAddr:                gatewayAddr,
+				GatewayServiceName:         gatewayName,
+				ScopedToken:                "scoped-" + test.connector + "-token",
+				HookContractID:             test.contractID,
+				HookContractLockUpdatedAt:  test.lockUpdated,
+				HookContractEntryUpdatedAt: test.entryUpdated,
+			}
+			bundle := windowsManagedRuntimeBundleFromDesired(
+				published,
+				strings.Repeat("a", 32),
+			)
+			current := published
+			// This models the shared lock after the last connector was added.
+			// Earlier connector entries remain unchanged even though updated_at
+			// on hook_contract_lock.json now reflects the Cursor write.
+			current.HookContractLockUpdatedAt = finalLock
+			if _, _, err := validateWindowsManagedRuntimeGenerationDesired(current); err != nil {
+				t.Fatalf("final desired contract is invalid: %v", err)
+			}
+			if !windowsManagedRuntimeBundleMatchesDesired(bundle, current) {
+				t.Fatal("peer connector lock update invalidated unchanged connector generation")
+			}
+
+			changedEntry := current
+			changedEntry.HookContractEntryUpdatedAt = "2026-08-24T10:00:00Z"
+			if windowsManagedRuntimeBundleMatchesDesired(bundle, changedEntry) {
+				t.Fatal("changed connector entry timestamp matched immutable generation")
+			}
+		})
+	}
+}
+
+func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContractDrift(t *testing.T) {
+	desired := WindowsManagedRuntimeGenerationDesired{
+		Connector:                  "codex",
+		TargetSID:                  "S-1-5-21-1000-1000-1000-1001",
+		DataDir:                    `C:\Users\developer\.defenseclaw`,
+		HookExecutable:             `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`,
+		GatewayAddr:                "127.0.0.1:18970",
+		GatewayServiceName:         "DefenseClawGateway-Test",
+		ScopedToken:                "scoped-codex-token",
+		HookContractID:             "codex-hooks-v1",
+		HookContractLockUpdatedAt:  "2026-08-24T10:00:03Z",
+		HookContractEntryUpdatedAt: "2026-08-24T10:00:02Z",
+	}
+	bundle := windowsManagedRuntimeBundleFromDesired(desired, strings.Repeat("b", 32))
+	tests := []struct {
+		name   string
+		mutate func(*windowsManagedRuntimeBundle, *WindowsManagedRuntimeGenerationDesired)
+	}{
+		{name: "connector", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.Connector = "cursor"
+		}},
+		{name: "target SID", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.TargetSID = "S-1-5-21-1000-1000-1000-1002"
+		}},
+		{name: "data directory", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.DataDir = `C:\Users\other\.defenseclaw`
+		}},
+		{name: "hook executable", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.HookExecutable = `C:\Program Files\DefenseClaw\other-hook.exe`
+		}},
+		{name: "gateway address", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.GatewayAddr = "127.0.0.1:18971"
+		}},
+		{name: "gateway service", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.GatewayServiceName = "DefenseClawGateway-Other"
+		}},
+		{name: "fail mode", mutate: func(got *windowsManagedRuntimeBundle, _ *WindowsManagedRuntimeGenerationDesired) {
+			got.FailMode = "open"
+		}},
+		{name: "scoped token", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.ScopedToken = "different-scoped-codex-token"
+		}},
+		{name: "hook contract ID", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.HookContractID = "codex-hooks-v2"
+		}},
+		{name: "connector entry timestamp", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
+			want.HookContractEntryUpdatedAt = "2026-08-24T10:00:01Z"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changedBundle := bundle
+			changedDesired := desired
+			test.mutate(&changedBundle, &changedDesired)
+			if windowsManagedRuntimeBundleMatchesDesired(changedBundle, changedDesired) {
+				t.Fatal("authenticated connector contract drift matched immutable generation")
+			}
+		})
 	}
 }

@@ -61,6 +61,7 @@ type WindowsManagedRuntimePlan struct {
 	SchemaVersion  int                             `json:"schema_version"`
 	ManifestPath   string                          `json:"manifest_path"`
 	ManifestSHA256 string                          `json:"manifest_sha256"`
+	TargetCount    int                             `json:"target_count"`
 	Roots          []WindowsManagedRuntimeRootPlan `json:"roots"`
 }
 
@@ -180,10 +181,24 @@ func PlanWindowsManagedRuntimeRoots(
 	if len(targets) > windowsManagedRuntimeMaxRoots {
 		return plan, fmt.Errorf("enterprise hooks: managed runtime plan has %d roots, maximum is %d", len(targets), windowsManagedRuntimeMaxRoots)
 	}
+	targetCount := 0
+	for _, row := range manifest.Targets {
+		if row.IsEnabled() {
+			targetCount++
+		}
+	}
+	if targetCount > windowsManagedRuntimeMaxRoots*3 {
+		return plan, fmt.Errorf(
+			"enterprise hooks: managed runtime plan has %d targets, maximum is %d",
+			targetCount,
+			windowsManagedRuntimeMaxRoots*3,
+		)
+	}
 	plan = WindowsManagedRuntimePlan{
 		SchemaVersion:  WindowsManagedRuntimePlanSchemaVersion,
 		ManifestPath:   manifestPath,
 		ManifestSHA256: manifestSHA256,
+		TargetCount:    targetCount,
 		Roots:          make([]WindowsManagedRuntimeRootPlan, 0, len(targets)),
 	}
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
@@ -1217,6 +1232,15 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 	targets, err := resolveWindowsManagedRuntimeTargets(manifest)
 	if err != nil {
 		return err
+	}
+	targetCount := 0
+	for _, row := range manifest.Targets {
+		if row.IsEnabled() {
+			targetCount++
+		}
+	}
+	if plan.TargetCount != targetCount || targetCount > windowsManagedRuntimeMaxRoots*3 {
+		return fmt.Errorf("enterprise hooks: managed runtime plan target count does not match manifest")
 	}
 	if len(plan.Roots) != len(targets) || len(plan.Roots) > windowsManagedRuntimeMaxRoots {
 		return fmt.Errorf("enterprise hooks: managed runtime plan root count does not match manifest")

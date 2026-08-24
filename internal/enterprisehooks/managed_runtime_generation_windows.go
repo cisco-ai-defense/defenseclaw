@@ -817,27 +817,71 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	} else if err != nil {
 		return 0, err
 	}
-	if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
-		return 0, err
+	// GC is also used to retire a committed lifecycle journal before Guardian
+	// has published the first immutable generation. Authenticate the existing
+	// target-owned data root independently so that an absent hooks child can be
+	// distinguished from an untrusted data root without weakening the strict
+	// two-root validator used by publication and verification.
+	if err := validateWindowsUserPathElement(
+		validated.DataDir,
+		target,
+		true,
+		true,
+		true,
+	); err != nil {
+		return 0, fmt.Errorf(
+			"enterprise hooks: managed runtime generation directory is untrusted: %w",
+			err,
+		)
 	}
 	err = withWindowsManagedRuntimeSelectorTransaction(validated.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(validated.Connector, true)
 		if err != nil {
 			return err
 		}
+		selected := false
 		if exists {
-			if selected, ok := windowsManagedRuntimeSelectorTargetForSID(selector, validated.TargetSID); ok {
-				if err := validateWindowsManagedRuntimeSelectorTargetAgainstSnapshot(selected, validated); err != nil {
+			if current, ok := windowsManagedRuntimeSelectorTargetForSID(selector, validated.TargetSID); ok {
+				if err := validateWindowsManagedRuntimeSelectorTargetAgainstSnapshot(current, validated); err != nil {
 					return err
 				}
-				preserve[selected.GenerationID] = struct{}{}
+				selected = true
+				preserve[current.GenerationID] = struct{}{}
 			}
 		}
-		hookDir := filepath.Join(validated.DataDir, "hooks")
-		entries, err := os.ReadDir(hookDir)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+
+		// Re-authenticate DataDir while holding the selector transaction before
+		// using selector absence to authorize the empty pre-activation case.
+		if err := validateWindowsUserPathElement(
+			validated.DataDir,
+			target,
+			true,
+			true,
+			true,
+		); err != nil {
+			return fmt.Errorf(
+				"enterprise hooks: managed runtime generation directory is untrusted: %w",
+				err,
+			)
 		}
+
+		hookDir := filepath.Join(validated.DataDir, "hooks")
+		if _, err := os.Lstat(hookDir); errors.Is(err, os.ErrNotExist) {
+			if selected {
+				return fmt.Errorf(
+					"enterprise hooks: selected managed runtime generation directory is absent: %w",
+					os.ErrNotExist,
+				)
+			}
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
+			return err
+		}
+
+		entries, err := os.ReadDir(hookDir)
 		if err != nil {
 			return err
 		}
@@ -1502,7 +1546,10 @@ func windowsManagedRuntimeBundleMatchesDesired(
 		bundle.FailMode == "closed" &&
 		subtle.ConstantTimeCompare([]byte(bundle.ScopedToken), []byte(desired.ScopedToken)) == 1 &&
 		bundle.HookContractID == desired.HookContractID &&
-		bundle.HookContractLockUpdatedAt == desired.HookContractLockUpdatedAt &&
+		// The lock timestamp is audit metadata for the shared, multi-connector
+		// hook_contract_lock.json. A later authenticated update to a different
+		// connector advances it without changing this connector's contract.
+		// HookContractEntryUpdatedAt is the stable connector-scoped identity.
 		bundle.HookContractEntryUpdatedAt == desired.HookContractEntryUpdatedAt
 }
 

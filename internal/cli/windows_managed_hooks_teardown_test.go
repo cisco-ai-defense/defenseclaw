@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
@@ -151,6 +152,285 @@ func TestWindowsManagedHooksTeardownTargetsRejectsExpansion(t *testing.T) {
 	}
 }
 
+func TestValidateWindowsManagedHooksTeardownActivationBindsManifest(t *testing.T) {
+	manifestSHA256 := strings.Repeat("a", 64)
+	valid := windowsManagedHooksActivationRecord{
+		SchemaVersion:          1,
+		DeploymentGenerationID: strings.Repeat("b", 32),
+		State:                  "never_activated",
+		ManifestSHA256:         manifestSHA256,
+		TargetCount:            3,
+	}
+	if _, err := validateWindowsManagedHooksTeardownActivation(
+		&valid,
+		manifestSHA256,
+		3,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		record *windowsManagedHooksActivationRecord
+		digest string
+		count  int
+	}{
+		{name: "missing record", digest: manifestSHA256, count: 3},
+		{name: "wrong schema", record: func() *windowsManagedHooksActivationRecord {
+			changed := valid
+			changed.SchemaVersion = 2
+			return &changed
+		}(), digest: manifestSHA256, count: 3},
+		{name: "invalid generation", record: func() *windowsManagedHooksActivationRecord {
+			changed := valid
+			changed.DeploymentGenerationID = strings.Repeat("B", 32)
+			return &changed
+		}(), digest: manifestSHA256, count: 3},
+		{name: "unknown state", record: func() *windowsManagedHooksActivationRecord {
+			changed := valid
+			changed.State = "unknown"
+			return &changed
+		}(), digest: manifestSHA256, count: 3},
+		{name: "manifest mismatch", record: &valid, digest: strings.Repeat("c", 64), count: 3},
+		{name: "target count mismatch", record: &valid, digest: manifestSHA256, count: 2},
+		{name: "target count exceeds bound", record: func() *windowsManagedHooksActivationRecord {
+			changed := valid
+			changed.TargetCount = windowsManagedHooksTeardownTargetMax + 1
+			return &changed
+		}(), digest: manifestSHA256, count: windowsManagedHooksTeardownTargetMax + 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := validateWindowsManagedHooksTeardownActivation(
+				test.record,
+				test.digest,
+				test.count,
+			); err == nil {
+				t.Fatal("invalid activation evidence was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateWindowsManagedHooksTeardownDeploymentBindsActionToCommitState(t *testing.T) {
+	manifestSHA256 := strings.Repeat("a", 64)
+	active := true
+	inactive := false
+	activation := &windowsManagedHooksActivationRecord{
+		SchemaVersion:          1,
+		DeploymentGenerationID: strings.Repeat("b", 32),
+		State:                  windowsManagedHooksNeverActivated,
+		ManifestSHA256:         manifestSHA256,
+		TargetCount:            3,
+	}
+
+	for _, action := range []string{"prepare", "verify", "rollback"} {
+		t.Run(action+" accepts active metadata", func(t *testing.T) {
+			_, err := validateWindowsManagedHooksTeardownDeployment(
+				windowsCodexDeploymentMetadata{
+					Installed:              &active,
+					ManagedHooksActivation: activation,
+				},
+				action,
+				manifestSHA256,
+				3,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+		t.Run(action+" rejects inactive tombstone", func(t *testing.T) {
+			_, err := validateWindowsManagedHooksTeardownDeployment(
+				windowsCodexDeploymentMetadata{
+					Installed:              &inactive,
+					ManagedHooksActivation: activation,
+				},
+				action,
+				manifestSHA256,
+				3,
+			)
+			if err == nil || !strings.Contains(err.Error(), "active deployment metadata") {
+				t.Fatalf("error = %v, want active deployment metadata rejection", err)
+			}
+		})
+	}
+
+	t.Run("finalize accepts authenticated inactive tombstone", func(t *testing.T) {
+		_, err := validateWindowsManagedHooksTeardownDeployment(
+			windowsCodexDeploymentMetadata{
+				Installed:              &inactive,
+				ManagedHooksActivation: activation,
+			},
+			"finalize",
+			manifestSHA256,
+			3,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, test := range []struct {
+		name       string
+		installed  *bool
+		activation *windowsManagedHooksActivationRecord
+	}{
+		{name: "active metadata", installed: &active, activation: activation},
+		{name: "legacy omitted installed flag", activation: activation},
+		{name: "missing activation", installed: &inactive},
+	} {
+		t.Run("finalize rejects "+test.name, func(t *testing.T) {
+			_, err := validateWindowsManagedHooksTeardownDeployment(
+				windowsCodexDeploymentMetadata{
+					Installed:              test.installed,
+					ManagedHooksActivation: test.activation,
+				},
+				"finalize",
+				manifestSHA256,
+				3,
+			)
+			if err == nil {
+				t.Fatal("invalid finalize deployment metadata was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateWindowsManagedHooksTeardownEnrollmentDistinguishesNoStart(t *testing.T) {
+	claudeTargets := []string{"S-1-5-21-111-222-333-1001"}
+	codexTargets := []connector.WindowsCodexManagedRuntimeTarget{{
+		SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+	}}
+	cursorTargets := []enterprisehooks.WindowsCursorManagedRuntimeTarget{{
+		SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+	}}
+
+	never := windowsManagedHooksTeardownJournal{ActivationState: "never_activated"}
+	never.ClaudeTargetSIDs, never.CodexPolicyActive, never.CodexTargets, never.CursorTargets =
+		windowsManagedHooksTeardownExpectedEnrollment(
+			never.ActivationState,
+			claudeTargets,
+			codexTargets,
+			cursorTargets,
+		)
+	if err := validateWindowsManagedHooksTeardownEnrollment(
+		never,
+		[]string{},
+		false,
+		connector.WindowsCodexManagedRuntimeRegistry{Active: true, Targets: []connector.WindowsCodexManagedRuntimeTarget{}},
+		[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWindowsManagedHooksTeardownEnrollment(
+		never,
+		[]string{},
+		false,
+		connector.WindowsCodexManagedRuntimeRegistry{},
+		[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+		false,
+	); err == nil {
+		t.Fatal("never-activated Codex policy absence was accepted for an enabled Codex manifest")
+	}
+	if err := validateWindowsManagedHooksTeardownEnrollment(
+		never,
+		claudeTargets,
+		true,
+		connector.WindowsCodexManagedRuntimeRegistry{Active: true, Targets: []connector.WindowsCodexManagedRuntimeTarget{}},
+		[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+		false,
+	); err == nil {
+		t.Fatal("never-activated Claude enrollment was accepted")
+	}
+	if err := validateWindowsManagedHooksTeardownEnrollment(
+		never,
+		[]string{},
+		false,
+		connector.WindowsCodexManagedRuntimeRegistry{Active: true, Targets: []connector.WindowsCodexManagedRuntimeTarget{}},
+		cursorTargets,
+		true,
+	); err == nil {
+		t.Fatal("never-activated Cursor enrollment was accepted")
+	}
+
+	activated := windowsManagedHooksTeardownJournal{ActivationState: "activated"}
+	activated.ClaudeTargetSIDs,
+		activated.CodexPolicyActive,
+		activated.CodexTargets,
+		activated.CursorTargets = windowsManagedHooksTeardownExpectedEnrollment(
+		activated.ActivationState,
+		claudeTargets,
+		codexTargets,
+		cursorTargets,
+	)
+	if err := validateWindowsManagedHooksTeardownEnrollment(
+		activated,
+		claudeTargets,
+		true,
+		connector.WindowsCodexManagedRuntimeRegistry{Active: true, Targets: codexTargets},
+		cursorTargets,
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWindowsManagedHooksTeardownEnrollment(
+		activated,
+		claudeTargets,
+		true,
+		connector.WindowsCodexManagedRuntimeRegistry{Active: true, Targets: []connector.WindowsCodexManagedRuntimeTarget{}},
+		cursorTargets,
+		true,
+	); err == nil {
+		t.Fatal("activated deployment with an emptied Codex registry was accepted")
+	}
+}
+
+func TestValidateWindowsManagedHooksTeardownJournalAcceptsExactNoStartPreimage(t *testing.T) {
+	targets := []windowsManagedHooksTeardownTarget{{
+		Connector: "codex",
+		SID:       "S-1-5-21-111-222-333-1001",
+		DataDir:   `C:\Users\alice\.defenseclaw`,
+	}}
+	fingerprint, err := windowsManagedHooksTeardownFingerprint(targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := windowsManagedHooksTeardownJournal{
+		SchemaVersion:          windowsManagedHooksTeardownJournalSchema,
+		Phase:                  "captured",
+		ManifestPath:           `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		ManifestSHA256:         strings.Repeat("a", 64),
+		ManifestFingerprint:    fingerprint,
+		ActivationState:        "never_activated",
+		DeploymentGenerationID: strings.Repeat("b", 32),
+		HookBinary:             `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:            "127.0.0.1:18970",
+		GatewayServiceName:     "DefenseClawGateway",
+		Targets:                targets,
+		ClaudeTargetSIDs:       []string{},
+		CodexPolicyActive:      true,
+		CodexTargets:           []connector.WindowsCodexManagedRuntimeTarget{},
+		CursorTargets:          []enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+		SelectorTargets: []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot{{
+			SchemaVersion: 1,
+			Connector:     "codex",
+			TargetSID:     targets[0].SID,
+		}},
+	}
+	if err := validateWindowsManagedHooksTeardownJournal(identity, identity); err != nil {
+		t.Fatal(err)
+	}
+	tampered := identity
+	tampered.SelectorTargets = append(
+		[]enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot(nil),
+		identity.SelectorTargets...,
+	)
+	tampered.SelectorTargets[0].Existed = true
+	if err := validateWindowsManagedHooksTeardownJournal(tampered, identity); err == nil {
+		t.Fatal("never-activated journal with a selector enrollment was accepted")
+	}
+}
+
 func TestValidateWindowsManagedHooksTeardownJournalRejectsIdentityChanges(t *testing.T) {
 	targets := []windowsManagedHooksTeardownTarget{{
 		Connector:    "codex",
@@ -163,14 +443,21 @@ func TestValidateWindowsManagedHooksTeardownJournalRejectsIdentityChanges(t *tes
 		t.Fatal(err)
 	}
 	identity := windowsManagedHooksTeardownJournal{
-		SchemaVersion:       windowsManagedHooksTeardownSchema,
-		Phase:               "prepared",
-		ManifestPath:        `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
-		ManifestFingerprint: fingerprint,
-		HookBinary:          `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
-		GatewayAddr:         "127.0.0.1:18970",
-		GatewayServiceName:  "DefenseClawGateway",
-		Targets:             targets,
+		SchemaVersion:          windowsManagedHooksTeardownJournalSchema,
+		Phase:                  "prepared",
+		ManifestPath:           `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		ManifestSHA256:         strings.Repeat("a", 64),
+		ManifestFingerprint:    fingerprint,
+		ActivationState:        "activated",
+		DeploymentGenerationID: strings.Repeat("b", 32),
+		HookBinary:             `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:            "127.0.0.1:18970",
+		GatewayServiceName:     "DefenseClawGateway",
+		Targets:                targets,
+		CodexPolicyActive:      true,
+		CodexTargets: []connector.WindowsCodexManagedRuntimeTarget{{
+			SID: targets[0].SID, DataDir: targets[0].DataDir,
+		}},
 	}
 	selectorBody := []byte("canonical-secretless-selector-target\n")
 	selectorDigestBytes := sha256.Sum256(selectorBody)

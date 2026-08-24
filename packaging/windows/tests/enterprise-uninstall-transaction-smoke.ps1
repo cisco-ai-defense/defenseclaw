@@ -129,7 +129,7 @@ try {
                     -Force | Microsoft.PowerShell.Core\Out-Null
             }
             $body = [Text.Encoding]::UTF8.GetBytes(
-                ('{{"schema_version":4,"phase":"{0}","nonce":"fixed"}}' -f $Phase)
+                ('{{"schema_version":5,"phase":"{0}","nonce":"fixed"}}' -f $Phase)
             )
             [IO.File]::WriteAllBytes($Path, $body)
         }
@@ -237,6 +237,13 @@ try {
                 RuntimeDirectory = (
                     Microsoft.PowerShell.Management\Join-Path $stateRoot 'runtime'
                 )
+                RedactionCorrelationKeyPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        (Microsoft.PowerShell.Management\Join-Path `
+                            $stateRoot `
+                            'runtime') `
+                        'redaction-correlation.key'
+                )
                 ManagedIPCDirectory = $managedIPCDirectory
                 ManagedIPCSocketPath = (
                     Microsoft.PowerShell.Management\Join-Path `
@@ -308,6 +315,26 @@ try {
                 )
                 CodexVendorDirectory = $codexVendorDirectory
                 CodexMachinePolicyDirectory = $codexMachinePolicyDirectory
+                CodexMachinePolicyPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $codexMachinePolicyDirectory `
+                        'requirements.toml'
+                )
+                CodexManagedHooksStatePath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $codexMachinePolicyDirectory `
+                        '.defenseclaw-managed-hooks.state'
+                )
+                CodexRequirementsOwnershipPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $installState `
+                        'codex-requirements-ownership.json'
+                )
+                CodexRequirementsAclBackupPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $installState `
+                        'codex-requirements-acl-backup.json'
+                )
                 CodexManagedHooksLockPath = (
                     Microsoft.PowerShell.Management\Join-Path `
                         $codexMachinePolicyDirectory `
@@ -355,6 +382,8 @@ try {
             }
             $snapshot = [ordered]@{
                 schema_version = 1
+                id = ('1' * 32)
+                directory = [string]$Layout.StateRoot
                 gateway_service = 'DefenseClawGateway'
                 guardian_service = 'DefenseClawHookGuardian'
                 service_activation_phase = 'quiesced'
@@ -851,10 +880,32 @@ try {
                     -PathType Leaf)) {
                 return $null
             }
-            return [pscustomobject]@{
+            $result = [ordered]@{
                 installed = [bool]$script:HarnessState.installed
                 codex_target_enabled = $false
             }
+            if ($script:HarnessState.ContainsKey(
+                    'managed_hooks_activation'
+                ) -and
+                $null -ne $script:HarnessState.managed_hooks_activation) {
+                $result['managed_hooks_activation'] =
+                    $script:HarnessState.managed_hooks_activation
+            }
+            elseif ([bool]$script:HarnessState.installed -and
+                (-not $script:HarnessState.ContainsKey(
+                    'legacy_activation_missing'
+                ) -or
+                -not [bool]$script:HarnessState.legacy_activation_missing)) {
+                $result['managed_hooks_activation'] =
+                    [pscustomobject][ordered]@{
+                    schema_version = 1
+                    deployment_generation_id = ('1' * 32)
+                    state = 'activated'
+                    manifest_sha256 = ('a' * 64)
+                    target_count = 1
+                }
+            }
+            return [pscustomobject]$result
         }
         function script:Assert-DefenseClawMetadataIdentity {
             param(
@@ -1007,6 +1058,35 @@ try {
                 ),
                 [Text.UTF8Encoding]::new($false)
             )
+            if ($script:HarnessState.ContainsKey(
+                    'legacy_lifecycle_recovery'
+                ) -and
+                [bool]$script:HarnessState.legacy_lifecycle_recovery -and
+                $script:HarnessState.ContainsKey('snapshot_path') -and
+                [string]::Equals(
+                    $Path,
+                    [string]$script:HarnessState.snapshot_path,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                $bindingProperty = $Value.PSObject.Properties[
+                    'managed_hooks_lifecycle_recovery'
+                ]
+                if ($null -ne $bindingProperty -and
+                    $null -ne $bindingProperty.Value) {
+                    $bindingStateProperty =
+                        $bindingProperty.Value.PSObject.Properties['state']
+                    if ($null -ne $bindingStateProperty -and
+                        [string]$bindingStateProperty.Value -in @(
+                            'recorded',
+                            'adopted'
+                        )) {
+                        $script:HarnessState.events.Add(
+                            'lifecycle-recovery-binding-' +
+                            [string]$bindingStateProperty.Value
+                        )
+                    }
+                }
+            }
             if ($isPurgeIntent) {
                 $script:HarnessState.events.Add('purge-intent-write')
             }
@@ -1020,6 +1100,7 @@ try {
                 [switch]$IncludeCodexMachineState,
                 [switch]$ManagedHooksTeardownPrepared,
                 [switch]$PreserveManagedHooksTeardownJournal,
+                [switch]$RecoverLegacyManagedHooksLifecycleJournal,
                 [switch]$InstallRootCreatedForTransaction,
                 [switch]$StateRootCreatedForTransaction
             )
@@ -1097,6 +1178,94 @@ try {
                     -PreimageSHA256 '' `
                     -ServicesRunning:$false `
                     -ServicesExisted:$servicesExisted
+                if ($script:HarnessState.ContainsKey(
+                        'legacy_lifecycle_recovery'
+                    ) -and
+                    [bool]$script:HarnessState.legacy_lifecycle_recovery) {
+                    if (-not $RecoverLegacyManagedHooksLifecycleJournal) {
+                        throw 'legacy recovery transaction omitted its explicit preimage contract'
+                    }
+                    $transactionID = ('1' * 32)
+                    $transactionDirectory =
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $Layout.TransactionsDirectory `
+                            $transactionID
+                    Microsoft.PowerShell.Management\New-Item `
+                        -ItemType Directory `
+                        -Path $transactionDirectory `
+                        -Force | Microsoft.PowerShell.Core\Out-Null
+                    $journalBackup =
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $transactionDirectory `
+                            'managed-hooks-lifecycle-journal.v3.preimage'
+                    $gatewayBackup =
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $transactionDirectory `
+                            'defenseclaw-gateway.exe.preimage'
+                    Microsoft.PowerShell.Management\Copy-Item `
+                        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+                        -Destination $journalBackup `
+                        -Force
+                    Microsoft.PowerShell.Management\Copy-Item `
+                        -LiteralPath $Layout.GatewayPath `
+                        -Destination $gatewayBackup `
+                        -Force
+                    $transaction =
+                        Microsoft.PowerShell.Management\Get-Content `
+                            -LiteralPath $snapshotPath `
+                            -Raw |
+                            Microsoft.PowerShell.Utility\ConvertFrom-Json
+                    $transaction.directory = $transactionDirectory
+                    $journalIdentity = Get-DefenseClawFileIdentity `
+                        -Path $Layout.ManagedHooksLifecycleJournalPath
+                    $journalSHA256 = (
+                        Microsoft.PowerShell.Utility\Get-FileHash `
+                            -LiteralPath `
+                                $Layout.ManagedHooksLifecycleJournalPath `
+                            -Algorithm SHA256
+                    ).Hash.ToLowerInvariant()
+                    $transaction |
+                        Microsoft.PowerShell.Utility\Add-Member `
+                            -MemberType NoteProperty `
+                            -Name managed_hooks_lifecycle_legacy_preimage `
+                            -Value ([pscustomobject][ordered]@{
+                                schema_version = 1
+                                transaction_id = $transactionID
+                                journal_path = [string](
+                                    $Layout.ManagedHooksLifecycleJournalPath
+                                )
+                                journal_file_identity = $journalIdentity
+                                journal_sha256 = $journalSHA256
+                                journal_schema_version = 3
+                                journal_phase = 'captured'
+                            }) `
+                            -Force
+                    $transaction.files = @($transaction.files) + @(
+                        [pscustomobject][ordered]@{
+                            path = [string](
+                                $Layout.ManagedHooksLifecycleJournalPath
+                            )
+                            existed = $true
+                            backup = $journalBackup
+                            security_descriptor = ''
+                        },
+                        [pscustomobject][ordered]@{
+                            path = [string]$Layout.GatewayPath
+                            existed = $true
+                            backup = $gatewayBackup
+                            security_descriptor = ''
+                        }
+                    )
+                    [IO.File]::WriteAllText(
+                        $snapshotPath,
+                        (
+                            $transaction |
+                                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                                    -Depth 16
+                        ),
+                        [Text.UTF8Encoding]::new($false)
+                    )
+                }
                 $script:HarnessState.snapshot_path = $snapshotPath
                 return $snapshotPath
             }
@@ -1143,6 +1312,24 @@ try {
                 [string]$Action
             )
             $script:HarnessState.events.Add("teardown:$Action")
+            $currentMetadata = Get-DefenseClawDeploymentMetadata `
+                -Layout $Layout `
+                -Required
+            $activationProperty = $currentMetadata.PSObject.Properties[
+                'managed_hooks_activation'
+            ]
+            if ($null -eq $activationProperty -or
+                $null -eq $activationProperty.Value) {
+                throw "teardown $Action lost protected activation evidence"
+            }
+            if ($Action -ceq 'finalize') {
+                if ([bool]$currentMetadata.installed) {
+                    throw 'teardown finalize did not observe an inactive tombstone'
+                }
+            }
+            elseif (-not [bool]$currentMetadata.installed) {
+                throw "teardown $Action did not observe active deployment metadata"
+            }
             switch ($Action) {
                 'prepare' {
                     $script:HarnessState.prepare_calls++
@@ -1265,13 +1452,47 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)]
-                [ValidateSet('capture', 'restore', 'retire')]
+                [ValidateSet(
+                    'capture',
+                    'restore',
+                    'retire',
+                    'retire-committed',
+                    'classify-activation'
+                )]
                 [string]$Action
             )
             $null = $GatewayServiceName
             $script:HarnessState.events.Add("lifecycle-snapshot:$Action")
             switch ($Action) {
                 'capture' {
+                    if ($script:HarnessState.ContainsKey(
+                            'legacy_lifecycle_recovery'
+                        ) -and
+                        [bool]$script:HarnessState.legacy_lifecycle_recovery) {
+                        $transaction =
+                            Microsoft.PowerShell.Management\Get-Content `
+                                -LiteralPath $script:HarnessState.snapshot_path `
+                                -Raw |
+                                Microsoft.PowerShell.Utility\ConvertFrom-Json
+                        $binding =
+                            $transaction.PSObject.Properties[
+                                'managed_hooks_lifecycle_recovery'
+                            ]
+                        if ($null -eq $binding -or
+                            [string]$binding.Value.state -cne 'adopted' -or
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath `
+                                    ([string]$binding.Value.quarantine_path) `
+                                -PathType Leaf) -or
+                            (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath `
+                                    $Layout.ManagedHooksLifecycleJournalPath)) {
+                            throw (
+                                'current lifecycle capture preceded exact ' +
+                                'stale-journal adoption'
+                            )
+                        }
+                    }
                     if ($script:HarnessState.ContainsKey(
                             'track_fresh_install_services'
                         ) -and
@@ -1304,7 +1525,10 @@ try {
                     )
                     [IO.File]::WriteAllText(
                         $Layout.ManagedHooksLifecycleJournalPath,
-                        '{"schema_version":1,"phase":"captured"}',
+                        (
+                            '{"schema_version":4,"phase":"captured",' +
+                            '"transaction_id":"' + ('1' * 32) + '"}'
+                        ),
                         [Text.UTF8Encoding]::new($false)
                     )
                     if ($script:HarnessState.ContainsKey(
@@ -1331,6 +1555,90 @@ try {
                         Microsoft.PowerShell.Management\Remove-Item `
                             -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
                             -Force
+                    }
+                }
+                'classify-activation' {
+                    $transaction = Microsoft.PowerShell.Management\Get-Content `
+                        -LiteralPath $script:HarnessState.snapshot_path `
+                        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+                    return [pscustomobject]@{
+                        ok = $true
+                        action = $Action
+                        phase = 'classified'
+                        transaction_id = [string]$transaction.id
+                        legacy_activation_state = if (
+                            $script:HarnessState.ContainsKey(
+                                'legacy_activation_state'
+                            )
+                        ) {
+                            [string]$script:HarnessState.legacy_activation_state
+                        }
+                        else {
+                            'never_activated'
+                        }
+                    }
+                }
+                'retire-committed' {
+                    if (-not $script:HarnessState.ContainsKey(
+                            'legacy_lifecycle_recovery'
+                        ) -or
+                        -not [bool](
+                            $script:HarnessState.legacy_lifecycle_recovery
+                        )) {
+                        throw 'unexpected stale lifecycle recovery in this fixture'
+                    }
+                    $transaction =
+                        Microsoft.PowerShell.Management\Get-Content `
+                            -LiteralPath $script:HarnessState.snapshot_path `
+                            -Raw |
+                            Microsoft.PowerShell.Utility\ConvertFrom-Json
+                    $bindingProperty =
+                        $transaction.PSObject.Properties[
+                            'managed_hooks_lifecycle_recovery'
+                        ]
+                    if ($null -eq $bindingProperty -or
+                        [string]$bindingProperty.Value.state -cne 'recorded') {
+                        throw 'retire-committed did not receive a recorded binding'
+                    }
+                    $binding = $bindingProperty.Value
+                    if (-not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath ([string]$binding.journal_path) `
+                            -PathType Leaf) -or
+                        (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath ([string]$binding.quarantine_path))) {
+                        throw 'retire-committed received an ambiguous journal state'
+                    }
+                    # Production performs bounded immutable-generation GC
+                    # before it makes the legacy journal name unavailable.
+                    # Keep both events observable so crash-prefix tests prove
+                    # that adoption never gets ahead of cleanup.
+                    $script:HarnessState.events.Add(
+                        'lifecycle-generation-gc'
+                    )
+                    [IO.File]::Move(
+                        [string]$binding.journal_path,
+                        [string]$binding.quarantine_path
+                    )
+                    $script:HarnessState.events.Add(
+                        'lifecycle-journal-quarantined'
+                    )
+                    return [pscustomobject][ordered]@{
+                        ok = $true
+                        action = $Action
+                        phase = 'adopted'
+                        adopted = $true
+                        transaction_id = [string]$binding.transaction_id
+                        quarantine_path = [string]$binding.quarantine_path
+                        legacy_activation_state = if (
+                            $script:HarnessState.ContainsKey(
+                                'legacy_activation_state'
+                            )
+                        ) {
+                            [string]$script:HarnessState.legacy_activation_state
+                        }
+                        else {
+                            'never_activated'
+                        }
                     }
                 }
             }
@@ -1549,12 +1857,21 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                $ManagedHooksActivation,
                 [bool]$Installed = $true
             )
+            if ($null -eq $ManagedHooksActivation) {
+                throw 'deployment metadata fixture lost managed-hook activation evidence'
+            }
             $script:HarnessState.installed = [bool]$Installed
+            if ($null -ne $ManagedHooksActivation) {
+                $script:HarnessState.managed_hooks_activation =
+                    $ManagedHooksActivation
+            }
             return [pscustomobject]@{
                 installed = [bool]$Installed
                 hashes = [ordered]@{ prior = 'hash' }
+                managed_hooks_activation = $ManagedHooksActivation
             }
         }
         function script:Set-DefenseClawPreservedStateAcls {
@@ -2079,11 +2396,16 @@ try {
                     -Path $parent `
                     -Force | Microsoft.PowerShell.Core\Out-Null
             }
-            [IO.File]::WriteAllText(
-                $Destination,
-                [string]$Source,
-                [Text.UTF8Encoding]::new($false)
-            )
+            if (-not [string]::IsNullOrWhiteSpace($sourcePath)) {
+                [IO.File]::Copy($sourcePath, $Destination, $true)
+            }
+            else {
+                [IO.File]::WriteAllText(
+                    $Destination,
+                    [string]$Source,
+                    [Text.UTF8Encoding]::new($false)
+                )
+            }
             if ([string]::Equals(
                 $Destination,
                 [string]$script:HarnessState.layout.HookPath,
@@ -2098,6 +2420,38 @@ try {
             )) {
                 $script:HarnessState.events.Add('manifest-published')
             }
+        }
+        function script:Assert-DefenseClawSourceDescriptorCurrent {
+            param([Parameter(Mandatory)][hashtable]$Source)
+            foreach ($required in @(
+                'path',
+                'label',
+                'authenticode',
+                'allow_unsigned',
+                'sha256'
+            )) {
+                if (-not $Source.ContainsKey($required)) {
+                    throw "lifecycle source descriptor is missing $required"
+                }
+            }
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath ([string]$Source.path) `
+                    -PathType Leaf)) {
+                throw 'lifecycle source descriptor path is missing'
+            }
+            $actualSHA256 = (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath ([string]$Source.path) `
+                    -Algorithm SHA256
+            ).Hash
+            if (-not [string]::Equals(
+                    $actualSHA256,
+                    [string]$Source.sha256,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw 'lifecycle source descriptor digest changed'
+            }
+            return $Source
         }
         function script:Test-DefenseClawSourceDescriptorPublishesReplacement {
             param(
@@ -2377,7 +2731,15 @@ try {
             if ($AlreadyUninstalled) {
                 [IO.File]::WriteAllText(
                     $layout.MetadataPath,
-                    '{"installed":false}',
+                    (
+                        '{"schema_version":1,"installed":false,' +
+                        '"managed_hooks_activation":{' +
+                        '"schema_version":1,' +
+                        '"deployment_generation_id":"' + ('1' * 32) + '",' +
+                        '"state":"activated",' +
+                        '"manifest_sha256":"' + ('a' * 64) + '",' +
+                        '"target_count":1}}'
+                    ),
                     [Text.UTF8Encoding]::new($false)
                 )
                 if (-not $PreexistingPrepared) {
@@ -2394,6 +2756,18 @@ try {
                 active_references = $InitialReferences
                 binary_present = -not $AlreadyUninstalled
                 installed = -not $AlreadyUninstalled
+                managed_hooks_activation = if ($AlreadyUninstalled) {
+                    [pscustomobject][ordered]@{
+                        schema_version = 1
+                        deployment_generation_id = ('1' * 32)
+                        state = 'activated'
+                        manifest_sha256 = ('a' * 64)
+                        target_count = 1
+                    }
+                }
+                else {
+                    $null
+                }
                 guardian_running = $ServicesRunning
                 gateway_running = $ServicesRunning
                 services_running = $ServicesRunning
@@ -2846,6 +3220,7 @@ try {
                             Get-HarnessSHA256 `
                                 -Bytes ([IO.File]::ReadAllBytes($manifestPath))
                         )
+                        target_count = 1
                         roots = @([pscustomobject]$root)
                     }
                     $script:HarnessState.target_runtime_manifest_sha256 =
@@ -3446,10 +3821,28 @@ targets:
                 '{"schema_version":1,"installed":false}',
                 [Text.UTF8Encoding]::new($false)
             )
+            $legacyManifest = @'
+version: 1
+targets:
+  - connector: claudecode
+    sid: S-1-5-21-111-222-333-1001
+    user_home: C:\Users\Alice
+    data_dir: C:\Users\Alice\.defenseclaw
+    agent_version: 2.1.152
+    enabled: true
+'@
+            [IO.File]::WriteAllText(
+                $layout.ManifestPath,
+                $legacyManifest,
+                [Text.UTF8Encoding]::new($false)
+            )
             $oldJournal = [ordered]@{
                 schema_version = 4
                 phase = 'finalized'
-                manifest_fingerprint = ('a' * 64)
+                manifest_path = [string]$layout.ManifestPath
+                manifest_fingerprint = 'sha256:' + ('a' * 64)
+                hook_binary = [string]$layout.HookPath
+                gateway_addr = 'npipe://defenseclaw'
                 gateway_service_name = 'DEFENSECLAWGATEWAY'
                 targets = @(
                     [ordered]@{
@@ -3459,6 +3852,11 @@ targets:
                         agent_version = '2.1.152'
                     }
                 )
+                claude_target_sids = @('S-1-5-21-111-222-333-1001')
+                claude = [ordered]@{}
+                cursor_targets = @()
+                cursor = [ordered]@{}
+                selector_targets = @()
             }
             [IO.File]::WriteAllText(
                 $layout.ManagedHooksTeardownJournalPath,
@@ -3477,6 +3875,7 @@ targets:
                 active_references = $false
                 binary_present = $false
                 installed = $false
+                managed_hooks_activation = $null
                 guardian_running = $false
                 gateway_running = $false
                 services_running = $false
@@ -3910,6 +4309,599 @@ targets:
             })
         }
 
+        function Invoke-HarnessLegacyCapturedJournalUpgradeSequence {
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label 'legacy-captured-journal-upgrade'
+            $layout = New-HarnessLayout -Root $root
+            $manifest = @'
+version: 1
+targets:
+  - connector: claudecode
+    sid: S-1-5-21-111-222-333-1001
+    user_home: C:\Users\Alice
+    data_dir: C:\Users\Alice\.defenseclaw
+    agent_version: 2.9.999
+    enabled: true
+'@
+            foreach ($entry in @(
+                @($layout.GatewayPath, 'legacy-gateway'),
+                @($layout.BrokerPath, 'legacy-broker'),
+                @($layout.HookPath, 'legacy-hook'),
+                @($layout.InstallerPath, 'legacy-installer'),
+                @($layout.ModulePath, 'legacy-module'),
+                @($layout.ConfigPath, 'listen_addr: 127.0.0.1:18969'),
+                @($layout.ManifestPath, $manifest),
+                @($layout.ProviderLibraryPath, 'provider-fixture'),
+                @($layout.MetadataPath, '{"installed":true}')
+            )) {
+                $parent = [IO.Path]::GetDirectoryName([string]$entry[0])
+                if (-not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $parent `
+                        -PathType Container)) {
+                    Microsoft.PowerShell.Management\New-Item `
+                        -ItemType Directory `
+                        -Path $parent `
+                        -Force | Microsoft.PowerShell.Core\Out-Null
+                }
+                [IO.File]::WriteAllText(
+                    [string]$entry[0],
+                    [string]$entry[1],
+                    [Text.UTF8Encoding]::new($false)
+                )
+            }
+            [IO.File]::WriteAllText(
+                $layout.ManagedHooksLifecycleJournalPath,
+                (
+                    '{"schema_version":3,"phase":"captured",' +
+                    '"legacy_fixture":true}'
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            & $script:HarnessRealSetPathAcl `
+                -Path $layout.ManifestPath `
+                -Kind AdminFile `
+                -GatewayServiceSID $script:AdministratorsSID
+
+            $replacementGateway =
+                Microsoft.PowerShell.Management\Join-Path `
+                    $root `
+                    'replacement-gateway.exe'
+            [IO.File]::WriteAllText(
+                $replacementGateway,
+                'fixed-gateway-with-retire-committed',
+                [Text.UTF8Encoding]::new($false)
+            )
+            $gatewaySource = @{
+                path = $replacementGateway
+                label = 'gateway executable'
+                authenticode = $false
+                allow_unsigned = $true
+                sha256 = (
+                    Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $replacementGateway `
+                        -Algorithm SHA256
+                ).Hash
+            }
+            $sources = @{
+                broker = 'replacement-broker'
+                gateway = $gatewaySource
+                hook = 'replacement-hook'
+                installer = 'replacement-installer'
+                module = 'replacement-module'
+                config = 'listen_addr: 127.0.0.1:18970'
+                manifest = $manifest
+                provider_library = [pscustomobject]@{
+                    path = $layout.ProviderLibraryPath
+                }
+            }
+            $script:HarnessState = @{
+                operation = 'install'
+                crash_at = ''
+                events = [Collections.Generic.List[string]]::new()
+                layout = $layout
+                active_references = $false
+                lifecycle_preimage_active = $false
+                binary_present = $true
+                installed = $true
+                legacy_activation_missing = $true
+                legacy_activation_state = 'never_activated'
+                legacy_lifecycle_recovery = $true
+                guardian_running = $false
+                gateway_running = $false
+                services_running = $false
+                services_were_running = $false
+                reheal_observed = $false
+                prepare_while_guardian_running = $false
+                transaction_calls = 0
+                prepare_calls = 0
+                verify_calls = 0
+                rollback_calls = 0
+                restore_calls = 0
+                complete_calls = 0
+                service_contract_checks = 0
+                owned_checks = 0
+                removed_services = 0
+                purged_state = $false
+                install_saw_retired_journal = $false
+                snapshot_path = ''
+                service_start_modes = @{
+                    DefenseClawGateway = 4
+                    DefenseClawCMIDBroker = 4
+                    DefenseClawHookGuardian = 4
+                    DefenseClawHookEnumerator = 4
+                }
+                service_exists = @{
+                    DefenseClawGateway = $true
+                    DefenseClawCMIDBroker = $true
+                    DefenseClawHookGuardian = $true
+                    DefenseClawHookEnumerator = $true
+                }
+                ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
+                guardian_fresh = $false
+                queued_gateway_restart = $false
+                queued_restart_blocked = $true
+                gateway_started_before_guardian = $false
+                barrier_required = $true
+                barrier_complete = $false
+                manifest_admin_acl = $false
+            }
+
+            $result = Invoke-DefenseClawInstallLikeLifecycle `
+                -Action Upgrade `
+                -Layout $layout `
+                -Sources $sources `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian' `
+                -NoStart
+            $recorded = $script:HarnessState.events.IndexOf(
+                'lifecycle-recovery-binding-recorded'
+            )
+            $adoption = $script:HarnessState.events.IndexOf(
+                'lifecycle-snapshot:retire-committed'
+            )
+            $adopted = $script:HarnessState.events.IndexOf(
+                'lifecycle-recovery-binding-adopted'
+            )
+            $capture = $script:HarnessState.events.IndexOf(
+                'lifecycle-snapshot:capture'
+            )
+            $classification = $script:HarnessState.events.LastIndexOf(
+                'lifecycle-snapshot:classify-activation'
+            )
+            $complete = $script:HarnessState.events.IndexOf('complete')
+            $retire = $script:HarnessState.events.LastIndexOf(
+                'lifecycle-snapshot:retire'
+            )
+            Assert-Harness `
+                -Condition (
+                    [bool]$result.ok -and
+                    $recorded -ge 0 -and
+                    $adoption -gt $recorded -and
+                    $adopted -gt $adoption -and
+                    $capture -gt $adopted -and
+                    $classification -gt $capture -and
+                    $complete -gt $classification -and
+                    $retire -gt $complete
+                ) `
+                -Message (
+                    'legacy captured-journal Upgrade violated ' +
+                    'binding/adoption/capture/classification/commit ordering'
+                )
+            Assert-Harness `
+                -Condition (
+                    -not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath `
+                            $layout.ManagedHooksLifecycleJournalPath) -and
+                    [string]$script:HarnessState.managed_hooks_activation.state `
+                        -ceq 'never_activated'
+                ) `
+                -Message 'legacy captured-journal Upgrade did not commit exact no-start activation state'
+            $uninstallResults.Add([pscustomobject]@{
+                name = 'legacy-schema3-captured-journal-upgrade'
+                failed = $false
+                rollback = $script:HarnessState.restore_calls
+                service_contract_checks = (
+                    $script:HarnessState.service_contract_checks
+                )
+                no_surviving_reference_before_delete = $true
+            })
+
+            # A schema-4 journal can be the valid post-commit residue of this
+            # installed helper. It must take the direct retirement lane before
+            # the next transaction, never the schema-3 replacement/adoption
+            # lane above.
+            [IO.File]::WriteAllText(
+                $layout.ManagedHooksLifecycleJournalPath,
+                (
+                    '{"schema_version":4,"phase":"captured",' +
+                    '"transaction_id":"' + ('1' * 32) + '"}'
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            $currentState = $script:HarnessState.Clone()
+            $currentState.events =
+                [Collections.Generic.List[string]]::new()
+            $currentState.legacy_lifecycle_recovery = $false
+            $currentState.legacy_activation_missing = $false
+            $currentState.legacy_activation_state = 'never_activated'
+            $currentState.transaction_calls = 0
+            $currentState.restore_calls = 0
+            $currentState.complete_calls = 0
+            $currentState.service_contract_checks = 0
+            $currentState.owned_checks = 0
+            $currentState.removed_services = 0
+            $currentState.snapshot_path = ''
+            $currentState.manifest_admin_acl = $false
+            $currentState.managed_hooks_activation =
+                [pscustomobject][ordered]@{
+                    schema_version = 1
+                    deployment_generation_id = ('1' * 32)
+                    state = 'never_activated'
+                    manifest_sha256 = ('a' * 64)
+                    target_count = 1
+                }
+            $script:HarnessState = $currentState
+            $currentResult = Invoke-DefenseClawInstallLikeLifecycle `
+                -Action Upgrade `
+                -Layout $layout `
+                -Sources $sources `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian' `
+                -NoStart
+            $directRetire = $script:HarnessState.events.IndexOf(
+                'lifecycle-snapshot:retire'
+            )
+            $currentTransaction = $script:HarnessState.events.IndexOf(
+                'transaction'
+            )
+            Assert-Harness `
+                -Condition (
+                    [bool]$currentResult.ok -and
+                    $directRetire -ge 0 -and
+                    $currentTransaction -gt $directRetire -and
+                    $script:HarnessState.events.IndexOf(
+                        'lifecycle-snapshot:retire-committed'
+                    ) -lt 0
+                ) `
+                -Message (
+                    'current schema-4 post-commit journal did not retire ' +
+                    'directly before the Upgrade transaction'
+                )
+            $uninstallResults.Add([pscustomobject]@{
+                name = 'current-schema4-post-commit-direct-retirement'
+                failed = $false
+                rollback = $script:HarnessState.restore_calls
+                service_contract_checks = (
+                    $script:HarnessState.service_contract_checks
+                )
+                no_surviving_reference_before_delete = $true
+            })
+        }
+
+        function Invoke-HarnessLegacyRecoveryCrashPrefixCases {
+            foreach ($case in @(
+                [pscustomobject]@{
+                    name = 'replacement-staged-before-binding'
+                    binding_state = ''
+                    journal_location = 'canonical'
+                    capture = $false
+                    seeded_cleanup = $false
+                },
+                [pscustomobject]@{
+                    name = 'binding-recorded-before-rename'
+                    binding_state = 'recorded'
+                    journal_location = 'canonical'
+                    capture = $false
+                    seeded_cleanup = $false
+                },
+                [pscustomobject]@{
+                    name = 'rename-before-adoption-receipt'
+                    binding_state = 'recorded'
+                    journal_location = 'quarantine'
+                    capture = $false
+                    seeded_cleanup = $true
+                },
+                [pscustomobject]@{
+                    name = 'adoption-receipt-before-current-capture'
+                    binding_state = 'adopted'
+                    journal_location = 'quarantine'
+                    capture = $true
+                    seeded_cleanup = $true
+                }
+            )) {
+                $root = New-HarnessCaseRoot `
+                    -Parent $TestRoot `
+                    -Label ([string]$case.name)
+                $layout = New-HarnessLayout -Root $root
+                $transactionID = ('2' * 32)
+                $transactionDirectory =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $layout.TransactionsDirectory `
+                        $transactionID
+                Microsoft.PowerShell.Management\New-Item `
+                    -ItemType Directory `
+                    -Path $transactionDirectory `
+                    -Force | Microsoft.PowerShell.Core\Out-Null
+                $quarantinePath =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $transactionDirectory `
+                        'managed-hooks-lifecycle-journal.v3.quarantine'
+                $gatewayParent = [IO.Path]::GetDirectoryName(
+                    [string]$layout.GatewayPath
+                )
+                Microsoft.PowerShell.Management\New-Item `
+                    -ItemType Directory `
+                    -Path $gatewayParent `
+                    -Force | Microsoft.PowerShell.Core\Out-Null
+                [IO.File]::WriteAllText(
+                    $layout.GatewayPath,
+                    'legacy-gateway-preimage',
+                    [Text.UTF8Encoding]::new($false)
+                )
+                $gatewayBackup =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $transactionDirectory `
+                        'defenseclaw-gateway.exe.preimage'
+                Microsoft.PowerShell.Management\Copy-Item `
+                    -LiteralPath $layout.GatewayPath `
+                    -Destination $gatewayBackup `
+                    -Force
+                # Model the hardest unbound crash prefix: pending and exact
+                # old preimages are durable, the authenticated replacement
+                # helper is already staged, but its journal binding has not
+                # yet been published.
+                [IO.File]::WriteAllText(
+                    $layout.GatewayPath,
+                    'staged-fixed-gateway',
+                    [Text.UTF8Encoding]::new($false)
+                )
+                [IO.File]::WriteAllText(
+                    $layout.ManagedHooksLifecycleJournalPath,
+                    '{"schema_version":3,"phase":"captured"}',
+                    [Text.UTF8Encoding]::new($false)
+                )
+                $journalBackup =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $transactionDirectory `
+                        'managed-hooks-lifecycle-journal.v3.preimage'
+                Microsoft.PowerShell.Management\Copy-Item `
+                    -LiteralPath $layout.ManagedHooksLifecycleJournalPath `
+                    -Destination $journalBackup `
+                    -Force
+                $journalIdentity = Get-DefenseClawFileIdentity `
+                    -Path $layout.ManagedHooksLifecycleJournalPath
+                $journalSHA256 = (
+                    Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath `
+                            $layout.ManagedHooksLifecycleJournalPath `
+                        -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+                if ([string]$case.journal_location -ceq 'quarantine') {
+                    [IO.File]::Move(
+                        $layout.ManagedHooksLifecycleJournalPath,
+                        $quarantinePath
+                    )
+                }
+                $snapshotPath =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $transactionDirectory `
+                        'snapshot.json'
+                Write-HarnessSnapshot `
+                    -Layout $layout `
+                    -SnapshotPath $snapshotPath `
+                    -Prepared:$false `
+                    -PreimageExisted:$false `
+                    -PreimageSHA256 '' `
+                    -ServicesRunning:$false `
+                    -ServicesExisted:$true
+                $snapshot =
+                    Microsoft.PowerShell.Management\Get-Content `
+                        -LiteralPath $snapshotPath `
+                        -Raw |
+                        Microsoft.PowerShell.Utility\ConvertFrom-Json
+                $snapshot.id = $transactionID
+                $snapshot.directory = $transactionDirectory
+                $snapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name prior_deployment_active `
+                        -Value $true `
+                        -Force
+                $snapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name agent_application_control_attested `
+                        -Value $true `
+                        -Force
+                $snapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name claude_effective_policy_verified `
+                        -Value $true `
+                        -Force
+                $snapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name managed_hooks_lifecycle_legacy_preimage `
+                        -Value ([pscustomobject][ordered]@{
+                            schema_version = 1
+                            transaction_id = $transactionID
+                            journal_path = [string](
+                                $layout.ManagedHooksLifecycleJournalPath
+                            )
+                            journal_file_identity = $journalIdentity
+                            journal_sha256 = $journalSHA256
+                            journal_schema_version = 3
+                            journal_phase = 'captured'
+                        }) `
+                        -Force
+                $snapshot.files = @($snapshot.files) + @(
+                    [pscustomobject][ordered]@{
+                        path = [string](
+                            $layout.ManagedHooksLifecycleJournalPath
+                        )
+                        existed = $true
+                        backup = $journalBackup
+                        security_descriptor = ''
+                    },
+                    [pscustomobject][ordered]@{
+                        path = [string]$layout.GatewayPath
+                        existed = $true
+                        backup = $gatewayBackup
+                        security_descriptor = ''
+                    }
+                )
+                if (-not [string]::IsNullOrWhiteSpace(
+                        [string]$case.binding_state
+                    )) {
+                    $snapshot |
+                        Microsoft.PowerShell.Utility\Add-Member `
+                            -MemberType NoteProperty `
+                            -Name managed_hooks_lifecycle_recovery `
+                            -Value ([pscustomobject][ordered]@{
+                                schema_version = 1
+                                transaction_id = $transactionID
+                                state = [string]$case.binding_state
+                                journal_path = [string](
+                                    $layout.ManagedHooksLifecycleJournalPath
+                                )
+                                journal_file_identity = $journalIdentity
+                                journal_sha256 = $journalSHA256
+                                journal_schema_version = 3
+                                journal_phase = 'captured'
+                                manifest_sha256 = ('a' * 64)
+                                old_gateway_sha256 = ('b' * 64)
+                                replacement_gateway_sha256 = ('c' * 64)
+                                quarantine_path = $quarantinePath
+                            }) `
+                            -Force
+                }
+                [IO.File]::WriteAllText(
+                    $snapshotPath,
+                    (
+                        $snapshot |
+                            Microsoft.PowerShell.Utility\ConvertTo-Json `
+                                -Depth 8
+                    ),
+                    [Text.UTF8Encoding]::new($false)
+                )
+                if ([bool]$case.capture) {
+                    [IO.File]::WriteAllText(
+                        $layout.ManagedHooksLifecycleJournalPath,
+                        (
+                            '{"schema_version":4,"phase":"captured",' +
+                            '"transaction_id":"' + $transactionID + '"}'
+                        ),
+                        [Text.UTF8Encoding]::new($false)
+                    )
+                }
+                $script:HarnessState = @{
+                    operation = 'install'
+                    crash_at = ''
+                    events = [Collections.Generic.List[string]]::new()
+                    layout = $layout
+                    snapshot_path = $snapshotPath
+                    legacy_lifecycle_recovery = $true
+                    legacy_activation_state = 'never_activated'
+                    active_references = $false
+                    lifecycle_preimage_active = $false
+                    owned_checks = 0
+                    removed_services = 0
+                    guardian_running = $false
+                    gateway_running = $false
+                    services_running = $false
+                    service_exists = @{
+                        DefenseClawGateway = $true
+                        DefenseClawCMIDBroker = $true
+                        DefenseClawHookGuardian = $true
+                        DefenseClawHookEnumerator = $true
+                    }
+                    service_start_modes = @{
+                        DefenseClawGateway = 4
+                        DefenseClawCMIDBroker = 4
+                        DefenseClawHookGuardian = 4
+                        DefenseClawHookEnumerator = 4
+                    }
+                    ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
+                }
+                if ([bool]$case.seeded_cleanup) {
+                    $script:HarnessState.events.Add(
+                        'lifecycle-generation-gc'
+                    )
+                    $script:HarnessState.events.Add(
+                        'lifecycle-journal-quarantined'
+                    )
+                }
+                if ([bool]$case.capture) {
+                    $script:HarnessState.events.Add(
+                        'lifecycle-snapshot:capture'
+                    )
+                }
+                [void](& $script:HarnessRealRestoreTransaction `
+                    -SnapshotPath $snapshotPath `
+                    -Layout $layout `
+                    -DeferServiceRestart)
+                $gc = $script:HarnessState.events.IndexOf(
+                    'lifecycle-generation-gc'
+                )
+                $quarantined = $script:HarnessState.events.IndexOf(
+                    'lifecycle-journal-quarantined'
+                )
+                if ([string]::IsNullOrWhiteSpace(
+                        [string]$case.binding_state
+                    )) {
+                    Assert-Harness `
+                        -Condition (
+                            $gc -lt 0 -and
+                            $quarantined -lt 0 -and
+                            (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath `
+                                    $layout.ManagedHooksLifecycleJournalPath `
+                                -PathType Leaf) -and
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath $quarantinePath) -and
+                            [IO.File]::ReadAllText(
+                                $layout.GatewayPath
+                            ) -ceq 'legacy-gateway-preimage'
+                        ) `
+                        -Message (
+                            [string]$case.name +
+                            ' did not restore the gateway and exact unbound legacy preimage'
+                        )
+                }
+                else {
+                    Assert-Harness `
+                        -Condition (
+                            $gc -ge 0 -and
+                            $quarantined -gt $gc -and
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath `
+                                    $layout.ManagedHooksLifecycleJournalPath) -and
+                            (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath $quarantinePath `
+                                -PathType Leaf) -and
+                            (Get-DefenseClawFileIdentity `
+                                -Path $quarantinePath) -ceq $journalIdentity -and
+                            [IO.File]::ReadAllText(
+                                $layout.GatewayPath
+                            ) -ceq 'legacy-gateway-preimage'
+                        ) `
+                        -Message (
+                            [string]$case.name +
+                            ' violated GC-before-adoption recovery ordering'
+                        )
+                }
+                $uninstallResults.Add([pscustomobject]@{
+                    name = 'legacy-recovery-' + [string]$case.name
+                    failed = $false
+                    rollback = 0
+                    service_contract_checks = 0
+                    no_surviving_reference_before_delete = $true
+                })
+            }
+        }
+
         $purgeResults = [Collections.Generic.List[object]]::new()
         function New-HarnessCommittedPurgeCase {
             param(
@@ -3923,7 +4915,15 @@ targets:
             $layout = New-HarnessLayout -Root $root
             [IO.File]::WriteAllText(
                 $layout.MetadataPath,
-                '{"schema_version":1,"installed":false}',
+                (
+                    '{"schema_version":1,"installed":false,' +
+                    '"managed_hooks_activation":{' +
+                    '"schema_version":1,' +
+                    '"deployment_generation_id":"' + ('1' * 32) + '",' +
+                    '"state":"activated",' +
+                    '"manifest_sha256":"' + ('a' * 64) + '",' +
+                    '"target_count":1}}'
+                ),
                 [Text.UTF8Encoding]::new($false)
             )
             if (-not $OmitTeardownJournal) {
@@ -3940,6 +4940,13 @@ targets:
                 active_references = $false
                 binary_present = $false
                 installed = $false
+                managed_hooks_activation = [pscustomobject][ordered]@{
+                    schema_version = 1
+                    deployment_generation_id = ('1' * 32)
+                    state = 'activated'
+                    manifest_sha256 = ('a' * 64)
+                    target_count = 1
+                }
                 guardian_running = $false
                 gateway_running = $false
                 services_running = $false
@@ -5028,6 +6035,8 @@ targets:
             Invoke-HarnessFreshInstallServiceBootstrapSequence
             Invoke-HarnessDirectReinstallSequence
             Invoke-HarnessFirstActivationFailureSequence
+            Invoke-HarnessLegacyCapturedJournalUpgradeSequence
+            Invoke-HarnessLegacyRecoveryCrashPrefixCases
         }
         finally {
             Microsoft.PowerShell.Management\Set-Item `
@@ -6489,6 +7498,7 @@ targets:
             schema_version = 1
             manifest_path = [string]$boundedLayout.ManifestPath
             manifest_sha256 = (('a' * 64) -join '')
+            target_count = 128
             roots = @($boundedRoots)
         }
         $boundedReport = [ordered]@{

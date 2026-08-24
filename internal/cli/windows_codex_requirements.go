@@ -35,11 +35,20 @@ var (
 )
 
 type windowsCodexDeploymentMetadata struct {
-	SchemaVersion  int    `json:"schema_version"`
-	DeploymentMode string `json:"deployment_mode"`
-	Installed      *bool  `json:"installed,omitempty"`
-	InstallRoot    string `json:"install_root"`
-	StateRoot      string `json:"state_root"`
+	SchemaVersion          int                                  `json:"schema_version"`
+	DeploymentMode         string                               `json:"deployment_mode"`
+	Installed              *bool                                `json:"installed,omitempty"`
+	InstallRoot            string                               `json:"install_root"`
+	StateRoot              string                               `json:"state_root"`
+	ManagedHooksActivation *windowsManagedHooksActivationRecord `json:"managed_hooks_activation,omitempty"`
+}
+
+type windowsManagedHooksActivationRecord struct {
+	SchemaVersion          int    `json:"schema_version"`
+	DeploymentGenerationID string `json:"deployment_generation_id"`
+	State                  string `json:"state"`
+	ManifestSHA256         string `json:"manifest_sha256"`
+	TargetCount            int    `json:"target_count"`
 }
 
 func newWindowsCodexRequirementsCommand() *cobra.Command {

@@ -6533,6 +6533,88 @@ function New-DefenseClawLayoutDirectories {
     }
 }
 
+function Assert-DefenseClawManagedHooksActivationRecord {
+    param(
+        [Parameter(Mandatory)]$Record,
+        [AllowEmptyString()][string]$ExpectedManifestSHA256 = '',
+        [int64]$ExpectedTargetCount = -1,
+        [AllowEmptyString()][string]$ExpectedDeploymentGenerationID = ''
+    )
+    $allowed = @(
+        'schema_version',
+        'deployment_generation_id',
+        'state',
+        'manifest_sha256',
+        'target_count'
+    )
+    foreach ($property in @($Record.PSObject.Properties)) {
+        if ([string]$property.Name -notin $allowed) {
+            throw 'managed-hook activation metadata contains an unexpected property'
+        }
+    }
+    foreach ($name in $allowed) {
+        if ($null -eq $Record.PSObject.Properties[$name]) {
+            throw "managed-hook activation metadata is missing $name"
+        }
+    }
+    if (($Record.schema_version -isnot [int] -and
+            $Record.schema_version -isnot [int64]) -or
+        [Convert]::ToInt64($Record.schema_version) -ne 1 -or
+        [string]$Record.deployment_generation_id -cnotmatch '^[0-9a-f]{32}$' -or
+        [string]$Record.state -notin @('never_activated', 'activated') -or
+        [string]$Record.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        ($Record.target_count -isnot [int] -and
+            $Record.target_count -isnot [int64])) {
+        throw 'managed-hook activation metadata has an invalid schema or identity'
+    }
+    try {
+        $targetCount = [Convert]::ToInt64($Record.target_count)
+    }
+    catch {
+        throw 'managed-hook activation metadata has an invalid target count'
+    }
+    if ($targetCount -lt 0 -or $targetCount -gt 384) {
+        throw 'managed-hook activation metadata target count is outside its bound'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
+        [string]$Record.manifest_sha256 -cne $ExpectedManifestSHA256) {
+        throw 'managed-hook activation metadata does not bind the exact target manifest'
+    }
+    if ($ExpectedTargetCount -ge 0 -and $targetCount -ne $ExpectedTargetCount) {
+        throw 'managed-hook activation metadata does not bind the exact target count'
+    }
+    if (-not [string]::IsNullOrWhiteSpace(
+        $ExpectedDeploymentGenerationID
+    ) -and [string]$Record.deployment_generation_id -cne
+        $ExpectedDeploymentGenerationID) {
+        throw 'managed-hook activation metadata does not bind the lifecycle transaction'
+    }
+    return $Record
+}
+
+function New-DefenseClawManagedHooksActivationRecord {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('never_activated', 'activated')]
+        [string]$State,
+        [Parameter(Mandatory)][string]$DeploymentGenerationID,
+        [Parameter(Mandatory)][string]$ManifestSHA256,
+        [Parameter(Mandatory)][int64]$TargetCount
+    )
+    $record = [pscustomobject][ordered]@{
+        schema_version = 1
+        deployment_generation_id = $DeploymentGenerationID
+        state = $State
+        manifest_sha256 = $ManifestSHA256
+        target_count = $TargetCount
+    }
+    return Assert-DefenseClawManagedHooksActivationRecord `
+        -Record $record `
+        -ExpectedManifestSHA256 $ManifestSHA256 `
+        -ExpectedTargetCount $TargetCount `
+        -ExpectedDeploymentGenerationID $DeploymentGenerationID
+}
+
 function Get-DefenseClawDeploymentMetadata {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -6545,6 +6627,13 @@ function Get-DefenseClawDeploymentMetadata {
         return $null
     }
     Assert-DefenseClawNoReparsePath -Path $Layout.MetadataPath
+    $expectedMetadataAcl = New-DefenseClawCanonicalPathAcl `
+        -IsDirectory:$false `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    Assert-DefenseClawCanonicalPathAcl `
+        -Path $Layout.MetadataPath `
+        -Expected $expectedMetadataAcl
     try {
         $metadata = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
     }
@@ -6553,6 +6642,16 @@ function Get-DefenseClawDeploymentMetadata {
     }
     if ([int]$metadata.schema_version -ne $script:SchemaVersion) {
         throw "unsupported DefenseClaw enterprise deployment metadata schema: $($metadata.schema_version)"
+    }
+    $activationProperty = $metadata.PSObject.Properties[
+        'managed_hooks_activation'
+    ]
+    if ($null -ne $activationProperty) {
+        if ($null -eq $activationProperty.Value) {
+            throw 'deployment metadata has an empty managed-hook activation record'
+        }
+        [void](Assert-DefenseClawManagedHooksActivationRecord `
+            -Record $activationProperty.Value)
     }
     foreach ($pair in @(
         @('install_root', $Layout.InstallRoot),
@@ -6681,8 +6780,18 @@ function New-DefenseClawDeploymentMetadata {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
-        [bool]$Installed = $true
+        [bool]$Installed = $true,
+        $ManagedHooksActivation
     )
+    # Every new metadata writer preserves the authenticated activation
+    # identity. An inactive tombstone is the post-commit authority used by
+    # teardown finalization, so dropping this record there would make the
+    # already-published journal impossible to authenticate.
+    if ($null -eq $ManagedHooksActivation) {
+        throw 'deployment metadata requires managed-hook activation evidence'
+    }
+    [void](Assert-DefenseClawManagedHooksActivationRecord `
+        -Record $ManagedHooksActivation)
     $hashes = [ordered]@{}
     foreach ($entry in @(
         @('broker', $Layout.BrokerPath),
@@ -6810,6 +6919,9 @@ function New-DefenseClawDeploymentMetadata {
     }
     if (-not [string]::IsNullOrWhiteSpace([string]$Layout.CertificationCodexHome)) {
         $metadata['certification_codex_home'] = [string]$Layout.CertificationCodexHome
+    }
+    if ($null -ne $ManagedHooksActivation) {
+        $metadata['managed_hooks_activation'] = $ManagedHooksActivation
     }
     return $metadata
 }
@@ -7066,6 +7178,7 @@ function New-DefenseClawTransaction {
         [switch]$IncludeCodexMachineState,
         [switch]$ManagedHooksTeardownPrepared,
         [switch]$PreserveManagedHooksTeardownJournal,
+        [switch]$RecoverLegacyManagedHooksLifecycleJournal,
         [switch]$InstallRootCreatedForTransaction,
         [switch]$StateRootCreatedForTransaction
     )
@@ -7227,6 +7340,7 @@ function New-DefenseClawTransaction {
                 -GatewayServiceSID $redactionKeyGatewaySID
 
         $files = [Collections.Generic.List[object]]::new()
+    $legacyManagedHooksLifecyclePreimage = $null
     $destinations = [Collections.Generic.List[string]]::new()
     foreach ($destination in @(
         $Layout.BrokerPath,
@@ -7239,7 +7353,8 @@ function New-DefenseClawTransaction {
         $Layout.ModulePath,
         $Layout.BrokerAuthKeyPath,
         $Layout.MetadataPath,
-        $Layout.AgentApplicationControlAttestationPath
+        $Layout.AgentApplicationControlAttestationPath,
+        $Layout.ManagedHooksLifecycleJournalPath
     )) {
         $destinations.Add([string]$destination)
     }
@@ -7270,6 +7385,85 @@ function New-DefenseClawTransaction {
         $securityDescriptor = ''
         if ($exists) {
             Assert-DefenseClawNoReparsePath -Path $destination
+            $isManagedHooksLifecycleJournal = [string]::Equals(
+                [IO.Path]::GetFullPath($destination).TrimEnd('\'),
+                [IO.Path]::GetFullPath(
+                    [string]$Layout.ManagedHooksLifecycleJournalPath
+                ).TrimEnd('\'),
+                [StringComparison]::OrdinalIgnoreCase
+            )
+            if ($isManagedHooksLifecycleJournal) {
+                # A stale post-commit journal is untrusted input until the
+                # replacement helper authenticates its exact schema/content.
+                # Bound and authenticate it before the generic snapshot copy
+                # so recovery cannot be preempted by link substitution or disk
+                # exhaustion.
+                $lifecycleItem = Microsoft.PowerShell.Management\Get-Item `
+                    -LiteralPath $destination `
+                    -Force
+                if ([int64]$lifecycleItem.Length -gt 33554432) {
+                    throw 'managed-hook lifecycle journal exceeds the 33554432-byte transaction limit'
+                }
+                Assert-DefenseClawPathAcl `
+                    -Path $destination `
+                    -AllowedWriterSIDs @(
+                        $script:SystemSID,
+                        $script:AdministratorsSID,
+                        $script:TrustedInstallerSID
+                    ) `
+                    -AllowedReaderSIDs @(
+                        $script:SystemSID,
+                        $script:AdministratorsSID,
+                        $script:TrustedInstallerSID
+                    ) `
+                    -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+                    -RejectUntrustedRead
+                if ($RecoverLegacyManagedHooksLifecycleJournal) {
+                    try {
+                        $legacyJournal =
+                            Microsoft.PowerShell.Management\Get-Content `
+                                -LiteralPath $destination `
+                                -Raw |
+                                Microsoft.PowerShell.Utility\ConvertFrom-Json
+                    }
+                    catch {
+                        throw 'cannot parse the legacy managed-hook lifecycle journal'
+                    }
+                    $legacySchema = $legacyJournal.PSObject.Properties[
+                        'schema_version'
+                    ]
+                    $legacyPhase = $legacyJournal.PSObject.Properties['phase']
+                    if ($null -eq $legacySchema -or
+                        ($legacySchema.Value -isnot [int] -and
+                            $legacySchema.Value -isnot [int64]) -or
+                        [Convert]::ToInt64($legacySchema.Value) -ne 3 -or
+                        $null -eq $legacyPhase -or
+                        [string]$legacyPhase.Value -cne 'captured') {
+                        throw (
+                            'legacy managed-hook lifecycle recovery requires ' +
+                            'an exact captured schema-3 journal'
+                        )
+                    }
+                    $legacyManagedHooksLifecyclePreimage =
+                        [ordered]@{
+                            schema_version = 1
+                            transaction_id = $id
+                            journal_path = [IO.Path]::GetFullPath(
+                                $destination
+                            )
+                            journal_file_identity =
+                                Get-DefenseClawFileIdentity `
+                                    -Path $destination
+                            journal_sha256 = (
+                                Microsoft.PowerShell.Utility\Get-FileHash `
+                                    -LiteralPath $destination `
+                                    -Algorithm SHA256
+                            ).Hash.ToLowerInvariant()
+                            journal_schema_version = 3
+                            journal_phase = 'captured'
+                        }
+                }
+            }
             $isSharedCodexFile = [string]::Equals(
                 [IO.Path]::GetFullPath($destination).TrimEnd('\'),
                 [IO.Path]::GetFullPath($Layout.CodexMachinePolicyPath).TrimEnd('\'),
@@ -7294,6 +7488,35 @@ function New-DefenseClawTransaction {
             }
             $backup = Microsoft.PowerShell.Management\Join-Path $directory ("file-{0:D2}.bak" -f $index)
             Microsoft.PowerShell.Management\Copy-Item -LiteralPath $destination -Destination $backup -Force
+            if ($isManagedHooksLifecycleJournal -and
+                $RecoverLegacyManagedHooksLifecycleJournal) {
+                $backupSHA256 = (
+                    Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $backup `
+                        -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+                $liveSHA256 = (
+                    Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $destination `
+                        -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+                $liveIdentity = Get-DefenseClawFileIdentity `
+                    -Path $destination
+                $expectedLifecycleSHA256 = [string](
+                    $legacyManagedHooksLifecyclePreimage.journal_sha256
+                )
+                $expectedLifecycleIdentity = [string](
+                    $legacyManagedHooksLifecyclePreimage.journal_file_identity
+                )
+                if ($backupSHA256 -cne $expectedLifecycleSHA256 -or
+                    $liveSHA256 -cne $expectedLifecycleSHA256 -or
+                    $liveIdentity -cne $expectedLifecycleIdentity) {
+                    throw (
+                        'legacy managed-hook lifecycle journal changed while ' +
+                        'its transaction preimage was captured'
+                    )
+                }
+            }
         }
         $files.Add([ordered]@{
             path = $destination
@@ -7364,11 +7587,20 @@ function New-DefenseClawTransaction {
         managed_hooks_teardown_journal_preimage_sha256 = [string](
             $teardownJournalPreimageSHA256
         )
+        managed_hooks_lifecycle_legacy_preimage =
+            $legacyManagedHooksLifecyclePreimage
         redaction_key_security = $redactionKeySecurity
         files = $files
         services = $services
         created_shared_directories = @()
         created_target_runtime_roots = @()
+    }
+    if ($RecoverLegacyManagedHooksLifecycleJournal -and
+        $null -eq $legacyManagedHooksLifecyclePreimage) {
+        throw (
+            'legacy managed-hook lifecycle recovery lost its authenticated ' +
+            'journal before transaction publication'
+        )
     }
     $snapshotPath = Microsoft.PowerShell.Management\Join-Path $directory 'snapshot.json'
     Write-DefenseClawJsonAtomic -Value $snapshot -Path $snapshotPath
@@ -8451,7 +8683,61 @@ function Restore-DefenseClawTransaction {
         -Path $SnapshotPath `
         -Phase quiesced `
         -ServicesQuiescedAt $restoreQuiescedAt
+    $managedHooksLifecycleRecovery =
+        Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding `
+            -Layout $Layout `
+            -SnapshotPath $SnapshotPath
+    $unboundLegacyLifecyclePreimage = $null
+    if ($null -eq $managedHooksLifecycleRecovery) {
+        $unboundLegacyLifecyclePreimage =
+            Assert-DefenseClawUnboundLegacyLifecycleRecoveryPreimage `
+                -Snapshot $snapshot `
+                -Layout $Layout
+    }
+    if ($null -ne $managedHooksLifecycleRecovery -and
+        [string]$managedHooksLifecycleRecovery.state -ceq 'recorded') {
+        # The process can die after the authenticated recovery receipt is
+        # durable but before the replacement helper adopts the stale journal.
+        # Finish that exact handle-bound no-replace quarantine while the staged
+        # helper and rollback authority are still present.
+        $adoptionReport =
+            Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                -Layout $Layout `
+                -GatewayServiceName ([string]$snapshot.gateway_service) `
+                -Action retire-committed
+        if ($adoptionReport.PSObject.Properties['adopted'] -eq $null -or
+            $adoptionReport.adopted -isnot [bool] -or
+            -not [bool]$adoptionReport.adopted -or
+            $adoptionReport.PSObject.Properties['transaction_id'] -eq $null -or
+            [string]$adoptionReport.transaction_id -cne
+                [string]$managedHooksLifecycleRecovery.transaction_id -or
+            $adoptionReport.PSObject.Properties['quarantine_path'] -eq $null -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath(
+                    [string]$adoptionReport.quarantine_path
+                ),
+                [IO.Path]::GetFullPath(
+                    [string]$managedHooksLifecycleRecovery.quarantine_path
+                ),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw 'managed-hook lifecycle recovery did not adopt its exact recorded journal'
+        }
+        $managedHooksLifecycleRecovery =
+            Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding `
+                -Layout $Layout `
+                -SnapshotPath $SnapshotPath
+        if ($null -eq $managedHooksLifecycleRecovery -or
+            [string]$managedHooksLifecycleRecovery.state -cne 'adopted') {
+            throw 'managed-hook lifecycle recovery adoption was not durable'
+        }
+    }
+    $skipAdoptedStaleLifecyclePreimage = [bool](
+        $null -ne $managedHooksLifecycleRecovery -and
+        [string]$managedHooksLifecycleRecovery.state -ceq 'adopted'
+    )
     if ($Layout.ContainsKey('ManagedHooksLifecycleJournalPath') -and
+        $null -eq $unboundLegacyLifecyclePreimage -and
         (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
             -PathType Leaf)) {
@@ -8483,6 +8769,20 @@ function Restore-DefenseClawTransaction {
         -GuardianServiceName ([string]$snapshot.guardian_service)
     foreach ($file in $snapshot.files) {
         $destination = [IO.Path]::GetFullPath([string]$file.path)
+        $isManagedHooksLifecycleJournal = [string]::Equals(
+            $destination.TrimEnd('\'),
+            [IO.Path]::GetFullPath(
+                [string]$Layout.ManagedHooksLifecycleJournalPath
+            ).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+        if ($isManagedHooksLifecycleJournal -and
+            $skipAdoptedStaleLifecyclePreimage) {
+            # retire-committed already consumed this exact stale inode. A
+            # rollback may restore the old gateway/config, but must never
+            # resurrect a journal whose bounded GC has durably completed.
+            continue
+        }
         $inInstall = $destination.StartsWith($Layout.InstallRoot + '\', [StringComparison]::OrdinalIgnoreCase)
         $inState = $destination.StartsWith($Layout.StateRoot + '\', [StringComparison]::OrdinalIgnoreCase)
         $isCodexMachinePolicy = [string]::Equals(
@@ -10364,7 +10664,12 @@ function Complete-DefenseClawTransaction {
 }
 
 function Get-DefenseClawManagedHooksTeardownJournalPhase {
-    param([Parameter(Mandatory)][hashtable]$Layout)
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        $Metadata,
+        [AllowEmptyString()][string]$GatewayServiceName = '',
+        [switch]$AllowLegacyInactive
+    )
     if (-not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
             -PathType Leaf)) {
@@ -10406,17 +10711,152 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
     catch {
         throw "cannot parse managed-hook teardown journal: $($_.Exception.Message)"
     }
-    if ($null -eq $journal.PSObject.Properties['schema_version'] -or
-        [Convert]::ToInt64($journal.schema_version) -ne 4 -or
-        [string]$journal.phase -notin @(
+    $schemaProperty = $journal.PSObject.Properties['schema_version']
+    $phaseProperty = $journal.PSObject.Properties['phase']
+    if ($null -eq $schemaProperty -or
+        $schemaProperty.Value -is [bool] -or
+        $null -eq $phaseProperty) {
+        throw 'managed-hook teardown journal has an invalid schema or phase'
+    }
+    try {
+        $schemaVersion = [Convert]::ToInt64($schemaProperty.Value)
+    }
+    catch {
+        throw 'managed-hook teardown journal has an invalid schema or phase'
+    }
+    $phase = [string]$phaseProperty.Value
+    if ($schemaVersion -eq 5) {
+        if ($phase -notin @(
             'captured',
             'prepared',
             'rolled_back',
             'finalized'
         )) {
+            throw 'managed-hook teardown journal has an invalid schema or phase'
+        }
+        if ($AllowLegacyInactive -and $null -ne $Metadata -and
+            -not (Test-DefenseClawMetadataInstalled -Metadata $Metadata) -and
+            $null -eq $Metadata.PSObject.Properties[
+                'managed_hooks_activation'
+            ]) {
+            throw (
+                'schema-5 managed-hook teardown journal cannot bind a legacy ' +
+                'inactive tombstone without activation evidence'
+            )
+        }
+        return $phase
+    }
+    if (-not $AllowLegacyInactive -or $schemaVersion -ne 4 -or
+        $null -eq $Metadata -or
+        (Test-DefenseClawMetadataInstalled -Metadata $Metadata) -or
+        $null -ne $Metadata.PSObject.Properties[
+            'managed_hooks_activation'
+        ] -or
+        [string]::IsNullOrWhiteSpace($GatewayServiceName) -or
+        $phase -notin @('prepared', 'finalized')) {
         throw 'managed-hook teardown journal has an invalid schema or phase'
     }
-    return [string]$journal.phase
+
+    # Schema 4 is accepted only for the exact post-commit state emitted by an
+    # older installed helper: an authenticated inactive tombstone with no
+    # activation field and a protected journal that still names this scope's
+    # manifest, hook binary, and retired gateway service. Active teardown and
+    # rollback continue to require the current schema-5 contract.
+    $legacyProperties = @(
+        'schema_version',
+        'phase',
+        'manifest_path',
+        'manifest_fingerprint',
+        'hook_binary',
+        'gateway_addr',
+        'gateway_service_name',
+        'targets',
+        'claude_target_sids',
+        'claude',
+        'cursor_targets',
+        'cursor',
+        'selector_targets'
+    )
+    foreach ($property in @($journal.PSObject.Properties)) {
+        if ([string]$property.Name -notin $legacyProperties) {
+            throw 'legacy managed-hook teardown journal contains an unexpected property'
+        }
+    }
+    foreach ($name in $legacyProperties) {
+        if ($null -eq $journal.PSObject.Properties[$name]) {
+            throw "legacy managed-hook teardown journal is missing $name"
+        }
+    }
+    foreach ($pair in @(
+        @('manifest_path', $Layout.ManifestPath),
+        @('hook_binary', $Layout.HookPath)
+    )) {
+        try {
+            $recorded = [IO.Path]::GetFullPath(
+                [string]$journal.($pair[0])
+            ).TrimEnd('\')
+            $expected = [IO.Path]::GetFullPath(
+                [string]$pair[1]
+            ).TrimEnd('\')
+        }
+        catch {
+            throw "legacy managed-hook teardown journal has an invalid $($pair[0])"
+        }
+        if (-not [string]::Equals(
+            $recorded,
+            $expected,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "legacy managed-hook teardown journal $($pair[0]) does not match this scope"
+        }
+    }
+    if (-not [string]::Equals(
+        [string]$journal.gateway_service_name,
+        $GatewayServiceName,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -or
+        [string]$journal.manifest_fingerprint -cnotmatch
+            '^sha256:[0-9a-f]{64}$' -or
+        [string]::IsNullOrWhiteSpace([string]$journal.gateway_addr) -or
+        [string]$journal.gateway_addr -match '[\x00-\x1f\x7f]' -or
+        ([string]$journal.gateway_addr).Length -gt 4096) {
+        throw 'legacy managed-hook teardown journal has an invalid protected identity'
+    }
+    $targets = @($journal.targets)
+    if ($targets.Count -gt 384 -or
+        @($journal.claude_target_sids).Count -gt 384 -or
+        @($journal.cursor_targets).Count -gt 384 -or
+        @($journal.selector_targets).Count -gt 384) {
+        throw 'legacy managed-hook teardown journal exceeds its target bound'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManifestPath `
+            -PathType Leaf)) {
+        throw 'legacy managed-hook teardown manifest is missing'
+    }
+    Assert-DefenseClawNoReparsePath -Path $Layout.ManifestPath
+    $manifestItem = Microsoft.PowerShell.Management\Get-Item `
+        -LiteralPath $Layout.ManifestPath `
+        -Force
+    if ([int64]$manifestItem.Length -gt 4194304) {
+        throw 'legacy managed-hook teardown manifest exceeds its size bound'
+    }
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.ManifestPath `
+        -AllowedWriterSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -AllowedReaderSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+        -AllowInheritance `
+        -RejectUntrustedRead
+    return $phase
 }
 
 function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
@@ -10446,7 +10886,10 @@ function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
         return $false
     }
     if ((Get-DefenseClawManagedHooksTeardownJournalPhase `
-            -Layout $Layout) -cne 'finalized') {
+            -Layout $Layout `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName `
+            -AllowLegacyInactive) -cne 'finalized') {
         throw 'refusing to retire a managed-hook teardown journal before finalization'
     }
     Microsoft.PowerShell.Management\Remove-Item `
@@ -10981,6 +11424,7 @@ function Assert-DefenseClawTargetRuntimePlan {
         'schema_version',
         'manifest_path',
         'manifest_sha256',
+        'target_count',
         'roots'
     )
     foreach ($property in @($Plan.PSObject.Properties)) {
@@ -11007,7 +11451,10 @@ function Assert-DefenseClawTargetRuntimePlan {
             [IO.Path]::GetFullPath([string]$Layout.ManifestPath),
             [StringComparison]::OrdinalIgnoreCase
         ) -or
-        [string]$Plan.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        [string]$Plan.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $Plan.target_count -is [bool] -or
+        [Convert]::ToInt64($Plan.target_count) -lt 0 -or
+        [Convert]::ToInt64($Plan.target_count) -gt 384) {
         throw 'target runtime plan has invalid schema or manifest binding'
     }
     $roots = @($Plan.roots)
@@ -12537,7 +12984,13 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)]
-        [ValidateSet('capture', 'restore', 'retire')]
+        [ValidateSet(
+            'capture',
+            'restore',
+            'retire',
+            'retire-committed',
+            'classify-activation'
+        )]
         [string]$Action
     )
     Assert-DefenseClawAdministrator
@@ -12572,7 +13025,7 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         throw "managed-hook lifecycle snapshot emitted $($reports.Count) JSON reports; expected exactly one"
     }
     $report = $reports[0]
-    if ([int]$report.schema_version -ne 3) {
+    if ([int]$report.schema_version -ne 4) {
         throw "unsupported managed-hook lifecycle snapshot schema: $($report.schema_version)"
     }
     if ([string]$report.action -cne $Action) {
@@ -12612,11 +13065,587 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         'capture' { 'captured' }
         'restore' { 'restored' }
         'retire' { @('absent', 'retired') }
+        'retire-committed' { 'adopted' }
+        'classify-activation' { 'classified' }
     }
     if ([string]$report.phase -notin @($expectedPhase)) {
         throw "managed-hook lifecycle snapshot $Action returned invalid phase: $($report.phase)"
     }
     return $report
+}
+
+function Get-DefenseClawManagedHooksLegacyActivationClassification {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$TransactionID
+    )
+    if ($TransactionID -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'managed-hook activation classification has an invalid transaction identity'
+    }
+    $classification =
+        Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action classify-activation
+    $classifiedProperty = $classification.PSObject.Properties[
+        'legacy_activation_state'
+    ]
+    if ($null -eq $classifiedProperty -or
+        [string]$classifiedProperty.Value -notin @(
+            'never_activated',
+            'activated'
+        ) -or
+        $classification.PSObject.Properties['transaction_id'] -eq $null -or
+        [string]$classification.transaction_id -cne $TransactionID) {
+        throw 'managed-hook activation classifier returned an invalid state'
+    }
+    return [string]$classifiedProperty.Value
+}
+
+function Get-DefenseClawTransactionFileSnapshotEntry {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label
+    )
+    $expected = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $matches = @(
+        @($Snapshot.files) |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [IO.Path]::GetFullPath([string]$_.path).TrimEnd('\'),
+                    $expected,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($matches.Count -ne 1) {
+        throw "transaction snapshot does not contain exactly one $Label preimage"
+    }
+    return $matches[0]
+}
+
+function Get-DefenseClawManagedHooksLifecycleJournalCompatibilityState {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $path = [string]$Layout.ManagedHooksLifecycleJournalPath
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path)) {
+        return 'absent'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path `
+            -PathType Leaf)) {
+        throw 'managed-hook lifecycle journal is not a regular file'
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    $item = Microsoft.PowerShell.Management\Get-Item `
+        -LiteralPath $path `
+        -Force
+    if ([int64]$item.Length -gt 33554432) {
+        throw 'managed-hook lifecycle journal exceeds the 33554432-byte limit'
+    }
+    Assert-DefenseClawPathAcl `
+        -Path $path `
+        -AllowedWriterSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -AllowedReaderSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+        -RejectUntrustedRead
+    try {
+        $journal = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $path `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $schemaProperty = $journal.PSObject.Properties['schema_version']
+        $phaseProperty = $journal.PSObject.Properties['phase']
+        if ($null -eq $schemaProperty -or
+            ($schemaProperty.Value -isnot [int] -and
+                $schemaProperty.Value -isnot [int64]) -or
+            $null -eq $phaseProperty) {
+            throw 'missing schema or phase'
+        }
+        $schema = [Convert]::ToInt64($schemaProperty.Value)
+        $phase = [string]$phaseProperty.Value
+    }
+    catch {
+        throw 'managed-hook lifecycle journal has an invalid compatibility schema'
+    }
+    if ($schema -eq 3 -and $phase -ceq 'captured') {
+        return 'legacy_captured'
+    }
+    if ($schema -eq 4) {
+        return 'current'
+    }
+    throw 'managed-hook lifecycle journal has an unsupported schema or phase'
+}
+
+function Assert-DefenseClawUnboundLegacyLifecycleRecoveryPreimage {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $property = $Snapshot.PSObject.Properties[
+        'managed_hooks_lifecycle_legacy_preimage'
+    ]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return $null
+    }
+    $preimage = $property.Value
+    foreach ($name in @(
+        'schema_version',
+        'transaction_id',
+        'journal_path',
+        'journal_file_identity',
+        'journal_sha256',
+        'journal_schema_version',
+        'journal_phase'
+    )) {
+        if ($null -eq $preimage.PSObject.Properties[$name]) {
+            throw "legacy lifecycle preimage marker is missing $name"
+        }
+    }
+    $expectedPath = [IO.Path]::GetFullPath(
+        [string]$Layout.ManagedHooksLifecycleJournalPath
+    )
+    if (($preimage.schema_version -isnot [int] -and
+            $preimage.schema_version -isnot [int64]) -or
+        [Convert]::ToInt64($preimage.schema_version) -ne 1 -or
+        [string]$preimage.transaction_id -cne [string]$Snapshot.id -or
+        [string]$preimage.transaction_id -cnotmatch '^[0-9a-f]{32}$' -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$preimage.journal_path),
+            $expectedPath,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$preimage.journal_file_identity
+        ) -or
+        [string]$preimage.journal_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        ($preimage.journal_schema_version -isnot [int] -and
+            $preimage.journal_schema_version -isnot [int64]) -or
+        [Convert]::ToInt64($preimage.journal_schema_version) -ne 3 -or
+        [string]$preimage.journal_phase -cne 'captured') {
+        throw 'legacy lifecycle preimage marker has an invalid identity'
+    }
+    $entry = Get-DefenseClawTransactionFileSnapshotEntry `
+        -Snapshot $Snapshot `
+        -Path $expectedPath `
+        -Label 'legacy managed-hook lifecycle journal'
+    if ($entry.PSObject.Properties['existed'] -eq $null -or
+        $entry.existed -isnot [bool] -or
+        -not [bool]$entry.existed -or
+        [string]::IsNullOrWhiteSpace([string]$entry.backup)) {
+        throw 'legacy lifecycle preimage marker lost its transaction backup'
+    }
+    $backup = Assert-DefenseClawDescendant `
+        -Path ([string]$entry.backup) `
+        -Root ([string]$Snapshot.directory) `
+        -Label 'legacy managed-hook lifecycle transaction backup'
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $backup `
+            -PathType Leaf)) {
+        throw 'legacy managed-hook lifecycle transaction backup is missing'
+    }
+    Assert-DefenseClawNoReparsePath -Path $backup
+    $backupItem = Microsoft.PowerShell.Management\Get-Item `
+        -LiteralPath $backup `
+        -Force
+    if ([int64]$backupItem.Length -gt 33554432) {
+        throw 'legacy managed-hook lifecycle transaction backup exceeds its bound'
+    }
+    $backupSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $backup `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($backupSHA256 -cne [string]$preimage.journal_sha256) {
+        throw 'legacy managed-hook lifecycle transaction backup changed'
+    }
+    if ((Get-DefenseClawManagedHooksLifecycleJournalCompatibilityState `
+            -Layout $Layout) -cne 'legacy_captured') {
+        throw 'unbound legacy lifecycle recovery lost its canonical journal'
+    }
+    $liveSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $expectedPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $liveIdentity = Get-DefenseClawFileIdentity -Path $expectedPath
+    if ($liveSHA256 -cne [string]$preimage.journal_sha256 -or
+        $liveIdentity -cne [string]$preimage.journal_file_identity) {
+        throw 'unbound legacy lifecycle journal changed before rollback'
+    }
+    return $preimage
+}
+
+function Publish-DefenseClawManagedHooksLifecycleRecoveryBinding {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$GatewaySource
+    )
+    Assert-DefenseClawNoReparsePath -Path $Layout.PendingPath
+    Assert-DefenseClawNoReparsePath -Path $SnapshotPath
+    $pending = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $Layout.PendingPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    if (-not [string]::Equals(
+        [IO.Path]::GetFullPath([string]$pending.snapshot),
+        [IO.Path]::GetFullPath($SnapshotPath),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'pending lifecycle record does not identify the stale-journal recovery transaction'
+    }
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $legacyPreimage =
+        Assert-DefenseClawUnboundLegacyLifecycleRecoveryPreimage `
+            -Snapshot $snapshot `
+            -Layout $Layout
+    if ($null -eq $legacyPreimage) {
+        throw 'stale-journal recovery transaction lacks its durable legacy preimage marker'
+    }
+    $transactionID = [string]$snapshot.id
+    if ($transactionID -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'stale-journal recovery transaction has an invalid identity'
+    }
+    $transactionDirectory = Assert-DefenseClawDescendant `
+        -Path ([string]$snapshot.directory) `
+        -Root $Layout.TransactionsDirectory `
+        -Label 'stale-journal recovery transaction directory'
+    $expectedDirectory = Microsoft.PowerShell.Management\Join-Path `
+        $Layout.TransactionsDirectory `
+        $transactionID
+    if (-not [string]::Equals(
+        [IO.Path]::GetFullPath($transactionDirectory).TrimEnd('\'),
+        [IO.Path]::GetFullPath($expectedDirectory).TrimEnd('\'),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'stale-journal recovery transaction directory does not match its identity'
+    }
+    Assert-DefenseClawNoReparsePath -Path $transactionDirectory
+
+    $journalEntry = Get-DefenseClawTransactionFileSnapshotEntry `
+        -Snapshot $snapshot `
+        -Path $Layout.ManagedHooksLifecycleJournalPath `
+        -Label 'managed-hook lifecycle journal'
+    if ($journalEntry.PSObject.Properties['existed'] -eq $null -or
+        $journalEntry.existed -isnot [bool] -or
+        -not [bool]$journalEntry.existed -or
+        [string]::IsNullOrWhiteSpace([string]$journalEntry.backup)) {
+        throw 'transaction did not preserve the stale managed-hook lifecycle journal'
+    }
+    $journalBackup = Assert-DefenseClawDescendant `
+        -Path ([string]$journalEntry.backup) `
+        -Root $transactionDirectory `
+        -Label 'stale managed-hook lifecycle journal preimage'
+    foreach ($path in @(
+        $Layout.ManagedHooksLifecycleJournalPath,
+        $journalBackup
+    )) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path `
+            -PathType Leaf)) {
+            throw "stale managed-hook lifecycle recovery file is missing: $path"
+        }
+        Assert-DefenseClawNoReparsePath -Path $path
+        $item = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $path `
+            -Force
+        if ([int64]$item.Length -gt 33554432) {
+            throw "stale managed-hook lifecycle recovery file exceeds its bound: $path"
+        }
+    }
+    $journalHash = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $backupHash = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $journalBackup `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($journalHash -cne $backupHash) {
+        throw 'stale managed-hook lifecycle journal changed after its transaction preimage was captured'
+    }
+    if ($journalHash -cne [string]$legacyPreimage.journal_sha256 -or
+        (Get-DefenseClawFileIdentity `
+            -Path $Layout.ManagedHooksLifecycleJournalPath) -cne
+            [string]$legacyPreimage.journal_file_identity) {
+        throw 'stale managed-hook lifecycle journal disagrees with its durable preimage marker'
+    }
+    $journal = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    if ([int]$journal.schema_version -ne 3 -or
+        [string]$journal.phase -cne 'captured') {
+        throw 'stale managed-hook lifecycle recovery accepts only a captured schema-3 journal'
+    }
+
+    $gatewayEntry = Get-DefenseClawTransactionFileSnapshotEntry `
+        -Snapshot $snapshot `
+        -Path $Layout.GatewayPath `
+        -Label 'installed gateway'
+    if ($gatewayEntry.PSObject.Properties['existed'] -eq $null -or
+        $gatewayEntry.existed -isnot [bool] -or
+        -not [bool]$gatewayEntry.existed -or
+        [string]::IsNullOrWhiteSpace([string]$gatewayEntry.backup)) {
+        throw 'transaction did not preserve the installed gateway preimage'
+    }
+    $oldGateway = Assert-DefenseClawDescendant `
+        -Path ([string]$gatewayEntry.backup) `
+        -Root $transactionDirectory `
+        -Label 'installed gateway transaction preimage'
+    Assert-DefenseClawNoReparsePath -Path $oldGateway
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $GatewaySource)
+    $oldGatewaySHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $oldGateway `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $replacementGatewaySHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.GatewayPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($replacementGatewaySHA256 -cne
+        ([string]$GatewaySource.sha256).ToLowerInvariant()) {
+        throw 'staged recovery gateway does not match its authenticated source digest'
+    }
+    $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    Set-DefenseClawPathAcl `
+        -Path $Layout.GatewayPath `
+        -Kind ServiceInstallFile `
+        -GatewayServiceSID $gatewaySID
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.GatewayPath `
+        -AllowedWriterSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -RequiredRights (New-DefenseClawRequiredRights `
+            -Kind ServiceInstall `
+            -GatewayServiceSID $gatewaySID) `
+        -AllowUsersRead
+
+    $manifestSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.ManifestPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $quarantinePath = Microsoft.PowerShell.Management\Join-Path `
+        $transactionDirectory `
+        'managed-hooks-lifecycle-journal.v3.quarantine'
+    Assert-DefenseClawNoReparsePath -Path $quarantinePath -AllowMissingLeaf
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $quarantinePath) {
+        throw 'stale managed-hook lifecycle recovery quarantine is already occupied'
+    }
+    $binding = [pscustomobject][ordered]@{
+        schema_version = 1
+        transaction_id = $transactionID
+        state = 'recorded'
+        journal_path = [IO.Path]::GetFullPath(
+            [string]$Layout.ManagedHooksLifecycleJournalPath
+        )
+        journal_file_identity = Get-DefenseClawFileIdentity `
+            -Path $Layout.ManagedHooksLifecycleJournalPath
+        journal_sha256 = $journalHash
+        journal_schema_version = 3
+        journal_phase = 'captured'
+        manifest_sha256 = $manifestSHA256
+        old_gateway_sha256 = $oldGatewaySHA256
+        replacement_gateway_sha256 = $replacementGatewaySHA256
+        quarantine_path = [IO.Path]::GetFullPath($quarantinePath)
+    }
+    $snapshot | Microsoft.PowerShell.Utility\Add-Member `
+        -NotePropertyName managed_hooks_lifecycle_recovery `
+        -NotePropertyValue $binding `
+        -Force
+    Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
+
+    $report = Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Action retire-committed
+    if ($report.PSObject.Properties['adopted'] -eq $null -or
+        $report.adopted -isnot [bool] -or
+        -not [bool]$report.adopted -or
+        $report.PSObject.Properties['transaction_id'] -eq $null -or
+        [string]$report.transaction_id -cne $transactionID -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$report.quarantine_path),
+            [IO.Path]::GetFullPath($quarantinePath),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'stale managed-hook lifecycle helper did not attest exact quarantine adoption'
+    }
+    $legacyActivationProperty = $report.PSObject.Properties[
+        'legacy_activation_state'
+    ]
+    if ($null -eq $legacyActivationProperty -or
+        [string]$legacyActivationProperty.Value -notin @(
+            'never_activated',
+            'activated'
+        )) {
+        throw 'stale managed-hook lifecycle helper did not classify the authenticated legacy activation state'
+    }
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath) {
+        throw 'stale managed-hook lifecycle journal remained after quarantine adoption'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $quarantinePath `
+        -PathType Leaf) -or
+        (Get-DefenseClawFileIdentity -Path $quarantinePath) -cne
+            [string]$binding.journal_file_identity) {
+        throw 'stale managed-hook lifecycle quarantine does not contain the authenticated journal inode'
+    }
+    $binding.state = 'adopted'
+    $snapshot.managed_hooks_lifecycle_recovery = $binding
+    Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
+    return [pscustomobject][ordered]@{
+        legacy_activation_state = [string]$legacyActivationProperty.Value
+    }
+}
+
+function Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$SnapshotPath
+    )
+    Assert-DefenseClawNoReparsePath -Path $SnapshotPath
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $property = $snapshot.PSObject.Properties[
+        'managed_hooks_lifecycle_recovery'
+    ]
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return $null
+    }
+    $binding = $property.Value
+    foreach ($name in @(
+        'schema_version',
+        'transaction_id',
+        'state',
+        'journal_path',
+        'journal_file_identity',
+        'journal_sha256',
+        'journal_schema_version',
+        'journal_phase',
+        'manifest_sha256',
+        'old_gateway_sha256',
+        'replacement_gateway_sha256',
+        'quarantine_path'
+    )) {
+        if ($null -eq $binding.PSObject.Properties[$name]) {
+            throw "managed-hook lifecycle recovery binding is missing $name"
+        }
+    }
+    if ([int]$binding.schema_version -ne 1 -or
+        [string]$binding.transaction_id -cne [string]$snapshot.id -or
+        [string]$binding.transaction_id -cnotmatch '^[0-9a-f]{32}$' -or
+        [string]$binding.state -notin @('recorded', 'adopted') -or
+        [string]$binding.journal_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$binding.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$binding.old_gateway_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$binding.replacement_gateway_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [int]$binding.journal_schema_version -ne 3 -or
+        [string]$binding.journal_phase -cne 'captured') {
+        throw 'managed-hook lifecycle recovery binding has an invalid schema or identity'
+    }
+    $journalPath = [IO.Path]::GetFullPath([string]$binding.journal_path)
+    if (-not [string]::Equals(
+        $journalPath,
+        [IO.Path]::GetFullPath([string]$Layout.ManagedHooksLifecycleJournalPath),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'managed-hook lifecycle recovery binding names a foreign journal path'
+    }
+    $transactionDirectory = Assert-DefenseClawDescendant `
+        -Path ([string]$snapshot.directory) `
+        -Root $Layout.TransactionsDirectory `
+        -Label 'managed-hook lifecycle recovery transaction directory'
+    $expectedQuarantine = Microsoft.PowerShell.Management\Join-Path `
+        $transactionDirectory `
+        'managed-hooks-lifecycle-journal.v3.quarantine'
+    $quarantinePath = [IO.Path]::GetFullPath(
+        [string]$binding.quarantine_path
+    )
+    if (-not [string]::Equals(
+        $quarantinePath,
+        [IO.Path]::GetFullPath($expectedQuarantine),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'managed-hook lifecycle recovery binding names a foreign quarantine path'
+    }
+    Assert-DefenseClawNoReparsePath -Path $journalPath -AllowMissingLeaf
+    Assert-DefenseClawNoReparsePath -Path $quarantinePath -AllowMissingLeaf
+    $journalExists = Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $journalPath `
+        -PathType Leaf
+    $quarantineExists = Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $quarantinePath `
+        -PathType Leaf
+    if ($journalExists) {
+        $journalIdentity = Get-DefenseClawFileIdentity -Path $journalPath
+        $journalSHA256 = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $journalPath `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
+    if ($quarantineExists) {
+        $quarantineIdentity = Get-DefenseClawFileIdentity -Path $quarantinePath
+        $quarantineSHA256 = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $quarantinePath `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
+    if ([string]$binding.state -ceq 'recorded') {
+        if ($journalExists -and -not $quarantineExists -and
+            $journalIdentity -ceq [string]$binding.journal_file_identity -and
+            $journalSHA256 -ceq [string]$binding.journal_sha256) {
+            return $binding
+        }
+        if (-not $journalExists -and $quarantineExists -and
+            $quarantineIdentity -ceq [string]$binding.journal_file_identity -and
+            $quarantineSHA256 -ceq [string]$binding.journal_sha256) {
+            # The helper committed its handle-bound quarantine before the
+            # PowerShell receipt update. Adopt that exact crash prefix.
+            $binding.state = 'adopted'
+            $snapshot.managed_hooks_lifecycle_recovery = $binding
+            Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
+            return $binding
+        }
+        throw 'recorded managed-hook lifecycle recovery has an ambiguous journal/quarantine identity'
+    }
+    if (-not $quarantineExists -or
+        $quarantineIdentity -cne [string]$binding.journal_file_identity -or
+        $quarantineSHA256 -cne [string]$binding.journal_sha256) {
+        throw 'adopted managed-hook lifecycle recovery lost its exact quarantined journal'
+    }
+    if ($journalExists) {
+        $current = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $journalPath `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        if ([int]$current.schema_version -ne 4) {
+            throw 'adopted managed-hook lifecycle recovery found a non-current journal at the canonical path'
+        }
+    }
+    return $binding
 }
 
 function Assert-DefenseClawInstalledConfig {
@@ -12655,7 +13684,110 @@ function Test-DefenseClawGatewayReady {
     return ([int]$probe.exit_code -eq 0)
 }
 
-function Test-DefenseClawGuardianReady {
+function Get-DefenseClawGuardianVerificationFailureDiagnostic {
+    param([Parameter(Mandatory)]$Probe)
+
+    $report = $null
+    foreach ($line in @($Probe.output)) {
+        $text = ([string]$line).Trim()
+        if (-not $text.StartsWith('{')) {
+            continue
+        }
+        try {
+            $candidate = $text |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+            $okProperty = $candidate.PSObject.Properties['ok']
+            if ($null -ne $okProperty -and
+                $okProperty.Value -is [bool]) {
+                $report = $candidate
+                break
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    if ($null -eq $report) {
+        $rawOutput = $Probe.output |
+            Microsoft.PowerShell.Utility\Out-String
+        return ConvertTo-DefenseClawBoundedDiagnostic -Value (
+            "verifier exited $([int]$Probe.exit_code) without a valid " +
+            "JSON report: $rawOutput"
+        )
+    }
+
+    $issues = [Collections.Generic.List[string]]::new()
+    $resultsProperty = $report.PSObject.Properties['results']
+    if ($null -ne $resultsProperty) {
+        foreach ($row in @($resultsProperty.Value)) {
+            if ($null -eq $row) {
+                continue
+            }
+            $rowOK = $row.PSObject.Properties['ok']
+            if ($null -ne $rowOK -and
+                $rowOK.Value -is [bool] -and
+                [bool]$rowOK.Value) {
+                continue
+            }
+
+            $connectorProperty = $row.PSObject.Properties['connector']
+            $label = if ($null -ne $connectorProperty -and
+                -not [string]::IsNullOrWhiteSpace(
+                    [string]$connectorProperty.Value
+                )) {
+                [string]$connectorProperty.Value
+            }
+            else {
+                'target'
+            }
+            foreach ($identityName in @('sid', 'user', 'user_home')) {
+                $identityProperty = $row.PSObject.Properties[$identityName]
+                if ($null -ne $identityProperty -and
+                    -not [string]::IsNullOrWhiteSpace(
+                        [string]$identityProperty.Value
+                    )) {
+                    $label += "@$([string]$identityProperty.Value)"
+                    break
+                }
+            }
+
+            $errorProperty = $row.PSObject.Properties['error']
+            $detail = if ($null -eq $rowOK -or
+                $rowOK.Value -isnot [bool]) {
+                'verifier result is missing boolean ok'
+            }
+            elseif ($null -ne $errorProperty -and
+                -not [string]::IsNullOrWhiteSpace(
+                    [string]$errorProperty.Value
+                )) {
+                [string]$errorProperty.Value
+            }
+            else {
+                'verification failed without a target error'
+            }
+            $issues.Add("${label}: $detail")
+        }
+    }
+
+    $authorizationProperty = $report.PSObject.Properties['authorization_error']
+    if ($null -ne $authorizationProperty -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$authorizationProperty.Value
+        )) {
+        $issues.Add(
+            "protected authorization: $([string]$authorizationProperty.Value)"
+        )
+    }
+    if ($issues.Count -eq 0) {
+        $issues.Add(
+            'verifier reported failure without a per-target diagnostic'
+        )
+    }
+    return ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')
+}
+
+function Get-DefenseClawGuardianReadinessProbe {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
@@ -12665,7 +13797,10 @@ function Test-DefenseClawGuardianReady {
     $service = Microsoft.PowerShell.Management\Get-Service -Name $GuardianServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service -or
         $service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
-        return $false
+        return [pscustomobject][ordered]@{
+            ready = $false
+            diagnostic = 'guardian service is not running'
+        }
     }
     $verb = if ($LiveVerify) { 'verify' } else { 'status' }
     $probe = Invoke-DefenseClawGatewayCommand `
@@ -12674,7 +13809,32 @@ function Test-DefenseClawGuardianReady {
         -Arguments @('enterprise', 'hooks', $verb, '--manifest', $Layout.ManifestPath, '--json') `
         -Capture `
         -AllowFailure
-    return ([int]$probe.exit_code -eq 0)
+    $ready = [int]$probe.exit_code -eq 0
+    return [pscustomobject][ordered]@{
+        ready = $ready
+        diagnostic = if ($ready) {
+            ''
+        }
+        else {
+            Get-DefenseClawGuardianVerificationFailureDiagnostic `
+                -Probe $probe
+        }
+    }
+}
+
+function Test-DefenseClawGuardianReady {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$LiveVerify
+    )
+    $readiness = Get-DefenseClawGuardianReadinessProbe `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -LiveVerify:$LiveVerify
+    return [bool]$readiness.ready
 }
 
 function Wait-DefenseClawEnterpriseReadiness {
@@ -13040,6 +14200,29 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Metadata $metadata `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
+    $managedHooksActivationProperty = $metadata.PSObject.Properties[
+        'managed_hooks_activation'
+    ]
+    if ($null -eq $managedHooksActivationProperty -or
+        $null -eq $managedHooksActivationProperty.Value) {
+        throw 'deployment metadata is missing protected managed-hook activation evidence'
+    }
+    $managedHooksActivation =
+        Assert-DefenseClawManagedHooksActivationRecord `
+            -Record $managedHooksActivationProperty.Value
+    $installedManifestSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.ManifestPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ([string]$managedHooksActivation.manifest_sha256 -cne
+        $installedManifestSHA256) {
+        throw 'deployment managed-hook activation evidence does not bind installed targets.yaml'
+    }
+    if ($RequireReadiness -and
+        [string]$managedHooksActivation.state -cne 'activated') {
+        throw 'live readiness requires a protected activated managed-hook deployment state'
+    }
     $recordedCodexParent = $metadata.PSObject.Properties['codex_machine_policy_parent']
     if ($null -eq $recordedCodexParent -or
         -not [string]::Equals(
@@ -13609,12 +14792,17 @@ function Assert-DefenseClawEnterpriseDeployment {
         if (-not (Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName)) {
             throw 'gateway SCM process is running but authenticated health is not ready'
         }
-        if (-not (Test-DefenseClawGuardianReady `
+        $guardianReadiness = Get-DefenseClawGuardianReadinessProbe `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
-            -LiveVerify)) {
-            throw 'guardian SCM process is running but protected target coverage is not verified'
+            -LiveVerify
+        if (-not [bool]$guardianReadiness.ready) {
+            throw (
+                'guardian SCM process is running but protected target ' +
+                'coverage is not verified: ' +
+                [string]$guardianReadiness.diagnostic
+            )
         }
         # Spec 005 D1: readiness check for the enumerator SCM
         # process. Uses the same lightweight "service is running"
@@ -16654,7 +17842,10 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             -LiteralPath $Layout.InstallRoot `
             -PathType Container) {
         $teardownPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
-            -Layout $Layout
+            -Layout $Layout `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName `
+            -AllowLegacyInactive
         if ($teardownPhase -ceq 'prepared') {
             [void](Complete-DefenseClawCommittedManagedHooksFinalization `
                 -Layout $Layout `
@@ -16922,6 +18113,37 @@ function Invoke-DefenseClawPreLayoutRecovery {
         }
     }
 
+    if ($Action -eq 'Install' -and
+        (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.StateRoot `
+            -PathType Container) -and
+        (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.MetadataPath `
+            -PathType Leaf) -and
+        -not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.PendingPath)) {
+        $committedMetadata = Get-DefenseClawDeploymentMetadata `
+            -Layout $Layout `
+            -Required
+        Assert-DefenseClawMetadataIdentity `
+            -Metadata $committedMetadata `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        if (-not (Test-DefenseClawMetadataInstalled `
+                -Metadata $committedMetadata)) {
+            # Finish the authenticated old uninstall before fresh-install root
+            # creation. This is essential for schema-4 prepared journals: the
+            # retained, hash-verified old gateway is still present here and is
+            # the only helper authorized to finalize its own journal. Cleanup
+            # leaves the inactive metadata tombstone as the exact StateRoot
+            # preimage that the new Install adopts transactionally later.
+            [void](Invoke-DefenseClawCommittedUninstallCleanup `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
+        }
+    }
+
     if ($Action -eq 'Uninstall') {
         if (-not (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.StateRoot `
@@ -17086,16 +18308,74 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $null -ne $metadata -and
         (Test-DefenseClawMetadataInstalled -Metadata $metadata)
     )
+    $priorManagedHooksActivation = $null
+    $legacyClassifiedActivationState = ''
+    if ($priorDeploymentActive) {
+        $activationProperty = $metadata.PSObject.Properties[
+            'managed_hooks_activation'
+        ]
+        if ($null -ne $activationProperty) {
+            $priorManagedHooksActivation =
+                Assert-DefenseClawManagedHooksActivationRecord `
+                    -Record $activationProperty.Value
+        }
+        elseif (-not $Sources.ContainsKey('gateway')) {
+            throw (
+                "$Action requires an authenticated replacement gateway to " +
+                'migrate legacy managed-hook activation evidence'
+            )
+        }
+    }
+    $recoverCommittedManagedHooksLifecycle = $false
     if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
-        -PathType Leaf) {
-        # A crash after transaction commit but before journal retirement is
-        # harmless. Authenticate and retire that stale preimage before a new
-        # lifecycle transaction is allowed to replace it.
-        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName `
-            -Action retire)
+        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath) {
+        if ($Action -eq 'Install') {
+            # Reinstall retains its existing committed-tombstone lane. The
+            # installed helper and inactive metadata still authenticate this
+            # exact journal before any new transaction is opened.
+            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action retire)
+        }
+        else {
+            $journalCompatibility =
+                Get-DefenseClawManagedHooksLifecycleJournalCompatibilityState `
+                    -Layout $Layout
+            if ($journalCompatibility -ceq 'current') {
+                # A current journal is owned by the installed schema-4 helper.
+                # Retire it before opening a new transaction; sending it down
+                # the schema-3 adoption lane would reject a valid receipt.
+                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -Action retire)
+                if (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath `
+                            $Layout.ManagedHooksLifecycleJournalPath) {
+                    throw 'current managed-hook lifecycle journal survived direct retirement'
+                }
+            }
+            elseif ($journalCompatibility -ceq 'legacy_captured') {
+                if (-not $Sources.ContainsKey('gateway')) {
+                    throw (
+                        "$Action found a committed managed-hook lifecycle " +
+                        'journal that requires an authenticated replacement ' +
+                        'gateway'
+                    )
+                }
+                # The old helper may contain the defect that left this
+                # schema-3 journal. The transaction publishes its exact
+                # identity/hash preimage with pending.json. A crash before the
+                # replacement helper and adoption binding exist can therefore
+                # restore the old deployment without invoking that defective
+                # helper; retry then re-enters this bounded migration lane.
+                $recoverCommittedManagedHooksLifecycle = $true
+            }
+            else {
+                throw 'managed-hook lifecycle journal compatibility state is invalid'
+            }
+        }
     }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `
@@ -17103,13 +18383,22 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -GuardianServiceName $GuardianServiceName `
         -PriorDeploymentActive:$priorDeploymentActive `
         -IncludeCodexMachineState:$priorCodexTargetEnabled `
+        -RecoverLegacyManagedHooksLifecycleJournal:$recoverCommittedManagedHooksLifecycle `
         -InstallRootCreatedForTransaction:$InstallRootCreatedForTransaction `
         -StateRootCreatedForTransaction:$StateRootCreatedForTransaction
+    $transactionRecord = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $snapshot `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $lifecycleTransactionID = [string]$transactionRecord.id
+    if ($lifecycleTransactionID -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'lifecycle transaction has an invalid managed-hook generation identity'
+    }
     [void](Set-DefenseClawInstallPreparationTransactionBinding `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -SnapshotPath $snapshot)
+    $committedLifecycleRecovery = $null
     try {
         if ($Action -eq 'Install' -and $null -ne $metadata) {
             # The inactive uninstall tombstone remains the authority for
@@ -17171,6 +18460,33 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         )) {
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
                 throw "required managed artifact is missing after $Action staging: $requiredPath"
+            }
+        }
+        if ($recoverCommittedManagedHooksLifecycle) {
+            $committedLifecycleRecovery =
+                Publish-DefenseClawManagedHooksLifecycleRecoveryBinding `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -SnapshotPath $snapshot `
+                -GatewaySource $Sources['gateway']
+        }
+        if ($priorDeploymentActive -and
+            $null -eq $priorManagedHooksActivation) {
+            if ($null -ne $committedLifecycleRecovery) {
+                $legacyClassifiedActivationState = [string](
+                    $committedLifecycleRecovery.legacy_activation_state
+                )
+            }
+            else {
+                # A legacy deployment can be validly never activated without
+                # having left a stale lifecycle journal. Classify its exact old
+                # connector/selector state with the authenticated replacement
+                # helper before the deferred manifest/config mutation.
+                $legacyClassifiedActivationState =
+                    Get-DefenseClawManagedHooksLegacyActivationClassification `
+                        -Layout $Layout `
+                        -GatewayServiceName $GatewayServiceName `
+                        -TransactionID $lifecycleTransactionID
             }
         }
         if ($Action -ne 'Install') {
@@ -17413,10 +18729,63 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         }
         Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
 
+        $deploymentGenerationID = $lifecycleTransactionID
+        $managedHooksActivationState = if ($Action -eq 'Install') {
+            'never_activated'
+        }
+        elseif ($null -ne $priorManagedHooksActivation) {
+            [string]$priorManagedHooksActivation.state
+        }
+        elseif ($null -ne $committedLifecycleRecovery) {
+            [string]$committedLifecycleRecovery.legacy_activation_state
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace(
+                $legacyClassifiedActivationState
+            )) {
+            $legacyClassifiedActivationState
+        }
+        else {
+            throw (
+                'legacy deployment has no unambiguous protected managed-hook ' +
+                'activation evidence'
+            )
+        }
+        if ($NoStart) {
+            $classifiedState =
+                Get-DefenseClawManagedHooksLegacyActivationClassification `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -TransactionID $deploymentGenerationID
+            if ($managedHooksActivationState -ceq 'activated' -and
+                $classifiedState -cne 'activated') {
+                throw 'no-start servicing cannot reset an activated deployment to never-activated'
+            }
+            if ($null -ne $committedLifecycleRecovery -and
+                $classifiedState -cne
+                    [string]$committedLifecycleRecovery.legacy_activation_state) {
+                throw 'stale-journal recovery and current activation evidence disagree'
+            }
+            if (-not [string]::IsNullOrWhiteSpace(
+                    $legacyClassifiedActivationState
+                ) -and
+                $classifiedState -cne $legacyClassifiedActivationState) {
+                throw 'legacy activation preimage and current no-start state disagree'
+            }
+            $managedHooksActivationState = $classifiedState
+        }
+        $managedHooksActivation =
+            New-DefenseClawManagedHooksActivationRecord `
+                -State $managedHooksActivationState `
+                -DeploymentGenerationID $deploymentGenerationID `
+                -ManifestSHA256 $expectedGuardianManifestSHA256 `
+                -TargetCount ([Convert]::ToInt64(
+                    $targetRuntimePlan.target_count
+                ))
         $newMetadata = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -ManagedHooksActivation $managedHooksActivation
         Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
 
@@ -17480,6 +18849,26 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -ExpectedManifestSHA256 $expectedGuardianManifestSHA256)
+            # The protected Guardian receipt is now exact for this manifest.
+            # Promote the monotonic deployment activation state inside the
+            # still-open transaction before the gateway can become startable.
+            $managedHooksActivation =
+                New-DefenseClawManagedHooksActivationRecord `
+                    -State activated `
+                    -DeploymentGenerationID $deploymentGenerationID `
+                    -ManifestSHA256 $expectedGuardianManifestSHA256 `
+                    -TargetCount ([Convert]::ToInt64(
+                        $targetRuntimePlan.target_count
+                    ))
+            $newMetadata.managed_hooks_activation = $managedHooksActivation
+            $newMetadata.updated_at = [DateTime]::UtcNow.ToString('o')
+            Write-DefenseClawJsonAtomic `
+                -Value $newMetadata `
+                -Path $Layout.MetadataPath
+            Set-DefenseClawPathAcl `
+                -Path $Layout.MetadataPath `
+                -Kind AdminFile `
+                -GatewayServiceSID $script:AdministratorsSID
             # Only a freshly reconciling guardian authorizes gateway demand
             # start. A queued gateway failure restart is now safe to run.
             Set-DefenseClawServiceStartMode `
@@ -17559,9 +18948,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             throw "$Action failed ($($operationError.Exception.Message)); rollback also failed and pending recovery was retained: $($_.Exception.Message)"
         }
         try {
-            if (Microsoft.PowerShell.Management\Test-Path `
+            if (-not $recoverCommittedManagedHooksLifecycle -and
+                (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
-                -PathType Leaf) {
+                -PathType Leaf)) {
                 [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
@@ -17623,6 +19013,16 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -Purge:$Purge
     }
+    $managedHooksActivationProperty = $metadata.PSObject.Properties[
+        'managed_hooks_activation'
+    ]
+    if ($null -eq $managedHooksActivationProperty -or
+        $null -eq $managedHooksActivationProperty.Value) {
+        throw 'Uninstall requires protected managed-hook activation evidence'
+    }
+    $managedHooksActivation =
+        Assert-DefenseClawManagedHooksActivationRecord `
+            -Record $managedHooksActivationProperty.Value
     Assert-DefenseClawOwnedServiceOrAbsent `
         -Name $GatewayServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath
@@ -17743,7 +19143,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
-            -Installed:$false
+            -Installed:$false `
+            -ManagedHooksActivation $managedHooksActivation
         Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath
         Set-DefenseClawPreservedStateAcls `
             -Layout $Layout `

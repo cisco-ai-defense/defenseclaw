@@ -1230,6 +1230,7 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "service_missing_array_properties_normalized",
                 "certification_scope_rejections",
                 "lifecycle_file_lock_reuse_stable",
+                "guardian_failure_diagnostic_preserved",
             ),
         ),
         (
@@ -1836,6 +1837,31 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "boundaryDeadline" not in wait
     assert "Get-DefenseClawGuardianStateIdentity" in wait
     assert "last_status=$lastStatus" in wait
+    guardian_failure = module[
+        module.index(
+            "function Get-DefenseClawGuardianVerificationFailureDiagnostic"
+        ) : module.index("function Get-DefenseClawGuardianReadinessProbe")
+    ]
+    guardian_probe = module[
+        module.index("function Get-DefenseClawGuardianReadinessProbe") :
+        module.index("function Test-DefenseClawGuardianReady")
+    ]
+    guardian_boolean = module[
+        module.index("function Test-DefenseClawGuardianReady") :
+        module.index("function Wait-DefenseClawEnterpriseReadiness")
+    ]
+    deployment_assertion = module[
+        module.index("function Assert-DefenseClawEnterpriseDeployment") :
+        module.index("function Get-DefenseClawArtifactPath")
+    ]
+    assert "PSObject.Properties['results']" in guardian_failure
+    assert "PSObject.Properties['authorization_error']" in guardian_failure
+    assert "ConvertTo-DefenseClawBoundedDiagnostic" in guardian_failure
+    assert "verification failed without a target error" in guardian_failure
+    assert "ready = $ready" in guardian_probe
+    assert "return [bool]$readiness.ready" in guardian_boolean
+    assert "Get-DefenseClawGuardianReadinessProbe `" in deployment_assertion
+    assert "[string]$guardianReadiness.diagnostic" in deployment_assertion
     install_like = module[
         module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
             "function Invoke-DefenseClawUninstallLifecycle"
@@ -1909,6 +1935,116 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     )
     assert "the exact prior machine enrollment was restored" in install_like
     assert "could not be retired" in install_like
+
+
+def test_legacy_captured_lifecycle_journal_has_transactional_upgrade_recovery() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    publish = module[
+        module.index(
+            "function Publish-DefenseClawManagedHooksLifecycleRecoveryBinding"
+        ) : module.index(
+            "function Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding"
+        )
+    ]
+    resolve = module[
+        module.index(
+            "function Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding"
+        ) : module.index("function Assert-DefenseClawInstalledConfig")
+    ]
+    install_like = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    assert "schema-3 journal" in publish
+    assert "state = 'recorded'" in publish
+    assert "-Action retire-committed" in publish
+    assert "$binding.state = 'adopted'" in publish
+    assert "journal_file_identity" in publish
+    assert "journal_sha256" in publish
+    assert "durable legacy preimage marker" in publish
+    assert "state -notin @('recorded', 'adopted')" in resolve
+    assert "The helper committed its handle-bound quarantine" in resolve
+    assert "Write-DefenseClawJsonAtomic -Value $snapshot" in resolve
+    restore = module[
+        module.index("function Restore-DefenseClawTransaction {") : module.index(
+            "function Assert-DefenseClawRestoredTransactionReadyForActivation"
+        )
+    ]
+    assert "Assert-DefenseClawUnboundLegacyLifecycleRecoveryPreimage `" in restore
+    assert "$null -eq $unboundLegacyLifecyclePreimage" in restore
+    assert "$skipAdoptedStaleLifecyclePreimage" in restore
+    recovery_publish = install_like.index(
+        "Publish-DefenseClawManagedHooksLifecycleRecoveryBinding `"
+    )
+    transaction_open = install_like.index("$snapshot = New-DefenseClawTransaction `")
+    assert "Get-DefenseClawManagedHooksLifecycleJournalCompatibilityState `" in (
+        install_like[:transaction_open]
+    )
+    assert "journalCompatibility -ceq 'current'" in install_like[:transaction_open]
+    assert "-Action retire" in install_like[:transaction_open]
+    assert "-RecoverLegacyManagedHooksLifecycleJournal:" in install_like
+    current_capture = install_like.index(
+        "if ($Action -ne 'Install') {\n"
+        "            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `",
+        recovery_publish,
+    )
+    assert recovery_publish < current_capture
+
+    upgrade_case = smoke[
+        smoke.index("function Invoke-HarnessLegacyCapturedJournalUpgradeSequence") :
+        smoke.index("function Invoke-HarnessLegacyRecoveryCrashPrefixCases")
+    ]
+    crash_cases = smoke[
+        smoke.index("function Invoke-HarnessLegacyRecoveryCrashPrefixCases") :
+        smoke.index("$purgeResults =")
+    ]
+    assert "legacy_activation_missing = $true" in upgrade_case
+    assert '"schema_version":3,"phase":"captured"' in upgrade_case
+    assert "-Action Upgrade `" in upgrade_case
+    assert "-NoStart" in upgrade_case
+    for ordered_event in (
+        "lifecycle-recovery-binding-recorded",
+        "lifecycle-snapshot:retire-committed",
+        "lifecycle-recovery-binding-adopted",
+        "lifecycle-snapshot:capture",
+        "lifecycle-snapshot:classify-activation",
+    ):
+        assert ordered_event in upgrade_case
+    for crash_prefix in (
+        "replacement-staged-before-binding",
+        "binding-recorded-before-rename",
+        "rename-before-adoption-receipt",
+        "adoption-receipt-before-current-capture",
+    ):
+        assert crash_prefix in crash_cases
+    assert "HarnessRealRestoreTransaction" in crash_cases
+    assert "-DeferServiceRestart" in crash_cases
+    assert "lifecycle-generation-gc" in crash_cases
+    assert "lifecycle-journal-quarantined" in crash_cases
+    assert "violated GC-before-adoption recovery ordering" in crash_cases
+    assert "restore the gateway and exact unbound legacy preimage" in crash_cases
+    assert "legacy-gateway-preimage" in crash_cases
+    assert "staged-fixed-gateway" in crash_cases
+    assert "current-schema4-post-commit-direct-retirement" in upgrade_case
+
+    teardown_writer = smoke[
+        smoke.index("function Write-HarnessJournal") :
+        smoke.index("function Get-HarnessJournalPhase")
+    ]
+    lifecycle_mock_start = smoke.index(
+        "function script:Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand"
+    )
+    lifecycle_mock = smoke[
+        lifecycle_mock_start : smoke.index(
+            "function script:Restore-DefenseClawTransaction",
+            lifecycle_mock_start,
+        )
+    ]
+    assert 'schema_version":5' in teardown_writer
+    assert 'schema_version":4' in lifecycle_mock
 
 
 def test_certification_inspects_actual_live_service_tokens() -> None:
@@ -3834,7 +3970,7 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "function New-HarnessCaseRoot" in smoke
     assert "$receiptProbe.Length -ge 240" in smoke
     assert "legacy MAX_PATH boundary" in smoke
-    assert smoke.count("New-HarnessCaseRoot") == 12
+    assert smoke.count("New-HarnessCaseRoot") == 14
     assert "fresh-install-service-bootstrap-rollback-retry" in smoke
     assert "snapshot capture ran before all four service identities existed" in smoke
     assert "repeated-first-activation-failure-exact-rollback" in smoke
@@ -4499,6 +4635,25 @@ def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
     ]
     assert "schema_version = 4" in old_journal
     assert "phase = 'finalized'" in old_journal
+    assert "managed_hooks_activation" not in direct_reinstall[
+        direct_reinstall.index("[IO.File]::WriteAllText(") :
+        direct_reinstall.index("$oldJournal = [ordered]@{")
+    ]
+    assert "[switch]$AllowLegacyInactive" in module[
+        module.index("function Get-DefenseClawManagedHooksTeardownJournalPhase") :
+        module.index("function Remove-DefenseClawCommittedManagedHooksTeardownJournal")
+    ]
+    assert "-AllowLegacyInactive" in module[
+        module.index("function Remove-DefenseClawCommittedManagedHooksTeardownJournal") :
+        module.index("function Recover-DefenseClawQuiescingIntent")
+    ]
+    pre_layout = module[
+        module.index("function Invoke-DefenseClawPreLayoutRecovery") :
+        module.index("function Get-DefenseClawTargetRuntimePreparationMode")
+    ]
+    assert "$Action -eq 'Install'" in pre_layout
+    assert "Invoke-DefenseClawCommittedUninstallCleanup `" in pre_layout
+    assert "the only helper authorized to finalize its own journal" in pre_layout
     assert "service_exists = @{" in direct_reinstall
     assert "ipc_service_sids = @('S-1-5-80-1-2-3-4-5')" in direct_reinstall
     assert "second uninstall retained its shared IPC service SID" in direct_reinstall
@@ -4509,6 +4664,44 @@ def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
     ]
     assert "Test-DefenseClawServiceExists -Name $GatewayServiceName" in revoke_mock
     assert ".service_exists.ContainsKey" not in revoke_mock
+
+
+def test_uninstall_tombstone_preserves_authenticated_activation_identity() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    metadata_writer = module[
+        module.index("function New-DefenseClawDeploymentMetadata") : module.index(
+            "function Test-DefenseClawMetadataInstalled"
+        )
+    ]
+    assert "deployment metadata requires managed-hook activation evidence" in metadata_writer
+    assert "managed_hooks_activation" in metadata_writer
+
+    uninstall = module[
+        module.index("function Invoke-DefenseClawUninstallLifecycle") : module.index(
+            "function Invoke-DefenseClawReconcileLifecycle"
+        )
+    ]
+    inactive_retry = uninstall.index(
+        "if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata))"
+    )
+    activation_authentication = uninstall.index(
+        "$managedHooksActivationProperty = $metadata.PSObject.Properties["
+    )
+    tombstone = uninstall.index("$tombstone = New-DefenseClawDeploymentMetadata")
+    tombstone_activation = uninstall.index(
+        "-ManagedHooksActivation $managedHooksActivation", tombstone
+    )
+    assert inactive_retry < activation_authentication < tombstone < tombstone_activation
+
+    teardown_mock = smoke[
+        smoke.index("function script:Invoke-DefenseClawManagedHooksTeardownCommand", 1000) :
+        smoke.index("function script:Complete-DefenseClawCommittedManagedHooksFinalization")
+    ]
+    assert "teardown $Action lost protected activation evidence" in teardown_mock
+    assert "teardown finalize did not observe an inactive tombstone" in teardown_mock
+    assert "teardown $Action did not observe active deployment metadata" in teardown_mock
 
 
 def test_certification_cleanup_handles_partial_profiles_and_empty_parents() -> None:

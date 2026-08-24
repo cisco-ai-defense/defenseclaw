@@ -652,16 +652,23 @@ namespace DefenseClaw.Windows.Tests
             -not [bool]$coreOnlyLayout.CoreHardeningCertification) {
             throw 'CertificationCodexHome still implicitly selects core-only mode'
         }
+        $inactiveActivation = New-DefenseClawManagedHooksActivationRecord `
+            -State never_activated `
+            -DeploymentGenerationID ('1' * 32) `
+            -ManifestSHA256 ('a' * 64) `
+            -TargetCount 0
         $fullUnsignedMetadata = New-DefenseClawDeploymentMetadata `
             -Layout $fullUnsignedLayout `
             -GatewayServiceName $unsignedGateway `
             -GuardianServiceName $unsignedGuardian `
-            -Installed:$false
+            -Installed:$false `
+            -ManagedHooksActivation $inactiveActivation
         $coreOnlyMetadata = New-DefenseClawDeploymentMetadata `
             -Layout $coreOnlyLayout `
             -GatewayServiceName $unsignedGateway `
             -GuardianServiceName $unsignedGuardian `
-            -Installed:$false
+            -Installed:$false `
+            -ManagedHooksActivation $inactiveActivation
         if ([bool]$fullUnsignedMetadata.core_hardening_certification -or
             -not [bool]$coreOnlyMetadata.core_hardening_certification) {
             throw 'deployment metadata did not preserve the explicit core-only mode'
@@ -681,6 +688,10 @@ namespace DefenseClaw.Windows.Tests
             ),
             [Text.UTF8Encoding]::new($false)
         )
+        Set-DefenseClawPathAcl `
+            -Path $modeMetadataPath `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
         [void](Get-DefenseClawDeploymentMetadata `
             -Layout $adoptLayout `
             -Required)
@@ -709,6 +720,10 @@ namespace DefenseClaw.Windows.Tests
             ),
             [Text.UTF8Encoding]::new($false)
         )
+        Set-DefenseClawPathAcl `
+            -Path $modeMetadataPath `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
         $conversionRejected = $false
         try {
             [void](Get-DefenseClawDeploymentMetadata `
@@ -812,7 +827,8 @@ namespace DefenseClaw.Windows.Tests
         -Layout $layout `
         -GatewayServiceName 'DefenseClawGateway' `
         -GuardianServiceName 'DefenseClawHookGuardian' `
-        -Installed:$false
+        -Installed:$false `
+        -ManagedHooksActivation $inactiveActivation
     if ($productionMetadata.Contains('certification_codex_home')) {
         throw 'production deployment metadata unexpectedly contains certification CODEX_HOME'
     }
@@ -826,7 +842,8 @@ namespace DefenseClaw.Windows.Tests
         -Layout $certificationLayout `
         -GatewayServiceName 'DefenseClawCertGateway_0123456789' `
         -GuardianServiceName 'DefenseClawCertGuardian_0123456789' `
-        -Installed:$false
+        -Installed:$false `
+        -ManagedHooksActivation $inactiveActivation
     if (-not $certificationMetadata.Contains('certification_codex_home') -or
         [string]$certificationMetadata['certification_codex_home'] -cne $certificationHome) {
         throw 'certification deployment metadata does not pin exact CODEX_HOME'
@@ -1009,6 +1026,46 @@ if (-not [bool]$teardownFailurePreserved) {
     throw 'failed managed-hook teardown diagnostic regression did not execute'
 }
 
+$guardianFailureDiagnosticPreserved = & $module {
+    $secretMarker = 'diagnostic-secret-marker'
+    $payload = [pscustomobject][ordered]@{
+        ok = $false
+        results = @(
+            [pscustomobject][ordered]@{
+                connector = 'claudecode'
+                sid = 'S-1-5-21-1000'
+                ok = $false
+                error = (
+                    'immutable managed runtime generation does not match ' +
+                    "the verified connector contract; token=$secretMarker"
+                )
+            },
+            [pscustomobject][ordered]@{
+                connector = 'cursor'
+                sid = 'S-1-5-21-1001'
+                ok = $true
+            }
+        )
+    } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress -Depth 4
+    $probe = [pscustomobject][ordered]@{
+        exit_code = 1
+        output = @($payload, 'enterprise hooks verify failed')
+    }
+    $diagnostic = Get-DefenseClawGuardianVerificationFailureDiagnostic `
+        -Probe $probe
+    if ($diagnostic -notmatch 'claudecode@S-1-5-21-1000' -or
+        $diagnostic -notmatch 'immutable managed runtime generation' -or
+        $diagnostic -match [regex]::Escape($secretMarker) -or
+        $diagnostic -notmatch 'token=<redacted>' -or
+        $diagnostic -match 'cursor@S-1-5-21-1001') {
+        throw "guardian live verifier diagnostic was not safely preserved: $diagnostic"
+    }
+    return $true
+}
+if (-not [bool]$guardianFailureDiagnosticPreserved) {
+    throw 'guardian live verifier diagnostic regression did not execute'
+}
+
 [pscustomobject]@{
     schema_version = 1
     ok = $true
@@ -1024,6 +1081,7 @@ if (-not [bool]$teardownFailurePreserved) {
     service_empty_environment_binding = $true
     service_missing_array_properties_normalized = $true
     teardown_failure_diagnostic_preserved = $teardownFailurePreserved
+    guardian_failure_diagnostic_preserved = $guardianFailureDiagnosticPreserved
     production_codex_home_absent = $true
     certification_codex_home_exact = $true
     certification_scope_rejections = $true
