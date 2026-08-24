@@ -46,6 +46,7 @@ const (
 )
 
 type windowsEnterpriseLifecycleOptions struct {
+	brokerBinary                  string
 	gatewayBinary                 string
 	hookBinary                    string
 	cliBinary                     string
@@ -79,9 +80,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// install-enterprise.ps1 renders a minimal managed_enterprise
 	// config.yaml + per-user targets.yaml into its protected bootstrap
 	// directory before invoking the lifecycle transaction.
-	mode       string
-	connector  string
-	jsonOutput bool
+	mode            string
+	connector       string
+	jsonOutput      bool
+	providerLibrary string
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -131,14 +133,15 @@ type windowsServiceConfigValidation struct {
 }
 
 var (
-	windowsEnterpriseCommandRunner        = runWindowsEnterprisePowerShell
-	windowsEnterpriseScriptFinder         = findWindowsEnterpriseInstaller
-	windowsEnterprisePayloadStager        = stageWindowsEnterprisePayload
-	windowsEnterpriseTrustValidator       = validateWindowsEnterpriseInstallerTrust
-	windowsEnterpriseExecutableResolver   = os.Executable
-	windowsEnterpriseProgramFilesResolver = trustedWindowsEnterpriseProgramFiles
-	windowsEnterpriseProgramDataResolver  = trustedWindowsEnterpriseProgramData
-	windowsEnterpriseMachineRootsResolver = resolveWindowsEnterpriseMachineRoots
+	windowsEnterpriseCommandRunner           = runWindowsEnterprisePowerShell
+	windowsEnterpriseScriptFinder            = findWindowsEnterpriseInstaller
+	windowsEnterprisePayloadStager           = stageWindowsEnterprisePayload
+	windowsEnterpriseTrustValidator          = validateWindowsEnterpriseInstallerTrust
+	windowsEnterpriseExecutableResolver      = os.Executable
+	windowsEnterpriseProgramFilesResolver    = trustedWindowsEnterpriseProgramFiles
+	windowsEnterpriseProgramDataResolver     = trustedWindowsEnterpriseProgramData
+	windowsEnterpriseMachineRootsResolver    = resolveWindowsEnterpriseMachineRoots
+	windowsEnterpriseProviderLibraryResolver = managed.DiscoverCMIDLibrary
 )
 
 type windowsEnterprisePowerShellTempOps struct {
@@ -174,6 +177,7 @@ func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksTeardownCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsTargetRuntimeCommand())
 	// Spec 005 D1: hook-enumerator subcommand. Windows-only; the
 	// whole file is //go:build windows so a non-Windows build never
 	// reaches this registration.
@@ -195,6 +199,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 		},
 	}
 	flags := cmd.Flags()
+	flags.StringVar(&opts.brokerBinary, "broker-binary", "", "source defenseclaw-cmid-broker.exe")
 	flags.StringVar(&opts.gatewayBinary, "gateway-binary", "", "source defenseclaw-gateway.exe")
 	flags.StringVar(&opts.hookBinary, "hook-binary", "", "source defenseclaw-hook.exe")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
@@ -272,6 +277,15 @@ func runWindowsEnterpriseLifecycle(
 	}
 	if err := validateWindowsEnterpriseLifecycleSecurityOptions(cmd, action, opts); err != nil {
 		return failPreflight(err)
+	}
+	mutation := action == "install" || action == "upgrade" || action == "repair"
+	if mutation && strings.TrimSpace(opts.brokerBinary) != "" {
+		opts.providerLibrary = strings.TrimSpace(windowsEnterpriseProviderLibraryResolver())
+		if opts.providerLibrary == "" {
+			return failPreflight(errors.New(
+				"the managed credential provider library was not found in the trusted Secure Client installation",
+			))
+		}
 	}
 	script, err := windowsEnterpriseScriptFinder(opts.installerPath)
 	if err != nil {
@@ -498,6 +512,8 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 			args = append(args, flag, value)
 		}
 	}
+	appendValue("-BrokerBinary", opts.brokerBinary)
+	appendValue("-ProviderLibrary", opts.providerLibrary)
 	appendValue("-GatewayBinary", opts.gatewayBinary)
 	appendValue("-HookBinary", opts.hookBinary)
 	appendValue("-CLIBinary", opts.cliBinary)
@@ -632,17 +648,10 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 				action,
 			)
 		}
-		// Windows managed_enterprise lifecycle only carries reconcile +
-		// teardown-snapshot plumbing for codex and claudecode today
-		// (specs 002/004/005). Cursor and Amp exist in the connector
-		// registry but their Windows managed_enterprise lifecycle
-		// hasn't been built — reconcile/teardown/trusted-state all
-		// fail closed on them deep inside the transaction. Reject at
-		// arg validation instead of letting the caller waste a
-		// transaction round-trip on
-		// "managed-hook teardown does not support connector 'cursor'".
-		// Follow-up: docs/specs/006-windows-cursor-managed-lifecycle.
-		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true}
+		// Keep this closed set aligned with the native Windows lifecycle. Each
+		// entry must have reconcile, trusted-runtime, rollback, and teardown
+		// coverage before it is accepted at this boundary.
+		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true, "cursor": true}
 		for _, entry := range strings.Split(opts.connector, ",") {
 			trimmed := strings.ToLower(strings.TrimSpace(entry))
 			if trimmed == "" {
@@ -651,8 +660,7 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			if !supportedOnWindows[trimmed] {
 				return fmt.Errorf(
 					"--connector entry %q is not supported on Windows managed_enterprise; "+
-						"supported: codex, claudecode. "+
-						"Follow-up: docs/specs/006-windows-cursor-managed-lifecycle.",
+						"supported: codex, claudecode, cursor.",
 					trimmed,
 				)
 			}

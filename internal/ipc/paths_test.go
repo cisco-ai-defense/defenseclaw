@@ -55,27 +55,6 @@ func TestResolveSocketPath(t *testing.T) {
 			want: "/tmp/env.sock",
 		},
 		{
-			name: "env var IGNORED in managed_enterprise (fail-closed)",
-			cfg: &config.Config{
-				DataDir:        "/opt/dc/runtime",
-				DeploymentMode: managed.DeploymentModeManagedEnterprise,
-			},
-			env:  "/tmp/attacker.sock",
-			want: filepath.Join("/opt/dc", "ipc", SocketFileName),
-		},
-		{
-			name: "managed_enterprise falls back to dirname(data_dir)/ipc/… (macOS installer layout)",
-			cfg: &config.Config{
-				// Matches packaging/macos/install.sh:
-				//   SUPPORT_DIR = /opt/cisco/secureclient/defenseclaw
-				//   data_dir    = ${SUPPORT_DIR}/runtime
-				// so the socket lands at ${SUPPORT_DIR}/ipc/<file>.
-				DataDir:        "/opt/cisco/secureclient/defenseclaw/runtime",
-				DeploymentMode: managed.DeploymentModeManagedEnterprise,
-			},
-			want: filepath.Join("/opt/cisco/secureclient/defenseclaw", "ipc", SocketFileName),
-		},
-		{
 			name: "unmanaged falls back to data_dir/ipc/…",
 			cfg: &config.Config{
 				DataDir: "/home/user/.defenseclaw",

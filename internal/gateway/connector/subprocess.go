@@ -75,7 +75,7 @@ const defaultHookFailMode = "closed"
 // cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
 // request budget while staying inside Cursor's 30-second command-hook timeout.
 // Keeping the adapter bound shorter than the vendor timeout gives it time to
-// terminate the launcher, remove the temporary payload, and emit fail-open JSON.
+// terminate the launcher and emit the configured fail-open/fail-closed JSON.
 const cursorAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
@@ -339,6 +339,7 @@ func writeHookHelpers(hookDir string) error {
 }
 
 func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
+	writeFile := hookRuntimeFileWriter(managedEnterprise)
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
@@ -360,7 +361,7 @@ func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 				}
 			}
 		}
-		if err := atomicWriteFile(helperPath, content, 0o600); err != nil {
+		if err := writeFile(helperPath, content, 0o600); err != nil {
 			return fmt.Errorf("write hook helper %s: %w", name, err)
 		}
 	}
@@ -462,7 +463,8 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 	if scopedToken {
 		tokenScope = connectorName
 	}
-	tokenFile, err := writeHookTokenFiles(hookDir, tokenScope, token)
+	writeFile := hookRuntimeFileWriter(managed)
+	tokenFile, err := writeHookTokenFilesUsing(hookDir, tokenScope, token, writeFile)
 	if err != nil {
 		return err
 	}
@@ -497,7 +499,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 			return fmt.Errorf("render hook %s: %w", name, err)
 		}
 		hookPath := filepath.Join(hookDir, name)
-		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := writeFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 		return nil
@@ -513,21 +515,38 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 			return err
 		}
 	}
-	if err := writeHookConfigSidecar(hookDir, apiAddr, connectorName, normalizeHookFailMode(failMode), managed); err != nil {
+	if err := writeHookConfigSidecarUsing(
+		hookDir,
+		apiAddr,
+		connectorName,
+		normalizeHookFailMode(failMode),
+		managed,
+		writeFile,
+	); err != nil {
 		return err
 	}
 	return nil
 }
 
-func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
-	return writeHookTokenFilesUsing(hookDir, connectorName, token, atomicWriteFile)
+// hookRuntimeFileWriter selects the final-descriptor publication primitive for
+// managed Windows runtime files. Generic atomicWriteFile intentionally uses an
+// owner-only two-ACE private descriptor; the managed runtime contract instead
+// requires the target, SYSTEM, Administrators, and OWNER RIGHTS four-ACE DACL.
+// Publishing through WriteManagedTargetRuntimeFile also makes an identical
+// canonical write a true no-op, avoiding an observable ACL/identity transition
+// during normal Guardian reconciliation.
+func hookRuntimeFileWriter(managedEnterprise bool) func(string, []byte, os.FileMode) error {
+	if managedEnterprise && runtime.GOOS == "windows" {
+		return func(path string, data []byte, _ os.FileMode) error {
+			return WriteManagedTargetRuntimeFile(path, data)
+		}
+	}
+	return atomicWriteFile
 }
 
-// writeHookTokenFilesUsing is the writer-injectable form used by
-// managed-mode callers (ReconcileManagedNativeHookRuntime) so token
-// files land through managed.WriteServiceRuntimeFile — validated
-// against the managed runtime trust model — rather than through
-// atomicWriteFile's private-state contract.
+// writeHookTokenFilesUsing is the writer-injectable form used by managed-mode
+// callers so token files can be published with the platform's exact managed
+// runtime descriptor rather than atomicWriteFile's generic private contract.
 func writeHookTokenFilesUsing(
 	hookDir, connectorName, token string,
 	writeFile func(string, []byte, os.FileMode) error,
@@ -587,7 +606,14 @@ type hookConfigSidecar struct {
 // resolved at runtime. Connector entries always win; the legacy fallback is
 // written only for unscoped callers and cannot collapse mixed connector state.
 func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, managed bool) error {
-	return writeHookConfigSidecarUsing(hookDir, apiAddr, connectorName, failMode, managed, atomicWriteFile)
+	return writeHookConfigSidecarUsing(
+		hookDir,
+		apiAddr,
+		connectorName,
+		failMode,
+		managed,
+		hookRuntimeFileWriter(managed),
+	)
 }
 
 // ReconcileManagedNativeHookRuntime writes only DefenseClaw's connector-scoped
@@ -595,35 +621,32 @@ func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, ma
 // so Windows machine-policy connectors never read or modify the agent's
 // user-level configuration file.
 //
-// T3.7 follow-up: the writes below go through atomicWriteFile which
-// enforces safefile's private-state contract (sole ownership by the
-// writer). On managed enterprise the correct writer is
-// managed.WriteServiceRuntimeFile which honours the Administrators-
-// owned + service-writer-ACE layout of a managed runtime tree. The
-// writer-injectable seam (writeHookTokenFilesUsing +
-// writeHookConfigSidecarUsing) already exists — swapping the writer to
-// managed.WriteServiceRuntimeFile is a one-line change here. The
-// blocker is the existing hookwiring_test.go suite, which exercises
-// this function with test-owned temp directories that intentionally
-// bypass managed trust; those tests need a test-injectable trust seam
-// before the writer swap can land safely. Tracked as a follow-up so
-// the test-infra refactor lives in its own PR alongside the writer
-// swap.
+// On Windows these writes use the target-aware managed-runtime publisher, so
+// both the staging inode and the published name have the exact final DACL.
+// Other platforms retain the existing private atomic writer.
 func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" {
+	if name != "codex" && name != "claudecode" && name != "cursor" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create managed native hook directory: %w", err)
 	}
-	if _, err := writeHookTokenFiles(hookDir, name, token); err != nil {
+	writeFile := hookRuntimeFileWriter(true)
+	if _, err := writeHookTokenFilesUsing(hookDir, name, token, writeFile); err != nil {
 		return err
 	}
-	return writeHookConfigSidecar(hookDir, apiAddr, name, "closed", true)
+	return writeHookConfigSidecarUsing(
+		hookDir,
+		apiAddr,
+		name,
+		"closed",
+		true,
+		writeFile,
+	)
 }
 
 // ValidateManagedNativeHookRuntime requires the v2 managed marker, protected
@@ -632,7 +655,7 @@ func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" {
+	if name != "codex" && name != "claudecode" && name != "cursor" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -739,12 +762,15 @@ func snapshotHookRuntimeFileForMode(
 	return snapshot, nil
 }
 
-func restoreHookRuntimeFiles(snapshots []hookRuntimeFileSnapshot) error {
+func restoreHookRuntimeFilesUsing(
+	snapshots []hookRuntimeFileSnapshot,
+	writeFile func(string, []byte, os.FileMode) error,
+) error {
 	var failures []string
 	for i := len(snapshots) - 1; i >= 0; i-- {
 		snapshot := snapshots[i]
 		if snapshot.existed {
-			if err := atomicWriteFile(snapshot.path, snapshot.data, 0o600); err != nil {
+			if err := writeFile(snapshot.path, snapshot.data, 0o600); err != nil {
 				failures = append(failures, fmt.Sprintf("%s: %v", snapshot.path, err))
 			}
 			continue
@@ -840,7 +866,7 @@ func writeHookConfigSidecarUsing(
 			normalizeHookFailMode(failMode),
 		)
 		if err := writeFile(flatPath, []byte(runtimeBody), 0o600); err != nil {
-			if restoreErr := restoreHookRuntimeFiles(snapshots); restoreErr != nil {
+			if restoreErr := restoreHookRuntimeFilesUsing(snapshots, writeFile); restoreErr != nil {
 				return fmt.Errorf("write shell hook runtime sidecar: %v (%v)", err, restoreErr)
 			}
 			return fmt.Errorf("write shell hook runtime sidecar: %w", err)
@@ -874,6 +900,7 @@ func clearHookConfigSidecarEntryLocked(
 	hookDir, name string,
 	managedEnterprise bool,
 ) ([]hookRuntimeFileSnapshot, error) {
+	writeFile := hookRuntimeFileWriter(managedEnterprise)
 	path := filepath.Join(hookDir, hookConfigSidecarName)
 	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+name)
 	jsonSnapshot, err := snapshotHookRuntimeFileForMode(path, managedEnterprise)
@@ -906,14 +933,14 @@ func clearHookConfigSidecarEntryLocked(
 					return nil, fmt.Errorf("marshal hook config sidecar: %w", err)
 				}
 				body = append(body, '\n')
-				if err := atomicWriteFile(path, body, 0o600); err != nil {
+				if err := writeFile(path, body, 0o600); err != nil {
 					return nil, fmt.Errorf("write hook config sidecar: %w", err)
 				}
 			}
 		}
 	}
 	if err := os.Remove(flatPath); err != nil && !os.IsNotExist(err) {
-		if restoreErr := restoreHookRuntimeFiles(snapshots); restoreErr != nil {
+		if restoreErr := restoreHookRuntimeFilesUsing(snapshots, writeFile); restoreErr != nil {
 			return nil, fmt.Errorf("remove shell hook runtime sidecar: %v (%v)", err, restoreErr)
 		}
 		return nil, fmt.Errorf("remove shell hook runtime sidecar: %w", err)
@@ -934,7 +961,7 @@ func validateHookRuntimeStateForContract(
 	if strings.TrimSpace(dataDir) == "" || name == "" {
 		return nil
 	}
-	if name != "claudecode" && name != "codex" {
+	if name != "claudecode" && name != "codex" && name != "cursor" {
 		return nil
 	}
 	hookDir := filepath.Join(dataDir, "hooks")

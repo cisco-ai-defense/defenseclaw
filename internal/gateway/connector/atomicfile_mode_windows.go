@@ -6,6 +6,9 @@
 package connector
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +28,49 @@ func atomicFileValidateStagedProtection(file *os.File, perm os.FileMode) error {
 		return nil
 	}
 	return validateAtomicTransformBoundFilePrivatePlatform(file)
+}
+
+// atomicFileCreateTemp creates private Windows staging files with the
+// effective user as their explicit owner in the create operation. An elevated
+// user's token can otherwise choose BUILTIN\Administrators as the default
+// owner, leaving a foreign-owned pathname that the subsequent fail-closed
+// protection check must reject. Creating through the already handle-bound
+// NT path also prevents a parent-directory name swap from redirecting the
+// staged object.
+func atomicFileCreateTemp(dir string, perm os.FileMode) (*os.File, string, error) {
+	if perm.Perm()&0o077 != 0 {
+		file, err := os.CreateTemp(dir, ".tmp-*")
+		if err != nil {
+			return nil, "", err
+		}
+		return file, file.Name(), nil
+	}
+
+	parent, err := openAtomicTransformBoundDirectoryPlatform(dir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open private staging directory: %w", err)
+	}
+	defer parent.Close()
+	if err := validateAtomicTransformBoundDirectoryPlatform(parent, false); err != nil {
+		return nil, "", fmt.Errorf("validate private staging directory: %w", err)
+	}
+
+	for attempt := 0; attempt < 128; attempt++ {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, "", fmt.Errorf("generate private staging name: %w", err)
+		}
+		name := ".tmp-" + hex.EncodeToString(random[:])
+		file, err := createAtomicTransformBoundFilePlatform(parent, name, perm)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("create private staging file: %w", err)
+		}
+		return file, filepath.Join(dir, name), nil
+	}
+	return nil, "", fmt.Errorf("create private staging file: exhausted collision retries")
 }
 
 // atomicFileBeforePrivatePublish is a Windows-only test seam invoked after the

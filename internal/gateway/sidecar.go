@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -46,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
+	"github.com/defenseclaw/defenseclaw/internal/managed/cmidbroker"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -464,7 +466,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	sidecar.publishConfig(cfg)
 	// Publish the process-global managed carve-out only after every fallible
 	// constructor has succeeded. A rejected Sidecar candidate must not change
-	// redaction behavior for an already-running embedder or a later retry.
+	// redaction behavior for an already-running embedder or a later retry. Cisco
+	// AI Defense failure diagnostics remain sink-redacted in every posture; this
+	// flag must never authorize raw upstream response bytes in gateway logs.
 	setManagedEnterpriseRedactionPosture(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	return sidecar, nil
 }
@@ -2082,6 +2086,18 @@ func (s *Sidecar) logCMIDBuildError(stage string, err error) {
 		stage, err)
 }
 
+// logCMIDBuildLane emits a one-line informational record naming the
+// credential lane a successful CMID provider build resolved to
+// ("broker" or "native"). Operators who set both CloudAuth.LibPath and
+// broker environment variables can tell which lane actually served a
+// token; logCMIDBuildError only fires on failure, so without this line
+// success is indistinguishable across lanes.
+func (s *Sidecar) logCMIDBuildLane(lane string) {
+	fmt.Fprintf(os.Stderr,
+		"[managed-cloud] CMID provider using %s credential lane\n",
+		lane)
+}
+
 // ensureCMIDProvider lazily constructs the managed cloud auth provider
 // on first use and caches it for the sidecar's lifetime.
 // Managed_enterprise only. Returns an error when the underlying
@@ -2128,6 +2144,27 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 }
 
 func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
+	brokerConfig, brokerConfigured, brokerConfigErr := cmidbroker.ConfigFromEnvironment(os.Getenv)
+	if brokerConfigErr != nil {
+		wrapped := fmt.Errorf("managed cloud broker configuration rejected: %w", brokerConfigErr)
+		s.logCMIDBuildError("broker-config", wrapped)
+		return nil, wrapped
+	}
+	if brokerConfigured {
+		provider, err := cmidbroker.NewClientProvider(brokerConfig)
+		if err != nil {
+			wrapped := fmt.Errorf("managed cloud broker unavailable: %w", err)
+			s.logCMIDBuildError("broker-client", wrapped)
+			return nil, wrapped
+		}
+		if err := provider.Refresh(ctx); err != nil {
+			s.logCMIDBuildError("broker-refresh-at-boot", err)
+			return provider, err
+		}
+		s.logCMIDBuildLane("broker")
+		return provider, nil
+	}
+
 	libPath := strings.TrimSpace(s.currentConfig().CloudAuth.LibPath)
 	if libPath == "" {
 		// Secure Client nests the identity library under version
@@ -2174,6 +2211,7 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 		s.logCMIDBuildError("refresh-at-boot", err)
 		return prov, err
 	}
+	s.logCMIDBuildLane("native")
 	return prov, nil
 }
 
@@ -3829,25 +3867,13 @@ type managedGuardianAuthorization struct {
 }
 
 type managedGuardianAuthorizationTarget struct {
-	User      string                              `json:"user,omitempty"`
-	UserHome  string                              `json:"user_home,omitempty"`
-	SID       string                              `json:"sid,omitempty"`
-	Connector string                              `json:"connector"`
-	OK        bool                                `json:"ok"`
-	Error     string                              `json:"error,omitempty"`
-	Result    *managedGuardianAuthorizationResult `json:"result,omitempty"`
-}
-
-type managedGuardianAuthorizationResult struct {
-	Connector       string   `json:"connector"`
-	UserHome        string   `json:"user_home"`
-	DataDir         string   `json:"data_dir"`
-	HookConfigPaths []string `json:"hook_config_paths,omitempty"`
-	HookScripts     []string `json:"hook_scripts,omitempty"`
-	BackupFiles     []string `json:"backup_files,omitempty"`
-	CreatedDirs     []string `json:"created_dirs,omitempty"`
-	AgentVersion    string   `json:"agent_version,omitempty"`
-	HookContractID  string   `json:"hook_contract_id,omitempty"`
+	User      string                         `json:"user,omitempty"`
+	UserHome  string                         `json:"user_home,omitempty"`
+	SID       string                         `json:"sid,omitempty"`
+	Connector string                         `json:"connector"`
+	OK        bool                           `json:"ok"`
+	Error     string                         `json:"error,omitempty"`
+	Result    *enterprisehooks.InstallResult `json:"result,omitempty"`
 }
 
 const managedGuardianAuthorizationMaxBytes int64 = 4 << 20

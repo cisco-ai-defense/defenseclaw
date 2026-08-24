@@ -60,7 +60,11 @@ env:
   # Expected fixture SHA-256. Regenerate via
   # scripts/generate-repro-fixture.sh; update this constant in the same
   # PR that regenerates.
-  FIXTURE_EXPECTED_SHA256: 9ba86aa776ef0c711d4e4d2514a01d81ae42a7ea0c0d05df5706602e6072f898
+  FIXTURE_EXPECTED_SHA256: 7dfdcb2342ed995dd8b001c856cc7fb934f1518307c33ad7f493938e278b5397
+  # Single source of truth for the six payload filenames the fixture and
+  # the emit-payload-metadata gate agree on. Referenced by both emit-linux
+  # and emit-macos so a future edit stays in one place.
+  EXPECTED_PAYLOAD_FILENAMES: "DefenseClawEnterprise.psm1,defenseclaw-cmid-broker.exe,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw.exe,install-enterprise.ps1"
 
 jobs:
   # Fast lint job that runs both reproducibility lints on every PR to
@@ -150,7 +154,7 @@ jobs:
             --version 0.0.0-repro-fixture \
             --source-commit 1111222233334444555566667777888899990000 \
             --cmid-pseudo-version v0.0.0-19700101000000-000000000000 \
-            --expected-filenames "DefenseClawEnterprise.psm1,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw.exe,install-enterprise.ps1" \
+            --expected-filenames "$EXPECTED_PAYLOAD_FILENAMES" \
             --out "$workdir/out/payload-metadata.json"
           # Use a fixed-byte "outer setup exe" stand-in so provenance is
           # comparable; the real outer go build lands in Workstream A.
@@ -227,7 +231,7 @@ jobs:
             --version 0.0.0-repro-fixture \
             --source-commit 1111222233334444555566667777888899990000 \
             --cmid-pseudo-version v0.0.0-19700101000000-000000000000 \
-            --expected-filenames "DefenseClawEnterprise.psm1,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw.exe,install-enterprise.ps1" \
+            --expected-filenames "$EXPECTED_PAYLOAD_FILENAMES" \
             --out "$workdir/out/payload-metadata.json"
           printf 'defenseclaw-outer-setup-fixture-v1\n' > "$workdir/out/setup.exe"
           "$workdir/windows-repro-manifest" emit-provenance \
@@ -270,8 +274,8 @@ jobs:
           mkdir -p "$workdir"
           zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
             | tar -x -C "$workdir"
-          # The fixture ships 5 tiny placeholder files under payload/.
-          # assemble.sh checks for exactly these five names.
+          # The fixture ships 6 tiny placeholder files under payload/.
+          # assemble.sh checks for exactly these six names.
           ls "$workdir/payload"
           # go build -mod=vendor (from repro-flags.sh) requires a vendor/
           # tree. The outer Setup EXE has no external deps (stdlib only

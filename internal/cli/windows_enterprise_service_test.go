@@ -25,6 +25,8 @@ import (
 
 func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 	opts := &windowsEnterpriseLifecycleOptions{
+		brokerBinary:                  `C:\stage\defenseclaw-cmid-broker.exe`,
+		providerLibrary:               `C:\Program Files\Cisco\Cisco Secure Client\CM\x64\cmidapi.dll`,
 		gatewayBinary:                 `C:\stage\defenseclaw-gateway.exe`,
 		hookBinary:                    `C:\stage\defenseclaw-hook.exe`,
 		cliBinary:                     `C:\stage\defenseclaw.exe`,
@@ -44,6 +46,8 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 	got := windowsEnterprisePowerShellArgs("upgrade", opts)
 	want := []string{
 		"-Action", "Upgrade",
+		"-BrokerBinary", opts.brokerBinary,
+		"-ProviderLibrary", opts.providerLibrary,
 		"-GatewayBinary", opts.gatewayBinary,
 		"-HookBinary", opts.hookBinary,
 		"-CLIBinary", opts.cliBinary,

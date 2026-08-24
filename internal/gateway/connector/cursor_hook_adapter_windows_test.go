@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,14 +42,21 @@ const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 func TestMain(m *testing.M) {
 	switch os.Getenv(cursorAdapterHelperMode) {
 	case "success":
-		inputPath := argumentValue(os.Args[1:], "--input-file")
-		payload, err := os.ReadFile(inputPath)
+		payload, err := io.ReadAll(os.Stdin)
 		if err != nil || !bytes.Contains(payload, []byte("cursor-adapter-probe")) {
-			fmt.Fprintln(os.Stderr, "adapter helper did not receive the expected input file")
+			fmt.Fprintln(os.Stderr, "adapter helper did not receive the expected stdin payload")
 			os.Exit(3)
+		}
+		if strings.Join(os.Args[1:], "|") != "hook|--connector|cursor|--enterprise-managed" {
+			fmt.Fprintln(os.Stderr, "adapter helper received unexpected arguments")
+			os.Exit(4)
 		}
 		fmt.Print(`{"continue":true}`)
 		os.Exit(0)
+	case "block":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		fmt.Print(`{"continue":false,"permission":"deny"}`)
+		os.Exit(2)
 	case "timeout":
 		if pidFile := os.Getenv(cursorAdapterPIDFileEnv); pidFile != "" {
 			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
@@ -67,30 +75,14 @@ func TestMain(m *testing.M) {
 	}
 }
 
-func argumentValue(args []string, name string) string {
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == name {
-			return args[i+1]
-		}
-	}
-	return ""
-}
-
-func renderCursorAdapterForTest(t *testing.T, hookPath string, timeoutMS int) string {
+func renderCursorAdapterForTest(t *testing.T, hookPath, failMode string, managed bool, timeoutMS int) string {
 	t.Helper()
-	tTemplate, err := hookFS.ReadFile("hooks/cursor-hook.ps1")
-	if err != nil {
-		t.Fatalf("read Cursor adapter template: %v", err)
-	}
-	rendered, err := renderTemplate(string(tTemplate), templateData{
-		HookBinaryPS:  strings.ReplaceAll(hookPath, "'", "''"),
-		HookTimeoutMS: timeoutMS,
-	})
+	rendered, err := renderWindowsCursorAdapter(hookPath, failMode, managed, timeoutMS)
 	if err != nil {
 		t.Fatalf("render Cursor adapter: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "cursor-hook.ps1")
-	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+	if err := os.WriteFile(path, rendered, 0o600); err != nil {
 		t.Fatalf("write Cursor adapter: %v", err)
 	}
 	return path
@@ -100,21 +92,12 @@ func runCursorAdapterTest(
 	t *testing.T,
 	adapterPath string,
 	payload string,
-	overrideCleanup bool,
 ) (stdout, stderr string, exitCode int) {
 	t.Helper()
-	var cmd *exec.Cmd
 	quoted := strings.ReplaceAll(adapterPath, "'", "''")
-	if overrideCleanup {
-		command := "function global:Remove-Item { " +
-			"param([string]$LiteralPath, [switch]$Force, [object]$ErrorAction) " +
-			"throw 'simulated cleanup failure' }; $input | & '" + quoted + "'"
-		cmd = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command)
-	} else {
-		cmd = exec.Command(
-			"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$input | & '"+quoted+"'",
-		)
-	}
+	cmd := exec.Command(
+		"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$input | & '"+quoted+"'",
+	)
 	cmd.Stdin = strings.NewReader(payload)
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
@@ -144,17 +127,6 @@ func assertCursorAllowJSON(t *testing.T, stdout string) {
 	}
 }
 
-func assertNoCursorPayload(t *testing.T, adapterPath string) {
-	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(filepath.Dir(adapterPath), ".cursor-input-*.json"))
-	if err != nil {
-		t.Fatalf("glob Cursor payloads: %v", err)
-	}
-	if len(matches) != 0 {
-		t.Fatalf("temporary Cursor payloads remain after adapter exit: %d", len(matches))
-	}
-}
-
 func windowsProcessRunning(pid uint32) bool {
 	const stillActive = 259
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
@@ -172,9 +144,9 @@ func TestCursorAdapterPreservesSuccessfulLauncherResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(cursorAdapterHelperMode, "success")
-	adapter := renderCursorAdapterForTest(t, executable, 1_000)
+	adapter := renderCursorAdapterForTest(t, executable, "closed", true, 1_000)
 	stdout, stderr, code := runCursorAdapterTest(
-		t, adapter, `{"source":"cursor-adapter-probe"}`, false,
+		t, adapter, `{"source":"cursor-adapter-probe"}`,
 	)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
@@ -183,10 +155,9 @@ func TestCursorAdapterPreservesSuccessfulLauncherResponse(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
 	}
-	assertNoCursorPayload(t, adapter)
 }
 
-func TestCursorAdapterTimeoutKillsChildAndFailsOpen(t *testing.T) {
+func TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -194,14 +165,23 @@ func TestCursorAdapterTimeoutKillsChildAndFailsOpen(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv(cursorAdapterHelperMode, "timeout")
 	t.Setenv(cursorAdapterPIDFileEnv, pidFile)
-	adapter := renderCursorAdapterForTest(t, executable, 1_000)
+	adapter := renderCursorAdapterForTest(t, executable, "closed", true, 1_000)
+	// Exceed the typical anonymous-pipe buffer so a synchronous stdin write
+	// would remain stuck until the helper's 30-second sleep completed.
+	payload := `{"source":"cursor-adapter-probe","padding":"` + strings.Repeat("x", 2<<20) + `"}`
+	startedAt := time.Now()
 	stdout, stderr, code := runCursorAdapterTest(
-		t, adapter, `{"source":"cursor-adapter-probe"}`, false,
+		t, adapter, payload,
 	)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
+	if elapsed := time.Since(startedAt); elapsed > 8*time.Second {
+		t.Fatalf("adapter exceeded bounded timeout: %s", elapsed)
 	}
-	assertCursorAllowJSON(t, stdout)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want fail-closed 2; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, `"permission":"deny"`) {
+		t.Fatalf("stdout = %q, want explicit deny", stdout)
+	}
 	if !strings.Contains(stderr, "timed out after 1000ms") {
 		t.Fatalf("stderr = %q, want timeout diagnostic", stderr)
 	}
@@ -216,14 +196,30 @@ func TestCursorAdapterTimeoutKillsChildAndFailsOpen(t *testing.T) {
 	if windowsProcessRunning(uint32(pid)) {
 		t.Fatalf("timed-out Cursor launcher process %d is still running", pid)
 	}
-	assertNoCursorPayload(t, adapter)
 }
 
-func TestCursorAdapterExceptionEmitsFailOpenJSON(t *testing.T) {
+func TestCursorAdapterExceptionEmitsFailClosedJSON(t *testing.T) {
 	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
-	adapter := renderCursorAdapterForTest(t, missingHook, 1_000)
+	adapter := renderCursorAdapterForTest(t, missingHook, "closed", true, 1_000)
 	stdout, stderr, code := runCursorAdapterTest(
-		t, adapter, `{"source":"cursor-adapter-probe"}`, false,
+		t, adapter, `{"source":"cursor-adapter-probe"}`,
+	)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want fail-closed 2; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, `"permission":"deny"`) {
+		t.Fatalf("stdout = %q, want explicit deny", stdout)
+	}
+	if !strings.Contains(stderr, "Cursor hook adapter failed") {
+		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
+	}
+}
+
+func TestCursorAdapterExceptionFailsOpenOnlyWhenConfigured(t *testing.T) {
+	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
+	adapter := renderCursorAdapterForTest(t, missingHook, "open", false, 1_000)
+	stdout, stderr, code := runCursorAdapterTest(
+		t, adapter, `{"source":"cursor-adapter-probe"}`,
 	)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
@@ -232,35 +228,17 @@ func TestCursorAdapterExceptionEmitsFailOpenJSON(t *testing.T) {
 	if !strings.Contains(stderr, "Cursor hook adapter failed") {
 		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
 	}
-	assertNoCursorPayload(t, adapter)
 }
 
-func TestCursorAdapterReportsCleanupFailureWithoutPayloadContents(t *testing.T) {
+func TestCursorAdapterPreservesLauncherBlockResponse(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(cursorAdapterHelperMode, "success")
-	adapter := renderCursorAdapterForTest(t, executable, 1_000)
-	const sensitiveMarker = "cursor-adapter-probe-sensitive-cleanup"
-	stdout, stderr, code := runCursorAdapterTest(
-		t, adapter, `{"source":"`+sensitiveMarker+`"}`, true,
-	)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
-	}
-	assertCursorAllowJSON(t, stdout)
-	if !strings.Contains(stderr, "could not remove temporary Cursor payload") {
-		t.Fatalf("stderr = %q, want cleanup failure diagnostic", stderr)
-	}
-	if strings.Contains(stderr, sensitiveMarker) {
-		t.Fatal("cleanup diagnostic leaked Cursor payload contents")
-	}
-	matches, err := filepath.Glob(filepath.Join(filepath.Dir(adapter), ".cursor-input-*.json"))
-	if err != nil {
-		t.Fatalf("glob retained Cursor payload: %v", err)
-	}
-	if len(matches) != 1 {
-		t.Fatalf("retained Cursor payloads = %d, want 1 after simulated cleanup failure", len(matches))
+	t.Setenv(cursorAdapterHelperMode, "block")
+	adapter := renderCursorAdapterForTest(t, executable, "closed", true, 1_000)
+	stdout, stderr, code := runCursorAdapterTest(t, adapter, `{"source":"cursor-adapter-probe"}`)
+	if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
+		t.Fatalf("block response=(code=%d stdout=%q stderr=%q), want exit 2 with deny", code, stdout, stderr)
 	}
 }

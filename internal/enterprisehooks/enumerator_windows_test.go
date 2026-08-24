@@ -24,6 +24,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // TestSIDIsInteractiveUserAcceptsRealUserSIDs pins the shape spec 005
@@ -130,17 +131,18 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 			want: []string{},
 		},
 		{
-			name: "map with two supported entries, alphabetical order",
+			name: "map with supported entries, alphabetical order",
 			cfg: &config.Config{
 				Guardrail: config.GuardrailConfig{
 					Connector: "codex",
 					Connectors: map[string]config.PerConnectorGuardrailConfig{
 						"codex":      {},
 						"claudecode": {},
+						"cursor":     {},
 					},
 				},
 			},
-			want: []string{"claudecode", "codex"},
+			want: []string{"claudecode", "codex", "cursor"},
 		},
 		{
 			name: "map contains explicitly-disabled connector",
@@ -200,13 +202,119 @@ func TestEffectiveWindowsHookConnectorsFiltersUnsupported(t *testing.T) {
 	}
 }
 
+func prepareWindowsTargetsManifestTestDirectory(t *testing.T) string {
+	t.Helper()
+	originalAncestorTrust := windowsTargetsManifestAncestorTrust
+	windowsTargetsManifestAncestorTrust = func(string) error { return nil }
+	t.Cleanup(func() { windowsTargetsManifestAncestorTrust = originalAncestorTrust })
+	dir := t.TempDir()
+	if err := protectWindowsTargetsManifestObject(dir, true); err != nil {
+		t.Fatalf("protect manifest test directory: %v", err)
+	}
+	return dir
+}
+
+func windowsTargetsManifestDescriptor(t *testing.T, path string) string {
+	t.Helper()
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|
+			windows.GROUP_SECURITY_INFORMATION|
+			windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatalf("read manifest descriptor: %v", err)
+	}
+	return descriptor.String()
+}
+
+func TestProtectWindowsTargetsManifestObjectAppliesExactInstallerContract(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "targets.yaml")
+	if err := os.WriteFile(file, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		path      string
+		directory bool
+	}{
+		{name: "AdminFile", path: file},
+		{name: "AdminDirectory", path: dir, directory: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := protectWindowsTargetsManifestObject(test.path, test.directory); err != nil {
+				t.Fatalf("protect %s: %v", test.name, err)
+			}
+			if err := validateWindowsTargetsManifestObject(test.path, test.directory); err != nil {
+				t.Fatalf("validate exact %s contract: %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestValidateWindowsTargetsManifestObjectRejectsGenericSplitDirectoryDACL(t *testing.T) {
+	dir := t.TempDir()
+	// This is the four-ACE representation produced when inheritable
+	// GENERIC_ALL entries are materialized by NTFS: concrete effective access
+	// plus generic inherit-only access for each trusted principal. It is not the
+	// installer's exact two-ACE AdminDirectory contract.
+	split, err := windows.SecurityDescriptorFromString(
+		"O:BAG:BAD:P" +
+			"(A;;FA;;;SY)(A;OICIIO;GA;;;SY)" +
+			"(A;;FA;;;BA)(A;OICIIO;GA;;;BA)",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := split.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, _, err := split.Group()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := split.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("resolve split DACL: %v", err)
+	}
+	extended, err := winpath.Extended(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|
+			windows.GROUP_SECURITY_INFORMATION|
+			windows.DACL_SECURITY_INFORMATION|
+			windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner,
+		group,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatalf("apply split DACL fixture: %v", err)
+	}
+	if err := validateWindowsTargetsManifestObject(dir, true); err == nil ||
+		!strings.Contains(err.Error(), "has 4 ACEs, want 2") {
+		t.Fatalf("split DACL validation error = %v, want exact four-vs-two rejection", err)
+	}
+}
+
 // TestWriteTargetsManifestAtomicNoOpNoWrite pins spec 005 REQ-05: a
 // byte-identical manifest must not touch the on-disk file. This is
 // the CORE property that prevents guardian fsnotify wakes every 5-min
 // tick on a stable box. If regressions land here, the test-fixture's
 // mtime check catches it.
 func TestWriteTargetsManifestAtomicNoOpNoWrite(t *testing.T) {
-	dir := t.TempDir()
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := filepath.Join(dir, "targets.yaml")
 
 	disabled := false
@@ -269,10 +377,10 @@ func TestWriteTargetsManifestAtomicNoOpNoWrite(t *testing.T) {
 }
 
 // TestWriteTargetsManifestAtomicReplacesOnDifference asserts the
-// atomic-replace half: a non-identical serialisation lands via
-// MoveFileEx REPLACE_EXISTING and the new bytes are on disk.
+// atomic-replace half: a non-identical serialisation lands via the
+// ACL-preserving Windows replacement path and the new bytes are on disk.
 func TestWriteTargetsManifestAtomicReplacesOnDifference(t *testing.T) {
-	dir := t.TempDir()
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
 	path := filepath.Join(dir, "targets.yaml")
 
 	first := Manifest{
@@ -286,6 +394,10 @@ func TestWriteTargetsManifestAtomicReplacesOnDifference(t *testing.T) {
 	if !changed {
 		t.Fatal("first write: changed=false, want true")
 	}
+	if err := validateWindowsTargetsManifestObject(path, false); err != nil {
+		t.Fatalf("first write did not publish exact AdminFile protection: %v", err)
+	}
+	descriptorBefore := windowsTargetsManifestDescriptor(t, path)
 
 	second := first
 	second.Targets = append(second.Targets, ManifestTarget{
@@ -298,6 +410,12 @@ func TestWriteTargetsManifestAtomicReplacesOnDifference(t *testing.T) {
 	if !changed {
 		t.Fatal("second write on distinct content: changed=false, want true")
 	}
+	if err := validateWindowsTargetsManifestObject(path, false); err != nil {
+		t.Fatalf("replacement lost exact AdminFile protection: %v", err)
+	}
+	if descriptorAfter := windowsTargetsManifestDescriptor(t, path); descriptorAfter != descriptorBefore {
+		t.Fatalf("replacement changed protected manifest descriptor: before=%q after=%q", descriptorBefore, descriptorAfter)
+	}
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -305,6 +423,91 @@ func TestWriteTargetsManifestAtomicReplacesOnDifference(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "S-1-5-21-1000-2000-3000-1002") {
 		t.Fatalf("second-row SID missing from on-disk file:\n%s", string(raw))
+	}
+}
+
+func TestWriteTargetsManifestAtomicProtectionFailureLeavesKnownGoodDestination(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := filepath.Join(dir, "targets.yaml")
+	first := Manifest{
+		Version: 1,
+		Targets: []ManifestTarget{{
+			SID:       "S-1-5-21-1000-2000-3000-1001",
+			UserHome:  `C:\Users\alice`,
+			Connector: "codex",
+			DataDir:   `C:\Users\alice\.defenseclaw`,
+		}},
+	}
+	if changed, err := WriteTargetsManifestAtomic(path, first); err != nil || !changed {
+		t.Fatalf("seed protected manifest: changed=%t err=%v", changed, err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptorBefore := windowsTargetsManifestDescriptor(t, path)
+
+	originalProtect := windowsTargetsManifestProtect
+	windowsTargetsManifestProtect = func(string, bool) error {
+		return errors.New("injected staging ACL failure")
+	}
+	t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+	second := first
+	second.Targets = append(second.Targets, ManifestTarget{
+		SID:       "S-1-5-21-1000-2000-3000-1002",
+		UserHome:  `C:\Users\bob`,
+		Connector: "codex",
+		DataDir:   `C:\Users\bob\.defenseclaw`,
+	})
+	changed, err := WriteTargetsManifestAtomic(path, second)
+	if err == nil || changed {
+		t.Fatalf("staging protection failure: changed=%t err=%v, want false/error", changed, err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("staging protection failure replaced known-good manifest bytes")
+	}
+	if descriptorAfter := windowsTargetsManifestDescriptor(t, path); descriptorAfter != descriptorBefore {
+		t.Fatal("staging protection failure changed known-good manifest DACL")
+	}
+}
+
+func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := filepath.Join(dir, "targets.yaml")
+	manifest := Manifest{
+		Version: 1,
+		Targets: []ManifestTarget{{
+			SID:       "S-1-5-21-1000-2000-3000-1001",
+			UserHome:  `C:\Users\alice`,
+			Connector: "codex",
+			DataDir:   `C:\Users\alice\.defenseclaw`,
+		}},
+	}
+	if changed, err := WriteTargetsManifestAtomic(path, manifest); err != nil || !changed {
+		t.Fatalf("seed protected manifest: changed=%t err=%v", changed, err)
+	}
+	alias := filepath.Join(dir, "targets-alias.yaml")
+	if err := os.Link(path, alias); err != nil {
+		t.Fatalf("create manifest hard link: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := WriteTargetsManifestAtomic(path, manifest)
+	if err == nil || changed || !strings.Contains(err.Error(), "hard links") {
+		t.Fatalf("hard-linked destination: changed=%t err=%v, want false/hard-link error", changed, err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("hard-link rejection changed manifest bytes")
 	}
 }
 

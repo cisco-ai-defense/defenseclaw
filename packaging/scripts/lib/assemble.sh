@@ -187,12 +187,13 @@ fi
 
 # ---------------------------------------------------------------------------
 # Stage (c): Cisco-signature assertion for every payload file, unless
-# --allow-unsigned. The five expected filenames are pinned; refusing
+# --allow-unsigned. The six expected filenames are pinned; refusing
 # unknown names catches a payload dir with a stray file.
 # ---------------------------------------------------------------------------
 _stage "stage 2/6  verify-signatures"
 EXPECTED_PAYLOAD=(
     DefenseClawEnterprise.psm1
+    defenseclaw-cmid-broker.exe
     defenseclaw-gateway.exe
     defenseclaw-hook.exe
     defenseclaw.exe

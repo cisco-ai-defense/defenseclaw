@@ -644,7 +644,7 @@ func saveHookContractLockEntry(
 		if err != nil {
 			return err
 		}
-		return atomicWriteFile(path, append(data, '\n'), 0o600)
+		return hookRuntimeFileWriter(managedEnterprise)(path, append(data, '\n'), 0o600)
 	})
 }
 
@@ -717,7 +717,7 @@ func ClearHookContractLockEntryForMode(
 			if marshalErr != nil {
 				return marshalErr
 			}
-			return atomicWriteFile(path, append(body, '\n'), 0o600)
+			return hookRuntimeFileWriter(managedEnterprise)(path, append(body, '\n'), 0o600)
 		} else if statErr != nil {
 			return fmt.Errorf("inspect hook runtime directory: %w", statErr)
 		}
@@ -738,8 +738,11 @@ func ClearHookContractLockEntryForMode(
 			if err != nil {
 				return err
 			}
-			if err := atomicWriteFile(path, append(body, '\n'), 0o600); err != nil {
-				if restoreErr := restoreHookRuntimeFiles(snapshots); restoreErr != nil {
+			if err := hookRuntimeFileWriter(managedEnterprise)(path, append(body, '\n'), 0o600); err != nil {
+				if restoreErr := restoreHookRuntimeFilesUsing(
+					snapshots,
+					hookRuntimeFileWriter(managedEnterprise),
+				); restoreErr != nil {
 					return fmt.Errorf("write cleared hook contract lock: %v (%v)", err, restoreErr)
 				}
 				return fmt.Errorf("write cleared hook contract lock: %w", err)
@@ -1312,7 +1315,7 @@ func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 	}
 	if runtime.GOOS == "windows" && conn != nil {
 		name := normalizeConnectorName(conn.Name())
-		if name == "claudecode" || name == "codex" {
+		if name == "claudecode" || name == "codex" || name == "cursor" {
 			paths = append(paths, defenseclawHookBinary())
 		}
 	}

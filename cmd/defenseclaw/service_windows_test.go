@@ -8,6 +8,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
@@ -69,6 +73,144 @@ func TestRunWindowsServiceConsultsDetectorOnlyWithEnterpriseMarker(t *testing.T)
 			code,
 			detectorCalled,
 		)
+	}
+}
+
+func TestWindowsServiceHostRedirectsLateCiscoDiagnosticToProtectedLog(t *testing.T) {
+	const (
+		testAPIKeyEnv       = "DEFENSECLAW_TEST_CISCO_API_KEY"
+		responseMarker      = "tenant_mapping_missing"
+		privatePromptMarker = "private-request-prompt-marker"
+	)
+	testAPIKey := strings.ReplaceAll(t.Name(), "/", "-")
+	t.Setenv(testAPIKeyEnv, testAPIKey)
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("X-Cisco-AI-Defense-API-Key"); got != testAPIKey {
+			t.Errorf("Cisco inspect API key header=%q, want test credential", got)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(
+			`{"code":403,"message":"Forbidden","detail":"` + responseMarker + `"}`,
+		))
+	}))
+	t.Cleanup(server.Close)
+
+	client := gateway.NewCiscoInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  server.URL,
+		APIKeyEnv: testAPIKeyEnv,
+		TimeoutMs: 1_000,
+	}, "")
+	if client == nil {
+		t.Fatal("Cisco inspect client is nil")
+	}
+	managedEnterpriseWasActive := gateway.ManagedEnterpriseActive()
+	gateway.SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { gateway.SetManagedEnterpriseActive(managedEnterpriseWasActive) })
+
+	serviceLogPath := filepath.Join(t.TempDir(), "gateway.log")
+	t.Setenv(windowsServiceNameEnv, defaultGatewayServiceName)
+	t.Setenv(windowsServiceLogEnv, serviceLogPath)
+
+	originalDetector := isWindowsService
+	originalRunner := runSCMService
+	originalStdout := os.Stdout
+	originalStderr := os.Stderr
+	t.Cleanup(func() {
+		isWindowsService = originalDetector
+		runSCMService = originalRunner
+		os.Stdout = originalStdout
+		os.Stderr = originalStderr
+	})
+	// inspectDone closes once client.Inspect has returned inside the
+	// service executor. The SCM mock waits for this signal before
+	// sending svc.Stop; otherwise cancellation from Stop could preempt
+	// the 403 diagnostic that this test is asserting on.
+	inspectDone := make(chan struct{})
+	isWindowsService = func() (bool, error) { return true, nil }
+	runSCMService = func(name string, handler svc.Handler) error {
+		if name != defaultGatewayServiceName {
+			t.Errorf("SCM service name=%q, want %q", name, defaultGatewayServiceName)
+		}
+		requests := make(chan svc.ChangeRequest, 1)
+		changes := make(chan svc.Status, 4)
+		result := make(chan struct {
+			specific bool
+			code     uint32
+		}, 1)
+		go func() {
+			specific, code := handler.Execute(nil, requests, changes)
+			result <- struct {
+				specific bool
+				code     uint32
+			}{specific: specific, code: code}
+		}()
+
+		waitForServiceState(t, changes, svc.Running)
+		// Wait for client.Inspect to have returned before triggering
+		// the stop so the redirected gateway log captures the 403
+		// diagnostic. Bound the wait so a broken executor still fails
+		// this test rather than deadlocking it.
+		select {
+		case <-inspectDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("client.Inspect did not complete before Stop")
+		}
+		requests <- svc.ChangeRequest{Cmd: svc.Stop}
+		waitForServiceState(t, changes, svc.StopPending)
+		select {
+		case got := <-result:
+			if got.specific || got.code != 0 {
+				t.Errorf("SCM handler result=specific:%v code:%d, want clean stop", got.specific, got.code)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("SCM handler did not stop")
+		}
+		return nil
+	}
+
+	handled, code := runWindowsService(func(ctx context.Context) int {
+		verdict := client.Inspect(ctx, []gateway.ChatMessage{{Role: "user", Content: privatePromptMarker}})
+		close(inspectDone)
+		if verdict != nil {
+			t.Errorf("non-200 Cisco response verdict=%+v, want nil", verdict)
+		}
+		<-ctx.Done()
+		return 0
+	})
+	// runWindowsService closes the log because a production host exits after
+	// svc.Run returns. Restore the process streams before any test diagnostics.
+	os.Stdout = originalStdout
+	os.Stderr = originalStderr
+	if !handled || code != 0 {
+		t.Fatalf("Windows service result=handled:%v code:%d, want handled success", handled, code)
+	}
+
+	contents, err := os.ReadFile(serviceLogPath)
+	if err != nil {
+		t.Fatalf("read redirected gateway log: %v", err)
+	}
+	logText := string(contents)
+	for _, expected := range []string{
+		"[cisco-ai-defense] error:",
+		"[gateway] error subsystem=cisco-inspect code=INVALID_RESPONSE",
+		"stage=response_status",
+		"http_status=403",
+		"classification=permission_denied",
+		`response_summary="<redacted`,
+	} {
+		if !strings.Contains(logText, expected) {
+			t.Errorf("redirected gateway log missing %q: %q", expected, logText)
+		}
+	}
+	for _, forbidden := range []string{privatePromptMarker, testAPIKey, responseMarker, "response_body="} {
+		if strings.Contains(logText, forbidden) {
+			t.Fatalf("redirected gateway log leaked private marker %q: %q", forbidden, logText)
+		}
+	}
+	if len(contents) > 1024 {
+		t.Fatalf("redirected diagnostic length=%d, want <= 1024", len(contents))
 	}
 }
 
@@ -423,6 +565,16 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 	requirements := windowsPowerShellFunction(t, module, "Invoke-DefenseClawCodexRequirementsCommand")
 	teardown := windowsPowerShellFunction(t, module, "Invoke-DefenseClawManagedHooksTeardownCommand")
 	lifecycleSnapshot := windowsPowerShellFunction(t, module, "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand")
+	teardownSchema := readWindowsManagedHooksSchemaConstant(
+		t,
+		"windows_managed_hooks_teardown.go",
+		"windowsManagedHooksTeardownSchema",
+	)
+	lifecycleSchema := readWindowsManagedHooksSchemaConstant(
+		t,
+		"windows_managed_hooks_lifecycle.go",
+		"windowsManagedHooksLifecycleSchema",
+	)
 
 	for label, body := range map[string]string{"native": native, "gateway": gateway} {
 		if strings.Contains(body, "$LASTEXITCODE") ||
@@ -467,8 +619,8 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 			t.Fatalf("guardian failure diagnostic missing safety contract %q", contract)
 		}
 	}
-	if strings.Count(services, "Assert-DefenseClawServiceImagePath `") != 2 {
-		t.Fatal("service creation does not immediately verify both ImagePath values")
+	if strings.Count(services, "Assert-DefenseClawServiceImagePath") != 4 {
+		t.Fatal("service creation does not immediately verify all four ImagePath values")
 	}
 	failureCheck := strings.Index(requirements, "if ([int]$probe.exit_code -ne 0")
 	firstSuccessPath := strings.Index(requirements, "@('requirements_path'")
@@ -479,7 +631,11 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 	teardownFirstSuccessPath := strings.Index(teardown, "@('manifest_path'")
 	if teardownFailureCheck < 0 || teardownFirstSuccessPath < 0 ||
 		teardownFailureCheck > teardownFirstSuccessPath ||
-		!strings.Contains(teardown, "ConvertTo-DefenseClawBoundedDiagnostic -Value $detail") {
+		!strings.Contains(teardown, "ConvertTo-DefenseClawBoundedDiagnostic -Value $detail") ||
+		!strings.Contains(
+			teardown,
+			"if ([int]$report.schema_version -ne "+teardownSchema+")",
+		) {
 		t.Fatal("managed-hook teardown failure is masked by success-layout validation")
 	}
 	lifecycleFailureCheck := strings.Index(lifecycleSnapshot, "if ([int]$probe.exit_code -ne 0")
@@ -487,7 +643,11 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 	if lifecycleFailureCheck < 0 || lifecycleFirstSuccessPath < 0 ||
 		lifecycleFailureCheck > lifecycleFirstSuccessPath ||
 		!strings.Contains(lifecycleSnapshot, "managed-hooks-lifecycle-snapshot") ||
-		!strings.Contains(lifecycleSnapshot, "ConvertTo-DefenseClawBoundedDiagnostic -Value $detail") {
+		!strings.Contains(lifecycleSnapshot, "ConvertTo-DefenseClawBoundedDiagnostic -Value $detail") ||
+		!strings.Contains(
+			lifecycleSnapshot,
+			"if ([int]$report.schema_version -ne "+lifecycleSchema+")",
+		) {
 		t.Fatal("managed-hook lifecycle snapshot masks failures or escapes its hidden command contract")
 	}
 }
@@ -1409,6 +1569,27 @@ func readWindowsEnterpriseModule(t *testing.T) []byte {
 		t.Fatalf("ReadFile(%s): %v", modulePath, err)
 	}
 	return module
+}
+
+func readWindowsManagedHooksSchemaConstant(
+	t *testing.T,
+	filename string,
+	constant string,
+) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "internal", "cli", filename)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	pattern := regexp.MustCompile(
+		`(?m)^\s*` + regexp.QuoteMeta(constant) + `\s*=\s*([0-9]+)\s*$`,
+	)
+	match := pattern.FindSubmatch(body)
+	if len(match) != 2 {
+		t.Fatalf("could not resolve %s from %s", constant, path)
+	}
+	return string(match[1])
 }
 
 func readWindowsEnterpriseHarness(t *testing.T) []byte {

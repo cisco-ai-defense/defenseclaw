@@ -90,6 +90,14 @@ type Options struct {
 	// precedence so an inherited generic gateway token cannot shadow the
 	// narrower credential; Token still precedes the legacy .token fallback.
 	Token string
+	// AuthenticatedManagedToken is the connector-scoped token captured from
+	// the same authenticated, immutable managed-runtime generation as the
+	// endpoint and service identity. A non-nil value is an explicit mode
+	// assertion: ManagedEnterprise execution must use this snapshot directly
+	// and must not probe or reread mutable legacy token sidecars. A nil value
+	// preserves the legacy resolution path; a non-nil empty value fails closed.
+	// It is ignored outside ManagedEnterprise mode.
+	AuthenticatedManagedToken *string
 
 	// StrictAvailability mirrors DEFENSECLAW_STRICT_AVAILABILITY: when true,
 	// transport failures and a missing token fail closed instead of open.
@@ -226,37 +234,53 @@ func Run(ctx context.Context, opts Options) int {
 		return 0
 	}
 
-	// Missing-token branch: only taken when BOTH the env token is empty AND
-	// the resolved token sidecar is absent. (An empty token inside an existing
-	// file is intentionally NOT a missing token — it selects the loopback
-	// no-auth path, same as the .sh.)
-	tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, opts.Connector)
-	if opts.Token == "" && !fileExists(tokenFile) {
-		return handleMissingToken(opts, sp, failMode)
-	}
+	var token string
+	if opts.ManagedEnterprise && opts.AuthenticatedManagedToken != nil {
+		// The resolver authenticated this token as part of one immutable
+		// runtime generation. Do not touch the legacy token paths here: doing
+		// so would split authority across generations after validation.
+		token = *opts.AuthenticatedManagedToken
+		if strings.TrimSpace(token) == "" {
+			return failUnreachable(
+				opts,
+				sp,
+				"closed",
+				"authenticated managed runtime token is empty",
+			)
+		}
+	} else {
+		// Missing-token branch: only taken when BOTH the env token is empty AND
+		// the resolved token sidecar is absent. (An empty token inside an existing
+		// file is intentionally NOT a missing token — it selects the loopback
+		// no-auth path, same as the .sh.)
+		tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, opts.Connector)
+		if opts.Token == "" && !fileExists(tokenFile) {
+			return handleMissingToken(opts, sp, failMode)
+		}
 
-	token := opts.Token
-	if scopedTokenFile || token == "" {
-		loaded, readErr := readTokenFileForModeE(
-			tokenFile,
-			scopedTokenFile,
-			opts.ManagedEnterprise,
-		)
-		if readErr != nil && opts.ManagedEnterprise {
-			// Managed enterprise mode must not silently omit Authorization when
-			// the token sidecar is present but unreadable, malformed, or fails a
-			// stability/identity check. Fail closed so unauthenticated loopback
-			// requests never sneak past connector-side auth.
-			return failUnreachable(opts, sp, "closed", "managed hook token unreadable")
+		token = opts.Token
+		if scopedTokenFile || token == "" {
+			loaded, readErr := readTokenFileForModeE(
+				tokenFile,
+				scopedTokenFile,
+				opts.ManagedEnterprise,
+			)
+			if readErr != nil && opts.ManagedEnterprise {
+				// Managed enterprise mode must not silently omit Authorization when
+				// the token sidecar is present but unreadable, malformed, or fails a
+				// stability/identity check. Fail closed so unauthenticated loopback
+				// requests never sneak past connector-side auth.
+				return failUnreachable(opts, sp, "closed", "managed hook token unreadable")
+			}
+			if opts.ManagedEnterprise && strings.TrimSpace(loaded) == "" {
+				// An empty sidecar parses without error but sendHookRequest would
+				// then omit Authorization entirely and the connector-side loopback
+				// path would accept the credential-less request. Managed mode has
+				// no no-auth path, so fail closed here.
+				return failUnreachable(opts, sp, "closed", "managed hook token empty")
+			}
+			token = loaded
 		}
-		if opts.ManagedEnterprise && strings.TrimSpace(loaded) == "" {
-			// An empty sidecar parses without error but sendHookRequest would
-			// then omit Authorization entirely and the connector-side loopback
-			// path would accept the credential-less request. Managed mode has
-			// no no-auth path, so fail closed here.
-			return failUnreachable(opts, sp, "closed", "managed hook token empty")
-		}
-		token = loaded
 	}
 
 	return doRequest(ctx, opts, sp, failMode, payload, token)
@@ -278,17 +302,28 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 		return 0
 	}
 
-	tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, "codex")
-	if opts.Token == "" && !fileExists(tokenFile) {
-		return 0
-	}
-	token := opts.Token
-	if scopedTokenFile || token == "" {
-		token = readTokenFileForMode(
-			tokenFile,
-			scopedTokenFile,
-			opts.ManagedEnterprise,
-		)
+	var token string
+	if opts.ManagedEnterprise && opts.AuthenticatedManagedToken != nil {
+		token = *opts.AuthenticatedManagedToken
+		if strings.TrimSpace(token) == "" {
+			// Notifications remain best-effort, but authenticated managed mode
+			// must never fall back to a different generation's token sidecar.
+			fmt.Fprintln(opts.Stderr, "authenticated managed runtime token is empty")
+			return 0
+		}
+	} else {
+		tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, "codex")
+		if opts.Token == "" && !fileExists(tokenFile) {
+			return 0
+		}
+		token = opts.Token
+		if scopedTokenFile || token == "" {
+			token = readTokenFileForMode(
+				tokenFile,
+				scopedTokenFile,
+				opts.ManagedEnterprise,
+			)
+		}
 	}
 
 	notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

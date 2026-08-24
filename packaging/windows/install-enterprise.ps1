@@ -18,6 +18,8 @@ param(
     [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Status', 'Verify', 'Uninstall')]
     [string]$Action = 'Install',
 
+    [string]$BrokerBinary,
+    [string]$ProviderLibrary,
     [string]$GatewayBinary,
     [string]$HookBinary,
     [string]$CLIBinary,
@@ -55,14 +57,9 @@ param(
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
-    # Spec 003 (docs/specs/003-windows-deferred-config/): opt in to
-    # the UCB-friendly late-config install. When set, -Config and
-    # -Manifest may be omitted; the module's Get-DefenseClawLifecycleSources
-    # + post-copy existence check both accept a missing source, the
-    # canonical drop-point directories are provisioned with ACLs but
-    # no file bodies, and both services are registered stopped so the
-    # gateway daemon's and hook-guardian's fsnotify wait loops can
-    # pick the files up when UCB atomically drops them.
+    # Retained for command-line compatibility, but rejected before bootstrap
+    # creation until late config publication can authenticate and prepare all
+    # enrolled user runtimes before any service activation.
     [switch]$DeferredConfig,
     [int]$SelfUninstallCallerPID,
     [switch]$Json
@@ -1390,20 +1387,12 @@ function Assert-DefenseClawBootstrapModuleTrust {
 # per-key drift regression during a QA install.
 # ---------------------------------------------------------------------------
 
-# Windows managed_enterprise lifecycle supports a subset of the
-# cross-platform connector registry. Codex and Claude Code each ship
-# real per-user reconcile + teardown-snapshot machinery on Windows
-# (specs 002 / 004 / 005). Cursor and Amp exist in the connector
-# registry but have no Windows managed-hook lifecycle plumbing —
-# reconcile/teardown/trusted-state checks all fail closed on cursor
-# today, and shipping them here would strand user data on uninstall.
-# Cursor is tracked as a follow-up spec
-# (docs/specs/006-windows-cursor-managed-lifecycle/); until that
-# lands, reject at arg validation with a targeted error rather than
-# failing deep in the transaction with "managed-hook teardown does
-# not support connector 'cursor'".
+# Windows managed_enterprise supports only connectors with a complete native
+# reconcile, trusted-runtime, rollback, and teardown lifecycle. Cursor uses its
+# documented machine enterprise hook source while retaining per-user scoped
+# DefenseClaw runtime and credentials.
 $script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp')
-$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode')
+$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode', 'cursor')
 
 function ConvertTo-DefenseClawConnectorList {
     param([Parameter(Mandatory)][string]$Connector)
@@ -1416,7 +1405,7 @@ function ConvertTo-DefenseClawConnectorList {
             throw "-Connector entry '$trimmed' is not a recognised connector; expected one or more of: $($script:DefenseClawSupportedConnectors -join ', ')"
         }
         if ($trimmed -notin $script:DefenseClawWindowsManagedEnterpriseSupportedConnectors) {
-            throw "-Connector entry '$trimmed' is not supported on Windows managed_enterprise; supported: $($script:DefenseClawWindowsManagedEnterpriseSupportedConnectors -join ', '). Follow-up: docs/specs/006-windows-cursor-managed-lifecycle."
+            throw "-Connector entry '$trimmed' is not supported on Windows managed_enterprise; supported: $($script:DefenseClawWindowsManagedEnterpriseSupportedConnectors -join ', ')."
         }
         if ($normalized -notcontains $trimmed) {
             $normalized.Add($trimmed) | Out-Null
@@ -1867,11 +1856,572 @@ function Get-DefenseClawClaudeWinGetMetadataVersion {
     return [string]($versions | Sort-Object -Descending | Select-Object -First 1)
 }
 
+function ConvertTo-DefenseClawCodexWinGetVersion {
+    param([AllowNull()][object]$Value)
+
+    if ($Value -isnot [string]) { return '' }
+    $version = ([string]$Value).Trim()
+    if ($version.Length -eq 0 -or $version.Length -gt 64) {
+        return ''
+    }
+    # Do not depend on PowerShell's automatic $Matches variable here.
+    # `-cnotmatch` does not provide stable capture state across PowerShell
+    # editions, and a stale capture would make a valid signed PE fail closed.
+    $versionMatch = [regex]::Match(
+        $version,
+        '^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.([0-9]+))?$',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    if (-not $versionMatch.Success) { return '' }
+    if ($versionMatch.Groups[4].Success -and
+        $versionMatch.Groups[4].Value -cne '0') {
+        return ''
+    }
+    try {
+        $parsed = [Version]::new(
+            [int]$versionMatch.Groups[1].Value,
+            [int]$versionMatch.Groups[2].Value,
+            [int]$versionMatch.Groups[3].Value
+        )
+    }
+    catch {
+        return ''
+    }
+    return ConvertTo-DefenseClawConnectorMetadataVersion `
+        -Value $parsed.ToString(3)
+}
+
+function Read-DefenseClawCodexPEBytes {
+    param(
+        [Parameter(Mandatory)][IO.Stream]$Stream,
+        [Parameter(Mandatory)][ValidateRange(1, 1048576)][int]$Count
+    )
+
+    $buffer = [byte[]]::new($Count)
+    $total = 0
+    while ($total -lt $Count) {
+        $read = $Stream.Read($buffer, $total, $Count - $total)
+        if ($read -eq 0) {
+            throw 'unexpected end of Codex PE metadata'
+        }
+        $total += $read
+    }
+    # Prevent PowerShell's pipeline from unrolling byte arrays.
+    Write-Output -NoEnumerate $buffer
+}
+
+function Get-DefenseClawCodexWinGetEmbeddedVersion {
+    param([Parameter(Mandatory)][IO.Stream]$Stream)
+
+    if (-not $Stream.CanRead -or -not $Stream.CanSeek) { return '' }
+    try {
+        if (-not [BitConverter]::IsLittleEndian) { return '' }
+        $streamLength = [uint64]$Stream.Length
+        if ($streamLength -le 0 -or $streamLength -gt 512MB) { return '' }
+
+        # Authenticode deliberately excludes the certificate table and some PE
+        # header fields from its digest. Parse the PE and scan only raw section
+        # bytes, which are covered by the verified signature; never accept a
+        # version marker injected into certificate padding or an unsigned tail.
+        [void]$Stream.Seek(0, [IO.SeekOrigin]::Begin)
+        [byte[]]$dos = Read-DefenseClawCodexPEBytes -Stream $Stream -Count 64
+        if ($dos[0] -ne 0x4d -or $dos[1] -ne 0x5a) { return '' }
+        $peOffset = [uint64][BitConverter]::ToUInt32($dos, 60)
+        if ($peOffset -lt 64 -or $peOffset -gt 1MB -or
+            $peOffset + 24 -gt $streamLength) {
+            return ''
+        }
+        [void]$Stream.Seek([int64]$peOffset, [IO.SeekOrigin]::Begin)
+        [byte[]]$signature = Read-DefenseClawCodexPEBytes `
+            -Stream $Stream -Count 4
+        if ($signature[0] -ne 0x50 -or $signature[1] -ne 0x45 -or
+            $signature[2] -ne 0 -or $signature[3] -ne 0) {
+            return ''
+        }
+        [byte[]]$coff = Read-DefenseClawCodexPEBytes -Stream $Stream -Count 20
+        if ([BitConverter]::ToUInt16($coff, 0) -ne 0x8664) { return '' }
+        $sectionCount = [uint32][BitConverter]::ToUInt16($coff, 2)
+        $optionalSize = [uint32][BitConverter]::ToUInt16($coff, 16)
+        if ($sectionCount -lt 1 -or $sectionCount -gt 96 -or
+            $optionalSize -lt 152 -or $optionalSize -gt 4096) {
+            return ''
+        }
+        [byte[]]$optional = Read-DefenseClawCodexPEBytes `
+            -Stream $Stream -Count ([int]$optionalSize)
+        if ([BitConverter]::ToUInt16($optional, 0) -ne 0x20b -or
+            [BitConverter]::ToUInt32($optional, 108) -lt 5) {
+            return ''
+        }
+        $sizeOfHeaders = [uint64][BitConverter]::ToUInt32($optional, 60)
+        $certificateOffset = [uint64][BitConverter]::ToUInt32($optional, 144)
+        $certificateSize = [uint64][BitConverter]::ToUInt32($optional, 148)
+        $sectionTableEnd = (
+            $peOffset + 24 + $optionalSize +
+            ([uint64]$sectionCount * 40)
+        )
+        $certificateEnd = $certificateOffset + $certificateSize
+        if ($sizeOfHeaders -lt $sectionTableEnd -or
+            $sizeOfHeaders -gt $streamLength -or
+            $certificateOffset -lt $sizeOfHeaders -or
+            $certificateOffset % 8 -ne 0 -or
+            $certificateSize -lt 8 -or
+            $certificateSize % 8 -ne 0 -or
+            $certificateEnd -ne $streamLength) {
+            return ''
+        }
+
+        $sections = [Collections.Generic.List[object]]::new()
+        $totalSectionBytes = [uint64]0
+        for ($index = 0; $index -lt $sectionCount; $index++) {
+            [byte[]]$sectionHeader = Read-DefenseClawCodexPEBytes `
+                -Stream $Stream -Count 40
+            $rawSize = [uint64][BitConverter]::ToUInt32($sectionHeader, 16)
+            $rawOffset = [uint64][BitConverter]::ToUInt32($sectionHeader, 20)
+            if ($rawSize -eq 0) { continue }
+            $rawEnd = $rawOffset + $rawSize
+            if ($rawEnd -lt $rawOffset -or
+                $rawOffset -lt $sizeOfHeaders -or
+                $rawEnd -gt $certificateOffset) {
+                return ''
+            }
+            $totalSectionBytes += $rawSize
+            if ($totalSectionBytes -gt 512MB) { return '' }
+            $sections.Add([pscustomobject]@{
+                Offset = $rawOffset
+                Length = $rawSize
+            })
+        }
+        if ($sections.Count -eq 0) { return '' }
+        $ordered = @($sections | Sort-Object -Property Offset)
+        $previousEnd = [uint64]0
+        foreach ($signedSection in $ordered) {
+            if ([uint64]$signedSection.Offset -lt $previousEnd) { return '' }
+            $previousEnd = (
+                [uint64]$signedSection.Offset +
+                [uint64]$signedSection.Length
+            )
+        }
+
+        $buffer = [byte[]]::new(1MB)
+        $ascii = [Text.Encoding]::ASCII
+        $sawCodexCLI = $false
+        $versions = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal
+        )
+        foreach ($signedSection in $ordered) {
+            [void]$Stream.Seek(
+                [int64][uint64]$signedSection.Offset,
+                [IO.SeekOrigin]::Begin
+            )
+            $remaining = [uint64]$signedSection.Length
+            $carry = ''
+            while ($remaining -gt 0) {
+                $readLength = if ($remaining -gt $buffer.Length) {
+                    $buffer.Length
+                }
+                else {
+                    [int]$remaining
+                }
+                $read = $Stream.Read($buffer, 0, $readLength)
+                if ($read -le 0) { return '' }
+                $remaining -= [uint64]$read
+                $text = $carry + $ascii.GetString($buffer, 0, $read)
+                if ($text.IndexOf(
+                        'codex-cli',
+                        [StringComparison]::Ordinal
+                    ) -ge 0) {
+                    $sawCodexCLI = $true
+                }
+                foreach ($match in [regex]::Matches(
+                        $text,
+                        'buildversion: ([0-9]{1,10}\.[0-9]{1,10}\.[0-9]{1,10}(?:\.[0-9]{1,10})?)',
+                        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+                    )) {
+                    $normalized = ConvertTo-DefenseClawCodexWinGetVersion `
+                        -Value $match.Groups[1].Value
+                    if ([string]::IsNullOrWhiteSpace($normalized)) { return '' }
+                    [void]$versions.Add($normalized)
+                    if ($versions.Count -gt 1) { return '' }
+                }
+                $carryLength = [Math]::Min(256, $text.Length)
+                $carry = $text.Substring($text.Length - $carryLength)
+            }
+        }
+        if (-not $sawCodexCLI -or $versions.Count -ne 1) { return '' }
+        return [string]($versions | Select-Object -First 1)
+    }
+    catch {
+        return ''
+    }
+}
+
+function Test-DefenseClawCodexWinGetIdentity {
+    param(
+        [AllowNull()][object]$SignatureStatus,
+        [AllowNull()][object]$SignerSimpleName,
+        [AllowNull()][object]$ProductName,
+        [AllowNull()][object]$OriginalFilename,
+        [AllowNull()][object]$FileVersion,
+        [AllowNull()][object]$EmbeddedVersion
+    )
+
+    if ([string]$SignatureStatus -cne 'Valid' -or
+        [string]$SignerSimpleName -cne 'OpenAI OpCo, LLC') {
+        return ''
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$ProductName) -and
+        [string]$ProductName -cnotin @('Codex', 'Codex CLI')) {
+        return ''
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$OriginalFilename) -and
+        [string]$OriginalFilename -cne 'codex-x86_64-pc-windows-msvc.exe') {
+        return ''
+    }
+    $embedded = ConvertTo-DefenseClawCodexWinGetVersion `
+        -Value $EmbeddedVersion
+    if ([string]::IsNullOrWhiteSpace($embedded)) { return '' }
+    if (-not [string]::IsNullOrWhiteSpace([string]$FileVersion)) {
+        $file = ConvertTo-DefenseClawCodexWinGetVersion -Value $FileVersion
+        if ([string]::IsNullOrWhiteSpace($file) -or $file -cne $embedded) {
+            return ''
+        }
+    }
+    return $embedded
+}
+
+function Test-DefenseClawConnectorMetadataTargetIsLocalAdmin {
+    param([Parameter(Mandatory)][string]$ExpectedSID)
+
+    # RID -500 is the built-in Administrator account (both on domain-joined
+    # workstations and standalone hosts). Its token is always
+    # BUILTIN\Administrators-owning by default, so any file it creates is
+    # stamped with SID S-1-5-32-544 as owner. Match on the well-known RID
+    # pattern first so the common QA case (logged in as local Administrator)
+    # never pays for a CIM query.
+    #
+    # Anchor the pattern to the canonical shape: S-1-5-21 (domain identifier
+    # authority) followed by exactly three non-empty numeric sub-authorities
+    # (the machine or domain identifier) and then the terminal -500 RID.
+    # A wider `[0-9-]+` sub-pattern would match e.g. `S-1-5-21---500` or
+    # `S-1-5-21-1-500` (only one sub-authority), neither of which is a real
+    # built-in Administrator SID.
+    if ($ExpectedSID -cmatch '^S-1-5-21-[0-9]+-[0-9]+-[0-9]+-500$') {
+        return $true
+    }
+    try {
+        # Direct-membership walk of the local Administrators group
+        # (SID S-1-5-32-544). Nested groups are deliberately NOT expanded —
+        # a transitively-nested group containing Administrators must not
+        # silently widen owner-acceptance. Any CIM query failure returns
+        # $false so we never widen acceptance based on incomplete data.
+        $adminGroup = CimCmdlets\Get-CimInstance `
+            -ClassName Win32_Group `
+            -Filter "SID='S-1-5-32-544' AND LocalAccount=True" `
+            -ErrorAction Stop
+        if ($null -eq $adminGroup) { return $false }
+        $members = CimCmdlets\Get-CimAssociatedInstance `
+            -InputObject $adminGroup `
+            -Association Win32_GroupUser `
+            -ErrorAction Stop
+        foreach ($member in $members) {
+            if ([string]::Equals(
+                    [string]$member.SID,
+                    $ExpectedSID,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                return $true
+            }
+        }
+    }
+    catch { return $false }
+    return $false
+}
+
+function Test-DefenseClawConnectorMetadataOwnerIdentity {
+    param(
+        [Parameter(Mandatory)][string]$ExpectedSID,
+        [Parameter(Mandatory)]$ActualOwner
+    )
+
+    try {
+        $expected = [Security.Principal.SecurityIdentifier]::new(
+            $ExpectedSID
+        ).Value
+        $actual = ConvertTo-DefenseClawBootstrapSID -Identity $ActualOwner
+        if ([string]::Equals(
+                $actual,
+                $expected,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            return $true
+        }
+        # Windows stamps files created by an elevated-admin token with owner
+        # BUILTIN\Administrators (SID S-1-5-32-544) rather than the user's
+        # own SID. Every admin-owned WinGet install (`winget install ...`
+        # from an elevated prompt) lands with Administrators-owned files,
+        # so the strict "owner must equal target SID" check refuses to
+        # detect Codex/etc. installed by any admin target — including
+        # the built-in Administrator RID -500 that QA uses. Accept
+        # Administrators as a valid owner iff the target SID is itself a
+        # member of the local Administrators group; the file is then
+        # functionally owned by the target. Regular non-admin users keep
+        # the strict target-SID-only check.
+        #
+        # See docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md § "Elevated target
+        # relaxation" for the parallel runtime-side softening. A determined
+        # admin attacker can always defeat DefenseClaw through uninstall or
+        # direct hook-file edits — refusing to detect their tools does not
+        # raise the trust boundary, it only denies inspection to legitimate
+        # admin QA + admin-managed helpdesk workflows.
+        if ([string]::Equals(
+                $actual,
+                'S-1-5-32-544',
+                [StringComparison]::OrdinalIgnoreCase
+            ) -and
+            (Test-DefenseClawConnectorMetadataTargetIsLocalAdmin `
+                -ExpectedSID $expected)) {
+            return $true
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-DefenseClawConnectorMetadataOwner {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedSID
+    )
+
+    try {
+        $acl = Microsoft.PowerShell.Security\Get-Acl `
+            -LiteralPath ([IO.Path]::GetFullPath($Path)) `
+            -ErrorAction Stop
+        return Test-DefenseClawConnectorMetadataOwnerIdentity `
+            -ExpectedSID $ExpectedSID -ActualOwner $acl.Owner
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-DefenseClawCodexWinGetExecutableVersion {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$OwnerSID
+    )
+
+    if ([IO.Path]::GetFileName($Path) -cne
+            'codex-x86_64-pc-windows-msvc.exe' -or
+        -not (Test-DefenseClawConnectorMetadataPath `
+            -Root $Root -Path $Path)) {
+        return ''
+    }
+
+    # The user-owned package directory is only a candidate hint. Keep the
+    # exact executable open without write/delete sharing while validating its
+    # owner, Authenticode signer, optional PE identity, and signed embedded
+    # build provenance. Never execute it from this elevated installer.
+    $stream = $null
+    try {
+        $full = [IO.Path]::GetFullPath($Path)
+        $stream = [IO.FileStream]::new(
+            $full,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        if ($stream.Length -le 0 -or $stream.Length -gt 512MB -or
+            -not (Test-DefenseClawConnectorMetadataOwner `
+                -Path $full -ExpectedSID $OwnerSID) -or
+            -not (Test-DefenseClawConnectorMetadataPath `
+                -Root $Root -Path $full)) {
+            return ''
+        }
+
+        $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
+            -LiteralPath $full `
+            -ErrorAction Stop
+        if ($signature.Status -ne
+            [Management.Automation.SignatureStatus]::Valid -or
+            $null -eq $signature.SignerCertificate) {
+            return ''
+        }
+        $signer = $signature.SignerCertificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+        $identity = [Diagnostics.FileVersionInfo]::GetVersionInfo($full)
+        if ($null -eq $identity) { return '' }
+        $embedded = Get-DefenseClawCodexWinGetEmbeddedVersion -Stream $stream
+        $version = Test-DefenseClawCodexWinGetIdentity `
+            -SignatureStatus $signature.Status `
+            -SignerSimpleName $signer `
+            -ProductName $identity.ProductName `
+            -OriginalFilename $identity.OriginalFilename `
+            -FileVersion $identity.FileVersion `
+            -EmbeddedVersion $embedded
+        if ([string]::IsNullOrWhiteSpace($version)) { return '' }
+
+        if (-not (Test-DefenseClawConnectorMetadataOwner `
+                -Path $full -ExpectedSID $OwnerSID) -or
+            -not (Test-DefenseClawConnectorMetadataPath `
+                -Root $Root -Path $full)) {
+            return ''
+        }
+        return $version
+    }
+    catch {
+        return ''
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Get-DefenseClawCodexWinGetMetadataVersion {
+    param(
+        [Parameter(Mandatory)][string]$UserHome,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$OwnerSID,
+        [scriptblock]$ExecutableVersionReader,
+        [scriptblock]$OwnerValidator,
+        [ref]$CandidateObserved
+    )
+
+    if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $false }
+    try {
+        $userHomeFull = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
+        $packageRoot = [IO.Path]::Combine(
+            $userHomeFull,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+    }
+    catch {
+        return ''
+    }
+    $packageRootPresent = $false
+    try {
+        [void][IO.File]::GetAttributes($packageRoot)
+        $packageRootPresent = $true
+    }
+    catch [IO.FileNotFoundException] {
+        return ''
+    }
+    catch [IO.DirectoryNotFoundException] {
+        return ''
+    }
+    catch {
+        if ($null -ne $CandidateObserved) {
+            $CandidateObserved.Value = $true
+        }
+        return ''
+    }
+    if (-not $packageRootPresent -or
+        -not (Test-DefenseClawConnectorMetadataPath `
+            -Root $userHomeFull -Path $packageRoot -Directory)) {
+        # An existing but unsafe/unreadable WinGet root is evidence, not
+        # absence. Prevent the caller from substituting a minimum version.
+        if ($null -ne $CandidateObserved) {
+            $CandidateObserved.Value = $true
+        }
+        return ''
+    }
+
+    if ($null -eq $ExecutableVersionReader) {
+        $ExecutableVersionReader = {
+            param([string]$Root, [string]$Path, [string]$ExpectedOwnerSID)
+            Get-DefenseClawCodexWinGetExecutableVersion `
+                -Root $Root -Path $Path -OwnerSID $ExpectedOwnerSID
+        }
+    }
+    if ($null -eq $OwnerValidator) {
+        $OwnerValidator = {
+            param([string]$Path, [string]$ExpectedOwnerSID)
+            Test-DefenseClawConnectorMetadataOwner `
+                -Path $Path -ExpectedSID $ExpectedOwnerSID
+        }
+    }
+
+    $versions = [Collections.Generic.List[Version]]::new()
+    $examined = 0
+    $matched = 0
+    $invalidCandidate = $false
+    try {
+        foreach ($directory in [IO.Directory]::EnumerateDirectories(
+                $packageRoot,
+                'OpenAI.Codex_Microsoft.Winget.Source_*',
+                [IO.SearchOption]::TopDirectoryOnly
+            )) {
+            $examined++
+            if ($null -ne $CandidateObserved) {
+                $CandidateObserved.Value = $true
+            }
+            if ($examined -gt 256) { return '' }
+            $leaf = [IO.Path]::GetFileName($directory)
+            if ($leaf -cnotmatch
+                '^OpenAI\.Codex_Microsoft\.Winget\.Source_[0-9A-Za-z]{1,64}$') {
+                $invalidCandidate = $true
+                continue
+            }
+            $matched++
+            if ($matched -gt 32 -or
+                [string]::IsNullOrWhiteSpace($OwnerSID) -or
+                -not (Test-DefenseClawConnectorMetadataPath `
+                    -Root $packageRoot -Path $directory -Directory) -or
+                -not (& $OwnerValidator $directory $OwnerSID)) {
+                $invalidCandidate = $true
+                continue
+            }
+            $executable = [IO.Path]::Combine(
+                $directory,
+                'codex-x86_64-pc-windows-msvc.exe'
+            )
+            if (-not (Test-DefenseClawConnectorMetadataPath `
+                    -Root $packageRoot -Path $executable) -or
+                -not (& $OwnerValidator $executable $OwnerSID)) {
+                $invalidCandidate = $true
+                continue
+            }
+            $version = & $ExecutableVersionReader `
+                $packageRoot $executable $OwnerSID
+            $normalized = ConvertTo-DefenseClawCodexWinGetVersion `
+                -Value $version
+            if ([string]::IsNullOrWhiteSpace($normalized)) {
+                $invalidCandidate = $true
+                continue
+            }
+            try {
+                $versions.Add([Version]::Parse($normalized))
+            }
+            catch {
+                $invalidCandidate = $true
+            }
+        }
+    }
+    catch {
+        if ($null -ne $CandidateObserved) {
+            $CandidateObserved.Value = $true
+        }
+        return ''
+    }
+    if ($invalidCandidate -or $versions.Count -eq 0) { return '' }
+    return [string]($versions | Sort-Object -Descending | Select-Object -First 1)
+}
+
 function Get-DefenseClawConnectorMetadataVersion {
     param(
         [Parameter(Mandatory)][string]$Connector,
-        [Parameter(Mandatory)][string]$UserHome
+        [Parameter(Mandatory)][string]$UserHome,
+        [string]$OwnerSID,
+        [ref]$NativeCandidateObserved
     )
+
+    if ($null -ne $NativeCandidateObserved) {
+        $NativeCandidateObserved.Value = $false
+    }
 
     try {
         $userHomeFull = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
@@ -1950,6 +2500,22 @@ function Get-DefenseClawConnectorMetadataVersion {
         -ExpectedNames @($expectedName)
     if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
 
+    if ($Connector -eq 'codex') {
+        $codexCandidateObserved = $false
+        $version = Get-DefenseClawCodexWinGetMetadataVersion `
+            -UserHome $userHomeFull `
+            -OwnerSID $OwnerSID `
+            -CandidateObserved ([ref]$codexCandidateObserved)
+        if ($codexCandidateObserved -and
+            $null -ne $NativeCandidateObserved) {
+            $NativeCandidateObserved.Value = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+        return ''
+    }
+
     if ($Connector -eq 'claudecode') {
         $version = Get-DefenseClawClaudeWinGetMetadataVersion `
             -UserHome $userHomeFull
@@ -1993,6 +2559,21 @@ function Get-DefenseClawConnectorMetadataVersion {
     return ''
 }
 
+function Resolve-DefenseClawConnectorMetadataVersion {
+    param(
+        [AllowNull()][object]$DiscoveredVersion,
+        [AllowNull()][object]$MinimumVersion,
+        [bool]$NativeCandidateObserved,
+        [bool]$DiscoveryFailed
+    )
+
+    $version = ConvertTo-DefenseClawConnectorMetadataVersion `
+        -Value $DiscoveredVersion
+    if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
+    if ($NativeCandidateObserved -or $DiscoveryFailed) { return '' }
+    return ConvertTo-DefenseClawConnectorMetadataVersion -Value $MinimumVersion
+}
+
 function Get-DefenseClawRenderedEnterpriseTargets {
     param(
         [Parameter(Mandatory)][string[]]$Connectors,
@@ -2021,45 +2602,59 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     # the connector's Windows minimum — see
     # requireWindowsEnterpriseManagedAgentVersion in
     # internal/enterprisehooks/install_windows.go (codex >= 0.131.0,
-    # claudecode >= 2.1.152). When install-time discovery fails
-    # (agent not yet installed under the target user's profile —
-    # the common state on managed_enterprise rollouts where AVC
-    # pushes DefenseClaw first), fall back to the exact minimum so
-    # the row is valid. The runtime hook-enumerator (spec 005 D1)
-    # re-renders targets.yaml on its 5-min tick and overwrites this
-    # placeholder with the real installed version the moment the
-    # agent binary shows up in the target user's home. If the
-    # operator ever installs an agent below the minimum, the
-    # enumerator's real version renders lower and the guardian
-    # refuses to enroll — same fail-closed contract as before.
+    # claudecode >= 2.1.152). When no agent metadata exists yet (the common
+    # state on managed rollouts where AVC pushes DefenseClaw first), use the
+    # exact minimum as a bootstrap placeholder. A detected native package
+    # whose identity/version cannot be authenticated never receives that
+    # fallback. A valid below-minimum version remains exact so downstream
+    # manifest validation fails closed instead of certifying a placeholder.
     $script:DefenseClawWindowsAgentVersionMinimum = @{
         'codex'      = '0.131.0'
         'claudecode' = '2.1.152'
+        'cursor'     = '1.7.0'
     }
     foreach ($u in $users) {
         foreach ($c in $Connectors) {
             $version = ''
+            $nativeCandidateObserved = $false
+            $metadataDiscoveryFailed = $false
             try {
                 $version = Get-DefenseClawConnectorMetadataVersion `
-                    -Connector $c -UserHome ([string]$u.UserHome)
+                    -Connector $c `
+                    -UserHome ([string]$u.UserHome) `
+                    -OwnerSID ([string]$u.SID) `
+                    -NativeCandidateObserved ([ref]$nativeCandidateObserved)
             }
             catch {
-                # Discovery is best-effort. Unreadable or concurrently changed
-                # user metadata falls through to the connector's Windows
-                # minimum below.
+                # Unexpected discovery errors must not turn an unverified
+                # installed native package into a certified minimum version.
                 $version = ''
+                $metadataDiscoveryFailed = $true
             }
-            $version = ConvertTo-DefenseClawConnectorMetadataVersion `
-                -Value $version
-            if ([string]::IsNullOrWhiteSpace($version)) {
-                $version = $script:DefenseClawWindowsAgentVersionMinimum[$c]
+            $minimumVersion = if (
+                $script:DefenseClawWindowsAgentVersionMinimum.ContainsKey($c)
+            ) {
+                $script:DefenseClawWindowsAgentVersionMinimum[$c]
             }
+            else {
+                ''
+            }
+            $version = Resolve-DefenseClawConnectorMetadataVersion `
+                -DiscoveredVersion $version `
+                -MinimumVersion $minimumVersion `
+                -NativeCandidateObserved $nativeCandidateObserved `
+                -DiscoveryFailed $metadataDiscoveryFailed
             [void]$sb.AppendLine("  - user: `"$($u.UserName -replace '"','\"')`"")
             [void]$sb.AppendLine("    user_home: `"$($u.UserHome -replace '"','\"' -replace '\\','\\')`"")
             [void]$sb.AppendLine("    sid: `"$($u.SID)`"")
             [void]$sb.AppendLine("    connector: `"$c`"")
-            [void]$sb.AppendLine("    agent_version: `"$version`"")
-            [void]$sb.AppendLine('    enabled: true')
+            if ([string]::IsNullOrWhiteSpace($version)) {
+                [void]$sb.AppendLine('    enabled: false')
+            }
+            else {
+                [void]$sb.AppendLine("    agent_version: `"$version`"")
+                [void]$sb.AppendLine('    enabled: true')
+            }
         }
     }
     return $sb.ToString()
@@ -2070,6 +2665,16 @@ $result = $null
 $failureMessage = $null
 $exitCode = 0
 try {
+    # Deferred installation cannot authenticate or precreate per-user target
+    # runtimes because targets.yaml does not exist yet. Fail before the
+    # bootstrap environment creates its first protected staging directory;
+    # the module repeats this check as defense in depth for direct callers.
+    if ($DeferredConfig) {
+        throw (
+            '-DeferredConfig is temporarily unavailable: secure target ' +
+            'runtime preparation requires authenticated targets.yaml during Install'
+        )
+    }
     $bootstrapEnvironment = New-DefenseClawBootstrapEnvironment
     $modulePath = [IO.Path]::GetFullPath(
         [IO.Path]::Combine($PSScriptRoot, 'DefenseClawEnterprise.psm1')
@@ -2177,6 +2782,8 @@ try {
 
     $arguments = @{
         Action = $Action
+        BrokerBinary = $BrokerBinary
+        ProviderLibrary = $ProviderLibrary
         GatewayBinary = $GatewayBinary
         HookBinary = $HookBinary
         CLIBinary = $CLIBinary
@@ -2196,11 +2803,9 @@ try {
         # The exact service/root/CODEX_HOME grammar scopes this relaxation for
         # every certification lifecycle action, including pre-install Status.
         AllowUnsigned = [bool]$AllowUnsigned
-        # Spec 003 Workstream B — see the [switch]$DeferredConfig
-        # param block above for the rationale. Only meaningful for
-        # Install actions in managed-enterprise deployments; the
-        # module's Get-DefenseClawLifecycleSources call ignores it
-        # for other actions.
+        # Retained in the module invocation shape for CLI compatibility. The
+        # entry gate above rejects it before bootstrap creation, and the module
+        # repeats that rejection for direct callers.
         DeferredConfig = [bool]$DeferredConfig
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath

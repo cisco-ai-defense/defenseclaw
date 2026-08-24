@@ -25,7 +25,7 @@
 #   1. Ordered stage log lines ("stage N/6  <name>") — catches missing
 #      stages, reordered stages, and typos in stage names.
 #   2. Expected payload filenames — both scripts must accept the same
-#      five files under ./payload/.
+#      six files under ./payload/.
 #   3. Emitter subcommand invocations — the two `emit-*` calls the
 #      scripts make against windows-repro-manifest must match.
 #
@@ -83,7 +83,7 @@ fi
 # --- 2. Expected payload filenames. --------------------------------------
 #
 # Both scripts declare an EXPECTED_PAYLOAD list (bash array / pwsh
-# array). The list MUST be the same set of five filenames so a payload
+# array). The list MUST be the same set of six filenames so a payload
 # staged for one shipped assembler passes signature and hash checks
 # under the other.
 extract_sh_payload() {

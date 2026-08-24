@@ -78,6 +78,43 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 	return validateTrustedWindowsRuntimeDir(path, label, nil)
 }
 
+// ValidateTrustedDirectoryAncestor validates an existing directory that will
+// contain a new protected child. Unlike ValidateTrustedRuntimeDir, the named
+// directory is evaluated with the narrow ancestor-replacement mask as well as
+// its parents. This accepts stock Windows known-folder create-child grants,
+// while still rejecting DELETE_CHILD, DELETE, WRITE_DAC, WRITE_OWNER, generic
+// write, reparse points, non-NTFS mounts, and untrusted owners.
+func ValidateTrustedDirectoryAncestor(path, label string) error {
+	if label == "" {
+		label = "managed directory ancestor"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	for cur := clean; ; cur = filepath.Dir(cur) {
+		if err := validateTrustedWindowsPathElementWithWriter(
+			cur,
+			true,
+			label,
+			nil,
+			true,
+		); err != nil {
+			return err
+		}
+		if cur == filepath.Dir(cur) {
+			break
+		}
+	}
+	return nil
+}
+
 // ValidateTrustedServiceRuntimeDir permits the exact NT SERVICE virtual
 // account installed for the gateway to write the managed runtime tree. That
 // exception is deliberately opt-in and is never used for config, binaries,

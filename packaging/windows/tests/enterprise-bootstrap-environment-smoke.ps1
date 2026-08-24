@@ -430,7 +430,7 @@ function Invoke-RenderedEnterpriseTargetsVersionProbe {
 function Invoke-ClaudeWinGetMetadataVersionProbe {
     $fixtureRoot = [IO.Path]::Combine(
         [IO.Path]::GetTempPath(),
-        "DefenseClaw-ClaudeWinGet-$([Guid]::NewGuid().ToString('N'))"
+        "aw-$([Guid]::NewGuid().ToString('N'))"
     )
     [void][IO.Directory]::CreateDirectory($fixtureRoot)
     $junctionPath = $null
@@ -494,7 +494,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
 
         $officialLeaf =
             'Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe'
-        $validUserHome = [IO.Path]::Combine($fixtureRoot, 'valid-user')
+        $validUserHome = [IO.Path]::Combine($fixtureRoot, 'v')
         $validPackageRoot = [IO.Path]::Combine(
             $validUserHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -532,7 +532,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
             throw 'official WinGet Claude package was not discovered exactly once'
         }
 
-        $missingUserHome = [IO.Path]::Combine($fixtureRoot, 'missing-user')
+        $missingUserHome = [IO.Path]::Combine($fixtureRoot, 'n')
         [void][IO.Directory]::CreateDirectory([IO.Path]::Combine(
             $missingUserHome,
             'AppData\Local\Microsoft\WinGet\Packages',
@@ -553,7 +553,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
             throw 'WinGet Claude discovery accepted a missing executable'
         }
 
-        $hostileUserHome = [IO.Path]::Combine($fixtureRoot, 'hostile-user')
+        $hostileUserHome = [IO.Path]::Combine($fixtureRoot, 'h')
         $hostilePackage = [IO.Path]::Combine(
             $hostileUserHome,
             'AppData\Local\Microsoft\WinGet\Packages',
@@ -579,7 +579,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
             throw 'WinGet Claude discovery accepted a similarly named package'
         }
 
-        $multipleUserHome = [IO.Path]::Combine($fixtureRoot, 'multiple-user')
+        $multipleUserHome = [IO.Path]::Combine($fixtureRoot, 'm')
         $multiplePackageRoot = [IO.Path]::Combine(
             $multipleUserHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -610,7 +610,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
             throw "multiple WinGet Claude packages selected '$highest'"
         }
 
-        $escapeUserHome = [IO.Path]::Combine($fixtureRoot, 'escape-user')
+        $escapeUserHome = [IO.Path]::Combine($fixtureRoot, 'e')
         $escapePackageRoot = [IO.Path]::Combine(
             $escapeUserHome,
             'AppData\Local\Microsoft\WinGet\Packages'
@@ -648,10 +648,7 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
         [IO.Directory]::Delete($junctionPath, $false)
         $junctionPath = $null
 
-        $precedenceUserHome = [IO.Path]::Combine(
-            $fixtureRoot,
-            'precedence-user'
-        )
+        $precedenceUserHome = [IO.Path]::Combine($fixtureRoot, 'p')
         $npmMetadata = [IO.Path]::Combine(
             $precedenceUserHome,
             'AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\package.json'
@@ -705,6 +702,637 @@ function Invoke-ClaudeWinGetMetadataVersionProbe {
                 '(?m)^    enabled: true\r?$'
             ).Count -ne 1) {
             throw 'eligible Claude user did not receive exactly one enabled target'
+        }
+    }
+    finally {
+        if ($null -ne $junctionPath -and
+            [IO.Directory]::Exists($junctionPath)) {
+            [IO.Directory]::Delete($junctionPath, $false)
+        }
+        if ([IO.Directory]::Exists($fixtureRoot)) {
+            [IO.Directory]::Delete($fixtureRoot, $true)
+        }
+    }
+    return $true
+}
+
+function New-TestCodexSignedPEFixture {
+    param(
+        [Parameter(Mandatory)][string]$SectionText,
+        [string]$GapText = '',
+        [string]$CertificateText = '',
+        [string]$UnsignedTail = ''
+    )
+
+    $ascii = [Text.Encoding]::ASCII
+    $prefixBody = $ascii.GetBytes('signed codex bootstrap section')
+    $sectionBody = $ascii.GetBytes($SectionText)
+    $gapBody = $ascii.GetBytes($GapText)
+    $certificateBody = $ascii.GetBytes($CertificateText)
+    $tailBody = $ascii.GetBytes($UnsignedTail)
+    $headersSize = 0x200
+    $prefixSectionSize = 0x200
+    $sectionSize = [Math]::Max(
+        0x200,
+        [int]([Math]::Ceiling($sectionBody.Length / 512.0) * 512)
+    )
+    $gapSize = [int]([Math]::Ceiling($gapBody.Length / 8.0) * 8)
+    $certificateSize = [Math]::Max(
+        8,
+        [int]([Math]::Ceiling((8 + $certificateBody.Length) / 8.0) * 8)
+    )
+    $certificateOffset = (
+        $headersSize + $prefixSectionSize + $sectionSize + $gapSize
+    )
+    $bytes = [byte[]]::new(
+        $certificateOffset + $certificateSize + $tailBody.Length
+    )
+
+    $bytes[0] = 0x4d
+    $bytes[1] = 0x5a
+    [BitConverter]::GetBytes([uint32]0x80).CopyTo($bytes, 0x3c)
+    $bytes[0x80] = 0x50
+    $bytes[0x81] = 0x45
+    [BitConverter]::GetBytes([uint16]0x8664).CopyTo($bytes, 0x84)
+    [BitConverter]::GetBytes([uint16]2).CopyTo($bytes, 0x86)
+    [BitConverter]::GetBytes([uint16]0xf0).CopyTo($bytes, 0x94)
+    [BitConverter]::GetBytes([uint16]0x2022).CopyTo($bytes, 0x96)
+    $optionalOffset = 0x98
+    [BitConverter]::GetBytes([uint16]0x20b).CopyTo($bytes, $optionalOffset)
+    [BitConverter]::GetBytes([uint32]$headersSize).CopyTo(
+        $bytes,
+        $optionalOffset + 60
+    )
+    [BitConverter]::GetBytes([uint32]16).CopyTo(
+        $bytes,
+        $optionalOffset + 108
+    )
+    [BitConverter]::GetBytes([uint32]$certificateOffset).CopyTo(
+        $bytes,
+        $optionalOffset + 144
+    )
+    [BitConverter]::GetBytes([uint32]$certificateSize).CopyTo(
+        $bytes,
+        $optionalOffset + 148
+    )
+    $sectionOffset = $optionalOffset + 0xf0
+    $ascii.GetBytes('.text').CopyTo($bytes, $sectionOffset)
+    [BitConverter]::GetBytes([uint32]$prefixBody.Length).CopyTo(
+        $bytes,
+        $sectionOffset + 8
+    )
+    [BitConverter]::GetBytes([uint32]0x1000).CopyTo(
+        $bytes,
+        $sectionOffset + 12
+    )
+    [BitConverter]::GetBytes([uint32]$prefixSectionSize).CopyTo(
+        $bytes,
+        $sectionOffset + 16
+    )
+    [BitConverter]::GetBytes([uint32]$headersSize).CopyTo(
+        $bytes,
+        $sectionOffset + 20
+    )
+    [BitConverter]::GetBytes([uint32]0x60000020).CopyTo(
+        $bytes,
+        $sectionOffset + 36
+    )
+    $metadataSectionOffset = $sectionOffset + 40
+    $ascii.GetBytes('.rdata').CopyTo($bytes, $metadataSectionOffset)
+    [BitConverter]::GetBytes([uint32]$sectionBody.Length).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 8
+    )
+    [BitConverter]::GetBytes([uint32]0x2000).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 12
+    )
+    [BitConverter]::GetBytes([uint32]$sectionSize).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 16
+    )
+    [BitConverter]::GetBytes(
+        [uint32]($headersSize + $prefixSectionSize)
+    ).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 20
+    )
+    [BitConverter]::GetBytes([uint32]0x40000040).CopyTo(
+        $bytes,
+        $metadataSectionOffset + 36
+    )
+    $prefixBody.CopyTo($bytes, $headersSize)
+    $sectionBody.CopyTo(
+        $bytes,
+        $headersSize + $prefixSectionSize
+    )
+    if ($gapBody.Length -gt 0) {
+        $gapBody.CopyTo(
+            $bytes,
+            $headersSize + $prefixSectionSize + $sectionSize
+        )
+    }
+    [BitConverter]::GetBytes([uint32]$certificateSize).CopyTo(
+        $bytes,
+        $certificateOffset
+    )
+    [BitConverter]::GetBytes([uint16]0x200).CopyTo(
+        $bytes,
+        $certificateOffset + 4
+    )
+    [BitConverter]::GetBytes([uint16]2).CopyTo(
+        $bytes,
+        $certificateOffset + 6
+    )
+    if ($certificateBody.Length -gt 0) {
+        $certificateBody.CopyTo($bytes, $certificateOffset + 8)
+    }
+    if ($tailBody.Length -gt 0) {
+        $tailBody.CopyTo($bytes, $certificateOffset + $certificateSize)
+    }
+    Write-Output -NoEnumerate $bytes
+}
+
+function Invoke-CodexWinGetMetadataVersionProbe {
+    $fixtureRoot = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        "cw-$([Guid]::NewGuid().ToString('N'))"
+    )
+    [void][IO.Directory]::CreateDirectory($fixtureRoot)
+    $ownerSID = 'S-1-5-21-3000-3000-3000-3001'
+    $junctionPath = $null
+    try {
+        [byte[]]$validBytes = New-TestCodexSignedPEFixture `
+            -SectionText (
+                "codex-cli`0standalone`0buildversion: 0.146.1" +
+                "`nplatform: windows"
+            )
+        $validStream = [IO.MemoryStream]::new($validBytes, $false)
+        try {
+            $embedded = Get-DefenseClawCodexWinGetEmbeddedVersion `
+                -Stream $validStream
+        }
+        finally {
+            $validStream.Dispose()
+        }
+        if ($embedded -cne '0.146.1') {
+            throw "WinGet Codex embedded version returned '$embedded'"
+        }
+        foreach ($invalidBody in @(
+            'standalone buildversion: 0.146.1',
+            'codex-cli without a build version',
+            'codex-cli buildversion: malformed',
+            'codex-cli buildversion: 0.146.1 buildversion: 0.147.0'
+        )) {
+            [byte[]]$bytes = New-TestCodexSignedPEFixture `
+                -SectionText $invalidBody
+            $stream = [IO.MemoryStream]::new($bytes, $false)
+            try {
+                $rejected = Get-DefenseClawCodexWinGetEmbeddedVersion `
+                    -Stream $stream
+            }
+            finally {
+                $stream.Dispose()
+            }
+            if (-not [string]::IsNullOrEmpty($rejected)) {
+                throw "WinGet Codex scanner accepted '$invalidBody'"
+            }
+        }
+        foreach ($unsignedFixture in @(
+            (New-TestCodexSignedPEFixture `
+                -SectionText 'codex-cli' `
+                -GapText 'buildversion: 0.146.1'),
+            (New-TestCodexSignedPEFixture `
+                -SectionText 'codex-cli' `
+                -CertificateText 'buildversion: 0.146.1'),
+            (New-TestCodexSignedPEFixture `
+                -SectionText 'codex-cli' `
+                -UnsignedTail 'buildversion: 0.146.1')
+        )) {
+            $stream = [IO.MemoryStream]::new(
+                [byte[]]$unsignedFixture,
+                $false
+            )
+            try {
+                $rejected = Get-DefenseClawCodexWinGetEmbeddedVersion `
+                    -Stream $stream
+            }
+            finally {
+                $stream.Dispose()
+            }
+            if (-not [string]::IsNullOrEmpty($rejected)) {
+                throw 'WinGet Codex scanner trusted unsigned PE bytes'
+            }
+        }
+
+        $validIdentity = Test-DefenseClawCodexWinGetIdentity `
+            -SignatureStatus 'Valid' `
+            -SignerSimpleName 'OpenAI OpCo, LLC' `
+            -ProductName '' `
+            -OriginalFilename '' `
+            -FileVersion '' `
+            -EmbeddedVersion '0.146.1'
+        if ($validIdentity -cne '0.146.1') {
+            throw "WinGet Codex identity returned '$validIdentity'"
+        }
+        $validPEIdentity = Test-DefenseClawCodexWinGetIdentity `
+            -SignatureStatus 'Valid' `
+            -SignerSimpleName 'OpenAI OpCo, LLC' `
+            -ProductName 'Codex CLI' `
+            -OriginalFilename 'codex-x86_64-pc-windows-msvc.exe' `
+            -FileVersion '0.146.1.0' `
+            -EmbeddedVersion '0.146.1'
+        if ($validPEIdentity -cne '0.146.1') {
+            throw 'WinGet Codex optional PE identity was not normalized'
+        }
+        foreach ($invalidIdentity in @(
+            [pscustomobject]@{
+                Status = 'NotSigned'; Signer = 'OpenAI OpCo, LLC'
+                Product = ''; Original = ''; File = ''; Embedded = '0.146.1'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'Attacker LLC'
+                Product = ''; Original = ''; File = ''; Embedded = '0.146.1'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'OpenAI OpCo, LLC'
+                Product = 'Other'; Original = ''; File = ''; Embedded = '0.146.1'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'OpenAI OpCo, LLC'
+                Product = ''; Original = 'codex.exe'; File = ''; Embedded = '0.146.1'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'OpenAI OpCo, LLC'
+                Product = ''; Original = ''; File = '0.145.0'; Embedded = '0.146.1'
+            },
+            [pscustomobject]@{
+                Status = 'Valid'; Signer = 'OpenAI OpCo, LLC'
+                Product = ''; Original = ''; File = ''; Embedded = ''
+            }
+        )) {
+            $rejected = Test-DefenseClawCodexWinGetIdentity `
+                -SignatureStatus $invalidIdentity.Status `
+                -SignerSimpleName $invalidIdentity.Signer `
+                -ProductName $invalidIdentity.Product `
+                -OriginalFilename $invalidIdentity.Original `
+                -FileVersion $invalidIdentity.File `
+                -EmbeddedVersion $invalidIdentity.Embedded
+            if (-not [string]::IsNullOrEmpty($rejected)) {
+                throw "WinGet Codex identity accepted '$rejected'"
+            }
+        }
+        if (-not (Test-DefenseClawConnectorMetadataOwnerIdentity `
+                -ExpectedSID $ownerSID -ActualOwner $ownerSID) -or
+            (Test-DefenseClawConnectorMetadataOwnerIdentity `
+                -ExpectedSID $ownerSID -ActualOwner 'S-1-5-18')) {
+            throw 'WinGet Codex owner identity did not reject a foreign owner'
+        }
+
+        # Windows stamps elevated-admin token creations with BUILTIN\Administrators
+        # owner (SID S-1-5-32-544), not the user's own SID. The owner identity
+        # check accepts that mismatch iff the target IS a local admin. Built-in
+        # Administrator (RID -500) is unconditionally admin — this is the primary
+        # QA case: files created by dclawadmin land as Administrators-owned.
+        $builtinAdminSID = 'S-1-5-21-3000-3000-3000-500'
+        if (-not (Test-DefenseClawConnectorMetadataOwnerIdentity `
+                -ExpectedSID $builtinAdminSID `
+                -ActualOwner 'S-1-5-32-544')) {
+            throw 'WinGet Codex owner identity rejected Administrators-owned file for built-in Administrator target'
+        }
+        # A non-admin user with an Administrators-owned file is still refused —
+        # the widening only kicks in for admin targets. $ownerSID here is a
+        # synthetic RID 3001 that is NOT in local Administrators, so the CIM
+        # membership check returns false and we fall through to strict reject.
+        if (Test-DefenseClawConnectorMetadataOwnerIdentity `
+                -ExpectedSID $ownerSID `
+                -ActualOwner 'S-1-5-32-544') {
+            throw 'WinGet Codex owner identity wrongly widened acceptance for a non-admin target'
+        }
+        # RID -500 fast path is a pure string match — verify the helper is
+        # independently correct without the CIM query in the loop.
+        if (-not (Test-DefenseClawConnectorMetadataTargetIsLocalAdmin `
+                -ExpectedSID $builtinAdminSID)) {
+            throw 'Target-is-local-admin check missed the RID -500 fast path'
+        }
+        if (Test-DefenseClawConnectorMetadataTargetIsLocalAdmin `
+                -ExpectedSID $ownerSID) {
+            throw 'Target-is-local-admin check falsely admitted a non-admin synthetic SID'
+        }
+
+        $officialLeaf = 'OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe'
+        $validUserHome = [IO.Path]::Combine($fixtureRoot, 'v')
+        $validPackageRoot = [IO.Path]::Combine(
+            $validUserHome,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+        $validPackage = [IO.Path]::Combine($validPackageRoot, $officialLeaf)
+        [void][IO.Directory]::CreateDirectory($validPackage)
+        $validExecutable = [IO.Path]::Combine(
+            $validPackage,
+            'codex-x86_64-pc-windows-msvc.exe'
+        )
+        [IO.File]::WriteAllBytes($validExecutable, [byte[]]@(0x4d, 0x5a))
+        $validPaths = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+        [void]$validPaths.Add([IO.Path]::GetFullPath($validPackage))
+        [void]$validPaths.Add([IO.Path]::GetFullPath($validExecutable))
+        $ownerValidator = {
+            param([string]$Path, [string]$ExpectedOwnerSID)
+            return (
+                $ExpectedOwnerSID -ceq $ownerSID -and
+                $validPaths.Contains([IO.Path]::GetFullPath($Path))
+            )
+        }.GetNewClosure()
+        $validReaderState = @{ Calls = 0 }
+        $validReader = {
+            param([string]$Root, [string]$Path, [string]$ExpectedOwnerSID)
+            $validReaderState.Calls++
+            if ($ExpectedOwnerSID -cne $ownerSID -or
+                -not [string]::Equals(
+                    [IO.Path]::GetFullPath($Root),
+                    [IO.Path]::GetFullPath($validPackageRoot),
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                -not [string]::Equals(
+                    [IO.Path]::GetFullPath($Path),
+                    [IO.Path]::GetFullPath($validExecutable),
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                return ''
+            }
+            return '0.146.1'
+        }.GetNewClosure()
+        $observed = $false
+        $discovered = Get-DefenseClawCodexWinGetMetadataVersion `
+            -UserHome $validUserHome `
+            -OwnerSID $ownerSID `
+            -ExecutableVersionReader $validReader `
+            -OwnerValidator $ownerValidator `
+            -CandidateObserved ([ref]$observed)
+        if ($discovered -cne '0.146.1' -or -not $observed -or
+            [int]$validReaderState.Calls -ne 1) {
+            throw 'official WinGet Codex package was not discovered exactly once'
+        }
+
+        $invalidCases = @(
+            [pscustomobject]@{
+                Name = 'missing executable'; Leaf = $officialLeaf
+                CreateExecutable = $false; OwnerValid = $true
+                ReaderVersion = '9.9.9'
+            },
+            [pscustomobject]@{
+                Name = 'foreign owner'; Leaf = $officialLeaf
+                CreateExecutable = $true; OwnerValid = $false
+                ReaderVersion = '9.9.9'
+            },
+            [pscustomobject]@{
+                Name = 'malformed metadata'; Leaf = $officialLeaf
+                CreateExecutable = $true; OwnerValid = $true
+                ReaderVersion = 'not-a-version'
+            },
+            [pscustomobject]@{
+                Name = 'lookalike package ID'; Leaf = "${officialLeaf}_hostile"
+                CreateExecutable = $true; OwnerValid = $true
+                ReaderVersion = '9.9.9'
+            }
+        )
+        for ($invalidCaseIndex = 0;
+            $invalidCaseIndex -lt $invalidCases.Count;
+            $invalidCaseIndex++) {
+            $invalidCase = $invalidCases[$invalidCaseIndex]
+            $caseHome = [IO.Path]::Combine(
+                $fixtureRoot,
+                "i$invalidCaseIndex"
+            )
+            $casePackage = [IO.Path]::Combine(
+                $caseHome,
+                'AppData\Local\Microsoft\WinGet\Packages',
+                $invalidCase.Leaf
+            )
+            [void][IO.Directory]::CreateDirectory($casePackage)
+            if ($invalidCase.CreateExecutable) {
+                [IO.File]::WriteAllBytes(
+                    [IO.Path]::Combine(
+                        $casePackage,
+                        'codex-x86_64-pc-windows-msvc.exe'
+                    ),
+                    [byte[]]@(0x4d, 0x5a)
+                )
+            }
+            $caseReaderState = @{ Calls = 0 }
+            $caseVersion = [string]$invalidCase.ReaderVersion
+            $caseReader = {
+                param([string]$Root, [string]$Path, [string]$ExpectedOwnerSID)
+                $caseReaderState.Calls++
+                return $caseVersion
+            }.GetNewClosure()
+            $caseOwnerValid = [bool]$invalidCase.OwnerValid
+            $caseOwner = {
+                param([string]$Path, [string]$ExpectedOwnerSID)
+                return $caseOwnerValid
+            }.GetNewClosure()
+            $caseObserved = $false
+            $caseResult = Get-DefenseClawCodexWinGetMetadataVersion `
+                -UserHome $caseHome `
+                -OwnerSID $ownerSID `
+                -ExecutableVersionReader $caseReader `
+                -OwnerValidator $caseOwner `
+                -CandidateObserved ([ref]$caseObserved)
+            if (-not [string]::IsNullOrEmpty($caseResult) -or
+                -not $caseObserved) {
+                throw "WinGet Codex accepted $($invalidCase.Name)"
+            }
+            if (($invalidCase.Name -ne 'malformed metadata') -and
+                [int]$caseReaderState.Calls -ne 0) {
+                throw "WinGet Codex reader reached $($invalidCase.Name)"
+            }
+        }
+
+        $belowMinimumReader = {
+            param([string]$Root, [string]$Path, [string]$ExpectedOwnerSID)
+            return '0.100.0'
+        }
+        $belowObserved = $false
+        $belowMinimum = Get-DefenseClawCodexWinGetMetadataVersion `
+            -UserHome $validUserHome `
+            -OwnerSID $ownerSID `
+            -ExecutableVersionReader $belowMinimumReader `
+            -OwnerValidator $ownerValidator `
+            -CandidateObserved ([ref]$belowObserved)
+        if ($belowMinimum -cne '0.100.0' -or -not $belowObserved -or
+            $belowMinimum -ceq '0.131.0') {
+            throw 'below-minimum native Codex was replaced by fallback metadata'
+        }
+        if ((Resolve-DefenseClawConnectorMetadataVersion `
+                -DiscoveredVersion $belowMinimum `
+                -MinimumVersion '0.131.0' `
+                -NativeCandidateObserved $true `
+                -DiscoveryFailed $false) -cne '0.100.0' -or
+            -not [string]::IsNullOrEmpty(
+                (Resolve-DefenseClawConnectorMetadataVersion `
+                    -DiscoveredVersion '' `
+                    -MinimumVersion '0.131.0' `
+                    -NativeCandidateObserved $true `
+                    -DiscoveryFailed $false)
+            ) -or
+            (Resolve-DefenseClawConnectorMetadataVersion `
+                -DiscoveredVersion '' `
+                -MinimumVersion '0.131.0' `
+                -NativeCandidateObserved $false `
+                -DiscoveryFailed $false) -cne '0.131.0') {
+            throw 'WinGet Codex fallback decision did not remain fail closed'
+        }
+
+        $multipleHome = [IO.Path]::Combine($fixtureRoot, 'm')
+        $multipleRoot = [IO.Path]::Combine(
+            $multipleHome,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+        $multipleVersions = @{}
+        $multiplePaths = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+        foreach ($candidate in @(
+            [pscustomobject]@{ Suffix = '8wekyb3d8bbwe'; Version = '0.145.0' },
+            [pscustomobject]@{ Suffix = 'SecondSource1'; Version = '0.146.1' }
+        )) {
+            $package = [IO.Path]::Combine(
+                $multipleRoot,
+                "OpenAI.Codex_Microsoft.Winget.Source_$($candidate.Suffix)"
+            )
+            [void][IO.Directory]::CreateDirectory($package)
+            $executable = [IO.Path]::Combine(
+                $package,
+                'codex-x86_64-pc-windows-msvc.exe'
+            )
+            [IO.File]::WriteAllBytes($executable, [byte[]]@(0x4d, 0x5a))
+            [void]$multiplePaths.Add([IO.Path]::GetFullPath($package))
+            [void]$multiplePaths.Add([IO.Path]::GetFullPath($executable))
+            $multipleVersions[[IO.Path]::GetFullPath($executable)] =
+                [string]$candidate.Version
+        }
+        $multipleOwner = {
+            param([string]$Path, [string]$ExpectedOwnerSID)
+            return $multiplePaths.Contains([IO.Path]::GetFullPath($Path))
+        }.GetNewClosure()
+        $multipleReader = {
+            param([string]$Root, [string]$Path, [string]$ExpectedOwnerSID)
+            return [string]$multipleVersions[[IO.Path]::GetFullPath($Path)]
+        }.GetNewClosure()
+        $multipleObserved = $false
+        $highest = Get-DefenseClawCodexWinGetMetadataVersion `
+            -UserHome $multipleHome `
+            -OwnerSID $ownerSID `
+            -ExecutableVersionReader $multipleReader `
+            -OwnerValidator $multipleOwner `
+            -CandidateObserved ([ref]$multipleObserved)
+        if ($highest -cne '0.146.1' -or -not $multipleObserved) {
+            throw "multiple WinGet Codex packages selected '$highest'"
+        }
+
+        $rootEscapeHome = [IO.Path]::Combine($fixtureRoot, 'r')
+        $rootEscapeParent = [IO.Path]::Combine(
+            $rootEscapeHome,
+            'AppData\Local\Microsoft\WinGet'
+        )
+        [void][IO.Directory]::CreateDirectory($rootEscapeParent)
+        $rootEscapeTarget = [IO.Path]::Combine(
+            $fixtureRoot,
+            'root-escape-target'
+        )
+        [void][IO.Directory]::CreateDirectory($rootEscapeTarget)
+        $junctionPath = [IO.Path]::Combine($rootEscapeParent, 'Packages')
+        [void](New-Item `
+            -ItemType Junction `
+            -Path $junctionPath `
+            -Target $rootEscapeTarget `
+            -ErrorAction Stop)
+        $rootEscapeObserved = $false
+        $rootEscapeResult = Get-DefenseClawCodexWinGetMetadataVersion `
+            -UserHome $rootEscapeHome `
+            -OwnerSID $ownerSID `
+            -ExecutableVersionReader $validReader `
+            -OwnerValidator { return $true } `
+            -CandidateObserved ([ref]$rootEscapeObserved)
+        if (-not [string]::IsNullOrEmpty($rootEscapeResult) -or
+            -not $rootEscapeObserved) {
+            throw 'WinGet Codex discovery treated a reparse package root as absent'
+        }
+        [IO.Directory]::Delete($junctionPath, $false)
+        $junctionPath = $null
+
+        $escapeHome = [IO.Path]::Combine($fixtureRoot, 'e')
+        $escapeRoot = [IO.Path]::Combine(
+            $escapeHome,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+        [void][IO.Directory]::CreateDirectory($escapeRoot)
+        $escapeTarget = [IO.Path]::Combine($fixtureRoot, 'escape-target')
+        [void][IO.Directory]::CreateDirectory($escapeTarget)
+        [IO.File]::WriteAllBytes(
+            [IO.Path]::Combine(
+                $escapeTarget,
+                'codex-x86_64-pc-windows-msvc.exe'
+            ),
+            [byte[]]@(0x4d, 0x5a)
+        )
+        $junctionPath = [IO.Path]::Combine(
+            $escapeRoot,
+            'OpenAI.Codex_Microsoft.Winget.Source_EscapeSource1'
+        )
+        [void](New-Item `
+            -ItemType Junction `
+            -Path $junctionPath `
+            -Target $escapeTarget `
+            -ErrorAction Stop)
+        $escapeObserved = $false
+        $escapeResult = Get-DefenseClawCodexWinGetMetadataVersion `
+            -UserHome $escapeHome `
+            -OwnerSID $ownerSID `
+            -ExecutableVersionReader $validReader `
+            -OwnerValidator { return $true } `
+            -CandidateObserved ([ref]$escapeObserved)
+        if (-not [string]::IsNullOrEmpty($escapeResult) -or
+            -not $escapeObserved) {
+            throw 'WinGet Codex discovery followed a package reparse point'
+        }
+        [IO.Directory]::Delete($junctionPath, $false)
+        $junctionPath = $null
+
+        $precedenceHome = [IO.Path]::Combine($fixtureRoot, 'p')
+        $npmMetadata = [IO.Path]::Combine(
+            $precedenceHome,
+            'AppData\Roaming\npm\node_modules\@openai\codex\package.json'
+        )
+        [void][IO.Directory]::CreateDirectory(
+            [IO.Path]::GetDirectoryName($npmMetadata)
+        )
+        [IO.File]::WriteAllText(
+            $npmMetadata,
+            '{"name":"@openai/codex","version":"0.147.0"}',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $precedencePackage = [IO.Path]::Combine(
+            $precedenceHome,
+            'AppData\Local\Microsoft\WinGet\Packages',
+            $officialLeaf
+        )
+        [void][IO.Directory]::CreateDirectory($precedencePackage)
+        [IO.File]::WriteAllBytes(
+            [IO.Path]::Combine(
+                $precedencePackage,
+                'codex-x86_64-pc-windows-msvc.exe'
+            ),
+            [byte[]]@(0x4d, 0x5a)
+        )
+        $precedence = Get-DefenseClawConnectorMetadataVersion `
+            -Connector 'codex' `
+            -UserHome $precedenceHome `
+            -OwnerSID $ownerSID
+        if ($precedence -cne '0.147.0') {
+            throw "npm/WinGet Codex precedence returned '$precedence'"
         }
     }
     finally {
@@ -947,6 +1575,7 @@ $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
 $renderedTargetsVersionContract = Invoke-RenderedEnterpriseTargetsVersionProbe
 $claudeWinGetMetadataContract = Invoke-ClaudeWinGetMetadataVersionProbe
+$codexWinGetMetadataContract = Invoke-CodexWinGetMetadataVersionProbe
 $renderedConfigEmbeddedRulePack = Invoke-RenderedEnterpriseConfigRulePackProbe
 $raceRoot = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
@@ -1080,6 +1709,8 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$renderedTargetsVersionContract
     claude_winget_metadata_contract =
         [bool]$claudeWinGetMetadataContract
+    codex_winget_metadata_contract =
+        [bool]$codexWinGetMetadataContract
     rendered_config_embedded_rule_pack =
         [bool]$renderedConfigEmbeddedRulePack
     concurrent_workers = 6

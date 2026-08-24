@@ -24,12 +24,13 @@
 #   3. Snapshot internal/managed/cloudreg/provider_cisco.go + go.mod + go.sum,
 #      apply the private overlay over the OSS stub, run `go get` to pin the
 #      cmid pseudo-version.
-#   4. Cross-build defenseclaw.exe and defenseclaw-hook.exe with
+#   4. Cross-build defenseclaw.exe, defenseclaw-hook.exe, and the isolated
+#      defenseclaw-cmid-broker.exe with
 #      GOOS=windows GOARCH=amd64 -tags cmid.
-#   5. Stamp VERSIONINFO / icon on both PE binaries via
+#   5. Stamp VERSIONINFO / icon on all three PE binaries via
 #      `go run ./internal/tools/windowsresources -target windows_amd64 ...`
 #      (Windows verifies via the Win32 VersionInfo API at install time).
-#   6. Assemble the AVC-facing kit: payload/ (5 unsigned inner files),
+#   6. Assemble the AVC-facing kit: payload/ (6 unsigned inner files),
 #      source/ (trimmed via `go list -deps`), source/vendor/
 #      (`go mod vendor`), packaging/scripts/lib/ (assemble + trust
 #      helpers), shipped assemble.{sh|ps1} at the kit root, and a
@@ -63,7 +64,7 @@
 # AVC-facing kit (spec 002 §2.3.A1): every invocation also emits
 #     ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/
 # whose contents match docs/WINDOWS-AVC-PACKAGING-HANDOFF.md. AVC signs
-# the five inner files under payload/, runs the shipped
+# the six inner files under payload/, runs the shipped
 # assemble.{sh|ps1}, then signs the resulting outer Setup EXE.
 #
 # Environment overrides (all optional):
@@ -252,18 +253,20 @@ cp "${OVERLAY_PATH}" "${CLOUDREG_TARGET}"
 echo "==> pinning managed cloud auth module @${CMID_VERSION}"
 ( cd "${REPO_ROOT}" && go get "github.com/cisco-aispg/ai-common/cmid@${CMID_VERSION}" )
 
-# ---- cross-build gateway + hook with -tags cmid -----------------------
+# ---- cross-build gateway + hook + credential broker with -tags cmid ---
 
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dc-managed-windows-stage.XXXXXX")"
 trap 'restore_overlay; rm -rf "${STAGE_DIR}"' EXIT
 
 GATEWAY_EXE="${STAGE_DIR}/defenseclaw.exe"
 HOOK_EXE="${STAGE_DIR}/defenseclaw-hook.exe"
+BROKER_EXE="${STAGE_DIR}/defenseclaw-cmid-broker.exe"
 # main.commit defaults to "unknown", which the enterprise Setup builder's
 # Assert-DefenseClawBinaryIdentity rejects. Stamp the exact HEAD sha we
 # derived above so identity verification passes.
 LDFLAGS_GATEWAY="-s -w -buildid=defenseclaw-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
 LDFLAGS_HOOK="-s -w -buildid=defenseclaw-hook-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
+LDFLAGS_BROKER="-s -w -buildid=defenseclaw-cmid-broker-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
 ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 
 echo "==> building defenseclaw.exe (windows/amd64 tags=cmid)"
@@ -285,6 +288,16 @@ echo "==> stamping defenseclaw-hook.exe VERSIONINFO / icon"
 ( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
     -target windows_amd64 -executable "${HOOK_EXE}" \
     -component hook -version "${VERSION}" -icon "${ICON_PATH}" )
+
+echo "==> building defenseclaw-cmid-broker.exe (windows/amd64 tags=cmid)"
+( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+    go build -trimpath -buildvcs=false -tags cmid \
+    -ldflags "${LDFLAGS_BROKER}" -o "${BROKER_EXE}" ./cmd/defenseclaw-cmid-broker )
+
+echo "==> stamping defenseclaw-cmid-broker.exe VERSIONINFO / icon"
+( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
+    -target windows_amd64 -executable "${BROKER_EXE}" \
+    -component cmid-broker -version "${VERSION}" -icon "${ICON_PATH}" )
 
 # ---- assemble the AVC-facing build kit (spec 002 §2.3.A1) -------------
 #
@@ -308,7 +321,7 @@ KIT_DIR="${DIST_ABS}/${KIT_NAME}"
 rm -rf "${KIT_DIR}"
 mkdir -p "${KIT_DIR}/payload" "${KIT_DIR}/source" "${KIT_DIR}/packaging/scripts/lib"
 
-# ---- kit/payload: the five files AVC signs (or leaves unsigned in
+# ---- kit/payload: the six files AVC signs (or leaves unsigned in
 #                   --allow-unsigned mode) ------------------------------
 echo "==> staging kit payload"
 # Single-source the expected filename list: EXPECTED_PAYLOAD_NAMES is
@@ -321,6 +334,7 @@ echo "==> staging kit payload"
 # scripts/check-assemble-parity.sh enforces the two assembler ends.
 EXPECTED_PAYLOAD_NAMES=(
     DefenseClawEnterprise.psm1
+    defenseclaw-cmid-broker.exe
     defenseclaw-gateway.exe
     defenseclaw-hook.exe
     defenseclaw.exe
@@ -336,6 +350,7 @@ EXPECTED_PAYLOAD_NAMES=(
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw.exe"
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw-gateway.exe"
 cp "${HOOK_EXE}"                                         "${KIT_DIR}/payload/defenseclaw-hook.exe"
+cp "${BROKER_EXE}"                                       "${KIT_DIR}/payload/defenseclaw-cmid-broker.exe"
 cp "${REPO_ROOT}/packaging/windows/DefenseClawEnterprise.psm1" \
                                                          "${KIT_DIR}/payload/DefenseClawEnterprise.psm1"
 cp "${REPO_ROOT}/packaging/windows/install-enterprise.ps1" \

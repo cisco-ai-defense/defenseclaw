@@ -91,6 +91,7 @@ func installWindowsCodexManagedResult(
 	var lockEntry connector.HookContractLockEntry
 	var lockUpdatedAt string
 	var entryUpdatedAt string
+	var generation WindowsManagedRuntimeGenerationPublication
 	err = connector.WithUserHomeDir(target.home, func() error {
 		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
 			verifiedHome, verifiedSID, verifyErr := validateWindowsEnterpriseHome(
@@ -114,24 +115,21 @@ func installWindowsCodexManagedResult(
 			if err != nil {
 				return err
 			}
-			if _, statErr := os.Lstat(transaction.dataDir); errors.Is(statErr, os.ErrNotExist) {
-				transaction.createdDataDir = true
-			} else if statErr != nil {
-				return fmt.Errorf("enterprise hooks: inspect Codex data directory: %w", statErr)
-			}
-			if _, statErr := os.Lstat(transaction.hookDir); errors.Is(statErr, os.ErrNotExist) {
-				transaction.createdHookDir = true
-			} else if statErr != nil {
-				return fmt.Errorf("enterprise hooks: inspect Codex hook directory: %w", statErr)
-			}
 			fail := func(cause error) error {
 				if restoreErr := restoreWindowsCodexUserRuntime(transaction); restoreErr != nil {
 					return fmt.Errorf("%v (Codex runtime rollback failed: %v)", cause, restoreErr)
 				}
 				return cause
 			}
-			if err := os.MkdirAll(transaction.hookDir, 0o700); err != nil {
-				return fail(fmt.Errorf("enterprise hooks: create Codex managed runtime: %w", err))
+			creation, createErr := ensureWindowsTargetOwnedDirectoryTree(
+				transaction.home,
+				transaction.hookDir,
+				transaction.targetSID,
+			)
+			transaction.createdDataDir = creation.createdDataDir
+			transaction.createdHookDir = creation.createdHookDir
+			if createErr != nil {
+				return fail(fmt.Errorf("enterprise hooks: create Codex managed runtime: %w", createErr))
 			}
 			if err := connector.ReconcileManagedNativeHookRuntime(
 				target.dataDir,
@@ -191,11 +189,40 @@ func installWindowsCodexManagedResult(
 			); err != nil {
 				return fail(err)
 			}
+			generation, err = prepareWindowsManagedRuntimeGenerationForInstall(
+				"codex",
+				target.sid,
+				target.dataDir,
+				target.hookExecutable,
+				target.setup.APIAddr,
+				target.setup.HookAPIToken,
+				lockEntry.ContractID,
+				lockUpdatedAt,
+				entryUpdatedAt,
+			)
+			if err != nil {
+				return fail(fmt.Errorf(
+					"enterprise hooks: prepare immutable Codex runtime generation: %w",
+					err,
+				))
+			}
 			return nil
 		})
 	})
 	if err != nil {
 		return InstallResult{}, err
+	}
+	generationCommit, err := windowsManagedRuntimeGenerationCommit(generation)
+	if err != nil {
+		return InstallResult{}, errors.Join(
+			fmt.Errorf("enterprise hooks: select immutable Codex runtime generation: %w", err),
+			discardWindowsManagedRuntimeGeneration(generation),
+			windowsEnterpriseTargetImpersonation(
+				target.sid,
+				target.home,
+				func() error { return restoreWindowsCodexUserRuntime(transaction) },
+			),
+		)
 	}
 	// Publish this SID only after its target-owned runtime has been hardened and
 	// verified. Until this atomic protected-registry update succeeds, direct
@@ -204,7 +231,15 @@ func installWindowsCodexManagedResult(
 		target.hookExecutable,
 	)
 	if err != nil {
-		return InstallResult{}, err
+		return InstallResult{}, errors.Join(
+			err,
+			rollbackWindowsManagedRuntimeGeneration(generationCommit, generation),
+			windowsEnterpriseTargetImpersonation(
+				target.sid,
+				target.home,
+				func() error { return restoreWindowsCodexUserRuntime(transaction) },
+			),
+		)
 	}
 	nextTargets := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(currentTargets)+1)
 	for _, current := range currentTargets {
@@ -221,21 +256,19 @@ func installWindowsCodexManagedResult(
 		machineOpts,
 		nextTargets,
 	); err != nil {
+		generationErr := rollbackWindowsManagedRuntimeGeneration(
+			generationCommit,
+			generation,
+		)
 		rollbackErr := windowsEnterpriseTargetImpersonation(
 			target.sid,
 			target.home,
 			func() error { return restoreWindowsCodexUserRuntime(transaction) },
 		)
-		if rollbackErr != nil {
-			return InstallResult{}, fmt.Errorf(
-				"enterprise hooks: publish Codex target enrollment: %v (target runtime rollback failed: %v)",
-				err,
-				rollbackErr,
-			)
-		}
-		return InstallResult{}, fmt.Errorf(
-			"enterprise hooks: publish Codex target enrollment: %w",
-			err,
+		return InstallResult{}, errors.Join(
+			fmt.Errorf("enterprise hooks: publish Codex target enrollment: %w", err),
+			generationErr,
+			rollbackErr,
 		)
 	}
 	return InstallResult{
@@ -298,6 +331,29 @@ func verifyWindowsCodexManagedResult(
 			"enterprise hooks: load Codex managed hook contract: %w",
 			err,
 		)
+	}
+	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
+		target.dataDir,
+		"codex",
+	)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf(
+			"enterprise hooks: load protected Codex runtime generation timestamps: %w",
+			err,
+		)
+	}
+	if err := verifyWindowsManagedRuntimeGenerationForInstall(
+		"codex",
+		target.sid,
+		target.dataDir,
+		target.hookExecutable,
+		target.setup.APIAddr,
+		target.setup.HookAPIToken,
+		lock.ContractID,
+		lockUpdatedAt,
+		entryUpdatedAt,
+	); err != nil {
+		return InstallResult{}, err
 	}
 	return InstallResult{
 		Connector:       "codex",

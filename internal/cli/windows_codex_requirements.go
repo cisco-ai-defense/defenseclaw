@@ -35,11 +35,20 @@ var (
 )
 
 type windowsCodexDeploymentMetadata struct {
-	SchemaVersion  int    `json:"schema_version"`
-	DeploymentMode string `json:"deployment_mode"`
-	Installed      *bool  `json:"installed,omitempty"`
-	InstallRoot    string `json:"install_root"`
-	StateRoot      string `json:"state_root"`
+	SchemaVersion          int                                  `json:"schema_version"`
+	DeploymentMode         string                               `json:"deployment_mode"`
+	Installed              *bool                                `json:"installed,omitempty"`
+	InstallRoot            string                               `json:"install_root"`
+	StateRoot              string                               `json:"state_root"`
+	ManagedHooksActivation *windowsManagedHooksActivationRecord `json:"managed_hooks_activation,omitempty"`
+}
+
+type windowsManagedHooksActivationRecord struct {
+	SchemaVersion          int    `json:"schema_version"`
+	DeploymentGenerationID string `json:"deployment_generation_id"`
+	State                  string `json:"state"`
+	ManifestSHA256         string `json:"manifest_sha256"`
+	TargetCount            int    `json:"target_count"`
 }
 
 func newWindowsCodexRequirementsCommand() *cobra.Command {
@@ -220,8 +229,7 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, fmt.Errorf("resolve trusted ProgramData: %w", err)
 	}
 	requirementsPath := filepath.Join(programData, "OpenAI", "Codex", "requirements.toml")
-	enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, err :=
-		resolveWindowsCodexManifestApplicability(stateRoot)
+	applicability, err := resolveWindowsCodexManifestApplicability(stateRoot)
 	if err != nil {
 		return opts, err
 	}
@@ -234,10 +242,11 @@ func resolveWindowsCodexRequirementsLayout(
 		GatewayAddr:                     gatewayAddr,
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
-		EnterpriseTargetEnabled:         enterpriseTargetEnabled,
-		ClaudeTargetEnabled:             claudeTargetEnabled,
+		EnterpriseTargetEnabled:         applicability.Enterprise,
+		ClaudeTargetEnabled:             applicability.Claude,
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
-		CodexTargetEnabled:              codexTargetEnabled,
+		CodexTargetEnabled:              applicability.Codex,
+		CursorTargetEnabled:             applicability.Cursor,
 	}
 
 	metadataPath := filepath.Join(stateRoot, "install", "deployment.json")
@@ -271,33 +280,47 @@ func resolveWindowsCodexRequirementsLayout(
 	return opts, nil
 }
 
+// windowsCodexManifestApplicability records which target connectors the
+// protected enterprise-hook manifest enables. It replaces four positional
+// booleans; every future target adds a named field so a swapped pair
+// cannot compile.
+type windowsCodexManifestApplicability struct {
+	Enterprise bool
+	Codex      bool
+	Claude     bool
+	Cursor     bool
+}
+
 func resolveWindowsCodexManifestApplicability(
 	stateRoot string,
-) (enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled bool, err error) {
+) (windowsCodexManifestApplicability, error) {
+	var applicability windowsCodexManifestApplicability
 	manifestPath := filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
 	if err := windowsCodexRequirementsManifestTrust(
 		manifestPath,
 		"Windows enterprise hook target manifest",
 	); err != nil {
-		return false, false, false, err
+		return applicability, err
 	}
 	manifest, err := windowsCodexRequirementsManifestLoader(manifestPath)
 	if err != nil {
-		return false, false, false, err
+		return applicability, err
 	}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
 		}
-		enterpriseTargetEnabled = true
+		applicability.Enterprise = true
 		switch strings.ToLower(strings.TrimSpace(target.Connector)) {
 		case "codex":
-			codexTargetEnabled = true
+			applicability.Codex = true
 		case "claudecode":
-			claudeTargetEnabled = true
+			applicability.Claude = true
+		case "cursor":
+			applicability.Cursor = true
 		}
 	}
-	return enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, nil
+	return applicability, nil
 }
 
 func exactWindowsCodexAttestationEnv(name string) (bool, error) {

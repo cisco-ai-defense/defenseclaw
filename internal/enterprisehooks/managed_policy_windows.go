@@ -47,6 +47,9 @@ var (
 	windowsManagedPolicyDirTrustCheck = func(path string) error {
 		return managed.ValidateTrustedRuntimeDir(path, "Claude Code managed policy directory")
 	}
+	windowsManagedPolicyAncestorTrustCheck = func(path string) error {
+		return managed.ValidateTrustedDirectoryAncestor(path, "managed policy directory ancestor")
+	}
 	windowsManagedPolicyFileTrustCheck = func(path string) error {
 		return managed.ValidateTrustedFilePath(path, "Claude Code managed policy file")
 	}
@@ -1880,7 +1883,7 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 			}
 			// Validate before creating anything. The production trust check
 			// validates this directory and its complete existing ancestor chain.
-			if err := windowsManagedPolicyDirTrustCheck(current); err != nil {
+			if err := windowsManagedPolicyAncestorTrustCheck(current); err != nil {
 				return fmt.Errorf("enterprise hooks: managed policy ancestor is untrusted: %w", err)
 			}
 			break
@@ -1921,7 +1924,7 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 		if err := rejectWindowsReparseChain(parent); err != nil {
 			return cleanupCreated(err)
 		}
-		if err := windowsManagedPolicyDirTrustCheck(parent); err != nil {
+		if err := windowsManagedPolicyAncestorTrustCheck(parent); err != nil {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: managed policy parent changed trust before creation: %w", err))
 		}
 		ptr, err := winpath.UTF16Ptr(directory)
@@ -1929,15 +1932,30 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 			return cleanupCreated(err)
 		}
 		createErr := windows.CreateDirectory(ptr, attributes)
+		var concurrentlyCreated bool
 		if createErr == nil {
 			created = append(created, directory)
 		} else if !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: create protected managed policy directory %s: %w", directory, createErr))
+		} else {
+			// Another process created this leaf between our
+			// existence probe and the CreateDirectory call. Its
+			// DACL is not necessarily the canonical
+			// administrator-owned shape, so upgrade the trust check
+			// to the stricter validator so Claude policy and
+			// managed runtime selector flows do not adopt a
+			// concurrently pre-created leaf that only happens to
+			// lack an immediately useful untrusted write ACE.
+			concurrentlyCreated = true
 		}
 		if err := rejectWindowsReparseChain(directory); err != nil {
 			return cleanupCreated(err)
 		}
-		if err := windowsManagedPolicyDirTrustCheck(directory); err != nil {
+		if concurrentlyCreated {
+			if err := validateWindowsManagedPolicyDirectoryProtection(directory); err != nil {
+				return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
+			}
+		} else if err := windowsManagedPolicyDirTrustCheck(directory); err != nil {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
 		}
 	}
@@ -1964,6 +1982,132 @@ func windowsManagedPolicyDirectorySecurityAttributes() (*windows.SecurityAttribu
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: descriptor,
 	}, nil
+}
+
+// validateWindowsManagedPolicyDirectoryProtection verifies the exact
+// administrator-owned directory shape created above. It is intentionally
+// stronger than the general trust predicate: a concurrently pre-created leaf
+// must not be adopted merely because it happens to lack an immediately useful
+// untrusted write ACE.
+func validateWindowsManagedPolicyDirectoryProtection(path string) error {
+	if err := windowsManagedPolicyDirTrustCheck(path); err != nil {
+		return err
+	}
+	owner, err := windowsManagedPolicyOwnerSID()
+	if err != nil || owner == nil {
+		return errors.New("enterprise hooks: managed policy directory owner SID is unavailable")
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect managed policy directory security descriptor: %w", err)
+	}
+	if descriptor == nil {
+		return errors.New("enterprise hooks: managed policy directory security descriptor is missing")
+	}
+	actualOwner, _, err := descriptor.Owner()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect managed policy directory owner: %w", err)
+	}
+	if actualOwner == nil || !actualOwner.Equals(owner) {
+		return fmt.Errorf(
+			"enterprise hooks: managed policy directory has unexpected owner %s",
+			windowsSIDString(actualOwner),
+		)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+		return errors.New("enterprise hooks: managed policy directory DACL is not protected")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return errors.New("enterprise hooks: managed policy directory has no trusted DACL")
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return err
+	}
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		return err
+	}
+	type coverageEntry struct {
+		current bool
+		child   bool
+		count   int
+	}
+	coverage := map[string]*coverageEntry{
+		owner.String():  {},
+		system.String(): {},
+		users.String():  {},
+	}
+	seen := make(map[string]struct{}, 6)
+	fullMasks := map[windows.ACCESS_MASK]struct{}{
+		windows.GENERIC_ALL: {},
+		mapWindowsUserPathGenericMask(windows.GENERIC_ALL): {},
+	}
+	userMask := windows.ACCESS_MASK(windows.GENERIC_READ | windows.GENERIC_EXECUTE)
+	userMasks := map[windows.ACCESS_MASK]struct{}{
+		userMask:                                {},
+		mapWindowsUserPathGenericMask(userMask): {},
+	}
+	allowedFlags := map[uint8]struct{}{
+		0: {},
+		uint8(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT):                            {},
+		uint8(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT) | windows.INHERIT_ONLY_ACE: {},
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return fmt.Errorf("enterprise hooks: inspect managed policy directory ACE %d: %w", index, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return errors.New("enterprise hooks: managed policy directory contains a noncanonical ACE")
+		}
+		if _, ok := allowedFlags[ace.Header.AceFlags]; !ok {
+			return errors.New("enterprise hooks: managed policy directory contains noncanonical inheritance")
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid == nil || !sid.IsValid() {
+			return errors.New("enterprise hooks: managed policy directory contains an invalid ACE principal")
+		}
+		entry, ok := coverage[sid.String()]
+		if !ok {
+			return fmt.Errorf("enterprise hooks: managed policy directory grants unexpected principal %s", sid)
+		}
+		if sid.Equals(users) {
+			if _, ok := userMasks[ace.Mask]; !ok {
+				return fmt.Errorf("enterprise hooks: managed policy directory grants unexpected Users mask 0x%x", uint32(ace.Mask))
+			}
+		} else if _, ok := fullMasks[ace.Mask]; !ok {
+			return fmt.Errorf("enterprise hooks: managed policy directory grants unexpected trusted mask 0x%x", uint32(ace.Mask))
+		}
+		signature := fmt.Sprintf("%s:%x:%x", sid, uint32(ace.Mask), ace.Header.AceFlags)
+		if _, duplicate := seen[signature]; duplicate {
+			return errors.New("enterprise hooks: managed policy directory contains a duplicate ACE")
+		}
+		seen[signature] = struct{}{}
+		entry.count++
+		entry.current = entry.current || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE == 0
+		entry.child = entry.child || ace.Header.AceFlags&uint8(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT) ==
+			uint8(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+		if entry.count > 2 {
+			return errors.New("enterprise hooks: managed policy directory has too many ACEs for a principal")
+		}
+	}
+	for sid, entry := range coverage {
+		if !entry.current || !entry.child {
+			return fmt.Errorf("enterprise hooks: managed policy directory lacks canonical coverage for %s", sid)
+		}
+	}
+	return nil
 }
 
 func writeWindowsManagedFile(path string, data []byte, userReadable bool) error {

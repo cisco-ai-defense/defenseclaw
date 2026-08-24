@@ -55,6 +55,8 @@ var nativeEnterpriseHookRuntimeSnapshot struct {
 	registered         bool
 	gatewayAddr        string
 	gatewayServiceName string
+	scopedToken        string
+	generationID       string
 	err                error
 }
 
@@ -134,7 +136,7 @@ func hookConnectorFromArgs(args []string) (string, error) {
 		}
 	}
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
-	if connectorName != "codex" && connectorName != "claudecode" {
+	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "cursor" {
 		return connectorName, fmt.Errorf(
 			"enterprise managed hook connector %q is not supported",
 			connectorName,
@@ -171,6 +173,19 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 
 	runtime, err := enterpriseManagedRuntimeResolver(executable, connectorName)
+	if err == nil && runtime.Registered {
+		if !validEnterpriseManagedRuntimeGenerationID(runtime.GenerationID) {
+			err = fmt.Errorf(
+				"enterprise hooks: connector %s authenticated runtime generation is invalid",
+				connectorName,
+			)
+		} else if strings.TrimSpace(runtime.ScopedToken) == "" {
+			err = fmt.Errorf(
+				"enterprise hooks: connector %s authenticated runtime token is empty",
+				connectorName,
+			)
+		}
+	}
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	nativeEnterpriseHookRuntimeSnapshot.prepared = true
 	nativeEnterpriseHookRuntimeSnapshot.executable = executable
@@ -180,6 +195,8 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	nativeEnterpriseHookRuntimeSnapshot.registered = runtime.Registered
 	nativeEnterpriseHookRuntimeSnapshot.gatewayAddr = runtime.GatewayAddr
 	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = runtime.GatewayServiceName
+	nativeEnterpriseHookRuntimeSnapshot.scopedToken = runtime.ScopedToken
+	nativeEnterpriseHookRuntimeSnapshot.generationID = runtime.GenerationID
 	nativeEnterpriseHookRuntimeSnapshot.err = err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	return enterpriseManagedRuntimeAbsenceNoop(
@@ -189,6 +206,18 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 		runtime.Registered,
 		err,
 	)
+}
+
+func validEnterpriseManagedRuntimeGenerationID(generationID string) bool {
+	if len(generationID) != 32 {
+		return false
+	}
+	for _, char := range generationID {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func enterpriseManagedRuntimeAbsenceNoop(
@@ -274,17 +303,42 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 func enterpriseManagedHookRuntimeEndpoint(
 	connectorName string,
 ) (gatewayAddr, gatewayServiceName string, ok bool) {
+	gatewayAddr, gatewayServiceName, _, ok =
+		enterpriseManagedHookRuntimeConnection(connectorName)
+	return gatewayAddr, gatewayServiceName, ok
+}
+
+// enterpriseManagedHookRuntimeConnection returns endpoint identity and the
+// connector-scoped token from one already-authenticated immutable generation.
+// The returned token pointer is the explicit hookexec snapshot-mode marker;
+// callers must never reconstruct it from the mutable legacy token path.
+func enterpriseManagedHookRuntimeConnection(
+	connectorName string,
+) (gatewayAddr, gatewayServiceName string, scopedToken *string, ok bool) {
 	// Normalize identically to enterpriseManagedHookRuntimeNoop so the
 	// snapshot cache lookup matches regardless of the caller's casing.
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	valid := nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil &&
+		nativeEnterpriseHookRuntimeSnapshot.registered &&
+		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
+		validEnterpriseManagedRuntimeGenerationID(
+			nativeEnterpriseHookRuntimeSnapshot.generationID,
+		) &&
+		strings.TrimSpace(nativeEnterpriseHookRuntimeSnapshot.scopedToken) != ""
+	if !valid {
+		return nativeEnterpriseHookRuntimeSnapshot.gatewayAddr,
+			nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName,
+			nil,
+			false
+	}
+	token := nativeEnterpriseHookRuntimeSnapshot.scopedToken
 	return nativeEnterpriseHookRuntimeSnapshot.gatewayAddr,
 		nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName,
-		nativeEnterpriseHookRuntimeSnapshot.prepared &&
-			nativeEnterpriseHookRuntimeSnapshot.err == nil &&
-			nativeEnterpriseHookRuntimeSnapshot.registered &&
-			nativeEnterpriseHookRuntimeSnapshot.connector == connectorName
+		&token,
+		true
 }
 
 type nativeHookInstallState struct {

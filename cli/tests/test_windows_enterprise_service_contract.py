@@ -97,6 +97,10 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$userHomeFull =" in discovery
     assert "$home =" not in discovery.casefold()
     assert "Get-DefenseClawClaudeWinGetMetadataVersion" in discovery
+    assert "Get-DefenseClawCodexWinGetMetadataVersion" in discovery
+    assert discovery.index("$machinePackage") < discovery.index(
+        "Get-DefenseClawCodexWinGetMetadataVersion"
+    )
     assert discovery.index("$machinePackage") < discovery.index(
         "Get-DefenseClawClaudeWinGetMetadataVersion"
     )
@@ -108,6 +112,10 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
         "Anthropic.ClaudeCode_Microsoft.Winget.Source_*"
         in winget_discovery
     )
+    assert "OpenAI.Codex_Microsoft.Winget.Source_*" in winget_discovery
+    assert "codex-x86_64-pc-windows-msvc.exe" in winget_discovery
+    assert "OpenAI OpCo, LLC" in winget_discovery
+    assert "Get-DefenseClawCodexWinGetEmbeddedVersion" in winget_discovery
     assert "[IO.SearchOption]::TopDirectoryOnly" in winget_discovery
     assert "[IO.SearchOption]::AllDirectories" not in winget_discovery
     assert (
@@ -122,10 +130,15 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$examined -gt 256" in winget_discovery
     assert "$matched -gt 32" in winget_discovery
     assert "Get-DefenseClawConnectorMetadataVersion" in renderer
+    assert "Resolve-DefenseClawConnectorMetadataVersion" in renderer
+    assert "-NativeCandidateObserved $nativeCandidateObserved" in renderer
+    assert "-DiscoveryFailed $metadataDiscoveryFailed" in renderer
     assert "$users = @(" in renderer
     assert "agent_version:" in renderer
     assert "enabled: false" in renderer
-    assert renderer.index("agent_version:") < renderer.index("enabled: true")
+    assert renderer.index('AppendLine("    agent_version:') < renderer.index(
+        "AppendLine('    enabled: true')"
+    )
     assert "@attacker/not-amp" in smoke
     assert "target renderer emitted an enabled/version contract mismatch" in smoke
     assert (
@@ -137,6 +150,14 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
         "eligible Claude user did not receive exactly one enabled target"
         in smoke
     )
+    assert (
+        "official WinGet Codex package was not discovered exactly once"
+        in smoke
+    )
+    assert "WinGet Codex owner identity did not reject a foreign owner" in smoke
+    assert "WinGet Codex discovery followed a package reparse point" in smoke
+    assert "below-minimum native Codex was replaced by fallback metadata" in smoke
+    assert "WinGet Codex fallback decision did not remain fail closed" in smoke
     assert "shorthand config did not explicitly select embedded rule-pack defaults" in smoke
 
 
@@ -409,6 +430,7 @@ def test_packaging_defaults_to_protected_scm_identities_and_roots() -> None:
     )
     assert (
         "    foreach ($path in @(\n"
+        "        $Layout.BrokerLogDirectory,\n"
         "        $Layout.GuardianDirectory,\n"
         "        $Layout.InstallStateDirectory,\n"
         "        $Layout.ManifestPath,\n"
@@ -641,6 +663,8 @@ def test_poisoned_program_root_environment_cannot_redirect_defaults(
                 f"$env:ProgramFiles='{poison_files_ps}';"
                 f"$env:ProgramData='{poison_data_ps}';"
                 f"& '{harness_ps}' "
+                f"-BrokerBinary '{payload_binary_ps}' "
+                f"-ProviderLibrary '{payload_binary_ps}' "
                 f"-GatewayBinary '{payload_binary_ps}' "
                 f"-HookBinary '{payload_binary_ps}' "
                 f"-CLIBinary '{payload_binary_ps}' "
@@ -1202,8 +1226,11 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "fixed_native_helper_spoof_ignored",
                 "command_line_empty_argument_round_trip",
                 "command_line_invalid_arguments_rejected",
+                "service_empty_environment_binding",
+                "service_missing_array_properties_normalized",
                 "certification_scope_rejections",
                 "lifecycle_file_lock_reuse_stable",
+                "guardian_failure_diagnostic_preserved",
             ),
         ),
         (
@@ -1344,13 +1371,37 @@ def test_windows_packaging_smokes_run_on_every_available_engine(
     assert not repository_cache.exists(), (
         f"PowerShell smoke started with repository cache residue: {repository_cache}"
     )
+    profile_prefix = (
+        "dc-ps-"
+        if script == BOOTSTRAP_ENVIRONMENT_SMOKE
+        else "DefenseClaw-PowerShellSmoke-"
+    )
     with tempfile.TemporaryDirectory(
-        prefix="DefenseClaw-PowerShellSmoke-",
+        prefix=profile_prefix,
         dir=os.environ.get("TEMP"),
     ) as temporary_profile:
         profile_root = str(Path(temporary_profile).resolve())
         volume, home_path = os.path.splitdrive(profile_root)
         if script == BOOTSTRAP_ENVIRONMENT_SMOKE:
+            # Windows PowerShell 5.1 still exercises legacy MAX_PATH behavior.
+            # Keep the real WinGet package/executable leaves while bounding the
+            # disposable prefixes that precede them.
+            longest_codex_fixture = (
+                Path(profile_root)
+                / ("cw-" + "0" * 32)
+                / "i3"
+                / "AppData"
+                / "Local"
+                / "Microsoft"
+                / "WinGet"
+                / "Packages"
+                / "OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe_hostile"
+                / "codex-x86_64-pc-windows-msvc.exe"
+            )
+            assert len(str(longest_codex_fixture)) < 260, (
+                "bootstrap metadata fixture exceeds the PowerShell 5.1 "
+                f"MAX_PATH boundary: {longest_codex_fixture}"
+            )
             smoke_environment = restricted_windows_bootstrap_environment(
                 profile_root
             )
@@ -1756,6 +1807,11 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     ]
     lifecycle_status = module[
         module.index("function Get-DefenseClawLifecycleStatus") : module.index(
+            "function Test-DefenseClawGuardianCoverageReport"
+        )
+    ]
+    coverage = module[
+        module.index("function Test-DefenseClawGuardianCoverageReport") : module.index(
             "function Wait-DefenseClawFreshGuardianReconcile"
         )
     ]
@@ -1767,9 +1823,45 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "without a valid JSON report" in report
     assert "guardianReport.PSObject.Properties['errors']" in lifecycle_status
     assert '"guardian status: $(ConvertTo-DefenseClawBoundedDiagnostic' in lifecycle_status
-    assert "PSObject.Properties['errors']" in wait
+    assert "PSObject.Properties['errors']" in coverage
+    assert "guardian status is missing protected activation coverage" in coverage
+    assert "Rollback may have restored the prior strict v1 binary" in coverage
+    assert "reconcile_id" in coverage
+    assert "manifest_sha256" in coverage
+    assert "$PriorReconcileID" in coverage
+    assert "$PriorGeneration" in coverage
+    assert "$PriorStateIdentity" in coverage
+    assert "$CurrentStateIdentity" in coverage
+    assert "$ExpectedManifestSHA256" in coverage
+    assert "Test-DefenseClawGuardianCoverageReport `" in wait
+    assert "boundaryDeadline" not in wait
+    assert "Get-DefenseClawGuardianStateIdentity" in wait
     assert "last_status=$lastStatus" in wait
-
+    guardian_failure = module[
+        module.index(
+            "function Get-DefenseClawGuardianVerificationFailureDiagnostic"
+        ) : module.index("function Get-DefenseClawGuardianReadinessProbe")
+    ]
+    guardian_probe = module[
+        module.index("function Get-DefenseClawGuardianReadinessProbe") :
+        module.index("function Test-DefenseClawGuardianReady")
+    ]
+    guardian_boolean = module[
+        module.index("function Test-DefenseClawGuardianReady") :
+        module.index("function Wait-DefenseClawEnterpriseReadiness")
+    ]
+    deployment_assertion = module[
+        module.index("function Assert-DefenseClawEnterpriseDeployment") :
+        module.index("function Get-DefenseClawArtifactPath")
+    ]
+    assert "PSObject.Properties['results']" in guardian_failure
+    assert "PSObject.Properties['authorization_error']" in guardian_failure
+    assert "ConvertTo-DefenseClawBoundedDiagnostic" in guardian_failure
+    assert "verification failed without a target error" in guardian_failure
+    assert "ready = $ready" in guardian_probe
+    assert "return [bool]$readiness.ready" in guardian_boolean
+    assert "Get-DefenseClawGuardianReadinessProbe `" in deployment_assertion
+    assert "[string]$guardianReadiness.diagnostic" in deployment_assertion
     install_like = module[
         module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
             "function Invoke-DefenseClawUninstallLifecycle"
@@ -1790,19 +1882,36 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "-DeferAutomaticStart" in service_preparation
 
     transaction = install_like.index("$snapshot = New-DefenseClawTransaction `")
-    fresh_install = install_like.index(
-        "if ($Action -eq 'Install') {\n"
-        "            # A clean install has no NT SERVICE identities"
-    )
-    fresh_service_registration = install_like.index(
+    enumerator_refresh = install_like.index("Invoke-DefenseClawEnumeratorRefresh `")
+    target_plan = install_like.index("Invoke-DefenseClawTargetRuntimePreparation `")
+    fresh_bind = install_like.index("-BindInstallPreparationSID", transaction)
+    fresh_service_registration = install_like.rfind(
         "Set-DefenseClawManagedServicesForTransaction `",
-        fresh_install,
+        transaction,
+        fresh_bind,
     )
     fresh_snapshot = install_like.index(
         "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `",
-        fresh_service_registration,
+        target_plan,
     )
-    assert transaction < fresh_service_registration < fresh_snapshot
+    guardian_wait = install_like.index("Wait-DefenseClawFreshGuardianReconcile `")
+    gateway_demand_start = install_like.index(
+        "Set-DefenseClawServiceStartMode `\n"
+        "                -Name $GatewayServiceName `\n"
+        "                -StartMode 3",
+        guardian_wait,
+    )
+    assert (
+        transaction
+        < fresh_service_registration
+        < enumerator_refresh
+        < target_plan
+        < fresh_snapshot
+        < guardian_wait
+        < gateway_demand_start
+    )
+    assert "$expectedGuardianManifestSHA256" in install_like
+    assert "-ExpectedManifestSHA256 $expectedGuardianManifestSHA256" in install_like
 
     upgrade_snapshot = install_like.index(
         "if ($Action -ne 'Install') {\n"
@@ -1828,6 +1937,116 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "could not be retired" in install_like
 
 
+def test_legacy_captured_lifecycle_journal_has_transactional_upgrade_recovery() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    publish = module[
+        module.index(
+            "function Publish-DefenseClawManagedHooksLifecycleRecoveryBinding"
+        ) : module.index(
+            "function Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding"
+        )
+    ]
+    resolve = module[
+        module.index(
+            "function Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding"
+        ) : module.index("function Assert-DefenseClawInstalledConfig")
+    ]
+    install_like = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    assert "schema-3 journal" in publish
+    assert "state = 'recorded'" in publish
+    assert "-Action retire-committed" in publish
+    assert "$binding.state = 'adopted'" in publish
+    assert "journal_file_identity" in publish
+    assert "journal_sha256" in publish
+    assert "durable legacy preimage marker" in publish
+    assert "state -notin @('recorded', 'adopted')" in resolve
+    assert "The helper committed its handle-bound quarantine" in resolve
+    assert "Write-DefenseClawJsonAtomic -Value $snapshot" in resolve
+    restore = module[
+        module.index("function Restore-DefenseClawTransaction {") : module.index(
+            "function Assert-DefenseClawRestoredTransactionReadyForActivation"
+        )
+    ]
+    assert "Assert-DefenseClawUnboundLegacyLifecycleRecoveryPreimage `" in restore
+    assert "$null -eq $unboundLegacyLifecyclePreimage" in restore
+    assert "$skipAdoptedStaleLifecyclePreimage" in restore
+    recovery_publish = install_like.index(
+        "Publish-DefenseClawManagedHooksLifecycleRecoveryBinding `"
+    )
+    transaction_open = install_like.index("$snapshot = New-DefenseClawTransaction `")
+    assert "Get-DefenseClawManagedHooksLifecycleJournalCompatibilityState `" in (
+        install_like[:transaction_open]
+    )
+    assert "journalCompatibility -ceq 'current'" in install_like[:transaction_open]
+    assert "-Action retire" in install_like[:transaction_open]
+    assert "-RecoverLegacyManagedHooksLifecycleJournal:" in install_like
+    current_capture = install_like.index(
+        "if ($Action -ne 'Install') {\n"
+        "            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `",
+        recovery_publish,
+    )
+    assert recovery_publish < current_capture
+
+    upgrade_case = smoke[
+        smoke.index("function Invoke-HarnessLegacyCapturedJournalUpgradeSequence") :
+        smoke.index("function Invoke-HarnessLegacyRecoveryCrashPrefixCases")
+    ]
+    crash_cases = smoke[
+        smoke.index("function Invoke-HarnessLegacyRecoveryCrashPrefixCases") :
+        smoke.index("$purgeResults =")
+    ]
+    assert "legacy_activation_missing = $true" in upgrade_case
+    assert '"schema_version":3,"phase":"captured"' in upgrade_case
+    assert "-Action Upgrade `" in upgrade_case
+    assert "-NoStart" in upgrade_case
+    for ordered_event in (
+        "lifecycle-recovery-binding-recorded",
+        "lifecycle-snapshot:retire-committed",
+        "lifecycle-recovery-binding-adopted",
+        "lifecycle-snapshot:capture",
+        "lifecycle-snapshot:classify-activation",
+    ):
+        assert ordered_event in upgrade_case
+    for crash_prefix in (
+        "replacement-staged-before-binding",
+        "binding-recorded-before-rename",
+        "rename-before-adoption-receipt",
+        "adoption-receipt-before-current-capture",
+    ):
+        assert crash_prefix in crash_cases
+    assert "HarnessRealRestoreTransaction" in crash_cases
+    assert "-DeferServiceRestart" in crash_cases
+    assert "lifecycle-generation-gc" in crash_cases
+    assert "lifecycle-journal-quarantined" in crash_cases
+    assert "violated GC-before-adoption recovery ordering" in crash_cases
+    assert "restore the gateway and exact unbound legacy preimage" in crash_cases
+    assert "legacy-gateway-preimage" in crash_cases
+    assert "staged-fixed-gateway" in crash_cases
+    assert "current-schema4-post-commit-direct-retirement" in upgrade_case
+
+    teardown_writer = smoke[
+        smoke.index("function Write-HarnessJournal") :
+        smoke.index("function Get-HarnessJournalPhase")
+    ]
+    lifecycle_mock_start = smoke.index(
+        "function script:Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand"
+    )
+    lifecycle_mock = smoke[
+        lifecycle_mock_start : smoke.index(
+            "function script:Restore-DefenseClawTransaction",
+            lifecycle_mock_start,
+        )
+    ]
+    assert 'schema_version":5' in teardown_writer
+    assert 'schema_version":4' in lifecycle_mock
+
+
 def test_certification_inspects_actual_live_service_tokens() -> None:
     harness = read(HARNESS)
     token_probe = harness[
@@ -1843,14 +2062,18 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     assert "IsTokenRestricted" in harness
     assert "'S-1-16-12288'" in token_probe
     assert "'S-1-16-16384'" in token_probe
+    assert "$broker = $serviceName -eq $script:BrokerServiceName" in token_probe
+    assert "$expectedPrivileges = if ($gateway -or $broker)" in token_probe
     assert "$expectedIntegritySID = if ($gateway)" in token_probe
     assert "integrity $($token.IntegritySid), want $expectedIntegrityName" in token_probe
     assert "expected_integrity_sid = $expectedIntegritySID" in token_probe
     assert "if (-not $gateway -and" in token_probe
+    assert "if (-not $gateway -and -not $broker)" in token_probe
     assert "service_sid_group_required = -not $gateway" in token_probe
     assert "service_sid_group_count = $serviceGroups.Count" in token_probe
     assert "foreach ($requiredSID in @($serviceSID, 'S-1-1-0', 'S-1-5-33'))" in token_probe
     assert "restricted SID list lacks one exact service-logon SID" in token_probe
+    assert "'broker'" in token_probe
     for privilege in (
         "SeChangeNotifyPrivilege",
         "SeTcbPrivilege",
@@ -1864,7 +2087,7 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     ):
         assert privilege in harness
     assert "live-service-token-least-privilege" in harness
-    assert "High gateway/System guardian integrity" in harness
+    assert "High gateway/System broker and guardian integrity" in harness
     assert "service-SID identity/group semantics" in harness
     assert "service_tokens = @($serviceTokenSnapshot)" in harness
 
@@ -1921,14 +2144,15 @@ def test_execute_requires_a_separately_built_successful_upgrade() -> None:
         harness.index("function Get-ManagedUserPathSecurityFingerprint")
     ]
 
-    assert "full execution requires -UpgradeGatewayBinary" in harness
-    assert "full execution requires all three -Upgrade*Binary inputs" in upgrade
+    assert "full execution requires -UpgradeBrokerBinary" in harness
+    assert "-UpgradeGatewayBinary" in harness
+    assert "full execution requires all four -Upgrade*Binary inputs" in upgrade
     assert "Add-SkippedResult" not in upgrade
     assert "external-release-public-cli-versioned-upgrade" in upgrade
     assert "Invoke-PublicEnterpriseLifecycleCLIJSON" in upgrade
     assert "-FilePath $script:UpgradeCLISource" in upgrade
     assert "separately version-stamped upgrade $name bytes do not" in upgrade
-    for name in ("gateway", "hook", "cli"):
+    for name in ("broker", "gateway", "hook", "cli"):
         assert f"{name} = [string]$script:SourceDigests['upgrade_{name}']" in upgrade
         assert f"exact_{name}_sha256 = $true" in upgrade
     assert "versioned public Upgrade installed the wrong $name bytes" in upgrade
@@ -1950,6 +2174,447 @@ def test_execute_requires_a_separately_built_successful_upgrade() -> None:
     assert "expected = [pscustomobject]$expected" in upgrade
     assert "after = $after" in upgrade
     assert "upgrade-activation-and-rollback" in upgrade
+
+
+def test_certification_threads_broker_and_vendor_provider_through_lifecycle() -> None:
+    harness = read(HARNESS)
+    lifecycle_cli = read(WINDOWS_LIFECYCLE_CLI)
+    module = read(MODULE)
+
+    assert "@('BrokerBinary', $BrokerBinary)" in module
+    assert "@('ProviderLibrary', $ProviderLibrary)" in module
+    assert (
+        "Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, and "
+        "-HookBinary" in module
+    )
+    assert "@('provider_library', $ProviderLibrary" in module
+    assert "$Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path" in (
+        module
+    )
+    assert "$metadata.PSObject.Properties['provider_library_path']" in module
+
+    parameter_block = harness[: harness.index("Set-StrictMode -Version Latest")]
+    for parameter in (
+        "[string]$BrokerBinary",
+        "[string]$ProviderLibrary",
+        "[string]$UpgradeBrokerBinary",
+    ):
+        assert parameter in parameter_block
+
+    source_initialization = harness[
+        harness.index("$script:OriginalGatewaySource") : harness.index(
+            "$script:RunToken ="
+        )
+    ]
+    assert (
+        "$script:OriginalBrokerSource = ConvertTo-CanonicalPath $BrokerBinary"
+        in source_initialization
+    )
+    assert (
+        "$script:OriginalProviderLibrarySource = ConvertTo-CanonicalPath "
+        "$ProviderLibrary" in source_initialization
+    )
+    assert "broker = Get-FileDigest $script:OriginalBrokerSource" in source_initialization
+    assert (
+        "provider_library = Get-FileDigest "
+        "$script:OriginalProviderLibrarySource" in source_initialization
+    )
+    provider_validation = harness[
+        harness.index("function Assert-CertificationProviderLibraryCurrent") :
+        harness.index("function Test-PublicCLIProviderLibrarySelection")
+    ]
+    assert "Get-AuthenticodeSignature -LiteralPath $full" in provider_validation
+    assert "[Management.Automation.SignatureStatus]::Valid" in provider_validation
+    assert "[Security.Cryptography.X509Certificates.X509NameType]::SimpleName" in (
+        provider_validation
+    )
+    assert "$signerName -cne 'Cisco Systems, Inc.'" in provider_validation
+    assert "signer is not the exact Cisco Systems, Inc. identity" in provider_validation
+
+    resolver_probe = harness[
+        harness.index("function Test-PublicCLIProviderLibrarySelection") : harness.index(
+            "function Copy-CertificationSourceToProtectedStaging"
+        )
+    ]
+    assert "'enterprise', 'windows', 'repair'" in resolver_probe
+    assert "'--broker-binary', $script:BrokerSource" in resolver_probe
+    assert "Win32_Process" in resolver_probe
+    assert '"ParentProcessId=$($RunningProcess.Id)"' in resolver_probe
+    assert "-ProviderLibrary" in resolver_probe
+    assert "-AllowedExitCodes @(1)" in resolver_probe
+    assert "-AllowedExitCodes @(1, 1603)" not in resolver_probe
+    assert (
+        "certification-scoped Install, Upgrade, or Repair requires -AllowUnsigned"
+        in resolver_probe
+    )
+    assert "ConvertFrom-SingleJSONDocument" in resolver_probe
+    assert "$probeJSON.action -cne 'repair'" in resolver_probe
+    assert "$probeJSON.error -cne $expectedFailure" in resolver_probe
+    assert "$observedChildPIDs.Count -ne 1" in resolver_probe
+    assert "$selectedPaths.Count -ne 1" in resolver_probe
+    assert "supplied ProviderLibrary does not match the exact public CLI" in resolver_probe
+    assert "post-probe managed credential provider library" in resolver_probe
+    assert "identity changed during resolver probe" in resolver_probe
+    assert "Assert-SameObjectJSON" in resolver_probe
+    assert "Get-NormalModeEnterpriseMachineSnapshot" in resolver_probe
+    assert "machine_state_unchanged = $true" in resolver_probe
+    assert "Deliberately omit --allow-unsigned" in resolver_probe
+    assert "'--allow-unsigned'" not in resolver_probe
+    provider_preflight_call = "Invoke-Check 'public-cli-provider-discovery-preflight'"
+    assert provider_preflight_call in harness
+    assert harness.index(provider_preflight_call) < harness.index(
+        "$script:Phase = 'normal-mode-noop'"
+    )
+    assert harness.index(provider_preflight_call) < harness.index(
+        "Invoke-Check 'enterprise-installer-install'"
+    )
+
+    protected_staging = harness[
+        harness.index("function Initialize-ProtectedCertificationSources") :
+        harness.index("function Get-AgentBinaryTrustIdentity")
+    ]
+    assert "$script:BrokerSource = Copy-CertificationSourceToProtectedStaging" in (
+        protected_staging
+    )
+    assert "$script:OriginalBrokerSource" in protected_staging
+    assert "$script:UpgradeBrokerSource = Copy-CertificationSourceToProtectedStaging" in (
+        protected_staging
+    )
+    # The Cisco provider DLL remains bound to its trusted vendor installation
+    # path. Copying it into certification staging would test a different path
+    # than the public CLI's trusted discovery and the broker's final image.
+    assert "Copy-CertificationSourceToProtectedStaging `\n            $script:OriginalProviderLibrarySource" not in (
+        protected_staging
+    )
+
+    direct_arguments = harness[
+        harness.index("function Get-InstallerArguments") : harness.index(
+            "function Get-EnterpriseLifecycleCLIArguments"
+        )
+    ]
+    for parameter in ("[string]$BrokerSource", "[string]$ProviderLibrarySource"):
+        assert parameter in direct_arguments
+    assert "if ($Action -in @('Install', 'Upgrade'))" in direct_arguments
+    for required in ("BrokerBinary", "ProviderLibrary", "GatewayBinary", "HookBinary"):
+        assert f"@('{required}'," in direct_arguments
+    assert "$arguments.Add('-BrokerBinary')" in direct_arguments
+    assert "$arguments.Add('-ProviderLibrary')" in direct_arguments
+    assert "if ($Action -eq 'Install'" in direct_arguments
+    assert "throw 'Install requires -Config and -Manifest'" in direct_arguments
+    assert "@('-Config', $ConfigSource)" in direct_arguments
+    assert "@('-Manifest', $ManifestSource)" in direct_arguments
+
+    public_arguments = harness[
+        harness.index("function Get-EnterpriseLifecycleCLIArguments") : harness.index(
+            "function Test-AllowUnsignedHarnessContract"
+        )
+    ]
+    assert "[string]$BrokerSource" in public_arguments
+    assert "if ($Action -in @('Install', 'Upgrade'))" in public_arguments
+    for required in ("--broker-binary", "--gateway-binary", "--hook-binary"):
+        assert f"@('{required}'," in public_arguments
+    assert "@('--broker-binary', $BrokerSource)" in public_arguments
+    assert "if ($Action -eq 'Install'" in public_arguments
+    assert "throw 'public Install requires --config and --manifest'" in public_arguments
+    assert "@('--config', $ConfigSource)" in public_arguments
+    assert "@('--manifest', $ManifestSource)" in public_arguments
+    assert "--provider-library" not in public_arguments
+    assert '"provider-library"' not in lifecycle_cli
+    assert '"broker-binary"' in lifecycle_cli
+    assert "windowsEnterpriseProviderLibraryResolver()" in lifecycle_cli
+
+    initial_install = harness[
+        harness.index("Invoke-Check 'enterprise-installer-install'") : harness.index(
+            "Invoke-Check 'windows-service-contract'"
+        )
+    ]
+    assert "-BrokerSource $script:BrokerSource" in initial_install
+    assert "'initial public Install' `" in initial_install
+    assert "([string]$script:SourceDigests['broker'])" in initial_install
+
+    upgrade = harness[
+        harness.index("function Test-UpgradeTransaction") : harness.index(
+            "function Get-ManagedUserPathSecurityFingerprint"
+        )
+    ]
+    assert "-BrokerSource $script:UpgradeBrokerSource" in upgrade
+    assert "broker = [string]$script:SourceDigests['upgrade_broker']" in upgrade
+    assert "exact_broker_sha256 = $true" in upgrade
+    assert "'versioned public Upgrade' `" in upgrade
+    assert "([string]$script:SourceDigests['upgrade_broker'])" in upgrade
+
+    source_free_repair = harness[
+        harness.index("function Invoke-CertificationActivationRepairAfterIsolationProof") :
+        harness.index("function Get-CertificationServiceProcessSnapshot")
+    ]
+    assert "--broker-binary" not in source_free_repair
+    assert "-BrokerBinary" not in source_free_repair
+    assert "-ProviderLibrary" not in source_free_repair
+    assert "Deliberately omit every artifact replacement" in source_free_repair
+    assert "'source-free installed public Repair' `" in source_free_repair
+    assert "([string]$script:SourceDigests['broker'])" in source_free_repair
+
+    installed_provider = harness[
+        harness.index("function Assert-InstalledProviderLibraryIdentity") :
+        harness.index("function Assert-SameDigests")
+    ]
+    for contract in (
+        "[string]$ExpectedBrokerSHA256 = ''",
+        "$brokerSHA256 = Get-FileDigest $brokerBinary",
+        "$ExpectedBrokerSHA256 -cnotmatch '^[0-9a-f]{64}$'",
+        "exact protected source digest",
+        "expected_broker_sha256 = $ExpectedBrokerSHA256",
+        "exact_broker_sha256 = $brokerDigestVerified",
+    ):
+        assert contract in installed_provider
+
+    direct_wrapper = harness[
+        harness.index("function Invoke-EnterpriseInstaller") : harness.index(
+            "function Get-ManagedCLIEnvironment"
+        )
+    ]
+    for source in (
+        "BrokerSource",
+        "ProviderLibrarySource",
+        "GatewaySource",
+        "HookSource",
+        "CLISource",
+        "ConfigSource",
+        "ManifestSource",
+    ):
+        assert f"[string]${source} = ''" in direct_wrapper
+
+
+def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None:
+    harness = read(HARNESS)
+    deployment_doc = read(DEPLOYMENT_DOC)
+
+    assert (
+        '$script:BrokerServiceName = "DefenseClawCMIDBroker_$($script:RunToken)"'
+        in harness
+    )
+    service_name_guard = harness[
+        harness.index("function Assert-CertificationServiceName") : harness.index(
+            "function Assert-CertificationUserName"
+        )
+    ]
+    assert "'broker' { \"DefenseClawCMIDBroker_$($script:RunToken)\" }" in (
+        service_name_guard
+    )
+    assert "Assert-CertificationServiceName $script:BrokerServiceName 'broker'" in (
+        harness
+    )
+    assert (
+        '$script:EnumeratorServiceName = '
+        '"DefenseClawCertEnumerator_$($script:RunToken)"' in harness
+    )
+    assert (
+        "'enumerator' { \"DefenseClawCertEnumerator_$($script:RunToken)\" }"
+        in service_name_guard
+    )
+    assert (
+        "Assert-CertificationServiceName "
+        "$script:EnumeratorServiceName 'enumerator'" in harness
+    )
+
+    execution_preflight_start = harness.index(
+        "if (-not (Test-IsElevatedAdministrator))"
+    )
+    execution_preflight = harness[
+        execution_preflight_start : harness.index(
+            "$failure = ''", execution_preflight_start
+        )
+    ]
+    assert "$script:BrokerServiceName" in execution_preflight
+    assert "$script:EnumeratorServiceName" in execution_preflight
+    assert "refusing pre-existing certification service" in execution_preflight
+
+    bounded_cleanup = harness[
+        harness.index("function Invoke-BoundedCleanup") : harness.index(
+            "function Write-FinalEvidence"
+        )
+    ]
+    assert bounded_cleanup.count("$script:BrokerServiceName") >= 5
+    assert bounded_cleanup.count("$script:EnumeratorServiceName") >= 5
+    assert "'broker'" in bounded_cleanup
+    assert "'enumerator'" in bounded_cleanup
+    assert "Assert-CertificationServiceName $serviceName $serviceRole" in bounded_cleanup
+    assert "@('delete', $serviceName)" in bounded_cleanup
+
+    certification_invocation = deployment_doc[
+        deployment_doc.index(
+            ".\\scripts\\test-windows-enterprise-hardening.ps1"
+        ) : deployment_doc.index("Without `-Execute -DisposableHost`")
+    ]
+    for parameter in (
+        "-BrokerBinary",
+        "-ProviderLibrary",
+        "-UpgradeBrokerBinary",
+    ):
+        assert parameter in certification_invocation
+    public_upgrade = deployment_doc[
+        deployment_doc.index("& $ReleaseCLI enterprise windows upgrade") :
+        deployment_doc.index("Running the installed CLI is still valid")
+    ]
+    assert "--broker-binary" in public_upgrade
+    repair = deployment_doc[
+        deployment_doc.index("-Action Repair") : deployment_doc.index(
+            "Use `-Action Upgrade`"
+        )
+    ]
+    assert "-BrokerBinary" in repair
+    assert "-ProviderLibrary" in repair
+
+
+def test_certification_treats_broker_as_a_first_class_service_boundary() -> None:
+    harness = read(HARNESS)
+
+    service_contract = harness[
+        harness.index("function Assert-ServiceContract") : harness.index(
+            "function Assert-CertificationServiceCodexHomeAbsent"
+        )
+    ]
+    for contract in (
+        "$broker = Get-CimInstance Win32_Service",
+        "$null -eq $gateway -or $null -eq $broker -or $null -eq $guardian",
+        "$broker.StartName",
+        "want LocalSystem",
+        "foreach ($service in @($gateway, $broker, $guardian))",
+        "bin\\defenseclaw-cmid-broker.exe",
+        "Assert-InstalledProviderLibraryIdentity 'service contract'",
+        "broker=$($broker.State)/$($broker.StartName)",
+    ):
+        assert contract in service_contract
+
+    environment_contract = harness[
+        harness.index("function Assert-CertificationServiceCodexHomeAbsent") :
+        harness.index("function Assert-CertificationServicesStoppedAndIndependent")
+    ]
+    assert "role = 'broker'" in environment_contract
+    assert "if ($role -eq 'broker' -and $null -ne $environmentProperty)" in (
+        environment_contract
+    )
+    assert "if ($role -ne 'broker' -and $null -eq $environmentProperty)" in (
+        environment_contract
+    )
+
+    stopped_contract = harness[
+        harness.index("function Assert-CertificationServicesStoppedAndIndependent") :
+        harness.index("function Invoke-EnterpriseLifecycleCLIJSON")
+    ]
+    assert "$script:BrokerServiceName" in stopped_contract
+    assert "State -ne 'Stopped'" in stopped_contract
+    assert "StartMode -ne 'Disabled'" in stopped_contract
+
+    control_snapshot = harness[
+        harness.index("function Get-ServiceControlSnapshot") : harness.index(
+            "function Get-CertificationServiceProcessSnapshot"
+        )
+    ]
+    process_snapshot = harness[
+        harness.index("function Get-CertificationServiceProcessSnapshot") :
+        harness.index("function Initialize-ServiceTokenProbeType")
+    ]
+    for snapshot in (control_snapshot, process_snapshot):
+        assert "$script:BrokerServiceName" in snapshot
+
+    failure_contract = harness[
+        harness.index("function Get-CertificationFailureActionContract") :
+        harness.index("function Wait-ForEnterpriseServiceReadiness")
+    ]
+    readiness = harness[
+        harness.index("function Wait-ForEnterpriseServiceReadiness") :
+        harness.index("function Invoke-ControlledServiceFailure")
+    ]
+    controlled_failure = harness[
+        harness.index("function Invoke-ControlledServiceFailure") : harness.index(
+            "function Assert-ExplicitServiceStopDoesNotRecover"
+        )
+    ]
+    recovery = harness[
+        harness.index("function Test-ServiceFailureRecovery") : harness.index(
+            "function Test-QueuedFailureRestartDuringServicing"
+        )
+    ]
+    queued = harness[
+        harness.index("function Test-QueuedFailureRestartDuringServicing") :
+        harness.index("function Assert-SameServiceControlSnapshot")
+    ]
+    for section in (failure_contract, recovery, queued):
+        assert "$script:BrokerServiceName" in section
+    assert "broker_service_state" in readiness
+    assert "'broker'" in controlled_failure
+    assert "'controlled-failure'" not in controlled_failure
+    assert "bin\\defenseclaw-cmid-broker.exe" in controlled_failure
+    assert "$dependentGatewayStopped = $true" in recovery
+    assert "dependent_gateway_quiesced = $dependentGatewayStopped" in recovery
+    assert "broker_service_state -cne 'stopped'" in queued
+    assert "broker_service_state -cne 'running'" in queued
+
+    wait = harness[
+        harness.index("function Wait-ForServicesRunning") : harness.index(
+            "function Get-AccessRules"
+        )
+    ]
+    assert "$broker = Get-Service -Name $script:BrokerServiceName" in wait
+    assert "$broker.Status -eq" in wait
+
+    standard_user_probe = harness[
+        harness.index("function Invoke-StandardUserControlProbe") : harness.index(
+            "function Assert-ProtectedUserTamperToken"
+        )
+    ]
+    for contract in (
+        "broker_service = $script:BrokerServiceName",
+        "broker_binary = Join-Path $script:InstallRoot",
+        "cmid-broker\\broker-auth.key",
+        "broker_pid = [uint32]$brokerProcess[0].process_id",
+        "write_broker_binary",
+        "[string]$input.broker_service",
+        "[uint32]$input.broker_pid",
+    ):
+        assert contract in standard_user_probe
+
+    normal_snapshot = harness[
+        harness.index("function Get-NormalModeEnterpriseMachineSnapshot") :
+        harness.index("function Get-NormalModeEnterpriseAttributionSnapshot")
+    ]
+    assert "bin\\defenseclaw-cmid-broker.exe" in normal_snapshot
+
+    public_json_checks = (
+        "function Test-CodexSharedDirectoriesPersistThroughPurge",
+        "function Invoke-CertificationActivationRepairAfterIsolationProof",
+        "function Test-QueuedFailureRestartDuringServicing",
+        "function Test-PublicLifecycleInspectionAndReconcile",
+        "function Test-UpgradeTransaction",
+        "function Test-PublicDefaultUninstallAndReinstall",
+    )
+    for function_name in public_json_checks:
+        start = harness.index(function_name)
+        next_function = harness.find("\nfunction ", start + len(function_name))
+        section = harness[start:] if next_function < 0 else harness[start:next_function]
+        assert "gateway_service_state" in section
+        assert "broker_service_state" in section
+
+    default_retention = harness[
+        harness.index("function Get-DefaultUninstallRetainedEvidenceSnapshot") :
+        harness.index("function Test-PublicDefaultUninstallAndReinstall")
+    ]
+    for retained in (
+        "broker_auth_key",
+        "broker_log",
+        "cmid-broker\\broker-auth.key",
+        "logs\\cmid-broker\\cmid-broker.log",
+    ):
+        assert retained in default_retention
+    assert "'broker_auth_key'" in default_retention
+    assert "'broker_log'" in default_retention
+
+    # PowerShell 5.1 has no String.Contains(value, comparisonType) overload.
+    assert not re.search(
+        r"\.Contains\(\s*[^\n,]+,\s*\[StringComparison\]::",
+        harness,
+    )
 
 
 def test_certification_manually_drives_every_public_windows_lifecycle_verb() -> None:
@@ -1989,6 +2654,7 @@ def test_certification_manually_drives_every_public_windows_lifecycle_verb() -> 
     assert "Invoke-PublicEnterpriseLifecycleCLIJSON" in initial_install
     assert "-FilePath $script:CLISource" in initial_install
     assert "-InstallerPath $script:Installer" in initial_install
+    assert "-BrokerSource $script:BrokerSource" in initial_install
     assert "-GatewaySource $script:GatewaySource" in initial_install
     assert "-HookSource $script:HookSource" in initial_install
     assert "-CLISource $script:CLISource" in initial_install
@@ -2028,6 +2694,8 @@ def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -
 
     for role_path in (
         "runtime\\audit.db",
+        "cmid-broker\\broker-auth.key",
+        "logs\\cmid-broker\\cmid-broker.log",
         "logs\\gateway\\gateway.log",
         "logs\\guardian\\hook-guardian.log",
         "runtime\\hook_guardian_state.json",
@@ -2052,6 +2720,8 @@ def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -
     assert "[uint32]0x00010000" in proof
     assert "($errorCode -eq 5)" in proof
     assert "services_absent" in proof
+    assert "enumerator_service = $script:EnumeratorServiceName" in proof
+    assert "$null -eq $enumerator" in proof
     assert "secret_material_recorded = $false" in proof
 
     assert "Assert-EnterpriseMachinePolicyAbsent" in default_uninstall
@@ -2059,6 +2729,8 @@ def test_default_uninstall_proves_real_retention_and_inactive_machine_wiring() -
     assert "machine_policy_absent_before_fresh_clients" in default_uninstall
     assert "machine_policy_absent_after_fresh_clients" in default_uninstall
     assert "fresh_clients_without_enterprise_hook" in default_uninstall
+    assert "'public reinstall' `" in default_uninstall
+    assert "([string]$script:SourceDigests['upgrade_broker'])" in default_uninstall
     assert default_uninstall.index(
         "after public default Uninstall and before fresh client processes"
     ) < default_uninstall.index(
@@ -3287,6 +3959,7 @@ def test_normal_mode_timeout_and_acl_cleanup_are_bounded_and_exact() -> None:
 
 
 def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatible() -> None:
+    module = read(MODULE)
     smoke = read(UNINSTALL_TRANSACTION_SMOKE)
 
     assert "failed-teardown-self-restored" in smoke
@@ -3297,14 +3970,749 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "function New-HarnessCaseRoot" in smoke
     assert "$receiptProbe.Length -ge 240" in smoke
     assert "legacy MAX_PATH boundary" in smoke
-    assert smoke.count("New-HarnessCaseRoot") == 11
+    assert smoke.count("New-HarnessCaseRoot") == 14
     assert "fresh-install-service-bootstrap-rollback-retry" in smoke
-    assert "snapshot capture ran before both service identities existed" in smoke
+    assert "snapshot capture ran before all four service identities existed" in smoke
     assert "repeated-first-activation-failure-exact-rollback" in smoke
+    assert "-IsDirectory $true `" in smoke
+    bare_directory_argument = re.compile(
+        r"(?m)^[ \t]*-IsDirectory[ \t]+`[ \t]*$"
+    )
+    assert bare_directory_argument.search(module) is None
+    assert bare_directory_argument.search(smoke) is None
+    rollback_descriptor = module[
+        module.index("function Assert-DefenseClawInstallRollbackRootDescriptor") :
+        module.index("function Complete-DefenseClawInstallRollbackIntent")
+    ]
+    assert "-IsDirectory $true `" in rollback_descriptor
+    assert "[void](Recover-DefenseClawPendingTransaction `" in smoke
+    assert re.search(
+        r"(?m)^[ \t]*Recover-DefenseClawPendingTransaction[ \t]+`[ \t]*$",
+        smoke,
+    ) is None
+    assert "$resultItems = @($result)" in smoke
+    assert "$resultItems.Count -ne 1" in smoke
     assert "lifecycle-snapshot:capture" in smoke
     assert "lifecycle-snapshot:restore" in smoke
     assert "lifecycle-snapshot:retire" in smoke
     assert "purge_cases = @($purgeResults)" in smoke
+
+    uninstall_case = smoke[
+        smoke.index("function Invoke-HarnessUninstallCase") : smoke.index(
+            "function Invoke-HarnessDirectReinstallSequence"
+        )
+    ]
+    committed_cleanup = uninstall_case[
+        uninstall_case.index("elseif ($CrashAt -ceq 'post-binary-delete')") :
+        uninstall_case.index("elseif ($ExpectSuccess)", uninstall_case.index(
+            "elseif ($CrashAt -ceq 'post-binary-delete')"
+        ))
+    ]
+    assert "$script:HarnessState.rollback_calls -eq 0" in committed_cleanup
+    assert "$script:HarnessState.complete_calls -eq 1" in committed_cleanup
+    assert "retry Uninstall to finish cleanup" in committed_cleanup
+
+    dispatch_start = smoke.index(
+        "# Quiescing recovery exercises the production disabled"
+    )
+    dispatch = smoke[dispatch_start : smoke.index(
+        "$quiescingResults =", dispatch_start
+    )]
+    assert "$script:HarnessState.ContainsKey('operation')" in dispatch
+    assert "if (-not $hasOperation)" in dispatch
+    assert "operation -ceq 'uninstall'" in dispatch
+    assert "& $script:HarnessRealStartTransactionServices `" in dispatch
+
+
+def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    timestamp_validator = module[
+        module.index("function Assert-DefenseClawInstallRollbackIntentCommitTimestamp") : module.index(
+            "function Get-DefenseClawInstallRollbackIntent"
+        )
+    ]
+    assert "$Intent.PSObject.Properties['committed_at']" in timestamp_validator
+    assert "committed install receipt is missing its commit timestamp" in timestamp_validator
+    assert "Microsoft.PowerShell.Utility\\Add-Member `" in timestamp_validator
+    assert "-Name committed_at `" in timestamp_validator
+    assert "-Value '' `" in timestamp_validator
+    assert "-Force" in timestamp_validator
+    assert "[DateTime]::ParseExact(" in timestamp_validator
+    assert "[DateTimeKind]::Unspecified" in timestamp_validator
+    assert "uncommitted install receipt contains a commit timestamp" in timestamp_validator
+
+    intent_reader = module[
+        module.index("function Get-DefenseClawInstallRollbackIntent") : module.index(
+            "function ConvertTo-DefenseClawInstallRollbackIntentJson"
+        )
+    ]
+    first_authentication = intent_reader.index("Assert-DefenseClawCanonicalRawPathAcl `")
+    authenticated_again = intent_reader.index(
+        "Assert-DefenseClawCanonicalRawPathAcl `", first_authentication + 1
+    )
+    timestamp_check = intent_reader.index("Assert-DefenseClawInstallRollbackIntentCommitTimestamp `")
+    assert authenticated_again < timestamp_check
+
+    preparation_intent = module[
+        module.index("function New-DefenseClawInstallPreparationIntent") : module.index(
+            "function Set-DefenseClawInstallPreparationRootIdentity"
+        )
+    ]
+    rollback_intent = module[
+        module.index("function Publish-DefenseClawInstallRollbackIntent") : module.index(
+            "function Assert-DefenseClawInstallRollbackRootDescriptor"
+        )
+    ]
+    assert "committed_at = ''" in preparation_intent
+    assert "committed_at = ''" in rollback_intent
+    runtime_claims = rollback_intent.index(
+        "$runtimeRootsProperty = $Snapshot.PSObject.Properties["
+    )
+    assert "$createdAny = $createdAny -or @($runtimeRoots).Count -gt 0" in rollback_intent
+    assert "$runtimeRoots.Count" not in rollback_intent
+    existing_receipt = rollback_intent.index(
+        "$existing = Get-DefenseClawInstallRollbackIntent `", runtime_claims
+    )
+    no_cleanup_authority = rollback_intent.index(
+        "if (-not $createdAny -and $null -eq $existing)", existing_receipt
+    )
+    service_absence_gate = rollback_intent.index(
+        "Get-DefenseClawManagedServiceNames `", no_cleanup_authority
+    )
+    service_sid = rollback_intent.index(
+        "Get-DefenseClawServiceSIDForRecovery `", service_absence_gate
+    )
+    rollback_receipt = rollback_intent.index("$intent = [ordered]@{", service_sid)
+    assert (
+        runtime_claims
+        < existing_receipt
+        < no_cleanup_authority
+        < service_absence_gate
+        < service_sid
+        < rollback_receipt
+    )
+
+    commit_state = module[
+        module.index("function Set-DefenseClawInstallRollbackIntentCommitState") : module.index(
+            "function Set-DefenseClawInstallRollbackIntentCommitted"
+        )
+    ]
+    assert "[string]$Intent.phase -cne 'preparing_layout'" in commit_state
+    assert "'^S-1-5-80-(?:[0-9]+-){4}[0-9]+$'" in commit_state
+    assert "$Intent.gateway_service_sid = $GatewayServiceSID" in commit_state
+    assert "$Intent.phase = 'committed'" in commit_state
+    assert "Microsoft.PowerShell.Utility\\Add-Member `" in commit_state
+    assert "-Name committed_at `" in commit_state
+    assert "-Force" in commit_state
+    assert "$Intent.committed_at =" not in commit_state
+
+    commit = module[
+        module.index("function Set-DefenseClawInstallRollbackIntentCommitted") : module.index(
+            "function Complete-DefenseClawCommittedInstallIntent"
+        )
+    ]
+    set_commit_state = commit.index("Set-DefenseClawInstallRollbackIntentCommitState `")
+    write_committed_intent = commit.index("Write-DefenseClawInstallRollbackIntent `", set_commit_state)
+    assert set_commit_state < write_committed_intent
+
+    service_setup = module[
+        module.index("function Set-DefenseClawManagedServicesForTransaction") : module.index(
+            "function Get-DefenseClawLayout"
+        )
+    ]
+    create_services = service_setup.index("Set-DefenseClawManagedServices `")
+    bind_service_sid = service_setup.index("Set-DefenseClawInstallPreparationGatewayServiceSID `")
+    initialize_ipc = service_setup.index("Initialize-DefenseClawManagedIPCDirectory `")
+    apply_runtime_acls = service_setup.index("Set-DefenseClawRetainedRuntimeAcls `")
+    apply_core_acls = service_setup.index("Set-DefenseClawManagedCoreAcls `")
+    assert "if ($BindInstallPreparationSID)" in service_setup
+    assert create_services < bind_service_sid < initialize_ipc < apply_runtime_acls < apply_core_acls
+
+    lifecycle = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    enumerator_refresh = lifecycle.index("Invoke-DefenseClawEnumeratorRefresh `")
+    target_preparation = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
+    fresh_bind = lifecycle.index("-BindInstallPreparationSID")
+    fresh_service_gate = lifecycle.rfind(
+        "if ($Action -eq 'Install') {", 0, fresh_bind
+    )
+    fresh_service_setup = lifecycle[fresh_service_gate:enumerator_refresh]
+    assert "Set-DefenseClawManagedServicesForTransaction `" in fresh_service_setup
+    assert "-BindInstallPreparationSID" in fresh_service_setup
+    assert fresh_service_gate < fresh_bind < enumerator_refresh < target_preparation
+
+    fresh_snapshot_gate = lifecycle.index(
+        "if ($Action -eq 'Install') {", target_preparation
+    )
+    fresh_snapshot_end = lifecycle.index("$attestationNeedsRefresh", fresh_snapshot_gate)
+    fresh_snapshot = lifecycle[fresh_snapshot_gate:fresh_snapshot_end]
+    assert "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `" in fresh_snapshot
+    assert "Set-DefenseClawManagedServicesForTransaction `" not in fresh_snapshot
+
+    existing_service_gate = lifecycle.index("if ($Action -ne 'Install') {", fresh_snapshot_end)
+    existing_service_end = lifecycle.index("$targetReport =", existing_service_gate)
+    existing_service_setup = lifecycle[existing_service_gate:existing_service_end]
+    assert "Set-DefenseClawManagedServicesForTransaction `" in existing_service_setup
+    assert "-BindInstallPreparationSID" not in existing_service_setup
+
+    descriptor = module[
+        module.index("function Assert-DefenseClawInstallRollbackRootDescriptor") : module.index(
+            "function Complete-DefenseClawInstallRollbackIntent"
+        )
+    ]
+    assert "[ValidateSet('planned', 'staged', 'canonical', 'quarantined')]" in descriptor
+    assert "[ValidateSet('InstallDirectory', 'AdminDirectory')]" in descriptor
+    assert "rollback root descriptor received an invalid gateway service SID" in descriptor
+    assert "if ($CreationState -ceq 'planned')" in descriptor
+    assert "if ($CreationState -ceq 'staged')" in descriptor
+    assert "if ($CreationState -ceq 'quarantined')" in descriptor
+    assert "$CreationState -cne 'canonical' -or -not $AllowPostManagedAcl" in descriptor
+    assert "$liveKind = if ($ExpectedKind -ceq 'InstallDirectory')" in descriptor
+    assert descriptor.count("'ServiceInstallDirectory'") == 1
+    assert descriptor.count("'StateDirectory'") == 1
+    assert "-GatewayServiceSID $GatewayServiceSID" in descriptor
+    assert descriptor.count("Assert-DefenseClawCanonicalRawPathAcl `") >= 3
+    assert descriptor.count("Test-DefenseClawCanonicalRawPathAcl `") == 2
+    bootstrap_match = descriptor.index("Test-DefenseClawCanonicalRawPathAcl `")
+    post_managed_gate = descriptor.index("$CreationState -cne 'canonical' -or -not $AllowPostManagedAcl")
+    quarantine_match = descriptor.index("Test-DefenseClawCanonicalRawPathAcl `", bootstrap_match + 1)
+    live_kind = descriptor.index("$liveKind = if ($ExpectedKind -ceq 'InstallDirectory')")
+    live_exact_match = descriptor.index("Assert-DefenseClawCanonicalRawPathAcl `", live_kind)
+    assert bootstrap_match < quarantine_match < post_managed_gate < live_kind < live_exact_match
+
+    cleanup = module[
+        module.index("function Complete-DefenseClawInstallRollbackIntent") : module.index(
+            "function Set-DefenseClawInstallRollbackIntentCommitState"
+        )
+    ]
+    assert "Get-DefenseClawServiceSIDForRecovery `" in cleanup
+    assert "fresh-install rollback gateway service SID changed" in cleanup
+    assert "legacy install rollback SID migration requires a transaction binding" in cleanup
+    assert "$transactionAuthorityBound = (" in cleanup
+    assert "-AllowPostManagedAcl:($creationState -ceq 'canonical' -and" in cleanup
+    assert "$transactionAuthorityBound -and $serviceSIDBound)" in cleanup
+
+    service_absence = cleanup.index("Assert-DefenseClawServicesAbsentChecked `")
+    current_snapshot = cleanup.index(
+        "$current = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists("
+    )
+    identity_check = cleanup.index("identity changed before rollback cleanup", current_snapshot)
+    descriptor_check = cleanup.index("Assert-DefenseClawInstallRollbackRootDescriptor `", identity_check)
+    pre_quarantine_no_reparse = cleanup.index(
+        "Assert-DefenseClawManagedTreeNoReparse -Root $path", descriptor_check
+    )
+    quarantine = cleanup.index("SetDirectoryDaclNoFollow(", pre_quarantine_no_reparse)
+    quarantine_identity = cleanup.index("identity changed during quarantine", quarantine)
+    quarantine_acl_check = cleanup.index("Assert-DefenseClawCanonicalRawPathAcl `", quarantine_identity)
+    quarantine_journal = cleanup.index("$intent.$creationStateName = 'quarantined'", quarantine_acl_check)
+    quarantine_receipt = cleanup.index("Write-DefenseClawInstallRollbackIntent `", quarantine_journal)
+    requery = cleanup.index("$rechecked =", quarantine_receipt)
+    requery_identity = cleanup.index("identity changed after quarantine", requery)
+    requery_acl_check = cleanup.index("Assert-DefenseClawCanonicalRawPathAcl `", requery_identity)
+    post_quarantine_no_reparse = cleanup.index(
+        "Assert-DefenseClawManagedTreeNoReparse -Root $path", requery_acl_check
+    )
+    removal = cleanup.index("Remove-DefenseClawManagedTree `", post_quarantine_no_reparse)
+    absence_requery = cleanup.index("GetDirectorySecuritySnapshotNoFollowIfExists(", removal)
+    assert (
+        service_absence
+        < current_snapshot
+        < identity_check
+        < descriptor_check
+        < pre_quarantine_no_reparse
+        < quarantine
+        < quarantine_identity
+        < quarantine_acl_check
+        < quarantine_journal
+        < quarantine_receipt
+        < requery
+        < requery_identity
+        < requery_acl_check
+        < post_quarantine_no_reparse
+        < removal
+        < absence_requery
+    )
+    quarantine_call = cleanup[quarantine:quarantine_identity]
+    assert "[string]$current.Identity" in quarantine_call
+
+    for case_name in (
+        "fresh-install-service-bootstrap-rollback-retry",
+        "legacy-v2-commit-timestamp-migration",
+        "phase-bound-live-root-descriptor-matrix",
+        "same-path-manifest-remains-validation-only",
+        "existing-deployment-rollback-skips-fresh-root-absence-gate",
+        "fresh-root-authority-still-requires-service-absence",
+    ):
+        assert f"name = '{case_name}'" in smoke
+    for event in (
+        "install-service-sid-bound",
+        "install-receipt:committed",
+    ):
+        assert event in smoke
+    for rejected_case in (
+        "planned_staging_only",
+        "staged_live_rejected",
+        "unbound_live_rejected",
+        "wrong_sid_rejected",
+        "swapped_kind_rejected",
+        "staged_quarantine_reentry_exact",
+        "canonical_quarantine_reentry_exact",
+        "quarantined_live_rejected",
+        "inherited_acl_rejected",
+    ):
+        assert rejected_case in smoke
+    assert "'O:BAG:BAD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'" in smoke
+    assert "'O:BAG:BA(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'" not in smoke
+
+
+def test_fresh_install_binds_service_identity_before_managed_config_loads() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    transaction_factory_start = module.index("function New-DefenseClawTransaction")
+    transaction_factory = module[
+        transaction_factory_start : module.index(
+            "function Restore-DefenseClawTransaction", transaction_factory_start
+        )
+    ]
+    service_inventory = transaction_factory.index(
+        "$services = [Collections.Generic.List[object]]::new()"
+    )
+    durable_intent = transaction_factory.index(
+        "Write-DefenseClawJsonAtomic `\n"
+        "            -Value $quiescingIntent `\n"
+        "            -Path $Layout.PendingPath",
+        service_inventory,
+    )
+    assert service_inventory < durable_intent
+    assert "services = $services" in transaction_factory[service_inventory:durable_intent]
+
+    lifecycle = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    transaction = lifecycle.index("$snapshot = New-DefenseClawTransaction `")
+    transaction_binding = lifecycle.index(
+        "Set-DefenseClawInstallPreparationTransactionBinding `", transaction
+    )
+    enumerator_refresh = lifecycle.index("Invoke-DefenseClawEnumeratorRefresh `")
+    target_preparation = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
+
+    service_setup_call = "Set-DefenseClawManagedServicesForTransaction `"
+    bind_argument = "-BindInstallPreparationSID"
+    fresh_bind = lifecycle.index(bind_argument, transaction_binding)
+    fresh_service_setup = lifecycle.rfind(
+        service_setup_call, transaction_binding, fresh_bind
+    )
+    fresh_gate = lifecycle.rfind(
+        "if ($Action -eq 'Install') {", transaction_binding, fresh_service_setup
+    )
+    assert (
+        transaction
+        < transaction_binding
+        < fresh_gate
+        < fresh_service_setup
+        < fresh_bind
+        < enumerator_refresh
+        < target_preparation
+    )
+
+    # Fresh Install has exactly one SID-binding service publication, and it is
+    # not repeated after a helper has loaded the managed configuration.
+    assert lifecycle.count(bind_argument) == 1
+    assert lifecycle.count(service_setup_call) == 2
+    assert service_setup_call not in lifecycle[fresh_bind:enumerator_refresh]
+    assert bind_argument not in lifecycle[enumerator_refresh:]
+
+    # Repair/Upgrade keep their existing ordering: capture the installed hook
+    # generation, validate the enumerated target runtime, then reconfigure the
+    # already-existing service identities without rebinding fresh-install SID
+    # authority.
+    existing_snapshot_gate = lifecycle.index(
+        "if ($Action -ne 'Install') {", transaction_binding
+    )
+    existing_snapshot = lifecycle.index(
+        "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `",
+        existing_snapshot_gate,
+    )
+    existing_service_setup = lifecycle.index(service_setup_call, enumerator_refresh)
+    existing_service_gate = lifecycle.rfind(
+        "if ($Action -ne 'Install') {", target_preparation, existing_service_setup
+    )
+    assert (
+        existing_snapshot_gate
+        < existing_snapshot
+        < enumerator_refresh
+        < target_preparation
+        < existing_service_gate
+        < existing_service_setup
+    )
+    existing_service_block = lifecycle[
+        existing_service_gate : lifecycle.index("$targetReport =", existing_service_setup)
+    ]
+    assert bind_argument not in existing_service_block
+
+    # Moving service/SID publication ahead of enumeration creates a new
+    # rollback boundary. Retained-state ACL restoration belongs to the shared
+    # idempotent restore path, so both synchronous rollback and reboot recovery
+    # complete it before authenticated transaction authority can be retired.
+    restore_body = module[
+        module.index("function Restore-DefenseClawTransaction {") : module.index(
+            "function Assert-DefenseClawRestoredTransactionReadyForActivation"
+        )
+    ]
+    ipc_revoke = restore_body.index("Revoke-DefenseClawManagedIPCServiceAccess `")
+    service_delete = restore_body.index(
+        "Remove-DefenseClawService -Name ([string]$service.name)", ipc_revoke
+    )
+    shared_cleanup = restore_body.index(
+        "Remove-DefenseClawTransactionCreatedSharedDirectories `", service_delete
+    )
+    retained_restore = restore_body.index(
+        "Restore-DefenseClawRetainedStateAclsFromTransaction `", shared_cleanup
+    )
+    restart_gate = restore_body.index("if (-not $DeferServiceRestart)", retained_restore)
+    assert ipc_revoke < service_delete < shared_cleanup < retained_restore < restart_gate
+
+    retained_helper = module[
+        module.index("function Restore-DefenseClawRetainedStateAclsFromTransaction") :
+        module.index("function Remove-DefenseClawManagedTree")
+    ]
+    for contract in (
+        "state_root_created",
+        "state_root_identity",
+        "prior_deployment_active",
+        "$gatewayServiceRows.Count -ne 1",
+        "$priorGatewayExisted -and -not $priorDeploymentActive",
+        "$priorDeploymentActive -or",
+        "[string]$Snapshot.state_root",
+        "[string]$Layout.StateRoot",
+        "Assert-DefenseClawServicesAbsentChecked `",
+        "Get-DefenseClawServiceSIDForRecovery `",
+        "Set-DefenseClawPreservedStateAcls `",
+        "retained StateRoot identity changed before ACL rollback",
+        "retained StateRoot identity changed during ACL rollback",
+        "-Kind AdminDirectory",
+    ):
+        assert contract in retained_helper
+    assert retained_helper.count("Assert-DefenseClawServicesAbsentChecked `") == 2
+    assert "$Action" not in retained_helper
+    assert "$StateRootCreatedForTransaction" not in retained_helper
+
+    lifecycle_rollback = lifecycle[
+        lifecycle.index("catch {\n        $operationError = $_", target_preparation) :
+    ]
+    restore = lifecycle_rollback.index("Restore-DefenseClawTransaction -SnapshotPath")
+    rollback_complete = lifecycle_rollback.index(
+        "Complete-DefenseClawTransaction `", restore
+    )
+    assert restore < rollback_complete
+    assert "Set-DefenseClawPreservedStateAcls" not in lifecycle_rollback[
+        :rollback_complete
+    ]
+
+    # The native smoke injects failure inside enumeration, before target
+    # planning or lifecycle capture, and proves exact rollback for gateway,
+    # broker, Guardian, and Enumerator before a successful retry.
+    for marker in (
+        "fail_fresh_install_enumeration = $true",
+        "injected fresh-install enumeration failure",
+        "enumerator-refresh-enter",
+        "DefenseClawGateway",
+        "DefenseClawCMIDBroker",
+        "DefenseClawHookGuardian",
+        "DefenseClawHookEnumerator",
+        "preserved-state-acls:S-1-5-80-1-2-3-4-5",
+    ):
+        assert marker in smoke
+    assert "$targetPlan -lt 0" in smoke
+    assert "$capture -lt 0" in smoke
+    assert "$preservedStateAcls -gt $finalServiceDelete" in smoke
+    assert "$transactionComplete -gt $preservedStateAcls" in smoke
+    assert "$script:HarnessState.transaction_calls -eq 3" in smoke
+    assert "$script:HarnessState.restore_calls -eq 2" in smoke
+    assert "$script:HarnessState.removed_services -eq 8" in smoke
+
+
+def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    lifecycle = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    transaction = lifecycle.index("$snapshot = New-DefenseClawTransaction")
+    source_publish = lifecycle.index("Install-DefenseClawSourceDescriptor `")
+    manifest_replacement = lifecycle.index(
+        "$publishedManifestReplacement = [bool](", source_publish
+    )
+    manifest_acl = lifecycle.index("Set-DefenseClawPathAcl `", manifest_replacement)
+    capture = lifecycle.index(
+        "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `", manifest_acl
+    )
+    deferred_source_publish = lifecycle.index(
+        "Install-DefenseClawSourceDescriptor `", capture
+    )
+    deferred_manifest_replacement = lifecycle.index(
+        "$publishedManifestReplacement = [bool](", deferred_source_publish
+    )
+    deferred_manifest_acl = lifecycle.index(
+        "Set-DefenseClawPathAcl `", deferred_manifest_replacement
+    )
+    enumerator_refresh = lifecycle.index("Invoke-DefenseClawEnumeratorRefresh `")
+    target_plan = lifecycle.index("Invoke-DefenseClawTargetRuntimePreparation `")
+    assert (
+        transaction
+        < source_publish
+        < manifest_replacement
+        < manifest_acl
+        < capture
+        < deferred_source_publish
+        < deferred_manifest_replacement
+        < deferred_manifest_acl
+        < enumerator_refresh
+        < target_plan
+    )
+    for acl_contract in (
+        lifecycle[manifest_replacement:capture],
+        lifecycle[deferred_manifest_replacement:target_plan],
+    ):
+        assert "$name -ceq 'manifest'" in acl_contract
+        assert "Test-DefenseClawSourceDescriptorPublishesReplacement `" in acl_contract
+        assert "-Path $destination `" in acl_contract
+        assert "-Kind AdminFile `" in acl_contract
+        assert "-GatewayServiceSID $script:AdministratorsSID" in acl_contract
+
+    replacement_helper = module[
+        module.index("function Test-DefenseClawSourceDescriptorPublishesReplacement") :
+        module.index("function ConvertTo-DefenseClawWindowsCommandLineArgument")
+    ]
+    assert "$Source.ContainsKey('path')" in replacement_helper
+    assert "[IO.Path]::GetFullPath([string]$Source.path)" in replacement_helper
+    assert "[IO.Path]::GetFullPath($Destination)" in replacement_helper
+    assert "[StringComparison]::OrdinalIgnoreCase" in replacement_helper
+
+    preparation_mode = module[
+        module.index("function Get-DefenseClawTargetRuntimePreparationMode") :
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle")
+    ]
+    assert "if ($Action -eq 'Install') { return 'prepare' }" in preparation_mode
+    assert "return 'validate'" in preparation_mode
+
+    failure_message = module[
+        module.index("function Get-DefenseClawTargetRuntimeProbeFailureMessage") :
+        module.index("function Invoke-DefenseClawTargetRuntimePreparation")
+    ]
+    assert "ConvertTo-DefenseClawBoundedDiagnostic -Value $Probe.output" in failure_message
+    target_runtime = module[
+        module.index("function Invoke-DefenseClawTargetRuntimePreparation") :
+        module.index("function Assert-DefenseClawTargetRuntimeProductionChildrenExclusive")
+    ]
+    for phase in ("planning", "staging", "finalization"):
+        assert f"-Phase {phase} `" in target_runtime
+    stage_journal = target_runtime.index("-StageReport $stage `")
+    stage_failure = target_runtime.index("-Phase staging `")
+    assert stage_journal < stage_failure
+
+    for event in (
+        "manifest-published",
+        "manifest-admin-acl",
+        "enumerator-refresh",
+        "target-runtime:plan-enter",
+        "target-runtime:plan",
+        "target-runtime:stage",
+        "target-runtime:finalize",
+    ):
+        assert event in smoke
+    assert "& $script:HarnessRealSetPathAcl @PSBoundParameters" in smoke
+    assert "Assert-DefenseClawCanonicalPathAcl `" in smoke
+    assert "target-runtime plan preceded the replacement manifest ACL" in smoke
+    assert "target-runtime planning preceded synchronous enumeration" in smoke
+    assert "'Repair'" in smoke
+    assert "'Upgrade'" in smoke
+    assert "$manifestPublished -gt $capture" in smoke
+    assert "$manifestAcl -gt $manifestPublished" in smoke
+    assert "$targetPlan -gt $manifestAcl" in smoke
+    assert "'O:BAG:BAD:(A;;FA;;;SY)(A;;FA;;;BA)'" in smoke
+    assert "$samePathSources['manifest']" in smoke
+    assert "path = $layout.ManifestPath" in smoke
+    assert "name = 'no-source'" in smoke
+    assert "sources = $noManifestSources" in smoke
+    assert "'managed DACL is not protected'" in smoke
+    assert "same_path_manifest_drift_rejected" in smoke
+    assert "no_source_manifest_drift_rejected" in smoke
+    target_runtime_mock = smoke[
+        smoke.index("function Invoke-HarnessTargetRuntimeGatewayCommand") :
+        smoke.index("function Assert-HarnessTargetRuntimeCleanupScopeExclusive")
+    ]
+    plan_enter = target_runtime_mock.index("'target-runtime:plan-enter'")
+    manifest_validation = target_runtime_mock.index(
+        "Assert-DefenseClawCanonicalPathAcl `",
+        target_runtime_mock.index("$manifestWasReplaced = [bool]("),
+    )
+    plan_event = target_runtime_mock.index(
+        "$script:HarnessState.events.Add('target-runtime:plan')"
+    )
+    assert plan_enter < manifest_validation < plan_event
+    activation_failure = smoke[
+        smoke.index("function Invoke-HarnessFirstActivationFailureSequence") :
+        smoke.index("Invoke-HarnessUninstallCase `", smoke.index(
+            "function Invoke-HarnessFirstActivationFailureSequence"
+        ))
+    ]
+    drift_boundary = activation_failure[
+        activation_failure.index("$validationOnlyManifestDriftRejected") :
+        activation_failure.index("for ($attempt = 1; $attempt -le 2; $attempt++)")
+    ]
+    assert "'target-runtime:plan-enter'" in drift_boundary
+    assert ") -lt 0 -and" in drift_boundary
+    assert "'target-runtime:plan'" in drift_boundary
+    assert "lowercase Install action skipped target preparation" in smoke
+    assert "bounded-redacted-target-runtime-diagnostic" in smoke
+    assert "diagnostic-secret" in smoke
+    assert "$targetRuntimeDiagnostic -notlike '*diagnostic-secret*'" in smoke
+    assert "target runtime finalization failed with exit 7: unavailable" in smoke
+
+
+def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    helper_start = module.index(
+        "function Remove-DefenseClawInactiveDeploymentMetadataForInstall"
+    )
+    helper_end = module.index(
+        "function Assert-DefenseClawMetadataIdentity", helper_start
+    )
+    helper = module[helper_start:helper_end]
+    assert "transaction snapshot does not contain exactly one" in helper
+    assert "Get-FileHash" in helper
+    assert "changed after its transaction snapshot" in helper
+    assert "Remove-Item" in helper
+
+    lifecycle_start = module.index(
+        "function Invoke-DefenseClawInstallLikeLifecycle"
+    )
+    lifecycle_end = module.index(
+        "function Invoke-DefenseClawUninstallLifecycle", lifecycle_start
+    )
+    lifecycle = module[lifecycle_start:lifecycle_end]
+    transaction = lifecycle.index("$snapshot = New-DefenseClawTransaction")
+    adoption = lifecycle.index(
+        "Remove-DefenseClawInactiveDeploymentMetadataForInstall"
+    )
+    inspection = lifecycle.index(
+        "Invoke-DefenseClawCodexRequirementsCommand", adoption
+    )
+    active_metadata = lifecycle.index(
+        "Write-DefenseClawJsonAtomic -Value $newMetadata", inspection
+    )
+    assert transaction < adoption < inspection < active_metadata
+
+    assert "codex-requirements:inspect:metadata-absent" in smoke
+    assert (
+        "direct reinstall did not transactionally replace the inactive tombstone"
+        in smoke
+    )
+    direct_reinstall = smoke[
+        smoke.index("function Invoke-HarnessDirectReinstallSequence") : smoke.index(
+            "function Invoke-HarnessFirstActivationFailureSequence"
+        )
+    ]
+    old_journal = direct_reinstall[
+        direct_reinstall.index("$oldJournal = [ordered]@{") :
+        direct_reinstall.index("[IO.File]::WriteAllText(", direct_reinstall.index(
+            "$oldJournal = [ordered]@{"
+        ))
+    ]
+    assert "schema_version = 4" in old_journal
+    assert "phase = 'finalized'" in old_journal
+    assert "managed_hooks_activation" not in direct_reinstall[
+        direct_reinstall.index("[IO.File]::WriteAllText(") :
+        direct_reinstall.index("$oldJournal = [ordered]@{")
+    ]
+    assert "[switch]$AllowLegacyInactive" in module[
+        module.index("function Get-DefenseClawManagedHooksTeardownJournalPhase") :
+        module.index("function Remove-DefenseClawCommittedManagedHooksTeardownJournal")
+    ]
+    assert "-AllowLegacyInactive" in module[
+        module.index("function Remove-DefenseClawCommittedManagedHooksTeardownJournal") :
+        module.index("function Recover-DefenseClawQuiescingIntent")
+    ]
+    pre_layout = module[
+        module.index("function Invoke-DefenseClawPreLayoutRecovery") :
+        module.index("function Get-DefenseClawTargetRuntimePreparationMode")
+    ]
+    assert "$Action -eq 'Install'" in pre_layout
+    assert "Invoke-DefenseClawCommittedUninstallCleanup `" in pre_layout
+    assert "the only helper authorized to finalize its own journal" in pre_layout
+    assert "service_exists = @{" in direct_reinstall
+    assert "ipc_service_sids = @('S-1-5-80-1-2-3-4-5')" in direct_reinstall
+    assert "second uninstall retained its shared IPC service SID" in direct_reinstall
+    revoke_mock = smoke[
+        smoke.index("function script:Revoke-DefenseClawManagedIPCServiceAccess") : smoke.index(
+            "function script:Set-DefenseClawManagedAcls"
+        )
+    ]
+    assert "Test-DefenseClawServiceExists -Name $GatewayServiceName" in revoke_mock
+    assert ".service_exists.ContainsKey" not in revoke_mock
+
+
+def test_uninstall_tombstone_preserves_authenticated_activation_identity() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    metadata_writer = module[
+        module.index("function New-DefenseClawDeploymentMetadata") : module.index(
+            "function Test-DefenseClawMetadataInstalled"
+        )
+    ]
+    assert "deployment metadata requires managed-hook activation evidence" in metadata_writer
+    assert "managed_hooks_activation" in metadata_writer
+
+    uninstall = module[
+        module.index("function Invoke-DefenseClawUninstallLifecycle") : module.index(
+            "function Invoke-DefenseClawReconcileLifecycle"
+        )
+    ]
+    inactive_retry = uninstall.index(
+        "if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata))"
+    )
+    activation_authentication = uninstall.index(
+        "$managedHooksActivationProperty = $metadata.PSObject.Properties["
+    )
+    tombstone = uninstall.index("$tombstone = New-DefenseClawDeploymentMetadata")
+    tombstone_activation = uninstall.index(
+        "-ManagedHooksActivation $managedHooksActivation", tombstone
+    )
+    assert inactive_retry < activation_authentication < tombstone < tombstone_activation
+
+    teardown_mock = smoke[
+        smoke.index("function script:Invoke-DefenseClawManagedHooksTeardownCommand", 1000) :
+        smoke.index("function script:Complete-DefenseClawCommittedManagedHooksFinalization")
+    ]
+    assert "teardown $Action lost protected activation evidence" in teardown_mock
+    assert "teardown finalize did not observe an inactive tombstone" in teardown_mock
+    assert "teardown $Action did not observe active deployment metadata" in teardown_mock
+
+    metadata_mock_start = smoke.index(
+        "function script:New-DefenseClawDeploymentMetadata"
+    )
+    metadata_mock = smoke[
+        metadata_mock_start : smoke.index(
+            "function script:Set-DefenseClawPreservedStateAcls",
+            metadata_mock_start,
+        )
+    ]
+    assert "updated_at = [DateTime]::UtcNow.ToString('o')" in metadata_mock
 
 
 def test_certification_cleanup_handles_partial_profiles_and_empty_parents() -> None:
@@ -3668,3 +5076,12 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "function Revoke-DefenseClawStateAncestorTraverse" in module
     assert "Revoke-DefenseClawStateAncestorTraverse `" in module
     assert "-GatewayServiceSID $gatewaySID" in module
+
+    # The fixed AVC IPC directory is also shared. Retire only the exact
+    # deleted gateway's service-SID ACE, including when purge resumes after
+    # the SCM row and captured SID are gone.
+    assert "function Revoke-DefenseClawManagedIPCServiceAccess" in module
+    assert "Remove-DefenseClawSIDFromRawDACL" in module
+    assert "Get-DefenseClawServiceSIDForRecovery" in module
+    assert "GetDirectorySecuritySnapshotNoFollow" in module
+    assert "SetDirectoryDaclNoFollow" in module

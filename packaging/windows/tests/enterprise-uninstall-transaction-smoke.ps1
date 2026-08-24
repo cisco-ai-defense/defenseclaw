@@ -12,6 +12,9 @@ $ErrorActionPreference = 'Stop'
 $modulePath = [IO.Path]::GetFullPath(
     (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')
 )
+$installerPath = [IO.Path]::GetFullPath(
+    (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\install-enterprise.ps1')
+)
 $testRoot = Microsoft.PowerShell.Management\Join-Path `
     ([IO.Path]::GetTempPath()) `
     ('dcut-' + [Guid]::NewGuid().ToString('N'))
@@ -28,7 +31,10 @@ try {
     }
 
     $result = & $module {
-        param([Parameter(Mandatory)][string]$TestRoot)
+        param(
+            [Parameter(Mandatory)][string]$TestRoot,
+            [Parameter(Mandatory)][string]$InstallerPath
+        )
 
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
@@ -40,6 +46,26 @@ try {
         $script:HarnessRealRestoreTransaction = (
             Microsoft.PowerShell.Core\Get-Command `
                 -Name Restore-DefenseClawTransaction `
+                -CommandType Function
+        ).ScriptBlock
+        $script:HarnessRealGatewayCommand = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawGatewayCommand `
+                -CommandType Function
+        ).ScriptBlock
+        $script:HarnessRealTargetRuntimeCleanupScope = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Assert-DefenseClawTargetRuntimeCleanupScopeExclusive `
+                -CommandType Function
+        ).ScriptBlock
+        $script:HarnessRealSetPathAcl = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Set-DefenseClawPathAcl `
+                -CommandType Function
+        ).ScriptBlock
+        $script:HarnessRealSourceReplacementDecision = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Test-DefenseClawSourceDescriptorPublishesReplacement `
                 -CommandType Function
         ).ScriptBlock
 
@@ -103,7 +129,7 @@ try {
                     -Force | Microsoft.PowerShell.Core\Out-Null
             }
             $body = [Text.Encoding]::UTF8.GetBytes(
-                ('{{"schema_version":1,"phase":"{0}","nonce":"fixed"}}' -f $Phase)
+                ('{{"schema_version":5,"phase":"{0}","nonce":"fixed"}}' -f $Phase)
             )
             [IO.File]::WriteAllBytes($Path, $body)
         }
@@ -142,6 +168,15 @@ try {
             $codexMachinePolicyDirectory = Microsoft.PowerShell.Management\Join-Path `
                 $codexVendorDirectory `
                 'Codex'
+            $brokerStateDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $stateRoot `
+                'broker'
+            $brokerLogDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $stateRoot `
+                'logs\broker'
+            $managedIPCDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $Root `
+                'managed-ipc'
             foreach ($directory in @(
                 $installRoot,
                 $stateRoot,
@@ -165,6 +200,22 @@ try {
                 GatewayPath = (
                     Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-gateway.exe'
                 )
+                BrokerPath = (
+                    Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-cmid-broker.exe'
+                )
+                BrokerServiceName = 'DefenseClawCMIDBroker'
+                BrokerPipeName = '\\.\pipe\DefenseClawCMIDBroker'
+                BrokerStateDirectory = $brokerStateDirectory
+                BrokerAuthKeyPath = (
+                    Microsoft.PowerShell.Management\Join-Path $brokerStateDirectory 'broker-auth.key'
+                )
+                BrokerLogDirectory = $brokerLogDirectory
+                BrokerLogPath = (
+                    Microsoft.PowerShell.Management\Join-Path $brokerLogDirectory 'cmid-broker.log'
+                )
+                ProviderLibraryPath = (
+                    Microsoft.PowerShell.Management\Join-Path $Root 'provider-fixture.dll'
+                )
                 HookPath = (
                     Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-hook.exe'
                 )
@@ -185,6 +236,19 @@ try {
                 )
                 RuntimeDirectory = (
                     Microsoft.PowerShell.Management\Join-Path $stateRoot 'runtime'
+                )
+                RedactionCorrelationKeyPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        (Microsoft.PowerShell.Management\Join-Path `
+                            $stateRoot `
+                            'runtime') `
+                        'redaction-correlation.key'
+                )
+                ManagedIPCDirectory = $managedIPCDirectory
+                ManagedIPCSocketPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $managedIPCDirectory `
+                        'defenseclaw_ipc.sock'
                 )
                 AuthorizationDirectory = (
                     Microsoft.PowerShell.Management\Join-Path $stateRoot 'authorization'
@@ -213,6 +277,11 @@ try {
                     Microsoft.PowerShell.Management\Join-Path `
                         $lifecycleDirectory `
                         "purge-$purgeScope.json"
+                )
+                InstallRollbackIntentPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $lifecycleDirectory `
+                        "install-rollback-$purgeScope.json"
                 )
                 SelfUninstallReceiptPath = (
                     Microsoft.PowerShell.Management\Join-Path `
@@ -246,6 +315,26 @@ try {
                 )
                 CodexVendorDirectory = $codexVendorDirectory
                 CodexMachinePolicyDirectory = $codexMachinePolicyDirectory
+                CodexMachinePolicyPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $codexMachinePolicyDirectory `
+                        'requirements.toml'
+                )
+                CodexManagedHooksStatePath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $codexMachinePolicyDirectory `
+                        '.defenseclaw-managed-hooks.state'
+                )
+                CodexRequirementsOwnershipPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $installState `
+                        'codex-requirements-ownership.json'
+                )
+                CodexRequirementsAclBackupPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $installState `
+                        'codex-requirements-acl-backup.json'
+                )
                 CodexManagedHooksLockPath = (
                     Microsoft.PowerShell.Management\Join-Path `
                         $codexMachinePolicyDirectory `
@@ -253,6 +342,7 @@ try {
                 )
                 CodexTargetEnabled = $false
                 ClaudeTargetEnabled = $true
+                CursorTargetEnabled = $false
                 AgentApplicationControlAttested = $true
                 ClaudeEffectivePolicyVerified = $true
                 CoreHardeningCertification = $false
@@ -272,8 +362,28 @@ try {
                 [Parameter(Mandatory)][bool]$ServicesRunning,
                 [bool]$ServicesExisted = $true
             )
+            $files = @()
+            if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.MetadataPath `
+                -PathType Leaf) {
+                $metadataBackup = $SnapshotPath + '.metadata.bak'
+                Microsoft.PowerShell.Management\Copy-Item `
+                    -LiteralPath $Layout.MetadataPath `
+                    -Destination $metadataBackup `
+                    -Force
+                $files = @(
+                    [ordered]@{
+                        path = $Layout.MetadataPath
+                        existed = $true
+                        backup = $metadataBackup
+                        security_descriptor = ''
+                    }
+                )
+            }
             $snapshot = [ordered]@{
                 schema_version = 1
+                id = ('1' * 32)
+                directory = [string]$Layout.StateRoot
                 gateway_service = 'DefenseClawGateway'
                 guardian_service = 'DefenseClawHookGuardian'
                 service_activation_phase = 'quiesced'
@@ -288,7 +398,7 @@ try {
                 managed_hooks_teardown_journal_preserved = $true
                 managed_hooks_teardown_journal_preimage_existed = $PreimageExisted
                 managed_hooks_teardown_journal_preimage_sha256 = $PreimageSHA256
-                files = @()
+                files = $files
                 services = @(
                     [ordered]@{
                         name = 'DefenseClawGateway'
@@ -304,6 +414,7 @@ try {
                     }
                 )
                 created_shared_directories = @()
+                created_target_runtime_roots = @()
             }
             [IO.File]::WriteAllText(
                 $SnapshotPath,
@@ -369,6 +480,28 @@ try {
                 [Parameter(Mandatory)][string]$Kind,
                 [Parameter(Mandatory)][string]$GatewayServiceSID
             )
+            $isManagedReplacementManifest = [bool](
+                $script:HarnessState.ContainsKey('layout') -and
+                $script:HarnessState.ContainsKey('events') -and
+                [string]::Equals(
+                    $Path,
+                    [string]$script:HarnessState.layout.ManifestPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and
+                $script:HarnessState.events.IndexOf(
+                    'manifest-published'
+                ) -ge 0
+            )
+            if ($isManagedReplacementManifest) {
+                if ($Kind -cne 'AdminFile' -or
+                    $GatewayServiceSID -cne $script:AdministratorsSID) {
+                    throw 'install-like lifecycle used a noncanonical manifest ACL contract'
+                }
+                & $script:HarnessRealSetPathAcl @PSBoundParameters
+                $script:HarnessState.manifest_admin_acl = $true
+                $script:HarnessState.events.Add('manifest-admin-acl')
+                return
+            }
             if ($script:HarnessState.ContainsKey('layout') -and
                 [string]::Equals(
                     $Path,
@@ -411,7 +544,7 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)]
-                [ValidateSet('prepare', 'verify', 'rollback')]
+                [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
                 [string]$Action
             )
             if ($Action -ne 'rollback') {
@@ -740,10 +873,39 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [switch]$Required
             )
-            return [pscustomobject]@{
+            if ($script:HarnessState.operation -eq 'install' -and
+                -not [bool]$script:HarnessState.installed -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.MetadataPath `
+                    -PathType Leaf)) {
+                return $null
+            }
+            $result = [ordered]@{
                 installed = [bool]$script:HarnessState.installed
                 codex_target_enabled = $false
             }
+            if ($script:HarnessState.ContainsKey(
+                    'managed_hooks_activation'
+                ) -and
+                $null -ne $script:HarnessState.managed_hooks_activation) {
+                $result['managed_hooks_activation'] =
+                    $script:HarnessState.managed_hooks_activation
+            }
+            elseif ([bool]$script:HarnessState.installed -and
+                (-not $script:HarnessState.ContainsKey(
+                    'legacy_activation_missing'
+                ) -or
+                -not [bool]$script:HarnessState.legacy_activation_missing)) {
+                $result['managed_hooks_activation'] =
+                    [pscustomobject][ordered]@{
+                    schema_version = 1
+                    deployment_generation_id = ('1' * 32)
+                    state = 'activated'
+                    manifest_sha256 = ('a' * 64)
+                    target_count = 1
+                }
+            }
+            return [pscustomobject]$result
         }
         function script:Assert-DefenseClawMetadataIdentity {
             param(
@@ -787,6 +949,15 @@ try {
                 throw "refusing foreign service $Name"
             }
         }
+        function script:Assert-DefenseClawCMIDBrokerServiceOrAbsent {
+            param(
+                [Parameter(Mandatory)][string]$Name,
+                [Parameter(Mandatory)][string]$ExpectedImage,
+                [switch]$AllowArgumentUpgrade
+            )
+            $script:HarnessState.events.Add("owned:$Name")
+            $script:HarnessState.owned_checks++
+        }
         function script:Assert-DefenseClawManagedServiceConfigurations {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
@@ -812,7 +983,11 @@ try {
             else {
                 @(2)
             }
-            foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+            foreach ($name in @(
+                $GatewayServiceName,
+                $Layout.BrokerServiceName,
+                $GuardianServiceName
+            )) {
                 if ($script:HarnessState.service_start_modes[$name] -notin
                     $expectedModes) {
                     throw "service $name mode is $($script:HarnessState.service_start_modes[$name]), expected $($expectedModes -join ' or ')"
@@ -841,7 +1016,14 @@ try {
         }
         function script:Get-DefenseClawServiceSID {
             param([Parameter(Mandatory)][string]$ServiceName)
-            return 'S-1-5-80-1234'
+            if ($ServiceName -ceq 'DefenseClawGatewayScopeB') {
+                return 'S-1-5-80-6-7-8-9-10'
+            }
+            return 'S-1-5-80-1-2-3-4-5'
+        }
+        function script:Get-DefenseClawServiceSIDForRecovery {
+            param([Parameter(Mandatory)][string]$ServiceName)
+            return Get-DefenseClawServiceSID -ServiceName $ServiceName
         }
         function script:Write-DefenseClawJsonAtomic {
             param(
@@ -876,6 +1058,35 @@ try {
                 ),
                 [Text.UTF8Encoding]::new($false)
             )
+            if ($script:HarnessState.ContainsKey(
+                    'legacy_lifecycle_recovery'
+                ) -and
+                [bool]$script:HarnessState.legacy_lifecycle_recovery -and
+                $script:HarnessState.ContainsKey('snapshot_path') -and
+                [string]::Equals(
+                    $Path,
+                    [string]$script:HarnessState.snapshot_path,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                $bindingProperty = $Value.PSObject.Properties[
+                    'managed_hooks_lifecycle_recovery'
+                ]
+                if ($null -ne $bindingProperty -and
+                    $null -ne $bindingProperty.Value) {
+                    $bindingStateProperty =
+                        $bindingProperty.Value.PSObject.Properties['state']
+                    if ($null -ne $bindingStateProperty -and
+                        [string]$bindingStateProperty.Value -in @(
+                            'recorded',
+                            'adopted'
+                        )) {
+                        $script:HarnessState.events.Add(
+                            'lifecycle-recovery-binding-' +
+                            [string]$bindingStateProperty.Value
+                        )
+                    }
+                }
+            }
             if ($isPurgeIntent) {
                 $script:HarnessState.events.Add('purge-intent-write')
             }
@@ -885,14 +1096,33 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$PriorDeploymentActive,
                 [switch]$IncludeCodexMachineState,
                 [switch]$ManagedHooksTeardownPrepared,
-                [switch]$PreserveManagedHooksTeardownJournal
+                [switch]$PreserveManagedHooksTeardownJournal,
+                [switch]$RecoverLegacyManagedHooksLifecycleJournal,
+                [switch]$InstallRootCreatedForTransaction,
+                [switch]$StateRootCreatedForTransaction
             )
+            if (-not $PSBoundParameters.ContainsKey(
+                    'PriorDeploymentActive'
+                )) {
+                throw 'transaction omitted the prior deployment activity contract'
+            }
+            if ([bool]$PriorDeploymentActive -ne
+                [bool]$script:HarnessState.installed) {
+                throw (
+                    'transaction prior deployment activity did not match ' +
+                    'the authenticated metadata fixture'
+                )
+            }
             $script:HarnessState.events.Add('transaction')
             $script:HarnessState.transaction_calls++
             $script:HarnessState.service_start_modes[
                 $GatewayServiceName
+            ] = 4
+            $script:HarnessState.service_start_modes[
+                $Layout.BrokerServiceName
             ] = 4
             $script:HarnessState.service_start_modes[
                 $GuardianServiceName
@@ -948,6 +1178,94 @@ try {
                     -PreimageSHA256 '' `
                     -ServicesRunning:$false `
                     -ServicesExisted:$servicesExisted
+                if ($script:HarnessState.ContainsKey(
+                        'legacy_lifecycle_recovery'
+                    ) -and
+                    [bool]$script:HarnessState.legacy_lifecycle_recovery) {
+                    if (-not $RecoverLegacyManagedHooksLifecycleJournal) {
+                        throw 'legacy recovery transaction omitted its explicit preimage contract'
+                    }
+                    $transactionID = ('1' * 32)
+                    $transactionDirectory =
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $Layout.TransactionsDirectory `
+                            $transactionID
+                    Microsoft.PowerShell.Management\New-Item `
+                        -ItemType Directory `
+                        -Path $transactionDirectory `
+                        -Force | Microsoft.PowerShell.Core\Out-Null
+                    $journalBackup =
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $transactionDirectory `
+                            'managed-hooks-lifecycle-journal.v3.preimage'
+                    $gatewayBackup =
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $transactionDirectory `
+                            'defenseclaw-gateway.exe.preimage'
+                    Microsoft.PowerShell.Management\Copy-Item `
+                        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+                        -Destination $journalBackup `
+                        -Force
+                    Microsoft.PowerShell.Management\Copy-Item `
+                        -LiteralPath $Layout.GatewayPath `
+                        -Destination $gatewayBackup `
+                        -Force
+                    $transaction =
+                        Microsoft.PowerShell.Management\Get-Content `
+                            -LiteralPath $snapshotPath `
+                            -Raw |
+                            Microsoft.PowerShell.Utility\ConvertFrom-Json
+                    $transaction.directory = $transactionDirectory
+                    $journalIdentity = Get-DefenseClawFileIdentity `
+                        -Path $Layout.ManagedHooksLifecycleJournalPath
+                    $journalSHA256 = (
+                        Microsoft.PowerShell.Utility\Get-FileHash `
+                            -LiteralPath `
+                                $Layout.ManagedHooksLifecycleJournalPath `
+                            -Algorithm SHA256
+                    ).Hash.ToLowerInvariant()
+                    $transaction |
+                        Microsoft.PowerShell.Utility\Add-Member `
+                            -MemberType NoteProperty `
+                            -Name managed_hooks_lifecycle_legacy_preimage `
+                            -Value ([pscustomobject][ordered]@{
+                                schema_version = 1
+                                transaction_id = $transactionID
+                                journal_path = [string](
+                                    $Layout.ManagedHooksLifecycleJournalPath
+                                )
+                                journal_file_identity = $journalIdentity
+                                journal_sha256 = $journalSHA256
+                                journal_schema_version = 3
+                                journal_phase = 'captured'
+                            }) `
+                            -Force
+                    $transaction.files = @($transaction.files) + @(
+                        [pscustomobject][ordered]@{
+                            path = [string](
+                                $Layout.ManagedHooksLifecycleJournalPath
+                            )
+                            existed = $true
+                            backup = $journalBackup
+                            security_descriptor = ''
+                        },
+                        [pscustomobject][ordered]@{
+                            path = [string]$Layout.GatewayPath
+                            existed = $true
+                            backup = $gatewayBackup
+                            security_descriptor = ''
+                        }
+                    )
+                    [IO.File]::WriteAllText(
+                        $snapshotPath,
+                        (
+                            $transaction |
+                                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                                    -Depth 16
+                        ),
+                        [Text.UTF8Encoding]::new($false)
+                    )
+                }
                 $script:HarnessState.snapshot_path = $snapshotPath
                 return $snapshotPath
             }
@@ -990,10 +1308,28 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)]
-                [ValidateSet('prepare', 'verify', 'rollback')]
+                [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
                 [string]$Action
             )
             $script:HarnessState.events.Add("teardown:$Action")
+            $currentMetadata = Get-DefenseClawDeploymentMetadata `
+                -Layout $Layout `
+                -Required
+            $activationProperty = $currentMetadata.PSObject.Properties[
+                'managed_hooks_activation'
+            ]
+            if ($null -eq $activationProperty -or
+                $null -eq $activationProperty.Value) {
+                throw "teardown $Action lost protected activation evidence"
+            }
+            if ($Action -ceq 'finalize') {
+                if ([bool]$currentMetadata.installed) {
+                    throw 'teardown finalize did not observe an inactive tombstone'
+                }
+            }
+            elseif (-not [bool]$currentMetadata.installed) {
+                throw "teardown $Action did not observe active deployment metadata"
+            }
             switch ($Action) {
                 'prepare' {
                     $script:HarnessState.prepare_calls++
@@ -1080,14 +1416,49 @@ try {
                     }
                     return [pscustomobject]@{ ok = $true }
                 }
+                'finalize' {
+                    if ([bool]$script:HarnessState.active_references) {
+                        throw 'finalize observed a surviving machine reference'
+                    }
+                    if (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $Layout.PendingPath) {
+                        throw 'finalize ran before transaction commit'
+                    }
+                    $phase = Get-HarnessJournalPhase `
+                        -Path $Layout.ManagedHooksTeardownJournalPath
+                    if ($phase -notin @('prepared', 'finalized')) {
+                        throw "finalize received invalid journal phase: $phase"
+                    }
+                    Write-HarnessJournal `
+                        -Path $Layout.ManagedHooksTeardownJournalPath `
+                        -Phase 'finalized'
+                    return [pscustomobject]@{ ok = $true }
+                }
             }
+        }
+        function script:Complete-DefenseClawCommittedManagedHooksFinalization {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string]$GuardianServiceName
+            )
+            return Invoke-DefenseClawManagedHooksTeardownCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action finalize
         }
         function script:Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)]
-                [ValidateSet('capture', 'restore', 'retire')]
+                [ValidateSet(
+                    'capture',
+                    'restore',
+                    'retire',
+                    'retire-committed',
+                    'classify-activation'
+                )]
                 [string]$Action
             )
             $null = $GatewayServiceName
@@ -1095,24 +1466,53 @@ try {
             switch ($Action) {
                 'capture' {
                     if ($script:HarnessState.ContainsKey(
+                            'legacy_lifecycle_recovery'
+                        ) -and
+                        [bool]$script:HarnessState.legacy_lifecycle_recovery) {
+                        $transaction =
+                            Microsoft.PowerShell.Management\Get-Content `
+                                -LiteralPath $script:HarnessState.snapshot_path `
+                                -Raw |
+                                Microsoft.PowerShell.Utility\ConvertFrom-Json
+                        $binding =
+                            $transaction.PSObject.Properties[
+                                'managed_hooks_lifecycle_recovery'
+                            ]
+                        if ($null -eq $binding -or
+                            [string]$binding.Value.state -cne 'adopted' -or
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath `
+                                    ([string]$binding.Value.quarantine_path) `
+                                -PathType Leaf) -or
+                            (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath `
+                                    $Layout.ManagedHooksLifecycleJournalPath)) {
+                            throw (
+                                'current lifecycle capture preceded exact ' +
+                                'stale-journal adoption'
+                            )
+                        }
+                    }
+                    if ($script:HarnessState.ContainsKey(
                             'track_fresh_install_services'
                         ) -and
                         [bool]$script:HarnessState.track_fresh_install_services) {
-                        if (-not [bool]$script:HarnessState.service_exists[
-                                $GatewayServiceName
-                            ] -or
-                            -not [bool]$script:HarnessState.service_exists[
-                                'DefenseClawHookGuardian'
-                            ]) {
-                            throw 'snapshot capture ran before both service identities existed'
-                        }
-                        if ($script:HarnessState.service_start_modes[
-                                $GatewayServiceName
-                            ] -ne 4 -or
-                            $script:HarnessState.service_start_modes[
-                                'DefenseClawHookGuardian'
-                            ] -ne 4) {
-                            throw 'snapshot capture observed a startable fresh service'
+                        foreach ($serviceName in @(
+                            $GatewayServiceName,
+                            'DefenseClawCMIDBroker',
+                            'DefenseClawHookGuardian',
+                            [string]$script:HarnessState.enumerator_service_name
+                        )) {
+                            if (-not [bool]$script:HarnessState.service_exists[
+                                    $serviceName
+                                ]) {
+                                throw 'snapshot capture ran before all four service identities existed'
+                            }
+                            if ($script:HarnessState.service_start_modes[
+                                    $serviceName
+                                ] -ne 4) {
+                                throw 'snapshot capture observed a startable fresh service'
+                            }
                         }
                         if ($script:HarnessState.events.IndexOf(
                                 'managed-core-acls'
@@ -1125,7 +1525,10 @@ try {
                     )
                     [IO.File]::WriteAllText(
                         $Layout.ManagedHooksLifecycleJournalPath,
-                        '{"schema_version":1,"phase":"captured"}',
+                        (
+                            '{"schema_version":4,"phase":"captured",' +
+                            '"transaction_id":"' + ('1' * 32) + '"}'
+                        ),
                         [Text.UTF8Encoding]::new($false)
                     )
                     if ($script:HarnessState.ContainsKey(
@@ -1154,6 +1557,90 @@ try {
                             -Force
                     }
                 }
+                'classify-activation' {
+                    $transaction = Microsoft.PowerShell.Management\Get-Content `
+                        -LiteralPath $script:HarnessState.snapshot_path `
+                        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+                    return [pscustomobject]@{
+                        ok = $true
+                        action = $Action
+                        phase = 'classified'
+                        transaction_id = [string]$transaction.id
+                        legacy_activation_state = if (
+                            $script:HarnessState.ContainsKey(
+                                'legacy_activation_state'
+                            )
+                        ) {
+                            [string]$script:HarnessState.legacy_activation_state
+                        }
+                        else {
+                            'never_activated'
+                        }
+                    }
+                }
+                'retire-committed' {
+                    if (-not $script:HarnessState.ContainsKey(
+                            'legacy_lifecycle_recovery'
+                        ) -or
+                        -not [bool](
+                            $script:HarnessState.legacy_lifecycle_recovery
+                        )) {
+                        throw 'unexpected stale lifecycle recovery in this fixture'
+                    }
+                    $transaction =
+                        Microsoft.PowerShell.Management\Get-Content `
+                            -LiteralPath $script:HarnessState.snapshot_path `
+                            -Raw |
+                            Microsoft.PowerShell.Utility\ConvertFrom-Json
+                    $bindingProperty =
+                        $transaction.PSObject.Properties[
+                            'managed_hooks_lifecycle_recovery'
+                        ]
+                    if ($null -eq $bindingProperty -or
+                        [string]$bindingProperty.Value.state -cne 'recorded') {
+                        throw 'retire-committed did not receive a recorded binding'
+                    }
+                    $binding = $bindingProperty.Value
+                    if (-not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath ([string]$binding.journal_path) `
+                            -PathType Leaf) -or
+                        (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath ([string]$binding.quarantine_path))) {
+                        throw 'retire-committed received an ambiguous journal state'
+                    }
+                    # Production performs bounded immutable-generation GC
+                    # before it makes the legacy journal name unavailable.
+                    # Keep both events observable so crash-prefix tests prove
+                    # that adoption never gets ahead of cleanup.
+                    $script:HarnessState.events.Add(
+                        'lifecycle-generation-gc'
+                    )
+                    [IO.File]::Move(
+                        [string]$binding.journal_path,
+                        [string]$binding.quarantine_path
+                    )
+                    $script:HarnessState.events.Add(
+                        'lifecycle-journal-quarantined'
+                    )
+                    return [pscustomobject][ordered]@{
+                        ok = $true
+                        action = $Action
+                        phase = 'adopted'
+                        adopted = $true
+                        transaction_id = [string]$binding.transaction_id
+                        quarantine_path = [string]$binding.quarantine_path
+                        legacy_activation_state = if (
+                            $script:HarnessState.ContainsKey(
+                                'legacy_activation_state'
+                            )
+                        ) {
+                            [string]$script:HarnessState.legacy_activation_state
+                        }
+                        else {
+                            'never_activated'
+                        }
+                    }
+                }
             }
             return [pscustomobject]@{ ok = $true; action = $Action }
         }
@@ -1166,14 +1653,54 @@ try {
             $script:HarnessState.events.Add('restore')
             $script:HarnessState.restore_calls++
             if ($script:HarnessState.operation -eq 'install') {
-                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
-                    -Layout $Layout `
-                    -GatewayServiceName 'DefenseClawGateway' `
-                    -Action restore)
-                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
-                    -Layout $Layout `
-                    -GatewayServiceName 'DefenseClawGateway' `
-                    -Action retire)
+                if (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+                        -PathType Leaf) {
+                    [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                        -Layout $Layout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -Action restore)
+                    [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                        -Layout $Layout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -Action retire)
+                }
+                $targetRuntimeSnapshot =
+                    Get-HarnessTargetRuntimeRequest -Path $SnapshotPath
+                if ($null -ne $targetRuntimeSnapshot.PSObject.Properties[
+                        'target_runtime_plan'
+                    ]) {
+                    # Exercise the real rollback orchestrator while the
+                    # target-runtime gateway boundary is case-scoped below.
+                    # The pending journal and protected plan/report files must
+                    # remain live until the helper proves every created root
+                    # absent; generic restore may then retire the staged binary.
+                    [void](Invoke-DefenseClawTargetRuntimeRollbackCleanup `
+                        -SnapshotPath $SnapshotPath `
+                        -Layout $Layout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -GuardianServiceName 'DefenseClawHookGuardian')
+                    $targetRuntimeSnapshot =
+                        Get-HarnessTargetRuntimeRequest -Path $SnapshotPath
+                    $cleanupReportProperty =
+                        $targetRuntimeSnapshot.PSObject.Properties[
+                            'target_runtime_cleanup_report'
+                        ]
+                    if ($null -eq $cleanupReportProperty -or
+                        -not [bool]$cleanupReportProperty.Value.ok -or
+                        @(
+                            $targetRuntimeSnapshot.created_target_runtime_roots
+                        ).Count -ne 0 -or
+                        [bool]$script:HarnessState.target_runtime_root_live -or
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $Layout.PendingPath `
+                            -PathType Leaf)) {
+                        throw 'target-runtime cleanup was not durably journaled'
+                    }
+                    $script:HarnessState.events.Add(
+                        'target-runtime:cleanup-authority-persisted'
+                    )
+                }
                 if ($script:HarnessState.ContainsKey(
                         'track_fresh_install_services'
                     ) -and
@@ -1199,22 +1726,36 @@ try {
                                 -Force
                         }
                     }
-                    # Spec 005 D1 (PR #766): third managed service.
-                    # The self-uninstall shortcut mock fakes removal of
-                    # all three services to stay consistent with the
-                    # full transactional path in the real code (which
-                    # removes enumerator + guardian + gateway).
+                    # The self-uninstall shortcut mock fakes removal of all
+                    # four services to stay consistent with the full path.
                     foreach ($name in @(
                         'DefenseClawGateway',
+                        'DefenseClawCMIDBroker',
                         'DefenseClawHookGuardian',
                         'DefenseClawHookEnumerator'
                     )) {
+                        if ($name -eq 'DefenseClawGateway') {
+                            [void](Revoke-DefenseClawManagedIPCServiceAccess `
+                                -Layout $Layout `
+                                -GatewayServiceName $name `
+                                -GatewayServiceSID 'S-1-5-80-1-2-3-4-5' `
+                                -TransactionCreatedServicePresent)
+                        }
+                        $script:HarnessState.events.Add(
+                            "remove-service:$name"
+                        )
                         $script:HarnessState.service_exists[$name] = $false
                         $script:HarnessState.service_start_modes[$name] = 0
                     }
-                    $script:HarnessState.removed_services += 3
+                    $script:HarnessState.removed_services += 4
                     $script:HarnessState.installed = $false
                     $script:HarnessState.services_running = $false
+                    $retainedGatewaySID =
+                        Get-DefenseClawServiceSIDForRecovery `
+                            -ServiceName 'DefenseClawGateway'
+                    Set-DefenseClawPreservedStateAcls `
+                        -Layout $Layout `
+                        -GatewayServiceSID $retainedGatewaySID
                     return
                 }
                 $script:HarnessState.installed = $true
@@ -1240,6 +1781,9 @@ try {
             $script:HarnessState.services_running = $false
             $script:HarnessState.service_start_modes[
                 'DefenseClawGateway'
+            ] = 4
+            $script:HarnessState.service_start_modes[
+                'DefenseClawCMIDBroker'
             ] = 4
             $script:HarnessState.service_start_modes[
                 'DefenseClawHookGuardian'
@@ -1313,18 +1857,49 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                $ManagedHooksActivation,
                 [bool]$Installed = $true
             )
+            if ($null -eq $ManagedHooksActivation) {
+                throw 'deployment metadata fixture lost managed-hook activation evidence'
+            }
             $script:HarnessState.installed = [bool]$Installed
+            if ($null -ne $ManagedHooksActivation) {
+                $script:HarnessState.managed_hooks_activation =
+                    $ManagedHooksActivation
+            }
             return [pscustomobject]@{
                 installed = [bool]$Installed
                 hashes = [ordered]@{ prior = 'hash' }
+                managed_hooks_activation = $ManagedHooksActivation
+                updated_at = [DateTime]::UtcNow.ToString('o')
             }
         }
         function script:Set-DefenseClawPreservedStateAcls {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceSID
+            )
+            if ([string]::IsNullOrWhiteSpace($GatewayServiceSID)) {
+                throw 'preserved-state ACL restoration lost its gateway SID'
+            }
+            if ($script:HarnessState.ContainsKey(
+                    'track_fresh_install_services'
+                ) -and
+                [bool]$script:HarnessState.track_fresh_install_services) {
+                if (-not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.PendingPath `
+                        -PathType Leaf)) {
+                    throw 'preserved-state ACL restoration lost its recovery authority'
+                }
+                if ([bool]$script:HarnessState.service_exists[
+                        'DefenseClawGateway'
+                    ]) {
+                    throw 'preserved-state ACL restoration preceded service rollback'
+                }
+            }
+            $script:HarnessState.events.Add(
+                "preserved-state-acls:$GatewayServiceSID"
             )
         }
         function script:Stop-DefenseClawService {
@@ -1408,6 +1983,12 @@ try {
             param(
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                [Parameter(Mandatory)][string]$BrokerServiceName,
+                [Parameter(Mandatory)][string]$BrokerPath,
+                [Parameter(Mandatory)][string]$BrokerPipeName,
+                [Parameter(Mandatory)][string]$BrokerAuthKeyPath,
+                [Parameter(Mandatory)][string]$ProviderLibraryPath,
+                [Parameter(Mandatory)][string]$BrokerLogPath,
                 [Parameter(Mandatory)][string]$GatewayPath,
                 [Parameter(Mandatory)][string]$ManifestPath,
                 [Parameter(Mandatory)][string]$RuntimeDirectory,
@@ -1423,12 +2004,38 @@ try {
             $mode = if ($DeferAutomaticStart) { 4 } else { 2 }
             $script:HarnessState.service_start_modes[$GatewayServiceName] =
                 $mode
+            $script:HarnessState.service_start_modes[$BrokerServiceName] =
+                $mode
             $script:HarnessState.service_start_modes[$GuardianServiceName] =
+                $mode
+            $enumeratorServiceName =
+                Get-DefenseClawEnumeratorServiceName `
+                    -GuardianServiceName $GuardianServiceName
+            $script:HarnessState.enumerator_service_name =
+                $enumeratorServiceName
+            $script:HarnessState.service_start_modes[$enumeratorServiceName] =
                 $mode
             if ($script:HarnessState.ContainsKey('service_exists')) {
                 $script:HarnessState.service_exists[$GatewayServiceName] = $true
+                $script:HarnessState.service_exists[$BrokerServiceName] = $true
                 $script:HarnessState.service_exists[$GuardianServiceName] = $true
+                $script:HarnessState.service_exists[
+                    $enumeratorServiceName
+                ] = $true
             }
+        }
+        function script:Set-DefenseClawInstallPreparationGatewayServiceSID {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string]$GuardianServiceName
+            )
+            $null = $Layout
+            if ($GatewayServiceName -cne 'DefenseClawGateway' -or
+                $GuardianServiceName -cne 'DefenseClawHookGuardian') {
+                throw 'fresh install bound the wrong service SID authority'
+            }
+            $script:HarnessState.events.Add('install-service-sid-bound')
         }
         function script:Set-DefenseClawManagedCoreAcls {
             param(
@@ -1437,6 +2044,91 @@ try {
             )
             $script:HarnessState.events.Add('managed-core-acls')
         }
+        function script:Set-DefenseClawRetainedRuntimeAcls {
+            param(
+                [Parameter(Mandatory)][string]$RuntimeDirectory,
+                [Parameter(Mandatory)][string]$GatewayServiceSID
+            )
+            if (-not [string]::Equals(
+                    $RuntimeDirectory,
+                    [string]$script:HarnessState.layout.RuntimeDirectory,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or $GatewayServiceSID -cne 'S-1-5-80-1-2-3-4-5') {
+                throw 'retained runtime ACL mock received the wrong identity'
+            }
+            $script:HarnessState.events.Add('retained-runtime-acls')
+        }
+        function script:Initialize-DefenseClawManagedIPCDirectory {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName
+            )
+            if ([string]::IsNullOrWhiteSpace(
+                    [string]$Layout.ManagedIPCDirectory
+                )) {
+                throw 'managed IPC mock received an empty contract path'
+            }
+            if ($script:HarnessState.ContainsKey('ipc_service_sids')) {
+                $gatewaySID = Get-DefenseClawServiceSID `
+                    -ServiceName $GatewayServiceName
+                $foreignSIDs = @(
+                    $script:HarnessState.ipc_service_sids |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]$_ -cne $gatewaySID
+                        }
+                )
+                if ($foreignSIDs.Count -gt 0) {
+                    throw (
+                        'managed IPC mock rejected a stale writable service ' +
+                        "SID: $($foreignSIDs -join ',')"
+                    )
+                }
+                $script:HarnessState.ipc_service_sids = @($gatewaySID)
+            }
+            $script:HarnessState.events.Add('managed-ipc-directory')
+        }
+        function script:Revoke-DefenseClawManagedIPCServiceAccess {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [string]$GatewayServiceSID,
+                [switch]$TransactionCreatedServicePresent
+            )
+            $null = $Layout
+            $serviceExists = Test-DefenseClawServiceExists -Name $GatewayServiceName
+            if ($TransactionCreatedServicePresent -and -not $serviceExists) {
+                throw 'transaction IPC cleanup mock lost its live service'
+            }
+            if (-not $TransactionCreatedServicePresent -and $serviceExists) {
+                throw 'managed IPC cleanup mock observed a live service'
+            }
+            $resolvedSID = Get-DefenseClawServiceSIDForRecovery `
+                -ServiceName $GatewayServiceName
+            if (-not [string]::IsNullOrWhiteSpace($GatewayServiceSID) -and
+                $GatewayServiceSID -cne $resolvedSID) {
+                throw 'managed IPC cleanup mock received a mismatched SID'
+            }
+            $removed = $false
+            if ($script:HarnessState.ContainsKey('ipc_service_sids')) {
+                $beforeCount = @(
+                    $script:HarnessState.ipc_service_sids
+                ).Count
+                $script:HarnessState.ipc_service_sids = @(
+                    $script:HarnessState.ipc_service_sids |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]$_ -cne $resolvedSID
+                        }
+                )
+                $removed = (
+                    @($script:HarnessState.ipc_service_sids).Count -lt
+                    $beforeCount
+                )
+            }
+            $script:HarnessState.events.Add(
+                "managed-ipc-revoke:$resolvedSID"
+            )
+            return $removed
+        }
         function script:Set-DefenseClawManagedAcls {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
@@ -1444,12 +2136,87 @@ try {
                 [switch]$SkipCodexMachineState
             )
         }
+        function script:Invoke-DefenseClawEnumeratorRefresh {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName
+            )
+            $expectedManifestAcl = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory $false `
+                -Kind AdminFile `
+                -GatewayServiceSID $script:AdministratorsSID
+            Assert-DefenseClawCanonicalPathAcl `
+                -Path $Layout.ManifestPath `
+                -Expected $expectedManifestAcl
+            if ($script:HarnessState.ContainsKey(
+                    'track_fresh_install_services'
+                ) -and
+                [bool]$script:HarnessState.track_fresh_install_services) {
+                $enumeratorServiceName = [string](
+                    $script:HarnessState.enumerator_service_name
+                )
+                if ([string]::IsNullOrWhiteSpace($enumeratorServiceName)) {
+                    throw 'fresh Install did not record its Enumerator identity'
+                }
+                foreach ($serviceName in @(
+                    $GatewayServiceName,
+                    'DefenseClawCMIDBroker',
+                    'DefenseClawHookGuardian',
+                    $enumeratorServiceName
+                )) {
+                    if (-not [bool]$script:HarnessState.service_exists[
+                            $serviceName
+                        ] -or
+                        $script:HarnessState.service_start_modes[
+                            $serviceName
+                        ] -ne 4) {
+                        throw (
+                            'fresh Install enumerated before every managed ' +
+                            'service was created disabled'
+                        )
+                    }
+                }
+                if ([bool]$script:HarnessState.services_running -or
+                    $script:HarnessState.events.IndexOf(
+                        'install-service-sid-bound'
+                    ) -lt 0) {
+                    throw (
+                        'fresh Install enumerated before its disabled gateway ' +
+                        'service identity and SID binding existed'
+                    )
+                }
+                $script:HarnessState.events.Add(
+                    'enumerator-refresh-enter'
+                )
+                if ($script:HarnessState.ContainsKey(
+                        'fail_fresh_install_enumeration'
+                    ) -and
+                    [bool]$script:HarnessState.fail_fresh_install_enumeration) {
+                    throw 'injected fresh-install enumeration failure'
+                }
+            }
+            $script:HarnessState.events.Add('enumerator-refresh')
+        }
         function script:Invoke-DefenseClawCodexRequirementsCommand {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$Action
             )
+            if ($script:HarnessState.ContainsKey(
+                    'require_inactive_tombstone_adoption'
+                ) -and
+                [bool]$script:HarnessState.require_inactive_tombstone_adoption -and
+                $Action -in @('inspect', 'reconcile')) {
+                if (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.MetadataPath `
+                    -PathType Leaf) {
+                    throw 'protected deployment metadata marks this installation inactive'
+                }
+                $script:HarnessState.events.Add(
+                    "codex-requirements:$Action`:metadata-absent"
+                )
+            }
             return [pscustomobject]@{
                 ok = $true
                 codex_target_enabled = $false
@@ -1471,6 +2238,9 @@ try {
                 [Parameter(Mandatory)][string]$AuthorizationDirectory,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$LogPath,
+                [string]$BrokerPipeName,
+                [string]$BrokerServiceName,
+                [string]$BrokerAuthKeyPath,
                 [switch]$AgentApplicationControlAttested,
                 [switch]$ClaudeEffectivePolicyVerified
             )
@@ -1495,12 +2265,38 @@ try {
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
+                [string]$ExpectedManifestSHA256,
                 [int]$TimeoutSeconds = 90
             )
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
                 ] -ne 4) {
                 throw 'fresh guardian reconcile began after gateway became startable'
+            }
+            $legacyRecovery = [bool](
+                $script:HarnessState.ContainsKey('operation') -and
+                [string]$script:HarnessState.operation -ceq
+                    'quiescing-recovery'
+            )
+            if ([string]::IsNullOrWhiteSpace($ExpectedManifestSHA256)) {
+                if (-not $legacyRecovery) {
+                    throw 'fresh guardian reconcile was not bound to the target-runtime manifest digest'
+                }
+                # Production deliberately supports transactions written by a
+                # prior strict-v1 build before activation digests existed. It
+                # still requires a fresh healthy generation and a newly
+                # published protected Guardian state inode.
+                $script:HarnessState.events.Add(
+                    'guardian-legacy-fresh-state'
+                )
+            }
+            elseif ($ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+                -not $script:HarnessState.ContainsKey(
+                    'target_runtime_manifest_sha256'
+                ) -or
+                $ExpectedManifestSHA256 -cne
+                    [string]$script:HarnessState.target_runtime_manifest_sha256) {
+                throw 'fresh guardian reconcile was not bound to the target-runtime manifest digest'
             }
             Start-DefenseClawService -Name $GuardianServiceName
             if ($script:HarnessState.ContainsKey('fail_fresh_guardian') -and
@@ -1569,6 +2365,31 @@ try {
                 [Parameter(Mandatory)]$Source,
                 [Parameter(Mandatory)][string]$Destination
             )
+            $sourcePath = if ($Source -is [Collections.IDictionary] -and
+                $Source.Contains('path')) {
+                [string]$Source['path']
+            }
+            else {
+                ''
+            }
+            $samePathManifest = [bool](
+                -not [string]::IsNullOrWhiteSpace($sourcePath) -and
+                [string]::Equals(
+                    [IO.Path]::GetFullPath($sourcePath),
+                    $Destination,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and
+                [string]::Equals(
+                    $Destination,
+                    [string]$script:HarnessState.layout.ManifestPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            )
+            if ($samePathManifest) {
+                # The real installer validates the in-place source digest but
+                # publishes no replacement inode and must not heal its ACL.
+                return
+            }
             $parent = [IO.Path]::GetDirectoryName($Destination)
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $parent)) {
                 Microsoft.PowerShell.Management\New-Item `
@@ -1576,11 +2397,16 @@ try {
                     -Path $parent `
                     -Force | Microsoft.PowerShell.Core\Out-Null
             }
-            [IO.File]::WriteAllText(
-                $Destination,
-                [string]$Source,
-                [Text.UTF8Encoding]::new($false)
-            )
+            if (-not [string]::IsNullOrWhiteSpace($sourcePath)) {
+                [IO.File]::Copy($sourcePath, $Destination, $true)
+            }
+            else {
+                [IO.File]::WriteAllText(
+                    $Destination,
+                    [string]$Source,
+                    [Text.UTF8Encoding]::new($false)
+                )
+            }
             if ([string]::Equals(
                 $Destination,
                 [string]$script:HarnessState.layout.HookPath,
@@ -1588,6 +2414,59 @@ try {
             )) {
                 $script:HarnessState.binary_present = $true
             }
+            if ([string]::Equals(
+                $Destination,
+                [string]$script:HarnessState.layout.ManifestPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                $script:HarnessState.events.Add('manifest-published')
+            }
+        }
+        function script:Assert-DefenseClawSourceDescriptorCurrent {
+            param([Parameter(Mandatory)][hashtable]$Source)
+            foreach ($required in @(
+                'path',
+                'label',
+                'authenticode',
+                'allow_unsigned',
+                'sha256'
+            )) {
+                if (-not $Source.ContainsKey($required)) {
+                    throw "lifecycle source descriptor is missing $required"
+                }
+            }
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath ([string]$Source.path) `
+                    -PathType Leaf)) {
+                throw 'lifecycle source descriptor path is missing'
+            }
+            $actualSHA256 = (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath ([string]$Source.path) `
+                    -Algorithm SHA256
+            ).Hash
+            if (-not [string]::Equals(
+                    $actualSHA256,
+                    [string]$Source.sha256,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw 'lifecycle source descriptor digest changed'
+            }
+            return $Source
+        }
+        function script:Test-DefenseClawSourceDescriptorPublishesReplacement {
+            param(
+                [Parameter(Mandatory)]$Source,
+                [Parameter(Mandatory)][string]$Destination
+            )
+            if ($Source -is [hashtable] -and $Source.ContainsKey('path')) {
+                return [bool](
+                    & $script:HarnessRealSourceReplacementDecision `
+                        -Source $Source `
+                        -Destination $Destination
+                )
+            }
+            return $true
         }
         function script:Remove-DefenseClawManagedTree {
             param(
@@ -1641,16 +2520,94 @@ try {
         function script:Complete-DefenseClawTransaction {
             param(
                 [Parameter(Mandatory)][string]$SnapshotPath,
-                [Parameter(Mandatory)][hashtable]$Layout
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [switch]$Rollback
             )
-            $script:HarnessState.events.Add('complete')
             $script:HarnessState.complete_calls++
+            if (-not $Rollback -and
+                $script:HarnessState.ContainsKey(
+                    'track_fresh_install_services'
+                ) -and
+                [bool]$script:HarnessState.track_fresh_install_services) {
+                # JSON round-trip the affected schema-v2 shape without
+                # committed_at. The production commit-state helper must add
+                # the property under StrictMode rather than assigning a
+                # missing PSCustomObject member.
+                $legacyCommitIntent = (
+                    [ordered]@{
+                        phase = 'preparing_layout'
+                        gateway_service_sid = ''
+                    } |
+                        Microsoft.PowerShell.Utility\ConvertTo-Json `
+                            -Compress |
+                        Microsoft.PowerShell.Utility\ConvertFrom-Json
+                )
+                $committedIntent =
+                    Set-DefenseClawInstallRollbackIntentCommitState `
+                        -Intent $legacyCommitIntent `
+                        -GatewayServiceSID 'S-1-5-80-1-2-3-4-5'
+                $commitTimestamp = $committedIntent.PSObject.Properties[
+                    'committed_at'
+                ]
+                if ([string]$committedIntent.phase -cne 'committed' -or
+                    [string]$committedIntent.gateway_service_sid -cne
+                        'S-1-5-80-1-2-3-4-5' -or
+                    $null -eq $commitTimestamp -or
+                    [string]::IsNullOrWhiteSpace(
+                        [string]$commitTimestamp.Value
+                    )) {
+                    throw 'fresh install did not publish its committed receipt schema'
+                }
+                $parsedCommitTimestamp =
+                    [DateTime]::ParseExact(
+                        [string]$commitTimestamp.Value,
+                        'o',
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::RoundtripKind
+                    )
+                if ($parsedCommitTimestamp.Kind -eq
+                    [DateTimeKind]::Unspecified) {
+                    throw 'fresh install committed timestamp has no timezone'
+                }
+                $script:HarnessState.events.Add('install-receipt:committed')
+            }
+            if ($Rollback -and
+                $script:HarnessState.ContainsKey(
+                    'target_runtime_cleanup_required'
+                ) -and
+                [bool]$script:HarnessState.target_runtime_cleanup_required) {
+                $rollbackSnapshot =
+                    Get-HarnessTargetRuntimeRequest -Path $SnapshotPath
+                $cleanupProperty = $rollbackSnapshot.PSObject.Properties[
+                    'target_runtime_cleanup_report'
+                ]
+                if ($null -eq $cleanupProperty -or
+                    -not [bool]$cleanupProperty.Value.ok -or
+                    [bool]$script:HarnessState.target_runtime_root_live -or
+                    'S-1-5-80-1-2-3-4-5' -in
+                        @($script:HarnessState.ipc_service_sids) -or
+                    [bool]$script:HarnessState.service_exists[
+                        'DefenseClawGateway'
+                    ] -or
+                    -not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.PendingPath `
+                        -PathType Leaf)) {
+                    throw (
+                        'rollback retired authenticated authority before ' +
+                        'target-runtime and IPC cleanup completed'
+                    )
+                }
+                $script:HarnessState.events.Add(
+                    'target-runtime:rollback-authority-retired'
+                )
+            }
             if (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.PendingPath) {
                 Microsoft.PowerShell.Management\Remove-Item `
                     -LiteralPath $Layout.PendingPath `
                     -Force
             }
+            $script:HarnessState.events.Add('complete')
         }
         function script:Get-DefenseClawLifecycleStatus {
             param(
@@ -1775,9 +2732,22 @@ try {
             if ($AlreadyUninstalled) {
                 [IO.File]::WriteAllText(
                     $layout.MetadataPath,
-                    '{"installed":false}',
+                    (
+                        '{"schema_version":1,"installed":false,' +
+                        '"managed_hooks_activation":{' +
+                        '"schema_version":1,' +
+                        '"deployment_generation_id":"' + ('1' * 32) + '",' +
+                        '"state":"activated",' +
+                        '"manifest_sha256":"' + ('a' * 64) + '",' +
+                        '"target_count":1}}'
+                    ),
                     [Text.UTF8Encoding]::new($false)
                 )
+                if (-not $PreexistingPrepared) {
+                    Write-HarnessJournal `
+                        -Path $layout.ManagedHooksTeardownJournalPath `
+                        -Phase 'finalized'
+                }
             }
             $events = [Collections.Generic.List[string]]::new()
             $script:HarnessState = @{
@@ -1787,6 +2757,18 @@ try {
                 active_references = $InitialReferences
                 binary_present = -not $AlreadyUninstalled
                 installed = -not $AlreadyUninstalled
+                managed_hooks_activation = if ($AlreadyUninstalled) {
+                    [pscustomobject][ordered]@{
+                        schema_version = 1
+                        deployment_generation_id = ('1' * 32)
+                        state = 'activated'
+                        manifest_sha256 = ('a' * 64)
+                        target_count = 1
+                    }
+                }
+                else {
+                    $null
+                }
                 guardian_running = $ServicesRunning
                 gateway_running = $ServicesRunning
                 services_running = $ServicesRunning
@@ -1809,12 +2791,15 @@ try {
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 2
+                    DefenseClawCMIDBroker = 2
                     DefenseClawHookGuardian = 2
                 }
                 service_exists = @{
                     DefenseClawGateway = -not $AlreadyUninstalled
+                    DefenseClawCMIDBroker = -not $AlreadyUninstalled
                     DefenseClawHookGuardian = -not $AlreadyUninstalled
                 }
+                ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
                 guardian_fresh = $ServicesRunning
                 queued_gateway_restart = $true
                 queued_restart_blocked = $false
@@ -1847,6 +2832,22 @@ try {
                 -Condition ($failed -ne $ExpectSuccess) `
                 -Message "$Name success result did not match expectation"
 
+            if ($ExpectSuccess) {
+                Assert-Harness `
+                    -Condition (
+                        'S-1-5-80-1-2-3-4-5' -notin
+                            @($script:HarnessState.ipc_service_sids)
+                    ) `
+                    -Message "$Name retained its gateway SID on the shared IPC path"
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.events.IndexOf(
+                            'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                        ) -ge 0
+                    ) `
+                    -Message "$Name did not run managed IPC permission cleanup"
+            }
+
             if ($AlreadyUninstalled) {
                 Assert-Harness `
                     -Condition ($script:HarnessState.transaction_calls -eq 0) `
@@ -1872,6 +2873,26 @@ try {
                     -Condition ([bool]$script:HarnessState.binary_present) `
                     -Message "$Name removed a binary after service drift"
             }
+            elseif ($CrashAt -ceq 'post-binary-delete') {
+                Assert-Harness `
+                    -Condition (
+                        -not [bool]$script:HarnessState.binary_present -and
+                        -not [bool]$script:HarnessState.installed
+                    ) `
+                    -Message "$Name restored a committed, retired installation"
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.rollback_calls -eq 0 -and
+                        $script:HarnessState.complete_calls -eq 1
+                    ) `
+                    -Message "$Name crossed the commit boundary with rollback semantics"
+                Assert-Harness `
+                    -Condition (
+                        $failureMessage -like
+                            '*retry Uninstall to finish cleanup*'
+                    ) `
+                    -Message "$Name did not report retryable committed cleanup: $failureMessage"
+            }
             elseif ($ExpectSuccess) {
                 Assert-Harness `
                     -Condition (
@@ -1890,14 +2911,22 @@ try {
                         $script:HarnessState.service_contract_checks -eq 2
                     ) `
                     -Message "$Name did not verify the full service contract twice"
-                # Spec 005 D1 (PR #766): the full uninstall path now
-                # removes enumerator + guardian + gateway (three
-                # services). Each `Remove-DefenseClawService` mock
-                # invocation increments `removed_services`, so the
-                # expected count is 3 not 2.
+                # The full uninstall path removes enumerator, guardian,
+                # gateway, and credential broker. Each mocked removal is
+                # preceded by its corresponding ownership recheck.
                 Assert-Harness `
-                    -Condition ($script:HarnessState.removed_services -eq 3) `
-                    -Message "$Name did not delete all three exactly rechecked services"
+                    -Condition ($script:HarnessState.removed_services -eq 4) `
+                    -Message "$Name did not delete all four exactly rechecked services"
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.events.IndexOf(
+                            'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                        ) -gt
+                        $script:HarnessState.events.IndexOf(
+                            'remove-service:DefenseClawGateway'
+                        )
+                    ) `
+                    -Message "$Name revoked IPC access before gateway deletion"
                 Assert-Harness `
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.ManagedHooksTeardownJournalPath)) `
@@ -1970,6 +2999,9 @@ try {
                 $completeIndex = $script:HarnessState.events.IndexOf(
                     'complete'
                 )
+                $finalizeIndex = $script:HarnessState.events.IndexOf(
+                    'teardown:finalize'
+                )
                 $commitReceiptIndex = $script:HarnessState.events.IndexOf(
                     'self-receipt-committed'
                 )
@@ -1981,9 +3013,10 @@ try {
                         $verifyIndex -ge 0 -and
                         $stripIndex -gt $verifyIndex -and
                         $prepareReceiptIndex -gt $stripIndex -and
-                        $retiredIndex -gt $prepareReceiptIndex -and
-                        $completeIndex -gt $retiredIndex -and
-                        $commitReceiptIndex -gt $completeIndex -and
+                        $completeIndex -gt $prepareReceiptIndex -and
+                        $finalizeIndex -gt $completeIndex -and
+                        $retiredIndex -gt $finalizeIndex -and
+                        $commitReceiptIndex -gt $retiredIndex -and
                         $helperIndex -gt $commitReceiptIndex
                     ) `
                     -Message "$Name violated reference-clean retirement/commit/helper ordering"
@@ -2002,6 +3035,346 @@ try {
             })
         }
 
+        function Write-HarnessTargetRuntimeExchange {
+            param(
+                [Parameter(Mandatory)]$Value,
+                [Parameter(Mandatory)][string]$Path
+            )
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Path `
+                    -PathType Leaf)) {
+                throw 'target-runtime mock received an unpublished exchange file'
+            }
+            # The general lifecycle harness replaces Set-DefenseClawPathAcl
+            # with an event-only mock. Authenticate and harden the pre-created
+            # exchange before the synthetic CLI truncates it, matching the real
+            # helper; the unchanged production reader then proves that the
+            # write preserved the protected AdminFile contract.
+            & $script:HarnessRealSetPathAcl `
+                -Path $Path `
+                -Kind AdminFile `
+                -GatewayServiceSID $script:AdministratorsSID
+            [IO.File]::WriteAllText(
+                $Path,
+                ($Value |
+                    Microsoft.PowerShell.Utility\ConvertTo-Json `
+                        -Depth 12 `
+                        -Compress),
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+
+        function Get-HarnessTargetRuntimeRequest {
+            param([Parameter(Mandatory)][string]$Path)
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Path `
+                    -PathType Leaf)) {
+                throw 'target-runtime mock request is missing'
+            }
+            return Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $Path `
+                -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        }
+
+        function New-HarnessTargetRuntimeReport {
+            param(
+                [Parameter(Mandatory)]$Plan,
+                [Parameter(Mandatory)]
+                [ValidateSet('stage', 'finalize', 'cleanup')]
+                [string]$Action
+            )
+            $claims = [Collections.Generic.List[object]]::new()
+            foreach ($root in @($Plan.roots)) {
+                $absentBaseline = [string]$root.baseline -ceq 'absent'
+                $state = switch ($Action) {
+                    'stage' {
+                        if ($absentBaseline) { 'staged' } else { 'canonical' }
+                    }
+                    'finalize' { 'canonical' }
+                    'cleanup' {
+                        if ($absentBaseline) { 'absent' } else { 'canonical' }
+                    }
+                }
+                $claim = [ordered]@{
+                    user_home = [string]$root.user_home
+                    data_dir = [string]$root.data_dir
+                    sid = [string]$root.sid
+                    created = [bool]($absentBaseline -and
+                        $Action -cne 'cleanup')
+                    state = $state
+                }
+                if ($state -cne 'absent') {
+                    $claim['identity'] = if ($absentBaseline) {
+                        '00000001:0000000000000001'
+                    }
+                    else {
+                        [string]$root.baseline_identity
+                    }
+                }
+                $claims.Add([pscustomobject]$claim)
+            }
+            return [ordered]@{
+                schema_version = 1
+                action = $Action
+                ok = $true
+                claims = @($claims)
+            }
+        }
+
+        function Invoke-HarnessTargetRuntimeGatewayCommand {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string[]]$Arguments,
+                [switch]$Capture,
+                [switch]$AllowFailure
+            )
+            $isTargetRuntime = [bool](
+                $Arguments.Count -ge 4 -and
+                [string]$Arguments[0] -ceq 'enterprise' -and
+                [string]$Arguments[1] -ceq 'windows' -and
+                [string]$Arguments[2] -ceq 'target-runtime'
+            )
+            if (-not $isTargetRuntime) {
+                return & $script:HarnessRealGatewayCommand @PSBoundParameters
+            }
+            if (-not $Capture -or -not $AllowFailure -or
+                $GatewayServiceName -cne 'DefenseClawGateway') {
+                throw 'target-runtime mock received an unexpected invocation contract'
+            }
+            $action = [string]$Arguments[3]
+            $plan = $null
+            $outputPath = ''
+            switch ($action) {
+                'plan' {
+                    if ($Arguments.Count -ne 8 -or
+                        [string]$Arguments[4] -cne '--manifest' -or
+                        [string]$Arguments[6] -cne '--output') {
+                        throw 'target-runtime plan mock received unexpected arguments'
+                    }
+                    $manifestPath = [IO.Path]::GetFullPath(
+                        [string]$Arguments[5]
+                    )
+                    if (-not [string]::Equals(
+                            $manifestPath,
+                            [IO.Path]::GetFullPath(
+                                [string]$Layout.ManifestPath
+                            ),
+                            [StringComparison]::OrdinalIgnoreCase
+                        )) {
+                        throw 'target-runtime plan mock received the wrong manifest'
+                    }
+                    $script:HarnessState.events.Add(
+                        'target-runtime:plan-enter'
+                    )
+                    if ($script:HarnessState.events.IndexOf(
+                            'enumerator-refresh'
+                        ) -lt 0) {
+                        throw 'target-runtime planning preceded synchronous enumeration'
+                    }
+                    $manifestWasReplaced = [bool](
+                        $script:HarnessState.events.IndexOf(
+                            'manifest-published'
+                        ) -ge 0
+                    )
+                    if ($manifestWasReplaced) {
+                        if (-not [bool]$script:HarnessState.manifest_admin_acl) {
+                            throw 'target-runtime plan preceded the replacement manifest ACL'
+                        }
+                    }
+                    # Validation-only Repair/Upgrade must check the same exact
+                    # contract without using publication as an ACL-healing
+                    # opportunity. This also proves no-source and same-path
+                    # drift fail closed in both PowerShell engines.
+                    $expectedManifestAcl =
+                        New-DefenseClawCanonicalPathAcl `
+                            -IsDirectory $false `
+                            -Kind AdminFile `
+                            -GatewayServiceSID $script:AdministratorsSID
+                    Assert-DefenseClawCanonicalPathAcl `
+                        -Path $manifestPath `
+                        -Expected $expectedManifestAcl
+                    $baseline = if ([bool]$script:HarnessState.installed) {
+                        'canonical'
+                    }
+                    else {
+                        'absent'
+                    }
+                    $root = [ordered]@{
+                        user_home = 'C:\Users\Alice'
+                        data_dir = 'C:\Users\Alice\.defenseclaw'
+                        sid = 'S-1-5-21-111-222-333-1001'
+                        baseline = $baseline
+                        staging_leaf = (
+                            '.defenseclaw.setup-' + ('1' * 32)
+                        )
+                        marker_sid = 'S-1-5-21-1-2-3-4-5-6-7-8'
+                    }
+                    if ($baseline -ceq 'canonical') {
+                        $root['baseline_identity'] =
+                            '00000001:0000000000000001'
+                    }
+                    $plan = [ordered]@{
+                        schema_version = 1
+                        manifest_path = $manifestPath
+                        manifest_sha256 = (
+                            Get-HarnessSHA256 `
+                                -Bytes ([IO.File]::ReadAllBytes($manifestPath))
+                        )
+                        target_count = 1
+                        roots = @([pscustomobject]$root)
+                    }
+                    $script:HarnessState.target_runtime_manifest_sha256 =
+                        [string]$plan.manifest_sha256
+                    $outputPath = [string]$Arguments[7]
+                    $script:HarnessState.events.Add('target-runtime:plan')
+                    Write-HarnessTargetRuntimeExchange `
+                        -Value $plan `
+                        -Path $outputPath
+                }
+                'stage' {
+                    if ($Arguments.Count -ne 8 -or
+                        [string]$Arguments[4] -cne '--request' -or
+                        [string]$Arguments[6] -cne '--output') {
+                        throw 'target-runtime stage mock received unexpected arguments'
+                    }
+                    $requestPath = [string]$Arguments[5]
+                    $plan = Get-HarnessTargetRuntimeRequest `
+                        -Path $requestPath
+                    $snapshot = Get-HarnessTargetRuntimeRequest `
+                        -Path ([string]$script:HarnessState.snapshot_path)
+                    if ($null -eq $snapshot.PSObject.Properties[
+                            'target_runtime_plan'
+                        ] -or
+                        [string]$snapshot.target_runtime_plan_path -cne
+                            $requestPath -or
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $Layout.PendingPath `
+                            -PathType Leaf)) {
+                        throw 'target-runtime mutation preceded durable plan authority'
+                    }
+                    $script:HarnessState.events.Add(
+                        'target-runtime:plan-authority-persisted'
+                    )
+                    $script:HarnessState.events.Add('target-runtime:stage')
+                    $script:HarnessState.target_runtime_cleanup_required =
+                        [bool](@($plan.roots |
+                            Microsoft.PowerShell.Core\Where-Object {
+                                [string]$_.baseline -ceq 'absent'
+                            }).Count -gt 0)
+                    $script:HarnessState.target_runtime_root_live =
+                        [bool]$script:HarnessState.target_runtime_cleanup_required
+                    $outputPath = [string]$Arguments[7]
+                    Write-HarnessTargetRuntimeExchange `
+                        -Value (New-HarnessTargetRuntimeReport `
+                            -Plan $plan `
+                            -Action stage) `
+                        -Path $outputPath
+                }
+                'finalize' {
+                    if ($Arguments.Count -ne 10 -or
+                        [string]$Arguments[4] -cne '--request' -or
+                        [string]$Arguments[6] -cne '--claims' -or
+                        [string]$Arguments[8] -cne '--output') {
+                        throw 'target-runtime finalize mock received unexpected arguments'
+                    }
+                    $plan = Get-HarnessTargetRuntimeRequest `
+                        -Path ([string]$Arguments[5])
+                    $snapshot = Get-HarnessTargetRuntimeRequest `
+                        -Path ([string]$script:HarnessState.snapshot_path)
+                    if ($null -eq $snapshot.PSObject.Properties[
+                            'target_runtime_stage_report'
+                        ] -or
+                        [string]$snapshot.target_runtime_stage_report_path -cne
+                            [string]$Arguments[7]) {
+                        throw 'target-runtime finalize preceded durable stage authority'
+                    }
+                    $script:HarnessState.events.Add(
+                        'target-runtime:stage-authority-persisted'
+                    )
+                    $script:HarnessState.events.Add('target-runtime:finalize')
+                    $outputPath = [string]$Arguments[9]
+                    Write-HarnessTargetRuntimeExchange `
+                        -Value (New-HarnessTargetRuntimeReport `
+                            -Plan $plan `
+                            -Action finalize) `
+                        -Path $outputPath
+                }
+                'cleanup' {
+                    $hasClaims = $Arguments.Count -eq 10
+                    if (($Arguments.Count -notin @(8, 10)) -or
+                        [string]$Arguments[4] -cne '--request' -or
+                        ($hasClaims -and
+                            [string]$Arguments[6] -cne '--claims') -or
+                        [string]$Arguments[$Arguments.Count - 2] -cne
+                            '--output') {
+                        throw 'target-runtime cleanup mock received unexpected arguments'
+                    }
+                    $requestPath = [string]$Arguments[5]
+                    $plan = Get-HarnessTargetRuntimeRequest `
+                        -Path $requestPath
+                    $snapshot = Get-HarnessTargetRuntimeRequest `
+                        -Path ([string]$script:HarnessState.snapshot_path)
+                    if ($null -eq $snapshot.PSObject.Properties[
+                            'target_runtime_plan'
+                        ] -or
+                        [string]$snapshot.target_runtime_plan_path -cne
+                            $requestPath -or
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $Layout.PendingPath `
+                            -PathType Leaf) -or
+                        ([bool]$script:HarnessState.target_runtime_cleanup_required -and
+                            -not [bool]$script:HarnessState.target_runtime_root_live)) {
+                        throw 'target-runtime cleanup lost its authenticated authority'
+                    }
+                    if ($hasClaims) {
+                        $claimsPath = [string]$Arguments[7]
+                        if ($claimsPath -cne
+                                [string]$snapshot.target_runtime_final_report_path -and
+                            $claimsPath -cne
+                                [string]$snapshot.target_runtime_stage_report_path) {
+                            throw 'target-runtime cleanup received unjournaled claims'
+                        }
+                    }
+                    $script:HarnessState.events.Add('target-runtime:cleanup')
+                    $outputPath = [string]$Arguments[$Arguments.Count - 1]
+                    Write-HarnessTargetRuntimeExchange `
+                        -Value (New-HarnessTargetRuntimeReport `
+                            -Plan $plan `
+                            -Action cleanup) `
+                        -Path $outputPath
+                    $script:HarnessState.target_runtime_root_live = $false
+                }
+                default {
+                    throw "target-runtime mock rejected action: $action"
+                }
+            }
+            return [ordered]@{
+                exit_code = 0
+                output = @()
+            }
+        }
+
+        function Assert-HarnessTargetRuntimeCleanupScopeExclusive {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string]$GuardianServiceName
+            )
+            $null = $GatewayServiceName
+            $null = $GuardianServiceName
+            if ([bool]$script:HarnessState.gateway_running -or
+                [bool]$script:HarnessState.guardian_running -or
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.PendingPath `
+                    -PathType Leaf)) {
+                throw 'target-runtime cleanup scope was not quiesced and journaled'
+            }
+            $script:HarnessState.events.Add(
+                'target-runtime:exclusive-cleanup'
+            )
+        }
+
         function Invoke-HarnessFreshInstallServiceBootstrapSequence {
             $root = New-HarnessCaseRoot `
                 -Parent $TestRoot `
@@ -2018,12 +3391,16 @@ targets:
     enabled: true
 '@
             $sources = @{
+                broker = 'fresh-broker'
                 gateway = 'fresh-gateway'
                 hook = 'fresh-hook'
                 installer = 'fresh-installer'
                 module = 'fresh-module'
                 config = 'listen_addr: 127.0.0.1:18970'
                 manifest = $manifest
+                provider_library = [pscustomobject]@{
+                    path = $layout.ProviderLibraryPath
+                }
             }
             $script:HarnessState = @{
                 operation = 'install'
@@ -2054,25 +3431,33 @@ targets:
                 snapshot_path = ''
                 track_fresh_install_services = $true
                 fresh_services_existed = $false
-                fail_fresh_install_capture = $true
+                fail_fresh_install_enumeration = $true
+                fail_fresh_install_capture = $false
                 service_start_modes = @{
                     DefenseClawGateway = 0
+                    DefenseClawCMIDBroker = 0
                     DefenseClawHookGuardian = 0
+                    DefenseClawHookEnumerator = 0
                 }
                 service_exists = @{
                     DefenseClawGateway = $false
+                    DefenseClawCMIDBroker = $false
                     DefenseClawHookGuardian = $false
+                    DefenseClawHookEnumerator = $false
                 }
+                ipc_service_sids = @()
                 guardian_fresh = $false
                 queued_gateway_restart = $false
                 queued_restart_blocked = $true
                 gateway_started_before_guardian = $false
                 barrier_required = $true
                 barrier_complete = $false
+                manifest_admin_acl = $false
             }
 
-            for ($attempt = 1; $attempt -le 2; $attempt++) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
                 $script:HarnessState.events.Clear()
+                $script:HarnessState.manifest_admin_acl = $false
                 $failure = ''
                 try {
                     [void](Invoke-DefenseClawInstallLikeLifecycle `
@@ -2090,8 +3475,48 @@ targets:
                 $transaction = $script:HarnessState.events.IndexOf(
                     'transaction'
                 )
+                $manifestPublished = $script:HarnessState.events.IndexOf(
+                    'manifest-published'
+                )
+                $manifestAcl = $script:HarnessState.events.IndexOf(
+                    'manifest-admin-acl'
+                )
+                $enumeratorRefresh = $script:HarnessState.events.IndexOf(
+                    'enumerator-refresh'
+                )
+                $enumeratorRefreshEnter =
+                    $script:HarnessState.events.IndexOf(
+                        'enumerator-refresh-enter'
+                    )
+                $targetPlan = $script:HarnessState.events.IndexOf(
+                    'target-runtime:plan'
+                )
+                $targetPlanAuthority = $script:HarnessState.events.IndexOf(
+                    'target-runtime:plan-authority-persisted'
+                )
+                $targetStage = $script:HarnessState.events.IndexOf(
+                    'target-runtime:stage'
+                )
+                $targetFinalize = $script:HarnessState.events.IndexOf(
+                    'target-runtime:finalize'
+                )
                 $services = $script:HarnessState.events.IndexOf(
                     'managed-services'
+                )
+                $managedServicesCount = @(
+                    $script:HarnessState.events |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]$_ -ceq 'managed-services'
+                        }
+                ).Count
+                $serviceSIDBound = $script:HarnessState.events.IndexOf(
+                    'install-service-sid-bound'
+                )
+                $managedIPC = $script:HarnessState.events.IndexOf(
+                    'managed-ipc-directory'
+                )
+                $retainedRuntimeAcls = $script:HarnessState.events.IndexOf(
+                    'retained-runtime-acls'
                 )
                 $coreAcls = $script:HarnessState.events.IndexOf(
                     'managed-core-acls'
@@ -2099,45 +3524,215 @@ targets:
                 $capture = $script:HarnessState.events.IndexOf(
                     'lifecycle-snapshot:capture'
                 )
+                $preservedStateAcls = $script:HarnessState.events.IndexOf(
+                    'preserved-state-acls:S-1-5-80-1-2-3-4-5'
+                )
+                $preservedStateAclCount = @(
+                    $script:HarnessState.events |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            [string]$_ -ceq
+                                'preserved-state-acls:S-1-5-80-1-2-3-4-5'
+                        }
+                ).Count
                 $eventTrace = [string]::Join(
                     ', ',
                     @($script:HarnessState.events)
                 )
+                $preEnumerationOrder = [bool](
+                    $transaction -ge 0 -and
+                    $manifestPublished -gt $transaction -and
+                    $manifestAcl -gt $manifestPublished -and
+                    $services -gt $manifestAcl -and
+                    $managedServicesCount -eq 1 -and
+                    $serviceSIDBound -gt $services -and
+                    $managedIPC -gt $serviceSIDBound -and
+                    $retainedRuntimeAcls -gt $managedIPC -and
+                    $coreAcls -gt $retainedRuntimeAcls -and
+                    $enumeratorRefreshEnter -gt $coreAcls
+                )
+                $postEnumerationOrder = [bool](
+                    $enumeratorRefresh -gt $enumeratorRefreshEnter -and
+                    $targetPlan -gt $enumeratorRefresh -and
+                    $targetPlanAuthority -gt $targetPlan -and
+                    $targetStage -gt $targetPlanAuthority -and
+                    $targetFinalize -gt $targetStage -and
+                    $capture -gt $targetFinalize
+                )
                 Assert-Harness `
                     -Condition (
-                        $transaction -ge 0 -and
-                        $services -gt $transaction -and
-                        $coreAcls -gt $services -and
-                        $capture -gt $coreAcls
+                        $preEnumerationOrder -and
+                        ($attempt -eq 1 -or $postEnumerationOrder)
                     ) `
                     -Message (
                         "fresh install attempt $attempt violated " +
-                        'transaction/service/ACL/snapshot ordering ' +
+                        'transaction/target/service/IPC/ACL/snapshot ordering ' +
                         "(transaction=$transaction services=$services " +
-                        "core_acls=$coreAcls capture=$capture; " +
+                        "manifest_published=$manifestPublished " +
+                        "manifest_acl=$manifestAcl " +
+                        "enumerator_refresh_enter=$enumeratorRefreshEnter " +
+                        "enumerator_refresh=$enumeratorRefresh " +
+                        "target_plan=$targetPlan " +
+                        "target_authority=$targetPlanAuthority " +
+                        "target_stage=$targetStage " +
+                        "target_finalize=$targetFinalize " +
+                        "service_sid_bound=$serviceSIDBound " +
+                        "managed_ipc=$managedIPC core_acls=$coreAcls " +
+                        "retained_runtime_acls=$retainedRuntimeAcls " +
+                        "managed_services_count=$managedServicesCount " +
+                        "capture=$capture; " +
                         "failure=$failure; events=[$eventTrace])"
                     )
 
                 if ($attempt -eq 1) {
                     Assert-Harness `
+                        -Condition (
+                            $failure -match
+                                'injected fresh-install enumeration failure' -and
+                            $enumeratorRefresh -lt 0 -and
+                            $targetPlan -lt 0 -and
+                            $capture -lt 0
+                        ) `
+                        -Message (
+                            'fresh install enumeration fault crossed the ' +
+                            "target-runtime boundary: $failure"
+                        )
+                    $ipcRevoke = $script:HarnessState.events.IndexOf(
+                        'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                    )
+                    $gatewayDelete = $script:HarnessState.events.IndexOf(
+                        'remove-service:DefenseClawGateway'
+                    )
+                    $finalServiceDelete = $script:HarnessState.events.IndexOf(
+                        'remove-service:DefenseClawHookEnumerator'
+                    )
+                    $transactionComplete = $script:HarnessState.events.IndexOf(
+                        'complete'
+                    )
+                    Assert-Harness `
+                        -Condition (
+                            $ipcRevoke -gt $enumeratorRefreshEnter -and
+                            $gatewayDelete -gt $ipcRevoke -and
+                            $finalServiceDelete -gt $gatewayDelete -and
+                            $preservedStateAclCount -eq 1 -and
+                            $preservedStateAcls -gt $finalServiceDelete -and
+                            $transactionComplete -gt $preservedStateAcls
+                        ) `
+                        -Message (
+                            'fresh enumeration rollback did not revoke IPC ' +
+                            'and restore retained-state ACLs before ' +
+                            'authority retirement'
+                        )
+                    foreach ($serviceName in @(
+                        'DefenseClawGateway',
+                        'DefenseClawCMIDBroker',
+                        'DefenseClawHookGuardian',
+                        'DefenseClawHookEnumerator'
+                    )) {
+                        Assert-Harness `
+                            -Condition (
+                                -not [bool]$script:HarnessState.service_exists[
+                                    $serviceName
+                                ] -and
+                                $script:HarnessState.service_start_modes[
+                                    $serviceName
+                                ] -eq 0
+                            ) `
+                            -Message (
+                                'fresh enumeration rollback retained ' +
+                                "transaction-created service $serviceName"
+                            )
+                    }
+                    $script:HarnessState.fail_fresh_install_enumeration =
+                        $false
+                    $script:HarnessState.fail_fresh_install_capture = $true
+                }
+                elseif ($attempt -eq 2) {
+                    Assert-Harness `
                         -Condition ($failure -match 'injected fresh-install snapshot failure') `
                         -Message "fresh install fault lost its causal failure: $failure"
+                    $exclusiveCleanup = $script:HarnessState.events.IndexOf(
+                        'target-runtime:exclusive-cleanup'
+                    )
+                    $targetCleanup = $script:HarnessState.events.IndexOf(
+                        'target-runtime:cleanup'
+                    )
+                    $cleanupAuthority = $script:HarnessState.events.IndexOf(
+                        'target-runtime:cleanup-authority-persisted'
+                    )
+                    $ipcRevoke = $script:HarnessState.events.IndexOf(
+                        'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                    )
+                    $gatewayDelete = $script:HarnessState.events.IndexOf(
+                        'remove-service:DefenseClawGateway'
+                    )
+                    $finalServiceDelete = $script:HarnessState.events.IndexOf(
+                        'remove-service:DefenseClawHookEnumerator'
+                    )
+                    $authorityRetired = $script:HarnessState.events.IndexOf(
+                        'target-runtime:rollback-authority-retired'
+                    )
+                    $transactionComplete = $script:HarnessState.events.IndexOf(
+                        'complete'
+                    )
+                    Assert-Harness `
+                        -Condition (
+                            $exclusiveCleanup -gt $capture -and
+                            $targetCleanup -gt $exclusiveCleanup -and
+                            $cleanupAuthority -gt $targetCleanup -and
+                            $ipcRevoke -gt $cleanupAuthority -and
+                            $gatewayDelete -gt $ipcRevoke -and
+                            $finalServiceDelete -gt $gatewayDelete -and
+                            $preservedStateAclCount -eq 1 -and
+                            $preservedStateAcls -gt $finalServiceDelete -and
+                            $authorityRetired -gt $preservedStateAcls -and
+                            $transactionComplete -gt $authorityRetired
+                        ) `
+                        -Message (
+                            'fresh install rollback retired authenticated ' +
+                            'authority before exact target/IPC cleanup'
+                        )
                     Assert-Harness `
                         -Condition (
                             -not [bool]$script:HarnessState.service_exists[
                                 'DefenseClawGateway'
                             ] -and
                             -not [bool]$script:HarnessState.service_exists[
+                                'DefenseClawCMIDBroker'
+                            ] -and
+                            -not [bool]$script:HarnessState.service_exists[
                                 'DefenseClawHookGuardian'
+                            ] -and
+                            -not [bool]$script:HarnessState.service_exists[
+                                'DefenseClawHookEnumerator'
                             ] -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawGateway'
                             ] -eq 0 -and
                             $script:HarnessState.service_start_modes[
+                                'DefenseClawCMIDBroker'
+                            ] -eq 0 -and
+                            $script:HarnessState.service_start_modes[
                                 'DefenseClawHookGuardian'
+                            ] -eq 0 -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawHookEnumerator'
                             ] -eq 0
                         ) `
                         -Message 'fresh install rollback retained a transaction-created service'
+                    Assert-Harness `
+                        -Condition (
+                            'S-1-5-80-1-2-3-4-5' -notin
+                                @($script:HarnessState.ipc_service_sids) -and
+                            $script:HarnessState.events.IndexOf(
+                                'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                            ) -ge 0 -and
+                            $script:HarnessState.events.IndexOf(
+                                'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                            ) -lt $script:HarnessState.events.IndexOf(
+                                'remove-service:DefenseClawGateway'
+                            )
+                        ) `
+                        -Message 'fresh install rollback retained its shared IPC gateway grant'
                     Assert-Harness `
                         -Condition (
                             -not (Microsoft.PowerShell.Management\Test-Path `
@@ -2150,8 +3745,24 @@ targets:
                 }
                 else {
                     Assert-Harness `
-                        -Condition ([string]::IsNullOrWhiteSpace($failure)) `
+                        -Condition (
+                            [string]::IsNullOrWhiteSpace($failure) -and
+                            $preservedStateAcls -lt 0 -and
+                            $preservedStateAclCount -eq 0
+                        ) `
                         -Message "fresh install retry failed: $failure"
+                    $receiptCommit = $script:HarnessState.events.IndexOf(
+                        'install-receipt:committed'
+                    )
+                    $completeEvent = $script:HarnessState.events.IndexOf(
+                        'complete'
+                    )
+                    Assert-Harness `
+                        -Condition (
+                            $receiptCommit -gt $capture -and
+                            $completeEvent -gt $receiptCommit
+                        ) `
+                        -Message 'fresh install did not commit and retire its receipt after activation'
                     Assert-Harness `
                         -Condition (
                             [bool]$script:HarnessState.installed -and
@@ -2159,26 +3770,37 @@ targets:
                                 'DefenseClawGateway'
                             ] -and
                             [bool]$script:HarnessState.service_exists[
+                                'DefenseClawCMIDBroker'
+                            ] -and
+                            [bool]$script:HarnessState.service_exists[
                                 'DefenseClawHookGuardian'
+                            ] -and
+                            [bool]$script:HarnessState.service_exists[
+                                'DefenseClawHookEnumerator'
                             ] -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawGateway'
                             ] -eq 4 -and
                             $script:HarnessState.service_start_modes[
+                                'DefenseClawCMIDBroker'
+                            ] -eq 4 -and
+                            $script:HarnessState.service_start_modes[
                                 'DefenseClawHookGuardian'
+                            ] -eq 4 -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawHookEnumerator'
                             ] -eq 4
                         ) `
-                        -Message 'fresh Install -NoStart retry did not leave both services disabled'
+                        -Message 'fresh Install -NoStart retry did not leave the broker-backed service set disabled'
                 }
             }
-            # Spec 005 D1 (PR #766): rollback removes all three managed
-            # services (Set-DefenseClawManagedServices creates the
-            # enumerator alongside gateway + guardian).
+            # Rollback removes all four transaction-created services:
+            # broker, gateway, guardian, and enumerator.
             Assert-Harness `
                 -Condition (
-                    $script:HarnessState.transaction_calls -eq 2 -and
-                    $script:HarnessState.restore_calls -eq 1 -and
-                    $script:HarnessState.removed_services -eq 3
+                    $script:HarnessState.transaction_calls -eq 3 -and
+                    $script:HarnessState.restore_calls -eq 2 -and
+                    $script:HarnessState.removed_services -eq 8
                 ) `
                 -Message 'fresh install fault/retry did not use exact transactional rollback'
             $uninstallResults.Add([pscustomobject]@{
@@ -2195,10 +3817,33 @@ targets:
                 -Parent $TestRoot `
                 -Label 'direct-reinstall-after-committed-crash'
             $layout = New-HarnessLayout -Root $root
+            [IO.File]::WriteAllText(
+                $layout.MetadataPath,
+                '{"schema_version":1,"installed":false}',
+                [Text.UTF8Encoding]::new($false)
+            )
+            $legacyManifest = @'
+version: 1
+targets:
+  - connector: claudecode
+    sid: S-1-5-21-111-222-333-1001
+    user_home: C:\Users\Alice
+    data_dir: C:\Users\Alice\.defenseclaw
+    agent_version: 2.1.152
+    enabled: true
+'@
+            [IO.File]::WriteAllText(
+                $layout.ManifestPath,
+                $legacyManifest,
+                [Text.UTF8Encoding]::new($false)
+            )
             $oldJournal = [ordered]@{
-                schema_version = 1
-                phase = 'prepared'
-                manifest_fingerprint = ('a' * 64)
+                schema_version = 4
+                phase = 'finalized'
+                manifest_path = [string]$layout.ManifestPath
+                manifest_fingerprint = 'sha256:' + ('a' * 64)
+                hook_binary = [string]$layout.HookPath
+                gateway_addr = 'npipe://defenseclaw'
                 gateway_service_name = 'DEFENSECLAWGATEWAY'
                 targets = @(
                     [ordered]@{
@@ -2208,6 +3853,11 @@ targets:
                         agent_version = '2.1.152'
                     }
                 )
+                claude_target_sids = @('S-1-5-21-111-222-333-1001')
+                claude = [ordered]@{}
+                cursor_targets = @()
+                cursor = [ordered]@{}
+                selector_targets = @()
             }
             [IO.File]::WriteAllText(
                 $layout.ManagedHooksTeardownJournalPath,
@@ -2226,6 +3876,7 @@ targets:
                 active_references = $false
                 binary_present = $false
                 installed = $false
+                managed_hooks_activation = $null
                 guardian_running = $false
                 gateway_running = $false
                 services_running = $false
@@ -2243,11 +3894,19 @@ targets:
                 removed_services = 0
                 purged_state = $false
                 install_saw_retired_journal = $false
+                require_inactive_tombstone_adoption = $true
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 2
+                    DefenseClawCMIDBroker = 2
                     DefenseClawHookGuardian = 2
                 }
+                service_exists = @{
+                    DefenseClawGateway = $false
+                    DefenseClawCMIDBroker = $false
+                    DefenseClawHookGuardian = $false
+                }
+                ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
                 guardian_fresh = $false
                 queued_gateway_restart = $true
                 queued_restart_blocked = $false
@@ -2266,12 +3925,16 @@ targets:
     enabled: true
 '@
             $sources = @{
+                broker = 'new-broker'
                 gateway = 'new-gateway'
                 hook = 'new-hook'
                 installer = 'new-installer'
                 module = 'new-module'
                 config = 'listen_addr: 127.0.0.1:18970'
                 manifest = $newManifest
+                provider_library = [pscustomobject]@{
+                    path = $layout.ProviderLibraryPath
+                }
             }
             [void](Invoke-DefenseClawInstallLikeLifecycle `
                 -Action 'Install' `
@@ -2279,9 +3942,25 @@ targets:
                 -Sources $sources `
                 -GatewayServiceName 'DefenseClawGateway' `
                 -GuardianServiceName 'DefenseClawHookGuardian')
+            $reinstalledMetadata =
+                Microsoft.PowerShell.Management\Get-Content `
+                    -LiteralPath $layout.MetadataPath `
+                    -Raw |
+                    Microsoft.PowerShell.Utility\ConvertFrom-Json
             Assert-Harness `
                 -Condition ([bool]$script:HarnessState.install_saw_retired_journal) `
                 -Message 'direct reinstall did not retire changed-identity journal before transaction'
+            Assert-Harness `
+                -Condition (
+                    $script:HarnessState.events.IndexOf(
+                        'codex-requirements:inspect:metadata-absent'
+                    ) -ge 0 -and
+                    (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $layout.MetadataPath `
+                        -PathType Leaf) -and
+                    [bool]$reinstalledMetadata.installed
+                ) `
+                -Message 'direct reinstall did not transactionally replace the inactive tombstone with active metadata'
             Assert-Harness `
                 -Condition (
                     [bool]$script:HarnessState.queued_restart_blocked -and
@@ -2329,6 +4008,12 @@ targets:
                 -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $layout.ManagedHooksTeardownJournalPath)) `
                 -Message 'second uninstall retained a prepared journal'
+            Assert-Harness `
+                -Condition (
+                    'S-1-5-80-1-2-3-4-5' -notin
+                        @($script:HarnessState.ipc_service_sids)
+                ) `
+                -Message 'second uninstall retained its shared IPC service SID'
             $uninstallResults.Add([pscustomobject]@{
                 name = 'crash-direct-reinstall-changed-identity-second-uninstall'
                 failed = $false
@@ -2358,12 +4043,16 @@ targets:
     enabled: true
 '@
             $sources = @{
+                broker = 'activation-broker'
                 gateway = 'activation-gateway'
                 hook = 'activation-hook'
                 installer = 'activation-installer'
                 module = 'activation-module'
                 config = 'listen_addr: 127.0.0.1:18970'
                 manifest = $manifest
+                provider_library = [pscustomobject]@{
+                    path = $layout.ProviderLibraryPath
+                }
             }
             foreach ($entry in @(
                 @($layout.ConfigPath, 'listen_addr: 127.0.0.1:18969'),
@@ -2383,6 +4072,17 @@ targets:
                     [string]$entry[1],
                     [Text.UTF8Encoding]::new($false)
                 )
+            }
+            $setManifestAclDrift = {
+                $driftedManifestAcl =
+                    [Security.AccessControl.FileSecurity]::new()
+                $driftedManifestAcl.SetSecurityDescriptorSddlForm(
+                    'O:BAG:BAD:(A;;FA;;;SY)(A;;FA;;;BA)',
+                    [Security.AccessControl.AccessControlSections]::All
+                )
+                Microsoft.PowerShell.Security\Set-Acl `
+                    -LiteralPath $layout.ManifestPath `
+                    -AclObject $driftedManifestAcl
             }
             $script:HarnessState = @{
                 operation = 'install'
@@ -2413,6 +4113,7 @@ targets:
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 4
+                    DefenseClawCMIDBroker = 4
                     DefenseClawHookGuardian = 4
                 }
                 guardian_fresh = $false
@@ -2422,15 +4123,115 @@ targets:
                 gateway_started_before_guardian = $false
                 barrier_required = $true
                 barrier_complete = $false
+                manifest_admin_acl = $false
             }
-            for ($attempt = 1; $attempt -le 2; $attempt++) {
+
+            $samePathSources = @{}
+            $noManifestSources = @{}
+            foreach ($name in @($sources.Keys)) {
+                $samePathSources[$name] = $sources[$name]
+                if ($name -cne 'manifest') {
+                    $noManifestSources[$name] = $sources[$name]
+                }
+            }
+            $samePathSources['manifest'] = @{
+                path = $layout.ManifestPath
+            }
+            $validationOnlyManifestDriftRejected = @{}
+            foreach ($validationCase in @(
+                [pscustomobject]@{
+                    name = 'same-path'
+                    action = 'Repair'
+                    sources = $samePathSources
+                },
+                [pscustomobject]@{
+                    name = 'no-source'
+                    action = 'Upgrade'
+                    sources = $noManifestSources
+                }
+            )) {
+                & $setManifestAclDrift
                 $script:HarnessState.events.Clear()
                 $script:HarnessState.barrier_complete = $false
                 $script:HarnessState.active_references = $false
+                $script:HarnessState.manifest_admin_acl = $false
+                $validationFailure = ''
+                try {
+                    [void](Invoke-DefenseClawInstallLikeLifecycle `
+                        -Action ([string]$validationCase.action) `
+                        -Layout $layout `
+                        -Sources ([hashtable]$validationCase.sources) `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -GuardianServiceName 'DefenseClawHookGuardian')
+                }
+                catch {
+                    $validationFailure = [string]$_.Exception.Message
+                }
+                Assert-Harness `
+                    -Condition (
+                        $validationFailure -match
+                            'managed DACL is not protected'
+                    ) `
+                    -Message (
+                        [string]$validationCase.action + ' ' +
+                        [string]$validationCase.name +
+                        ' manifest drift was not rejected exactly: ' +
+                        $validationFailure
+                    )
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.events.IndexOf(
+                            'lifecycle-snapshot:capture'
+                        ) -ge 0 -and
+                        $script:HarnessState.events.IndexOf(
+                            'manifest-published'
+                        ) -lt 0 -and
+                        $script:HarnessState.events.IndexOf(
+                            'manifest-admin-acl'
+                        ) -lt 0 -and
+                        $script:HarnessState.events.IndexOf(
+                            'target-runtime:plan-enter'
+                        ) -lt 0 -and
+                        $script:HarnessState.events.IndexOf(
+                            'target-runtime:plan'
+                        ) -lt 0
+                    ) `
+                    -Message (
+                        [string]$validationCase.action + ' ' +
+                        [string]$validationCase.name +
+                        ' manifest drift crossed the validation-only boundary'
+                    )
+                Assert-Harness `
+                    -Condition (
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $layout.ManagedHooksLifecycleJournalPath) -and
+                        -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $layout.PendingPath)
+                    ) `
+                    -Message (
+                        [string]$validationCase.action + ' ' +
+                        [string]$validationCase.name +
+                        ' manifest rejection retained recovery residue'
+                    )
+                $validationOnlyManifestDriftRejected[
+                    [string]$validationCase.name
+                ] = $true
+            }
+            for ($attempt = 1; $attempt -le 2; $attempt++) {
+                $installLikeAction = if ($attempt -eq 1) {
+                    'Repair'
+                }
+                else {
+                    'Upgrade'
+                }
+                $script:HarnessState.events.Clear()
+                $script:HarnessState.barrier_complete = $false
+                $script:HarnessState.active_references = $false
+                $script:HarnessState.manifest_admin_acl = $false
                 $failure = ''
                 try {
                     [void](Invoke-DefenseClawInstallLikeLifecycle `
-                        -Action 'Repair' `
+                        -Action $installLikeAction `
                         -Layout $layout `
                         -Sources $sources `
                         -GatewayServiceName 'DefenseClawGateway' `
@@ -2441,21 +4242,41 @@ targets:
                 }
                 Assert-Harness `
                     -Condition ($failure -match 'injected stale guardian generation') `
-                    -Message "first activation attempt $attempt lost its causal failure: $failure"
+                    -Message "$installLikeAction activation attempt lost its causal failure: $failure"
                 Assert-Harness `
                     -Condition (-not [bool]$script:HarnessState.active_references) `
-                    -Message "first activation attempt $attempt retained partial machine enrollment"
+                    -Message "$installLikeAction activation attempt retained partial machine enrollment"
                 Assert-Harness `
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.ManagedHooksLifecycleJournalPath)) `
-                    -Message "first activation attempt $attempt retained its completed lifecycle journal"
+                    -Message "$installLikeAction activation attempt retained its completed lifecycle journal"
                 Assert-Harness `
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.PendingPath)) `
-                    -Message "first activation attempt $attempt retained pending recovery after exact rollback"
+                    -Message "$installLikeAction activation attempt retained pending recovery after exact rollback"
+                $manifestPublished = $script:HarnessState.events.IndexOf(
+                    'manifest-published'
+                )
+                $manifestAcl = $script:HarnessState.events.IndexOf(
+                    'manifest-admin-acl'
+                )
+                $targetPlan = $script:HarnessState.events.IndexOf(
+                    'target-runtime:plan'
+                )
                 $capture = $script:HarnessState.events.IndexOf(
                     'lifecycle-snapshot:capture'
                 )
+                Assert-Harness `
+                    -Condition (
+                        $capture -ge 0 -and
+                        $manifestPublished -gt $capture -and
+                        $manifestAcl -gt $manifestPublished -and
+                        $targetPlan -gt $manifestAcl
+                    ) `
+                    -Message (
+                        "$installLikeAction validated its replacement " +
+                        'manifest before the exact AdminFile ACL was applied'
+                    )
                 $restore = $script:HarnessState.events.IndexOf(
                     'lifecycle-snapshot:restore'
                 )
@@ -2470,7 +4291,7 @@ targets:
                         $retire -gt $restore -and
                         $complete -gt $retire
                     ) `
-                    -Message "first activation attempt $attempt violated capture/restore/retire ordering"
+                    -Message "$installLikeAction activation attempt violated capture/restore/retire ordering"
             }
             $uninstallResults.Add([pscustomobject]@{
                 name = 'repeated-first-activation-failure-exact-rollback'
@@ -2480,14 +4301,614 @@ targets:
                     $script:HarnessState.service_contract_checks
                 )
                 no_surviving_reference_before_delete = $true
+                same_path_manifest_drift_rejected = [bool](
+                    $validationOnlyManifestDriftRejected['same-path']
+                )
+                no_source_manifest_drift_rejected = [bool](
+                    $validationOnlyManifestDriftRejected['no-source']
+                )
             })
+        }
+
+        function Invoke-HarnessLegacyCapturedJournalUpgradeSequence {
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label 'legacy-captured-journal-upgrade'
+            $layout = New-HarnessLayout -Root $root
+            $manifest = @'
+version: 1
+targets:
+  - connector: claudecode
+    sid: S-1-5-21-111-222-333-1001
+    user_home: C:\Users\Alice
+    data_dir: C:\Users\Alice\.defenseclaw
+    agent_version: 2.9.999
+    enabled: true
+'@
+            foreach ($entry in @(
+                @($layout.GatewayPath, 'legacy-gateway'),
+                @($layout.BrokerPath, 'legacy-broker'),
+                @($layout.HookPath, 'legacy-hook'),
+                @($layout.InstallerPath, 'legacy-installer'),
+                @($layout.ModulePath, 'legacy-module'),
+                @($layout.ConfigPath, 'listen_addr: 127.0.0.1:18969'),
+                @($layout.ManifestPath, $manifest),
+                @($layout.ProviderLibraryPath, 'provider-fixture'),
+                @($layout.MetadataPath, '{"installed":true}')
+            )) {
+                $parent = [IO.Path]::GetDirectoryName([string]$entry[0])
+                if (-not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $parent `
+                        -PathType Container)) {
+                    Microsoft.PowerShell.Management\New-Item `
+                        -ItemType Directory `
+                        -Path $parent `
+                        -Force | Microsoft.PowerShell.Core\Out-Null
+                }
+                [IO.File]::WriteAllText(
+                    [string]$entry[0],
+                    [string]$entry[1],
+                    [Text.UTF8Encoding]::new($false)
+                )
+            }
+            [IO.File]::WriteAllText(
+                $layout.ManagedHooksLifecycleJournalPath,
+                (
+                    '{"schema_version":3,"phase":"captured",' +
+                    '"legacy_fixture":true}'
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            & $script:HarnessRealSetPathAcl `
+                -Path $layout.ManifestPath `
+                -Kind AdminFile `
+                -GatewayServiceSID $script:AdministratorsSID
+
+            $replacementGateway =
+                Microsoft.PowerShell.Management\Join-Path `
+                    $root `
+                    'replacement-gateway.exe'
+            [IO.File]::WriteAllText(
+                $replacementGateway,
+                'fixed-gateway-with-retire-committed',
+                [Text.UTF8Encoding]::new($false)
+            )
+            $gatewaySource = @{
+                path = $replacementGateway
+                label = 'gateway executable'
+                authenticode = $false
+                allow_unsigned = $true
+                sha256 = (
+                    Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $replacementGateway `
+                        -Algorithm SHA256
+                ).Hash
+            }
+            $sources = @{
+                broker = 'replacement-broker'
+                gateway = $gatewaySource
+                hook = 'replacement-hook'
+                installer = 'replacement-installer'
+                module = 'replacement-module'
+                config = 'listen_addr: 127.0.0.1:18970'
+                manifest = $manifest
+                provider_library = [pscustomobject]@{
+                    path = $layout.ProviderLibraryPath
+                }
+            }
+            $script:HarnessState = @{
+                operation = 'install'
+                crash_at = ''
+                events = [Collections.Generic.List[string]]::new()
+                layout = $layout
+                active_references = $false
+                lifecycle_preimage_active = $false
+                binary_present = $true
+                installed = $true
+                legacy_activation_missing = $true
+                legacy_activation_state = 'never_activated'
+                legacy_lifecycle_recovery = $true
+                guardian_running = $false
+                gateway_running = $false
+                services_running = $false
+                services_were_running = $false
+                reheal_observed = $false
+                prepare_while_guardian_running = $false
+                transaction_calls = 0
+                prepare_calls = 0
+                verify_calls = 0
+                rollback_calls = 0
+                restore_calls = 0
+                complete_calls = 0
+                service_contract_checks = 0
+                owned_checks = 0
+                removed_services = 0
+                purged_state = $false
+                install_saw_retired_journal = $false
+                snapshot_path = ''
+                service_start_modes = @{
+                    DefenseClawGateway = 4
+                    DefenseClawCMIDBroker = 4
+                    DefenseClawHookGuardian = 4
+                    DefenseClawHookEnumerator = 4
+                }
+                service_exists = @{
+                    DefenseClawGateway = $true
+                    DefenseClawCMIDBroker = $true
+                    DefenseClawHookGuardian = $true
+                    DefenseClawHookEnumerator = $true
+                }
+                ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
+                guardian_fresh = $false
+                queued_gateway_restart = $false
+                queued_restart_blocked = $true
+                gateway_started_before_guardian = $false
+                barrier_required = $true
+                barrier_complete = $false
+                manifest_admin_acl = $false
+            }
+
+            $result = Invoke-DefenseClawInstallLikeLifecycle `
+                -Action Upgrade `
+                -Layout $layout `
+                -Sources $sources `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian' `
+                -NoStart
+            $recorded = $script:HarnessState.events.IndexOf(
+                'lifecycle-recovery-binding-recorded'
+            )
+            $adoption = $script:HarnessState.events.IndexOf(
+                'lifecycle-snapshot:retire-committed'
+            )
+            $adopted = $script:HarnessState.events.IndexOf(
+                'lifecycle-recovery-binding-adopted'
+            )
+            $capture = $script:HarnessState.events.IndexOf(
+                'lifecycle-snapshot:capture'
+            )
+            $classification = $script:HarnessState.events.LastIndexOf(
+                'lifecycle-snapshot:classify-activation'
+            )
+            $complete = $script:HarnessState.events.IndexOf('complete')
+            $retire = $script:HarnessState.events.LastIndexOf(
+                'lifecycle-snapshot:retire'
+            )
+            Assert-Harness `
+                -Condition (
+                    [bool]$result.ok -and
+                    $recorded -ge 0 -and
+                    $adoption -gt $recorded -and
+                    $adopted -gt $adoption -and
+                    $capture -gt $adopted -and
+                    $classification -gt $capture -and
+                    $complete -gt $classification -and
+                    $retire -gt $complete
+                ) `
+                -Message (
+                    'legacy captured-journal Upgrade violated ' +
+                    'binding/adoption/capture/classification/commit ordering'
+                )
+            Assert-Harness `
+                -Condition (
+                    -not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath `
+                            $layout.ManagedHooksLifecycleJournalPath) -and
+                    [string]$script:HarnessState.managed_hooks_activation.state `
+                        -ceq 'never_activated'
+                ) `
+                -Message 'legacy captured-journal Upgrade did not commit exact no-start activation state'
+            $uninstallResults.Add([pscustomobject]@{
+                name = 'legacy-schema3-captured-journal-upgrade'
+                failed = $false
+                rollback = $script:HarnessState.restore_calls
+                service_contract_checks = (
+                    $script:HarnessState.service_contract_checks
+                )
+                no_surviving_reference_before_delete = $true
+            })
+
+            # A schema-4 journal can be the valid post-commit residue of this
+            # installed helper. It must take the direct retirement lane before
+            # the next transaction, never the schema-3 replacement/adoption
+            # lane above.
+            [IO.File]::WriteAllText(
+                $layout.ManagedHooksLifecycleJournalPath,
+                (
+                    '{"schema_version":4,"phase":"captured",' +
+                    '"transaction_id":"' + ('1' * 32) + '"}'
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            $currentState = $script:HarnessState.Clone()
+            $currentState.events =
+                [Collections.Generic.List[string]]::new()
+            $currentState.legacy_lifecycle_recovery = $false
+            $currentState.legacy_activation_missing = $false
+            $currentState.legacy_activation_state = 'never_activated'
+            $currentState.transaction_calls = 0
+            $currentState.restore_calls = 0
+            $currentState.complete_calls = 0
+            $currentState.service_contract_checks = 0
+            $currentState.owned_checks = 0
+            $currentState.removed_services = 0
+            $currentState.snapshot_path = ''
+            $currentState.manifest_admin_acl = $false
+            $currentState.managed_hooks_activation =
+                [pscustomobject][ordered]@{
+                    schema_version = 1
+                    deployment_generation_id = ('1' * 32)
+                    state = 'never_activated'
+                    manifest_sha256 = ('a' * 64)
+                    target_count = 1
+                }
+            $script:HarnessState = $currentState
+            $currentResult = Invoke-DefenseClawInstallLikeLifecycle `
+                -Action Upgrade `
+                -Layout $layout `
+                -Sources $sources `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian' `
+                -NoStart
+            $directRetire = $script:HarnessState.events.IndexOf(
+                'lifecycle-snapshot:retire'
+            )
+            $currentTransaction = $script:HarnessState.events.IndexOf(
+                'transaction'
+            )
+            Assert-Harness `
+                -Condition (
+                    [bool]$currentResult.ok -and
+                    $directRetire -ge 0 -and
+                    $currentTransaction -gt $directRetire -and
+                    $script:HarnessState.events.IndexOf(
+                        'lifecycle-snapshot:retire-committed'
+                    ) -lt 0
+                ) `
+                -Message (
+                    'current schema-4 post-commit journal did not retire ' +
+                    'directly before the Upgrade transaction'
+                )
+            $uninstallResults.Add([pscustomobject]@{
+                name = 'current-schema4-post-commit-direct-retirement'
+                failed = $false
+                rollback = $script:HarnessState.restore_calls
+                service_contract_checks = (
+                    $script:HarnessState.service_contract_checks
+                )
+                no_surviving_reference_before_delete = $true
+            })
+        }
+
+        function Invoke-HarnessLegacyRecoveryCrashPrefixCases {
+            foreach ($case in @(
+                [pscustomobject]@{
+                    name = 'replacement-staged-before-binding'
+                    binding_state = ''
+                    journal_location = 'canonical'
+                    capture = $false
+                    seeded_cleanup = $false
+                },
+                [pscustomobject]@{
+                    name = 'binding-recorded-before-rename'
+                    binding_state = 'recorded'
+                    journal_location = 'canonical'
+                    capture = $false
+                    seeded_cleanup = $false
+                },
+                [pscustomobject]@{
+                    name = 'rename-before-adoption-receipt'
+                    binding_state = 'recorded'
+                    journal_location = 'quarantine'
+                    capture = $false
+                    seeded_cleanup = $true
+                },
+                [pscustomobject]@{
+                    name = 'adoption-receipt-before-current-capture'
+                    binding_state = 'adopted'
+                    journal_location = 'quarantine'
+                    capture = $true
+                    seeded_cleanup = $true
+                }
+            )) {
+                $root = New-HarnessCaseRoot `
+                    -Parent $TestRoot `
+                    -Label ([string]$case.name)
+                $layout = New-HarnessLayout -Root $root
+                $transactionID = ('2' * 32)
+                $transactionDirectory =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $layout.TransactionsDirectory `
+                        $transactionID
+                Microsoft.PowerShell.Management\New-Item `
+                    -ItemType Directory `
+                    -Path $transactionDirectory `
+                    -Force | Microsoft.PowerShell.Core\Out-Null
+                $quarantinePath =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $transactionDirectory `
+                        'managed-hooks-lifecycle-journal.v3.quarantine'
+                $gatewayParent = [IO.Path]::GetDirectoryName(
+                    [string]$layout.GatewayPath
+                )
+                Microsoft.PowerShell.Management\New-Item `
+                    -ItemType Directory `
+                    -Path $gatewayParent `
+                    -Force | Microsoft.PowerShell.Core\Out-Null
+                [IO.File]::WriteAllText(
+                    $layout.GatewayPath,
+                    'legacy-gateway-preimage',
+                    [Text.UTF8Encoding]::new($false)
+                )
+                $gatewayBackup =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $transactionDirectory `
+                        'defenseclaw-gateway.exe.preimage'
+                Microsoft.PowerShell.Management\Copy-Item `
+                    -LiteralPath $layout.GatewayPath `
+                    -Destination $gatewayBackup `
+                    -Force
+                # Model the hardest unbound crash prefix: pending and exact
+                # old preimages are durable, the authenticated replacement
+                # helper is already staged, but its journal binding has not
+                # yet been published.
+                [IO.File]::WriteAllText(
+                    $layout.GatewayPath,
+                    'staged-fixed-gateway',
+                    [Text.UTF8Encoding]::new($false)
+                )
+                [IO.File]::WriteAllText(
+                    $layout.ManagedHooksLifecycleJournalPath,
+                    '{"schema_version":3,"phase":"captured"}',
+                    [Text.UTF8Encoding]::new($false)
+                )
+                $journalBackup =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $transactionDirectory `
+                        'managed-hooks-lifecycle-journal.v3.preimage'
+                Microsoft.PowerShell.Management\Copy-Item `
+                    -LiteralPath $layout.ManagedHooksLifecycleJournalPath `
+                    -Destination $journalBackup `
+                    -Force
+                $journalIdentity = Get-DefenseClawFileIdentity `
+                    -Path $layout.ManagedHooksLifecycleJournalPath
+                $journalSHA256 = (
+                    Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath `
+                            $layout.ManagedHooksLifecycleJournalPath `
+                        -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+                if ([string]$case.journal_location -ceq 'quarantine') {
+                    [IO.File]::Move(
+                        $layout.ManagedHooksLifecycleJournalPath,
+                        $quarantinePath
+                    )
+                }
+                $snapshotPath =
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $transactionDirectory `
+                        'snapshot.json'
+                Write-HarnessSnapshot `
+                    -Layout $layout `
+                    -SnapshotPath $snapshotPath `
+                    -Prepared:$false `
+                    -PreimageExisted:$false `
+                    -PreimageSHA256 '' `
+                    -ServicesRunning:$false `
+                    -ServicesExisted:$true
+                $snapshot =
+                    Microsoft.PowerShell.Management\Get-Content `
+                        -LiteralPath $snapshotPath `
+                        -Raw |
+                        Microsoft.PowerShell.Utility\ConvertFrom-Json
+                $snapshot.id = $transactionID
+                $snapshot.directory = $transactionDirectory
+                $snapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name prior_deployment_active `
+                        -Value $true `
+                        -Force
+                $snapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name agent_application_control_attested `
+                        -Value $true `
+                        -Force
+                $snapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name claude_effective_policy_verified `
+                        -Value $true `
+                        -Force
+                $snapshot |
+                    Microsoft.PowerShell.Utility\Add-Member `
+                        -MemberType NoteProperty `
+                        -Name managed_hooks_lifecycle_legacy_preimage `
+                        -Value ([pscustomobject][ordered]@{
+                            schema_version = 1
+                            transaction_id = $transactionID
+                            journal_path = [string](
+                                $layout.ManagedHooksLifecycleJournalPath
+                            )
+                            journal_file_identity = $journalIdentity
+                            journal_sha256 = $journalSHA256
+                            journal_schema_version = 3
+                            journal_phase = 'captured'
+                        }) `
+                        -Force
+                $snapshot.files = @($snapshot.files) + @(
+                    [pscustomobject][ordered]@{
+                        path = [string](
+                            $layout.ManagedHooksLifecycleJournalPath
+                        )
+                        existed = $true
+                        backup = $journalBackup
+                        security_descriptor = ''
+                    },
+                    [pscustomobject][ordered]@{
+                        path = [string]$layout.GatewayPath
+                        existed = $true
+                        backup = $gatewayBackup
+                        security_descriptor = ''
+                    }
+                )
+                if (-not [string]::IsNullOrWhiteSpace(
+                        [string]$case.binding_state
+                    )) {
+                    $snapshot |
+                        Microsoft.PowerShell.Utility\Add-Member `
+                            -MemberType NoteProperty `
+                            -Name managed_hooks_lifecycle_recovery `
+                            -Value ([pscustomobject][ordered]@{
+                                schema_version = 1
+                                transaction_id = $transactionID
+                                state = [string]$case.binding_state
+                                journal_path = [string](
+                                    $layout.ManagedHooksLifecycleJournalPath
+                                )
+                                journal_file_identity = $journalIdentity
+                                journal_sha256 = $journalSHA256
+                                journal_schema_version = 3
+                                journal_phase = 'captured'
+                                manifest_sha256 = ('a' * 64)
+                                old_gateway_sha256 = ('b' * 64)
+                                replacement_gateway_sha256 = ('c' * 64)
+                                quarantine_path = $quarantinePath
+                            }) `
+                            -Force
+                }
+                [IO.File]::WriteAllText(
+                    $snapshotPath,
+                    (
+                        $snapshot |
+                            Microsoft.PowerShell.Utility\ConvertTo-Json `
+                                -Depth 8
+                    ),
+                    [Text.UTF8Encoding]::new($false)
+                )
+                if ([bool]$case.capture) {
+                    [IO.File]::WriteAllText(
+                        $layout.ManagedHooksLifecycleJournalPath,
+                        (
+                            '{"schema_version":4,"phase":"captured",' +
+                            '"transaction_id":"' + $transactionID + '"}'
+                        ),
+                        [Text.UTF8Encoding]::new($false)
+                    )
+                }
+                $script:HarnessState = @{
+                    operation = 'install'
+                    crash_at = ''
+                    events = [Collections.Generic.List[string]]::new()
+                    layout = $layout
+                    snapshot_path = $snapshotPath
+                    legacy_lifecycle_recovery = $true
+                    legacy_activation_state = 'never_activated'
+                    active_references = $false
+                    lifecycle_preimage_active = $false
+                    owned_checks = 0
+                    removed_services = 0
+                    guardian_running = $false
+                    gateway_running = $false
+                    services_running = $false
+                    service_exists = @{
+                        DefenseClawGateway = $true
+                        DefenseClawCMIDBroker = $true
+                        DefenseClawHookGuardian = $true
+                        DefenseClawHookEnumerator = $true
+                    }
+                    service_start_modes = @{
+                        DefenseClawGateway = 4
+                        DefenseClawCMIDBroker = 4
+                        DefenseClawHookGuardian = 4
+                        DefenseClawHookEnumerator = 4
+                    }
+                    ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
+                }
+                if ([bool]$case.seeded_cleanup) {
+                    $script:HarnessState.events.Add(
+                        'lifecycle-generation-gc'
+                    )
+                    $script:HarnessState.events.Add(
+                        'lifecycle-journal-quarantined'
+                    )
+                }
+                if ([bool]$case.capture) {
+                    $script:HarnessState.events.Add(
+                        'lifecycle-snapshot:capture'
+                    )
+                }
+                [void](& $script:HarnessRealRestoreTransaction `
+                    -SnapshotPath $snapshotPath `
+                    -Layout $layout `
+                    -DeferServiceRestart)
+                $gc = $script:HarnessState.events.IndexOf(
+                    'lifecycle-generation-gc'
+                )
+                $quarantined = $script:HarnessState.events.IndexOf(
+                    'lifecycle-journal-quarantined'
+                )
+                if ([string]::IsNullOrWhiteSpace(
+                        [string]$case.binding_state
+                    )) {
+                    Assert-Harness `
+                        -Condition (
+                            $gc -lt 0 -and
+                            $quarantined -lt 0 -and
+                            (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath `
+                                    $layout.ManagedHooksLifecycleJournalPath `
+                                -PathType Leaf) -and
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath $quarantinePath) -and
+                            [IO.File]::ReadAllText(
+                                $layout.GatewayPath
+                            ) -ceq 'legacy-gateway-preimage'
+                        ) `
+                        -Message (
+                            [string]$case.name +
+                            ' did not restore the gateway and exact unbound legacy preimage'
+                        )
+                }
+                else {
+                    Assert-Harness `
+                        -Condition (
+                            $gc -ge 0 -and
+                            $quarantined -gt $gc -and
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath `
+                                    $layout.ManagedHooksLifecycleJournalPath) -and
+                            (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath $quarantinePath `
+                                -PathType Leaf) -and
+                            (Get-DefenseClawFileIdentity `
+                                -Path $quarantinePath) -ceq $journalIdentity -and
+                            [IO.File]::ReadAllText(
+                                $layout.GatewayPath
+                            ) -ceq 'legacy-gateway-preimage'
+                        ) `
+                        -Message (
+                            [string]$case.name +
+                            ' violated GC-before-adoption recovery ordering'
+                        )
+                }
+                $uninstallResults.Add([pscustomobject]@{
+                    name = 'legacy-recovery-' + [string]$case.name
+                    failed = $false
+                    rollback = 0
+                    service_contract_checks = 0
+                    no_surviving_reference_before_delete = $true
+                })
+            }
         }
 
         $purgeResults = [Collections.Generic.List[object]]::new()
         function New-HarnessCommittedPurgeCase {
             param(
                 [Parameter(Mandatory)][string]$Name,
-                [string]$CrashAt = ''
+                [string]$CrashAt = '',
+                [switch]$OmitTeardownJournal
             )
             $root = New-HarnessCaseRoot `
                 -Parent $TestRoot `
@@ -2495,9 +4916,22 @@ targets:
             $layout = New-HarnessLayout -Root $root
             [IO.File]::WriteAllText(
                 $layout.MetadataPath,
-                '{"schema_version":1,"installed":false}',
+                (
+                    '{"schema_version":1,"installed":false,' +
+                    '"managed_hooks_activation":{' +
+                    '"schema_version":1,' +
+                    '"deployment_generation_id":"' + ('1' * 32) + '",' +
+                    '"state":"activated",' +
+                    '"manifest_sha256":"' + ('a' * 64) + '",' +
+                    '"target_count":1}}'
+                ),
                 [Text.UTF8Encoding]::new($false)
             )
+            if (-not $OmitTeardownJournal) {
+                Write-HarnessJournal `
+                    -Path $layout.ManagedHooksTeardownJournalPath `
+                    -Phase 'prepared'
+            }
             $events = [Collections.Generic.List[string]]::new()
             $script:HarnessState = @{
                 operation = 'purge'
@@ -2507,6 +4941,13 @@ targets:
                 active_references = $false
                 binary_present = $false
                 installed = $false
+                managed_hooks_activation = [pscustomobject][ordered]@{
+                    schema_version = 1
+                    deployment_generation_id = ('1' * 32)
+                    state = 'activated'
+                    manifest_sha256 = ('a' * 64)
+                    target_count = 1
+                }
                 guardian_running = $false
                 gateway_running = $false
                 services_running = $false
@@ -2528,12 +4969,15 @@ targets:
                 snapshot_path = ''
                 service_start_modes = @{
                     DefenseClawGateway = 4
+                    DefenseClawCMIDBroker = 4
                     DefenseClawHookGuardian = 4
                 }
                 service_exists = @{
                     DefenseClawGateway = $false
+                    DefenseClawCMIDBroker = $false
                     DefenseClawHookGuardian = $false
                 }
+                ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
                 guardian_fresh = $false
                 queued_gateway_restart = $false
                 queued_restart_blocked = $true
@@ -2546,7 +4990,15 @@ targets:
 
         function Publish-HarnessPurgeReceipt {
             param([Parameter(Mandatory)][hashtable]$Layout)
+            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                -Layout $Layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian')
             Remove-DefenseClawCommittedEmptyInstallRoot -Layout $Layout
+            [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
+                -Layout $Layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian')
             [void](Publish-DefenseClawStatePurgeIntent `
                 -Layout $Layout `
                 -GatewayServiceName 'DefenseClawGateway' `
@@ -2579,6 +5031,61 @@ targets:
             })
         }
 
+        $missingJournalExecutableLayout = New-HarnessCommittedPurgeCase `
+            -Name 'missing-journal-executable' `
+            -OmitTeardownJournal
+        Microsoft.PowerShell.Management\New-Item `
+            -ItemType Directory `
+            -Path $missingJournalExecutableLayout.BinDirectory `
+            -Force | Microsoft.PowerShell.Core\Out-Null
+        [IO.File]::WriteAllText(
+            $missingJournalExecutableLayout.HookPath,
+            'unexpected managed hook executable',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $missingJournalPath = [string](
+            $missingJournalExecutableLayout.ManagedHooksTeardownJournalPath
+        )
+        $missingJournalExecutableFailed = $false
+        try {
+            [void](Invoke-DefenseClawCommittedUninstallCleanup `
+                -Layout $missingJournalExecutableLayout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian' `
+                -Purge)
+        }
+        catch {
+            $missingJournalExecutableFailed = $true
+        }
+        Assert-Harness `
+            -Condition (
+                $missingJournalExecutableFailed -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalExecutableLayout.InstallRoot `
+                    -PathType Container) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalExecutableLayout.HookPath `
+                    -PathType Leaf) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalExecutableLayout.StateRoot `
+                    -PathType Container) -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalPath) -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $missingJournalExecutableLayout.PurgeIntentPath) -and
+                'S-1-5-80-1-2-3-4-5' -in
+                    @($script:HarnessState.ipc_service_sids) -and
+                $script:HarnessState.events.IndexOf(
+                    'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                ) -lt 0 -and
+                $script:HarnessState.events.IndexOf('purge-intent-write') -lt 0
+            ) `
+            -Message 'missing teardown journal authorized executable or purge cleanup'
+        Add-HarnessPurgeResult `
+            -Name 'missing-journal-executable-fails-closed' `
+            -FailedClosed:$true `
+            -Retried:$false
+
         $orderedLayout = New-HarnessCommittedPurgeCase -Name 'ordered'
         [void](Invoke-DefenseClawCommittedUninstallCleanup `
             -Layout $orderedLayout `
@@ -2601,10 +5108,30 @@ targets:
                     -LiteralPath $orderedLayout.PurgeIntentPath)
             ) `
             -Message 'purge did not publish its authenticated receipt before first StateRoot deletion'
+        Assert-Harness `
+            -Condition (
+                'S-1-5-80-1-2-3-4-5' -notin
+                    @($script:HarnessState.ipc_service_sids)
+            ) `
+            -Message 'scope A purge retained its shared IPC service SID'
+        Initialize-DefenseClawManagedIPCDirectory `
+            -Layout $orderedLayout `
+            -GatewayServiceName 'DefenseClawGatewayScopeB'
+        Assert-Harness `
+            -Condition (
+                @($script:HarnessState.ipc_service_sids).Count -eq 1 -and
+                [string]$script:HarnessState.ipc_service_sids[0] -ceq
+                    'S-1-5-80-6-7-8-9-10'
+            ) `
+            -Message 'scope B could not claim the shared IPC contract after scope A purge'
         Add-HarnessPurgeResult `
             -Name 'receipt-before-state-delete' `
             -FailedClosed:$false `
             -Retried:$false
+        Add-HarnessPurgeResult `
+            -Name 'scope-a-purge-allows-scope-b-install' `
+            -FailedClosed:$false `
+            -Retried:$true
 
         foreach ($crashCase in @(
             'purge-after-receipt-publication',
@@ -2644,6 +5171,16 @@ targets:
                         -LiteralPath $layout.PurgeIntentPath)
                 ) `
                 -Message "$crashCase did not resume before layout creation"
+            Assert-Harness `
+                -Condition (
+                    'S-1-5-80-1-2-3-4-5' -notin
+                        @($script:HarnessState.ipc_service_sids) -and
+                    @($script:HarnessState.events |
+                        Microsoft.PowerShell.Core\Where-Object {
+                            $_ -ceq 'managed-ipc-revoke:S-1-5-80-1-2-3-4-5'
+                        }).Count -ge 2
+                ) `
+                -Message "$crashCase did not idempotently resume IPC SID cleanup"
             Add-HarnessPurgeResult `
                 -Name $crashCase `
                 -FailedClosed:$true `
@@ -2874,6 +5411,10 @@ targets:
 
         $nonPurgeLayout = New-HarnessCommittedPurgeCase `
             -Name 'nonpurge-no-install-root'
+        [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+            -Layout $nonPurgeLayout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian')
         Remove-DefenseClawCommittedEmptyInstallRoot -Layout $nonPurgeLayout
         $nonPurge = Invoke-DefenseClawPreLayoutRecovery `
             -Action 'Uninstall' `
@@ -2941,6 +5482,43 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName
             )
+            $hasOperation = $script:HarnessState.ContainsKey('operation')
+            if (-not $hasOperation) {
+                $script:HarnessState.start_calls++
+                if ($script:HarnessState.expect_rollback -and
+                    $script:HarnessState.rollback_calls -ne 1) {
+                    throw 'services restarted before exactly one managed-hook rollback'
+                }
+                $script:HarnessState.services_running = [bool](
+                    @(
+                        $Services |
+                            Microsoft.PowerShell.Core\Where-Object {
+                                [bool]$_.existed -and [bool]$_.running
+                            }
+                    ).Count -gt 0
+                )
+                return
+            }
+
+            if ([string]$script:HarnessState.operation -ceq 'uninstall') {
+                $script:HarnessState.events.Add('restart-services')
+                if ($script:HarnessState.rollback_calls -ne 1) {
+                    throw 'services restarted before managed-hook rollback completed'
+                }
+                $script:HarnessState.services_running = [bool](
+                    @(
+                        $Services |
+                            Microsoft.PowerShell.Core\Where-Object {
+                                [bool]$_.existed -and [bool]$_.running
+                            }
+                    ).Count -gt 0
+                )
+                return
+            }
+
+            # Quiescing recovery intentionally exercises the real production
+            # activation ordering. Other explicitly modeled operations retain
+            # the same real-helper behavior this final fixture previously used.
             & $script:HarnessRealStartTransactionServices `
                 -Services $Services `
                 -Layout $Layout `
@@ -3112,6 +5690,7 @@ targets:
                     } else {
                         0
                     })
+                    DefenseClawCMIDBroker = 0
                     DefenseClawHookGuardian = $(
                         if ($PriorGuardianExisted) { 4 } else { 0 }
                     )
@@ -3130,10 +5709,10 @@ targets:
             }
             $failed = $false
             try {
-                Recover-DefenseClawPendingTransaction `
+                [void](Recover-DefenseClawPendingTransaction `
                     -Layout $layout `
                     -GatewayServiceName 'DefenseClawGateway' `
-                    -GuardianServiceName 'DefenseClawHookGuardian'
+                    -GuardianServiceName 'DefenseClawHookGuardian')
             }
             catch {
                 $failed = $true
@@ -3210,6 +5789,15 @@ targets:
                         -not [bool]$script:HarnessState.gateway_started_before_guardian
                     ) `
                     -Message "$Name let a queued gateway restart beat fresh guardian reconciliation"
+                if ($guardianTemporarilyRequired) {
+                    Assert-Harness `
+                        -Condition (
+                            $script:HarnessState.events.IndexOf(
+                                'guardian-legacy-fresh-state'
+                            ) -ge 0
+                        ) `
+                        -Message "$Name did not exercise legacy fresh-state Guardian coverage"
+                }
                 if ($PriorGatewayExisted) {
                     Assert-Harness `
                         -Condition (
@@ -3423,9 +6011,47 @@ targets:
             -ExpectSuccess:$true `
             -SelfUninstall:$true `
             -Purge:$true
-        Invoke-HarnessFreshInstallServiceBootstrapSequence
-        Invoke-HarnessDirectReinstallSequence
-        Invoke-HarnessFirstActivationFailureSequence
+        $targetRuntimeGatewayMock = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-HarnessTargetRuntimeGatewayCommand `
+                -CommandType Function
+        ).ScriptBlock
+        $targetRuntimeCleanupScopeMock = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Assert-HarnessTargetRuntimeCleanupScopeExclusive `
+                -CommandType Function
+        ).ScriptBlock
+        Microsoft.PowerShell.Management\Set-Item `
+            -LiteralPath (
+                'Function:script:Invoke-DefenseClawGatewayCommand'
+            ) `
+            -Value $targetRuntimeGatewayMock
+        Microsoft.PowerShell.Management\Set-Item `
+            -LiteralPath (
+                'Function:script:' +
+                'Assert-DefenseClawTargetRuntimeCleanupScopeExclusive'
+            ) `
+            -Value $targetRuntimeCleanupScopeMock
+        try {
+            Invoke-HarnessFreshInstallServiceBootstrapSequence
+            Invoke-HarnessDirectReinstallSequence
+            Invoke-HarnessFirstActivationFailureSequence
+            Invoke-HarnessLegacyCapturedJournalUpgradeSequence
+            Invoke-HarnessLegacyRecoveryCrashPrefixCases
+        }
+        finally {
+            Microsoft.PowerShell.Management\Set-Item `
+                -LiteralPath (
+                    'Function:script:Invoke-DefenseClawGatewayCommand'
+                ) `
+                -Value $script:HarnessRealGatewayCommand
+            Microsoft.PowerShell.Management\Set-Item `
+                -LiteralPath (
+                    'Function:script:' +
+                    'Assert-DefenseClawTargetRuntimeCleanupScopeExclusive'
+                ) `
+                -Value $script:HarnessRealTargetRuntimeCleanupScope
+        }
 
         # Exercise the authenticated pre-layout self-uninstall state machine
         # directly. These cases cover the rename/transaction crash windows
@@ -3953,6 +6579,1118 @@ targets:
             -ForeignFile 'requirements.toml' `
             -ExpectFailure:$true
 
+        # Blockers 039/040/043: exercise the crash-boundary decisions behind
+        # the external fresh-install receipt and shared target-root rollback.
+        # Native create/delete coverage remains in the focused Windows package;
+        # these cases keep the lifecycle ordering and fail-closed transitions
+        # visible in the complete PS 5.1/7 uninstall matrix.
+        $installRollbackContractResults =
+            [Collections.Generic.List[object]]::new()
+
+        $replacementProbe = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'manifest-replacement-probe.yaml'
+        $samePathIsReplacement = [bool](
+            & $script:HarnessRealSourceReplacementDecision `
+                -Source @{path = $replacementProbe} `
+                -Destination $replacementProbe
+        )
+        $distinctPathIsReplacement = [bool](
+            & $script:HarnessRealSourceReplacementDecision `
+                -Source @{path = $replacementProbe} `
+                -Destination (Microsoft.PowerShell.Management\Join-Path `
+                    $TestRoot `
+                    'manifest-replacement-target.yaml')
+        )
+        Assert-Harness `
+            -Condition (
+                -not $samePathIsReplacement -and
+                $distinctPathIsReplacement
+            ) `
+            -Message 'same-path manifest source can bypass validation-only ACL drift checks'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'same-path-manifest-remains-validation-only'
+            same_path_replacement = $samePathIsReplacement
+            distinct_path_replacement = $distinctPathIsReplacement
+        })
+
+        $legacyTimestampIntent = (
+            [ordered]@{phase = 'rollback'} |
+                Microsoft.PowerShell.Utility\ConvertTo-Json -Compress |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+        )
+        $legacyTimestampIntent =
+            Assert-DefenseClawInstallRollbackIntentCommitTimestamp `
+                -Intent $legacyTimestampIntent
+        Assert-Harness `
+            -Condition (
+                $null -ne $legacyTimestampIntent.PSObject.Properties[
+                    'committed_at'
+                ] -and
+                [string]$legacyTimestampIntent.committed_at -ceq ''
+            ) `
+            -Message 'legacy uncommitted receipt did not migrate committed_at'
+        $invalidCommitTimestampsRejected = 0
+        foreach ($invalidCommitIntent in @(
+            [pscustomobject]@{phase = 'committed'},
+            [pscustomobject]@{phase = 'committed'; committed_at = ''},
+            [pscustomobject]@{
+                phase = 'committed'
+                committed_at = 'not-a-timestamp'
+            },
+            [pscustomobject]@{
+                phase = 'preparing_layout'
+                committed_at = ' '
+            }
+        )) {
+            try {
+                $null =
+                    Assert-DefenseClawInstallRollbackIntentCommitTimestamp `
+                        -Intent $invalidCommitIntent
+            }
+            catch {
+                $invalidCommitTimestampsRejected++
+            }
+        }
+        Assert-Harness `
+            -Condition ($invalidCommitTimestampsRejected -eq 4) `
+            -Message 'install receipt accepted an invalid phase/timestamp shape'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'legacy-v2-commit-timestamp-migration'
+            missing_precommit_field_migrated = $true
+            invalid_committed_shapes_rejected =
+                $invalidCommitTimestampsRejected
+        })
+
+        $canonicalRootAcl = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $true `
+            -Kind AdminDirectory `
+            -GatewayServiceSID $script:AdministratorsSID
+        $canonicalRootSnapshot = [pscustomobject]@{
+            SecurityDescriptor =
+                $canonicalRootAcl.GetSecurityDescriptorBinaryForm()
+        }
+        function script:Assert-DefenseClawManagedRootStagingAcl {
+            param(
+                [Parameter(Mandatory)][string]$Path,
+                [Parameter(Mandatory)][string]$MarkerSID
+            )
+            $null = $Path
+            $null = $MarkerSID
+            if ([bool]$script:HarnessAcceptRootStagingDescriptor) {
+                return [pscustomobject]@{
+                    Identity = '00000001:0000000000000001'
+                }
+            }
+            throw 'injected crash after canonical ACL publication'
+        }
+        $script:HarnessAcceptRootStagingDescriptor = $false
+        $rollbackGatewaySID = 'S-1-5-80-1-2-3-4-5'
+        Assert-DefenseClawInstallRollbackRootDescriptor `
+            -Path (Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'post-canonical-crash') `
+            -Current $canonicalRootSnapshot `
+            -CreationState staged `
+            -MarkerSID 'S-1-5-21-1-2-3-4' `
+            -ExpectedKind AdminDirectory `
+            -GatewayServiceSID $rollbackGatewaySID
+        $unsafeRootAcl = [Security.AccessControl.DirectorySecurity]::new()
+        $unsafeRootAcl.SetSecurityDescriptorSddlForm(
+            'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)',
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        $unsafeCrashRejected = $false
+        try {
+            Assert-DefenseClawInstallRollbackRootDescriptor `
+                -Path (Microsoft.PowerShell.Management\Join-Path `
+                    $TestRoot `
+                    'post-unsafe-crash') `
+                -Current ([pscustomobject]@{
+                    SecurityDescriptor =
+                        $unsafeRootAcl.GetSecurityDescriptorBinaryForm()
+                }) `
+                -CreationState staged `
+                -MarkerSID 'S-1-5-21-1-2-3-4' `
+                -ExpectedKind AdminDirectory `
+                -GatewayServiceSID $rollbackGatewaySID
+        }
+        catch {
+            $unsafeCrashRejected = $true
+        }
+        Assert-Harness `
+            -Condition $unsafeCrashRejected `
+            -Message 'staged receipt accepted a noncanonical post-publication DACL'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'staged-to-canonical-crash-window'
+            canonical_inode_accepted = $true
+            noncanonical_inode_rejected = $unsafeCrashRejected
+        })
+
+        function Test-HarnessRollbackRootDescriptorRejected {
+            param(
+                [Parameter(Mandatory)]$Current,
+                [Parameter(Mandatory)][string]$CreationState,
+                [Parameter(Mandatory)][string]$ExpectedKind,
+                [Parameter(Mandatory)][string]$GatewayServiceSID,
+                [switch]$AllowPostManagedAcl
+            )
+            try {
+                Assert-DefenseClawInstallRollbackRootDescriptor `
+                    -Path (Microsoft.PowerShell.Management\Join-Path `
+                        $TestRoot `
+                        'descriptor-matrix') `
+                    -Current $Current `
+                    -CreationState $CreationState `
+                    -MarkerSID 'S-1-5-21-1-2-3-4' `
+                    -ExpectedKind $ExpectedKind `
+                    -GatewayServiceSID $GatewayServiceSID `
+                    -AllowPostManagedAcl:$AllowPostManagedAcl
+                return $false
+            }
+            catch {
+                return $true
+            }
+        }
+
+        $installLiveAcl = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $true `
+            -Kind ServiceInstallDirectory `
+            -GatewayServiceSID $rollbackGatewaySID
+        $installLiveSnapshot = [pscustomobject]@{
+            SecurityDescriptor =
+                $installLiveAcl.GetSecurityDescriptorBinaryForm()
+        }
+        $stateLiveAcl = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $true `
+            -Kind StateDirectory `
+            -GatewayServiceSID $rollbackGatewaySID
+        $stateLiveSnapshot = [pscustomobject]@{
+            SecurityDescriptor = $stateLiveAcl.GetSecurityDescriptorBinaryForm()
+        }
+        $foreignLiveAcl = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $true `
+            -Kind ServiceInstallDirectory `
+            -GatewayServiceSID 'S-1-5-80-6-7-8-9-10'
+        $foreignLiveSnapshot = [pscustomobject]@{
+            SecurityDescriptor =
+                $foreignLiveAcl.GetSecurityDescriptorBinaryForm()
+        }
+
+        Assert-DefenseClawInstallRollbackRootDescriptor `
+            -Path (Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'install-live') `
+            -Current $installLiveSnapshot `
+            -CreationState canonical `
+            -MarkerSID 'S-1-5-21-1-2-3-4' `
+            -ExpectedKind InstallDirectory `
+            -GatewayServiceSID $rollbackGatewaySID `
+            -AllowPostManagedAcl
+        Assert-DefenseClawInstallRollbackRootDescriptor `
+            -Path (Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'state-live') `
+            -Current $stateLiveSnapshot `
+            -CreationState canonical `
+            -MarkerSID 'S-1-5-21-1-2-3-4' `
+            -ExpectedKind AdminDirectory `
+            -GatewayServiceSID $rollbackGatewaySID `
+            -AllowPostManagedAcl
+        Assert-DefenseClawInstallRollbackRootDescriptor `
+            -Path (Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'install-quarantined') `
+            -Current $canonicalRootSnapshot `
+            -CreationState quarantined `
+            -MarkerSID 'S-1-5-21-1-2-3-4' `
+            -ExpectedKind InstallDirectory `
+            -GatewayServiceSID $rollbackGatewaySID
+        Assert-DefenseClawInstallRollbackRootDescriptor `
+            -Path (Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'install-staged-quarantine-crash') `
+            -Current $canonicalRootSnapshot `
+            -CreationState staged `
+            -MarkerSID 'S-1-5-21-1-2-3-4' `
+            -ExpectedKind InstallDirectory `
+            -GatewayServiceSID $rollbackGatewaySID
+        Assert-DefenseClawInstallRollbackRootDescriptor `
+            -Path (Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'install-canonical-quarantine-crash') `
+            -Current $canonicalRootSnapshot `
+            -CreationState canonical `
+            -MarkerSID 'S-1-5-21-1-2-3-4' `
+            -ExpectedKind InstallDirectory `
+            -GatewayServiceSID $rollbackGatewaySID
+
+        $script:HarnessAcceptRootStagingDescriptor = $true
+        Assert-DefenseClawInstallRollbackRootDescriptor `
+            -Path (Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                'planned-staging') `
+            -Current $canonicalRootSnapshot `
+            -CreationState planned `
+            -MarkerSID 'S-1-5-21-1-2-3-4' `
+            -ExpectedKind InstallDirectory `
+            -GatewayServiceSID $rollbackGatewaySID
+        $script:HarnessAcceptRootStagingDescriptor = $false
+
+        $plannedBootstrapRejected =
+            Test-HarnessRollbackRootDescriptorRejected `
+                -Current $canonicalRootSnapshot `
+                -CreationState planned `
+                -ExpectedKind AdminDirectory `
+                -GatewayServiceSID $rollbackGatewaySID
+        $stagedLiveRejected =
+            Test-HarnessRollbackRootDescriptorRejected `
+                -Current $installLiveSnapshot `
+                -CreationState staged `
+                -ExpectedKind InstallDirectory `
+                -GatewayServiceSID $rollbackGatewaySID
+        $unboundLiveRejected =
+            Test-HarnessRollbackRootDescriptorRejected `
+                -Current $installLiveSnapshot `
+                -CreationState canonical `
+                -ExpectedKind InstallDirectory `
+                -GatewayServiceSID $rollbackGatewaySID
+        $foreignSIDRejected =
+            Test-HarnessRollbackRootDescriptorRejected `
+                -Current $foreignLiveSnapshot `
+                -CreationState canonical `
+                -ExpectedKind InstallDirectory `
+                -GatewayServiceSID $rollbackGatewaySID `
+                -AllowPostManagedAcl
+        $swappedKindRejected =
+            Test-HarnessRollbackRootDescriptorRejected `
+                -Current $installLiveSnapshot `
+                -CreationState canonical `
+                -ExpectedKind AdminDirectory `
+                -GatewayServiceSID $rollbackGatewaySID `
+                -AllowPostManagedAcl
+        $quarantinedLiveRejected =
+            Test-HarnessRollbackRootDescriptorRejected `
+                -Current $installLiveSnapshot `
+                -CreationState quarantined `
+                -ExpectedKind InstallDirectory `
+                -GatewayServiceSID $rollbackGatewaySID
+        $inheritedAcl = [Security.AccessControl.DirectorySecurity]::new()
+        $inheritedAcl.SetSecurityDescriptorSddlForm(
+            'O:BAG:BAD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)',
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        $inheritedAclRejected =
+            Test-HarnessRollbackRootDescriptorRejected `
+                -Current ([pscustomobject]@{
+                    SecurityDescriptor =
+                        $inheritedAcl.GetSecurityDescriptorBinaryForm()
+                }) `
+                -CreationState canonical `
+                -ExpectedKind AdminDirectory `
+                -GatewayServiceSID $rollbackGatewaySID `
+                -AllowPostManagedAcl
+        Assert-Harness `
+            -Condition (
+                $plannedBootstrapRejected -and
+                $stagedLiveRejected -and
+                $unboundLiveRejected -and
+                $foreignSIDRejected -and
+                $swappedKindRejected -and
+                $quarantinedLiveRejected -and
+                $inheritedAclRejected
+            ) `
+            -Message 'rollback root descriptor phase/SID allowlist accepted drift'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'phase-bound-live-root-descriptor-matrix'
+            planned_staging_only = $plannedBootstrapRejected
+            staged_live_rejected = $stagedLiveRejected
+            canonical_live_exact = $true
+            unbound_live_rejected = $unboundLiveRejected
+            wrong_sid_rejected = $foreignSIDRejected
+            swapped_kind_rejected = $swappedKindRejected
+            staged_quarantine_reentry_exact = $true
+            canonical_quarantine_reentry_exact = $true
+            quarantined_live_rejected = $quarantinedLiveRejected
+            inherited_acl_rejected = $inheritedAclRejected
+        })
+
+        $productionState = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'production-state'
+        $productionIPC = Microsoft.PowerShell.Management\Join-Path `
+            $productionState `
+            'ipc'
+        Assert-DefenseClawTargetRuntimeProductionChildrenExclusive `
+            -ProductionState $productionState `
+            -Children @([pscustomobject]@{FullName = $productionIPC})
+        $productionChildRejected = $false
+        try {
+            Assert-DefenseClawTargetRuntimeProductionChildrenExclusive `
+                -ProductionState $productionState `
+                -Children @(
+                    [pscustomobject]@{FullName = $productionIPC},
+                    [pscustomobject]@{
+                        FullName = (
+                            Microsoft.PowerShell.Management\Join-Path `
+                                $productionState `
+                                'install'
+                        )
+                    }
+                )
+        }
+        catch {
+            $productionChildRejected = $true
+        }
+        Assert-Harness `
+            -Condition $productionChildRejected `
+            -Message 'shared target cleanup accepted non-IPC production state'
+        $allCanonicalPlan = [pscustomobject]@{
+            roots = @([pscustomobject]@{baseline = 'canonical'})
+        }
+        $absentPlan = [pscustomobject]@{
+            roots = @([pscustomobject]@{baseline = 'absent'})
+        }
+        Assert-Harness `
+            -Condition (
+                -not (Test-DefenseClawTargetRuntimePlanRequiresExclusiveCleanup `
+                    -Plan $allCanonicalPlan) -and
+                (Test-DefenseClawTargetRuntimePlanRequiresExclusiveCleanup `
+                    -Plan $absentPlan)
+            ) `
+            -Message 'target runtime cleanup coexistence gate ignored baseline ownership'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'production-root-coexistence-gate'
+            ipc_only_allowed = $true
+            foreign_child_rejected = $productionChildRejected
+            canonical_only_plan_is_validation_only = $true
+        })
+
+        $targetPreparationModes = [ordered]@{
+            Install = 'prepare'
+            Upgrade = 'validate'
+            Repair = 'validate'
+        }
+        foreach ($installLikeAction in $targetPreparationModes.Keys) {
+            $actualPreparationMode =
+                Get-DefenseClawTargetRuntimePreparationMode `
+                    -Action $installLikeAction `
+                    -ManifestPresent $true
+            Assert-Harness `
+                -Condition (
+                    $actualPreparationMode -ceq
+                        [string]$targetPreparationModes[$installLikeAction]
+                ) `
+                -Message (
+                    "$installLikeAction target runtime mode was " +
+                    "$actualPreparationMode, expected " +
+                    [string]$targetPreparationModes[$installLikeAction]
+                )
+        }
+        $lowercaseInstallPreparationMode =
+            Get-DefenseClawTargetRuntimePreparationMode `
+                -Action install `
+                -ManifestPresent $true
+        Assert-Harness `
+            -Condition ($lowercaseInstallPreparationMode -ceq 'prepare') `
+            -Message 'lowercase Install action skipped target preparation'
+        $missingManifestRejected = $false
+        try {
+            $null = Get-DefenseClawTargetRuntimePreparationMode `
+                -Action Install `
+                -ManifestPresent $false
+        }
+        catch {
+            $missingManifestRejected = [bool](
+                $_.Exception.Message -like
+                    '*requires an authenticated installed targets.yaml*'
+            )
+        }
+        Assert-Harness `
+            -Condition $missingManifestRejected `
+            -Message 'manifest-free Install skipped target preparation'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'bounded-install-like-target-preparation'
+            install = 'prepare'
+            upgrade = 'validate'
+            repair = 'validate'
+            lowercase_install = 'prepare'
+            missing_manifest = 'rejected'
+        })
+
+        $targetRuntimeDiagnostic =
+            Get-DefenseClawTargetRuntimeProbeFailureMessage `
+                -Phase planning `
+                -Probe ([pscustomobject]@{
+                    exit_code = 1
+                    output = @(
+                        'manifest ACL rejected token=diagnostic-secret ' +
+                        [Environment]::NewLine +
+                        '{"client_secret":"json-secret"} ' +
+                        ('x' * 5000)
+                    )
+                })
+        Assert-Harness `
+            -Condition (
+                $targetRuntimeDiagnostic -like
+                    '*manifest ACL rejected token=<redacted>*' -and
+                $targetRuntimeDiagnostic -notlike '*diagnostic-secret*' -and
+                $targetRuntimeDiagnostic -notlike '*json-secret*' -and
+                $targetRuntimeDiagnostic -notmatch '[\r\n]' -and
+                $targetRuntimeDiagnostic.Length -le 2150
+            ) `
+            -Message 'target runtime failure diagnostic was hidden, unbounded, or unsafe'
+        $emptyTargetRuntimeDiagnostic =
+            Get-DefenseClawTargetRuntimeProbeFailureMessage `
+                -Phase finalization `
+                -Probe ([pscustomobject]@{
+                    exit_code = 7
+                    output = @()
+                })
+        Assert-Harness `
+            -Condition ($emptyTargetRuntimeDiagnostic -ceq
+                'target runtime finalization failed with exit 7: unavailable') `
+            -Message 'empty target runtime output did not produce a safe diagnostic'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'bounded-redacted-target-runtime-diagnostic'
+            captured_error_visible = $true
+            credential_redacted = $true
+            bounded = $true
+        })
+
+        # ConvertFrom-Json yields a fixed PSCustomObject shape on both Windows
+        # PowerShell 5.1 and PowerShell 7. Model a legacy/restored transaction
+        # that predates created_target_runtime_roots, then exercise both the
+        # first live-claim publication and terminal cleanup replacement.
+        $legacySchemaRoot = New-HarnessCaseRoot `
+            -Parent $TestRoot `
+            -Label 'legacy-target-runtime-schema'
+        $legacySchemaLayout = New-HarnessLayout -Root $legacySchemaRoot
+        Assert-Harness `
+            -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $legacySchemaLayout.InstallRollbackIntentPath)) `
+            -Message 'legacy schema fixture unexpectedly has rollback intent'
+        $legacySchemaSnapshot = Microsoft.PowerShell.Management\Join-Path `
+            $legacySchemaLayout.StateRoot `
+            'legacy-target-runtime-snapshot.json'
+        [IO.File]::WriteAllText(
+            $legacySchemaSnapshot,
+            (
+                [ordered]@{
+                    schema_version = 1
+                    gateway_service = 'DefenseClawGateway'
+                    guardian_service = 'DefenseClawHookGuardian'
+                    created_shared_directories = @()
+                } |
+                    Microsoft.PowerShell.Utility\ConvertTo-Json `
+                        -Depth 6 `
+                        -Compress
+            ),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $legacyOriginal = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $legacySchemaSnapshot `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        Assert-Harness `
+            -Condition (
+                $null -eq $legacyOriginal.PSObject.Properties[
+                    'created_target_runtime_roots'
+                ]
+            ) `
+            -Message 'legacy transaction fixture unexpectedly has runtime claims'
+        $legacyLiveClaim = [pscustomobject]@{
+            user_home = 'C:\Users\Alice'
+            data_dir = 'C:\Users\Alice\.defenseclaw'
+            sid = 'S-1-5-21-111-222-333-1001'
+            identity = '00000001:0000000000000001'
+            created = $true
+            state = 'staged'
+        }
+        $legacyStageReport = Assert-DefenseClawTargetRuntimeReport `
+            -Report ([pscustomobject]@{
+                schema_version = 1
+                action = 'stage'
+                ok = $true
+                claims = @($legacyLiveClaim)
+            }) `
+            -Action stage `
+            -JournalProjection
+        [void](Set-DefenseClawTargetRuntimeTransactionState `
+            -SnapshotPath $legacySchemaSnapshot `
+            -Layout $legacySchemaLayout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian' `
+            -StageReport $legacyStageReport)
+        $legacyStaged = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $legacySchemaSnapshot `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $legacyClaimsProperty = $legacyStaged.PSObject.Properties[
+            'created_target_runtime_roots'
+        ]
+        Assert-Harness `
+            -Condition ($null -ne $legacyClaimsProperty) `
+            -Message 'legacy transaction did not add its runtime-claim property'
+        $legacyClaims = @($legacyClaimsProperty.Value)
+        Assert-Harness `
+            -Condition (
+                $legacyClaims.Count -eq 1 -and
+                [string]$legacyClaims[0].state -ceq 'staged'
+            ) `
+            -Message 'legacy transaction could not add its first runtime claim'
+        $legacyCleanupReport = Assert-DefenseClawTargetRuntimeReport `
+            -Report ([pscustomobject]@{
+                schema_version = 1
+                action = 'cleanup'
+                ok = $true
+                claims = @([pscustomobject]@{
+                    user_home = 'C:\Users\Alice'
+                    data_dir = 'C:\Users\Alice\.defenseclaw'
+                    sid = 'S-1-5-21-111-222-333-1001'
+                    created = $false
+                    state = 'absent'
+                })
+            }) `
+            -Action cleanup
+        [void](Set-DefenseClawTargetRuntimeTransactionState `
+            -SnapshotPath $legacySchemaSnapshot `
+            -Layout $legacySchemaLayout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian' `
+            -CleanupReport $legacyCleanupReport)
+        $legacyCleaned = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $legacySchemaSnapshot `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $legacyCleanedProperty = $legacyCleaned.PSObject.Properties[
+            'created_target_runtime_roots'
+        ]
+        Assert-Harness `
+            -Condition ($null -ne $legacyCleanedProperty) `
+            -Message 'cleanup removed the runtime-claim property'
+        Assert-Harness `
+            -Condition (@($legacyCleanedProperty.Value).Count -eq 0) `
+            -Message 'legacy transaction retained claims after exact cleanup'
+        Assert-Harness `
+            -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $legacySchemaLayout.InstallRollbackIntentPath)) `
+            -Message 'schema upsert accidentally published rollback intent'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'legacy-restored-target-runtime-schema-upsert'
+            missing_property_added = $true
+            live_claim_replaced_by_cleanup = $true
+            json_round_trip = $true
+        })
+
+        $twoRootPlan = [pscustomobject]@{
+            roots = @(
+                [pscustomobject]@{baseline = 'absent'},
+                [pscustomobject]@{baseline = 'absent'}
+            )
+        }
+        $partialCleanup = [pscustomobject]@{
+            ok = $false
+            claims = @([pscustomobject]@{state = 'absent'})
+        }
+        $completeCleanup = [pscustomobject]@{
+            ok = $true
+            claims = @(
+                [pscustomobject]@{state = 'absent'},
+                [pscustomobject]@{state = 'absent'}
+            )
+        }
+        Assert-Harness `
+            -Condition (
+                -not (Test-DefenseClawTargetRuntimeReportComplete `
+                    -Plan $twoRootPlan `
+                    -Report $partialCleanup) -and
+                (Test-DefenseClawTargetRuntimeReportComplete `
+                    -Plan $twoRootPlan `
+                    -Report $completeCleanup)
+            ) `
+            -Message 'partial target cleanup became terminal before successful retry'
+        $cleanupSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawTargetRuntimeRollbackCleanup `
+                -CommandType Function
+        ).ScriptBlock
+        $cleanupFailureGate = $cleanupSource.IndexOf(
+            'target runtime rollback cleanup failed',
+            [StringComparison]::Ordinal
+        )
+        $cleanupJournalUpdate = $cleanupSource.IndexOf(
+            'Set-DefenseClawTargetRuntimeTransactionState',
+            [StringComparison]::Ordinal
+        )
+        Assert-Harness `
+            -Condition (
+                $cleanupFailureGate -ge 0 -and
+                $cleanupJournalUpdate -gt $cleanupFailureGate
+            ) `
+            -Message 'partial target cleanup can replace live rollback claims'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'multi-root-cleanup-failure-retries'
+            partial_report_terminal = $false
+            full_retry_terminal = $true
+            prior_live_claims_retained = $true
+        })
+
+        function script:Test-DefenseClawServiceExists {
+            param([Parameter(Mandatory)][string]$Name)
+            throw "injected SCM access failure for $Name"
+        }
+        $noFreshCleanupSnapshot = [pscustomobject]@{
+            gateway_service = 'DefenseClawGateway'
+            guardian_service = 'DefenseClawHookGuardian'
+            install_root_created = $false
+            install_root_identity = '00000001:0000000000000001'
+            state_root_created = $false
+            state_root_identity = '00000002:0000000000000002'
+            created_target_runtime_roots = @()
+        }
+        $noFreshCleanupIntent = Publish-DefenseClawInstallRollbackIntent `
+            -Snapshot $noFreshCleanupSnapshot `
+            -Layout $legacySchemaLayout
+        Assert-Harness `
+            -Condition (
+                $null -eq $noFreshCleanupIntent -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $legacySchemaLayout.InstallRollbackIntentPath)
+            ) `
+            -Message (
+                'Repair/Upgrade rollback queried restored services without ' +
+                'fresh-install cleanup authority'
+            )
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'existing-deployment-rollback-skips-fresh-root-absence-gate'
+            fresh_cleanup_authority = $false
+            service_absence_queried = $false
+            receipt_published = $false
+        })
+
+        $freshCleanupSnapshot = [pscustomobject]@{
+            gateway_service = 'DefenseClawGateway'
+            guardian_service = 'DefenseClawHookGuardian'
+            install_root_created = $true
+            install_root_identity = '00000001:0000000000000001'
+            state_root_created = $false
+            state_root_identity = '00000002:0000000000000002'
+            created_target_runtime_roots = @()
+        }
+        $freshCleanupServiceGateClosed = $false
+        try {
+            $null = Publish-DefenseClawInstallRollbackIntent `
+                -Snapshot $freshCleanupSnapshot `
+                -Layout $legacySchemaLayout
+        }
+        catch {
+            $freshCleanupServiceGateClosed = [bool](
+                $_.Exception.Message -like '*injected SCM access failure*'
+            )
+        }
+        Assert-Harness `
+            -Condition (
+                $freshCleanupServiceGateClosed -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $legacySchemaLayout.InstallRollbackIntentPath)
+            ) `
+            -Message 'fresh-install cleanup authority bypassed the service-absence gate'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'fresh-root-authority-still-requires-service-absence'
+            fresh_cleanup_authority = $true
+            service_query_failure_propagated = $freshCleanupServiceGateClosed
+            receipt_published = $false
+        })
+
+        $scmFailureClosed = $false
+        try {
+            Assert-DefenseClawServicesAbsentChecked `
+                -Names @('DefenseClawGateway') `
+                -Operation 'injected destructive cleanup'
+        }
+        catch {
+            $scmFailureClosed = $true
+        }
+        $rootCleanupSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Complete-DefenseClawInstallRollbackIntent `
+                -CommandType Function
+        ).ScriptBlock
+        $checkedAbsenceIndex = $rootCleanupSource.IndexOf(
+            'Assert-DefenseClawServicesAbsentChecked',
+            [StringComparison]::Ordinal
+        )
+        $quarantineIndex = $rootCleanupSource.IndexOf(
+            'SetDirectoryDaclNoFollow',
+            [StringComparison]::Ordinal
+        )
+        $rootMutationIndex = $rootCleanupSource.IndexOf(
+            'Remove-DefenseClawManagedTree',
+            [StringComparison]::Ordinal
+        )
+        Assert-Harness `
+            -Condition (
+                $scmFailureClosed -and
+                $checkedAbsenceIndex -ge 0 -and
+                $quarantineIndex -gt $checkedAbsenceIndex -and
+                $rootMutationIndex -gt $quarantineIndex
+            ) `
+            -Message 'SCM query failure can reach destructive root cleanup'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'scm-query-failure-before-root-mutation'
+            query_failure_propagated = $scmFailureClosed
+            root_mutation_reached = $false
+        })
+
+        $preLayoutSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawPreLayoutRecovery `
+                -CommandType Function
+        ).ScriptBlock
+        $enterpriseSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawEnterpriseLifecycle `
+                -CommandType Function
+        ).ScriptBlock
+        $pendingMarker = $preLayoutSource.IndexOf(
+            'Repair and Upgrade transactions predate',
+            [StringComparison]::Ordinal
+        )
+        $pendingRecoveryIndex = if ($pendingMarker -ge 0) {
+            $preLayoutSource.IndexOf(
+                'Recover-DefenseClawPendingTransaction',
+                $pendingMarker,
+                [StringComparison]::Ordinal
+            )
+        }
+        else {
+            -1
+        }
+        $preLayoutIndex = $enterpriseSource.IndexOf(
+            'Invoke-DefenseClawPreLayoutRecovery',
+            [StringComparison]::Ordinal
+        )
+        $newReceiptIndex = $enterpriseSource.IndexOf(
+            'New-DefenseClawInstallPreparationIntent',
+            [StringComparison]::Ordinal
+        )
+        Assert-Harness `
+            -Condition (
+                $pendingMarker -ge 0 -and
+                $pendingRecoveryIndex -gt $pendingMarker -and
+                $preLayoutIndex -ge 0 -and
+                $newReceiptIndex -gt $preLayoutIndex
+            ) `
+            -Message 'old pending transaction is not recovered before new Install authority'
+        foreach ($priorAction in @('Repair', 'Upgrade')) {
+            $installRollbackContractResults.Add([pscustomobject]@{
+                name = ($priorAction.ToLowerInvariant() + '-crash-then-install')
+                old_pending_recovered_before_new_receipt = $true
+            })
+        }
+
+        $deferredModuleGate = $enterpriseSource.IndexOf(
+            '-DeferredConfig is temporarily unavailable',
+            [StringComparison]::Ordinal
+        )
+        $deferredModuleInvocationRejected = $false
+        try {
+            $null = Invoke-DefenseClawEnterpriseLifecycle `
+                -Action Install `
+                -DeferredConfig
+        }
+        catch {
+            $deferredModuleInvocationRejected = [bool](
+                $_.Exception.Message -like
+                    '*-DeferredConfig is temporarily unavailable*'
+            )
+        }
+        Assert-Harness `
+            -Condition $deferredModuleInvocationRejected `
+            -Message 'module invocation did not reject deferred config at entry'
+        $moduleLayoutResolution = $enterpriseSource.IndexOf(
+            'Resolve-DefenseClawCertificationCodexHome',
+            [StringComparison]::Ordinal
+        )
+        $bootstrapInstallerSource = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $InstallerPath `
+            -Raw
+        $deferredBootstrapGate = $bootstrapInstallerSource.IndexOf(
+            '-DeferredConfig is temporarily unavailable',
+            [StringComparison]::Ordinal
+        )
+        $bootstrapEnvironmentCreation = $bootstrapInstallerSource.IndexOf(
+            '$bootstrapEnvironment = New-DefenseClawBootstrapEnvironment',
+            [StringComparison]::Ordinal
+        )
+        Assert-Harness `
+            -Condition (
+                $deferredModuleGate -ge 0 -and
+                $moduleLayoutResolution -gt $deferredModuleGate -and
+                $deferredBootstrapGate -ge 0 -and
+                $bootstrapEnvironmentCreation -gt $deferredBootstrapGate
+            ) `
+            -Message 'deferred config can reach layout or bootstrap mutation'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'deferred-config-rejected-before-mutation'
+            bootstrap_gate_precedes_environment = $true
+            module_gate_precedes_layout = $true
+            module_invocation_rejected = $deferredModuleInvocationRejected
+        })
+
+        $boundedFixtureRoot = Microsoft.PowerShell.Management\Join-Path `
+            $TestRoot `
+            'c999'
+        $boundedLayout = New-HarnessLayout -Root $boundedFixtureRoot
+        # Keep every Windows component below 255 characters. PowerShell 7 can
+        # validate a nested long-path payload large enough to prove the raised
+        # receipt bound; Windows PowerShell 5.1 uses one identical valid
+        # component so its legacy MAX_PATH implementation can run the same
+        # schema/uniqueness assertions authoritatively.
+        $longProfileStem = ('a' * 180) -join ''
+        $longPathComponentCount = if (
+            $PSVersionTable.PSVersion.Major -ge 7
+        ) {
+            5
+        }
+        else {
+            1
+        }
+        $boundedRoots = [Collections.Generic.List[object]]::new()
+        $boundedClaims = [Collections.Generic.List[object]]::new()
+        for ($index = 0; $index -lt 128; $index++) {
+            $suffix = '{0:d3}' -f $index
+            $profileComponents = [Collections.Generic.List[string]]::new()
+            for (
+                $componentIndex = 0;
+                $componentIndex -lt $longPathComponentCount;
+                $componentIndex++
+            ) {
+                $componentPrefix = if ($componentIndex -eq 0) {
+                    'u' + $suffix + '-'
+                }
+                else {
+                    'p' + $componentIndex + '-'
+                }
+                $profileComponents.Add(
+                    $componentPrefix + $longProfileStem
+                )
+            }
+            $home = 'C:\Users\' + ($profileComponents -join '\')
+            $data = $home + '\.defenseclaw'
+            $sid = 'S-1-5-21-100-200-300-' + (1000 + $index)
+            $boundedRoots.Add([ordered]@{
+                user_home = $home
+                data_dir = $data
+                sid = $sid
+                baseline = 'absent'
+                staging_leaf =
+                    '.defenseclaw.setup-' + ('{0:x32}' -f ($index + 1))
+                marker_sid = 'S-1-5-21-1-2-3-4-5-6-7-' + (10 + $index)
+            })
+            $boundedClaims.Add([ordered]@{
+                user_home = $home
+                data_dir = $data
+                sid = $sid
+                identity = ('00000001:{0:x16}' -f ($index + 1))
+                created = $true
+                state = 'canonical'
+            })
+        }
+        $boundedPlan = [ordered]@{
+            schema_version = 1
+            manifest_path = [string]$boundedLayout.ManifestPath
+            manifest_sha256 = (('a' * 64) -join '')
+            target_count = 128
+            roots = @($boundedRoots)
+        }
+        $boundedReport = [ordered]@{
+            schema_version = 1
+            action = 'finalize'
+            ok = $true
+            claims = @($boundedClaims)
+        }
+        $boundedPlan = (
+            $boundedPlan |
+                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                    -Depth 12 `
+                    -Compress |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+        )
+        $boundedReport = (
+            $boundedReport |
+                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                    -Depth 12 `
+                    -Compress |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+        )
+        $boundedPlan = Assert-DefenseClawTargetRuntimePlan `
+            -Plan $boundedPlan `
+            -Layout $boundedLayout
+        $boundedReport = Assert-DefenseClawTargetRuntimeReport `
+            -Report $boundedReport `
+            -Action finalize `
+            -Plan $boundedPlan `
+            -JournalProjection
+        $planBytes = [Text.Encoding]::UTF8.GetByteCount(
+            ($boundedPlan |
+                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                    -Depth 12 `
+                    -Compress)
+        )
+        $reportBytes = [Text.Encoding]::UTF8.GetByteCount(
+            ($boundedReport |
+                Microsoft.PowerShell.Utility\ConvertTo-Json `
+                    -Depth 12 `
+                    -Compress)
+        )
+        Assert-Harness `
+            -Condition ($planBytes -le 1048576 -and $reportBytes -le 1048576) `
+            -Message 'max-root long-path fixture exceeds CLI exchange bounds'
+        $boundedIntent = [ordered]@{
+            schema_version = 2
+            phase = 'preparing_layout'
+            target_runtime_plan = $boundedPlan
+            created_target_runtime_roots = @($boundedReport.claims)
+        }
+        $boundedIntentJson = ConvertTo-DefenseClawInstallRollbackIntentJson `
+            -Intent $boundedIntent
+        $roundTrippedIntent = $boundedIntentJson |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $boundedIntentBytes =
+            [Text.Encoding]::UTF8.GetByteCount($boundedIntentJson)
+        $expandedBoundExercised = [bool](
+            $PSVersionTable.PSVersion.Major -lt 7 -or
+            $boundedIntentBytes -gt 262144
+        )
+        Assert-Harness `
+            -Condition (
+                $boundedIntentBytes -le 3145728 -and
+                $expandedBoundExercised -and
+                @($roundTrippedIntent.target_runtime_plan.roots).Count -eq
+                    128 -and
+                @($roundTrippedIntent.created_target_runtime_roots).Count -eq
+                    128
+            ) `
+            -Message 'bounded max-root install receipt does not round-trip'
+        $installRollbackContractResults.Add([pscustomobject]@{
+            name = 'max-root-long-path-receipt-roundtrip'
+            roots = 128
+            path_components = $longPathComponentCount
+            plan_bytes = $planBytes
+            report_bytes = $reportBytes
+            receipt_bytes = $boundedIntentBytes
+            expanded_bound_exercised = $expandedBoundExercised
+        })
+
+        $coverageStartedAfter = [DateTime]::UtcNow.AddMinutes(-1)
+        $coverageGeneration = [DateTime]::UtcNow.ToString('o')
+        $coverageDigest = ('a' * 64) -join ''
+        $coveragePriorID = ('b' * 32) -join ''
+        $coverageFreshID = ('c' * 32) -join ''
+        $coveragePriorStateIdentity = '00000001:0000000000000001'
+        $coverageFreshStateIdentity = '00000001:0000000000000002'
+        $coverageState = [pscustomobject][ordered]@{
+            version = 1
+            updated_at = $coverageGeneration
+        }
+        $coverageAuthorization = [pscustomobject][ordered]@{
+            version = 1
+            updated_at = $coverageGeneration
+        }
+        $coverageActivation = [pscustomobject][ordered]@{
+            version = 1
+            updated_at = $coverageGeneration
+            reconcile_id = $coverageFreshID
+            manifest_sha256 = $coverageDigest
+        }
+        $coverageReport = [pscustomobject][ordered]@{
+            ok = $true
+            state = $coverageState
+            authorization = $coverageAuthorization
+            activation = $coverageActivation
+            errors = @()
+        }
+        $acceptedCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $coverageReport `
+            -PriorReconcileID $coveragePriorID `
+            -ExpectedManifestSHA256 $coverageDigest `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition ([bool]$acceptedCoverage.ok) `
+            -Message 'fresh exact Guardian coverage was rejected'
+
+        $coverageReport.activation.reconcile_id = $coveragePriorID
+        $staleCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $coverageReport `
+            -PriorReconcileID $coveragePriorID `
+            -ExpectedManifestSHA256 $coverageDigest `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$staleCoverage.ok) `
+            -Message 'stale Guardian reconcile ID was accepted'
+
+        $coverageReport.activation.reconcile_id = $coverageFreshID
+        $wrongDigestCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $coverageReport `
+            -PriorReconcileID $coveragePriorID `
+            -ExpectedManifestSHA256 (('d' * 64) -join '') `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$wrongDigestCoverage.ok) `
+            -Message 'wrong Guardian manifest digest was accepted'
+
+        $missingActivationReport = [pscustomobject][ordered]@{
+            ok = $true
+            state = $coverageState
+            authorization = $coverageAuthorization
+            errors = @()
+        }
+        $missingActivationCoverage =
+            Test-DefenseClawGuardianCoverageReport `
+                -Report $missingActivationReport `
+                -PriorReconcileID $coveragePriorID `
+                -ExpectedManifestSHA256 $coverageDigest `
+                -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$missingActivationCoverage.ok) `
+            -Message 'missing exact Guardian activation was accepted'
+
+        $legacyReport = [pscustomobject][ordered]@{
+            ok = $true
+            state = $coverageState
+            authorization = $coverageAuthorization
+            errors = @()
+        }
+        $legacyCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $legacyReport `
+            -PriorGeneration ([DateTime]::UtcNow.AddMinutes(-2).ToString('o')) `
+            -PriorStateIdentity $coveragePriorStateIdentity `
+            -CurrentStateIdentity $coverageFreshStateIdentity `
+            -ExpectedManifestSHA256 '' `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition ([bool]$legacyCoverage.ok) `
+            -Message 'rollback-compatible fresh v1 Guardian coverage was rejected'
+        $staleLegacyCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $legacyReport `
+            -PriorGeneration $coverageGeneration `
+            -PriorStateIdentity $coveragePriorStateIdentity `
+            -CurrentStateIdentity $coverageFreshStateIdentity `
+            -ExpectedManifestSHA256 '' `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$staleLegacyCoverage.ok) `
+            -Message 'stale rollback-compatible v1 Guardian coverage was accepted'
+        $sameInodeLegacyCoverage = Test-DefenseClawGuardianCoverageReport `
+            -Report $legacyReport `
+            -PriorGeneration ([DateTime]::UtcNow.AddMinutes(-2).ToString('o')) `
+            -PriorStateIdentity $coveragePriorStateIdentity `
+            -CurrentStateIdentity $coveragePriorStateIdentity `
+            -ExpectedManifestSHA256 '' `
+            -StartedAfter $coverageStartedAfter
+        Assert-Harness `
+            -Condition (-not [bool]$sameInodeLegacyCoverage.ok) `
+            -Message 'same-inode rollback-compatible v1 Guardian coverage was accepted'
+
         return [pscustomobject]@{
             schema_version = 1
             ok = $true
@@ -3964,10 +7702,21 @@ targets:
             self_uninstall_recovery_cases = @(
                 $selfUninstallRecoveryResults
             )
+            install_rollback_contract_cases = @(
+                $installRollbackContractResults
+            )
         }
-    } $testRoot
+    } $testRoot $installerPath
 
-    $result | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8 -Compress
+    $resultItems = @($result)
+    if ($resultItems.Count -ne 1) {
+        throw (
+            'uninstall transaction smoke emitted ' +
+            "$($resultItems.Count) report objects, expected exactly one"
+        )
+    }
+    $resultItems[0] |
+        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8 -Compress
 }
 finally {
     Microsoft.PowerShell.Core\Remove-Module `

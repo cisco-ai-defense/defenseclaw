@@ -25,6 +25,7 @@ func TestEnterpriseLifecycleArgumentsUsePublicMachineTransaction(t *testing.T) {
 	want := []string{
 		"enterprise", "windows", "install",
 		"--installer", filepath.Join(stage, "install-enterprise.ps1"),
+		"--broker-binary", filepath.Join(stage, "defenseclaw-cmid-broker.exe"),
 		"--gateway-binary", filepath.Join(stage, "defenseclaw-gateway.exe"),
 		"--hook-binary", filepath.Join(stage, "defenseclaw-hook.exe"),
 		"--cli-binary", filepath.Join(stage, "defenseclaw.exe"),

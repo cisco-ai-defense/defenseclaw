@@ -32,6 +32,8 @@ func stubEnterpriseManagedRuntimeResolver(
 	nativeEnterpriseHookRuntimeSnapshot.registered = false
 	nativeEnterpriseHookRuntimeSnapshot.gatewayAddr = ""
 	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = ""
+	nativeEnterpriseHookRuntimeSnapshot.scopedToken = ""
+	nativeEnterpriseHookRuntimeSnapshot.generationID = ""
 	nativeEnterpriseHookRuntimeSnapshot.err = nil
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	t.Cleanup(func() {
@@ -45,6 +47,8 @@ func stubEnterpriseManagedRuntimeResolver(
 		nativeEnterpriseHookRuntimeSnapshot.registered = false
 		nativeEnterpriseHookRuntimeSnapshot.gatewayAddr = ""
 		nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = ""
+		nativeEnterpriseHookRuntimeSnapshot.scopedToken = ""
+		nativeEnterpriseHookRuntimeSnapshot.generationID = ""
 		nativeEnterpriseHookRuntimeSnapshot.err = nil
 		nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	})
@@ -160,6 +164,8 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 			Registered:         true,
 			GatewayAddr:        "127.0.0.1:18977",
 			GatewayServiceName: "DefenseClawGateway",
+			ScopedToken:        "authenticated-generation-token",
+			GenerationID:       "0123456789abcdef0123456789abcdef",
 		}, nil
 	})
 	if enterpriseManagedHookRuntimeNoop("claudecode") {
@@ -169,8 +175,72 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 	if opts.Home != userRuntime || opts.HookDir != hookDir ||
 		opts.APIAddr != "127.0.0.1:18977" ||
 		opts.ManagedGatewayServiceName != "DefenseClawGateway" ||
+		opts.AuthenticatedManagedToken == nil ||
+		*opts.AuthenticatedManagedToken != "authenticated-generation-token" ||
 		opts.FailMode != "closed" {
 		t.Fatalf("enterprise runtime options = %+v", opts)
+	}
+}
+
+func TestBuildHookOptionsEnterpriseManagedRejectsIncompleteAuthenticatedGeneration(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "open")
+	for _, tc := range []struct {
+		name         string
+		scopedToken  string
+		generationID string
+	}{
+		{
+			name:         "empty token",
+			generationID: "0123456789abcdef0123456789abcdef",
+		},
+		{
+			name:        "missing generation",
+			scopedToken: "authenticated-generation-token",
+		},
+		{
+			name:         "noncanonical generation",
+			scopedToken:  "authenticated-generation-token",
+			generationID: "0123456789ABCDEF0123456789ABCDEF",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+				return enterprisehooks.WindowsManagedHookRuntime{
+					Connector:          "codex",
+					DataDir:            filepath.Join(t.TempDir(), ".defenseclaw"),
+					PolicyActive:       true,
+					Registered:         true,
+					GatewayAddr:        "127.0.0.1:18977",
+					GatewayServiceName: "DefenseClawGateway",
+					ScopedToken:        tc.scopedToken,
+					GenerationID:       tc.generationID,
+				}, nil
+			})
+			if enterpriseManagedHookRuntimeNoop("codex") {
+				t.Fatal("incomplete authenticated generation was treated as a no-op")
+			}
+			opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)
+			if opts.ManagedRuntimeFailure != "enterprise_managed_runtime_state_invalid" ||
+				opts.AuthenticatedManagedToken != nil ||
+				opts.FailMode != "closed" || !opts.StrictAvailability {
+				t.Fatalf("incomplete authenticated generation did not fail closed: %+v", opts)
+			}
+		})
+	}
+}
+
+func TestBuildHookOptionsEnterpriseManagedWithoutPreflightCannotReadLegacyRuntime(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "open")
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		t.Fatal("managed resolver must not be called from the options builder")
+		return enterprisehooks.WindowsManagedHookRuntime{}, nil
+	})
+
+	opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)
+	if opts.ManagedRuntimeFailure != "enterprise_managed_runtime_state_invalid" ||
+		opts.AuthenticatedManagedToken != nil || opts.APIAddr != "127.0.0.1:1" ||
+		opts.FailMode != "closed" || !opts.StrictAvailability {
+		t.Fatalf("managed options without authenticated preflight did not fail closed: %+v", opts)
 	}
 }
 

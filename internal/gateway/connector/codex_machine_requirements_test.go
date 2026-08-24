@@ -52,6 +52,20 @@ func TestWindowsCodexMachineSecurityCompleteRequiresEnabledTarget(t *testing.T) 
 		t.Fatal("Codex-only target should be security-complete without optional application control")
 	}
 
+	opts.CodexTargetEnabled = false
+	opts.CursorTargetEnabled = true
+	if !windowsCodexMachineSecurityComplete(opts) {
+		t.Fatal("Cursor-only target should be security-complete without optional application control")
+	}
+	// Regression guard: Cursor plumbing must reach the emitted report so
+	// a future refactor that drops CursorTargetEnabled from
+	// windowsCodexMachineReport fails this test rather than silently
+	// misclassifying Cursor targets.
+	if report := windowsCodexMachineReport("inspect", opts); !report.CursorTargetEnabled ||
+		report.CodexTargetEnabled || report.ClaudeTargetEnabled {
+		t.Fatalf("Cursor target flag did not reach the report: %+v", report)
+	}
+
 	opts.EnterpriseTargetEnabled = false
 	if windowsCodexMachineSecurityComplete(opts) {
 		t.Fatal("disabled last target must clear security_complete")

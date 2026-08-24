@@ -137,6 +137,171 @@ func TestRunPrefersConnectorScopedToken(t *testing.T) {
 	}
 }
 
+func TestRunUsesAuthenticatedManagedTokenSnapshotWithoutRereadingSidecars(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mutateSidecar func(*testing.T, string)
+	}{
+		{
+			name: "changed",
+			mutateSidecar: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("replacement-generation-token\n"), 0o600); err != nil {
+					t.Fatalf("replace scoped token: %v", err)
+				}
+			},
+		},
+		{
+			name: "disappeared",
+			mutateSidecar: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove scoped token: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const snapshotToken = "authenticated-generation-token"
+			result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+				scopedPath := filepath.Join(opts.HookDir, ".hook-codex.token")
+				if err := os.WriteFile(scopedPath, []byte("prior-generation-token\n"), 0o600); err != nil {
+					t.Fatalf("write scoped token: %v", err)
+				}
+				tc.mutateSidecar(t, scopedPath)
+				opts.Token = "untrusted-generic-token"
+				opts.ManagedEnterprise = true
+				token := snapshotToken
+				opts.AuthenticatedManagedToken = &token
+			})
+			if result.code != 0 {
+				t.Fatalf("Run code = %d, want 0; stderr=%s", result.code, result.stderr)
+			}
+			if got := result.rt.gotReq.Header.Get("Authorization"); got != "Bearer "+snapshotToken {
+				t.Fatalf("Authorization = %q, want authenticated snapshot token", got)
+			}
+		})
+	}
+}
+
+func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *testing.T) {
+	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+		path := filepath.Join(opts.HookDir, ".hook-codex.token")
+		if err := os.WriteFile(path, []byte("valid-but-different-generation-token\n"), 0o600); err != nil {
+			t.Fatalf("write scoped token: %v", err)
+		}
+		opts.ManagedEnterprise = true
+		opts.FailMode = "open"
+		empty := "  "
+		opts.AuthenticatedManagedToken = &empty
+	})
+	if result.code != blockExit {
+		t.Fatalf("Run code = %d, want fail-closed %d; stderr=%s", result.code, blockExit, result.stderr)
+	}
+	if result.rt.requests != 0 {
+		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
+	}
+	if !strings.Contains(result.stderr, "authenticated managed runtime token is empty") {
+		t.Fatalf("stderr = %q, want authenticated-snapshot diagnostic", result.stderr)
+	}
+}
+
+// TestRunCodexNotifyUsesAuthenticatedManagedTokenSnapshot mirrors the Run
+// snapshot coverage above for the RunCodexNotify branch introduced at
+// hookexec.go lines 305-326. A non-empty snapshot token must reach the
+// request, and an empty snapshot token must send no request at all and
+// return the best-effort success code (0).
+func TestRunCodexNotifyUsesAuthenticatedManagedTokenSnapshot(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A prior-generation sidecar exists on disk. The snapshot branch must
+	// use the snapshot token (not this sidecar) when ManagedEnterprise +
+	// AuthenticatedManagedToken are both present.
+	scopedPath := filepath.Join(hookDir, ".hook-codex.token")
+	if err := os.WriteFile(scopedPath, []byte("prior-generation-token\n"), 0o600); err != nil {
+		t.Fatalf("write scoped token: %v", err)
+	}
+	rt := ok(`{"status":"ok"}`)
+	const snapshotToken = "authenticated-notify-snapshot-token"
+	tok := snapshotToken
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:                   "127.0.0.1:8787",
+		Home:                      home,
+		HookDir:                   hookDir,
+		Token:                     "untrusted-generic-token",
+		ManagedEnterprise:         true,
+		AuthenticatedManagedToken: &tok,
+		HTTPClient:                &http.Client{Transport: rt},
+	}, []byte(`{"type":"agent-turn-complete"}`))
+	if code != 0 {
+		t.Fatalf("RunCodexNotify code = %d, want 0", code)
+	}
+	if rt.gotReq == nil {
+		t.Fatal("expected the snapshot branch to issue a request")
+	}
+	if got := rt.gotReq.Header.Get("Authorization"); got != "Bearer "+snapshotToken {
+		t.Fatalf("Authorization = %q, want snapshot token", got)
+	}
+}
+
+// TestRunCodexNotifyRejectsEmptyAuthenticatedManagedTokenSnapshot proves
+// the RunCodexNotify snapshot branch never falls back to another
+// generation's token sidecar when the snapshot token is empty, and stays
+// best-effort by returning 0 without issuing any request.
+func TestRunCodexNotifyRejectsEmptyAuthenticatedManagedTokenSnapshot(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".hook-codex.token"),
+		[]byte("valid-but-different-generation-token\n"), 0o600); err != nil {
+		t.Fatalf("write scoped token: %v", err)
+	}
+	rt := ok(`{"status":"ok"}`)
+	stderr := &bytes.Buffer{}
+	empty := "  "
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:                   "127.0.0.1:8787",
+		Home:                      home,
+		HookDir:                   hookDir,
+		ManagedEnterprise:         true,
+		AuthenticatedManagedToken: &empty,
+		HTTPClient:                &http.Client{Transport: rt},
+		Stderr:                    stderr,
+	}, []byte(`{"type":"agent-turn-complete"}`))
+	if code != 0 {
+		t.Fatalf("RunCodexNotify code = %d, want best-effort 0", code)
+	}
+	if rt.requests != 0 {
+		t.Fatalf("gateway requests = %d, want 0 when snapshot token empty", rt.requests)
+	}
+	if !strings.Contains(stderr.String(), "authenticated managed runtime token is empty") {
+		t.Fatalf("stderr = %q, want authenticated-snapshot diagnostic", stderr.String())
+	}
+}
+
+func TestAuthenticatedManagedTokenFieldIsIgnoredOutsideManagedMode(t *testing.T) {
+	const snapshotToken = "must-not-apply-outside-managed-mode"
+	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+		path := filepath.Join(opts.HookDir, ".hook-codex.token")
+		if err := os.WriteFile(path, []byte("unmanaged-scoped-token\n"), 0o600); err != nil {
+			t.Fatalf("write scoped token: %v", err)
+		}
+		token := snapshotToken
+		opts.AuthenticatedManagedToken = &token
+	})
+	if result.code != 0 {
+		t.Fatalf("Run code = %d, want 0; stderr=%s", result.code, result.stderr)
+	}
+	if got := result.rt.gotReq.Header.Get("Authorization"); got != "Bearer unmanaged-scoped-token" {
+		t.Fatalf("Authorization = %q, want unchanged unmanaged token resolution", got)
+	}
+}
+
 func TestMalformedLegacyTokenIsNotAcceptedAsRaw(t *testing.T) {
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 		if err := os.WriteFile(filepath.Join(opts.HookDir, ".token"), []byte("malformed-legacy-token\n"), 0o600); err != nil {

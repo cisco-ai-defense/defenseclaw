@@ -319,6 +319,42 @@ namespace DefenseClaw.Windows.Tests
 }
 
 & $module {
+    $missingServiceName = 'DefenseClawEmptyEnvironmentFixture_' +
+        [Guid]::NewGuid().ToString('N')
+    $emptyEnvironmentAccepted = $false
+    try {
+        Assert-DefenseClawServiceConfiguration `
+            -Name $missingServiceName `
+            -ExpectedImage 'unused' `
+            -ExpectedAccount 'unused' `
+            -ExpectedDisplayName 'unused' `
+            -ExpectedSidType 1 `
+            -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
+            -ExpectedEnvironment @()
+    }
+    catch {
+        $expectedMissingService = "required Windows service is missing: $missingServiceName"
+        if ([string]$_.Exception.Message -cne $expectedMissingService) {
+            throw
+        }
+        $emptyEnvironmentAccepted = $true
+    }
+    if (-not $emptyEnvironmentAccepted) {
+        throw 'service verification did not accept an empty expected environment'
+    }
+
+    $missingRegistryProperties = [pscustomobject]@{
+        ImagePath = 'unused'
+    }
+    if (@(Get-DefenseClawOptionalPropertyValues `
+            -Properties $missingRegistryProperties `
+            -Name 'DependOnService').Count -ne 0 -or
+        @(Get-DefenseClawOptionalPropertyValues `
+            -Properties $missingRegistryProperties `
+            -Name 'Environment').Count -ne 0) {
+        throw 'missing service array properties were not normalized to empty arrays'
+    }
+
     $argumentFixture = [string[]]@(
         'config',
         'DefenseClawGateway',
@@ -477,6 +513,23 @@ namespace DefenseClaw.Windows.Tests
         -InstallRoot (Join-Path $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw') `
         -StateRoot (Join-Path $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw')
     $expectedCodexParent = Join-Path $script:ProgramData 'OpenAI\Codex'
+    $expectedManagedIPCDirectory = Join-Path `
+        $script:ProgramData `
+        'Cisco\Cisco Secure Client\DefenseClaw\ipc'
+    if (-not [string]::Equals(
+        [string]$layout.ManagedIPCDirectory,
+        $expectedManagedIPCDirectory,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "managed IPC contract path drift: $($layout.ManagedIPCDirectory)"
+    }
+    if (-not [string]::Equals(
+        [string]$layout.ManagedIPCSocketPath,
+        (Join-Path $expectedManagedIPCDirectory 'defenseclaw_ipc.sock'),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "managed IPC socket path drift: $($layout.ManagedIPCSocketPath)"
+    }
     if (-not [string]::Equals(
         [string]$layout.CodexMachinePolicyDirectory,
         $expectedCodexParent,
@@ -599,16 +652,23 @@ namespace DefenseClaw.Windows.Tests
             -not [bool]$coreOnlyLayout.CoreHardeningCertification) {
             throw 'CertificationCodexHome still implicitly selects core-only mode'
         }
+        $inactiveActivation = New-DefenseClawManagedHooksActivationRecord `
+            -State never_activated `
+            -DeploymentGenerationID ('1' * 32) `
+            -ManifestSHA256 ('a' * 64) `
+            -TargetCount 0
         $fullUnsignedMetadata = New-DefenseClawDeploymentMetadata `
             -Layout $fullUnsignedLayout `
             -GatewayServiceName $unsignedGateway `
             -GuardianServiceName $unsignedGuardian `
-            -Installed:$false
+            -Installed:$false `
+            -ManagedHooksActivation $inactiveActivation
         $coreOnlyMetadata = New-DefenseClawDeploymentMetadata `
             -Layout $coreOnlyLayout `
             -GatewayServiceName $unsignedGateway `
             -GuardianServiceName $unsignedGuardian `
-            -Installed:$false
+            -Installed:$false `
+            -ManagedHooksActivation $inactiveActivation
         if ([bool]$fullUnsignedMetadata.core_hardening_certification -or
             -not [bool]$coreOnlyMetadata.core_hardening_certification) {
             throw 'deployment metadata did not preserve the explicit core-only mode'
@@ -628,6 +688,10 @@ namespace DefenseClaw.Windows.Tests
             ),
             [Text.UTF8Encoding]::new($false)
         )
+        Set-DefenseClawPathAcl `
+            -Path $modeMetadataPath `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
         [void](Get-DefenseClawDeploymentMetadata `
             -Layout $adoptLayout `
             -Required)
@@ -656,6 +720,10 @@ namespace DefenseClaw.Windows.Tests
             ),
             [Text.UTF8Encoding]::new($false)
         )
+        Set-DefenseClawPathAcl `
+            -Path $modeMetadataPath `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
         $conversionRejected = $false
         try {
             [void](Get-DefenseClawDeploymentMetadata `
@@ -759,7 +827,8 @@ namespace DefenseClaw.Windows.Tests
         -Layout $layout `
         -GatewayServiceName 'DefenseClawGateway' `
         -GuardianServiceName 'DefenseClawHookGuardian' `
-        -Installed:$false
+        -Installed:$false `
+        -ManagedHooksActivation $inactiveActivation
     if ($productionMetadata.Contains('certification_codex_home')) {
         throw 'production deployment metadata unexpectedly contains certification CODEX_HOME'
     }
@@ -773,7 +842,8 @@ namespace DefenseClaw.Windows.Tests
         -Layout $certificationLayout `
         -GatewayServiceName 'DefenseClawCertGateway_0123456789' `
         -GuardianServiceName 'DefenseClawCertGuardian_0123456789' `
-        -Installed:$false
+        -Installed:$false `
+        -ManagedHooksActivation $inactiveActivation
     if (-not $certificationMetadata.Contains('certification_codex_home') -or
         [string]$certificationMetadata['certification_codex_home'] -cne $certificationHome) {
         throw 'certification deployment metadata does not pin exact CODEX_HOME'
@@ -927,7 +997,7 @@ $teardownFailurePreserved = & $module {
         return [pscustomobject]@{
             exit_code = 1
             output = @(
-                '{"schema_version":2,"action":"prepare","ok":false,"error":"resolve trusted ProgramData: restricted fixture"}'
+                '{"schema_version":4,"action":"prepare","ok":false,"error":"resolve trusted ProgramData: restricted fixture"}'
             )
         }
     }
@@ -956,6 +1026,46 @@ if (-not [bool]$teardownFailurePreserved) {
     throw 'failed managed-hook teardown diagnostic regression did not execute'
 }
 
+$guardianFailureDiagnosticPreserved = & $module {
+    $secretMarker = 'diagnostic-secret-marker'
+    $payload = [pscustomobject][ordered]@{
+        ok = $false
+        results = @(
+            [pscustomobject][ordered]@{
+                connector = 'claudecode'
+                sid = 'S-1-5-21-1000'
+                ok = $false
+                error = (
+                    'immutable managed runtime generation does not match ' +
+                    "the verified connector contract; token=$secretMarker"
+                )
+            },
+            [pscustomobject][ordered]@{
+                connector = 'cursor'
+                sid = 'S-1-5-21-1001'
+                ok = $true
+            }
+        )
+    } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress -Depth 4
+    $probe = [pscustomobject][ordered]@{
+        exit_code = 1
+        output = @($payload, 'enterprise hooks verify failed')
+    }
+    $diagnostic = Get-DefenseClawGuardianVerificationFailureDiagnostic `
+        -Probe $probe
+    if ($diagnostic -notmatch 'claudecode@S-1-5-21-1000' -or
+        $diagnostic -notmatch 'immutable managed runtime generation' -or
+        $diagnostic -match [regex]::Escape($secretMarker) -or
+        $diagnostic -notmatch 'token=<redacted>' -or
+        $diagnostic -match 'cursor@S-1-5-21-1001') {
+        throw "guardian live verifier diagnostic was not safely preserved: $diagnostic"
+    }
+    return $true
+}
+if (-not [bool]$guardianFailureDiagnosticPreserved) {
+    throw 'guardian live verifier diagnostic regression did not execute'
+}
+
 [pscustomobject]@{
     schema_version = 1
     ok = $true
@@ -968,7 +1078,10 @@ if (-not [bool]$teardownFailurePreserved) {
     fixed_native_helper_spoof_ignored = $true
     command_line_empty_argument_round_trip = $true
     command_line_invalid_arguments_rejected = $true
+    service_empty_environment_binding = $true
+    service_missing_array_properties_normalized = $true
     teardown_failure_diagnostic_preserved = $teardownFailurePreserved
+    guardian_failure_diagnostic_preserved = $guardianFailureDiagnosticPreserved
     production_codex_home_absent = $true
     certification_codex_home_exact = $true
     certification_scope_rejections = $true

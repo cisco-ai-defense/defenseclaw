@@ -198,17 +198,28 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	}
 
 	managedGatewayService := ""
+	var authenticatedManagedToken *string
+	managedRuntimeFailure := ""
 	if enterpriseManaged {
-		protectedAddr, protectedService, ok :=
-			enterpriseManagedHookRuntimeEndpoint(connector)
+		protectedAddr, protectedService, protectedToken, ok :=
+			enterpriseManagedHookRuntimeConnection(connector)
 		if ok {
 			apiAddr = protectedAddr
 			managedGatewayService = protectedService
+			authenticatedManagedToken = protectedToken
 		} else {
 			// Resolver failure is carried separately and blocks before network
 			// contact. Keep a loopback placeholder so no user-supplied flag,
 			// environment value, or target-writable sidecar becomes selected.
 			apiAddr = "127.0.0.1:1"
+			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
+			if strings.TrimSpace(managedRuntimeFailure) == "" {
+				// Keep direct/internal callers safe even when they bypass the normal
+				// NativeHookRuntimeNoop preflight. Managed execution may never fall
+				// back to the mutable legacy sidecars merely because no authenticated
+				// generation has been cached yet.
+				managedRuntimeFailure = "enterprise_managed_runtime_state_invalid"
+			}
 		}
 	} else {
 		if apiAddr == "" && trustedNativeState {
@@ -264,6 +275,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		Home:                      home,
 		HookDir:                   hookDir,
 		Token:                     token,
+		AuthenticatedManagedToken: authenticatedManagedToken,
 		StrictAvailability:        hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
 		ManagedEnterprise:         enterpriseManaged,
 		ManagedGatewayServiceName: managedGatewayService,
@@ -283,7 +295,10 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	}
 	if enterpriseManaged {
 		opts.ManagedEnterprise = true
-		opts.ManagedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
+		if managedRuntimeFailure == "" {
+			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
+		}
+		opts.ManagedRuntimeFailure = managedRuntimeFailure
 		opts.FailMode = "closed"
 		opts.StrictAvailability = true
 	}

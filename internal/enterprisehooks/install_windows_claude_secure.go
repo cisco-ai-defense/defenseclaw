@@ -112,6 +112,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		entryUpdatedAt string
 		hookScripts    []string
 		transaction    windowsClaudeUserRuntimeTransaction
+		generation     WindowsManagedRuntimeGenerationPublication
 	)
 	err = windowsEnterpriseTargetImpersonation(targetSID, opts.UserHome, func() error {
 		verifiedHome, verifiedSID, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
@@ -198,24 +199,21 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		if err != nil {
 			return err
 		}
-		if _, statErr := os.Lstat(transaction.dataDir); errors.Is(statErr, os.ErrNotExist) {
-			transaction.createdDataDir = true
-		} else if statErr != nil {
-			return fmt.Errorf("enterprise hooks: inspect per-user data directory: %w", statErr)
-		}
-		if _, statErr := os.Lstat(transaction.hookDir); errors.Is(statErr, os.ErrNotExist) {
-			transaction.createdHookDir = true
-		} else if statErr != nil {
-			return fmt.Errorf("enterprise hooks: inspect per-user hook directory: %w", statErr)
-		}
 		fail := func(cause error) error {
 			if restoreErr := restoreWindowsClaudeUserRuntime(transaction); restoreErr != nil {
 				return fmt.Errorf("%v (per-user runtime rollback failed: %v)", cause, restoreErr)
 			}
 			return cause
 		}
-		if err := os.MkdirAll(transaction.hookDir, 0o700); err != nil {
-			return fail(fmt.Errorf("enterprise hooks: create per-user hook runtime: %w", err))
+		creation, createErr := ensureWindowsTargetOwnedDirectoryTree(
+			transaction.home,
+			transaction.hookDir,
+			transaction.targetSID,
+		)
+		transaction.createdDataDir = creation.createdDataDir
+		transaction.createdHookDir = creation.createdHookDir
+		if createErr != nil {
+			return fail(fmt.Errorf("enterprise hooks: create per-user hook runtime: %w", createErr))
 		}
 		if err := connector.WriteHookScriptsForConnectorObjectWithOpts(transaction.hookDir, setup, conn); err != nil {
 			return fail(fmt.Errorf("enterprise hooks: write managed Claude Code hook runtime: %w", err))
@@ -280,6 +278,23 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		) != 1 {
 			return fail(fmt.Errorf("enterprise hooks: per-user connector-scoped token does not match the protected service token"))
 		}
+		generation, err = prepareWindowsManagedRuntimeGenerationForInstall(
+			conn.Name(),
+			targetSID,
+			setup.DataDir,
+			hookExecutable,
+			setup.APIAddr,
+			setup.HookAPIToken,
+			lockEntry.ContractID,
+			lockUpdatedAt,
+			entryUpdatedAt,
+		)
+		if err != nil {
+			return fail(fmt.Errorf(
+				"enterprise hooks: prepare immutable Claude Code runtime generation: %w",
+				err,
+			))
+		}
 		if scriptProvider, ok := conn.(connector.HookScriptProvider); ok {
 			hookScripts = scriptProvider.HookScripts(setup)
 		}
@@ -289,18 +304,36 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		return InstallResult{}, err
 	}
 
+	generationCommit, err := windowsManagedRuntimeGenerationCommit(generation)
+	if err != nil {
+		generationErr := discardWindowsManagedRuntimeGeneration(generation)
+		restoreErr := restoreWindowsClaudeUserRuntimeAsTarget(targetSID, home, transaction)
+		return InstallResult{}, errors.Join(
+			fmt.Errorf("enterprise hooks: select immutable Claude Code runtime generation: %w", err),
+			generationErr,
+			restoreErr,
+		)
+	}
+
 	installedPolicyPath, rollbackPolicy, err := installWindowsClaudeManagedPolicy(policyBody, setup, targetSID)
 	if err != nil {
-		if restoreErr := restoreWindowsClaudeUserRuntimeAsTarget(targetSID, home, transaction); restoreErr != nil {
-			return InstallResult{}, fmt.Errorf("%v (per-user runtime rollback failed: %v)", err, restoreErr)
-		}
-		return InstallResult{}, err
+		return InstallResult{}, errors.Join(
+			err,
+			rollbackWindowsManagedRuntimeGeneration(generationCommit, generation),
+			restoreWindowsClaudeUserRuntimeAsTarget(targetSID, home, transaction),
+		)
 	}
 	rollbackAll := func(cause error) error {
 		if rollbackPolicy != nil {
 			if policyErr := rollbackPolicy(); policyErr != nil {
 				cause = fmt.Errorf("%v (managed policy rollback failed: %v)", cause, policyErr)
 			}
+		}
+		if generationErr := rollbackWindowsManagedRuntimeGeneration(
+			generationCommit,
+			generation,
+		); generationErr != nil {
+			cause = fmt.Errorf("%v (managed runtime generation rollback failed: %v)", cause, generationErr)
 		}
 		if restoreErr := restoreWindowsClaudeUserRuntimeAsTarget(targetSID, home, transaction); restoreErr != nil {
 			cause = fmt.Errorf("%v (per-user runtime rollback failed: %v)", cause, restoreErr)

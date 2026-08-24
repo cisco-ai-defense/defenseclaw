@@ -47,6 +47,12 @@ finally; it never treats cleanup as proof that a failed test was safe.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
+    [string]$BrokerBinary,
+
+    [Parameter(Mandatory)]
+    [string]$ProviderLibrary,
+
+    [Parameter(Mandatory)]
     [string]$GatewayBinary,
 
     [Parameter(Mandatory)]
@@ -72,6 +78,8 @@ param(
     [string]$RejectedClaudeBinary,
 
     [string]$InstallerPath = '',
+
+    [string]$UpgradeBrokerBinary = '',
 
     [string]$UpgradeGatewayBinary = '',
 
@@ -400,6 +408,8 @@ function Assert-CertificationServiceName([string]$Name, [string]$Role) {
     $expected = switch ($Role) {
         'gateway' { "DefenseClawCertGateway_$($script:RunToken)" }
         'guardian' { "DefenseClawCertGuardian_$($script:RunToken)" }
+        'broker' { "DefenseClawCMIDBroker_$($script:RunToken)" }
+        'enumerator' { "DefenseClawCertEnumerator_$($script:RunToken)" }
         default { throw "unknown certification service role: $Role" }
     }
     if ($Name -cne $expected) {
@@ -416,6 +426,8 @@ function Assert-CertificationUserName([string]$Name, [string]$Role) {
 function Assert-CertificationScope {
     Assert-CertificationServiceName $script:GatewayServiceName 'gateway'
     Assert-CertificationServiceName $script:GuardianServiceName 'guardian'
+    Assert-CertificationServiceName $script:BrokerServiceName 'broker'
+    Assert-CertificationServiceName $script:EnumeratorServiceName 'enumerator'
     $expectedInstall = ConvertTo-CanonicalPath (
         Join-Path $script:ProgramFilesCertificationRoot $script:RunToken
     )
@@ -4486,6 +4498,206 @@ function Assert-SourcePathHasNoReparse([string]$Path, [string]$Label) {
     return $full
 }
 
+function Assert-CertificationProviderLibraryCurrent(
+    [string]$Path,
+    [string]$ExpectedSHA256,
+    [string]$Label
+) {
+    $full = Assert-SourcePathHasNoReparse $Path $Label
+    if (-not [IO.Path]::GetFileName($full).Equals(
+            'cmidapi.dll',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "$Label must be the exact managed credential provider library cmidapi.dll: $full"
+    }
+    $providerRoot = ConvertTo-CanonicalPath (
+        Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client\CM'
+    )
+    $null = Assert-PathBelow $full $providerRoot $Label
+    $signature = Get-AuthenticodeSignature -LiteralPath $full
+    if ($signature.Status -ne
+            [Management.Automation.SignatureStatus]::Valid -or
+        $null -eq $signature.SignerCertificate) {
+        throw (
+            "$Label requires a valid vendor Authenticode signature; " +
+            "status=$($signature.Status)"
+        )
+    }
+    $signerName = $signature.SignerCertificate.GetNameInfo(
+        [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+        $false
+    )
+    if ($signerName -cne 'Cisco Systems, Inc.') {
+        throw "$Label signer is not the exact Cisco Systems, Inc. identity"
+    }
+    $actualSHA256 = Get-FileDigest $full
+    if ([string]::IsNullOrWhiteSpace($actualSHA256) -or
+        -not [string]::Equals(
+            $actualSHA256,
+            $ExpectedSHA256,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "$Label changed after certification preflight"
+    }
+    return [pscustomobject]@{
+        path = $full
+        sha256 = $actualSHA256
+        signature_status = [string]$signature.Status
+        signer_name = $signerName
+        signer_thumbprint = [string]$signature.SignerCertificate.Thumbprint
+        signer_subject = [string]$signature.SignerCertificate.Subject
+    }
+}
+
+function Test-PublicCLIProviderLibrarySelection {
+    $expected = Assert-CertificationProviderLibraryCurrent `
+        $script:ProviderLibrarySource `
+        ([string]$script:SourceDigests['provider_library']) `
+        'public CLI provider-discovery preflight'
+    $machineBefore = Get-NormalModeEnterpriseMachineSnapshot
+    $observedCommands = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $observedChildPIDs = [Collections.Generic.HashSet[uint32]]::new()
+    $observeProviderArgument = {
+        param($RunningProcess)
+        foreach ($child in @(
+            Get-CimInstance `
+                Win32_Process `
+                -Filter "ParentProcessId=$($RunningProcess.Id)" `
+                -ErrorAction SilentlyContinue
+        )) {
+            $commandLine = [string]$child.CommandLine
+            if (-not [string]::IsNullOrWhiteSpace($commandLine) -and
+                $commandLine.IndexOf(
+                    '-ProviderLibrary',
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -ge 0 -and
+                $commandLine.IndexOf(
+                    $script:Installer,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -ge 0) {
+                [void]$observedCommands.Add($commandLine)
+                [void]$observedChildPIDs.Add([uint32]$child.ProcessId)
+            }
+        }
+    }
+    # Deliberately omit --allow-unsigned. The certification-scoped service
+    # names make the production installer reject this probe before layout
+    # resolution, lock acquisition, root creation, or SCM mutation. The CLI
+    # nevertheless resolves the provider first and places that exact result
+    # in the child PowerShell command line, which lets this harness verify the
+    # real compiled resolver without reimplementing its version ordering.
+    $probe = Invoke-NativeProcess `
+        -FilePath $script:CLISource `
+        -ArgumentList @(
+            'enterprise', 'windows', 'repair',
+            '--installer', $script:Installer,
+            '--broker-binary', $script:BrokerSource,
+            '--gateway-service-name', $script:GatewayServiceName,
+            '--guardian-service-name', $script:GuardianServiceName,
+            '--install-root', $script:InstallRoot,
+            '--state-root', $script:StateRoot,
+            '--json'
+        ) `
+        -AllowedExitCodes @(1) `
+        -Environment (Get-CertificationCodexEnvironment) `
+        -TimeoutSeconds 120 `
+        -Label 'public-cli-provider-discovery-preflight' `
+        -DuringExecution $observeProviderArgument `
+        -ExecutionPollMilliseconds 10 `
+        -StrictWindowsBootstrapEnvironment
+
+    $expectedFailure =
+        'certification-scoped Install, Upgrade, or Repair requires -AllowUnsigned'
+    $probeJSON = ConvertFrom-SingleJSONDocument `
+        $probe.StdOut `
+        'public CLI provider-discovery preflight'
+    if ([int]$probeJSON.schema_version -ne 1 -or
+        [bool]$probeJSON.ok -or
+        [string]$probeJSON.action -cne 'repair' -or
+        [string]$probeJSON.error -cne $expectedFailure -or
+        @($probeJSON.errors).Count -ne 1 -or
+        [string](@($probeJSON.errors)[0]) -cne $expectedFailure) {
+        throw (
+            'public CLI provider-discovery preflight did not stop at the ' +
+            'required pre-mutation certification gate'
+        )
+    }
+    if ($observedChildPIDs.Count -ne 1) {
+        throw (
+            'public CLI provider-discovery preflight did not expose exactly ' +
+            "one PowerShell child; observed=$($observedChildPIDs.Count)"
+        )
+    }
+    $current = Assert-CertificationProviderLibraryCurrent `
+        $script:ProviderLibrarySource `
+        ([string]$script:SourceDigests['provider_library']) `
+        'post-probe managed credential provider library'
+    foreach ($property in @('path', 'sha256', 'signer_name', 'signer_thumbprint')) {
+        if (-not [string]::Equals(
+                [string]$current.$property,
+                [string]$expected.$property,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "managed credential provider identity changed during resolver probe: $property"
+        }
+    }
+    $machineAfter = Get-NormalModeEnterpriseMachineSnapshot
+    Assert-SameObjectJSON `
+        $machineBefore `
+        $machineAfter `
+        'public CLI provider-discovery preflight machine state'
+
+    $selectedPaths = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $pattern = '(?i)(?:^|\s)-ProviderLibrary\s+(?:"([^"]+)"|([^\s"]+))(?=\s|$)'
+    foreach ($commandLine in @($observedCommands)) {
+        $matches = [Text.RegularExpressions.Regex]::Matches(
+            $commandLine,
+            $pattern,
+            [Text.RegularExpressions.RegexOptions]::CultureInvariant
+        )
+        if ($matches.Count -ne 1) {
+            throw 'public CLI provider-discovery preflight emitted an ambiguous provider argument'
+        }
+        $selected = if ($matches[0].Groups[1].Success) {
+            [string]$matches[0].Groups[1].Value
+        } else {
+            [string]$matches[0].Groups[2].Value
+        }
+        [void]$selectedPaths.Add((ConvertTo-CanonicalPath $selected))
+    }
+    if ($selectedPaths.Count -ne 1) {
+        throw (
+            'public CLI provider-discovery preflight did not expose exactly ' +
+            "one resolver-selected path; observed=$($selectedPaths.Count)"
+        )
+    }
+    $selectedPath = [string](@($selectedPaths)[0])
+    if (-not [string]::Equals(
+            $selectedPath,
+            [string]$expected.path,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (
+            'supplied ProviderLibrary does not match the exact public CLI ' +
+            "resolver selection: supplied=$($expected.path) selected=$selectedPath"
+        )
+    }
+    return [pscustomobject]@{
+        supplied_path = [string]$expected.path
+        resolver_selected_path = $selectedPath
+        sha256 = [string]$expected.sha256
+        signer_name = [string]$expected.signer_name
+        probe_exit_code = [int]$probe.ExitCode
+        observed_command_count = [int]$observedCommands.Count
+        observed_child_pid = [uint32](@($observedChildPIDs)[0])
+        machine_state_unchanged = $true
+    }
+}
+
 function Copy-CertificationSourceToProtectedStaging(
     [string]$Source,
     [string]$RelativeDestination,
@@ -4521,6 +4733,15 @@ function Initialize-ProtectedCertificationSources {
     if (-not (Test-Path -LiteralPath $originalModule -PathType Leaf)) {
         throw "enterprise installer module is missing: $originalModule"
     }
+    $script:BrokerSource = Copy-CertificationSourceToProtectedStaging `
+        $script:OriginalBrokerSource `
+        'sources\defenseclaw-cmid-broker.exe' `
+        'stage-broker'
+    $providerIdentity = Assert-CertificationProviderLibraryCurrent `
+        $script:OriginalProviderLibrarySource `
+        ([string]$script:SourceDigests['provider_library']) `
+        'managed credential provider library'
+    $script:ProviderLibrarySource = [string]$providerIdentity.path
     $script:GatewaySource = Copy-CertificationSourceToProtectedStaging `
         $script:OriginalGatewaySource `
         'sources\defenseclaw-gateway.exe' `
@@ -4558,6 +4779,11 @@ function Initialize-ProtectedCertificationSources {
         'installer\DefenseClawEnterprise.psm1' `
         'stage-enterprise-module'
     foreach ($entry in @(
+        [pscustomobject]@{ name = 'broker'; path = $script:BrokerSource },
+        [pscustomobject]@{
+            name = 'provider_library'
+            path = $script:ProviderLibrarySource
+        },
         [pscustomobject]@{ name = 'gateway'; path = $script:GatewaySource },
         [pscustomobject]@{ name = 'hook'; path = $script:HookSource },
         [pscustomobject]@{ name = 'cli'; path = $script:CLISource },
@@ -4580,17 +4806,24 @@ function Initialize-ProtectedCertificationSources {
         }
     }
 
+    $script:UpgradeBrokerSource = ''
     $script:UpgradeGatewaySource = ''
     $script:UpgradeHookSource = ''
     $script:UpgradeCLISource = ''
-    if (-not [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
+    if (-not [string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
+        -not [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
-        if ([string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
+        if ([string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
+            [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
-            throw 'upgrade certification requires all three upgrade binaries'
+            throw 'upgrade certification requires all four upgrade binaries'
         }
+        $script:UpgradeBrokerSource = Copy-CertificationSourceToProtectedStaging `
+            $UpgradeBrokerBinary `
+            'upgrade-sources\defenseclaw-cmid-broker.exe' `
+            'stage-upgrade-broker'
         $script:UpgradeGatewaySource = Copy-CertificationSourceToProtectedStaging `
             $UpgradeGatewayBinary `
             'upgrade-sources\defenseclaw-gateway.exe' `
@@ -4604,6 +4837,7 @@ function Initialize-ProtectedCertificationSources {
             'upgrade-sources\defenseclaw.exe' `
             'stage-upgrade-cli'
         foreach ($entry in @(
+            [pscustomobject]@{ name = 'upgrade_broker'; path = $script:UpgradeBrokerSource },
             [pscustomobject]@{ name = 'upgrade_gateway'; path = $script:UpgradeGatewaySource },
             [pscustomobject]@{ name = 'upgrade_hook'; path = $script:UpgradeHookSource },
             [pscustomobject]@{ name = 'upgrade_cli'; path = $script:UpgradeCLISource }
@@ -4613,7 +4847,7 @@ function Initialize-ProtectedCertificationSources {
             }
         }
     }
-    return 'installer, module, gateway, hook, lifecycle CLI, normal-mode Python CLI, and optional upgrade binaries are byte-stable in administrator-protected staging'
+    return 'installer, module, broker, gateway, hook, lifecycle CLI, normal-mode Python CLI, and optional upgrade binaries are byte-stable in administrator-protected staging; the signed vendor provider library remains pinned to its authenticated Secure Client path'
 }
 
 function Get-AgentBinaryTrustIdentity(
@@ -4631,10 +4865,10 @@ function Get-AgentBinaryTrustIdentity(
     if ($signature.Status -ne
         [Management.Automation.SignatureStatus]::Valid -or
         $null -eq $signature.SignerCertificate -or
-        -not ([string]$signature.SignerCertificate.Subject).Contains(
+        ([string]$signature.SignerCertificate.Subject).IndexOf(
             $expectedSigner,
             [StringComparison]::Ordinal
-        )) {
+        ) -lt 0) {
         throw (
             "$Agent application-control artifact requires a valid " +
             "$expectedSigner Authenticode signature; status=$($signature.Status)"
@@ -4900,10 +5134,10 @@ function Initialize-ProtectedCodexRuntime {
     if ($stagedSignature.Status -ne
         [Management.Automation.SignatureStatus]::Valid -or
         $null -eq $stagedSignature.SignerCertificate -or
-        -not ([string]$stagedSignature.SignerCertificate.Subject).Contains(
+        ([string]$stagedSignature.SignerCertificate.Subject).IndexOf(
             'OpenAI OpCo, LLC',
             [StringComparison]::Ordinal
-        )) {
+        ) -lt 0) {
         throw 'protected Codex runtime lost its valid OpenAI Authenticode signature'
     }
     $script:ClaudeRuntimeBinary = Assert-PathBelow `
@@ -6067,6 +6301,7 @@ function Test-ProtectedUserTreeSecurityRoundTrip {
 
 function Get-DeploymentDigests {
     $paths = [ordered]@{
+        broker = Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'
         gateway = Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'
         hook = Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'
         cli = Join-Path $script:InstallRoot 'bin\defenseclaw.exe'
@@ -6079,6 +6314,97 @@ function Get-DeploymentDigests {
         $out[$entry.Key] = Get-FileDigest $entry.Value
     }
     return [pscustomobject]$out
+}
+
+function Assert-InstalledProviderLibraryIdentity(
+    [string]$Label,
+    [string]$ExpectedBrokerSHA256 = ''
+) {
+    $provider = Assert-CertificationProviderLibraryCurrent `
+        $script:ProviderLibrarySource `
+        ([string]$script:SourceDigests['provider_library']) `
+        "$Label managed credential provider library"
+    $metadataPath = Join-Path $script:StateRoot 'install\deployment.json'
+    if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+        throw "$Label deployment metadata is missing: $metadataPath"
+    }
+    $metadata = Get-Content `
+        -LiteralPath $metadataPath `
+        -Raw `
+        -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $property = $metadata.PSObject.Properties['provider_library_path']
+    if ($null -eq $property -or
+        [string]::IsNullOrWhiteSpace([string]$property.Value) -or
+        -not [string]::Equals(
+            (ConvertTo-CanonicalPath ([string]$property.Value)),
+            [string]$provider.path,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "$Label deployment metadata is not bound to the authenticated provider library"
+    }
+    $brokerServiceName = $script:BrokerServiceName
+    $brokerService = Get-CimInstance `
+        Win32_Service `
+        -Filter "Name='$brokerServiceName'" `
+        -ErrorAction Stop
+    $brokerBinary = ConvertTo-CanonicalPath (
+        Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'
+    )
+    $brokerSHA256 = Get-FileDigest $brokerBinary
+    $brokerDigestVerified = $false
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedBrokerSHA256)) {
+        if ($ExpectedBrokerSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+            -not [string]::Equals(
+                $brokerSHA256,
+                $ExpectedBrokerSHA256,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw (
+                "$Label installed credential broker digest is not the " +
+                'exact protected source digest'
+            )
+        }
+        $brokerDigestVerified = $true
+    }
+    $brokerAuthKey = ConvertTo-CanonicalPath (
+        Join-Path $script:StateRoot 'cmid-broker\broker-auth.key'
+    )
+    $brokerLog = ConvertTo-CanonicalPath (
+        Join-Path $script:StateRoot 'logs\cmid-broker\cmid-broker.log'
+    )
+    $expectedImage = (
+        '"{0}" service --service-name {1} --gateway-service-name {2} ' +
+        '--pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"'
+    ) -f @(
+        $brokerBinary,
+        $brokerServiceName,
+        $script:GatewayServiceName,
+        "\\.\pipe\$brokerServiceName",
+        $brokerAuthKey,
+        [string]$provider.path,
+        $brokerLog
+    )
+    if ($null -eq $brokerService -or
+        -not [string]::Equals(
+            [string]$brokerService.PathName,
+            $expectedImage,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "$Label credential broker image is not bound to the authenticated provider library"
+    }
+    return [pscustomobject]@{
+        path = [string]$provider.path
+        sha256 = [string]$provider.sha256
+        signature_status = [string]$provider.signature_status
+        signer_name = [string]$provider.signer_name
+        signer_thumbprint = [string]$provider.signer_thumbprint
+        broker_service = $brokerServiceName
+        broker_sha256 = $brokerSHA256
+        expected_broker_sha256 = $ExpectedBrokerSHA256
+        exact_broker_sha256 = $brokerDigestVerified
+        broker_image_bound = $true
+        deployment_metadata_bound = $true
+    }
 }
 
 function Assert-SameDigests([object]$Before, [object]$After, [string]$Context) {
@@ -6171,6 +6497,7 @@ function Get-NormalModeEnterpriseMachineSnapshot {
         $script:LifecycleLockDirectory,
         $script:LifecycleLockPath,
         (Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'),
+        (Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw.exe'),
         (Join-Path $script:StateRoot 'etc\config.yaml'),
@@ -6218,6 +6545,7 @@ function Get-NormalModeEnterpriseAttributionSnapshot([object]$Snapshot) {
     )
     foreach ($path in @(
         (Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'),
+        (Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw.exe'),
         (Join-Path $script:StateRoot 'etc\config.yaml'),
@@ -9830,7 +10158,13 @@ function Test-CodexSharedDirectoryCreationRollback {
 
     $failed = Invoke-EnterpriseInstallerJSON `
         -Action Install `
+        -BrokerSource $script:BrokerSource `
+        -ProviderLibrarySource $script:ProviderLibrarySource `
+        -GatewaySource $script:GatewaySource `
+        -HookSource $script:HookSource `
+        -CLISource $script:CLISource `
         -ConfigSource $badConfig `
+        -ManifestSource $script:ManifestSource `
         -AllowedExitCodes @(1) `
         -NoStart `
         -Label 'installer-initial-codex-parent-rollback'
@@ -9915,7 +10249,13 @@ function Test-CodexSharedDirectoriesSurviveFailedInstall {
     $servicesBefore = Get-DefenseClawServiceInventory
     $failed = Invoke-EnterpriseInstallerJSON `
         -Action Install `
+        -BrokerSource $script:BrokerSource `
+        -ProviderLibrarySource $script:ProviderLibrarySource `
+        -GatewaySource $script:GatewaySource `
+        -HookSource $script:HookSource `
+        -CLISource $script:CLISource `
         -ConfigSource $badConfig `
+        -ManifestSource $script:ManifestSource `
         -AllowedExitCodes @(1) `
         -NoStart `
         -Label 'installer-preexisting-codex-parent-failure'
@@ -9957,6 +10297,13 @@ function Test-UnsafeCodexSharedDirectoryFailsClosed {
             'unsafe Codex shared owner/DACL before refusal'
         $failed = Invoke-EnterpriseInstallerJSON `
             -Action Install `
+            -BrokerSource $script:BrokerSource `
+            -ProviderLibrarySource $script:ProviderLibrarySource `
+            -GatewaySource $script:GatewaySource `
+            -HookSource $script:HookSource `
+            -CLISource $script:CLISource `
+            -ConfigSource $script:ConfigSource `
+            -ManifestSource $script:ManifestSource `
             -AllowedExitCodes @(1) `
             -NoStart `
             -Label 'installer-unsafe-codex-parent-refusal'
@@ -10018,6 +10365,13 @@ function Test-ReparseCodexSharedDirectoryFailsClosed {
         $linkBefore = Get-CodexReparseFixtureSnapshot $outside
         $failed = Invoke-EnterpriseInstallerJSON `
             -Action Install `
+            -BrokerSource $script:BrokerSource `
+            -ProviderLibrarySource $script:ProviderLibrarySource `
+            -GatewaySource $script:GatewaySource `
+            -HookSource $script:HookSource `
+            -CLISource $script:CLISource `
+            -ConfigSource $script:ConfigSource `
+            -ManifestSource $script:ManifestSource `
             -AllowedExitCodes @(1) `
             -NoStart `
             -Label 'installer-reparse-codex-parent-refusal'
@@ -10706,6 +11060,7 @@ function Test-CodexSharedDirectoriesPersistThroughPurge {
             [bool]$uninstalled.installed -or
             [bool]$uninstalled.transaction_pending -or
             [string]$uninstalled.gateway_service_state -cne 'absent' -or
+            [string]$uninstalled.broker_service_state -cne 'absent' -or
             [string]$uninstalled.guardian_service_state -cne 'absent' -or
             [bool]$uninstalled.gateway_ready -or
             [bool]$uninstalled.guardian_ready -or
@@ -10717,6 +11072,8 @@ function Test-CodexSharedDirectoriesPersistThroughPurge {
             ) -or
             [string]$uninstalled.gateway_service -cne
                 $script:GatewayServiceName -or
+            [string]$uninstalled.broker_service -cne
+                $script:BrokerServiceName -or
             [string]$uninstalled.guardian_service -cne
                 $script:GuardianServiceName -or
             -not [string]::Equals(
@@ -10743,7 +11100,9 @@ function Test-CodexSharedDirectoriesPersistThroughPurge {
         $script:Installed = $false
         foreach ($serviceName in @(
             $script:GatewayServiceName,
-            $script:GuardianServiceName
+            $script:BrokerServiceName,
+            $script:GuardianServiceName,
+            $script:EnumeratorServiceName
         )) {
             if ($null -ne (
                 Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -11187,6 +11546,8 @@ function Get-CertificationLifecycleScopeArguments(
 
 function Get-InstallerArguments(
     [string]$Action,
+    [string]$BrokerSource,
+    [string]$ProviderLibrarySource,
     [string]$GatewaySource,
     [string]$HookSource,
     [string]$CLISource,
@@ -11210,6 +11571,30 @@ function Get-InstallerArguments(
     )) {
         $arguments.Add([string]$value)
     }
+    if ($Action -in @('Install', 'Upgrade')) {
+        foreach ($required in @(
+            @('BrokerBinary', $BrokerSource),
+            @('ProviderLibrary', $ProviderLibrarySource),
+            @('GatewayBinary', $GatewaySource),
+            @('HookBinary', $HookSource)
+        )) {
+            if ([string]::IsNullOrWhiteSpace([string]$required[1])) {
+                throw "$Action requires -$($required[0])"
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BrokerSource)) {
+        $arguments.Add('-BrokerBinary')
+        $arguments.Add((ConvertTo-CanonicalPath $BrokerSource))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ProviderLibrarySource)) {
+        $providerIdentity = Assert-CertificationProviderLibraryCurrent `
+            $ProviderLibrarySource `
+            ([string]$script:SourceDigests['provider_library']) `
+            "$Action managed credential provider library"
+        $arguments.Add('-ProviderLibrary')
+        $arguments.Add([string]$providerIdentity.path)
+    }
     if (-not [string]::IsNullOrWhiteSpace($GatewaySource)) {
         $arguments.Add('-GatewayBinary')
         $arguments.Add((ConvertTo-CanonicalPath $GatewaySource))
@@ -11222,11 +11607,19 @@ function Get-InstallerArguments(
         $arguments.Add('-CLIBinary')
         $arguments.Add((ConvertTo-CanonicalPath $CLISource))
     }
-    if ($Action -in @('Install', 'Upgrade', 'Repair')) {
-        $arguments.Add('-Config')
-        $arguments.Add((ConvertTo-CanonicalPath $ConfigSource))
-        $arguments.Add('-Manifest')
-        $arguments.Add((ConvertTo-CanonicalPath $ManifestSource))
+    if ($Action -eq 'Install' -and
+        ([string]::IsNullOrWhiteSpace($ConfigSource) -or
+            [string]::IsNullOrWhiteSpace($ManifestSource))) {
+        throw 'Install requires -Config and -Manifest'
+    }
+    foreach ($source in @(
+        @('-Config', $ConfigSource),
+        @('-Manifest', $ManifestSource)
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$source[1])) {
+            $arguments.Add([string]$source[0])
+            $arguments.Add((ConvertTo-CanonicalPath ([string]$source[1])))
+        }
     }
     if ($NoStart) { $arguments.Add('-NoStart') }
     if ($Purge) { $arguments.Add('-Purge') }
@@ -11270,6 +11663,7 @@ function Get-EnterpriseLifecycleCLIArguments(
     )]
     [string]$Action,
     [string]$InstallerPath,
+    [string]$BrokerSource = '',
     [string]$GatewaySource = '',
     [string]$HookSource = '',
     [string]$CLISource = '',
@@ -11296,7 +11690,19 @@ function Get-EnterpriseLifecycleCLIArguments(
     )) {
         $arguments.Add([string]$value)
     }
+    if ($Action -in @('Install', 'Upgrade')) {
+        foreach ($required in @(
+            @('--broker-binary', $BrokerSource),
+            @('--gateway-binary', $GatewaySource),
+            @('--hook-binary', $HookSource)
+        )) {
+            if ([string]::IsNullOrWhiteSpace([string]$required[1])) {
+                throw "public $Action requires $($required[0])"
+            }
+        }
+    }
     foreach ($source in @(
+        @('--broker-binary', $BrokerSource),
         @('--gateway-binary', $GatewaySource),
         @('--hook-binary', $HookSource),
         @('--cli-binary', $CLISource)
@@ -11307,16 +11713,31 @@ function Get-EnterpriseLifecycleCLIArguments(
         }
     }
     $mutation = $Action -in @('Install', 'Upgrade', 'Repair')
+    if ($mutation -and
+        -not [string]::IsNullOrWhiteSpace($BrokerSource)) {
+        # The public CLI intentionally exposes no provider-library override.
+        # It discovers the signed Cisco library below trusted Program Files;
+        # pin the operator-supplied expectation before that discovery and
+        # prove the resulting metadata path after each mutation.
+        $null = Assert-CertificationProviderLibraryCurrent `
+            $script:ProviderLibrarySource `
+            ([string]$script:SourceDigests['provider_library']) `
+            "$Action public CLI managed credential provider library"
+    }
+    if ($Action -eq 'Install' -and
+        ([string]::IsNullOrWhiteSpace($ConfigSource) -or
+            [string]::IsNullOrWhiteSpace($ManifestSource))) {
+        throw 'public Install requires --config and --manifest'
+    }
     if ($mutation) {
         foreach ($source in @(
             @('--config', $ConfigSource),
             @('--manifest', $ManifestSource)
         )) {
-            if ([string]::IsNullOrWhiteSpace([string]$source[1])) {
-                throw "public $Action requires $($source[0])"
+            if (-not [string]::IsNullOrWhiteSpace([string]$source[1])) {
+                $arguments.Add([string]$source[0])
+                $arguments.Add((ConvertTo-CanonicalPath ([string]$source[1])))
             }
-            $arguments.Add([string]$source[0])
-            $arguments.Add((ConvertTo-CanonicalPath ([string]$source[1])))
         }
     }
     if ($NoStart) {
@@ -11368,6 +11789,8 @@ function Test-AllowUnsignedHarnessContract {
     $installArguments = @(
         Get-InstallerArguments `
             -Action Install `
+            -BrokerSource $script:BrokerSource `
+            -ProviderLibrarySource $script:ProviderLibrarySource `
             -GatewaySource $script:GatewaySource `
             -HookSource $script:HookSource `
             -CLISource $script:CLISource `
@@ -11377,6 +11800,8 @@ function Test-AllowUnsignedHarnessContract {
     $verifyArguments = @(
         Get-InstallerArguments `
             -Action Verify `
+            -BrokerSource '' `
+            -ProviderLibrarySource '' `
             -GatewaySource '' `
             -HookSource '' `
             -CLISource '' `
@@ -11684,11 +12109,13 @@ function Invoke-EnterpriseInstaller {
         [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Status', 'Verify', 'Uninstall')]
         [string]$Action,
 
-        [string]$GatewaySource = $script:GatewaySource,
-        [string]$HookSource = $script:HookSource,
-        [string]$CLISource = $script:CLISource,
-        [string]$ConfigSource = $script:ConfigSource,
-        [string]$ManifestSource = $script:ManifestSource,
+        [string]$BrokerSource = '',
+        [string]$ProviderLibrarySource = '',
+        [string]$GatewaySource = '',
+        [string]$HookSource = '',
+        [string]$CLISource = '',
+        [string]$ConfigSource = '',
+        [string]$ManifestSource = '',
         [int[]]$AllowedExitCodes = @(0),
         [switch]$NoStart,
         [switch]$Purge,
@@ -11703,6 +12130,8 @@ function Invoke-EnterpriseInstaller {
     }
     $arguments = Get-InstallerArguments `
         -Action $Action `
+        -BrokerSource $BrokerSource `
+        -ProviderLibrarySource $ProviderLibrarySource `
         -GatewaySource $GatewaySource `
         -HookSource $HookSource `
         -CLISource $CLISource `
@@ -11729,11 +12158,13 @@ function Invoke-EnterpriseInstallerJSON {
         [ValidateSet('Install', 'Upgrade', 'Repair', 'Reconcile', 'Status', 'Verify', 'Uninstall')]
         [string]$Action,
 
-        [string]$GatewaySource = $script:GatewaySource,
-        [string]$HookSource = $script:HookSource,
-        [string]$CLISource = $script:CLISource,
-        [string]$ConfigSource = $script:ConfigSource,
-        [string]$ManifestSource = $script:ManifestSource,
+        [string]$BrokerSource = '',
+        [string]$ProviderLibrarySource = '',
+        [string]$GatewaySource = '',
+        [string]$HookSource = '',
+        [string]$CLISource = '',
+        [string]$ConfigSource = '',
+        [string]$ManifestSource = '',
         [int[]]$AllowedExitCodes = @(0),
         [switch]$NoStart,
         [switch]$Purge,
@@ -11747,6 +12178,8 @@ function Invoke-EnterpriseInstallerJSON {
     }
     $process = Invoke-EnterpriseInstaller `
         -Action $Action `
+        -BrokerSource $BrokerSource `
+        -ProviderLibrarySource $ProviderLibrarySource `
         -GatewaySource $GatewaySource `
         -HookSource $HookSource `
         -CLISource $CLISource `
@@ -12892,9 +13325,10 @@ foreach ($path in @($userSettings, $projectSettings, $localSettings)) {
 
 function Assert-ServiceContract {
     $gateway = Get-CimInstance Win32_Service -Filter "Name='$($script:GatewayServiceName)'" -ErrorAction Stop
+    $broker = Get-CimInstance Win32_Service -Filter "Name='$($script:BrokerServiceName)'" -ErrorAction Stop
     $guardian = Get-CimInstance Win32_Service -Filter "Name='$($script:GuardianServiceName)'" -ErrorAction Stop
-    if ($null -eq $gateway -or $null -eq $guardian) {
-        throw 'one or both certification services are missing'
+    if ($null -eq $gateway -or $null -eq $broker -or $null -eq $guardian) {
+        throw 'one or more certification services are missing'
     }
     if ([string]$gateway.StartName -ne "NT SERVICE\$($script:GatewayServiceName)") {
         throw "gateway identity is $($gateway.StartName), want NT SERVICE\$($script:GatewayServiceName)"
@@ -12902,28 +13336,45 @@ function Assert-ServiceContract {
     if ([string]$guardian.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
         throw "guardian identity is $($guardian.StartName), want LocalSystem"
     }
-    foreach ($service in @($gateway, $guardian)) {
+    if ([string]$broker.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
+        throw "broker identity is $($broker.StartName), want LocalSystem"
+    }
+    foreach ($service in @($gateway, $broker, $guardian)) {
         if ([string]$service.StartMode -ne 'Auto') {
             throw "$($service.Name) start mode is $($service.StartMode), want Auto"
         }
         if ([string]$service.State -ne 'Running') {
             throw "$($service.Name) state is $($service.State), want Running"
         }
-        if (-not ([string]$service.PathName).Contains(
+        if (([string]$service.PathName).IndexOf(
             $script:InstallRoot,
             [StringComparison]::OrdinalIgnoreCase
-        )) {
+        ) -lt 0) {
             throw "$($service.Name) image path escapes install root: $($service.PathName)"
         }
     }
-    if (-not ([string]$guardian.PathName).Contains(
+    if (([string]$guardian.PathName).IndexOf(
         'enterprise hooks watch',
         [StringComparison]::OrdinalIgnoreCase
-    )) {
+    ) -lt 0) {
         throw "guardian service does not host enterprise hooks watch: $($guardian.PathName)"
     }
+    $expectedBrokerBinary = ConvertTo-CanonicalPath (
+        Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'
+    )
+    if (([string]$broker.PathName).IndexOf(
+            '"' + $expectedBrokerBinary + '"',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -lt 0 -or
+        ([string]$broker.PathName).IndexOf(
+            " service --service-name $($script:BrokerServiceName) ",
+            [StringComparison]::Ordinal
+        ) -lt 0) {
+        throw "broker service does not host the exact credential broker image: $($broker.PathName)"
+    }
+    $null = Assert-InstalledProviderLibraryIdentity 'service contract'
     $null = Assert-CertificationServiceCodexHomeAbsent
-    return "gateway=$($gateway.State)/$($gateway.StartName); guardian=$($guardian.State)/$($guardian.StartName)"
+    return "gateway=$($gateway.State)/$($gateway.StartName); broker=$($broker.State)/$($broker.StartName); guardian=$($guardian.State)/$($guardian.StartName)"
 }
 
 function Assert-CertificationServiceCodexHomeAbsent {
@@ -12934,19 +13385,34 @@ function Assert-CertificationServiceCodexHomeAbsent {
             role = 'gateway'
         },
         [pscustomobject]@{
+            name = $script:BrokerServiceName
+            role = 'broker'
+        },
+        [pscustomobject]@{
             name = $script:GuardianServiceName
             role = 'guardian'
         }
     )) {
         $serviceName = [string]$service.name
-        Assert-CertificationServiceName $serviceName ([string]$service.role)
+        $role = [string]$service.role
+        Assert-CertificationServiceName $serviceName $role
         $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-        $values = @(
-            Get-ItemPropertyValue `
-                -LiteralPath $serviceKey `
-                -Name Environment `
-                -ErrorAction Stop
-        )
+        $serviceProperties = Get-ItemProperty `
+            -LiteralPath $serviceKey `
+            -ErrorAction Stop
+        $environmentProperty =
+            $serviceProperties.PSObject.Properties['Environment']
+        if ($role -eq 'broker' -and $null -ne $environmentProperty) {
+            throw "$serviceName must not have an Environment registry value"
+        }
+        if ($role -ne 'broker' -and $null -eq $environmentProperty) {
+            throw "$serviceName is missing its required Environment registry value"
+        }
+        $values = if ($null -eq $environmentProperty) {
+            @()
+        } else {
+            @($environmentProperty.Value)
+        }
         $entries = @(
             $values |
                 Where-Object {
@@ -12977,6 +13443,7 @@ function Assert-CertificationServicesStoppedAndIndependent {
     $proof = Assert-CertificationServiceCodexHomeAbsent
     foreach ($serviceName in @(
         $script:GatewayServiceName,
+        $script:BrokerServiceName,
         $script:GuardianServiceName
     )) {
         $service = Get-CimInstance `
@@ -13108,6 +13575,7 @@ function Invoke-PublicEnterpriseLifecycleCLIJSON(
     [string]$Action,
     [string]$FilePath,
     [string]$InstallerPath,
+    [string]$BrokerSource = '',
     [string]$GatewaySource = '',
     [string]$HookSource = '',
     [string]$CLISource = '',
@@ -13121,6 +13589,7 @@ function Invoke-PublicEnterpriseLifecycleCLIJSON(
     $arguments = Get-EnterpriseLifecycleCLIArguments `
         -Action $Action `
         -InstallerPath $InstallerPath `
+        -BrokerSource $BrokerSource `
         -GatewaySource $GatewaySource `
         -HookSource $HookSource `
         -CLISource $CLISource `
@@ -13157,10 +13626,17 @@ function Invoke-CertificationActivationRepairAfterIsolationProof {
         Win32_Service `
         -Filter "Name='$($script:GuardianServiceName)'" `
         -ErrorAction Stop
+    $brokerAfterBlockedStart = Get-CimInstance `
+        Win32_Service `
+        -Filter "Name='$($script:BrokerServiceName)'" `
+        -ErrorAction Stop
     if (-not $gatewayStartFailed -or
         [string]$gatewayAfterBlockedStart.State -ne 'Stopped' -or
         [uint32]$gatewayAfterBlockedStart.ProcessId -ne 0 -or
         [string]$gatewayAfterBlockedStart.StartMode -ne 'Disabled' -or
+        [string]$brokerAfterBlockedStart.State -ne 'Stopped' -or
+        [uint32]$brokerAfterBlockedStart.ProcessId -ne 0 -or
+        [string]$brokerAfterBlockedStart.StartMode -ne 'Disabled' -or
         [string]$guardianAfterBlockedStart.State -ne 'Stopped' -or
         [uint32]$guardianAfterBlockedStart.ProcessId -ne 0 -or
         [string]$guardianAfterBlockedStart.StartMode -ne 'Disabled') {
@@ -13170,6 +13646,9 @@ function Invoke-CertificationActivationRepairAfterIsolationProof {
             "gateway=$($gatewayAfterBlockedStart.State)/" +
             "$($gatewayAfterBlockedStart.ProcessId)/" +
             "$($gatewayAfterBlockedStart.StartMode) " +
+            "broker=$($brokerAfterBlockedStart.State)/" +
+            "$($brokerAfterBlockedStart.ProcessId)/" +
+            "$($brokerAfterBlockedStart.StartMode) " +
             "guardian=$($guardianAfterBlockedStart.State)/" +
             "$($guardianAfterBlockedStart.ProcessId)/" +
             "$($guardianAfterBlockedStart.StartMode)"
@@ -13252,6 +13731,7 @@ function Invoke-CertificationActivationRepairAfterIsolationProof {
         -not [bool]$repair.installed -or
         [bool]$repair.transaction_pending -or
         [string]$repair.gateway_service_state -cne 'running' -or
+        [string]$repair.broker_service_state -cne 'running' -or
         [string]$repair.guardian_service_state -cne 'running' -or
         -not [bool]$repair.gateway_ready -or
         -not [bool]$repair.guardian_ready -or
@@ -13267,6 +13747,7 @@ function Invoke-CertificationActivationRepairAfterIsolationProof {
         [bool]$repair.security_complete -or
         [string]::IsNullOrWhiteSpace([string]$repair.guardian_generation) -or
         [string]$repair.gateway_service -cne $script:GatewayServiceName -or
+        [string]$repair.broker_service -cne $script:BrokerServiceName -or
         [string]$repair.guardian_service -cne $script:GuardianServiceName -or
         -not [string]::Equals(
             [string]$repair.install_root,
@@ -13288,6 +13769,9 @@ function Invoke-CertificationActivationRepairAfterIsolationProof {
         )
     }
     Wait-ForServicesRunning
+    $providerIdentity = Assert-InstalledProviderLibraryIdentity `
+        'source-free installed public Repair' `
+        ([string]$script:SourceDigests['broker'])
     $null = Assert-MachineCodexHomeUnchanged
     return [pscustomobject]@{
         gateway_start_blocked_while_disabled = $true
@@ -13296,6 +13780,7 @@ function Invoke-CertificationActivationRepairAfterIsolationProof {
         installed_installer_sha256 = Get-FileDigest $installedInstaller
         installed_module_sha256 = Get-FileDigest $installedModule
         replacement_sources_supplied = @()
+        provider_library = $providerIdentity
         elevated_powershell_temp_boundary = $repairEnvelope.TempBoundary
         repair = $repair
     }
@@ -13304,7 +13789,11 @@ function Invoke-CertificationActivationRepairAfterIsolationProof {
 function Get-ServiceControlSnapshot([string]$Label) {
     $sc = Join-Path $script:System32 'sc.exe'
     $snapshot = [ordered]@{}
-    foreach ($serviceName in @($script:GatewayServiceName, $script:GuardianServiceName)) {
+    foreach ($serviceName in @(
+        $script:GatewayServiceName,
+        $script:BrokerServiceName,
+        $script:GuardianServiceName
+    )) {
         $service = Get-CimInstance Win32_Service `
             -Filter "Name='$serviceName'" `
             -ErrorAction Stop
@@ -13317,12 +13806,16 @@ function Get-ServiceControlSnapshot([string]$Label) {
             $commands[$command] = $result.StdOut.Trim()
         }
         $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-        $environment = @(
-            Get-ItemPropertyValue `
-                -LiteralPath $serviceKey `
-                -Name Environment `
-                -ErrorAction Stop
-        ) | Sort-Object
+        $serviceProperties = Get-ItemProperty `
+            -LiteralPath $serviceKey `
+            -ErrorAction Stop
+        $environmentProperty =
+            $serviceProperties.PSObject.Properties['Environment']
+        $environment = if ($null -eq $environmentProperty) {
+            @()
+        } else {
+            @($environmentProperty.Value) | Sort-Object
+        }
         $snapshot[$serviceName] = [pscustomobject]@{
             name = [string]$service.Name
             path_name = [string]$service.PathName
@@ -13339,7 +13832,11 @@ function Get-ServiceControlSnapshot([string]$Label) {
 
 function Get-CertificationServiceProcessSnapshot {
     $rows = [Collections.Generic.List[object]]::new()
-    foreach ($name in @($script:GatewayServiceName, $script:GuardianServiceName)) {
+    foreach ($name in @(
+        $script:GatewayServiceName,
+        $script:BrokerServiceName,
+        $script:GuardianServiceName
+    )) {
         $service = Get-CimInstance `
             Win32_Service `
             -Filter "Name='$name'" `
@@ -13825,6 +14322,7 @@ function Get-CertificationServiceTokenSnapshot {
     foreach ($process in $processes) {
         $serviceName = [string]$process.name
         $gateway = $serviceName -eq $script:GatewayServiceName
+        $broker = $serviceName -eq $script:BrokerServiceName
         $expectedUserSID = if ($gateway) {
             [Security.Principal.NTAccount]::new(
                 "NT SERVICE\$serviceName"
@@ -13832,7 +14330,7 @@ function Get-CertificationServiceTokenSnapshot {
         } else {
             'S-1-5-18'
         }
-        $expectedPrivileges = if ($gateway) {
+        $expectedPrivileges = if ($gateway -or $broker) {
             @('SeChangeNotifyPrivilege')
         } else {
             @(
@@ -13883,7 +14381,7 @@ function Get-CertificationServiceTokenSnapshot {
                 "[$($wantedPrivileges -join ',')]"
             )
         }
-        if (-not $gateway) {
+        if (-not $gateway -and -not $broker) {
             foreach ($boundedPrivilege in @(
                 'SeBackupPrivilege',
                 'SeRestorePrivilege'
@@ -13916,8 +14414,8 @@ function Get-CertificationServiceTokenSnapshot {
         )
         # The virtual-account gateway already proves the service SID as its
         # exact TokenUser. Windows does not redundantly duplicate that identity
-        # in TokenGroups. The LocalSystem guardian has a different TokenUser,
-        # so its non-deny-only service SID group remains mandatory.
+        # in TokenGroups. The LocalSystem broker and guardian have a different
+        # TokenUser, so each non-deny-only service SID group remains mandatory.
         if (-not $gateway -and
             ($serviceGroups.Count -ne 1 -or [bool]$serviceGroups[0].DenyOnly)) {
             throw "$serviceName PID $($process.process_id) lacks its non-deny-only service SID group $serviceSID"
@@ -13950,6 +14448,13 @@ function Get-CertificationServiceTokenSnapshot {
             token_user_name = [string]$token.UserName
             integrity_sid = [string]$token.IntegritySid
             expected_integrity_sid = $expectedIntegritySID
+            role = if ($gateway) {
+                'gateway'
+            } elseif ($broker) {
+                'broker'
+            } else {
+                'guardian'
+            }
             service_sid_group_required = -not $gateway
             service_sid_group_count = $serviceGroups.Count
             restricted = [bool]$token.IsRestricted
@@ -14005,6 +14510,7 @@ function Get-CertificationFailureActionContract {
     $records = [Collections.Generic.List[object]]::new()
     foreach ($serviceName in @(
         $script:GatewayServiceName,
+        $script:BrokerServiceName,
         $script:GuardianServiceName
     )) {
         $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
@@ -14078,11 +14584,13 @@ function Wait-ForEnterpriseServiceReadiness(
                 -CLISource '' `
                 -Label ($Label + '-installer-verify')
             if (-not [bool]$verified.JSON.ok -or
+                [string]$verified.JSON.broker_service_state -cne 'running' -or
                 -not [bool]$verified.JSON.gateway_ready -or
                 -not [bool]$verified.JSON.guardian_ready) {
                 throw (
                     "$Label Verify was not fully ready: " +
                     "ok=$($verified.JSON.ok) " +
+                    "broker=$($verified.JSON.broker_service_state) " +
                     "gateway_ready=$($verified.JSON.gateway_ready) " +
                     "guardian_ready=$($verified.JSON.guardian_ready)"
                 )
@@ -14092,6 +14600,7 @@ function Wait-ForEnterpriseServiceReadiness(
     $watch.Stop()
     return [pscustomobject]@{
         elapsed_seconds = [Math]::Round($watch.Elapsed.TotalSeconds, 3)
+        broker_service_state = [string]$report.broker_service_state
         gateway_ready = [bool]$report.gateway_ready
         guardian_ready = [bool]$report.guardian_ready
     }
@@ -14102,7 +14611,16 @@ function Invoke-ControlledServiceFailure(
     [int]$Ordinal,
     [int]$ExpectedDelaySeconds
 ) {
-    Assert-CertificationServiceName $ServiceName 'controlled-failure'
+    $serviceRole = if ($ServiceName -ceq $script:GatewayServiceName) {
+        'gateway'
+    } elseif ($ServiceName -ceq $script:BrokerServiceName) {
+        'broker'
+    } elseif ($ServiceName -ceq $script:GuardianServiceName) {
+        'guardian'
+    } else {
+        throw "unsafe controlled-failure service name: $ServiceName"
+    }
+    Assert-CertificationServiceName $ServiceName $serviceRole
     $service = Get-CimInstance `
         Win32_Service `
         -Filter "Name='$ServiceName'" `
@@ -14112,7 +14630,13 @@ function Invoke-ControlledServiceFailure(
     }
     $oldPID = [uint32]$service.ProcessId
     $expectedExecutable = ConvertTo-CanonicalPath (
-        Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'
+        Join-Path `
+            $script:InstallRoot `
+            $(if ($serviceRole -eq 'broker') {
+                'bin\defenseclaw-cmid-broker.exe'
+            } else {
+                'bin\defenseclaw-gateway.exe'
+            })
     )
     $liveProcess = Get-CimInstance `
         Win32_Process `
@@ -14224,6 +14748,7 @@ function Test-ServiceFailureRecovery {
     $serviceRuns = [Collections.Generic.List[object]]::new()
     foreach ($serviceName in @(
         $script:GatewayServiceName,
+        $script:BrokerServiceName,
         $script:GuardianServiceName
     )) {
         $failures = [Collections.Generic.List[object]]::new()
@@ -14236,10 +14761,37 @@ function Test-ServiceFailureRecovery {
                     -ExpectedDelaySeconds ($delays[$index]))
             )
         }
+        $dependentGatewayStopped = $false
+        if ($serviceName -ceq $script:BrokerServiceName) {
+            # SCM correctly refuses a normal Stop of the broker while its
+            # gateway dependent is running. Quiesce only that exact dependent
+            # first, then prove an explicit broker Stop does not trigger the
+            # unexpected-failure restart policy.
+            Stop-Service `
+                -Name $script:GatewayServiceName `
+                -ErrorAction Stop
+            Wait-Until `
+                -Description 'gateway dependent to stop before broker explicit-stop proof' `
+                -TimeoutSeconds 30 `
+                -Condition {
+                    $gateway = Get-CimInstance `
+                        Win32_Service `
+                        -Filter "Name='$($script:GatewayServiceName)'" `
+                        -ErrorAction Stop
+                    return (
+                        [string]$gateway.State -eq 'Stopped' -and
+                        [uint32]$gateway.ProcessId -eq 0
+                    )
+                } | Out-Null
+            $dependentGatewayStopped = $true
+        }
         $explicitStop = Assert-ExplicitServiceStopDoesNotRecover `
             -ServiceName $serviceName `
             -ObservationSeconds 70
         Start-Service -Name $serviceName -ErrorAction Stop
+        if ($dependentGatewayStopped) {
+            Start-Service -Name $script:GatewayServiceName -ErrorAction Stop
+        }
         Wait-ForServicesRunning
         $postExplicitStartReadiness = Wait-ForEnterpriseServiceReadiness `
             -Label "$serviceName-post-explicit-start"
@@ -14247,6 +14799,7 @@ function Test-ServiceFailureRecovery {
             service = $serviceName
             unexpected_failures = $failures.ToArray()
             explicit_stop = $explicitStop
+            dependent_gateway_quiesced = $dependentGatewayStopped
             post_explicit_start_readiness = $postExplicitStartReadiness
         })
     }
@@ -14305,8 +14858,9 @@ function Test-QueuedFailureRestartDuringServicing {
     # Test-ServiceFailureRecovery has already exercised all four configured
     # actions. The next unexpected gateway failure therefore schedules the
     # final repeated SC_ACTION_RESTART after 60 seconds. Observe the whole
-    # Repair -NoStart transaction and fail if either service becomes startable
-    # or obtains a PID after the transaction first reaches disabled/stopped.
+    # Repair -NoStart transaction and fail if any managed service becomes
+    # startable or obtains a PID after the transaction first reaches
+    # disabled/stopped.
     $monitor = [pscustomobject]@{
         samples = 0
         quiesced_observed = $false
@@ -14320,6 +14874,7 @@ function Test-QueuedFailureRestartDuringServicing {
         $rows = @(
             foreach ($name in @(
                 $script:GatewayServiceName,
+                $script:BrokerServiceName,
                 $script:GuardianServiceName
             )) {
                 $service = Get-CimInstance `
@@ -14367,6 +14922,7 @@ function Test-QueuedFailureRestartDuringServicing {
     if (-not [bool]$staged.JSON.ok -or
         [bool]$staged.JSON.transaction_pending -or
         [string]$staged.JSON.gateway_service_state -cne 'stopped' -or
+        [string]$staged.JSON.broker_service_state -cne 'stopped' -or
         [string]$staged.JSON.guardian_service_state -cne 'stopped' -or
         [bool]$staged.JSON.gateway_ready -or
         [bool]$staged.JSON.guardian_ready) {
@@ -14398,6 +14954,7 @@ function Test-QueuedFailureRestartDuringServicing {
     Start-Sleep -Seconds 2
     foreach ($name in @(
         $script:GatewayServiceName,
+        $script:BrokerServiceName,
         $script:GuardianServiceName
     )) {
         $service = Get-CimInstance `
@@ -14421,6 +14978,7 @@ function Test-QueuedFailureRestartDuringServicing {
     if (-not [bool]$reactivated.JSON.ok -or
         [bool]$reactivated.JSON.transaction_pending -or
         [string]$reactivated.JSON.gateway_service_state -cne 'running' -or
+        [string]$reactivated.JSON.broker_service_state -cne 'running' -or
         [string]$reactivated.JSON.guardian_service_state -cne 'running' -or
         -not [bool]$reactivated.JSON.gateway_ready -or
         -not [bool]$reactivated.JSON.guardian_ready) {
@@ -14484,13 +15042,16 @@ function Assert-SameServiceControlSnapshot(
 }
 
 function Wait-ForServicesRunning {
-    Wait-Until -Description 'both certification services to be running' -Condition {
+    Wait-Until -Description 'all three certification services to be running' -Condition {
         $gateway = Get-Service -Name $script:GatewayServiceName -ErrorAction SilentlyContinue
+        $broker = Get-Service -Name $script:BrokerServiceName -ErrorAction SilentlyContinue
         $guardian = Get-Service -Name $script:GuardianServiceName -ErrorAction SilentlyContinue
         return (
             $null -ne $gateway -and
+            $null -ne $broker -and
             $null -ne $guardian -and
             $gateway.Status -eq [ServiceProcess.ServiceControllerStatus]::Running -and
+            $broker.Status -eq [ServiceProcess.ServiceControllerStatus]::Running -and
             $guardian.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
         )
     } | Out-Null
@@ -14547,10 +15108,29 @@ function Assert-NoStandardUserAccess(
 
 function Invoke-StandardUserControlProbe {
     $processes = Get-CertificationServiceProcessSnapshot
+    $gatewayProcess = @(
+        $processes |
+            Where-Object { [string]$_.name -ceq $script:GatewayServiceName }
+    )
+    $brokerProcess = @(
+        $processes |
+            Where-Object { [string]$_.name -ceq $script:BrokerServiceName }
+    )
+    $guardianProcess = @(
+        $processes |
+            Where-Object { [string]$_.name -ceq $script:GuardianServiceName }
+    )
+    if ($gatewayProcess.Count -ne 1 -or
+        $brokerProcess.Count -ne 1 -or
+        $guardianProcess.Count -ne 1) {
+        throw 'standard-user control probe requires one exact process for each certification service'
+    }
     $inputObject = [ordered]@{
         gateway_service = $script:GatewayServiceName
+        broker_service = $script:BrokerServiceName
         guardian_service = $script:GuardianServiceName
         gateway_binary = Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'
+        broker_binary = Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'
         hook_binary = Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'
         config = Join-Path $script:StateRoot 'etc\config.yaml'
         manifest = Join-Path $script:StateRoot 'hook-guardian\targets.yaml'
@@ -14569,6 +15149,12 @@ function Invoke-StandardUserControlProbe {
                 path = Join-Path `
                     $script:StateRoot `
                     'runtime\hooks\.hook-claudecode.token'
+            }
+            [ordered]@{
+                name = 'cmid_broker_auth'
+                path = Join-Path `
+                    $script:StateRoot `
+                    'cmid-broker\broker-auth.key'
             }
         )
         claude_machine_paths = @(
@@ -14603,8 +15189,9 @@ function Invoke-StandardUserControlProbe {
         target_user = $script:PrimaryUserName
         target_home = $script:PrimaryProfile
         target_sid = $script:PrimarySID
-        gateway_pid = [uint32]$processes[0].process_id
-        guardian_pid = [uint32]$processes[1].process_id
+        gateway_pid = [uint32]$gatewayProcess[0].process_id
+        broker_pid = [uint32]$brokerProcess[0].process_id
+        guardian_pid = [uint32]$guardianProcess[0].process_id
     }
     $inputBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes(($inputObject | ConvertTo-Json -Compress -Depth 5))
@@ -14836,6 +15423,7 @@ if ([bool]$input.codex_target_enabled) {
 }
 foreach ($entry in @(
     @('write_gateway_binary', [string]$input.gateway_binary),
+    @('write_broker_binary', [string]$input.broker_binary),
     @('write_hook_binary', [string]$input.hook_binary),
     @('write_managed_config', [string]$input.config),
     @('write_guardian_manifest', [string]$input.manifest),
@@ -14902,6 +15490,10 @@ foreach ($process in @(
     [pscustomobject]@{
         service = [string]$input.gateway_service
         pid = [uint32]$input.gateway_pid
+    },
+    [pscustomobject]@{
+        service = [string]$input.broker_service
+        pid = [uint32]$input.broker_pid
     },
     [pscustomobject]@{
         service = [string]$input.guardian_service
@@ -15029,7 +15621,11 @@ foreach ($process in @(
         ($LASTEXITCODE -ne 0) `
         ("taskkill.exe exit " + $LASTEXITCODE)
 }
-foreach ($service in @([string]$input.gateway_service, [string]$input.guardian_service)) {
+foreach ($service in @(
+    [string]$input.gateway_service,
+    [string]$input.broker_service,
+    [string]$input.guardian_service
+)) {
     $sc = Join-Path $system32 'sc.exe'
     & $sc query $service 1>$null 2>$null
     Add-Probe ("query_service_" + $service) ($LASTEXITCODE -eq 0) ("sc.exe exit " + $LASTEXITCODE)
@@ -16450,9 +17046,13 @@ function Test-FailedUpgradePreservesTransaction {
     }
     $result = Invoke-EnterpriseInstaller `
         -Action Upgrade `
+        -BrokerSource $script:BrokerSource `
+        -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
         -HookSource $missing `
         -CLISource $script:CLISource `
+        -ConfigSource $script:ConfigSource `
+        -ManifestSource $script:ManifestSource `
         -AllowedExitCodes @(1) `
         -Label 'installer-invalid-upgrade'
     if ($result.ExitCode -eq 0) {
@@ -16484,7 +17084,13 @@ function Test-PostSnapshotActivationFailureRollsBack {
 
     $failed = Invoke-EnterpriseInstallerJSON `
         -Action Upgrade `
+        -BrokerSource $script:BrokerSource `
+        -ProviderLibrarySource $script:ProviderLibrarySource `
+        -GatewaySource $script:GatewaySource `
+        -HookSource $script:HookSource `
+        -CLISource $script:CLISource `
         -ConfigSource $badConfig `
+        -ManifestSource $script:ManifestSource `
         -AllowedExitCodes @(1) `
         -Label 'installer-post-snapshot-activation-failure'
     if ($failed.Process.ExitCode -eq 0 -or [bool]$failed.JSON.ok) {
@@ -16541,6 +17147,7 @@ function Test-PublicLifecycleInspectionAndReconcile {
             -not [bool]$result.installed -or
             [bool]$result.transaction_pending -or
             [string]$result.gateway_service_state -cne 'running' -or
+            [string]$result.broker_service_state -cne 'running' -or
             [string]$result.guardian_service_state -cne 'running' -or
             -not [bool]$result.gateway_ready -or
             -not [bool]$result.guardian_ready -or
@@ -16565,23 +17172,25 @@ function Test-PublicLifecycleInspectionAndReconcile {
 }
 
 function Test-UpgradeTransaction {
-    if ([string]::IsNullOrWhiteSpace($script:UpgradeGatewaySource) -or
+    if ([string]::IsNullOrWhiteSpace($script:UpgradeBrokerSource) -or
+        [string]::IsNullOrWhiteSpace($script:UpgradeGatewaySource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeHookSource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeCLISource)) {
         throw (
-            'full execution requires all three -Upgrade*Binary inputs from ' +
+            'full execution requires all four -Upgrade*Binary inputs from ' +
             'a separately version-stamped build'
         )
     }
     $before = Get-DeploymentDigests
     $expected = [ordered]@{
+        broker = [string]$script:SourceDigests['upgrade_broker']
         gateway = [string]$script:SourceDigests['upgrade_gateway']
         hook = [string]$script:SourceDigests['upgrade_hook']
         cli = [string]$script:SourceDigests['upgrade_cli']
     }
     $expectedConfigSHA256 = Get-FileDigest $script:ConfigSource
     $expectedManifestSHA256 = Get-FileDigest $script:ManifestSource
-    foreach ($name in @('gateway', 'hook', 'cli')) {
+    foreach ($name in @('broker', 'gateway', 'hook', 'cli')) {
         if ([string]::Equals(
             [string]$before.$name,
             [string]$expected[$name],
@@ -16600,6 +17209,7 @@ function Test-UpgradeTransaction {
         -Action Upgrade `
         -FilePath $script:UpgradeCLISource `
         -InstallerPath $installedInstaller `
+        -BrokerSource $script:UpgradeBrokerSource `
         -GatewaySource $script:UpgradeGatewaySource `
         -HookSource $script:UpgradeHookSource `
         -CLISource $script:UpgradeCLISource `
@@ -16612,6 +17222,7 @@ function Test-UpgradeTransaction {
         -not [bool]$upgrade.JSON.installed -or
         [bool]$upgrade.JSON.transaction_pending -or
         [string]$upgrade.JSON.gateway_service_state -cne 'running' -or
+        [string]$upgrade.JSON.broker_service_state -cne 'running' -or
         [string]$upgrade.JSON.guardian_service_state -cne 'running' -or
         -not [bool]$upgrade.JSON.gateway_ready -or
         -not [bool]$upgrade.JSON.guardian_ready -or
@@ -16623,6 +17234,9 @@ function Test-UpgradeTransaction {
             ))
         )
     }
+    $providerIdentity = Assert-InstalledProviderLibraryIdentity `
+        'versioned public Upgrade' `
+        ([string]$script:SourceDigests['upgrade_broker'])
     $installedV2CLI = Assert-SourcePathHasNoReparse `
         (Join-Path $script:InstallRoot 'bin\defenseclaw.exe') `
         'installed v2 public Verify CLI'
@@ -16643,6 +17257,7 @@ function Test-UpgradeTransaction {
         -not [bool]$verify.JSON.installed -or
         [bool]$verify.JSON.transaction_pending -or
         [string]$verify.JSON.gateway_service_state -cne 'running' -or
+        [string]$verify.JSON.broker_service_state -cne 'running' -or
         [string]$verify.JSON.guardian_service_state -cne 'running' -or
         -not [bool]$verify.JSON.gateway_ready -or
         -not [bool]$verify.JSON.guardian_ready -or
@@ -16657,7 +17272,7 @@ function Test-UpgradeTransaction {
     }
     $serviceContract = Assert-ServiceContract
     $after = Get-DeploymentDigests
-    foreach ($name in @('gateway', 'hook', 'cli')) {
+    foreach ($name in @('broker', 'gateway', 'hook', 'cli')) {
         if (-not [string]::Equals(
             [string]$after.$name,
             [string]$expected[$name],
@@ -16706,18 +17321,22 @@ function Test-UpgradeTransaction {
             expected = [pscustomobject]$expected
             after = $after
             exact_gateway_sha256 = $true
+            exact_broker_sha256 = $true
             exact_hook_sha256 = $true
             exact_cli_sha256 = $true
             exact_config_source_sha256 = $true
             exact_manifest_source_sha256 = $true
+            provider_library = $providerIdentity
             service_contract = $serviceContract
         }
 }
 
 function Stop-CertificationServicesForDefaultUninstallSnapshot {
     foreach ($name in @(
+        $script:EnumeratorServiceName,
         $script:GuardianServiceName,
-        $script:GatewayServiceName
+        $script:GatewayServiceName,
+        $script:BrokerServiceName
     )) {
         $service = Get-Service -Name $name -ErrorAction Stop
         if ($service.Status -ne
@@ -16733,7 +17352,9 @@ function Stop-CertificationServicesForDefaultUninstallSnapshot {
             $rows = @(
                 foreach ($name in @(
                     $script:GatewayServiceName,
-                    $script:GuardianServiceName
+                    $script:BrokerServiceName,
+                    $script:GuardianServiceName,
+                    $script:EnumeratorServiceName
                 )) {
                     Get-CimInstance `
                         Win32_Service `
@@ -16741,7 +17362,7 @@ function Stop-CertificationServicesForDefaultUninstallSnapshot {
                         -ErrorAction Stop
                 }
             )
-            if ($rows.Count -ne 2 -or
+            if ($rows.Count -ne 4 -or
                 @($rows | Where-Object {
                     [string]$_.State -ne 'Stopped' -or
                     [uint32]$_.ProcessId -ne 0
@@ -16770,7 +17391,13 @@ function Get-DefaultUninstallRetainedEvidenceSnapshot(
 ) {
     $specifications = [ordered]@{
         runtime_audit = Join-Path $script:StateRoot 'runtime\audit.db'
+        broker_auth_key = Join-Path `
+            $script:StateRoot `
+            'cmid-broker\broker-auth.key'
         gateway_log = Join-Path $script:StateRoot 'logs\gateway\gateway.log'
+        broker_log = Join-Path `
+            $script:StateRoot `
+            'logs\cmid-broker\cmid-broker.log'
         guardian_log = Join-Path `
             $script:StateRoot `
             'logs\guardian\hook-guardian.log'
@@ -16829,6 +17456,8 @@ function Get-DefaultUninstallRetainedEvidenceSnapshot(
         [bool]$deployment.installed -ne $wantInstalled -or
         [string]$deployment.gateway_service -cne
             $script:GatewayServiceName -or
+        [string]$deployment.broker_service -cne
+            $script:BrokerServiceName -or
         [string]$deployment.guardian_service -cne
             $script:GuardianServiceName -or
         -not [string]::Equals(
@@ -16896,7 +17525,9 @@ function Assert-DefaultUninstallRetainedEvidenceContent(
 ) {
     $contentRoles = @(
         'runtime_audit',
+        'broker_auth_key',
         'gateway_log',
+        'broker_log',
         'guardian_log',
         'guardian_runtime',
         'guardian_authorization'
@@ -16929,7 +17560,9 @@ function Get-DefaultUninstallRetainedDirectorySecuritySnapshot(
     $paths = @(
         $script:StateRoot,
         (Join-Path $script:StateRoot 'runtime'),
+        (Join-Path $script:StateRoot 'cmid-broker'),
         (Join-Path $script:StateRoot 'logs'),
+        (Join-Path $script:StateRoot 'logs\cmid-broker'),
         (Join-Path $script:StateRoot 'logs\gateway'),
         (Join-Path $script:StateRoot 'logs\guardian'),
         (Join-Path $script:StateRoot 'hook-guardian'),
@@ -17039,7 +17672,9 @@ function Test-DefaultUninstallRetainedStateMediumUserDenial(
     $inputObject = [ordered]@{
         expected_sid = $script:PrimarySID
         gateway_service = $script:GatewayServiceName
+        broker_service = $script:BrokerServiceName
         guardian_service = $script:GuardianServiceName
+        enumerator_service = $script:EnumeratorServiceName
         whoami = Join-Path $script:System32 'whoami.exe'
         nonce = $script:RunToken
         directories = @(
@@ -17096,8 +17731,14 @@ $mediumIntegrity = $groups -match 'S-1-16-8192'
 $gateway = Get-Service `
     -Name ([string]$inputObject.gateway_service) `
     -ErrorAction SilentlyContinue
+$broker = Get-Service `
+    -Name ([string]$inputObject.broker_service) `
+    -ErrorAction SilentlyContinue
 $guardian = Get-Service `
     -Name ([string]$inputObject.guardian_service) `
+    -ErrorAction SilentlyContinue
+$enumerator = Get-Service `
+    -Name ([string]$inputObject.enumerator_service) `
     -ErrorAction SilentlyContinue
 $checks = [Collections.Generic.List[object]]::new()
 function Add-DenialCheck(
@@ -17207,13 +17848,20 @@ $failed = @($checks | Where-Object {
         -not $adminEnabled -and
         $mediumIntegrity -and
         $null -eq $gateway -and
+        $null -eq $broker -and
         $null -eq $guardian -and
+        $null -eq $enumerator -and
         $failed.Count -eq 0
     )
     sid = $identity.User.Value
     admin_enabled = $adminEnabled
     medium_integrity = $mediumIntegrity
-    services_absent = $null -eq $gateway -and $null -eq $guardian
+    services_absent = (
+        $null -eq $gateway -and
+        $null -eq $broker -and
+        $null -eq $guardian -and
+        $null -eq $enumerator
+    )
     checks = @($checks.ToArray())
     failed_count = $failed.Count
     secret_material_recorded = $false
@@ -17245,7 +17893,7 @@ $failed = @($checks | Where-Object {
         }).Count -ne 0) {
         throw (
             'default-Uninstall retained-state medium-user probe did not ' +
-            'observe exact ACCESS_DENIED write/delete boundaries while both ' +
+            'observe exact ACCESS_DENIED write/delete boundaries while all four ' +
             'services were absent: ' +
             (Protect-SensitiveDisplayText (
                 $json | ConvertTo-Json -Compress -Depth 7
@@ -17312,6 +17960,7 @@ function Test-PublicDefaultUninstallAndReinstall {
         [bool]$uninstall.JSON.installed -or
         [bool]$uninstall.JSON.transaction_pending -or
         [string]$uninstall.JSON.gateway_service_state -cne 'absent' -or
+        [string]$uninstall.JSON.broker_service_state -cne 'absent' -or
         [string]$uninstall.JSON.guardian_service_state -cne 'absent' -or
         $null -eq $purgedProperty -or
         [bool]$purgedProperty.Value -or
@@ -17346,7 +17995,9 @@ function Test-PublicDefaultUninstallAndReinstall {
     }
     foreach ($name in @(
         $script:GatewayServiceName,
-        $script:GuardianServiceName
+        $script:BrokerServiceName,
+        $script:GuardianServiceName,
+        $script:EnumeratorServiceName
     )) {
         if ($null -ne (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
             throw "public default Uninstall left service $name"
@@ -17402,6 +18053,7 @@ function Test-PublicDefaultUninstallAndReinstall {
         -Action Install `
         -FilePath $releaseCLI `
         -InstallerPath $script:Installer `
+        -BrokerSource $script:UpgradeBrokerSource `
         -GatewaySource $script:UpgradeGatewaySource `
         -HookSource $script:UpgradeHookSource `
         -CLISource $script:UpgradeCLISource `
@@ -17414,6 +18066,7 @@ function Test-PublicDefaultUninstallAndReinstall {
         -not [bool]$install.JSON.installed -or
         [bool]$install.JSON.transaction_pending -or
         [string]$install.JSON.gateway_service_state -cne 'running' -or
+        [string]$install.JSON.broker_service_state -cne 'running' -or
         [string]$install.JSON.guardian_service_state -cne 'running' -or
         -not [bool]$install.JSON.gateway_ready -or
         -not [bool]$install.JSON.guardian_ready -or
@@ -17425,9 +18078,12 @@ function Test-PublicDefaultUninstallAndReinstall {
             ))
         )
     }
+    $providerIdentity = Assert-InstalledProviderLibraryIdentity `
+        'public reinstall' `
+        ([string]$script:SourceDigests['upgrade_broker'])
     $script:Installed = $true
     $after = Get-DeploymentDigests
-    foreach ($name in @('gateway', 'hook', 'cli')) {
+    foreach ($name in @('broker', 'gateway', 'hook', 'cli')) {
         $expected = [string]$script:SourceDigests["upgrade_$name"]
         if (-not [string]::Equals(
             [string]$after.$name,
@@ -17480,6 +18136,7 @@ function Test-PublicDefaultUninstallAndReinstall {
         install_json = $install.JSON
         install_temp_boundary = $install.TempBoundary
         installed_digests = $after
+        provider_library = $providerIdentity
     }
 }
 
@@ -19381,7 +20038,9 @@ function Invoke-BoundedCleanup {
     }
     if ($script:Installed -or
         $null -ne (Get-Service -Name $script:GatewayServiceName -ErrorAction SilentlyContinue) -or
-        $null -ne (Get-Service -Name $script:GuardianServiceName -ErrorAction SilentlyContinue)) {
+        $null -ne (Get-Service -Name $script:GuardianServiceName -ErrorAction SilentlyContinue) -or
+        $null -ne (Get-Service -Name $script:BrokerServiceName -ErrorAction SilentlyContinue) -or
+        $null -ne (Get-Service -Name $script:EnumeratorServiceName -ErrorAction SilentlyContinue)) {
         try {
             $null = Invoke-EnterpriseInstaller `
                 -Action Uninstall `
@@ -19395,13 +20054,22 @@ function Invoke-BoundedCleanup {
             )
         }
     }
-    foreach ($serviceName in @($script:GuardianServiceName, $script:GatewayServiceName)) {
+    foreach ($serviceName in @(
+        $script:GuardianServiceName,
+        $script:GatewayServiceName,
+        $script:BrokerServiceName,
+        $script:EnumeratorServiceName
+    )) {
         if ($null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
             try {
                 $serviceRole = if ($serviceName -ceq $script:GuardianServiceName) {
                     'guardian'
                 } elseif ($serviceName -ceq $script:GatewayServiceName) {
                     'gateway'
+                } elseif ($serviceName -ceq $script:BrokerServiceName) {
+                    'broker'
+                } elseif ($serviceName -ceq $script:EnumeratorServiceName) {
+                    'enumerator'
                 } else {
                     throw "unsafe cleanup service name: $serviceName"
                 }
@@ -19435,7 +20103,9 @@ function Invoke-BoundedCleanup {
     try {
         foreach ($serviceName in @(
             $script:GuardianServiceName,
-            $script:GatewayServiceName
+            $script:GatewayServiceName,
+            $script:BrokerServiceName,
+            $script:EnumeratorServiceName
         )) {
             if ($null -ne (
                 Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -19454,7 +20124,9 @@ function Invoke-BoundedCleanup {
     try {
         foreach ($serviceName in @(
             $script:GuardianServiceName,
-            $script:GatewayServiceName
+            $script:GatewayServiceName,
+            $script:BrokerServiceName,
+            $script:EnumeratorServiceName
         )) {
             if ($null -ne (
                 Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -19610,6 +20282,9 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
         started_at = $script:RunStartedAt.ToString('o')
         completed_at = [DateTimeOffset]::UtcNow.ToString('o')
         source = [ordered]@{
+            broker_sha256 = [string]$script:SourceDigests['broker']
+            provider_library_sha256 =
+                [string]$script:SourceDigests['provider_library']
             gateway_sha256 = [string]$script:SourceDigests['gateway']
             hook_sha256 = [string]$script:SourceDigests['hook']
             cli_sha256 = [string]$script:SourceDigests['cli']
@@ -19623,6 +20298,7 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
             claude_sha256 = [string]$script:SourceDigests['claude']
             rejected_codex_sha256 = [string]$script:SourceDigests['rejected_codex']
             rejected_claude_sha256 = [string]$script:SourceDigests['rejected_claude']
+            upgrade_broker_sha256 = [string]$script:SourceDigests['upgrade_broker']
             upgrade_gateway_sha256 = [string]$script:SourceDigests['upgrade_gateway']
             upgrade_hook_sha256 = [string]$script:SourceDigests['upgrade_hook']
             upgrade_cli_sha256 = [string]$script:SourceDigests['upgrade_cli']
@@ -19630,6 +20306,8 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
         fixture = [ordered]@{
             gateway_service = $script:GatewayServiceName
             guardian_service = $script:GuardianServiceName
+            broker_service = $script:BrokerServiceName
+            enumerator_service = $script:EnumeratorServiceName
             protected_active_user = $script:PrimaryUserName
             protected_active_sid = $script:PrimarySID
             protected_active_session_id = $script:PrimarySessionID
@@ -19734,6 +20412,8 @@ $resolvedInstallerPath = if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
     $InstallerPath
 }
 $script:Installer = ConvertTo-CanonicalPath $resolvedInstallerPath
+$script:OriginalBrokerSource = ConvertTo-CanonicalPath $BrokerBinary
+$script:OriginalProviderLibrarySource = ConvertTo-CanonicalPath $ProviderLibrary
 $script:OriginalGatewaySource = ConvertTo-CanonicalPath $GatewayBinary
 $script:OriginalHookSource = ConvertTo-CanonicalPath $HookBinary
 $script:OriginalCLISource = ConvertTo-CanonicalPath $CLIBinary
@@ -19773,12 +20453,15 @@ if ($ClaudeOnly) {
 $script:OriginalModuleSource = ConvertTo-CanonicalPath (
     Join-Path (Split-Path -Parent $script:Installer) 'DefenseClawEnterprise.psm1'
 )
+$script:BrokerSource = $script:OriginalBrokerSource
+$script:ProviderLibrarySource = $script:OriginalProviderLibrarySource
 $script:GatewaySource = $script:OriginalGatewaySource
 $script:HookSource = $script:OriginalHookSource
 $script:CLISource = $script:OriginalCLISource
 $script:NormalModeCLILauncherSource =
     $script:OriginalNormalModeCLILauncher
 $script:NormalModeCLIWheelSource = $script:OriginalNormalModeCLIWheel
+$script:UpgradeBrokerSource = ''
 $script:UpgradeGatewaySource = ''
 $script:UpgradeHookSource = ''
 $script:UpgradeCLISource = ''
@@ -19786,6 +20469,8 @@ $script:PowerShellExecutable = Get-PowerShellExecutable
 foreach ($required in @(
     [pscustomobject]@{ Path = $script:Installer; Label = 'enterprise installer' },
     [pscustomobject]@{ Path = $script:OriginalModuleSource; Label = 'enterprise installer module' },
+    [pscustomobject]@{ Path = $script:OriginalBrokerSource; Label = 'credential broker binary' },
+    [pscustomobject]@{ Path = $script:OriginalProviderLibrarySource; Label = 'managed credential provider library' },
     [pscustomobject]@{ Path = $script:GatewaySource; Label = 'gateway binary' },
     [pscustomobject]@{ Path = $script:HookSource; Label = 'hook binary' },
     [pscustomobject]@{ Path = $script:CLISource; Label = 'CLI binary' },
@@ -19814,6 +20499,8 @@ foreach ($required in @(
     }
 }
 $script:SourceDigests = [ordered]@{
+    broker = Get-FileDigest $script:OriginalBrokerSource
+    provider_library = Get-FileDigest $script:OriginalProviderLibrarySource
     gateway = Get-FileDigest $script:OriginalGatewaySource
     hook = Get-FileDigest $script:OriginalHookSource
     cli = Get-FileDigest $script:OriginalCLISource
@@ -19839,6 +20526,11 @@ $script:SourceDigests = [ordered]@{
     claude = Get-FileDigest $script:OriginalClaudeSource
     rejected_codex = Get-FileDigest $script:OriginalRejectedCodexSource
     rejected_claude = Get-FileDigest $script:OriginalRejectedClaudeSource
+    upgrade_broker = if ([string]::IsNullOrWhiteSpace($UpgradeBrokerBinary)) {
+        ''
+    } else {
+        Get-FileDigest (ConvertTo-CanonicalPath $UpgradeBrokerBinary)
+    }
     upgrade_gateway = if ([string]::IsNullOrWhiteSpace($UpgradeGatewayBinary)) {
         ''
     } else {
@@ -19859,10 +20551,14 @@ $script:SourceDigests = [ordered]@{
 $script:RunToken = ([Guid]::NewGuid().ToString('N')).Substring(0, 10)
 $script:GatewayServiceName = "DefenseClawCertGateway_$($script:RunToken)"
 $script:GuardianServiceName = "DefenseClawCertGuardian_$($script:RunToken)"
+$script:BrokerServiceName = "DefenseClawCMIDBroker_$($script:RunToken)"
+$script:EnumeratorServiceName = "DefenseClawCertEnumerator_$($script:RunToken)"
 $script:PrimaryUserName = '<active-wts-user>'
 $script:HostileUserName = 'DCEH' + $script:RunToken.Substring(0, 8)
 Assert-CertificationServiceName $script:GatewayServiceName 'gateway'
 Assert-CertificationServiceName $script:GuardianServiceName 'guardian'
+Assert-CertificationServiceName $script:BrokerServiceName 'broker'
+Assert-CertificationServiceName $script:EnumeratorServiceName 'enumerator'
 Assert-CertificationUserName $script:HostileUserName 'hostile'
 
 $script:KnownProgramFiles = ConvertTo-CanonicalPath (
@@ -20006,6 +20702,8 @@ $plan = [ordered]@{
     run_id = $script:RunToken
     installer = $script:Installer
     installer_bootstrap = $script:BootstrapPowerShellExecutable
+    broker_source = $script:BrokerSource
+    provider_library_source = $script:ProviderLibrarySource
     gateway_source = $script:GatewaySource
     hook_source = $script:HookSource
     cli_source = $script:CLISource
@@ -20017,6 +20715,8 @@ $plan = [ordered]@{
     rejected_claude_source = $script:OriginalRejectedClaudeSource
     gateway_service = $script:GatewayServiceName
     guardian_service = $script:GuardianServiceName
+    broker_service = $script:BrokerServiceName
+    enumerator_service = $script:EnumeratorServiceName
     protected_active_user = $script:PrimaryUserName
     protected_active_sid_filter = $ProtectedUserSID
     generated_denial_user = $script:HostileUserName
@@ -20095,11 +20795,12 @@ if ([string]::IsNullOrWhiteSpace($script:OriginalNormalModeCLILauncher) -or
 if (-not $DisposableHost) {
     throw 'host mutation requires both -Execute and -DisposableHost'
 }
-if ([string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
+if ([string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
+    [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
     throw (
-        'full execution requires -UpgradeGatewayBinary, ' +
+        'full execution requires -UpgradeBrokerBinary, -UpgradeGatewayBinary, ' +
         '-UpgradeHookBinary, and -UpgradeCLIBinary from a separately ' +
         'version-stamped build'
     )
@@ -20107,7 +20808,12 @@ if ([string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
 if (-not (Test-IsElevatedAdministrator)) {
     throw 'execution requires an elevated administrator token'
 }
-foreach ($name in @($script:GatewayServiceName, $script:GuardianServiceName)) {
+foreach ($name in @(
+    $script:GatewayServiceName,
+    $script:GuardianServiceName,
+    $script:BrokerServiceName,
+    $script:EnumeratorServiceName
+)) {
     if ($null -ne (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
         throw "refusing pre-existing certification service: $name"
     }
@@ -20221,6 +20927,9 @@ try {
     }
     Invoke-Check 'protected-source-staging' {
         Initialize-ProtectedCertificationSources
+    }
+    Invoke-Check 'public-cli-provider-discovery-preflight' {
+        Test-PublicCLIProviderLibrarySelection
     }
     Invoke-Check 'protected-approved-agent-runtimes' {
         $runtime = Initialize-ProtectedCodexRuntime
@@ -20358,6 +21067,7 @@ targets:
             -Action Install `
             -FilePath $script:CLISource `
             -InstallerPath $script:Installer `
+            -BrokerSource $script:BrokerSource `
             -GatewaySource $script:GatewaySource `
             -HookSource $script:HookSource `
             -CLISource $script:CLISource `
@@ -20373,6 +21083,7 @@ targets:
             -not [bool]$installed.JSON.installed -or
             [bool]$installed.JSON.transaction_pending -or
             [string]$installed.JSON.gateway_service_state -cne 'stopped' -or
+            [string]$installed.JSON.broker_service_state -cne 'stopped' -or
             [string]$installed.JSON.guardian_service_state -cne 'stopped' -or
             [bool]$installed.JSON.gateway_ready -or
             [bool]$installed.JSON.guardian_ready -or
@@ -20394,17 +21105,21 @@ targets:
                 ))
             )
         }
+        $providerIdentity = Assert-InstalledProviderLibraryIdentity `
+            'initial public Install' `
+            ([string]$script:SourceDigests['broker'])
         $script:Installed = $true
         $null = Assert-CertificationServicesStoppedAndIndependent
         $activation =
             Invoke-CertificationActivationRepairAfterIsolationProof
         return (
-            'the staged base public CLI Install -NoStart left both services ' +
+            'the staged base public CLI Install -NoStart left gateway, broker, and guardian ' +
             'disabled with PID zero and ' +
             'core_hardening_complete=false; direct gateway start failed, then ' +
             'the protected installed public Repair supplied no replacement ' +
             'sources and established fresh guardian-first readiness while ' +
             'pre-live Claude/security_complete remained honestly false; ' +
+            "provider=$($providerIdentity.path); " +
             "blocked-start diagnostic=$($activation.gateway_start_diagnostic)"
         )
     }
@@ -20421,7 +21136,7 @@ targets:
         Add-Result `
             'live-service-token-least-privilege' `
             'passed' `
-            'live gateway/guardian TokenUser, High gateway/System guardian integrity, privileges, service-SID identity/group semantics, and restricted-token semantics match the hardened contract' `
+            'live gateway/broker/guardian TokenUser, High gateway/System broker and guardian integrity, role-specific privileges, service-SID identity/group semantics, and restricted-token semantics match the hardened contract' `
             @{ service_tokens = @($serviceTokenSnapshot) }
     } catch {
         Add-Result `
@@ -20549,10 +21264,12 @@ targets:
         $protectedPaths = [Collections.Generic.List[string]]::new()
         foreach ($path in @(
             (Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'),
+            (Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'),
             (Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'),
             (Join-Path $script:StateRoot 'etc\config.yaml'),
             (Join-Path $script:StateRoot 'hook-guardian\targets.yaml'),
             (Join-Path $script:StateRoot 'hook-guardian-state\protected_targets.json'),
+            (Join-Path $script:StateRoot 'cmid-broker\broker-auth.key'),
             $script:LifecycleLockDirectory,
             $script:LifecycleLockPath,
             $script:ClaudeManagedPolicyDirectory,
@@ -20585,6 +21302,9 @@ targets:
             }
         }
         $secretPaths = [Collections.Generic.List[string]]::new()
+        $secretPaths.Add((
+            Join-Path $script:StateRoot 'cmid-broker\broker-auth.key'
+        ))
         $secretPaths.Add((
             Join-Path `
                 $script:StateRoot `
@@ -20737,8 +21457,8 @@ targets:
             $afterServiceControl `
             'hostile SCM probe'
         $afterServiceProcesses = Get-CertificationServiceProcessSnapshot
-        if (@($afterServiceProcesses).Count -ne 2) {
-            throw 'managed services are not both running after authorized lifecycle transitions'
+        if (@($afterServiceProcesses).Count -ne 3) {
+            throw 'gateway, broker, and guardian are not all running after authorized lifecycle transitions'
         }
         $responsive = Invoke-EnterpriseInstallerJSON `
             -Action Verify `
@@ -20867,7 +21587,7 @@ targets:
         Add-Result `
             'scm-repeated-restart-and-explicit-stop' `
             'passed' `
-            'both services restarted after controlled failures 1-4 using 5s/15s/60s/final-repeat recovery, while explicit administrator Stop remained stopped beyond the final delay' `
+            'gateway, broker, and guardian restarted after controlled failures 1-4 using 5s/15s/60s/final-repeat recovery, while dependency-aware explicit administrator Stop remained stopped beyond the final delay' `
             @{
                 failure_action_contract = @($recoveryEvidence.contract)
                 recovery_observations = @($recoveryEvidence.observations)
@@ -20884,7 +21604,7 @@ targets:
         Add-Result `
             'queued-scm-restart-during-servicing' `
             'passed' `
-            'after the repeated 60-second SCM recovery action was armed by a real gateway crash, Repair -NoStart continuously held both services disabled/stopped through a fresh 65-second drain; the queued restart never obtained a PID, and a second public Repair restored guardian-first readiness' `
+            'after the repeated 60-second SCM recovery action was armed by a real gateway crash, Repair -NoStart continuously held gateway, broker, and guardian disabled/stopped through a fresh 65-second drain; the queued restart never obtained a PID, and a second public Repair restored guardian-first readiness' `
             @{ evidence = $queuedRestart }
     } catch {
         Add-Result `
@@ -20929,7 +21649,7 @@ targets:
         Add-Result `
             'public-windows-default-uninstall-and-install' `
             'passed' `
-            'the protected external release CLI executed default Uninstall without --purge, preserved exact real audit/log/guardian evidence plus its sentinel, converted every retained StateRoot DACL to administrator-only, denied medium-user write/delete access while both services were absent, removed machine wiring before fresh clients, then restored the exact upgraded binaries, service contract, and guardian readiness' `
+            'the protected external release CLI executed default Uninstall without --purge, preserved exact real audit/log/guardian evidence plus its sentinel, converted every retained StateRoot DACL to administrator-only, denied medium-user write/delete access while gateway, broker, and guardian were absent, removed machine wiring before fresh clients, then restored the exact upgraded binaries, service contract, and guardian readiness' `
             @{ lifecycle = $publicReinstall }
     } catch {
         Add-Result `
