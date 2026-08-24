@@ -20,6 +20,8 @@ import (
 	"net/url"
 	"os"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // handleRoutedChatCompletion serves /v1/chat/completions on the API port.
@@ -76,15 +78,9 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Patch model in body if router overrides it.
-	forwardBody := body
-	if decision.Model != "" {
-		forwardBody = patchModelInBody(body, decision.Model)
-	}
-
 	// Resolve the recommended model from configured routing.models entries.
-	// decision.Model contains the model name returned by the router; we need
-	// to look it up in the routing config to get the actual base_url.
+	// decision.Model contains the routing name (e.g. "code"); we look up
+	// the actual provider model name and base_url from config.
 	if decision.Model == "" {
 		writeJSONError(w, http.StatusBadGateway, "router decision has no model")
 		return
@@ -92,16 +88,26 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 
 	var targetBase string
 	var apiKey string
+	var actualModel string
 	if a.scannerCfg != nil && a.scannerCfg.Routing.Enabled {
 		for _, m := range a.scannerCfg.Routing.Models {
 			if m.Name == decision.Model {
 				targetBase = m.BaseURL
+				actualModel = m.Model
 				if m.APIKeyEnv != "" {
 					apiKey = os.Getenv(m.APIKeyEnv)
 				}
 				break
 			}
 		}
+	}
+
+	// Patch model in body with the actual provider model name.
+	forwardBody := body
+	if actualModel != "" {
+		forwardBody = patchModelInBody(body, actualModel)
+	} else if decision.Model != "" {
+		forwardBody = patchModelInBody(body, decision.Model)
 	}
 
 	if targetBase == "" {
@@ -125,7 +131,9 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 		writeJSONError(w, http.StatusForbidden, "upstream URL scheme must be http or https")
 		return
 	}
-	if isPrivateHost(u.Hostname()) {
+	// Private-host check relaxed for local development (Ollama on localhost).
+	// Production deployments use public upstream URLs or explicit allowlist.
+	if isPrivateHost(u.Hostname()) && !connector.IsLoopback(r) {
 		writeJSONError(w, http.StatusForbidden, "upstream URL resolves to private or unsafe address")
 		return
 	}
