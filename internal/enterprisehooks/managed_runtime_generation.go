@@ -346,6 +346,16 @@ func CaptureWindowsManagedRuntimeSelector(
 	return captureWindowsManagedRuntimeSelectorPlatform(connectorName)
 }
 
+// ReadWindowsManagedRuntimeSelectorCAS authenticates the current complete
+// connector selector and returns only its secretless byte identity. Unlike the
+// lifecycle Capture API, this read-only verifier does not acquire or create a
+// mutation lock and does not prepare a missing policy directory.
+func ReadWindowsManagedRuntimeSelectorCAS(
+	connectorName string,
+) (WindowsManagedRuntimeSelectorCAS, error) {
+	return readWindowsManagedRuntimeSelectorCASPlatform(connectorName)
+}
+
 // RestoreWindowsManagedRuntimeSelectorCAS restores a complete connector
 // selector only when the current full-selector CAS matches the protected
 // lifecycle journal.

@@ -37,8 +37,24 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// currentStderrWriter resolves os.Stderr for every write. The Windows service
+// host redirects os.Stderr only after package initialization, so retaining the
+// *os.File value observed here would strand later diagnostics on the original
+// process handle instead of the protected service log. Keeping this proxy
+// stateless also preserves the existing test seam: focused tests may still
+// replace defaultLogWriter or ciscoInspectStructuredLogWriter with a buffer.
+type currentStderrWriter struct{}
+
+func (currentStderrWriter) Write(data []byte) (int, error) {
+	stderr := os.Stderr
+	if stderr == nil {
+		return 0, os.ErrInvalid
+	}
+	return stderr.Write(data)
+}
+
 // defaultLogWriter is the destination for guardrail diagnostic messages.
-var defaultLogWriter io.Writer = os.Stderr
+var defaultLogWriter io.Writer = currentStderrWriter{}
 
 // ScanVerdict is the result of a guardrail inspection.
 type ScanVerdict struct {

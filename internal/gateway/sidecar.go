@@ -466,12 +466,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	sidecar.publishConfig(cfg)
 	// Publish the process-global managed carve-out only after every fallible
 	// constructor has succeeded. A rejected Sidecar candidate must not change
-	// redaction behavior for an already-running embedder or a later retry.
-	// This is also what gates the verbatim non-200 body preview in Cisco AI
-	// Defense INVALID_RESPONSE diagnostics via ManagedEnterpriseActive() —
-	// captured customer logs from managed_enterprise deployments carry the
-	// actual response bytes so support engineers can debug without reproducing.
-	// See renderCiscoInspectFailureDiagnostic in cisco_inspect_diagnostics.go.
+	// redaction behavior for an already-running embedder or a later retry. Cisco
+	// AI Defense failure diagnostics remain sink-redacted in every posture; this
+	// flag must never authorize raw upstream response bytes in gateway logs.
 	setManagedEnterpriseRedactionPosture(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	return sidecar, nil
 }

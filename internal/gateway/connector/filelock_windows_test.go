@@ -136,6 +136,29 @@ func TestManagedWindowsRuntimeLocksPinEffectiveOwnerForEveryConnector(t *testing
 			); err != nil {
 				t.Fatalf("save managed contract: %v", err)
 			}
+			target := windowsProcessUserSIDForTest(t)
+			for _, runtimePath := range []string{
+				filepath.Join(dataDir, "hooks", ".hookcfg"),
+				filepath.Join(dataDir, "hooks", ".hookcfg."+connectorName),
+				filepath.Join(dataDir, "hooks", ".hook-"+connectorName+".token"),
+				filepath.Join(dataDir, hookContractLockFile),
+			} {
+				body, err := os.ReadFile(runtimePath)
+				if err != nil {
+					t.Fatalf("read managed runtime %s: %v", runtimePath, err)
+				}
+				file := openManagedTargetRuntimeFileForTest(t, runtimePath)
+				validateErr := validateWindowsManagedTargetRuntimeHandle(file, target, body)
+				closeErr := file.Close()
+				if validateErr != nil || closeErr != nil {
+					t.Fatalf(
+						"validate final managed runtime descriptor for %s: validate=%v close=%v",
+						runtimePath,
+						validateErr,
+						closeErr,
+					)
+				}
+			}
 			for _, lockPath := range []string{
 				filepath.Join(dataDir, "hooks", ".hookcfg.lock"),
 				filepath.Join(dataDir, "hook_contract_lock.json.lock"),
@@ -143,6 +166,85 @@ func TestManagedWindowsRuntimeLocksPinEffectiveOwnerForEveryConnector(t *testing
 				assertWindowsManagedLockHasEffectiveOwner(t, lockPath)
 			}
 		})
+	}
+}
+
+func TestManagedWindowsMultiConnectorNoChangeReconcileKeepsCanonicalInodes(t *testing.T) {
+	dataDir := t.TempDir()
+	connectors := []string{"claudecode", "codex", "cursor"}
+	reconcile := func() {
+		for _, connectorName := range connectors {
+			if err := ReconcileManagedNativeHookRuntime(
+				dataDir,
+				"127.0.0.1:18970",
+				connectorName,
+				"scoped-"+connectorName+"-token",
+			); err != nil {
+				t.Fatalf("reconcile %s managed runtime: %v", connectorName, err)
+			}
+			if err := SaveHookContractLockEntryForMode(
+				dataDir,
+				HookContractLockEntry{
+					Connector:    connectorName,
+					ContractID:   connectorName + "-hooks-v1",
+					HookFailMode: "closed",
+				},
+				true,
+			); err != nil {
+				t.Fatalf("save %s managed contract: %v", connectorName, err)
+			}
+		}
+	}
+	reconcile()
+
+	paths := []string{
+		filepath.Join(dataDir, "hooks", ".hookcfg"),
+		filepath.Join(dataDir, hookContractLockFile),
+	}
+	for _, connectorName := range connectors {
+		paths = append(
+			paths,
+			filepath.Join(dataDir, "hooks", ".hookcfg."+connectorName),
+			filepath.Join(dataDir, "hooks", ".hook-"+connectorName+".token"),
+		)
+	}
+	identities := make(map[string]string, len(paths))
+	for _, path := range paths {
+		file := openManagedTargetRuntimeFileForTest(t, path)
+		identity, err := atomicTransformOpenFileIdentity(file)
+		closeErr := file.Close()
+		if err != nil || closeErr != nil {
+			t.Fatalf("capture managed runtime identity %s: identity=%v close=%v", path, err, closeErr)
+		}
+		identities[path] = identity
+	}
+
+	reconcile()
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read repeated managed runtime %s: %v", path, err)
+		}
+		file := openManagedTargetRuntimeFileForTest(t, path)
+		identity, identityErr := atomicTransformOpenFileIdentity(file)
+		validateErr := validateWindowsManagedTargetRuntimeHandle(
+			file,
+			windowsProcessUserSIDForTest(t),
+			body,
+		)
+		closeErr := file.Close()
+		if identityErr != nil || validateErr != nil || closeErr != nil {
+			t.Fatalf(
+				"validate repeated managed runtime %s: identity=%v validate=%v close=%v",
+				path,
+				identityErr,
+				validateErr,
+				closeErr,
+			)
+		}
+		if identity != identities[path] {
+			t.Fatalf("no-change managed reconcile replaced canonical inode %s", path)
+		}
 	}
 }
 

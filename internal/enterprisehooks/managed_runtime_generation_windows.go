@@ -699,6 +699,30 @@ func captureWindowsManagedRuntimeSelectorPlatform(
 	return snapshot, err
 }
 
+func readWindowsManagedRuntimeSelectorCASPlatform(
+	connectorName string,
+) (WindowsManagedRuntimeSelectorCAS, error) {
+	var cas WindowsManagedRuntimeSelectorCAS
+	name, err := canonicalWindowsManagedRuntimeConnector(connectorName)
+	if err != nil || name != connectorName {
+		return cas, errors.New(
+			"enterprise hooks: managed runtime selector read connector is not canonical",
+		)
+	}
+	if err := windowsManagedRuntimeSelectorVerifyAuthorize(); err != nil {
+		return cas, err
+	}
+	_, data, exists, err := readWindowsManagedRuntimeSelector(connectorName, true)
+	if err != nil {
+		return cas, err
+	}
+	cas.Exists = exists
+	if exists {
+		cas.SHA256 = windowsManagedRuntimeSHA256(data)
+	}
+	return cas, nil
+}
+
 func restoreWindowsManagedRuntimeSelectorCASPlatform(
 	opts WindowsManagedRuntimeSelectorFullRestoreOptions,
 ) error {

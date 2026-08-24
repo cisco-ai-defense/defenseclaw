@@ -8,6 +8,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
@@ -69,6 +73,129 @@ func TestRunWindowsServiceConsultsDetectorOnlyWithEnterpriseMarker(t *testing.T)
 			code,
 			detectorCalled,
 		)
+	}
+}
+
+func TestWindowsServiceHostRedirectsLateCiscoDiagnosticToProtectedLog(t *testing.T) {
+	const (
+		testAPIKeyEnv       = "DEFENSECLAW_TEST_CISCO_API_KEY"
+		responseMarker      = "tenant_mapping_missing"
+		privatePromptMarker = "private-request-prompt-marker"
+	)
+	testAPIKey := strings.ReplaceAll(t.Name(), "/", "-")
+	t.Setenv(testAPIKeyEnv, testAPIKey)
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("X-Cisco-AI-Defense-API-Key"); got != testAPIKey {
+			t.Errorf("Cisco inspect API key header=%q, want test credential", got)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(
+			`{"code":403,"message":"Forbidden","detail":"` + responseMarker + `"}`,
+		))
+	}))
+	t.Cleanup(server.Close)
+
+	client := gateway.NewCiscoInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  server.URL,
+		APIKeyEnv: testAPIKeyEnv,
+		TimeoutMs: 1_000,
+	}, "")
+	if client == nil {
+		t.Fatal("Cisco inspect client is nil")
+	}
+	managedEnterpriseWasActive := gateway.ManagedEnterpriseActive()
+	gateway.SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { gateway.SetManagedEnterpriseActive(managedEnterpriseWasActive) })
+
+	serviceLogPath := filepath.Join(t.TempDir(), "gateway.log")
+	t.Setenv(windowsServiceNameEnv, defaultGatewayServiceName)
+	t.Setenv(windowsServiceLogEnv, serviceLogPath)
+
+	originalDetector := isWindowsService
+	originalRunner := runSCMService
+	originalStdout := os.Stdout
+	originalStderr := os.Stderr
+	t.Cleanup(func() {
+		isWindowsService = originalDetector
+		runSCMService = originalRunner
+		os.Stdout = originalStdout
+		os.Stderr = originalStderr
+	})
+	isWindowsService = func() (bool, error) { return true, nil }
+	runSCMService = func(name string, handler svc.Handler) error {
+		if name != defaultGatewayServiceName {
+			t.Errorf("SCM service name=%q, want %q", name, defaultGatewayServiceName)
+		}
+		requests := make(chan svc.ChangeRequest, 1)
+		changes := make(chan svc.Status, 4)
+		result := make(chan struct {
+			specific bool
+			code     uint32
+		}, 1)
+		go func() {
+			specific, code := handler.Execute(nil, requests, changes)
+			result <- struct {
+				specific bool
+				code     uint32
+			}{specific: specific, code: code}
+		}()
+
+		waitForServiceState(t, changes, svc.Running)
+		requests <- svc.ChangeRequest{Cmd: svc.Stop}
+		waitForServiceState(t, changes, svc.StopPending)
+		select {
+		case got := <-result:
+			if got.specific || got.code != 0 {
+				t.Errorf("SCM handler result=specific:%v code:%d, want clean stop", got.specific, got.code)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("SCM handler did not stop")
+		}
+		return nil
+	}
+
+	handled, code := runWindowsService(func(ctx context.Context) int {
+		verdict := client.Inspect(ctx, []gateway.ChatMessage{{Role: "user", Content: privatePromptMarker}})
+		if verdict != nil {
+			t.Errorf("non-200 Cisco response verdict=%+v, want nil", verdict)
+		}
+		<-ctx.Done()
+		return 0
+	})
+	// runWindowsService closes the log because a production host exits after
+	// svc.Run returns. Restore the process streams before any test diagnostics.
+	os.Stdout = originalStdout
+	os.Stderr = originalStderr
+	if !handled || code != 0 {
+		t.Fatalf("Windows service result=handled:%v code:%d, want handled success", handled, code)
+	}
+
+	contents, err := os.ReadFile(serviceLogPath)
+	if err != nil {
+		t.Fatalf("read redirected gateway log: %v", err)
+	}
+	logText := string(contents)
+	for _, expected := range []string{
+		"[cisco-ai-defense] error:",
+		"[gateway] error subsystem=cisco-inspect code=INVALID_RESPONSE",
+		"stage=response_status",
+		"http_status=403",
+		"classification=permission_denied",
+		`response_summary="<redacted`,
+	} {
+		if !strings.Contains(logText, expected) {
+			t.Errorf("redirected gateway log missing %q: %q", expected, logText)
+		}
+	}
+	for _, forbidden := range []string{privatePromptMarker, testAPIKey, responseMarker, "response_body="} {
+		if strings.Contains(logText, forbidden) {
+			t.Fatalf("redirected gateway log leaked private marker %q: %q", forbidden, logText)
+		}
+	}
+	if len(contents) > 1024 {
+		t.Fatalf("redirected diagnostic length=%d, want <= 1024", len(contents))
 	}
 }
 

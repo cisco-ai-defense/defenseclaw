@@ -898,6 +898,28 @@ type enterpriseHookVerifyRun struct {
 	AuthorizationErr error
 }
 
+const enterpriseHookVerifyGenerationAttempts = 5
+
+var enterpriseHookVerifyGenerationRetryDelay = 50 * time.Millisecond
+
+// enterpriseHookVerifyGenerationSnapshot is the authenticated identity of all
+// connector selectors used by one Verify pass. The selectors contain no token
+// material; their CAS values bind the complete machine-protected bytes for the
+// connector, including every enrolled SID and immutable generation ID.
+type enterpriseHookVerifyGenerationSnapshot struct {
+	Claude enterprisehooks.WindowsManagedRuntimeSelectorCAS
+	Codex  enterprisehooks.WindowsManagedRuntimeSelectorCAS
+	Cursor enterprisehooks.WindowsManagedRuntimeSelectorCAS
+}
+
+type enterpriseHookVerifyGenerationCapture func() (
+	enterpriseHookVerifyGenerationSnapshot,
+	bool,
+	error,
+)
+
+var enterpriseHookVerifyCaptureGeneration enterpriseHookVerifyGenerationCapture = captureEnterpriseHookVerifyGeneration
+
 func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 	run, err := runEnterpriseHookVerifyOnce(cmd.Context())
 	if err != nil {
@@ -949,6 +971,129 @@ func enterpriseHooksClaudeEffectivePolicyVerified(rows []enterpriseHookReconcile
 }
 
 func runEnterpriseHookVerifyOnce(ctx context.Context) (enterpriseHookVerifyRun, error) {
+	return runEnterpriseHookVerifyGenerationConsistent(
+		ctx,
+		enterpriseHookVerifyCaptureGeneration,
+		enterpriseHookVerifyGenerationAttempts,
+		enterpriseHookVerifyGenerationRetryDelay,
+		runEnterpriseHookVerifyAttempt,
+	)
+}
+
+func captureEnterpriseHookVerifyGeneration() (
+	enterpriseHookVerifyGenerationSnapshot,
+	bool,
+	error,
+) {
+	var generation enterpriseHookVerifyGenerationSnapshot
+	if runtime.GOOS != "windows" || cfg == nil ||
+		!managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return generation, false, nil
+	}
+	selectors := [...]struct {
+		name string
+		set  func(enterprisehooks.WindowsManagedRuntimeSelectorCAS)
+	}{
+		{name: "claudecode", set: func(cas enterprisehooks.WindowsManagedRuntimeSelectorCAS) {
+			generation.Claude = cas
+		}},
+		{name: "codex", set: func(cas enterprisehooks.WindowsManagedRuntimeSelectorCAS) {
+			generation.Codex = cas
+		}},
+		{name: "cursor", set: func(cas enterprisehooks.WindowsManagedRuntimeSelectorCAS) {
+			generation.Cursor = cas
+		}},
+	}
+	for _, selector := range selectors {
+		cas, err := enterprisehooks.ReadWindowsManagedRuntimeSelectorCAS(selector.name)
+		if err != nil {
+			return generation, true, fmt.Errorf(
+				"capture %s managed runtime selector for generation-consistent verify: %w",
+				selector.name,
+				err,
+			)
+		}
+		selector.set(cas)
+	}
+	return generation, true, nil
+}
+
+// runEnterpriseHookVerifyGenerationConsistent makes one complete Verify pass
+// optimistic over the three protected selector files. A Guardian publication
+// may replace several target-owned files before it atomically selects the new
+// immutable bundle, so a failed pass is retried even when its first selector
+// re-read is unchanged; a genuine stable defect still fails closed after the
+// strict attempt bound. Successful results are accepted only when the full
+// selector vector is byte-identity-equivalent before and after every target.
+func runEnterpriseHookVerifyGenerationConsistent(
+	ctx context.Context,
+	capture enterpriseHookVerifyGenerationCapture,
+	attempts int,
+	retryDelay time.Duration,
+	verify func(context.Context) (enterpriseHookVerifyRun, error),
+) (enterpriseHookVerifyRun, error) {
+	var last enterpriseHookVerifyRun
+	if attempts <= 0 {
+		return last, errors.New("enterprise hooks verify: generation attempt bound is invalid")
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		before, enabled, err := capture()
+		if err != nil {
+			return last, err
+		}
+		if !enabled {
+			return verify(ctx)
+		}
+
+		last, err = verify(ctx)
+		after, afterEnabled, captureErr := capture()
+		if captureErr != nil {
+			return last, captureErr
+		}
+		if !afterEnabled {
+			return last, errors.New(
+				"enterprise hooks verify: managed runtime selector capture became unavailable",
+			)
+		}
+		stable := before == after
+		if err != nil && stable {
+			// Manifest/configuration trust errors are outside the mutable target
+			// publication window. Preserve their original fail-closed result.
+			return last, err
+		}
+		failed := err != nil || last.Failures != 0 || last.AuthorizationErr != nil
+		if stable && !failed {
+			return last, nil
+		}
+		if attempt == attempts-1 {
+			if stable {
+				return last, err
+			}
+			return last, fmt.Errorf(
+				"enterprise hooks verify: protected managed runtime generation changed during %d bounded attempts",
+				attempts,
+			)
+		}
+		if retryDelay <= 0 {
+			continue
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return last, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return last, errors.New("enterprise hooks verify: generation attempt bound exhausted")
+}
+
+func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRun, error) {
 	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks verify: config is not loaded")

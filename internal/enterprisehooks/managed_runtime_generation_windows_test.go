@@ -95,6 +95,37 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err != nil || !firstCommit.Changed() {
 		t.Fatalf("commit first generation: changed=%v err=%v", firstCommit.Changed(), err)
 	}
+	selectorLockPath := filepath.Join(base, windowsManagedRuntimeSelectorLockFile)
+	if err := os.Remove(selectorLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove selector mutation lock before read-only check: %v", err)
+	}
+	verifyAuthorizationErr := errors.New("selector verification is not authorized")
+	windowsManagedRuntimeSelectorVerifyAuthorize = func() error {
+		return verifyAuthorizationErr
+	}
+	if _, err := ReadWindowsManagedRuntimeSelectorCAS("codex"); !errors.Is(err, verifyAuthorizationErr) {
+		t.Fatalf("read selector CAS authorization error = %v, want %v", err, verifyAuthorizationErr)
+	}
+	windowsManagedRuntimeSelectorVerifyAuthorize = func() error { return nil }
+	mutationCalled := false
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error {
+		mutationCalled = true
+		return errors.New("mutation authorization must not run during read-only selector CAS")
+	}
+	readOnlyCAS, err := ReadWindowsManagedRuntimeSelectorCAS("codex")
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error { return nil }
+	if err != nil {
+		t.Fatalf("read selector CAS without mutation authority: %v", err)
+	}
+	if mutationCalled {
+		t.Fatal("read-only selector CAS requested mutation authorization")
+	}
+	if !readOnlyCAS.Exists || !validWindowsManagedRuntimeSHA256(readOnlyCAS.SHA256) {
+		t.Fatalf("read-only selector CAS is incomplete: %+v", readOnlyCAS)
+	}
+	if _, err := os.Lstat(selectorLockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only selector CAS created a mutation lock: %v", err)
+	}
 
 	resolve := WindowsManagedRuntimeGenerationResolveOptions{
 		Connector:               desired.Connector,

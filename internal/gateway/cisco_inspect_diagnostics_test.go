@@ -9,10 +9,92 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestCiscoInspectFailureDiagnosticsFollowLateStderrRedirect(t *testing.T) {
+	// Both production writers are initialized before the Windows service host
+	// replaces os.Stderr. Do not replace either writer in this regression: it
+	// must prove that the package-initialized defaults resolve the redirected
+	// process stream when the diagnostic is actually emitted.
+	if _, ok := defaultLogWriter.(currentStderrWriter); !ok {
+		t.Fatalf("defaultLogWriter type = %T, want currentStderrWriter", defaultLogWriter)
+	}
+	if _, ok := ciscoInspectStructuredLogWriter.(currentStderrWriter); !ok {
+		t.Fatalf(
+			"ciscoInspectStructuredLogWriter type = %T, want currentStderrWriter",
+			ciscoInspectStructuredLogWriter,
+		)
+	}
+	managedEnterpriseWasActive := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(managedEnterpriseWasActive) })
+
+	serviceLog, err := os.CreateTemp(t.TempDir(), "gateway-*.log")
+	if err != nil {
+		t.Fatalf("create redirected gateway log: %v", err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = serviceLog
+	t.Cleanup(func() {
+		os.Stderr = originalStderr
+		_ = serviceLog.Close()
+	})
+
+	const privateResponseMarker = "private-tenant-response-marker"
+	var verdict *ScanVerdict
+	verdict = doInspectHTTP(t.Context(), nil, inspectCall{
+		client: &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"code":403,"message":"Forbidden","detail":"` + privateResponseMarker + `"}`,
+				)),
+				Request: request,
+			}, nil
+		})},
+		endpoint: "https://inspect.example.test",
+		urlPath:  "/api/v1/inspect/chat",
+		payload:  map[string]interface{}{"messages": []interface{}{}},
+		setAuth:  func(*http.Request) {},
+	})
+	if verdict != nil {
+		t.Fatalf("failure response verdict=%+v, want nil", verdict)
+	}
+	if err := serviceLog.Sync(); err != nil {
+		t.Fatalf("sync redirected gateway log: %v", err)
+	}
+	contents, err := os.ReadFile(serviceLog.Name())
+	if err != nil {
+		t.Fatalf("read redirected gateway log: %v", err)
+	}
+	logText := string(contents)
+	for _, expected := range []string{
+		"[cisco-ai-defense] error:",
+		"[gateway] error subsystem=cisco-inspect code=INVALID_RESPONSE",
+		"stage=response_status",
+		"http_status=403",
+		"classification=permission_denied",
+		`response_summary="<redacted`,
+	} {
+		if !strings.Contains(logText, expected) {
+			t.Errorf("redirected gateway log missing %q: %q", expected, logText)
+		}
+	}
+	if strings.Contains(logText, privateResponseMarker) {
+		t.Fatalf("redirected gateway log leaked private response marker: %q", logText)
+	}
+	if strings.Contains(logText, "response_body=") {
+		t.Fatalf("redirected gateway log exposed an unrestricted response body: %q", logText)
+	}
+	if len(contents) > 1024 {
+		t.Fatalf("redirected diagnostic length=%d, want <= 1024", len(contents))
+	}
+}
 
 func TestCiscoInspectFailureDiagnosticsAreUsefulAndSecretSafe(t *testing.T) {
 	// The upstream diagnostic contract must remain secret-safe even when the
@@ -135,190 +217,77 @@ func TestCiscoInspectFailureDiagnosticsAreUsefulAndSecretSafe(t *testing.T) {
 	}
 }
 
-func TestCiscoInspectManagedEnterpriseNon200IncludesVerbatimBody(t *testing.T) {
-	// Managed_enterprise support engineers only ever see captured logs from
-	// the customer endpoint, so INVALID_RESPONSE on a non-200 must carry the
-	// actual response bytes (bounded + sanitized) — not a redacted length/hash
-	// placeholder. Outside managed_enterprise the redacted placeholder stays
-	// (safer default when Reveal() is available locally).
+func TestCiscoInspectManagedEnterpriseNon200KeepsResponseSecretSafe(t *testing.T) {
+	// Managed enterprise mode must not turn support diagnostics into a response
+	// transcript. Operators get the HTTP status, a closed classification, and a
+	// bounded length/digest summary; arbitrary upstream fields remain private.
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
 	previous := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
 	t.Cleanup(func() { SetManagedEnterpriseActive(previous) })
 
-	// The upstream body carries a diagnostic-shaped Cisco AID error envelope
-	// AND an embedded control character to prove sanitize keeps the line
-	// single-record. The full body is what customer support needs to see.
-	upstreamBody := "{\"error\":{\"code\":\"quota_exceeded\",\"message\":\"tenant quota\x07exceeded\"}}"
-
-	// -- managed_enterprise ON: verbatim body must appear ------------------
-	SetManagedEnterpriseActive(true)
-	var verdict *ScanVerdict
-	humanLog, structuredLog := captureCiscoInspectFailureLogs(t, func() {
-		verdict = doInspectHTTP(t.Context(), nil, inspectCall{
-			client: &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusBadRequest,
-					Header:     make(http.Header),
-					Body:       io.NopCloser(strings.NewReader(upstreamBody)),
-					Request:    request,
-				}, nil
-			})},
-			endpoint: "https://inspect.example.test",
-			urlPath:  "/api/v1/inspect/chat",
-			payload:  map[string]interface{}{"messages": []interface{}{}},
-			setAuth:  func(*http.Request) {},
-		})
-	})
-	if verdict != nil {
-		t.Fatalf("non-200 verdict=%+v, want nil", verdict)
-	}
-	// The verbatim body must appear on both rails so both operators tailing
-	// stderr and downstream SIEM ingesting the structured line can debug the
-	// same INVALID_RESPONSE.
+	const (
+		credentialMarker = "private-upstream-credential-marker"
+		piiMarker        = "private-upstream-pii-marker"
+	)
+	body := `{"code":403,"message":"Forbidden","credential":"` + credentialMarker +
+		`","tenant_detail":"` + piiMarker + `"}`
+	humanLog, structuredLog := runCiscoInspectFailureResponse(t, http.StatusForbidden, body)
 	for name, output := range map[string]string{"human": humanLog, "structured": structuredLog} {
-		if !strings.Contains(output, "stage=response_status") {
-			t.Errorf("%s log missing response_status stage: %q", name, output)
-		}
-		if !strings.Contains(output, "response_body=") {
-			t.Errorf("%s log missing verbatim response_body= field under managed_enterprise: %q", name, output)
-		}
-		// The Cisco error envelope's diagnostic tokens must be visible verbatim.
-		for _, must := range []string{"quota_exceeded", "tenant quota", "exceeded"} {
-			if !strings.Contains(output, must) {
-				t.Errorf("%s log missing verbatim upstream marker %q: %q", name, must, output)
+		for _, expected := range []string{
+			"stage=response_status",
+			"http_status=403",
+			"classification=permission_denied",
+			`response_summary="<redacted len=`,
+			"sha=",
+		} {
+			if !strings.Contains(output, expected) {
+				t.Errorf("%s log missing %q: %q", name, expected, output)
 			}
 		}
-		// Control chars must be sanitized so a single log record stays a
-		// single log record for downstream ingesters that key on newline framing.
-		if strings.ContainsRune(output, '\x07') {
-			t.Errorf("%s log leaked raw control character: %q", name, output)
-		}
-		// The redacted summary is still there — verbatim body is additive.
-		if !strings.Contains(output, `response_summary="<redacted`) {
-			t.Errorf("%s log lost the redacted response_summary field: %q", name, output)
-		}
-	}
-
-	// -- managed_enterprise OFF: verbatim body must be absent --------------
-	SetManagedEnterpriseActive(false)
-	humanLog, structuredLog = captureCiscoInspectFailureLogs(t, func() {
-		_ = doInspectHTTP(t.Context(), nil, inspectCall{
-			client: &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusBadRequest,
-					Header:     make(http.Header),
-					Body:       io.NopCloser(strings.NewReader(upstreamBody)),
-					Request:    request,
-				}, nil
-			})},
-			endpoint: "https://inspect.example.test",
-			urlPath:  "/api/v1/inspect/chat",
-			payload:  map[string]interface{}{"messages": []interface{}{}},
-			setAuth:  func(*http.Request) {},
-		})
-	})
-	for name, output := range map[string]string{"human": humanLog, "structured": structuredLog} {
-		if strings.Contains(output, "response_body=") {
-			t.Errorf("%s log leaked verbatim response_body= outside managed_enterprise: %q", name, output)
-		}
-		for _, banned := range []string{"quota_exceeded", "tenant quota"} {
-			if strings.Contains(output, banned) {
-				t.Errorf("%s log leaked upstream body %q outside managed_enterprise: %q", name, banned, output)
+		for _, forbidden := range []string{"response_body=", credentialMarker, piiMarker, "Forbidden"} {
+			if strings.Contains(output, forbidden) {
+				t.Errorf("%s log leaked upstream response material %q: %q", name, forbidden, output)
 			}
 		}
-		if !strings.Contains(output, `response_summary="<redacted`) {
-			t.Errorf("%s log missing redacted response_summary outside managed_enterprise: %q", name, output)
+		if len(output) > 512 {
+			t.Errorf("%s diagnostic length=%d, want <= 512", name, len(output))
 		}
 	}
+	assertCiscoInspectDiagnosticRailParity(t, humanLog, structuredLog)
 }
 
-func TestCiscoInspectManagedEnterpriseBodyIsBoundedAndSanitized(t *testing.T) {
-	// Pathological upstream responses (huge body, embedded newlines / control
-	// chars) must not blow up the diagnostic line or break single-record
-	// framing even when managed_enterprise unlocks verbatim body inclusion.
+func TestCiscoInspectManagedEnterpriseOversizedBodyStaysRedactedAndBounded(t *testing.T) {
 	previous := ManagedEnterpriseActive()
-	t.Cleanup(func() { SetManagedEnterpriseActive(previous) })
 	SetManagedEnterpriseActive(true)
-
-	// 3 KB of body, mostly padding + a private tail marker past the bound.
-	privateTail := "leaked-past-managed-bound-marker"
-	body := strings.Repeat("a", maxCiscoInspectManagedResponseBodyBytes+256) +
-		"\r\n\t\x00" + privateTail
-
-	var verdict *ScanVerdict
-	humanLog, structuredLog := captureCiscoInspectFailureLogs(t, func() {
-		verdict = doInspectHTTP(t.Context(), nil, inspectCall{
-			client: &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusInternalServerError,
-					Header:     make(http.Header),
-					Body:       io.NopCloser(strings.NewReader(body)),
-					Request:    request,
-				}, nil
-			})},
-			endpoint: "https://inspect.example.test",
-			urlPath:  "/api/v1/inspect/chat",
-			payload:  map[string]interface{}{"messages": []interface{}{}},
-			setAuth:  func(*http.Request) {},
-		})
-	})
-	if verdict != nil {
-		t.Fatalf("verdict=%+v, want nil", verdict)
-	}
-	for name, output := range map[string]string{"human": humanLog, "structured": structuredLog} {
-		if strings.Contains(output, privateTail) {
-			t.Errorf("%s log leaked bytes past managed body cap: %q", name, output)
-		}
-		if strings.ContainsAny(output, "\x00") {
-			t.Errorf("%s log leaked NUL: %q", name, output)
-		}
-		// Newline in the record body must have been collapsed to a space,
-		// otherwise downstream ingesters that key on '\n' as record separator
-		// split the diagnostic.
-		if newlines := strings.Count(output, "\n"); newlines > 1 {
-			t.Errorf("%s log has %d newlines, want at most 1 (trailing): %q", name, newlines, output)
-		}
-	}
-}
-
-func TestCiscoInspectManagedEnterpriseBodyOnlyForNon200Path(t *testing.T) {
-	// The verbatim body is meaningful only for the response_status stage
-	// (upstream returned a non-200 with an error envelope). Body-read and
-	// JSON-decode failures don't need it — the classification carries the
-	// signal — and including it would leak bytes we specifically failed to
-	// consume cleanly.
-	previous := ManagedEnterpriseActive()
 	t.Cleanup(func() { SetManagedEnterpriseActive(previous) })
-	SetManagedEnterpriseActive(true)
 
-	// Case A — JSON-decode failure (200 status + malformed JSON): response_body
-	// must NOT be emitted verbatim.
-	humanLog, structuredLog := captureCiscoInspectFailureLogs(t, func() {
-		_ = doInspectHTTP(t.Context(), nil, inspectCall{
-			client: &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     make(http.Header),
-					Body:       io.NopCloser(strings.NewReader(`{"detail":"partial-json-marker`)),
-					Request:    request,
-				}, nil
-			})},
-			endpoint: "https://inspect.example.test",
-			urlPath:  "/api/v1/inspect/chat",
-			payload:  map[string]interface{}{"messages": []interface{}{}},
-			setAuth:  func(*http.Request) {},
-		})
-	})
+	const privateMarker = "private-oversized-response-marker"
+	body := privateMarker + strings.Repeat("x", maxCiscoInspectResponseBodyBytes+1)
+	humanLog, structuredLog := runCiscoInspectFailureResponse(t, http.StatusBadGateway, body)
 	for name, output := range map[string]string{"human": humanLog, "structured": structuredLog} {
-		if !strings.Contains(output, "stage=response_decode") {
-			t.Errorf("%s log missing response_decode stage: %q", name, output)
+		for _, expected := range []string{
+			"stage=response_status",
+			"http_status=502",
+			"classification=upstream_bad_gateway",
+			"response_truncated=true",
+			`response_summary="<redacted len=`,
+			"sha=",
+		} {
+			if !strings.Contains(output, expected) {
+				t.Errorf("%s log missing %q: %q", name, expected, output)
+			}
 		}
-		if strings.Contains(output, "response_body=") {
-			t.Errorf("%s log wrongly included response_body= on decode-failure path: %q", name, output)
+		for _, forbidden := range []string{"response_body=", privateMarker} {
+			if strings.Contains(output, forbidden) {
+				t.Errorf("%s log leaked oversized response material %q: %q", name, forbidden, output)
+			}
 		}
-		if strings.Contains(output, "partial-json-marker") {
-			t.Errorf("%s log leaked malformed body bytes: %q", name, output)
+		if len(output) > 512 {
+			t.Errorf("%s diagnostic length=%d, want <= 512", name, len(output))
 		}
 	}
+	assertCiscoInspectDiagnosticRailParity(t, humanLog, structuredLog)
 }
 
 func TestCiscoInspectOversizedResponseIsBoundedBeforeLogging(t *testing.T) {
