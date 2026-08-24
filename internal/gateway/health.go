@@ -591,6 +591,19 @@ func (h *SidecarHealth) recomputeConfigurationLocked(guardianState string) {
 		return
 	}
 	var next ConfigurationState
+	// The waiting_for_config branch below is only reachable if
+	// SetDaemonConfigLoaded(false) has run. In production this never
+	// happens on the initial-boot path: rootPersistentPreRunE blocks in
+	// waitForConfigV8Managed before runSidecar ever constructs the
+	// SidecarHealth, so during the deferred-config wait window this
+	// method has no configuration to update anyway. Only unit tests
+	// exercise the branch today. Left in place because (a) removing
+	// CONFIGURATION_STATE_WAITING_FOR_CONFIG would be a proto wire-compat
+	// change to AVC UI clients that already receive it as a valid enum
+	// value, and (b) a future hot-reload path that wants to publish a
+	// "reload in progress" state can call SetDaemonConfigLoaded(false)
+	// at the reload's start and back to true when the new config lands,
+	// without any additional plumbing here.
 	if !h.daemonConfigLoaded {
 		next = ConfigStateWaitingForConfig
 	} else {

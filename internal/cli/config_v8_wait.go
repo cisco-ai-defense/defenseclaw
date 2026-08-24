@@ -56,8 +56,17 @@ func waitForConfigV8Managed(ctx context.Context, cfgPath string, w io.Writer) er
 	}
 	defer fsw.Close()
 
+	// fsw.Add errors with ENOENT if the parent doesn't exist yet, which
+	// UCB drops of "create dir + config.yaml as one atomic step" reliably
+	// hit. Propagating that error turns the intended 24-hour bounded wait
+	// into a crash-restart loop. Instead we log the miss and fall through
+	// to the poll ticker below — poll always runs, so we still notice the
+	// file when it lands. If the parent DOES exist and fsw.Add still
+	// fails (permission error, watcher exhaustion), same fallthrough:
+	// polling is strictly slower but functionally equivalent for spotting
+	// the file, and better than a fatal exit at daemon start.
 	if err := fsw.Add(parentDir); err != nil {
-		return fmt.Errorf("waitForConfigV8Managed: watch %s: %w", parentDir, err)
+		fmt.Fprintf(w, "[gateway] fsnotify.Add(%s) failed: %v — falling through to poll loop\n", parentDir, err)
 	}
 
 	poll := time.NewTicker(waitForConfigV8ManagedPoll)
