@@ -989,6 +989,37 @@ function Invoke-CodexWinGetMetadataVersionProbe {
             throw 'WinGet Codex owner identity did not reject a foreign owner'
         }
 
+        # Windows stamps elevated-admin token creations with BUILTIN\Administrators
+        # owner (SID S-1-5-32-544), not the user's own SID. The owner identity
+        # check accepts that mismatch iff the target IS a local admin. Built-in
+        # Administrator (RID -500) is unconditionally admin — this is the primary
+        # QA case: files created by dclawadmin land as Administrators-owned.
+        $builtinAdminSID = 'S-1-5-21-3000-3000-3000-500'
+        if (-not (Test-DefenseClawConnectorMetadataOwnerIdentity `
+                -ExpectedSID $builtinAdminSID `
+                -ActualOwner 'S-1-5-32-544')) {
+            throw 'WinGet Codex owner identity rejected Administrators-owned file for built-in Administrator target'
+        }
+        # A non-admin user with an Administrators-owned file is still refused —
+        # the widening only kicks in for admin targets. $ownerSID here is a
+        # synthetic RID 3001 that is NOT in local Administrators, so the CIM
+        # membership check returns false and we fall through to strict reject.
+        if (Test-DefenseClawConnectorMetadataOwnerIdentity `
+                -ExpectedSID $ownerSID `
+                -ActualOwner 'S-1-5-32-544') {
+            throw 'WinGet Codex owner identity wrongly widened acceptance for a non-admin target'
+        }
+        # RID -500 fast path is a pure string match — verify the helper is
+        # independently correct without the CIM query in the loop.
+        if (-not (Test-DefenseClawConnectorMetadataTargetIsLocalAdmin `
+                -ExpectedSID $builtinAdminSID)) {
+            throw 'Target-is-local-admin check missed the RID -500 fast path'
+        }
+        if (Test-DefenseClawConnectorMetadataTargetIsLocalAdmin `
+                -ExpectedSID $ownerSID) {
+            throw 'Target-is-local-admin check falsely admitted a non-admin synthetic SID'
+        }
+
         $officialLeaf = 'OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe'
         $validUserHome = [IO.Path]::Combine($fixtureRoot, 'v')
         $validPackageRoot = [IO.Path]::Combine(

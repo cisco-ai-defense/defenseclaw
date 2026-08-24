@@ -2089,6 +2089,47 @@ function Test-DefenseClawCodexWinGetIdentity {
     return $embedded
 }
 
+function Test-DefenseClawConnectorMetadataTargetIsLocalAdmin {
+    param([Parameter(Mandatory)][string]$ExpectedSID)
+
+    # RID -500 is the built-in Administrator account (both on domain-joined
+    # workstations and standalone hosts). Its token is always
+    # BUILTIN\Administrators-owning by default, so any file it creates is
+    # stamped with SID S-1-5-32-544 as owner. Match on the well-known RID
+    # pattern first so the common QA case (logged in as local Administrator)
+    # never pays for a CIM query.
+    if ($ExpectedSID -cmatch '^S-1-5-21-[0-9-]+-500$') {
+        return $true
+    }
+    try {
+        # Direct-membership walk of the local Administrators group
+        # (SID S-1-5-32-544). Nested groups are deliberately NOT expanded —
+        # a transitively-nested group containing Administrators must not
+        # silently widen owner-acceptance. Any CIM query failure returns
+        # $false so we never widen acceptance based on incomplete data.
+        $adminGroup = CimCmdlets\Get-CimInstance `
+            -ClassName Win32_Group `
+            -Filter "SID='S-1-5-32-544' AND LocalAccount=True" `
+            -ErrorAction Stop
+        if ($null -eq $adminGroup) { return $false }
+        $members = CimCmdlets\Get-CimAssociatedInstance `
+            -InputObject $adminGroup `
+            -Association Win32_GroupUser `
+            -ErrorAction Stop
+        foreach ($member in $members) {
+            if ([string]::Equals(
+                    [string]$member.SID,
+                    $ExpectedSID,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                return $true
+            }
+        }
+    }
+    catch { return $false }
+    return $false
+}
+
 function Test-DefenseClawConnectorMetadataOwnerIdentity {
     param(
         [Parameter(Mandatory)][string]$ExpectedSID,
@@ -2100,11 +2141,41 @@ function Test-DefenseClawConnectorMetadataOwnerIdentity {
             $ExpectedSID
         ).Value
         $actual = ConvertTo-DefenseClawBootstrapSID -Identity $ActualOwner
-        return [string]::Equals(
-            $actual,
-            $expected,
-            [StringComparison]::OrdinalIgnoreCase
-        )
+        if ([string]::Equals(
+                $actual,
+                $expected,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            return $true
+        }
+        # Windows stamps files created by an elevated-admin token with owner
+        # BUILTIN\Administrators (SID S-1-5-32-544) rather than the user's
+        # own SID. Every admin-owned WinGet install (`winget install ...`
+        # from an elevated prompt) lands with Administrators-owned files,
+        # so the strict "owner must equal target SID" check refuses to
+        # detect Codex/etc. installed by any admin target — including
+        # the built-in Administrator RID -500 that QA uses. Accept
+        # Administrators as a valid owner iff the target SID is itself a
+        # member of the local Administrators group; the file is then
+        # functionally owned by the target. Regular non-admin users keep
+        # the strict target-SID-only check.
+        #
+        # See docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md § "Elevated target
+        # relaxation" for the parallel runtime-side softening. A determined
+        # admin attacker can always defeat DefenseClaw through uninstall or
+        # direct hook-file edits — refusing to detect their tools does not
+        # raise the trust boundary, it only denies inspection to legitimate
+        # admin QA + admin-managed helpdesk workflows.
+        if ([string]::Equals(
+                $actual,
+                'S-1-5-32-544',
+                [StringComparison]::OrdinalIgnoreCase
+            ) -and
+            (Test-DefenseClawConnectorMetadataTargetIsLocalAdmin `
+                -ExpectedSID $expected)) {
+            return $true
+        }
+        return $false
     }
     catch {
         return $false
