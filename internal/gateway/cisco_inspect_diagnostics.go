@@ -219,6 +219,16 @@ func classifyOfficialCiscoInspectError(responseBody []byte, httpStatus int) (str
 	// failure.
 	switch httpStatus {
 	case http.StatusBadRequest:
+		// Variable-suffix documented phrases get a prefix check before the
+		// exact-match switch. Cisco AI Defense's request-body-encoding error
+		// is documented as "Request body is not in base64: <base64-decode-err>",
+		// where the suffix is a libbase64 decoder error message. Exact-match
+		// would never fire on real responses, silently falling through to
+		// upstream_bad_request; the classification token itself stays the
+		// closed constant so no upstream bytes reach the log line.
+		if strings.HasPrefix(normalized, "request body is not in base64:") {
+			return ciscoInspectClassRequestBodyEncodingInvalid, true
+		}
 		switch normalized {
 		case "bad request":
 			return ciscoInspectClassRequestInvalid, true
@@ -250,8 +260,6 @@ func classifyOfficialCiscoInspectError(responseBody []byte, httpStatus int) (str
 			return ciscoInspectClassDestinationURLMissing, true
 		case "invalid url":
 			return ciscoInspectClassDestinationURLInvalid, true
-		case "request body is not in base64:":
-			return ciscoInspectClassRequestBodyEncodingInvalid, true
 		case "request body is not in valid format.":
 			return ciscoInspectClassRequestBodyFormatInvalid, true
 		case "response body is not base64.":

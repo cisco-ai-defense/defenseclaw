@@ -406,6 +406,24 @@ func TestCiscoInspectOfficialErrorClassificationIsClosedAndRailSafe(t *testing.T
 			wantClass:      "upstream_bad_request",
 			privateMarkers: []string{"Input messages not found", "private-nested-only-field"},
 		},
+		// Cisco AI Defense's request-body-encoding error is documented as a
+		// prefix + variable suffix ("Request body is not in base64: <err>").
+		// Exact-match would misclassify the entire family as upstream_bad_request.
+		// Classification token stays closed; the variable suffix never leaks
+		// into the log line via this branch (the summary is redacted, and
+		// managed_enterprise body-preview goes through a separate path).
+		{
+			name:           "documented variable-suffix phrase classifies via prefix",
+			body:           `{"code":400,"message":"Request body is not in base64: invalid byte at offset 3"}`,
+			wantClass:      ciscoInspectClassRequestBodyEncodingInvalid,
+			privateMarkers: []string{"invalid byte at offset 3", "Request body is not in base64"},
+		},
+		{
+			name:           "empty-suffix variant still classifies via prefix",
+			body:           `{"code":400,"message":"Request body is not in base64:"}`,
+			wantClass:      ciscoInspectClassRequestBodyEncodingInvalid,
+			privateMarkers: []string{"Request body is not in base64"},
+		},
 	}
 
 	for _, test := range tests {
