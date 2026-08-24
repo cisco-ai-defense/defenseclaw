@@ -659,18 +659,34 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     if options.trusted_binary_prefixes is not None:
         preserved: list[str] = []
         seen: set[str] = set()
+        # See _validated_preinit_trusted_binary_prefixes in cmd_init.py:
+        # quarantine entries that fail post-`--force` re-validation with a
+        # warning instead of aborting first-run bootstrap. The persisted
+        # list is left untouched so subsequent `setup trusted-paths remove`
+        # invocations can still target the bad entry by its original path.
+        quarantined_bootstrap: list[tuple[str, str]] = []
         for raw in options.trusted_binary_prefixes:
             resolved, error = agent_discovery.validate_trusted_prefix(raw)
             if not resolved or error:
-                raise ValueError(
-                    "pre-init trusted binary prefix is no longer safe: "
-                    f"{raw!r} ({error or 'invalid path'})"
-                )
+                quarantined_bootstrap.append((raw, error or "invalid path"))
+                continue
             key = agent_discovery._path_key(resolved)
             if key in seen:
                 continue
             seen.add(key)
             preserved.append(resolved)
+        # bootstrap.py runs before the click.echo output stream is
+        # bound; emit the quarantine warnings via the standard warnings
+        # module so pytest's caplog and the click test runner both see
+        # them without adding a stderr side channel.
+        import warnings as _warnings
+        for entry, reason in quarantined_bootstrap:
+            _warnings.warn(
+                f"skipping pre-init trusted binary prefix {entry!r} "
+                f"({reason}); fix with "
+                f"`defenseclaw setup trusted-paths remove {entry!r}`",
+                stacklevel=2,
+            )
         preserved_trusted_prefixes = tuple(preserved)
         cfg.ai_discovery.trusted_binary_prefixes = list(preserved_trusted_prefixes)
 

@@ -844,22 +844,38 @@ def _validated_preinit_trusted_binary_prefixes(
 
     if not os.path.lexists(cfg_mod.config_path_for_data_dir(data_dir)):
         return None
+    cfg_path = cfg_mod.config_path_for_data_dir(data_dir)
     cfg = cfg_mod.load(data_dir=os.fspath(data_dir))
     values = tuple(cfg.ai_discovery.trusted_binary_prefixes or ())
     resolved_values: list[str] = []
+    quarantined: list[tuple[str, str]] = []
     seen: set[str] = set()
     for raw in values:
         resolved, error = agent_discovery.validate_trusted_prefix(str(raw))
         if not resolved or error:
-            raise click.ClickException(
-                "pre-init trusted binary prefix is no longer safe: "
-                f"{raw!r} ({error or 'invalid path'})"
-            )
+            # `setup trusted-paths add --force` can persist an entry that
+            # later fails validation (writable parent, missing directory,
+            # etc.). Aborting init leaves no CLI-visible recovery path:
+            # the operator has to hand-edit the config file to unblock
+            # subsequent runs. Quarantine the offending entry, warn
+            # visibly with the fix hint, and let init proceed on the
+            # remaining valid prefixes. The persisted list itself is
+            # untouched here — the operator can inspect / correct via
+            # the setup subcommands. See Vineeth review of PR #767, #3.
+            quarantined.append((str(raw), error or "invalid path"))
+            continue
         key = agent_discovery._path_key(resolved)
         if key in seen:
             continue
         seen.add(key)
         resolved_values.append(resolved)
+    for entry, reason in quarantined:
+        click.echo(
+            f"warning: skipping pre-init trusted binary prefix "
+            f"{entry!r} ({reason}); config file: {cfg_path}; "
+            f"fix with `defenseclaw setup trusted-paths remove {entry!r}`",
+            err=True,
+        )
     return tuple(resolved_values)
 
 
