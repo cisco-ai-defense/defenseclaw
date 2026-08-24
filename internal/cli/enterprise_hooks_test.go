@@ -724,6 +724,7 @@ func TestEnterpriseHookProtectedTargetSetsRejectRemovedOrDisabledStaleTarget(t *
 	issues := compareEnterpriseHookProtectedTargetSets(
 		[]enterpriseHookReconcileRow{enabled},
 		[]enterpriseHookReconcileRow{enabled, removedOrDisabled},
+		"authorization",
 	)
 	if got := strings.Join(issues, "\n"); !strings.Contains(got, "extra or stale target claudecode@"+removedOrDisabled.SID) {
 		t.Fatalf("issues = %v, want removed/disabled target rejection", issues)

@@ -1019,7 +1019,7 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 		if err != nil {
 			return nil, true, err
 		}
-		root, _, _, _, _, _, err := windowsCursorManagedPaths()
+		cursorPaths, err := windowsCursorManagedPaths()
 		if err != nil {
 			return nil, true, err
 		}
@@ -1041,7 +1041,7 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 				return nil, true, err
 			}
 		}
-		return sortedUnique(append(userDirs, root)), true, nil
+		return sortedUnique(append(userDirs, cursorPaths.Root)), true, nil
 	}
 	if name != "claudecode" {
 		target, err := resolveWindowsGenericManagedTarget(opts)
@@ -1101,17 +1101,17 @@ func platformWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) 
 	if err != nil {
 		return WatchOwnership{}, true, err
 	}
-	_, hooksPath, adapterPath, statePath, receiptPath, _, err := windowsCursorManagedPaths()
+	cursorPaths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return WatchOwnership{}, true, err
 	}
 	hookDir := filepath.Join(target.dataDir, "hooks")
 	return WatchOwnership{
-		SharedWriter: []string{hooksPath},
+		SharedWriter: []string{cursorPaths.Hooks},
 		ExclusiveWriter: sortedUnique([]string{
-			adapterPath,
-			statePath,
-			receiptPath,
+			cursorPaths.Adapter,
+			cursorPaths.State,
+			cursorPaths.Receipt,
 			filepath.Join(hookDir, ".hookcfg.cursor"),
 			filepath.Join(hookDir, ".hook-cursor.token"),
 			filepath.Join(target.dataDir, "hook_contract_lock.json"),
@@ -1144,6 +1144,17 @@ func resolveWindowsEnterpriseDataDir(home, raw string) (string, error) {
 func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return err
+	}
+	// Serialize managed-policy removal against enterprise-hook install
+	// and reconcile transactions. Both this path and install_windows.go
+	// (line ~45) use the same per-SID machine-wide named mutex so
+	// separate defenseclaw processes cannot interleave mutations.
+	if trimmedSID := strings.TrimSpace(opts.OwnerSID); trimmedSID != "" {
+		unlock, err := lockWindowsUserRuntimeTransaction(trimmedSID)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "claudecode") {
 		var targetSID *windows.SID

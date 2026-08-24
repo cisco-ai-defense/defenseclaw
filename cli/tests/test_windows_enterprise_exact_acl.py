@@ -269,16 +269,16 @@ def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> No
         "$publishedDescriptor =",
     )
 
-    native_open = source[
-        source.index("private static IntPtr OpenDirectorySecurity") : source.index(
-            "public static PathSecuritySnapshot\n            GetDirectorySecuritySnapshotNoFollow",
-        )
-    ]
-    native_set = source[
-        source.index("public static PathSecuritySnapshot SetDirectoryDaclNoFollow") : source.index(
-            "public static RegularFileSecuritySnapshot\n            SetRegularFileSecurityDescriptorNoFollow",
-        )
-    ]
+    native_open = _extract_function_body(
+        source,
+        "private static IntPtr OpenDirectorySecurity",
+        "GetDirectorySecuritySnapshotNoFollow",
+    )
+    native_set = _extract_function_body(
+        source,
+        "public static PathSecuritySnapshot SetDirectoryDaclNoFollow",
+        "SetRegularFileSecurityDescriptorNoFollow",
+    )
     assert "bool shareDelete" in native_open
     assert "(shareDelete ? FILE_SHARE_DELETE : 0)" in native_open
     assert "false,\n                    out before" in native_set

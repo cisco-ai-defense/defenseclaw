@@ -95,7 +95,11 @@ jobs:
             'test', '-v', '-count=1', '-timeout=10m', './internal/observability/redaction'
           ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-redaction-test.log')
           $restrictedTest = 'TestWindowsCorrelationKeyPublishesWithAdministratorsDisabled'
-          if ([string]$result.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($restrictedTest)) ") {
+          $escaped = [regex]::Escape($restrictedTest)
+          if ([string]$result.StdOut -match "(?m)^--- SKIP: $escaped ") {
+            throw "$restrictedTest was skipped on the native Windows runner; the restricted-token fixture must run here"
+          }
+          if ([string]$result.StdOut -notmatch "(?m)^--- PASS: $escaped ") {
             throw "$restrictedTest did not complete with PASS on the native Windows runner"
           }
       - name: Stress native single-flight and executable lifecycle contracts

@@ -495,10 +495,19 @@ func rollbackWindowsManagedRuntimeSelectorCommitPlatform(
 		) {
 			return ErrWindowsManagedRuntimeGenerationConflict
 		}
-		selector = setWindowsManagedRuntimeSelectorTarget(
-			selector,
-			receipt.previousTarget,
-		)
+		// A first-time selection has receipt.previousTarget == nil.
+		// setWindowsManagedRuntimeSelectorTarget returns the selector
+		// unchanged when target == nil, so passing nil would republish
+		// the selector that still contains receipt.publishedTarget and
+		// silently un-revoke the rollback. Match the sentinel used by
+		// restoreWindowsManagedRuntimeSelectorTargetCASPlatform for
+		// the absent-preimage case: nilForSID clears the entry so the
+		// caller's "revoked" status matches the persisted state.
+		restored := receipt.previousTarget
+		if restored == nil {
+			restored = nilForSID(receipt.targetSID)
+		}
+		selector = setWindowsManagedRuntimeSelectorTarget(selector, restored)
 		return publishOrRemoveWindowsManagedRuntimeSelector(selector)
 	})
 }
@@ -1620,11 +1629,11 @@ func defaultWindowsManagedRuntimeSelectorPath(connectorName string) (string, err
 		}
 		directory = filepath.Dir(policyPath)
 	case "cursor":
-		root, _, _, _, _, _, err := windowsCursorManagedPaths()
+		cursorPaths, err := windowsCursorManagedPaths()
 		if err != nil {
 			return "", err
 		}
-		directory = root
+		directory = cursorPaths.Root
 	case "codex":
 		requirementsPath, err := windowsCodexMachineRequirementsPath()
 		if err != nil {

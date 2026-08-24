@@ -1326,6 +1326,23 @@ func main() {
 	if !strings.Contains(strings.TrimSpace(string(out)), payload) {
 		t.Fatalf("adapter output did not preserve JSON\nwant: %s\ngot: %q", payload, out)
 	}
+	// Adapter contract (helpers.go:152-156): payloads never touch disk.
+	// The .cursor-input-*.json staged-payload check disappeared with the
+	// stdin pipe refactor; restore an on-disk assertion so a regression
+	// that reintroduces a payload file would fail the test again.
+	entries, readErr := os.ReadDir(hookDir)
+	if readErr != nil {
+		t.Fatalf("read Cursor hooks dir: %v", readErr)
+	}
+	for _, entry := range entries {
+		if entry.Name() == "cursor-hook.ps1" || entry.Name() == "cursor-hook.sh" {
+			continue
+		}
+		body, readErr := os.ReadFile(filepath.Join(hookDir, entry.Name()))
+		if readErr == nil && strings.Contains(string(body), payload) {
+			t.Fatalf("adapter staged the Cursor payload on disk in %s", entry.Name())
+		}
+	}
 }
 
 // TestCodexWindowsHookCommandRunsAsSingleCmdArgument reproduces Codex's native

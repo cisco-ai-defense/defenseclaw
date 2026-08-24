@@ -147,7 +147,7 @@ The harness never targets an existing machine-level DefenseClaw installation.
 Every run generates a new ten-character identifier and confines machine
 mutations to:
 
-- `DefenseClawCertGateway_<id>`, `DefenseClawCMIDBroker_<id>`,
+- `DefenseClawCertGateway_<id>`, `DefenseClawCertBroker_<id>`,
   `DefenseClawCertGuardian_<id>`, and `DefenseClawCertEnumerator_<id>`;
 - one `DCEH<id-prefix>` local non-admin denial user;
 - short-lived, Administrators-owned `DefenseClawCert_<id>_*` scheduled tasks
@@ -676,6 +676,7 @@ actual token—not only the SCM registry—to this exact contract:
 | Service | Token contract |
 | --- | --- |
 | Gateway | TokenUser equals the resolved `NT SERVICE\<generated-gateway>` SID; integrity is System (`S-1-16-16384`); the service SID is a non-deny-only token group; the token is restricted and includes the service SID, World (`S-1-1-0`), write-restricted (`S-1-5-33`), and exactly one service-logon SID; its only privilege is `SeChangeNotifyPrivilege`. |
+| Broker | TokenUser is LocalSystem (`S-1-5-18`); integrity is System (`S-1-16-16384`); the token has no restricting SID list (`IsTokenRestricted` is false); its only privilege is `SeChangeNotifyPrivilege`. |
 | Guardian | TokenUser is LocalSystem (`S-1-5-18`); integrity is System; its service SID is a non-deny-only group; the token has no restricting SID list; its privileges are exactly `SeTcbPrivilege`, `SeImpersonatePrivilege`, `SeChangeNotifyPrivilege`, `SeBackupPrivilege`, and `SeRestorePrivilege`. Backup and Restore are present-but-disabled in the idle process token and are enabled only on the locked, short-lived repair thread. |
 
 Either token retaining Debug, TakeOwnership, AssignPrimaryToken, or

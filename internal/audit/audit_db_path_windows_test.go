@@ -50,6 +50,12 @@ func TestAuditDBWindowsAllowsOnlyExactPinnedGatewayServiceSID(t *testing.T) {
 	if auditDBWindowsTrustedPrincipal(foreignSID, resolved) {
 		t.Fatal("foreign NT SERVICE SID was broadly trusted")
 	}
+	// Cover the pin branch itself: a SID that is neither the current
+	// user, Administrators, LocalSystem, nor TrustedInstaller must be
+	// trusted only when it is the pinned gateway service SID.
+	if !auditDBWindowsTrustedPrincipal(foreignSID, foreignSID) {
+		t.Fatal("pinned gateway service SID was not trusted through the pin")
+	}
 
 	dacl, err := auditDBWindowsProtectedDACL(true)
 	if err != nil {
@@ -117,6 +123,16 @@ func TestAuditDBWindowsManagedRuntimeFileCanonicalForms(t *testing.T) {
 		current.User.Sid,
 	); err != nil || !canonical {
 		t.Fatalf("installer-managed audit descriptor canonical = %v, %v", canonical, err)
+	}
+	// Gateway-owned files must reject the 3-ACE installer DACL — a
+	// service-owned file with no OWNER RIGHTS ACE retains an implicit
+	// WRITE_DAC, so the branch at audit_db_path_windows.go
+	// (ownerIsGateway && !ownerRightsSeen) must return false.
+	if canonical, err := auditDBWindowsManagedRuntimeFileCanonical(
+		newAuditDBWindowsTestDescriptor(t, current.User.Sid, installerDACL),
+		current.User.Sid,
+	); err != nil || canonical {
+		t.Fatalf("gateway-owned descriptor without OWNER RIGHTS canonical = %v, %v", canonical, err)
 	}
 }
 
@@ -657,9 +673,9 @@ func setAuditDBWindowsInstallerRuntimeFileACLValue(
 		sid  *windows.SID
 		mask windows.ACCESS_MASK
 	}{
-		{sid: localSystem, mask: windows.ACCESS_MASK(0x001f01ff)},
-		{sid: administrators, mask: windows.ACCESS_MASK(0x001f01ff)},
-		{sid: gatewaySID, mask: windows.ACCESS_MASK(0x001301bf)},
+		{sid: localSystem, mask: auditDBWindowsFileAllAccess},
+		{sid: administrators, mask: auditDBWindowsFileAllAccess},
+		{sid: gatewaySID, mask: auditDBWindowsFileModify},
 	} {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: item.mask,

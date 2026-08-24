@@ -53,10 +53,12 @@ func installWindowsCursorManagedResult(
 		)
 	}
 	target.setup.HookFailMode = "closed"
-	_, hooksPath, adapterPath, _, _, _, err := windowsCursorManagedPaths()
+	cursorPaths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return InstallResult{}, err
 	}
+	hooksPath := cursorPaths.Hooks
+	adapterPath := cursorPaths.Adapter
 	transaction := windowsCursorUserRuntimeTransaction{
 		home:      target.home,
 		dataDir:   target.dataDir,
@@ -264,10 +266,12 @@ func verifyWindowsCursorManagedResult(
 		return InstallResult{}, err
 	}
 	target.setup.HookFailMode = "closed"
-	_, hooksPath, adapterPath, _, _, _, err := windowsCursorManagedPaths()
+	cursorPaths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return InstallResult{}, err
 	}
+	hooksPath := cursorPaths.Hooks
+	adapterPath := cursorPaths.Adapter
 	if err := verifyWindowsCursorUserRuntime(target, hooksPath, adapterPath); err != nil {
 		return InstallResult{}, err
 	}

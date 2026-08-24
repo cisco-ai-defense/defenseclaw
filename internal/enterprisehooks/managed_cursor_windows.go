@@ -135,31 +135,48 @@ func defaultWindowsCursorManagedRoot() (string, error) {
 	return filepath.Join(programData, "Cursor"), nil
 }
 
-func windowsCursorManagedPaths() (root, hooks, adapter, state, receipt, lock string, err error) {
-	root, err = windowsCursorManagedRootResolver()
+// windowsCursorPaths carries every managed leaf path derived from the
+// resolved Cursor enterprise root. Callers bind the fields they need by
+// name, which prevents a swap between two same-typed positional string
+// return values from silently pointing at the wrong path.
+type windowsCursorPaths struct {
+	Root    string
+	Hooks   string
+	Adapter string
+	State   string
+	Receipt string
+	Lock    string
+}
+
+func windowsCursorManagedPaths() (windowsCursorPaths, error) {
+	root, err := windowsCursorManagedRootResolver()
 	if err != nil {
-		return "", "", "", "", "", "", err
+		return windowsCursorPaths{}, err
 	}
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root ||
 		!strings.EqualFold(filepath.Base(root), "Cursor") {
-		return "", "", "", "", "", "", fmt.Errorf(
+		return windowsCursorPaths{}, fmt.Errorf(
 			"enterprise hooks: refusing noncanonical Cursor enterprise root: %s",
 			root,
 		)
 	}
-	hooks = filepath.Join(root, windowsCursorManagedHooksFile)
-	adapter = filepath.Join(root, windowsCursorManagedAdapterFile)
-	state = filepath.Join(root, windowsCursorManagedStateFile)
-	receipt = filepath.Join(root, windowsCursorManagedReceiptFile)
-	lock = filepath.Join(root, windowsCursorManagedLockFile)
-	return root, hooks, adapter, state, receipt, lock, nil
+	return windowsCursorPaths{
+		Root:    root,
+		Hooks:   filepath.Join(root, windowsCursorManagedHooksFile),
+		Adapter: filepath.Join(root, windowsCursorManagedAdapterFile),
+		State:   filepath.Join(root, windowsCursorManagedStateFile),
+		Receipt: filepath.Join(root, windowsCursorManagedReceiptFile),
+		Lock:    filepath.Join(root, windowsCursorManagedLockFile),
+	}, nil
 }
 
 func withWindowsCursorManagedTransaction(fn func() error) error {
-	root, _, _, _, _, lockPath, err := windowsCursorManagedPaths()
+	paths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return err
 	}
+	root := paths.Root
+	lockPath := paths.Lock
 	if err := ensureWindowsManagedPolicyDirectory(root); err != nil {
 		return fmt.Errorf("enterprise hooks: prepare Cursor enterprise directory: %w", err)
 	}
@@ -253,10 +270,11 @@ func snapshotWindowsCursorManagedArtifacts() (windowsCursorManagedArtifacts, err
 	if err != nil {
 		return result, err
 	}
-	_, _, _, _, receiptPath, _, err := windowsCursorManagedPaths()
+	paths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return result, err
 	}
+	receiptPath := paths.Receipt
 	result.receipt, err = snapshotWindowsManagedFileWithLimit(receiptPath, windowsCursorManagedReceiptLimit)
 	if err != nil {
 		return result, err
@@ -269,11 +287,14 @@ func snapshotWindowsCursorManagedArtifacts() (windowsCursorManagedArtifacts, err
 }
 
 func snapshotWindowsCursorManagedPublicArtifacts() (windowsCursorManagedArtifacts, error) {
-	root, hooksPath, adapterPath, statePath, _, _, err := windowsCursorManagedPaths()
+	paths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return windowsCursorManagedArtifacts{}, err
 	}
-	result := windowsCursorManagedArtifacts{root: root}
+	hooksPath := paths.Hooks
+	adapterPath := paths.Adapter
+	statePath := paths.State
+	result := windowsCursorManagedArtifacts{root: paths.Root}
 	result.hooks, err = snapshotWindowsManagedFileWithLimit(hooksPath, windowsCursorManagedHooksLimit)
 	if err != nil {
 		return result, err
@@ -1512,10 +1533,11 @@ func validateWindowsCursorManagedTeardownSnapshot(
 		!bytes.Equal(expectedAdapter, snapshot.Adapter) {
 		return errors.New("enterprise hooks: Cursor snapshot adapter identity is invalid")
 	}
-	_, _, adapterPath, _, _, _, err := windowsCursorManagedPaths()
+	paths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return err
 	}
+	adapterPath := paths.Adapter
 	if err := connector.VerifyWindowsCursorEnterpriseHooks(snapshot.Hooks, adapterPath, "closed"); err != nil {
 		return fmt.Errorf("enterprise hooks: Cursor snapshot hook contract is invalid: %w", err)
 	}
@@ -1552,10 +1574,14 @@ func restoreWindowsCursorManagedSnapshotUnlocked(
 	if err := validateWindowsCursorManagedTeardownSnapshot(opts, snapshot); err != nil {
 		return err
 	}
-	_, hooksPath, adapterPath, statePath, receiptPath, _, err := windowsCursorManagedPaths()
+	paths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return err
 	}
+	hooksPath := paths.Hooks
+	adapterPath := paths.Adapter
+	statePath := paths.State
+	receiptPath := paths.Receipt
 	if err := windowsCursorRestoreHooksCompatible(
 		current,
 		snapshot,

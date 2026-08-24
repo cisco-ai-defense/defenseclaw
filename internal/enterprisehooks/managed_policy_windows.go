@@ -1932,15 +1932,30 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 			return cleanupCreated(err)
 		}
 		createErr := windows.CreateDirectory(ptr, attributes)
+		var concurrentlyCreated bool
 		if createErr == nil {
 			created = append(created, directory)
 		} else if !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: create protected managed policy directory %s: %w", directory, createErr))
+		} else {
+			// Another process created this leaf between our
+			// existence probe and the CreateDirectory call. Its
+			// DACL is not necessarily the canonical
+			// administrator-owned shape, so upgrade the trust check
+			// to the stricter validator so Claude policy and
+			// managed runtime selector flows do not adopt a
+			// concurrently pre-created leaf that only happens to
+			// lack an immediately useful untrusted write ACE.
+			concurrentlyCreated = true
 		}
 		if err := rejectWindowsReparseChain(directory); err != nil {
 			return cleanupCreated(err)
 		}
-		if err := windowsManagedPolicyDirTrustCheck(directory); err != nil {
+		if concurrentlyCreated {
+			if err := validateWindowsManagedPolicyDirectoryProtection(directory); err != nil {
+				return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
+			}
+		} else if err := windowsManagedPolicyDirTrustCheck(directory); err != nil {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
 		}
 	}

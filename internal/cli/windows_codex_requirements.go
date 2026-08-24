@@ -229,8 +229,7 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, fmt.Errorf("resolve trusted ProgramData: %w", err)
 	}
 	requirementsPath := filepath.Join(programData, "OpenAI", "Codex", "requirements.toml")
-	enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, cursorTargetEnabled, err :=
-		resolveWindowsCodexManifestApplicability(stateRoot)
+	applicability, err := resolveWindowsCodexManifestApplicability(stateRoot)
 	if err != nil {
 		return opts, err
 	}
@@ -243,11 +242,11 @@ func resolveWindowsCodexRequirementsLayout(
 		GatewayAddr:                     gatewayAddr,
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
-		EnterpriseTargetEnabled:         enterpriseTargetEnabled,
-		ClaudeTargetEnabled:             claudeTargetEnabled,
+		EnterpriseTargetEnabled:         applicability.Enterprise,
+		ClaudeTargetEnabled:             applicability.Claude,
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
-		CodexTargetEnabled:              codexTargetEnabled,
-		CursorTargetEnabled:             cursorTargetEnabled,
+		CodexTargetEnabled:              applicability.Codex,
+		CursorTargetEnabled:             applicability.Cursor,
 	}
 
 	metadataPath := filepath.Join(stateRoot, "install", "deployment.json")
@@ -281,35 +280,47 @@ func resolveWindowsCodexRequirementsLayout(
 	return opts, nil
 }
 
+// windowsCodexManifestApplicability records which target connectors the
+// protected enterprise-hook manifest enables. It replaces four positional
+// booleans; every future target adds a named field so a swapped pair
+// cannot compile.
+type windowsCodexManifestApplicability struct {
+	Enterprise bool
+	Codex      bool
+	Claude     bool
+	Cursor     bool
+}
+
 func resolveWindowsCodexManifestApplicability(
 	stateRoot string,
-) (enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, cursorTargetEnabled bool, err error) {
+) (windowsCodexManifestApplicability, error) {
+	var applicability windowsCodexManifestApplicability
 	manifestPath := filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
 	if err := windowsCodexRequirementsManifestTrust(
 		manifestPath,
 		"Windows enterprise hook target manifest",
 	); err != nil {
-		return false, false, false, false, err
+		return applicability, err
 	}
 	manifest, err := windowsCodexRequirementsManifestLoader(manifestPath)
 	if err != nil {
-		return false, false, false, false, err
+		return applicability, err
 	}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
 		}
-		enterpriseTargetEnabled = true
+		applicability.Enterprise = true
 		switch strings.ToLower(strings.TrimSpace(target.Connector)) {
 		case "codex":
-			codexTargetEnabled = true
+			applicability.Codex = true
 		case "claudecode":
-			claudeTargetEnabled = true
+			applicability.Claude = true
 		case "cursor":
-			cursorTargetEnabled = true
+			applicability.Cursor = true
 		}
 	}
-	return enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, cursorTargetEnabled, nil
+	return applicability, nil
 }
 
 func exactWindowsCodexAttestationEnv(name string) (bool, error) {

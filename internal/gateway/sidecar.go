@@ -2089,6 +2089,18 @@ func (s *Sidecar) logCMIDBuildError(stage string, err error) {
 		stage, err)
 }
 
+// logCMIDBuildLane emits a one-line informational record naming the
+// credential lane a successful CMID provider build resolved to
+// ("broker" or "native"). Operators who set both CloudAuth.LibPath and
+// broker environment variables can tell which lane actually served a
+// token; logCMIDBuildError only fires on failure, so without this line
+// success is indistinguishable across lanes.
+func (s *Sidecar) logCMIDBuildLane(lane string) {
+	fmt.Fprintf(os.Stderr,
+		"[managed-cloud] CMID provider using %s credential lane\n",
+		lane)
+}
+
 // ensureCMIDProvider lazily constructs the managed cloud auth provider
 // on first use and caches it for the sidecar's lifetime.
 // Managed_enterprise only. Returns an error when the underlying
@@ -2152,6 +2164,7 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 			s.logCMIDBuildError("broker-refresh-at-boot", err)
 			return provider, err
 		}
+		s.logCMIDBuildLane("broker")
 		return provider, nil
 	}
 
@@ -2201,6 +2214,7 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 		s.logCMIDBuildError("refresh-at-boot", err)
 		return prov, err
 	}
+	s.logCMIDBuildLane("native")
 	return prov, nil
 }
 

@@ -1070,12 +1070,14 @@ func validateLegacyWindowsManagedHooksGuardianActivation(
 	activationIssues := compareEnterpriseHookProtectedTargetSets(
 		expected,
 		activation.ProtectedTargets,
+		"activation",
 	)
 	authorizationIssues := compareEnterpriseHookProtectedTargetSets(
 		expected,
 		authorization.ProtectedTargets,
+		"authorization",
 	)
-	stateIssues := compareEnterpriseHookProtectedTargetSets(expected, state.Results)
+	stateIssues := compareEnterpriseHookProtectedTargetSets(expected, state.Results, "guardian state")
 	if activation.Version != enterpriseHookGuardianActivationVersion ||
 		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
 		authorization.Version != 1 || state.Version != 1 || activationTimeErr != nil ||
@@ -1214,6 +1216,14 @@ func validateLegacyWindowsManagedHooksLifecycleJournal(
 	upgraded := journal
 	upgraded.SchemaVersion = windowsManagedHooksLifecycleSchema
 	upgraded.TransactionID = transactionID
+	// Schema-3 predates runtime_selectors; decoding leaves the field
+	// empty. Synthesize the three absent snapshots so the shared
+	// validator's selector count check passes for the legacy journal.
+	// Newer schemas already carry authentic snapshots and hit the
+	// stricter absent/existed invariants unchanged.
+	if len(upgraded.RuntimeSelectors) == 0 {
+		upgraded.RuntimeSelectors = absentWindowsManagedHooksLifecycleSelectorSnapshots()
+	}
 	if err := validateWindowsManagedHooksLifecycleJournal(upgraded, identity); err != nil {
 		return fmt.Errorf("validate legacy committed managed-hook lifecycle journal: %w", err)
 	}
@@ -1576,6 +1586,26 @@ var windowsManagedHooksLifecycleSelectorConnectors = [...]string{
 	"claudecode",
 	"codex",
 	"cursor",
+}
+
+// absentWindowsManagedHooksLifecycleSelectorSnapshots returns the canonical
+// absent runtime-selector snapshot set for schema-3 legacy journal upgrades.
+// The shared validator accepts these because Existed=false and every string
+// field is empty; the CAS zero value's SHA256 is likewise the empty string.
+func absentWindowsManagedHooksLifecycleSelectorSnapshots() []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot {
+	snapshots := make(
+		[]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+		0,
+		len(windowsManagedHooksLifecycleSelectorConnectors),
+	)
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		snapshots = append(snapshots, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1,
+			Connector:     connectorName,
+			Existed:       false,
+		})
+	}
+	return snapshots
 }
 
 var (

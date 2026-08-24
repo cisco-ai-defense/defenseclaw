@@ -383,7 +383,11 @@ func pinAndSecureAuditDBSQLiteSidecars(
 				return retained, fmt.Errorf("audit: close SQLite sidecar %s ACL-hardening handle: %w", suffix, closeErr)
 			}
 			if auditDBPlatformHardeningNeedsCapabilityReopen() {
-				if stillNeedsHardening, err := auditDBPlatformFileNeedsHardening(pinned); err != nil {
+				// Match the sidecar-scoped predicate used above so the
+				// post-hardening check proves the decision the branch
+				// took, even if the sidecar rule ever diverges from
+				// the file rule.
+				if stillNeedsHardening, err := auditDBPlatformSidecarNeedsHardening(pinned); err != nil {
 					return retained, fmt.Errorf("audit: verify SQLite sidecar %s platform ACL: %w", suffix, err)
 				} else if stillNeedsHardening {
 					return retained, fmt.Errorf("audit: SQLite sidecar %s DACL remains noncanonical after hardening", suffix)

@@ -240,6 +240,13 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 		t.Fatalf("selected generation was removed by GC: %v", err)
 	}
 
+	// DataDir is intentionally left empty here: this is the
+	// deleted-profile removal shape, where the caller no longer has
+	// the profile-owned data directory to compare against. The
+	// validator in validateWindowsManagedRuntimeSelectorTargetAgainstRemoval
+	// skips the DataDir comparison whenever opts.DataDir is empty, so
+	// Connector, TargetSID, and HookExecutable remain the identity
+	// checks that authorize the removal.
 	removal, err := RemoveWindowsManagedRuntimeGenerationEnrollment(
 		WindowsManagedRuntimeGenerationRemovalOptions{
 			Connector:                thirdDesired.Connector,

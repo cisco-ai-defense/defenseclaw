@@ -337,10 +337,18 @@ func openWindowsTargetRuntimeFile(path string, access, share uint32) (*os.File, 
 	return file, nil
 }
 
+// requireWindowsTargetRuntimeAbsolutePath validates that raw is an exact
+// absolute path. `label` is a descriptive tag reused for the trust/admin
+// helpers and other diagnostics; the required-path errors use it as
+// context so a missing flag names both the flag and the descriptive role.
+// windowsTargetRuntimeFlagFromLabel derives the flag name from the label
+// so the emitted error names a flag that actually exists (--output,
+// --request, --claims, --manifest) rather than the internal role tag.
 func requireWindowsTargetRuntimeAbsolutePath(raw, label string) (string, error) {
+	flag := windowsTargetRuntimeFlagFromLabel(label)
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return "", fmt.Errorf("--%s is required", label)
+		return "", fmt.Errorf("--%s (%s) is required", flag, label)
 	}
 	abs, err := filepath.Abs(value)
 	if err != nil {
@@ -348,7 +356,7 @@ func requireWindowsTargetRuntimeAbsolutePath(raw, label string) (string, error) 
 	}
 	abs = filepath.Clean(abs)
 	if !filepath.IsAbs(value) || filepath.Clean(value) != value || !sameWindowsEnterprisePathCLI(value, abs) {
-		return "", fmt.Errorf("--%s must be an exact absolute path", label)
+		return "", fmt.Errorf("--%s (%s) must be an exact absolute path", flag, label)
 	}
 	return abs, nil
 }
@@ -365,6 +373,24 @@ func requireWindowsTargetRuntimeProtectedPath(raw, label string) (string, error)
 		return "", err
 	}
 	return path, nil
+}
+
+// windowsTargetRuntimeFlagFromLabel maps a descriptive label such as
+// "target-runtime request" to the CLI flag that carries the value
+// ("request"). Labels for other flags map directly. Unknown labels fall
+// back to the label itself so the message still names something usable.
+func windowsTargetRuntimeFlagFromLabel(label string) string {
+	switch label {
+	case "target-runtime output":
+		return "output"
+	case "target-runtime request":
+		return "request"
+	case "target-runtime claims":
+		return "claims"
+	case "manifest":
+		return "manifest"
+	}
+	return label
 }
 
 func validateWindowsTargetRuntimeClaimsReport(report enterprisehooks.WindowsManagedRuntimeReport) error {

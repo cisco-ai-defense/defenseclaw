@@ -785,11 +785,11 @@ func compareEnterpriseHookGuardianRecords(
 	if state.OK && authorization.OK {
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(state.Results, authorization.ProtectedTargets)...,
+			compareEnterpriseHookProtectedTargetSets(state.Results, authorization.ProtectedTargets, "authorization")...,
 		)
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(state.Results, activation.ProtectedTargets)...,
+			compareEnterpriseHookProtectedTargetSets(state.Results, activation.ProtectedTargets, "activation")...,
 		)
 	} else {
 		for _, row := range state.Results {
@@ -811,7 +811,14 @@ func compareEnterpriseHookGuardianRecords(
 	return issues
 }
 
-func compareEnterpriseHookProtectedTargetSets(expected, actual []enterpriseHookReconcileRow) []string {
+// compareEnterpriseHookProtectedTargetSets diffs the reconcile-time target
+// set against a protected record. `record` names the record whose drift is
+// being reported (for example "authorization" or "activation") so operators
+// can triage the correct file when the sets diverge.
+func compareEnterpriseHookProtectedTargetSets(
+	expected, actual []enterpriseHookReconcileRow,
+	record string,
+) []string {
 	expectedByKey := make(map[string]enterpriseHookReconcileRow, len(expected))
 	actualByKey := make(map[string]enterpriseHookReconcileRow, len(actual))
 	var issues []string
@@ -830,23 +837,23 @@ func compareEnterpriseHookProtectedTargetSets(expected, actual []enterpriseHookR
 	for _, row := range actual {
 		key := enterpriseHookProtectedTargetKey(row)
 		if key == "" {
-			issues = append(issues, fmt.Sprintf("protected authorization contains an incomplete target: %s", enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains an incomplete target: %s", record, enterpriseHookTargetLabel(row)))
 			continue
 		}
 		if _, duplicate := actualByKey[key]; duplicate {
-			issues = append(issues, fmt.Sprintf("protected authorization contains a duplicate target: %s", enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains a duplicate target: %s", record, enterpriseHookTargetLabel(row)))
 			continue
 		}
 		actualByKey[key] = row
 	}
 	for key, row := range expectedByKey {
 		if _, covered := actualByKey[key]; !covered {
-			issues = append(issues, fmt.Sprintf("protected authorization does not cover %s", enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s does not cover %s", record, enterpriseHookTargetLabel(row)))
 		}
 	}
 	for key, row := range actualByKey {
 		if _, enabled := expectedByKey[key]; !enabled {
-			issues = append(issues, fmt.Sprintf("protected authorization contains extra or stale target %s", enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains extra or stale target %s", record, enterpriseHookTargetLabel(row)))
 		}
 	}
 	sort.Strings(issues)
@@ -1072,7 +1079,7 @@ func runEnterpriseHookVerifyOnce(ctx context.Context) (enterpriseHookVerifyRun, 
 		run.Rows = append(run.Rows, row)
 	}
 	if run.AuthorizationErr == nil && exists {
-		if issues := compareEnterpriseHookProtectedTargetSets(run.Rows, authorization.ProtectedTargets); len(issues) > 0 {
+		if issues := compareEnterpriseHookProtectedTargetSets(run.Rows, authorization.ProtectedTargets, "authorization"); len(issues) > 0 {
 			run.AuthorizationErr = fmt.Errorf("%s", strings.Join(issues, "; "))
 		}
 	}

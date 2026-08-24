@@ -236,10 +236,13 @@ func TestWindowsCursorPublicArtifactsAcceptBoundReceiptDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, hooksPath, adapterPath, statePath, _, _, err := windowsCursorManagedPaths()
+	cursorPaths, err := windowsCursorManagedPaths()
 	if err != nil {
 		t.Fatal(err)
 	}
+	hooksPath := cursorPaths.Hooks
+	adapterPath := cursorPaths.Adapter
+	statePath := cursorPaths.State
 	hooks, err := connector.MergeWindowsCursorEnterpriseHooks(nil, adapterPath, "closed")
 	if err != nil {
 		t.Fatal(err)

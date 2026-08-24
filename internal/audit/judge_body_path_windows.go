@@ -177,12 +177,18 @@ func judgeBodyPlatformPathNeedsHardening(path string) (bool, error) {
 		return false, errors.New("judge_body: missing Windows security descriptor")
 	}
 	owner, _, err := sd.Owner()
-	if err != nil || !judgeBodyWindowsTrustedPrincipal(owner) {
+	if err != nil {
+		return false, fmt.Errorf("judge_body: inspect Windows owner: %w", err)
+	}
+	if !judgeBodyWindowsTrustedPrincipal(owner) {
 		return false, fmt.Errorf("judge_body: Windows owner %s is not trusted", judgeBodyWindowsSID(owner))
 	}
 	dacl, _, err := sd.DACL()
-	if err != nil || dacl == nil {
-		return false, errors.New("judge_body: null or unreadable Windows DACL is not trusted")
+	if err != nil {
+		return false, fmt.Errorf("judge_body: inspect Windows DACL: %w", err)
+	}
+	if dacl == nil {
+		return false, errors.New("judge_body: null Windows DACL is not trusted")
 	}
 	if err := rejectUntrustedJudgeBodyWindowsWriteACEs(path, dacl, false, true); err != nil {
 		return false, err

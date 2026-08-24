@@ -178,10 +178,12 @@ func validateWindowsCursorManagedRuntime(
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: Cursor managed runtime sidecars are invalid: %w", err)
 	}
-	_, hooksPath, adapterPath, _, _, _, err := windowsCursorManagedPaths()
+	cursorPaths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return err
 	}
+	hooksPath := cursorPaths.Hooks
+	adapterPath := cursorPaths.Adapter
 	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: load Cursor managed hook contract: %w", err)
@@ -248,6 +250,16 @@ func resolveWindowsClaudeManagedHookRuntime(
 	)
 	if err != nil {
 		return result, err
+	}
+	// The hook consumes the generation gateway identity, not the
+	// policy record. Reject a policy whose gateway metadata does not
+	// match the resolved generation instead of silently trusting one
+	// source. The generation resolver otherwise never compares them.
+	if generation.GatewayAddr != target.gatewayAddr ||
+		generation.GatewayServiceName != target.gatewayServiceName {
+		return result, errors.New(
+			"enterprise hooks: Claude managed policy gateway identity does not match the resolved generation",
+		)
 	}
 	result.GatewayAddr = generation.GatewayAddr
 	result.GatewayServiceName = generation.GatewayServiceName

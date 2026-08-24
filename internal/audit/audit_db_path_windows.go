@@ -19,6 +19,16 @@ import (
 
 var auditDBWindowsServiceAccountSID = managed.WindowsServiceAccountSID
 
+// Shared access masks for the managed audit-database DACL. These form a
+// closed round-trip between auditDBWindowsProtectedDACLForOwner (which
+// writes the DACL) and auditDBWindowsManagedRuntimeFileCanonical (which
+// validates it). Declaring them once ensures a one-sided edit cannot
+// desync the write path from the post-hardening verification.
+const (
+	auditDBWindowsFileAllAccess windows.ACCESS_MASK = 0x001f01ff
+	auditDBWindowsFileModify    windows.ACCESS_MASK = 0x001301bf
+)
+
 func openAuditDBFileNoFollow(path string, create, harden bool) (*os.File, error) {
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -319,10 +329,6 @@ func auditDBWindowsProtectedDACLForOwner(
 		if err != nil {
 			return nil, fmt.Errorf("audit: resolve Windows OWNER RIGHTS SID: %w", err)
 		}
-		const (
-			fileAllAccess windows.ACCESS_MASK = 0x001f01ff
-			fileModify    windows.ACCESS_MASK = 0x001301bf
-		)
 		entries := make([]windows.EXPLICIT_ACCESS, 0, 4)
 		if directory || owner == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
 			entries = append(entries,
@@ -330,9 +336,9 @@ func auditDBWindowsProtectedDACLForOwner(
 			)
 		}
 		entries = append(entries,
-			auditDBWindowsExplicitAccess(localSystem, fileAllAccess, inheritance),
-			auditDBWindowsExplicitAccess(administrators, fileAllAccess, inheritance),
-			auditDBWindowsExplicitAccess(gatewayServiceSID, fileModify, inheritance),
+			auditDBWindowsExplicitAccess(localSystem, auditDBWindowsFileAllAccess, inheritance),
+			auditDBWindowsExplicitAccess(administrators, auditDBWindowsFileAllAccess, inheritance),
+			auditDBWindowsExplicitAccess(gatewayServiceSID, auditDBWindowsFileModify, inheritance),
 		)
 		dacl, err := windows.ACLFromEntries(entries, nil)
 		if err != nil {
@@ -426,18 +432,14 @@ func auditDBWindowsManagedRuntimeFileCanonical(
 	if err != nil {
 		return false, err
 	}
-	const (
-		fileAllAccess windows.ACCESS_MASK = 0x001f01ff
-		fileModify    windows.ACCESS_MASK = 0x001301bf
-	)
 	type expectedACE struct {
 		sid  *windows.SID
 		mask windows.ACCESS_MASK
 	}
 	expected := []expectedACE{
-		{sid: localSystem, mask: fileAllAccess},
-		{sid: administrators, mask: fileAllAccess},
-		{sid: gatewayServiceSID, mask: fileModify},
+		{sid: localSystem, mask: auditDBWindowsFileAllAccess},
+		{sid: administrators, mask: auditDBWindowsFileAllAccess},
+		{sid: gatewayServiceSID, mask: auditDBWindowsFileModify},
 	}
 	ownerRightsSeen := false
 	seen := make([]bool, len(expected))
