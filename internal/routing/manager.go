@@ -43,7 +43,12 @@ func (m *Manager) InstalledVersion() string {
 // EnsureInstalled installs vllm-sr via pip if not present.
 func (m *Manager) EnsureInstalled(ctx context.Context, version string) error {
 	if m.IsInstalled() {
-		fmt.Fprintf(os.Stderr, "[routing] vllm-sr already installed (%s)\n", m.InstalledVersion())
+		installedVer := m.InstalledVersion()
+		// If a specific version is requested, verify it matches.
+		if version != "" && installedVer != version {
+			return fmt.Errorf("routing: vllm-sr version mismatch (installed: %s, required: %s)", installedVer, version)
+		}
+		fmt.Fprintf(os.Stderr, "[routing] vllm-sr already installed (%s)\n", installedVer)
 		return nil
 	}
 

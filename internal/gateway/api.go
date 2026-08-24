@@ -3097,10 +3097,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/routing/") && connector.IsLoopback(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
 		route := r.Pattern
 		if route == "" {
 			// Sanitize so the OTLP path-token is never recorded as a
@@ -3299,10 +3295,6 @@ func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, _ 
 func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/routing/") && connector.IsLoopback(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

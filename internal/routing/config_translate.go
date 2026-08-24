@@ -254,8 +254,13 @@ func Translate(input TranslateInput) *SRConfig {
 			Rules:       rules,
 			ModelRefs:   modelRefs,
 		}
-		if d.Algorithm != "" {
-			dec.Algorithm = &SRAlgorithm{Name: d.Algorithm}
+		// Use decision-specific algorithm if provided, otherwise fall back to input.Algorithm.
+		alg := d.Algorithm
+		if alg == "" {
+			alg = input.Algorithm
+		}
+		if alg != "" {
+			dec.Algorithm = &SRAlgorithm{Name: alg}
 		}
 		cfg.Routing.Decisions = append(cfg.Routing.Decisions, dec)
 	}

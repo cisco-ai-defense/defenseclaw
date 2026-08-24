@@ -14,19 +14,20 @@ import (
 )
 
 const (
-	defaultSRPort    = 8888 // Envoy listener port (unused in our integration)
-	defaultSRAPIPort = 8080 // Router API server port (classify/intent, health)
-	srRouterImage    = "ghcr.io/vllm-project/semantic-router/vllm-sr:v0.3.0"
-	srContainerName  = "defenseclaw-semantic-router"
+	defaultSRPort        = 8888 // Envoy listener port (unused in our integration)
+	defaultSRAPIPort     = 8080 // Router API server port (classify/intent, health)
+	srRouterImage        = "ghcr.io/vllm-project/semantic-router/vllm-sr:v0.3.0"
+	srContainerNameLabel = "com.defenseclaw.component=semantic-router"
 )
 
 // Lifecycle manages the semantic router container.
 // We start ONLY the router container (not Envoy/dashboard/observability)
 // since DefenseClaw only needs the /api/v1/classify/intent endpoint.
 type Lifecycle struct {
-	configPath string
-	port       int
-	dataDir    string
+	configPath    string
+	port          int
+	dataDir       string
+	containerName string
 }
 
 type LifecycleConfig struct {
@@ -40,25 +41,33 @@ func NewLifecycle(cfg LifecycleConfig) *Lifecycle {
 	if port == 0 {
 		port = defaultSRAPIPort
 	}
+	// Generate instance-specific container name from data directory.
+	containerName := fmt.Sprintf("defenseclaw-sr-%d", port)
+	if cfg.DataDir != "" {
+		// Use a stable hash of the data directory for uniqueness.
+		containerName = fmt.Sprintf("defenseclaw-sr-%x", cfg.DataDir)[:32]
+	}
 	return &Lifecycle{
-		configPath: cfg.ConfigPath,
-		port:       port,
-		dataDir:    cfg.DataDir,
+		configPath:    cfg.ConfigPath,
+		port:          port,
+		dataDir:       cfg.DataDir,
+		containerName: containerName,
 	}
 }
 
 // Start launches only the router container via Docker.
 // This gives us the /api/v1/classify/intent API without Envoy or extras.
 func (l *Lifecycle) Start(ctx context.Context) error {
-	// Stop any existing container
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", srContainerName).Run()
+	// Stop any existing container with this instance name.
+	_ = exec.CommandContext(ctx, "docker", "rm", "-f", l.containerName).Run()
 
 	configDir := filepath.Dir(l.configPath)
 	configFile := filepath.Base(l.configPath)
 
 	args := []string{
 		"run", "-d",
-		"--name", srContainerName,
+		"--name", l.containerName,
+		"--label", srContainerNameLabel,
 		"-v", fmt.Sprintf("%s:/app/config", configDir),
 		"-p", fmt.Sprintf("%d:%d", l.port, l.port),
 		"--entrypoint", "/usr/local/bin/router",
@@ -77,7 +86,7 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 		return fmt.Errorf("routing: docker run router failed: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "[routing] router container started (port=%d, container=%s)\n", l.port, srContainerName)
+	fmt.Fprintf(os.Stderr, "[routing] router container started (port=%d, container=%s)\n", l.port, l.containerName)
 	return nil
 }
 
@@ -108,12 +117,12 @@ func (l *Lifecycle) WaitForHealth(ctx context.Context, timeout time.Duration) er
 	return fmt.Errorf("routing: router health check timed out after %v", timeout)
 }
 
-// Stop removes the router container.
+// Stop removes the router container belonging to this lifecycle instance.
 func (l *Lifecycle) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", srContainerName).Run()
-	fmt.Fprintf(os.Stderr, "[routing] router container stopped\n")
+	_ = exec.CommandContext(ctx, "docker", "rm", "-f", l.containerName).Run()
+	fmt.Fprintf(os.Stderr, "[routing] router container %s stopped\n", l.containerName)
 	return nil
 }
 

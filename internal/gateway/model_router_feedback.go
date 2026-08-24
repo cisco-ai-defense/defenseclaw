@@ -21,8 +21,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -31,6 +33,12 @@ type RouterFeedback struct {
 	endpoint string // e.g. "http://127.0.0.1:8080"
 	client   *http.Client
 	ch       chan feedbackEntry
+
+	// Rate-limited error logging.
+	errMu        sync.Mutex
+	lastErrLog   time.Time
+	errsSinceLog int
+	errLogBudget time.Duration
 }
 
 type feedbackEntry struct {
@@ -46,9 +54,10 @@ type feedbackEntry struct {
 // that drains the channel and sends to SR. The goroutine stops when ctx is cancelled.
 func NewRouterFeedback(ctx context.Context, endpoint string) *RouterFeedback {
 	rf := &RouterFeedback{
-		endpoint: endpoint,
-		client:   &http.Client{Timeout: 5 * time.Second},
-		ch:       make(chan feedbackEntry, 100),
+		endpoint:     endpoint,
+		client:       &http.Client{Timeout: 5 * time.Second},
+		ch:           make(chan feedbackEntry, 100),
+		errLogBudget: 10 * time.Second,
 	}
 	go rf.drain(ctx)
 	return rf
@@ -99,9 +108,35 @@ func (rf *RouterFeedback) send(ctx context.Context, entry feedbackEntry) {
 
 	resp, err := rf.client.Do(req)
 	if err != nil {
-		// SR unreachable for feedback — non-critical, just log once per batch
-		fmt.Fprintf(os.Stderr, "[routing] feedback send failed: %v\n", err)
+		// SR unreachable for feedback — non-critical, rate-limit logging.
+		rf.logError("feedback send failed: %v", err)
 		return
 	}
+	// Drain response body before closing to allow HTTP connection reuse.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+}
+
+// logError rate-limits error logging so transient SR failures don't spam stderr.
+func (rf *RouterFeedback) logError(format string, args ...interface{}) {
+	rf.errMu.Lock()
+	defer rf.errMu.Unlock()
+
+	rf.errsSinceLog++
+	now := time.Now()
+
+	if now.Sub(rf.lastErrLog) < rf.errLogBudget {
+		// Within budget — suppress.
+		return
+	}
+
+	// Budget expired — emit aggregated log.
+	if rf.errsSinceLog > 1 {
+		fmt.Fprintf(os.Stderr, "[routing] %s (%d errors since last log)\n", fmt.Sprintf(format, args...), rf.errsSinceLog)
+	} else {
+		fmt.Fprintf(os.Stderr, "[routing] %s\n", fmt.Sprintf(format, args...))
+	}
+
+	rf.lastErrLog = now
+	rf.errsSinceLog = 0
 }

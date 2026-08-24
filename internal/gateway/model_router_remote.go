@@ -183,7 +183,9 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// Capture limited error body for debugging, then drain remaining.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		_, _ = io.Copy(io.Discard, resp.Body)
 		fmt.Fprintf(os.Stderr, "[routing] sr error %d: %s\n", resp.StatusCode, body)
 		return nil
 	}
@@ -200,8 +202,6 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 
 	reason := fmt.Sprintf("decision=%s model=%s confidence=%.2f",
 		classResp.RoutingDecision, classResp.RecommendedModel, classResp.Classification.Confidence)
-
-	fmt.Fprintf(os.Stderr, "[routing] route: %s\n", reason)
 
 	decision := &ModelRouterDecision{
 		Model:          classResp.RecommendedModel,
@@ -267,6 +267,9 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 
 // Healthy checks if the SR service is reachable.
 func (c *RemoteRouterClient) Healthy(ctx context.Context) bool {
+	if c == nil {
+		return false
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, c.endpoint+"/health", nil)

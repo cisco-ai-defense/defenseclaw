@@ -30,6 +30,7 @@ import (
 func TestRouterFeedback_Record_Success(t *testing.T) {
 	var mu sync.Mutex
 	var received []feedbackEntry
+	requestReceived := make(chan struct{}, 1)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/feedback" {
@@ -54,6 +55,10 @@ func TestRouterFeedback_Record_Success(t *testing.T) {
 		received = append(received, entry)
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
+		select {
+		case requestReceived <- struct{}{}:
+		default:
+		}
 	}))
 	defer srv.Close()
 
@@ -63,8 +68,13 @@ func TestRouterFeedback_Record_Success(t *testing.T) {
 	rf := NewRouterFeedback(ctx, srv.URL)
 	rf.Record("reasoning", "complex_reasoning", 1250*time.Millisecond, 450, true, "abc123")
 
-	// Give the background goroutine time to drain
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the handler to receive the request or timeout.
+	select {
+	case <-requestReceived:
+		// Success
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for feedback request")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -137,29 +147,65 @@ func TestRouterFeedback_Record_SRDown(t *testing.T) {
 	// Should not panic or hang
 	rf.Record("model", "decision", time.Second, 100, true, "session123")
 
-	// Give time for the send to fail
-	time.Sleep(100 * time.Millisecond)
-
 	// If we get here without panic, test passes
 }
 
 func TestRouterFeedback_ContextCancelled(t *testing.T) {
+	requestReceived := make(chan struct{}, 1)
+	contextCanceled := make(chan struct{}, 1)
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		select {
+		case requestReceived <- struct{}{}:
+		default:
+		}
 	}))
 	defer srv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	rf := NewRouterFeedback(ctx, srv.URL)
+
+	// Track when the drain goroutine exits after cancellation.
+	drainExited := make(chan struct{})
+	origNewRouterFeedback := func(ctx context.Context, endpoint string) *RouterFeedback {
+		rf := &RouterFeedback{
+			endpoint: endpoint,
+			client:   &http.Client{Timeout: 5 * time.Second},
+			ch:       make(chan feedbackEntry, 100),
+		}
+		go func() {
+			defer close(drainExited)
+			rf.drain(ctx)
+		}()
+		return rf
+	}
+
+	rf := origNewRouterFeedback(ctx, srv.URL)
 
 	// Record an entry
 	rf.Record("model", "decision", time.Second, 100, true, "")
 
-	// Cancel context immediately
+	// Wait for the first request to be received.
+	testCtx, testCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer testCancel()
+	select {
+	case <-requestReceived:
+		// Success
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for initial feedback request")
+	}
+
+	// Cancel context
 	cancel()
 
-	// Give time for drain goroutine to exit
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the drain goroutine to exit after cancellation.
+	select {
+	case <-drainExited:
+		// Success - drain exited
+		close(contextCanceled)
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for drain goroutine to exit after context cancellation")
+	}
 
 	// Try to record after cancellation - should not crash
 	rf.Record("model2", "decision2", time.Second, 100, true, "")

@@ -30,7 +30,9 @@ func TestRemoteRouterClient_Route_Success(t *testing.T) {
 
 		var req classifyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
+			t.Errorf("decode request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
 
 		if len(req.Messages) != 2 {
@@ -79,7 +81,12 @@ func TestRemoteRouterClient_Route_Success(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_SRDown(t *testing.T) {
-	client := NewRemoteRouterClient("http://127.0.0.1:9999", 10)
+	// Create and immediately close a server to get an unreachable URL.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	unreachableURL := srv.URL
+	srv.Close()
+
+	client := NewRemoteRouterClient(unreachableURL, 10)
 	input := &ModelRouterInput{
 		Model: "gpt-4",
 		Messages: []ChatMessage{
@@ -202,7 +209,12 @@ func TestRemoteRouterClient_Healthy_Up(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Healthy_Down(t *testing.T) {
-	client := NewRemoteRouterClient("http://127.0.0.1:9998", 10)
+	// Create and immediately close a server to get an unreachable URL.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	unreachableURL := srv.URL
+	srv.Close()
+
+	client := NewRemoteRouterClient(unreachableURL, 10)
 	healthy := client.Healthy(context.Background())
 
 	if healthy {

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 )
@@ -81,13 +82,53 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 		forwardBody = patchModelInBody(body, decision.Model)
 	}
 
-	// Build upstream URL: base_url + /v1/chat/completions (Ollama OpenAI-compat).
-	targetBase := decision.TargetURL
-	if targetBase == "" {
-		writeJSONError(w, http.StatusBadGateway, "router decision has no target URL")
+	// Resolve the recommended model from configured routing.models entries.
+	// decision.Model contains the model name returned by the router; we need
+	// to look it up in the routing config to get the actual base_url.
+	if decision.Model == "" {
+		writeJSONError(w, http.StatusBadGateway, "router decision has no model")
 		return
 	}
+
+	var targetBase string
+	var apiKey string
+	if a.scannerCfg != nil && a.scannerCfg.Routing.Enabled {
+		for _, m := range a.scannerCfg.Routing.Models {
+			if m.Name == decision.Model {
+				targetBase = m.BaseURL
+				if m.APIKeyEnv != "" {
+					apiKey = os.Getenv(m.APIKeyEnv)
+				}
+				break
+			}
+		}
+	}
+
+	if targetBase == "" {
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("model %q not found in routing.models", decision.Model))
+		return
+	}
+
 	upstreamURL := targetBase + "/v1/chat/completions"
+
+	// Validate upstream URL with netguard protection before dialing.
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid upstream URL")
+		return
+	}
+	if u.User != nil {
+		writeJSONError(w, http.StatusForbidden, "upstream URL must not contain userinfo")
+		return
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		writeJSONError(w, http.StatusForbidden, "upstream URL scheme must be http or https")
+		return
+	}
+	if isPrivateHost(u.Hostname()) {
+		writeJSONError(w, http.StatusForbidden, "upstream URL resolves to private or unsafe address")
+		return
+	}
 
 	fmt.Fprintf(os.Stderr, "[api] routed chat: decision=%q model=%q → %s\n",
 		decision.Reason, decision.Model, upstreamURL)
@@ -101,11 +142,19 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
-	if decision.APIKey != "" {
-		upReq.Header.Set("Authorization", "Bearer "+decision.APIKey)
+	if apiKey != "" {
+		upReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := http.DefaultClient.Do(upReq)
+	// Use a client that does not follow redirects.
+	noRedirectClient := &http.Client{
+		Timeout: 120 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := noRedirectClient.Do(upReq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[api] routed chat upstream error: %v\n", err)
 		writeJSONError(w, http.StatusBadGateway, "upstream request failed")
@@ -119,24 +168,32 @@ func (a *APIServer) handleRoutedChatCompletion(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(resp.StatusCode)
 
 	if req.Stream {
-		flusher, _ := w.(http.Flusher)
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := resp.Body.Read(buf)
-			if n > 0 {
-				if _, werr := w.Write(buf[:n]); werr != nil {
-					return
-				}
-				if flusher != nil {
-					flusher.Flush()
-				}
-			}
-			if rerr != nil {
-				return
-			}
+		// Streaming response: use io.Copy with ResponseController flushing.
+		rc := http.NewResponseController(w)
+		flushWriter := &flushingWriter{w: w, rc: rc}
+		if _, err := io.Copy(flushWriter, resp.Body); err != nil {
+			// Write error - connection may be closed. Stop processing.
+			return
 		}
+	} else {
+		// Non-streaming response: simple copy.
+		_, _ = io.Copy(w, resp.Body)
 	}
-	_, _ = io.Copy(w, resp.Body)
+}
+
+// flushingWriter wraps a ResponseWriter to flush after each Write.
+type flushingWriter struct {
+	w  http.ResponseWriter
+	rc *http.ResponseController
+}
+
+func (fw *flushingWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if err != nil {
+		return n, err
+	}
+	_ = fw.rc.Flush()
+	return n, nil
 }
 
 func writeJSONError(w http.ResponseWriter, code int, msg string) {

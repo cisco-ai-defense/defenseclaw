@@ -2726,10 +2726,12 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				// logging still apply to cache hits.
 				return
 			}
+			modelOverride := ""
 			if decision.TargetURL != "" {
 				req.TargetURL = decision.TargetURL
 			}
 			if decision.Model != "" {
+				modelOverride = decision.Model
 				req.Model = decision.Model
 			}
 			if decision.APIKey != "" {
@@ -2737,6 +2739,11 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			w.Header().Set("X-Semantic-Router", "routed")
 			w.Header().Set("X-Semantic-Router-Reason", decision.Reason)
+
+			// Apply model patching if router changed the model and we'll raw-forward.
+			if req.TargetURL != "" && modelOverride != "" {
+				body = patchModelInBody(body, modelOverride)
+			}
 		}
 	}
 
@@ -2746,6 +2753,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// chat_template_kwargs, extra_body, and parallel_tool_calls must not be
 	// dropped by the structured provider translation path.
 	if req.TargetURL != "" {
+		// Revalidate the router-selected URL before forwarding.
+		if p.guardUpstreamTargetURL(w, r, req.TargetURL) {
+			return
+		}
 		if requestTrace != nil {
 			requestTrace.Abort()
 		}
