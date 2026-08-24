@@ -28,6 +28,7 @@ import (
 )
 
 func TestRouterFeedback_Record_Success(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var received []feedbackEntry
 	requestReceived := make(chan struct{}, 1)
@@ -105,6 +106,7 @@ func TestRouterFeedback_Record_Success(t *testing.T) {
 }
 
 func TestRouterFeedback_Record_ChannelFull(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Slow handler to block draining
 		time.Sleep(200 * time.Millisecond)
@@ -138,6 +140,7 @@ func TestRouterFeedback_Record_ChannelFull(t *testing.T) {
 }
 
 func TestRouterFeedback_Record_SRDown(t *testing.T) {
+	t.Parallel()
 	// No server running at this address
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -151,6 +154,7 @@ func TestRouterFeedback_Record_SRDown(t *testing.T) {
 }
 
 func TestRouterFeedback_ContextCancelled(t *testing.T) {
+	t.Parallel()
 	requestReceived := make(chan struct{}, 1)
 	contextCanceled := make(chan struct{}, 1)
 

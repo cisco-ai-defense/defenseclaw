@@ -20,6 +20,7 @@ import (
 )
 
 func TestRemoteRouterClient_Route_Success(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/classify/intent" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -81,6 +82,7 @@ func TestRemoteRouterClient_Route_Success(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_SRDown(t *testing.T) {
+	t.Parallel()
 	// Create and immediately close a server to get an unreachable URL.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	unreachableURL := srv.URL
@@ -102,6 +104,7 @@ func TestRemoteRouterClient_Route_SRDown(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_Timeout(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
@@ -126,6 +129,7 @@ func TestRemoteRouterClient_Route_Timeout(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_BadJSON(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -147,6 +151,7 @@ func TestRemoteRouterClient_Route_BadJSON(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_ErrorStatus(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error": "internal error"}`))
@@ -167,6 +172,7 @@ func TestRemoteRouterClient_Route_ErrorStatus(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_EmptyModel(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := classifyResponse{
 			RecommendedModel: "",
@@ -191,6 +197,7 @@ func TestRemoteRouterClient_Route_EmptyModel(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Healthy_Up(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -209,6 +216,7 @@ func TestRemoteRouterClient_Healthy_Up(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Healthy_Down(t *testing.T) {
+	t.Parallel()
 	// Create and immediately close a server to get an unreachable URL.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	unreachableURL := srv.URL
@@ -223,6 +231,7 @@ func TestRemoteRouterClient_Healthy_Down(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Healthy_Unhealthy(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
@@ -237,6 +246,7 @@ func TestRemoteRouterClient_Healthy_Unhealthy(t *testing.T) {
 }
 
 func TestRemoteRouterClient_NilClient(t *testing.T) {
+	t.Parallel()
 	var client *RemoteRouterClient
 	input := &ModelRouterInput{
 		Model:    "gpt-4",
@@ -251,6 +261,7 @@ func TestRemoteRouterClient_NilClient(t *testing.T) {
 }
 
 func TestRemoteRouterClient_EmptyEndpoint(t *testing.T) {
+	t.Parallel()
 	client := NewRemoteRouterClient("", 100)
 	input := &ModelRouterInput{
 		Model:    "gpt-4",
@@ -265,6 +276,7 @@ func TestRemoteRouterClient_EmptyEndpoint(t *testing.T) {
 }
 
 func TestRemoteRouterClient_DefaultTimeout(t *testing.T) {
+	t.Parallel()
 	client := NewRemoteRouterClient("http://example.com", 0)
 	if client.timeout != 100*time.Millisecond {
 		t.Errorf("expected default timeout 100ms, got %v", client.timeout)
@@ -277,6 +289,7 @@ func TestRemoteRouterClient_DefaultTimeout(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_NilInput(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("should not be called with nil input")
 	}))
@@ -291,6 +304,7 @@ func TestRemoteRouterClient_Route_NilInput(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_PluginOutputs_SystemPrompt(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"recommended_model": "claude-sonnet",
@@ -338,6 +352,7 @@ func TestRemoteRouterClient_Route_PluginOutputs_SystemPrompt(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_PluginOutputs_CachedResponse(t *testing.T) {
+	t.Parallel()
 	cachedBody := `{"choices":[{"message":{"content":"cached answer"}}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
@@ -377,6 +392,7 @@ func TestRemoteRouterClient_Route_PluginOutputs_CachedResponse(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_PluginOutputs_HeaderMutations(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"recommended_model": "gpt-4o",
@@ -421,6 +437,7 @@ func TestRemoteRouterClient_Route_PluginOutputs_HeaderMutations(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_PluginOutputs_RAGContext(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"recommended_model": "gpt-4o",
@@ -465,6 +482,7 @@ func TestRemoteRouterClient_Route_PluginOutputs_RAGContext(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_PluginOutputs_CompressedPrompt(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"recommended_model": "gpt-4o",
@@ -507,6 +525,7 @@ func TestRemoteRouterClient_Route_PluginOutputs_CompressedPrompt(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_PluginOutputs_Warnings(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"recommended_model": "gpt-4o",
@@ -537,6 +556,7 @@ func TestRemoteRouterClient_Route_PluginOutputs_Warnings(t *testing.T) {
 }
 
 func TestRemoteRouterClient_Route_RichContext(t *testing.T) {
+	t.Parallel()
 	var receivedReq classifyRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&receivedReq)
