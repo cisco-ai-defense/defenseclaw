@@ -1872,6 +1872,7 @@ try {
                 installed = [bool]$Installed
                 hashes = [ordered]@{ prior = 'hash' }
                 managed_hooks_activation = $ManagedHooksActivation
+                updated_at = [DateTime]::UtcNow.ToString('o')
             }
         }
         function script:Set-DefenseClawPreservedStateAcls {

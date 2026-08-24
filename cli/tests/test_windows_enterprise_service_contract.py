@@ -4703,6 +4703,17 @@ def test_uninstall_tombstone_preserves_authenticated_activation_identity() -> No
     assert "teardown finalize did not observe an inactive tombstone" in teardown_mock
     assert "teardown $Action did not observe active deployment metadata" in teardown_mock
 
+    metadata_mock_start = smoke.index(
+        "function script:New-DefenseClawDeploymentMetadata"
+    )
+    metadata_mock = smoke[
+        metadata_mock_start : smoke.index(
+            "function script:Set-DefenseClawPreservedStateAcls",
+            metadata_mock_start,
+        )
+    ]
+    assert "updated_at = [DateTime]::UtcNow.ToString('o')" in metadata_mock
+
 
 def test_certification_cleanup_handles_partial_profiles_and_empty_parents() -> None:
     harness = read(HARNESS)
