@@ -1625,7 +1625,7 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 	cfg["version"] = 1
 	for _, event := range cursorHookEvents {
 		entry := map[string]interface{}{
-			"type": "command",
+			"type":    "command",
 			"command": shellWord(hookScript),
 			// Cursor's hooks.json timeout is in seconds; use the same
 			// shared constant the enterprise writer emits so a bug in

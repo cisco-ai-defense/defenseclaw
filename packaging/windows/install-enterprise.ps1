@@ -2098,7 +2098,14 @@ function Test-DefenseClawConnectorMetadataTargetIsLocalAdmin {
     # stamped with SID S-1-5-32-544 as owner. Match on the well-known RID
     # pattern first so the common QA case (logged in as local Administrator)
     # never pays for a CIM query.
-    if ($ExpectedSID -cmatch '^S-1-5-21-[0-9-]+-500$') {
+    #
+    # Anchor the pattern to the canonical shape: S-1-5-21 (domain identifier
+    # authority) followed by exactly three non-empty numeric sub-authorities
+    # (the machine or domain identifier) and then the terminal -500 RID.
+    # A wider `[0-9-]+` sub-pattern would match e.g. `S-1-5-21---500` or
+    # `S-1-5-21-1-500` (only one sub-authority), neither of which is a real
+    # built-in Administrator SID.
+    if ($ExpectedSID -cmatch '^S-1-5-21-[0-9]+-[0-9]+-[0-9]+-500$') {
         return $true
     }
     try {

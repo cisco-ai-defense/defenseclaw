@@ -123,6 +123,11 @@ func TestWindowsServiceHostRedirectsLateCiscoDiagnosticToProtectedLog(t *testing
 		os.Stdout = originalStdout
 		os.Stderr = originalStderr
 	})
+	// inspectDone closes once client.Inspect has returned inside the
+	// service executor. The SCM mock waits for this signal before
+	// sending svc.Stop; otherwise cancellation from Stop could preempt
+	// the 403 diagnostic that this test is asserting on.
+	inspectDone := make(chan struct{})
 	isWindowsService = func() (bool, error) { return true, nil }
 	runSCMService = func(name string, handler svc.Handler) error {
 		if name != defaultGatewayServiceName {
@@ -143,6 +148,15 @@ func TestWindowsServiceHostRedirectsLateCiscoDiagnosticToProtectedLog(t *testing
 		}()
 
 		waitForServiceState(t, changes, svc.Running)
+		// Wait for client.Inspect to have returned before triggering
+		// the stop so the redirected gateway log captures the 403
+		// diagnostic. Bound the wait so a broken executor still fails
+		// this test rather than deadlocking it.
+		select {
+		case <-inspectDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("client.Inspect did not complete before Stop")
+		}
 		requests <- svc.ChangeRequest{Cmd: svc.Stop}
 		waitForServiceState(t, changes, svc.StopPending)
 		select {
@@ -158,6 +172,7 @@ func TestWindowsServiceHostRedirectsLateCiscoDiagnosticToProtectedLog(t *testing
 
 	handled, code := runWindowsService(func(ctx context.Context) int {
 		verdict := client.Inspect(ctx, []gateway.ChatMessage{{Role: "user", Content: privatePromptMarker}})
+		close(inspectDone)
 		if verdict != nil {
 			t.Errorf("non-200 Cisco response verdict=%+v, want nil", verdict)
 		}

@@ -118,21 +118,38 @@ func (server *Server) handleConnection(ctx context.Context, pipe windows.Handle,
 // blocking the caller past timeout. FlushFileBuffers on a pipe server
 // handle waits until the client has read every buffered byte; a client
 // that stops reading would otherwise pin the active-client semaphore.
-// Runs in its own goroutine and abandons the wait if the client is
-// slow — DisconnectNamedPipe then discards the tail as usual.
+// Runs in its own goroutine. On timeout the flush is CANCELLED via
+// CancelIoEx and the caller waits for the goroutine to observe that
+// cancellation before returning, so the pipe handle is guaranteed to
+// still be valid at every point the goroutine references it. This
+// prevents a race where a slow flush would keep touching the handle
+// after the caller (via subsequent deferred CloseHandle) had already
+// released it.
 func flushPipeBounded(handle windows.Handle, timeout time.Duration) {
 	if timeout <= 0 {
 		timeout = defaultOperationTimeout
 	}
-	done := make(chan struct{}, 1)
+	done := make(chan struct{})
 	go func() {
 		_ = windows.FlushFileBuffers(handle)
-		done <- struct{}{}
+		close(done)
 	}()
 	select {
 	case <-done:
+		return
 	case <-time.After(timeout):
 	}
+	// Cancel the outstanding I/O on this handle so the goroutine's
+	// FlushFileBuffers returns promptly. CancelIoEx targets any
+	// pending operation on the handle; on a pipe server that already
+	// wrote its response, the flush is what we're waiting on.
+	_ = windows.CancelIoEx(handle, nil)
+	// Wait for the goroutine to finish before returning so the caller
+	// may safely proceed to DisconnectNamedPipe / CloseHandle. The
+	// goroutine cannot block forever: CancelIoEx unblocks the pending
+	// flush; if the handle is somehow already closed, FlushFileBuffers
+	// returns immediately with an error we deliberately ignore.
+	<-done
 }
 
 func createServerPipe(

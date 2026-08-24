@@ -1145,29 +1145,42 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return err
 	}
-	// Serialize managed-policy removal against enterprise-hook install
-	// and reconcile transactions. Both this path and install_windows.go
-	// (line ~45) use the same per-SID machine-wide named mutex so
-	// separate defenseclaw processes cannot interleave mutations.
-	if trimmedSID := strings.TrimSpace(opts.OwnerSID); trimmedSID != "" {
-		unlock, err := lockWindowsUserRuntimeTransaction(trimmedSID)
+	// Resolve the target SID from either OwnerSID or (for Claude Code
+	// only) UserHome BEFORE locking, so a UserHome-only request cannot
+	// bypass the machine-wide per-SID lock. Serializes managed-policy
+	// removal against enterprise-hook install/reconcile transactions
+	// via the same named mutex.
+	trimmedSID := strings.TrimSpace(opts.OwnerSID)
+	var claudeTargetSID *windows.SID
+	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "claudecode") {
+		var err error
+		if strings.TrimSpace(opts.UserHome) != "" {
+			_, claudeTargetSID, err = validateWindowsEnterpriseHome(
+				opts.UserHome, opts.OwnerSID,
+			)
+		} else {
+			claudeTargetSID, err = validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	// Prefer the pre-resolved Claude target SID when only UserHome was
+	// supplied — otherwise fall back to the trimmed opts.OwnerSID for
+	// non-Claude connectors that reject empty OwnerSID downstream.
+	lockKey := trimmedSID
+	if lockKey == "" && claudeTargetSID != nil {
+		lockKey = claudeTargetSID.String()
+	}
+	if lockKey != "" {
+		unlock, err := lockWindowsUserRuntimeTransaction(lockKey)
 		if err != nil {
 			return err
 		}
 		defer unlock()
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "claudecode") {
-		var targetSID *windows.SID
-		var err error
-		if strings.TrimSpace(opts.UserHome) != "" {
-			_, targetSID, err = validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
-		} else {
-			targetSID, err = validateWindowsEnterpriseTargetSID(opts.OwnerSID)
-		}
-		if err != nil {
-			return err
-		}
-		return removeWindowsClaudeManagedPolicyTarget(targetSID)
+		return removeWindowsClaudeManagedPolicyTarget(claudeTargetSID)
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "codex") {
 		if err := windowsEnterpriseMutationIdentityCheck(); err != nil {

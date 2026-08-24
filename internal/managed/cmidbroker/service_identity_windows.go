@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -21,9 +20,14 @@ import (
 
 // windows.ImpersonateNamedPipeClient is not exported by x/sys/windows;
 // bind it directly. Keeping the LazyProc at package scope avoids a
-// runtime resolution on every connection.
+// runtime resolution on every connection. Use NewLazySystemDLL so the
+// loader is restricted to %SystemRoot%\System32\ — defense in depth
+// against a same-directory advapi32.dll planted next to the broker EXE
+// or the current working directory being writable to a non-admin
+// (KnownDLLs already covers most cases, but the system-only loader
+// closes the residual gap).
 var (
-	modAdvapi32                   = syscall.NewLazyDLL("advapi32.dll")
+	modAdvapi32                    = windows.NewLazySystemDLL("advapi32.dll")
 	procImpersonateNamedPipeClient = modAdvapi32.NewProc("ImpersonateNamedPipeClient")
 )
 
@@ -151,8 +155,20 @@ func verifyPipeClientTokenSID(pipe windows.Handle, expected *windows.SID) error 
 		}
 		return fmt.Errorf("CMID broker open pipe-client thread token: %w", err)
 	}
+	// Defer the close immediately so every subsequent return path
+	// releases the token handle exactly once. Capture the Close error
+	// into a named return-adjacent local via a small closure so it can
+	// be surfaced when the primary flow succeeded.
+	var closeErr error
+	closedByDefer := true
+	defer func() {
+		if closedByDefer {
+			if err := threadToken.Close(); err != nil && closeErr == nil {
+				closeErr = err
+			}
+		}
+	}()
 	tokenUser, err := threadToken.GetTokenUser()
-	closeErr := threadToken.Close()
 	if err != nil || tokenUser == nil || tokenUser.User.Sid == nil {
 		if revertErr := windows.RevertToSelf(); revertErr == nil {
 			revertOK = true
@@ -162,17 +178,27 @@ func verifyPipeClientTokenSID(pipe windows.Handle, expected *windows.SID) error 
 		}
 		return fmt.Errorf("CMID broker inspect pipe-client token user: %w", err)
 	}
-	_ = closeErr
 	sid := tokenUser.User.Sid
 	if revertErr := windows.RevertToSelf(); revertErr != nil {
 		return fmt.Errorf("CMID broker revert impersonation: %w", revertErr)
 	}
 	revertOK = true
+	// Close the token explicitly on the success path so a Close error
+	// can be surfaced (not silently discarded) before the SID mismatch
+	// check runs — a Close failure indicates handle-leak / kernel-state
+	// corruption that we want visible in the broker log rail.
+	closedByDefer = false
+	if err := threadToken.Close(); err != nil {
+		return fmt.Errorf("CMID broker close pipe-client thread token: %w", err)
+	}
 	if !sid.Equals(expected) {
 		return fmt.Errorf(
 			"CMID broker pipe client token SID %s does not match gateway service SID %s",
 			sid, expected,
 		)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("CMID broker close pipe-client thread token: %w", closeErr)
 	}
 	return nil
 }
