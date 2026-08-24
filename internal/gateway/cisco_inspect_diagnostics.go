@@ -79,6 +79,13 @@ const (
 // Production never replaces it.
 var ciscoInspectStructuredLogWriter io.Writer = os.Stderr
 
+// maxCiscoInspectManagedResponseBodyBytes bounds how much of the Cisco AI Defense
+// non-200 response body is included in the diagnostic line under managed_enterprise
+// mode. AID's error envelope is short JSON ({"error":{"code","message"}} on the
+// order of 100-200 bytes); 512 comfortably fits real payloads without letting a
+// pathological upstream response inflate log lines.
+const maxCiscoInspectManagedResponseBodyBytes = 512
+
 // ciscoInspectFailureDiagnostic contains only closed classifications, numeric
 // metadata, and a bounded response body. renderCiscoInspectFailureDiagnostic
 // always replaces the response bytes with the sink redactor's length/digest
@@ -347,7 +354,51 @@ func renderCiscoInspectFailureDiagnostic(diagnostic ciscoInspectFailureDiagnosti
 	}
 	responseSummary := redaction.ForSinkMessageContent(string(diagnostic.responseBody))
 	fmt.Fprintf(&fields, " response_summary=%s", strconv.Quote(responseSummary))
+	// Managed_enterprise: include the actual response bytes (bounded + sanitized)
+	// for non-200 responses so support engineers can debug INVALID_RESPONSE from
+	// captured customer logs without needing to reproduce the failure locally.
+	// Body/decode failure diagnostics don't need the raw body — the classification
+	// already carries the useful signal. Non-managed_enterprise deployments stay
+	// with the redacted response_summary above (the safer default when Reveal()
+	// is available locally).
+	if diagnostic.stage == ciscoInspectStageResponseStatus &&
+		len(diagnostic.responseBody) > 0 &&
+		ManagedEnterpriseActive() {
+		body := sanitizeCiscoInspectManagedResponseBody(
+			diagnostic.responseBody,
+			maxCiscoInspectManagedResponseBodyBytes,
+		)
+		if body != "" {
+			fmt.Fprintf(&fields, " response_body=%s", strconv.Quote(body))
+		}
+	}
 	return fields.String()
+}
+
+// sanitizeCiscoInspectManagedResponseBody bounds a Cisco AI Defense response
+// body for inclusion in a single log line. It (a) truncates to max bytes so a
+// pathological upstream response cannot inflate the diagnostic; (b) replaces
+// bare control characters with '.' so the line stays one-per-record; (c)
+// collapses embedded newlines/tabs to spaces so downstream log ingesters that
+// key on newline framing (Splunk, journald tail, LogAnalytics) don't split the
+// record. strconv.Quote at the call site handles the outer quoting + escaping.
+func sanitizeCiscoInspectManagedResponseBody(body []byte, max int) string {
+	if max > 0 && len(body) > max {
+		body = body[:max]
+	}
+	var b strings.Builder
+	b.Grow(len(body))
+	for _, r := range string(body) {
+		switch {
+		case r == '\r' || r == '\n' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			b.WriteByte('.')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func canonicalCiscoInspectDiagnosticToken(value, fallback string) string {
