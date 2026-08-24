@@ -154,6 +154,15 @@ func validateWindowsSocketPathOverride(socketPath string) error {
 		return fmt.Errorf("ipc: socket path override must end in %q (got %s)", SocketFileName, clean)
 	}
 	parent := filepath.Clean(filepath.Dir(clean))
+	// Shape anchor: the socket must live under an "ipc" directory. In
+	// production this is fully subsumed by the trusted-root check below,
+	// which requires an exact case-insensitive match against
+	// TrustedProgramData/…/ipc — check 3 can only fire for inputs check 4
+	// would also reject. It IS load-bearing under the test hook
+	// (allowUnsafeSocketOverrideForTest) which short-circuits check 4:
+	// leaving this shape check ensures the tests still exercise a
+	// non-trivial parent-directory invariant. Do not delete without
+	// substituting an equivalent shape assertion into the test-hook path.
 	if filepath.Base(parent) != "ipc" {
 		return fmt.Errorf("ipc: socket path override must live under an 'ipc' directory (got parent %s)", parent)
 	}

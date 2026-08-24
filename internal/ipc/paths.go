@@ -68,8 +68,14 @@ const (
 //
 // The env override is intentionally ignored in managed_enterprise so
 // a systemd unit drop-in or launchd env inheritance cannot redirect
-// the enterprise-owned socket path. Operators who need to move the
-// socket in production must set cfg.Managed.SocketPath explicitly.
+// the enterprise-owned socket path. On linux/darwin, operators who
+// need to move the socket in production may set cfg.Managed.SocketPath
+// explicitly and validateManagedSocketPathOverride will honor a
+// per-platform-trusted parent. On Windows the socket path is fixed to
+// <TrustedProgramData>/Cisco/Cisco Secure Client/DefenseClaw/ipc/
+// SocketFileName: validateWindowsSocketPathOverride only accepts a
+// byte-identical override, so cfg.Managed.SocketPath is effectively
+// non-configurable there. See internal/ipc/server_windows.go.
 //
 // Never returns an error: rule 4 always produces a value (rule 3 may
 // return "" on Windows when the TrustedProgramData registry lookup

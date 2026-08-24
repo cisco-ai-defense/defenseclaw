@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -3912,8 +3913,19 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		)
 	}
 	var authorization managedGuardianAuthorization
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
+	// bytes.NewReader avoids the []byte → string → *strings.Reader copy pair
+	// that the previous encoding did on the 4 MiB read buffer for every check.
+	//
+	// DisallowUnknownFields is deliberately NOT set here. The version-tolerance
+	// block below already accepts version==0 files during a lockstep upgrade
+	// window (T5.6). The symmetric case is guardian-ahead-of-gateway: the
+	// guardian ships in the AVC payload and can roll to a schema with an added
+	// protected_targets field before the gateway on the same host has been
+	// upgraded. A strict decoder would refuse the new schema and publish
+	// guardian_verified=false on a correctly-protected host. Since the
+	// authorization file is administrator-owned and every consumed field is
+	// already validated by name below, unknown fields are safely ignored.
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&authorization); err != nil {
 		return false, fmt.Sprintf("parse hook guardian authorization: %v", err)
 	}
@@ -3979,6 +3991,23 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 func managedGuardianTargetKey(target managedGuardianAuthorizationTarget, connectorName string) string {
 	if connectorName == "" {
 		return ""
+	}
+	// On Windows we mirror validateManifestPlatformTarget's requirement and
+	// key strictly by SID. Without this, a guardian authorization file that
+	// lists the same target twice — once as {sid: S-1-5-21-…} and once as
+	// {user_home: c:\users\alice} — passes the caller's duplicate check
+	// because each row produces a different composite key ("sid" vs "home").
+	// TargetCount / SuccessCount / len(ProtectedTargets) all agree and the
+	// strict completeness assertion passes on a machine where only one
+	// profile is actually protected. Requiring SID and returning "" for
+	// SID-less Windows rows makes the caller reject them via the existing
+	// key == "" branch.
+	if runtime.GOOS == "windows" {
+		sid := strings.ToUpper(strings.TrimSpace(target.SID))
+		if sid == "" {
+			return ""
+		}
+		return connectorName + "\x00sid\x00" + sid
 	}
 	if sid := strings.ToUpper(strings.TrimSpace(target.SID)); sid != "" {
 		return connectorName + "\x00sid\x00" + sid

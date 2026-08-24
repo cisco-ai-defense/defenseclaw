@@ -1178,7 +1178,7 @@ func stableManagedArtifactDigest(
 	if err != nil {
 		return "", false, err
 	}
-	if expected.Mode()&os.ModeSymlink != 0 || !expected.Mode().IsRegular() {
+	if !expected.Mode().IsRegular() {
 		return "", true, fmt.Errorf("%s is not a regular non-link file", label)
 	}
 	if expected.Size() < 0 || expected.Size() > maxBytes {

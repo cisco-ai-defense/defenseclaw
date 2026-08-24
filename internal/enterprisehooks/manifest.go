@@ -52,7 +52,7 @@ func LoadManifestWithSHA256(path string) (Manifest, string, error) {
 	if err != nil {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
 	}
-	if expected.Mode()&os.ModeSymlink != 0 || !expected.Mode().IsRegular() {
+	if !expected.Mode().IsRegular() {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest is not a regular non-link file: %s", path)
 	}
 	if expected.Size() > enterpriseHookManifestMaxBytes {
@@ -82,7 +82,7 @@ func LoadManifestWithSHA256(path string) (Manifest, string, error) {
 		)
 	}
 	current, err := os.Lstat(path)
-	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() || !os.SameFile(info, current) {
+	if err != nil || !current.Mode().IsRegular() || !os.SameFile(info, current) {
 		if err != nil {
 			return Manifest{}, "", fmt.Errorf("enterprise hooks: re-inspect manifest %s: %w", path, err)
 		}
@@ -98,6 +98,20 @@ func LoadManifestWithSHA256(path string) (Manifest, string, error) {
 			path,
 			enterpriseHookManifestMaxBytes,
 		)
+	}
+	// Post-read identity confirmation. The pre-ReadAll Lstat above proves
+	// the entry we're about to read is still the same inode we opened, but
+	// nothing between there and here reproves it — a swap in the read
+	// window would silently give us bytes from a different file. Re-Lstat
+	// AFTER ReadAll and require size + inode identity to still match the
+	// open handle's Stat. Same pattern as stableManagedArtifactDigest in
+	// internal/gateway/connector/connector_state.go.
+	final, err := os.Lstat(path)
+	if err != nil {
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: re-inspect manifest %s after read: %w", path, err)
+	}
+	if !final.Mode().IsRegular() || !os.SameFile(info, final) || final.Size() != int64(len(data)) {
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest changed identity during read: %s", path)
 	}
 	var manifest Manifest
 	decoder := yaml.NewDecoder(bytes.NewReader(data))

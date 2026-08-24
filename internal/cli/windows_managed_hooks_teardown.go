@@ -137,7 +137,15 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 					)
 				}
 				if err != nil {
-					return fmt.Errorf("managed-hook teardown %s failed", action)
+					// Wrap the underlying err so both the non-JSON operator
+					// path and the MSI log receive the real cause. The prior
+					// fixed "managed-hook teardown <action> failed" string
+					// collapsed distinct failure classes (e.g. rollback
+					// required vs noncanonical ownership vs unavailable state
+					// root) into one, making 1603-recovery guidance guess-work.
+					// The --json branch already surfaces this via report.Error;
+					// this ensures the non-JSON caller gets it too.
+					return fmt.Errorf("managed-hook teardown %s failed: %w", action, err)
 				}
 				return nil
 			},
@@ -405,7 +413,14 @@ func runWindowsManagedHooksTeardown(
 		report.Results[index].OK = true
 	}
 	report.FailedCount = 0
-	report.SurvivingOwnedPathReferences = 0
+	// SurvivingOwnedPathReferences is intentionally NOT reset here. The
+	// prepare / verify / finalize phases each write the current surviving
+	// count into the report (lines 302 / 332 / 386); the field is only
+	// ever observed via fail(), so clobbering it on the success tail loses
+	// the diagnostic without gaining anything. If the caller reaches this
+	// line the report is being returned OK, which already implies zero
+	// blocking references. Preserve whatever earlier phase wrote so a
+	// future readback (audit dump, test) can see the observation trail.
 	report.OK = true
 	return report, nil
 }
@@ -1584,8 +1599,7 @@ func readWindowsManagedHooksTeardownJournal(
 	if err != nil {
 		return journal, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Size() > windowsManagedHooksTeardownJournalMax {
+	if !info.Mode().IsRegular() || info.Size() > windowsManagedHooksTeardownJournalMax {
 		return journal, errors.New(
 			"managed-hook teardown journal is not a bounded regular non-link file",
 		)
@@ -1666,7 +1680,7 @@ func writeWindowsManagedHooksTeardownJournal(
 		return err
 	}
 	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		if !info.Mode().IsRegular() {
 			return errors.New("managed-hook teardown journal is not a regular non-link file")
 		}
 		if err := managed.ValidateTrustedFilePath(path, "managed-hook teardown journal"); err != nil {

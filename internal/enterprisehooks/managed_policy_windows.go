@@ -200,10 +200,10 @@ func ReadWindowsClaudeManagedPolicyTargets() ([]string, bool, error) {
 	if errors.Is(policyErr, os.ErrNotExist) && errors.Is(stateErr, os.ErrNotExist) {
 		return nil, false, nil
 	}
-	if policyErr == nil && (policyInfo.Mode()&os.ModeSymlink != 0 || !policyInfo.Mode().IsRegular()) {
+	if policyErr == nil && !policyInfo.Mode().IsRegular() {
 		return nil, false, fmt.Errorf("enterprise hooks: unsafe Claude managed policy path: %s", path)
 	}
-	if stateErr == nil && (stateInfo.Mode()&os.ModeSymlink != 0 || !stateInfo.Mode().IsRegular()) {
+	if stateErr == nil && !stateInfo.Mode().IsRegular() {
 		return nil, false, fmt.Errorf("enterprise hooks: unsafe Claude managed state path: %s", statePath)
 	}
 	if policyErr != nil && !errors.Is(policyErr, os.ErrNotExist) {
