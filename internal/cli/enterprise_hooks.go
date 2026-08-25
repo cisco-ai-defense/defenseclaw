@@ -930,6 +930,8 @@ type enterpriseHookVerifyRun struct {
 	AuthorizationErr error
 }
 
+var enterpriseHookDeferredPendingStateVerifier = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
+
 func enterpriseHookDeferredPendingAfterSessionError(
 	target enterprisehooks.ManifestTarget,
 	previouslyProtected bool,
@@ -1168,6 +1170,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 	}
 	authorization, exists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
 	activation, activationExists, activationErr := loadEnterpriseHookGuardianActivation(cfg.DataDir)
+	guardianState, guardianStateExists, guardianStateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
 	if authorizationErr != nil {
 		run.AuthorizationErr = authorizationErr
 	} else if !exists {
@@ -1185,6 +1188,27 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		activation.UpdatedAt != authorization.UpdatedAt ||
 		activation.ManifestSHA256 != manifestSHA256 {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation does not cover the current manifest bytes")
+	}
+	authenticatedPending := map[string]struct{}{}
+	if run.AuthorizationErr == nil &&
+		(authorization.PendingCount != 0 || activation.PendingCount != 0) {
+		if guardianStateErr != nil {
+			run.AuthorizationErr = guardianStateErr
+		} else if !guardianStateExists {
+			run.AuthorizationErr = fmt.Errorf("hook guardian state is missing for deferred pending verification")
+		} else {
+			authenticatedPending, err = enterpriseHookAuthenticatedPendingTargets(
+				manifest,
+				guardianState,
+				authorization,
+				activation,
+				enterpriseHookManifest,
+				manifestSHA256,
+			)
+			if err != nil {
+				run.AuthorizationErr = err
+			}
+		}
 	}
 	apiAddr := strings.TrimSpace(enterpriseHookAPIAddr)
 	if apiAddr == "" {
@@ -1236,9 +1260,13 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		}
 		if targetErr == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
-			var available bool
-			available, targetErr = enterpriseHookDeferredTargetSessionAvailable(target)
-			if targetErr == nil && !available {
+			var pending bool
+			pending, targetErr = enterpriseHookVerifyAuthenticatedPendingTarget(
+				target,
+				row,
+				authenticatedPending,
+			)
+			if targetErr == nil && pending {
 				row.Pending = true
 				run.Pending++
 				run.Rows = append(run.Rows, row)
@@ -1293,18 +1321,6 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				targetErr = fmt.Errorf("protected authorization does not cover target")
 			}
 		}
-		var deferredPending bool
-		deferredPending, targetErr = enterpriseHookDeferredPendingAfterSessionError(
-			target,
-			previousProtection.PreviouslyProtected,
-			targetErr,
-		)
-		if deferredPending {
-			row.Pending = true
-			run.Pending++
-			run.Rows = append(run.Rows, row)
-			continue
-		}
 		if targetErr != nil {
 			row.OK = false
 			row.Error = targetErr.Error()
@@ -1322,6 +1338,91 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		}
 	}
 	return run, nil
+}
+
+func enterpriseHookVerifyAuthenticatedPendingTarget(
+	target enterprisehooks.ManifestTarget,
+	row enterpriseHookReconcileRow,
+	authenticated map[string]struct{},
+) (bool, error) {
+	if !target.IsDeferred() {
+		return false, nil
+	}
+	if _, ok := authenticated[enterpriseHookProtectedTargetKey(row)]; !ok {
+		return false, nil
+	}
+	if err := enterpriseHookDeferredPendingStateVerifier(target); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func enterpriseHookAuthenticatedPendingTargets(
+	manifest enterprisehooks.Manifest,
+	state enterpriseHookGuardianState,
+	authorization enterpriseHookGuardianAuthorization,
+	activation enterpriseHookGuardianActivation,
+	manifestPath,
+	manifestSHA256 string,
+) (map[string]struct{}, error) {
+	if issues := compareEnterpriseHookGuardianRecords(
+		state,
+		authorization,
+		activation,
+		manifestPath,
+		manifestSHA256,
+	); len(issues) != 0 {
+		return nil, fmt.Errorf(
+			"protected Guardian pending proof is invalid: %s",
+			strings.Join(issues, "; "),
+		)
+	}
+	expected := make(map[string]enterprisehooks.ManifestTarget)
+	for _, target := range manifest.Targets {
+		if !target.IsEnabled() {
+			continue
+		}
+		key := enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{
+			SID:       strings.TrimSpace(target.SID),
+			Connector: strings.TrimSpace(target.Connector),
+		})
+		if key == "" {
+			return nil, errors.New("protected Guardian pending proof has an incomplete manifest target")
+		}
+		expected[key] = target
+	}
+	if len(state.Results) != len(expected) {
+		return nil, errors.New("protected Guardian pending proof does not cover the exact enabled manifest")
+	}
+	pending := make(map[string]struct{}, state.PendingCount)
+	seen := make(map[string]struct{}, len(state.Results))
+	for _, row := range state.Results {
+		key := enterpriseHookProtectedTargetKey(row)
+		target, ok := expected[key]
+		if !ok {
+			return nil, errors.New("protected Guardian pending proof contains a target outside the enabled manifest")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return nil, errors.New("protected Guardian pending proof contains a duplicate target")
+		}
+		seen[key] = struct{}{}
+		if !strings.EqualFold(strings.TrimSpace(row.SID), strings.TrimSpace(target.SID)) ||
+			!strings.EqualFold(strings.TrimSpace(row.Connector), strings.TrimSpace(target.Connector)) ||
+			!sameEnterpriseHookPath(row.UserHome, target.UserHome) {
+			return nil, errors.New("protected Guardian pending proof target identity differs from the manifest")
+		}
+		if row.Pending {
+			if !target.IsDeferred() || row.OK || row.Result != nil || strings.TrimSpace(row.Error) != "" {
+				return nil, errors.New("protected Guardian pending proof contains a noncanonical pending target")
+			}
+			pending[key] = struct{}{}
+		}
+	}
+	if len(pending) != state.PendingCount || len(pending) != authorization.PendingCount ||
+		len(pending) != activation.PendingCount {
+		return nil, errors.New("protected Guardian pending proof has inconsistent pending target counts")
+	}
+	return pending, nil
 }
 
 func enterpriseHookVerifyDispositionIssues(

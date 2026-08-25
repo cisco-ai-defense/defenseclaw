@@ -242,6 +242,93 @@ func TestEnterpriseHookVerifyDispositionIssuesRejectsStalePendingEvidence(t *tes
 	})
 }
 
+func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *testing.T) {
+	manifestPath := filepath.Join(t.TempDir(), "targets.yaml")
+	digest := strings.Repeat("a", sha256.Size*2)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	active := enterpriseHookReconcileRow{
+		UserHome:  filepath.Join(string(filepath.Separator), "Users", "active"),
+		SID:       "S-1-5-21-1-2-3-1001",
+		Connector: "codex",
+		OK:        true,
+	}
+	pending := enterpriseHookReconcileRow{
+		UserHome:  filepath.Join(string(filepath.Separator), "Users", "offline"),
+		SID:       "S-1-5-21-1-2-3-1002",
+		Connector: "codex",
+		Pending:   true,
+	}
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{UserHome: active.UserHome, SID: active.SID, Connector: active.Connector},
+		{UserHome: pending.UserHome, SID: pending.SID, Connector: pending.Connector, Deferred: true},
+	}}
+	state := enterpriseHookGuardianState{
+		Version: 1, UpdatedAt: now, Manifest: manifestPath, OK: true,
+		TargetCount: 2, SuccessCount: 1, PendingCount: 1,
+		Results: []enterpriseHookReconcileRow{active, pending},
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version: 1, UpdatedAt: now, OK: true,
+		TargetCount: 2, SuccessCount: 1, PendingCount: 1,
+		ProtectedTargets: []enterpriseHookReconcileRow{active},
+	}
+	activation := enterpriseHookGuardianActivation{
+		Version: enterpriseHookGuardianActivationVersion, UpdatedAt: now,
+		ReconcileID: strings.Repeat("b", 32), Manifest: manifestPath,
+		ManifestSHA256: digest, OK: true,
+		TargetCount: 2, SuccessCount: 1, PendingCount: 1,
+		ProtectedTargets: []enterpriseHookReconcileRow{active},
+	}
+
+	proof, err := enterpriseHookAuthenticatedPendingTargets(
+		manifest, state, authorization, activation, manifestPath, digest,
+	)
+	if err != nil {
+		t.Fatalf("authenticate pending proof: %v", err)
+	}
+	key := enterpriseHookProtectedTargetKey(pending)
+	if _, ok := proof[key]; !ok || len(proof) != 1 {
+		t.Fatalf("pending proof = %v, want only %q", proof, key)
+	}
+
+	manifest.Targets[1].Deferred = false
+	if _, err := enterpriseHookAuthenticatedPendingTargets(
+		manifest, state, authorization, activation, manifestPath, digest,
+	); err == nil || !strings.Contains(err.Error(), "noncanonical pending target") {
+		t.Fatalf("non-deferred pending proof error = %v, want fail closed", err)
+	}
+
+	manifest.Targets[1].Deferred = true
+	state.Results[1].UserHome = filepath.Join(string(filepath.Separator), "Users", "other")
+	if _, err := enterpriseHookAuthenticatedPendingTargets(
+		manifest, state, authorization, activation, manifestPath, digest,
+	); err == nil || !strings.Contains(err.Error(), "identity differs") {
+		t.Fatalf("wrong-home pending proof error = %v, want fail closed", err)
+	}
+}
+
+func TestEnterpriseHookVerifyPendingUsesProtectedStateProofNotSessionProbe(t *testing.T) {
+	previous := enterpriseHookDeferredPendingStateVerifier
+	t.Cleanup(func() { enterpriseHookDeferredPendingStateVerifier = previous })
+	calls := 0
+	enterpriseHookDeferredPendingStateVerifier = func(target enterprisehooks.ManifestTarget) error {
+		calls++
+		if !target.Deferred {
+			t.Fatal("pending verifier received a non-deferred target")
+		}
+		return nil
+	}
+	target := enterprisehooks.ManifestTarget{
+		SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Deferred: true,
+	}
+	row := enterpriseHookReconcileRow{SID: target.SID, Connector: target.Connector}
+	authenticated := map[string]struct{}{enterpriseHookProtectedTargetKey(row): {}}
+	pending, err := enterpriseHookVerifyAuthenticatedPendingTarget(target, row, authenticated)
+	if err != nil || !pending || calls != 1 {
+		t.Fatalf("pending=%t calls=%d err=%v, want true/1/nil", pending, calls, err)
+	}
+}
+
 func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 	state := enterpriseHookGuardianState{
 		FailureCount: 2,
