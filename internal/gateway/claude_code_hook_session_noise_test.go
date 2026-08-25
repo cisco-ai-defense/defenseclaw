@@ -1,0 +1,82 @@
+package gateway
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+)
+
+// Payloads captured from a real Claude Code session against the pre-755
+// gateway. Each one produced a CRITICAL/HIGH "would block" finding purely
+// because result text mentioned a command or a rule name. They are tool
+// OUTPUT, never tool invocations.
+func newNoiseAPI() *APIServer {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	return &APIServer{scannerCfg: cfg}
+}
+
+func TestSessionNoise_SourceCommentMentioningDeleteIsNotACommand(t *testing.T) {
+	api := newNoiseAPI()
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolName:      "Bash",
+		ToolInput:     map[string]interface{}{"command": "sed -n '520,540p' internal/gateway/claude_code_hook.go"},
+		ToolResponse: map[string]interface{}{
+			"stdout": "// prevents source snippets such as \"rm -rf /\" from becoming a CRITICAL\n// command finding on PostToolBatch while retaining trust, secret, and PII",
+		},
+	})
+	t.Logf("findings=%v would_block=%v", resp.Findings, resp.WouldBlock)
+	if containsString(resp.Findings, "CMD-RM-RF:Recursive force delete from critical root path") {
+		t.Errorf("REGRESSION: source comment treated as executable command: %v", resp.Findings)
+	}
+}
+
+func TestSessionNoise_RuleNameListingIsNotACommand(t *testing.T) {
+	api := newNoiseAPI()
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolBatch",
+		ToolCalls: map[string]interface{}{
+			"stdout": "rule_id          severity  c\nCMD-MKFS         CRITICAL  348\nCMD-SUDO         LOW       75\nCMD-RM-RF        CRITICAL  161",
+		},
+	})
+	t.Logf("findings=%v would_block=%v", resp.Findings, resp.WouldBlock)
+	for _, bad := range []string{"CMD-MKFS", "CMD-SUDO", "CMD-RM-RF"} {
+		for _, got := range resp.Findings {
+			if strings.Contains(got, bad) {
+				t.Errorf("REGRESSION: rule-name listing matched %s: %v", bad, resp.Findings)
+			}
+		}
+	}
+}
+
+// Secret detection is deliberately RETAINED on untrusted content by #750/#755.
+// This test documents that boundary rather than asserting silence.
+func TestSessionNoise_SecretInResultStillDetected(t *testing.T) {
+	api := newNoiseAPI()
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolName:      "Bash",
+		ToolInput:     map[string]interface{}{"command": "grep defenseclaw ~/.claude/settings.json"},
+		ToolResponse: map[string]interface{}{
+			"stdout": "\"OTEL_EXPORTER_OTLP_HEADERS\": \"authorization=Bearer redacted-test-token-not-a-secret\"",
+		},
+	})
+	t.Logf("SECRET-PATH findings=%v would_block=%v", resp.Findings, resp.WouldBlock)
+}
+
+func TestSessionNoise_DirectoryListingWithEnvFile(t *testing.T) {
+	api := newNoiseAPI()
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolName:      "Bash",
+		ToolInput:     map[string]interface{}{"command": "ls -la ~/.defenseclaw/"},
+		ToolResponse: map[string]interface{}{
+			"stdout": "-rw-------  1 user staff    91 Aug 10 18:48 .env\n-rw-------  1 user staff     0 Aug 10 18:35 .env.lock",
+		},
+	})
+	t.Logf("PATH-RULE findings=%v would_block=%v", resp.Findings, resp.WouldBlock)
+}
