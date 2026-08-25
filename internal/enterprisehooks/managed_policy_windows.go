@@ -208,14 +208,18 @@ func ReadWindowsClaudeManagedPolicyTargets() ([]string, bool, error) {
 	if errors.Is(policyErr, os.ErrNotExist) && errors.Is(stateErr, os.ErrNotExist) {
 		return nil, false, nil
 	}
-	// Orphaned policy without ownership state — a partial uninstall
-	// left the policy file behind. Report "no active policy" so the
-	// caller treats this as a fresh-install scenario; the downstream
-	// Capture step will physically reclaim the orphan before the
-	// install writes its own artifacts. This function stays read-only
-	// on purpose — deletion is an install-time side effect owned by
-	// CaptureWindowsClaudeManagedPolicySnapshot.
-	if policyErr == nil && errors.Is(stateErr, os.ErrNotExist) {
+	// Orphaned artifact — either the policy file or the state sidecar
+	// exists but not both. A partial prior uninstall left one behind.
+	// Report "no active policy" so the caller treats this as a
+	// fresh-install scenario; the downstream Capture step will
+	// physically reclaim the orphan before the install writes its own
+	// artifacts. This function stays read-only on purpose — deletion is
+	// an install-time side effect owned by
+	// CaptureWindowsClaudeManagedPolicySnapshot / reclaimOrphanClaude
+	// ManagedPolicy.
+	policyExistsForOrphan := policyErr == nil
+	stateExistsForOrphan := stateErr == nil
+	if policyExistsForOrphan != stateExistsForOrphan {
 		return nil, false, nil
 	}
 	if policyErr == nil && !policyInfo.Mode().IsRegular() {
