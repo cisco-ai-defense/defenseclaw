@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -4700,6 +4701,110 @@ def test_non_purge_tombstone_is_transactionally_adopted_on_reinstall() -> None:
     ]
     assert "Test-DefenseClawServiceExists -Name $GatewayServiceName" in revoke_mock
     assert ".service_exists.ContainsKey" not in revoke_mock
+
+
+def test_schema_six_managed_hook_teardown_retirement_is_exact_and_retryable() -> None:
+    module = read(MODULE)
+    smoke = read(UNINSTALL_TRANSACTION_SMOKE)
+
+    validator = module[
+        module.index("function Assert-DefenseClawManagedHooksTeardownJsonObject") :
+        module.index("function Get-DefenseClawManagedHooksTeardownJournalPhase")
+    ]
+    assert "$Label contains an unexpected property" in validator
+    assert "schema-6 managed-hook teardown journal has an invalid schema type" in validator
+    assert "schema-6 managed-hook teardown target has an invalid property type" in validator
+    assert "managed_hooks_activation" in validator
+    assert "manifest_sha256" in validator
+    assert "deployment_generation_id" in validator
+    assert "pending_targets" in validator
+    assert "deferred" in validator
+    assert "invalid pending target binding" in validator
+    assert "pending target changed from the manifest target" in validator
+    assert "never-activated journal contains pending target evidence" in validator
+    assert "Get-DefenseClawManagedHooksTeardownTargetFingerprint" in validator
+    assert "target fingerprint is invalid" in validator
+    assert "machine enrollment count is invalid" not in validator
+    assert "managed runtime selector snapshot is invalid" not in validator
+    assert validator.count(
+        "Assert-DefenseClawManagedHooksTeardownProtectedAdminFile"
+    ) == 3
+    protected_acl = validator[
+        validator.index(
+            "function Assert-DefenseClawManagedHooksTeardownProtectedAdminFile"
+        ) : validator.index(
+            "function Get-DefenseClawManagedHooksTeardownJsonArray"
+        )
+    ]
+    assert "Assert-DefenseClawPathAcl" in protected_acl
+    assert "-AllowInheritance" not in protected_acl
+
+    reader = module[
+        module.index("function Get-DefenseClawManagedHooksTeardownJournalPhase") :
+        module.index("function Remove-DefenseClawCommittedManagedHooksTeardownJournal")
+    ]
+    assert "if ($schemaVersion -eq 6)" in reader
+    assert "if ($schemaVersion -ge 6)" not in reader
+    assert "if ($schemaVersion -eq 5)" in reader
+    assert "$schemaProperty.Value -isnot [int]" in reader
+    assert "schema-5 managed-hook teardown journal contains pending targets" in reader
+    assert "schema-5 managed-hook teardown target is deferred" in reader
+    assert "$schemaVersion -ne 4" in reader
+    assert "[switch]$AllowLegacyInactive" in reader
+    assert "33554432-byte limit" in reader
+
+    schema_six_fixture = smoke[
+        smoke.index("function Write-HarnessSchema6TeardownJournal") :
+        smoke.index("function Get-HarnessJournalPhase")
+    ]
+    assert "schema_version = 6" in schema_six_fixture
+    assert "[string]$Disposition = 'active'" in schema_six_fixture
+    assert "pending_targets = $pendingTargets" in schema_six_fixture
+    fingerprint_body = json.dumps(
+        [
+            {
+                "connector": "claudecode",
+                "sid": "S-1-5-21-111-222-333-1009",
+                "data_dir": r"C:\Users\Deferred\.defenseclaw",
+                "agent_version": "2.1.240",
+                "deferred": True,
+            }
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    assert hashlib.sha256(fingerprint_body).hexdigest() in schema_six_fixture
+    assert "deferred = $true" in schema_six_fixture
+    assert "managed_hooks_activation" not in schema_six_fixture
+
+    purge_case = smoke[
+        smoke.index("function New-HarnessCommittedPurgeCase") :
+        smoke.index("function Publish-HarnessPurgeReceipt")
+    ]
+    assert "-Phase 'captured'" in purge_case
+    assert "$capturedPhase -ceq 'captured'" in purge_case
+    assert "Set-HarnessJournalPhase" in purge_case
+    assert "$preparedPhase -ceq 'prepared'" in purge_case
+    assert "schema_version = 7" in purge_case
+    assert "$invalidPendingTarget.deferred = $false" in purge_case
+    assert "foreach ($disposition in @('pending', 'never'))" in purge_case
+    assert "false target fingerprint" in purge_case
+    assert "pending target accepted a selector enrollment" not in purge_case
+    assert "accepted mismatched Claude enrollment" not in purge_case
+    assert "schema-5 teardown reader accepted $legacyCase state" in purge_case
+    assert "schema-5 non-deferred compatibility was rejected" in purge_case
+    assert "schema-5 reader contract" in purge_case
+
+    finalize_mock = smoke[
+        smoke.index("'finalize' {") :
+        smoke.index(
+            "function script:Complete-DefenseClawCommittedManagedHooksFinalization"
+        )
+    ]
+    assert "Set-HarnessJournalPhase" in finalize_mock
+    assert "-Phase 'finalized'" in finalize_mock
+    assert "scope A purge retained its shared IPC service SID" in smoke
+    assert "did not idempotently resume IPC SID cleanup" in smoke
 
 
 def test_uninstall_tombstone_preserves_authenticated_activation_identity() -> None:

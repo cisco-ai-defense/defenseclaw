@@ -10663,6 +10663,505 @@ function Complete-DefenseClawTransaction {
     }
 }
 
+function Assert-DefenseClawManagedHooksTeardownJsonObject {
+    param(
+        [Parameter(Mandatory)]$Value,
+        [Parameter(Mandatory)][string[]]$AllowedProperties,
+        [string[]]$RequiredProperties = @(),
+        [Parameter(Mandatory)][string]$Label
+    )
+    if ($null -eq $Value -or
+        $Value -is [string] -or
+        $Value -is [Array] -or
+        $Value -is [ValueType]) {
+        throw "$Label is not a JSON object"
+    }
+    foreach ($property in @($Value.PSObject.Properties)) {
+        if ([string]$property.Name -notin $AllowedProperties) {
+            throw "$Label contains an unexpected property: $($property.Name)"
+        }
+    }
+    foreach ($name in $RequiredProperties) {
+        if ($null -eq $Value.PSObject.Properties[$name]) {
+            throw "$Label is missing $name"
+        }
+    }
+    return $Value
+}
+
+function Assert-DefenseClawManagedHooksTeardownProtectedAdminFile {
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-DefenseClawPathAcl `
+        -Path $Path `
+        -AllowedWriterSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -AllowedReaderSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+        -RejectUntrustedRead
+}
+
+function Get-DefenseClawManagedHooksTeardownJsonArray {
+    param(
+        [Parameter(Mandatory)]$Object,
+        [Parameter(Mandatory)][string]$PropertyName,
+        [Parameter(Mandatory)][string]$Label,
+        [int64]$MaximumCount = 384,
+        [switch]$Optional
+    )
+    $property = $Object.PSObject.Properties[$PropertyName]
+    if ($null -eq $property) {
+        if (-not $Optional) {
+            throw "$Label is missing $PropertyName"
+        }
+        return [pscustomobject]@{ values = @(); count = 0 }
+    }
+    if ($null -eq $property.Value) {
+        return [pscustomobject]@{ values = @(); count = 0 }
+    }
+    if ($property.Value -isnot [Array]) {
+        throw "$Label $PropertyName is not an array"
+    }
+    $values = @($property.Value)
+    if ($values.Count -gt $MaximumCount) {
+        throw "$Label $PropertyName exceeds its count bound"
+    }
+    return [pscustomobject]@{ values = $values; count = $values.Count }
+}
+
+function ConvertTo-DefenseClawManagedHooksGoJsonString {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    $builder = [Text.StringBuilder]::new($Value.Length + 2)
+    [void]$builder.Append('"')
+    for ($index = 0; $index -lt $Value.Length; $index++) {
+        $character = $Value[$index]
+        $code = [int]$character
+        $escape = $null
+        if ($code -eq 8) {
+            $escape = '\b'
+        }
+        elseif ($code -eq 9) {
+            $escape = '\t'
+        }
+        elseif ($code -eq 10) {
+            $escape = '\n'
+        }
+        elseif ($code -eq 12) {
+            $escape = '\f'
+        }
+        elseif ($code -eq 13) {
+            $escape = '\r'
+        }
+        elseif ($code -eq 34) {
+            $escape = '\"'
+        }
+        elseif ($code -eq 92) {
+            $escape = '\\'
+        }
+        if ($null -ne $escape) {
+            [void]$builder.Append($escape)
+            continue
+        }
+        if ($code -lt 32 -or $code -in @(38, 60, 62, 0x2028, 0x2029)) {
+            [void]$builder.Append(('\u{0:x4}' -f $code))
+            continue
+        }
+        if ($code -ge 0xd800 -and $code -le 0xdbff) {
+            if ($index + 1 -lt $Value.Length) {
+                $next = [int]$Value[$index + 1]
+                if ($next -ge 0xdc00 -and $next -le 0xdfff) {
+                    [void]$builder.Append($character)
+                    $index++
+                    [void]$builder.Append($Value[$index])
+                    continue
+                }
+            }
+            [void]$builder.Append([char]0xfffd)
+            continue
+        }
+        if ($code -ge 0xdc00 -and $code -le 0xdfff) {
+            [void]$builder.Append([char]0xfffd)
+            continue
+        }
+        [void]$builder.Append($character)
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Get-DefenseClawManagedHooksTeardownTargetFingerprint {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Targets)
+    $builder = [Text.StringBuilder]::new()
+    [void]$builder.Append('[')
+    for ($index = 0; $index -lt $Targets.Count; $index++) {
+        if ($index -ne 0) {
+            [void]$builder.Append(',')
+        }
+        $target = $Targets[$index]
+        [void]$builder.Append('{"connector":')
+        [void]$builder.Append((ConvertTo-DefenseClawManagedHooksGoJsonString `
+            -Value ([string]$target.connector)))
+        [void]$builder.Append(',"sid":')
+        [void]$builder.Append((ConvertTo-DefenseClawManagedHooksGoJsonString `
+            -Value ([string]$target.sid)))
+        [void]$builder.Append(',"data_dir":')
+        [void]$builder.Append((ConvertTo-DefenseClawManagedHooksGoJsonString `
+            -Value ([string]$target.data_dir)))
+        [void]$builder.Append(',"agent_version":')
+        [void]$builder.Append((ConvertTo-DefenseClawManagedHooksGoJsonString `
+            -Value ([string]$target.agent_version)))
+        if ([bool]$target.deferred) {
+            [void]$builder.Append(',"deferred":true')
+        }
+        [void]$builder.Append('}')
+    }
+    [void]$builder.Append(']')
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            $builder.ToString()
+        )
+        return 'sha256:' + (
+            [BitConverter]::ToString(
+                $algorithm.ComputeHash($bytes)
+            ).Replace('-', '').ToLowerInvariant()
+        )
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Assert-DefenseClawManagedHooksTeardownSchema6Target {
+    param([Parameter(Mandatory)]$Target)
+    $allowed = @(
+        'connector',
+        'sid',
+        'data_dir',
+        'agent_version',
+        'deferred'
+    )
+    $required = @('connector', 'sid', 'data_dir', 'agent_version')
+    [void](Assert-DefenseClawManagedHooksTeardownJsonObject `
+        -Value $Target `
+        -AllowedProperties $allowed `
+        -RequiredProperties $required `
+        -Label 'schema-6 managed-hook teardown target')
+    if ($Target.connector -isnot [string] -or
+        $Target.sid -isnot [string] -or
+        $Target.data_dir -isnot [string] -or
+        $Target.agent_version -isnot [string]) {
+        throw 'schema-6 managed-hook teardown target has an invalid property type'
+    }
+    $connector = [string]$Target.connector
+    $sid = [string]$Target.sid
+    $agentVersion = [string]$Target.agent_version
+    try {
+        $canonicalSID = [Security.Principal.SecurityIdentifier]::new(
+            $sid
+        ).Value
+    }
+    catch {
+        throw 'schema-6 managed-hook teardown target has an invalid SID'
+    }
+    if ($connector -cnotin @('claudecode', 'codex', 'cursor') -or
+        $sid -cne $canonicalSID -or
+        $agentVersion -cne $agentVersion.Trim() -or
+        $agentVersion -match '[\x00-\x1f\x7f]' -or
+        $agentVersion.Length -gt 128) {
+        throw 'schema-6 managed-hook teardown target has an invalid identity'
+    }
+    try {
+        $dataDir = [IO.Path]::GetFullPath(
+            [string]$Target.data_dir
+        ).TrimEnd('\')
+    }
+    catch {
+        throw 'schema-6 managed-hook teardown target has an invalid data directory'
+    }
+    if (-not [string]::Equals(
+            $dataDir,
+            [string]$Target.data_dir,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [IO.Path]::GetFileName($dataDir),
+            '.defenseclaw',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'schema-6 managed-hook teardown target has a noncanonical data directory'
+    }
+    $deferredProperty = $Target.PSObject.Properties['deferred']
+    if ($null -ne $deferredProperty -and
+        $deferredProperty.Value -isnot [bool]) {
+        throw 'schema-6 managed-hook teardown target has an invalid deferred binding'
+    }
+    return [pscustomobject][ordered]@{
+        connector = $connector
+        sid = $sid
+        data_dir = $dataDir
+        agent_version = $agentVersion
+        deferred = [bool](
+            $null -ne $deferredProperty -and
+            [bool]$deferredProperty.Value
+        )
+    }
+}
+
+function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
+    param(
+        [Parameter(Mandatory)]$Journal,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $allowed = @(
+        'schema_version',
+        'phase',
+        'manifest_path',
+        'manifest_sha256',
+        'manifest_fingerprint',
+        'activation_state',
+        'deployment_generation_id',
+        'hook_binary',
+        'gateway_addr',
+        'gateway_service_name',
+        'targets',
+        'pending_targets',
+        'claude_target_sids',
+        'claude',
+        'codex_policy_active',
+        'codex_targets',
+        'cursor_targets',
+        'cursor',
+        'selector_targets'
+    )
+    $required = @(
+        $allowed | Microsoft.PowerShell.Core\Where-Object {
+            $_ -cne 'pending_targets'
+        }
+    )
+    [void](Assert-DefenseClawManagedHooksTeardownJsonObject `
+        -Value $Journal `
+        -AllowedProperties $allowed `
+        -RequiredProperties $required `
+        -Label 'schema-6 managed-hook teardown journal')
+    if (($Journal.schema_version -isnot [int] -and
+            $Journal.schema_version -isnot [int64]) -or
+        [Convert]::ToInt64($Journal.schema_version) -ne 6) {
+        throw 'schema-6 managed-hook teardown journal has an invalid schema type'
+    }
+    foreach ($name in @(
+        'phase',
+        'manifest_path',
+        'manifest_sha256',
+        'manifest_fingerprint',
+        'activation_state',
+        'deployment_generation_id',
+        'hook_binary',
+        'gateway_addr',
+        'gateway_service_name'
+    )) {
+        if ($Journal.($name) -isnot [string]) {
+            throw "schema-6 managed-hook teardown journal $name is not a string"
+        }
+    }
+    if ($Journal.codex_policy_active -isnot [bool]) {
+        throw 'schema-6 managed-hook teardown codex_policy_active is not Boolean'
+    }
+    Assert-DefenseClawManagedHooksTeardownProtectedAdminFile `
+        -Path $Layout.ManagedHooksTeardownJournalPath
+    $phase = [string]$Journal.phase
+    if ($phase -cnotin @('captured', 'prepared', 'rolled_back', 'finalized')) {
+        throw 'schema-6 managed-hook teardown journal has an invalid phase'
+    }
+    $activationProperty = $Metadata.PSObject.Properties[
+        'managed_hooks_activation'
+    ]
+    if ($null -eq $activationProperty -or
+        $null -eq $activationProperty.Value) {
+        throw 'schema-6 managed-hook teardown journal requires activation evidence'
+    }
+    $activation = Assert-DefenseClawManagedHooksActivationRecord `
+        -Record $activationProperty.Value
+    if ([string]$Journal.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$Journal.manifest_fingerprint -cnotmatch
+            '^sha256:[0-9a-f]{64}$' -or
+        [string]$Journal.activation_state -notin @(
+            'never_activated',
+            'activated'
+        ) -or
+        [string]$Journal.deployment_generation_id -cnotmatch
+            '^[0-9a-f]{32}$' -or
+        [string]$Journal.activation_state -cne [string]$activation.state -or
+        [string]$Journal.deployment_generation_id -cne
+            [string]$activation.deployment_generation_id -or
+        [string]$Journal.manifest_sha256 -cne
+            [string]$activation.manifest_sha256) {
+        throw 'schema-6 managed-hook teardown journal activation binding is invalid'
+    }
+    foreach ($pair in @(
+        @('manifest_path', $Layout.ManifestPath),
+        @('hook_binary', $Layout.HookPath)
+    )) {
+        try {
+            $recorded = [IO.Path]::GetFullPath(
+                [string]$Journal.($pair[0])
+            ).TrimEnd('\')
+            $expected = [IO.Path]::GetFullPath(
+                [string]$pair[1]
+            ).TrimEnd('\')
+        }
+        catch {
+            throw "schema-6 managed-hook teardown journal has an invalid $($pair[0])"
+        }
+        if (-not [string]::Equals(
+            $recorded,
+            $expected,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "schema-6 managed-hook teardown journal $($pair[0]) does not match this scope"
+        }
+    }
+    if (-not [string]::Equals(
+            [string]$Journal.gateway_service_name,
+            $GatewayServiceName,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]::IsNullOrWhiteSpace([string]$Journal.gateway_addr) -or
+        [string]$Journal.gateway_addr -match '[\x00-\x1f\x7f]' -or
+        ([string]$Journal.gateway_addr).Length -gt 4096 -or
+        $Journal.codex_policy_active -isnot [bool]) {
+        throw 'schema-6 managed-hook teardown journal has an invalid protected identity'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManifestPath `
+            -PathType Leaf)) {
+        throw 'schema-6 managed-hook teardown manifest is missing'
+    }
+    Assert-DefenseClawNoReparsePath -Path $Layout.ManifestPath
+    $manifest = Microsoft.PowerShell.Management\Get-Item `
+        -LiteralPath $Layout.ManifestPath `
+        -Force
+    if ([int64]$manifest.Length -gt 4194304) {
+        throw 'schema-6 managed-hook teardown manifest exceeds its size bound'
+    }
+    Assert-DefenseClawManagedHooksTeardownProtectedAdminFile `
+        -Path $Layout.ManifestPath
+    $manifestSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.ManifestPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($manifestSHA256 -cne [string]$Journal.manifest_sha256) {
+        throw 'schema-6 managed-hook teardown journal does not bind the protected manifest bytes'
+    }
+
+    $targetArray = Get-DefenseClawManagedHooksTeardownJsonArray `
+        -Object $Journal `
+        -PropertyName 'targets' `
+        -Label 'schema-6 managed-hook teardown journal'
+    $pendingArray = Get-DefenseClawManagedHooksTeardownJsonArray `
+        -Object $Journal `
+        -PropertyName 'pending_targets' `
+        -Label 'schema-6 managed-hook teardown journal' `
+        -Optional
+    if ($targetArray.count -ne [Convert]::ToInt64(
+            $activation.target_count
+        )) {
+        throw 'schema-6 managed-hook teardown journal has an invalid target count'
+    }
+
+    $targets = @()
+    $targetsByKey = @{}
+    $previousTarget = $null
+    foreach ($target in @($targetArray.values)) {
+        $validated = Assert-DefenseClawManagedHooksTeardownSchema6Target `
+            -Target $target
+        if ($null -ne $previousTarget) {
+            $connectorOrder = [string]::CompareOrdinal(
+                [string]$previousTarget.connector,
+                [string]$validated.connector
+            )
+            $sidOrder = [string]::CompareOrdinal(
+                [string]$previousTarget.sid,
+                [string]$validated.sid
+            )
+            if ($connectorOrder -gt 0 -or
+                ($connectorOrder -eq 0 -and $sidOrder -ge 0)) {
+                throw 'schema-6 managed-hook teardown targets are not in canonical order'
+            }
+        }
+        $key = (
+            $validated.connector + [char]0 +
+            $validated.sid.ToUpperInvariant()
+        )
+        if ($targetsByKey.ContainsKey($key)) {
+            throw 'schema-6 managed-hook teardown journal contains a duplicate target'
+        }
+        $targets += $validated
+        $targetsByKey[$key] = $validated
+        $previousTarget = $validated
+    }
+    $fingerprint = Get-DefenseClawManagedHooksTeardownTargetFingerprint `
+        -Targets @($targets)
+    if ($fingerprint -cne [string]$Journal.manifest_fingerprint) {
+        throw 'schema-6 managed-hook teardown target fingerprint is invalid'
+    }
+
+    $pendingTargetsByKey = @{}
+    $previousPending = $null
+    foreach ($pending in @($pendingArray.values)) {
+        $validated = Assert-DefenseClawManagedHooksTeardownSchema6Target `
+            -Target $pending
+        if ($null -ne $previousPending) {
+            $connectorOrder = [string]::CompareOrdinal(
+                [string]$previousPending.connector,
+                [string]$validated.connector
+            )
+            $sidOrder = [string]::CompareOrdinal(
+                [string]$previousPending.sid,
+                [string]$validated.sid
+            )
+            if ($connectorOrder -gt 0 -or
+                ($connectorOrder -eq 0 -and $sidOrder -ge 0)) {
+                throw 'schema-6 pending teardown targets are not in canonical order'
+            }
+        }
+        $key = (
+            $validated.connector + [char]0 +
+            $validated.sid.ToUpperInvariant()
+        )
+        if (-not $validated.deferred -or
+            -not $targetsByKey.ContainsKey($key) -or
+            $pendingTargetsByKey.ContainsKey($key)) {
+            throw 'schema-6 managed-hook teardown journal has an invalid pending target binding'
+        }
+        $manifestTarget = $targetsByKey[$key]
+        if ($manifestTarget.connector -cne $validated.connector -or
+            $manifestTarget.sid -cne $validated.sid -or
+            $manifestTarget.data_dir -cne $validated.data_dir -or
+            $manifestTarget.agent_version -cne $validated.agent_version -or
+            $manifestTarget.deferred -ne $validated.deferred) {
+            throw 'schema-6 managed-hook teardown pending target changed from the manifest target'
+        }
+        $pendingTargetsByKey[$key] = $true
+        $previousPending = $validated
+    }
+    if ([string]$Journal.activation_state -cne 'activated' -and
+        $pendingArray.count -ne 0) {
+        throw 'schema-6 never-activated journal contains pending target evidence'
+    }
+
+    return $phase
+}
+
 function Get-DefenseClawManagedHooksTeardownJournalPhase {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -10682,11 +11181,22 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
         Microsoft.PowerShell.Core\Out-Null
     Assert-DefenseClawNoReparsePath `
         -Path $Layout.ManagedHooksTeardownJournalPath
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $captured =
+        $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+            [string]$Layout.ManagedHooksTeardownJournalPath
+        )
+    if ($null -eq $captured) {
+        throw 'managed-hook teardown journal disappeared before authentication'
+    }
+    $capturedIdentity = [string]$captured.Identity
     $item = Microsoft.PowerShell.Management\Get-Item `
         -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
         -Force
-    if ([int64]$item.Length -gt 4194304) {
-        throw 'managed-hook teardown journal exceeds the 4194304-byte limit'
+    # Match the bounded native journal contract; machine-policy preimages can
+    # legitimately make this larger than the target manifest's 4 MiB limit.
+    if ([int64]$item.Length -gt 33554432) {
+        throw 'managed-hook teardown journal exceeds the 33554432-byte limit'
     }
     Assert-DefenseClawPathAcl `
         -Path $Layout.ManagedHooksTeardownJournalPath `
@@ -10711,22 +11221,38 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
     catch {
         throw "cannot parse managed-hook teardown journal: $($_.Exception.Message)"
     }
+    $after =
+        $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+            [string]$Layout.ManagedHooksTeardownJournalPath
+        )
+    if ($null -eq $after -or
+        [string]$after.Identity -cne $capturedIdentity) {
+        throw 'managed-hook teardown journal identity changed while it was read'
+    }
     $schemaProperty = $journal.PSObject.Properties['schema_version']
     $phaseProperty = $journal.PSObject.Properties['phase']
     if ($null -eq $schemaProperty -or
-        $schemaProperty.Value -is [bool] -or
-        $null -eq $phaseProperty) {
+        ($schemaProperty.Value -isnot [int] -and
+            $schemaProperty.Value -isnot [int64]) -or
+        $null -eq $phaseProperty -or
+        $phaseProperty.Value -isnot [string]) {
         throw 'managed-hook teardown journal has an invalid schema or phase'
     }
-    try {
-        $schemaVersion = [Convert]::ToInt64($schemaProperty.Value)
-    }
-    catch {
-        throw 'managed-hook teardown journal has an invalid schema or phase'
-    }
+    $schemaVersion = [Convert]::ToInt64($schemaProperty.Value)
     $phase = [string]$phaseProperty.Value
+    if ($schemaVersion -eq 6) {
+        if ($null -eq $Metadata -or
+            [string]::IsNullOrWhiteSpace($GatewayServiceName)) {
+            throw 'schema-6 managed-hook teardown journal requires protected deployment identity'
+        }
+        return Assert-DefenseClawManagedHooksTeardownSchema6Journal `
+            -Journal $journal `
+            -Layout $Layout `
+            -Metadata $Metadata `
+            -GatewayServiceName $GatewayServiceName
+    }
     if ($schemaVersion -eq 5) {
-        if ($phase -notin @(
+        if ($phase -cnotin @(
             'captured',
             'prepared',
             'rolled_back',
@@ -10743,6 +11269,29 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
                 'schema-5 managed-hook teardown journal cannot bind a legacy ' +
                 'inactive tombstone without activation evidence'
             )
+        }
+        $pendingProperty = $journal.PSObject.Properties['pending_targets']
+        if ($null -ne $pendingProperty -and
+            $null -ne $pendingProperty.Value) {
+            if ($pendingProperty.Value -isnot [Array] -or
+                @($pendingProperty.Value).Count -ne 0) {
+                throw 'schema-5 managed-hook teardown journal contains pending targets'
+            }
+        }
+        $targetsProperty = $journal.PSObject.Properties['targets']
+        if ($null -ne $targetsProperty -and
+            $null -ne $targetsProperty.Value) {
+            if ($targetsProperty.Value -isnot [Array]) {
+                throw 'schema-5 managed-hook teardown targets are not an array'
+            }
+            foreach ($target in @($targetsProperty.Value)) {
+                $validatedTarget =
+                    Assert-DefenseClawManagedHooksTeardownSchema6Target `
+                        -Target $target
+                if ([bool]$validatedTarget.deferred) {
+                    throw 'schema-5 managed-hook teardown target is deferred'
+                }
+            }
         }
         return $phase
     }
@@ -10761,7 +11310,7 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
     # older installed helper: an authenticated inactive tombstone with no
     # activation field and a protected journal that still names this scope's
     # manifest, hook binary, and retired gateway service. Active teardown and
-    # rollback continue to require the current schema-5 contract.
+    # rollback continue to require a current authenticated journal contract.
     $legacyProperties = @(
         'schema_version',
         'phase',
@@ -12958,8 +13507,8 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
     $journal = Microsoft.PowerShell.Management\Get-Item `
         -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
         -Force
-    if ([int64]$journal.Length -gt 4194304) {
-        throw 'managed-hook teardown rollback journal exceeds the 4194304-byte limit'
+    if ([int64]$journal.Length -gt 33554432) {
+        throw 'managed-hook teardown rollback journal exceeds the 33554432-byte limit'
     }
     Assert-DefenseClawPathAcl `
         -Path $Layout.ManagedHooksTeardownJournalPath `

@@ -134,6 +134,158 @@ try {
             [IO.File]::WriteAllBytes($Path, $body)
         }
 
+        function Set-HarnessJournalPhase {
+            param(
+                [Parameter(Mandatory)][string]$Path,
+                [Parameter(Mandatory)][string]$Phase
+            )
+            $journal = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $Path `
+                -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+            $journal.phase = $Phase
+            [IO.File]::WriteAllText(
+                $Path,
+                (
+                    $journal |
+                        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 16
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+
+        function Write-HarnessSchema6TeardownJournal {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$Phase,
+                [ValidateSet('pending', 'active', 'never')]
+                [string]$Disposition = 'active'
+            )
+            $manifest = @'
+version: 1
+targets:
+  - connector: claudecode
+    sid: S-1-5-21-111-222-333-1009
+    user_home: C:\Users\Deferred
+    data_dir: C:\Users\Deferred\.defenseclaw
+    agent_version: 2.1.240
+    enabled: true
+    deferred: true
+'@
+            [IO.File]::WriteAllText(
+                $Layout.ManifestPath,
+                $manifest,
+                [Text.UTF8Encoding]::new($false)
+            )
+            $manifestSHA256 = (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $Layout.ManifestPath `
+                    -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            $target = [pscustomobject][ordered]@{
+                connector = 'claudecode'
+                sid = 'S-1-5-21-111-222-333-1009'
+                data_dir = 'C:\Users\Deferred\.defenseclaw'
+                agent_version = '2.1.240'
+                deferred = $true
+            }
+            $activationState = 'activated'
+            $pendingTargets = @()
+            $claudeTargetSIDs = @(
+                'S-1-5-21-111-222-333-1009'
+            )
+            $claude = [ordered]@{
+                policy_existed = $true
+                policy = 'e30='
+                state_existed = $true
+                state = 'e30='
+            }
+            $selector = [ordered]@{
+                schema_version = 1
+                connector = 'claudecode'
+                target_sid = 'S-1-5-21-111-222-333-1009'
+                existed = $false
+                cas = [ordered]@{ exists = $false }
+            }
+            if ($Disposition -ceq 'pending') {
+                $pendingTargets = @($target)
+            }
+            elseif ($Disposition -ceq 'active') {
+                $targetBody = [Text.UTF8Encoding]::new($false).GetBytes(
+                    '{"generation_id":"0123456789abcdef0123456789abcdef"}'
+                )
+                $targetSHA256 = 'sha256:' + (
+                    Get-HarnessSHA256 -Bytes $targetBody
+                )
+                $selector = [ordered]@{
+                    schema_version = 1
+                    connector = 'claudecode'
+                    target_sid = 'S-1-5-21-111-222-333-1009'
+                    existed = $true
+                    target = [Convert]::ToBase64String($targetBody)
+                    target_sha256 = $targetSHA256
+                    cas = [ordered]@{
+                        exists = $true
+                        generation_id = ('c' * 32)
+                        bundle_sha256 = 'sha256:' + ('d' * 64)
+                        target_sha256 = $targetSHA256
+                    }
+                }
+            }
+            else {
+                $activationState = 'never_activated'
+                $claudeTargetSIDs = @()
+                $claude = [ordered]@{
+                    policy_existed = $false
+                    state_existed = $false
+                }
+            }
+            $journal = [ordered]@{
+                schema_version = 6
+                phase = $Phase
+                manifest_path = [string]$Layout.ManifestPath
+                manifest_sha256 = $manifestSHA256
+                manifest_fingerprint = (
+                    'sha256:' +
+                    '7f3c2ea0bb68753cddb2bb80f8021161b91c19efadc7b03915818adedfcbfc78'
+                )
+                activation_state = $activationState
+                deployment_generation_id = ('6' * 32)
+                hook_binary = [string]$Layout.HookPath
+                gateway_addr = 'npipe://defenseclaw'
+                gateway_service_name = 'DefenseClawGateway'
+                targets = @($target)
+                pending_targets = $pendingTargets
+                claude_target_sids = $claudeTargetSIDs
+                claude = $claude
+                codex_policy_active = $false
+                codex_targets = @()
+                cursor_targets = @()
+                cursor = [ordered]@{
+                    policy_active = $false
+                    hooks_existed = $false
+                    adapter_existed = $false
+                    state_existed = $false
+                    receipt_existed = $false
+                }
+                selector_targets = @($selector)
+            }
+            [IO.File]::WriteAllText(
+                $Layout.ManagedHooksTeardownJournalPath,
+                (
+                    $journal |
+                        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 16
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            return [pscustomobject][ordered]@{
+                schema_version = 1
+                deployment_generation_id = ('6' * 32)
+                state = $activationState
+                manifest_sha256 = $manifestSHA256
+                target_count = 1
+            }
+        }
+
         function Get-HarnessJournalPhase {
             param([Parameter(Mandatory)][string]$Path)
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -1429,7 +1581,7 @@ try {
                     if ($phase -notin @('prepared', 'finalized')) {
                         throw "finalize received invalid journal phase: $phase"
                     }
-                    Write-HarnessJournal `
+                    Set-HarnessJournalPhase `
                         -Path $Layout.ManagedHooksTeardownJournalPath `
                         -Phase 'finalized'
                     return [pscustomobject]@{ ok = $true }
@@ -4914,24 +5066,22 @@ targets:
                 -Parent $TestRoot `
                 -Label ('purge-' + $Name)
             $layout = New-HarnessLayout -Root $root
+            $managedHooksActivation =
+                Write-HarnessSchema6TeardownJournal `
+                    -Layout $layout `
+                    -Phase 'captured'
             [IO.File]::WriteAllText(
                 $layout.MetadataPath,
                 (
-                    '{"schema_version":1,"installed":false,' +
-                    '"managed_hooks_activation":{' +
-                    '"schema_version":1,' +
-                    '"deployment_generation_id":"' + ('1' * 32) + '",' +
-                    '"state":"activated",' +
-                    '"manifest_sha256":"' + ('a' * 64) + '",' +
-                    '"target_count":1}}'
+                    [ordered]@{
+                        schema_version = 1
+                        installed = $false
+                        managed_hooks_activation = $managedHooksActivation
+                    } |
+                        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8
                 ),
                 [Text.UTF8Encoding]::new($false)
             )
-            if (-not $OmitTeardownJournal) {
-                Write-HarnessJournal `
-                    -Path $layout.ManagedHooksTeardownJournalPath `
-                    -Phase 'prepared'
-            }
             $events = [Collections.Generic.List[string]]::new()
             $script:HarnessState = @{
                 operation = 'purge'
@@ -4941,13 +5091,7 @@ targets:
                 active_references = $false
                 binary_present = $false
                 installed = $false
-                managed_hooks_activation = [pscustomobject][ordered]@{
-                    schema_version = 1
-                    deployment_generation_id = ('1' * 32)
-                    state = 'activated'
-                    manifest_sha256 = ('a' * 64)
-                    target_count = 1
-                }
+                managed_hooks_activation = $managedHooksActivation
                 guardian_running = $false
                 gateway_running = $false
                 services_running = $false
@@ -4985,7 +5129,285 @@ targets:
                 barrier_required = $false
                 barrier_complete = $true
             }
+            $metadata = [pscustomobject][ordered]@{
+                installed = $false
+                managed_hooks_activation = $managedHooksActivation
+            }
+            $capturedPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+                -Layout $layout `
+                -Metadata $metadata `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -AllowLegacyInactive
+            Assert-Harness `
+                -Condition ($capturedPhase -ceq 'captured') `
+                -Message 'schema-6 teardown reader rejected the captured phase'
+            Set-HarnessJournalPhase `
+                -Path $layout.ManagedHooksTeardownJournalPath `
+                -Phase 'prepared'
+            $preparedPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+                -Layout $layout `
+                -Metadata $metadata `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -AllowLegacyInactive
+            Assert-Harness `
+                -Condition ($preparedPhase -ceq 'prepared') `
+                -Message 'schema-6 teardown reader rejected the prepared phase'
+            if ($OmitTeardownJournal) {
+                Microsoft.PowerShell.Management\Remove-Item `
+                    -LiteralPath $layout.ManagedHooksTeardownJournalPath `
+                    -Force
+            }
             return $layout
+        }
+
+        function Invoke-HarnessSchema6TeardownReaderNegativeCases {
+            $layout = New-HarnessCommittedPurgeCase `
+                -Name 'schema6-reader-negative-cases'
+            $metadata = [pscustomobject][ordered]@{
+                installed = $false
+                managed_hooks_activation =
+                    $script:HarnessState.managed_hooks_activation
+            }
+            function Assert-HarnessTeardownReaderRejected {
+                param([Parameter(Mandatory)][string]$Message)
+                $rejected = $false
+                try {
+                    [void](Get-DefenseClawManagedHooksTeardownJournalPhase `
+                        -Layout $layout `
+                        -Metadata $metadata `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -AllowLegacyInactive)
+                }
+                catch {
+                    $rejected = $true
+                }
+                Assert-Harness -Condition $rejected -Message $Message
+            }
+            function Invoke-HarnessSchema6ReaderMutation {
+                param(
+                    [Parameter(Mandatory)][string]$Message,
+                    [ValidateSet('pending', 'active', 'never')]
+                    [string]$Disposition = 'pending',
+                    [Parameter(Mandatory)][scriptblock]$Mutation
+                )
+                $activation = Write-HarnessSchema6TeardownJournal `
+                    -Layout $layout `
+                    -Phase 'prepared' `
+                    -Disposition $Disposition
+                $script:HarnessState.managed_hooks_activation = $activation
+                $metadata.managed_hooks_activation = $activation
+                $journal = Microsoft.PowerShell.Management\Get-Content `
+                    -LiteralPath $layout.ManagedHooksTeardownJournalPath `
+                    -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+                & $Mutation $journal
+                [IO.File]::WriteAllText(
+                    $layout.ManagedHooksTeardownJournalPath,
+                    (
+                        $journal |
+                            Microsoft.PowerShell.Utility\ConvertTo-Json `
+                                -Depth 16
+                    ),
+                    [Text.UTF8Encoding]::new($false)
+                )
+                Assert-HarnessTeardownReaderRejected -Message $Message
+            }
+
+            foreach ($disposition in @('pending', 'never')) {
+                $activation = Write-HarnessSchema6TeardownJournal `
+                    -Layout $layout `
+                    -Phase 'prepared' `
+                    -Disposition $disposition
+                $script:HarnessState.managed_hooks_activation = $activation
+                $metadata.managed_hooks_activation = $activation
+                $validatedPhase =
+                    Get-DefenseClawManagedHooksTeardownJournalPhase `
+                        -Layout $layout `
+                        -Metadata $metadata `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -AllowLegacyInactive
+                Assert-Harness `
+                    -Condition ($validatedPhase -ceq 'prepared') `
+                    -Message (
+                        "schema-6 teardown reader rejected $disposition " +
+                        'selector state'
+                    )
+            }
+
+            $future = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $layout.ManagedHooksTeardownJournalPath `
+                -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+            $future.schema_version = 7
+            [IO.File]::WriteAllText(
+                $layout.ManagedHooksTeardownJournalPath,
+                (
+                    $future |
+                        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 16
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            $futureRejected = $false
+            try {
+                [void](Get-DefenseClawManagedHooksTeardownJournalPhase `
+                    -Layout $layout `
+                    -Metadata $metadata `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -AllowLegacyInactive)
+            }
+            catch {
+                $futureRejected = $true
+            }
+            Assert-Harness `
+                -Condition $futureRejected `
+                -Message 'managed-hook teardown reader accepted a future schema'
+
+            $activation = Write-HarnessSchema6TeardownJournal `
+                -Layout $layout `
+                -Phase 'prepared' `
+                -Disposition 'pending'
+            $script:HarnessState.managed_hooks_activation = $activation
+            $metadata.managed_hooks_activation = $activation
+            $typedSchema = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $layout.ManagedHooksTeardownJournalPath `
+                -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+            $typedSchema.schema_version = '6'
+            [IO.File]::WriteAllText(
+                $layout.ManagedHooksTeardownJournalPath,
+                (
+                    $typedSchema |
+                        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 16
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            $typedSchemaRejected = $false
+            try {
+                [void](Get-DefenseClawManagedHooksTeardownJournalPhase `
+                    -Layout $layout `
+                    -Metadata $metadata `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -AllowLegacyInactive)
+            }
+            catch {
+                $typedSchemaRejected = $true
+            }
+            Assert-Harness `
+                -Condition $typedSchemaRejected `
+                -Message 'managed-hook teardown reader accepted a string schema'
+
+            $activation = Write-HarnessSchema6TeardownJournal `
+                -Layout $layout `
+                -Phase 'prepared' `
+                -Disposition 'pending'
+            $script:HarnessState.managed_hooks_activation = $activation
+            $metadata.managed_hooks_activation = $activation
+            $invalidPending = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $layout.ManagedHooksTeardownJournalPath `
+                -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+            $invalidPendingTarget = @($invalidPending.pending_targets)[0]
+            $invalidPendingTarget.deferred = $false
+            [IO.File]::WriteAllText(
+                $layout.ManagedHooksTeardownJournalPath,
+                (
+                    $invalidPending |
+                        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 16
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            $pendingRejected = $false
+            try {
+                [void](Get-DefenseClawManagedHooksTeardownJournalPhase `
+                    -Layout $layout `
+                    -Metadata $metadata `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -AllowLegacyInactive)
+            }
+            catch {
+                $pendingRejected = $true
+            }
+            Assert-Harness `
+                -Condition $pendingRejected `
+                -Message 'schema-6 teardown reader accepted an unbound pending target'
+
+            Invoke-HarnessSchema6ReaderMutation `
+                -Message 'schema-6 teardown reader accepted a false target fingerprint' `
+                -Mutation {
+                    param($journal)
+                    $journal.manifest_fingerprint = 'sha256:' + ('0' * 64)
+                }
+            Invoke-HarnessSchema6ReaderMutation `
+                -Message 'managed-hook teardown reader accepted a decimal schema' `
+                -Disposition 'active' `
+                -Mutation {
+                    param($journal)
+                    $journal.schema_version = [double]6.5
+                }
+
+            $legacyTarget = [pscustomobject][ordered]@{
+                connector = 'claudecode'
+                sid = 'S-1-5-21-111-222-333-1009'
+                data_dir = 'C:\Users\Deferred\.defenseclaw'
+                agent_version = '2.1.240'
+                deferred = $false
+            }
+            foreach ($legacyCase in @('pending', 'deferred')) {
+                $legacyTarget.deferred = $legacyCase -ceq 'deferred'
+                $legacyPendingTargets = @()
+                if ($legacyCase -ceq 'pending') {
+                    $legacyPendingTargets = @($legacyTarget)
+                }
+                $legacyJournal = [ordered]@{
+                    schema_version = 5
+                    phase = 'finalized'
+                    targets = @($legacyTarget)
+                    pending_targets = $legacyPendingTargets
+                }
+                [IO.File]::WriteAllText(
+                    $layout.ManagedHooksTeardownJournalPath,
+                    (
+                        $legacyJournal |
+                            Microsoft.PowerShell.Utility\ConvertTo-Json `
+                                -Depth 16
+                    ),
+                    [Text.UTF8Encoding]::new($false)
+                )
+                Assert-HarnessTeardownReaderRejected `
+                    -Message (
+                        "schema-5 teardown reader accepted $legacyCase state"
+                    )
+            }
+
+            $legacyTarget.deferred = $false
+            [IO.File]::WriteAllText(
+                $layout.ManagedHooksTeardownJournalPath,
+                (
+                    [ordered]@{
+                        schema_version = 5
+                        phase = 'finalized'
+                        targets = @($legacyTarget)
+                        pending_targets = @()
+                    } |
+                        Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 16
+                ),
+                [Text.UTF8Encoding]::new($false)
+            )
+            $compatibleLegacyPhase =
+                Get-DefenseClawManagedHooksTeardownJournalPhase `
+                    -Layout $layout `
+                    -Metadata $metadata `
+                    -GatewayServiceName 'DefenseClawGateway'
+            Assert-Harness `
+                -Condition ($compatibleLegacyPhase -ceq 'finalized') `
+                -Message 'schema-5 non-deferred compatibility was rejected'
+
+            Write-HarnessJournal `
+                -Path $layout.ManagedHooksTeardownJournalPath `
+                -Phase 'finalized'
+            $legacyPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+                -Layout $layout `
+                -Metadata $metadata `
+                -GatewayServiceName 'DefenseClawGateway'
+            Assert-Harness `
+                -Condition ($legacyPhase -ceq 'finalized') `
+                -Message 'schema-6 support changed the schema-5 reader contract'
         }
 
         function Publish-HarnessPurgeReceipt {
@@ -5030,6 +5452,8 @@ targets:
                 retried = $Retried
             })
         }
+
+        Invoke-HarnessSchema6TeardownReaderNegativeCases
 
         $missingJournalExecutableLayout = New-HarnessCommittedPurgeCase `
             -Name 'missing-journal-executable' `
