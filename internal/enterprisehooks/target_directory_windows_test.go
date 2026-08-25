@@ -171,7 +171,25 @@ func newWindowsTargetOwnedTestHome(t *testing.T, target *windows.SID) string {
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	owner, err := windowsPathOwnerNoFollow(home)
+	setWindowsTestPathExactOwner(t, home, target)
+	if err := setWindowsUserPathProtection(home, target, true); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
+// setWindowsTestPathExactOwner establishes the fixture precondition that a
+// real target profile already has its enrolled user's owner SID. Elevated
+// Windows tokens may otherwise assign BUILTIN\Administrators as the default
+// owner. This helper is test-only and intentionally changes only OWNER; the
+// production protection helper must still apply and validate the exact DACL.
+func setWindowsTestPathExactOwner(
+	t *testing.T,
+	path string,
+	target *windows.SID,
+) {
+	t.Helper()
+	owner, err := windowsPathOwnerNoFollow(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +198,7 @@ func newWindowsTargetOwnedTestHome(t *testing.T, target *windows.SID) string {
 		// default owner even though the process token user is the test target.
 		// Pin the fixture to that exact user before exercising production's
 		// deliberate wrong-owner refusal.
-		extended, err := winpath.Extended(home)
+		extended, err := winpath.Extended(path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,13 +211,9 @@ func newWindowsTargetOwnedTestHome(t *testing.T, target *windows.SID) string {
 			nil,
 			nil,
 		); err != nil {
-			t.Fatalf("assign exact test profile owner: %v", err)
+			t.Fatalf("assign exact test path owner on %s: %v", path, err)
 		}
 	}
-	if err := setWindowsUserPathProtection(home, target, true); err != nil {
-		t.Fatal(err)
-	}
-	return home
 }
 
 func assertWindowsTargetOwnedCanonicalDirectory(

@@ -431,6 +431,11 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 			t.Fatal(err)
 		}
 	}
+	// An elevated test process can create this directory with
+	// BUILTIN\Administrators as its default owner. Establish the real profile
+	// precondition explicitly before production's wrong-owner guard is allowed
+	// to inspect or protect it.
+	setWindowsTestPathExactOwner(t, home, targetSID)
 	if homeSetup != nil {
 		homeSetup(home, targetSID)
 	} else if err := setWindowsUserPathProtection(home, targetSID, true); err != nil {
