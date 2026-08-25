@@ -55,6 +55,7 @@ cli/defenseclaw/_data/config/*
 # Local binaries
 /defenseclaw
 /defenseclaw-*
+!/defenseclaw-lite/
 /custom-scanner
 
 # Collector builder output

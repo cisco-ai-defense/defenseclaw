@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""
+DefenseClaw Lite Policy Compiler
+
+Compiles YAML policy files into:
+  1. C header (policy_tables.h) — compile-time embed for device firmware
+  2. Signed binary blob (policy.bin) — OTA delivery to devices
+
+Usage:
+  dclaw-compile --input policies/strict.yaml --profile standard \
+    --output-header generated/policy_tables.h \
+    --output-binary dist/policy.bin \
+    --signing-key keys/ota-ca.key \
+    --target-partition-size 4096
+
+Implements REQ-41 through REQ-44.
+"""
+
+import argparse
+import hashlib
+import struct
+import sys
+import os
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML required. Install with: pip install pyyaml", file=sys.stderr)
+    sys.exit(1)
+
+
+# Profile partition size limits
+PROFILE_LIMITS = {
+    "minimal": 2048,
+    "standard": 4096,
+    "edge": 8192,
+}
+
+# Capability name → bitmask mapping
+CAP_MAP = {
+    "read_fs": 0x01,
+    "write_fs": 0x02,
+    "exec_shell": 0x04,
+    "net_fetch": 0x08,
+    "send_msg": 0x10,
+    "actuate": 0x20,
+    "sensor_read": 0x40,
+}
+
+# Action name → enum value
+ACTION_MAP = {
+    "allow": 0,
+    "block": 1,
+    "warn": 2,
+    "escalate": 3,
+}
+
+# Severity name → enum value
+SEVERITY_MAP = {
+    "info": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
+
+# Escalation mode name → value
+ESCALATION_MAP = {
+    "sync_block": 0,
+    "speculative": 1,
+}
+
+
+def parse_policy(yaml_path: Path) -> dict:
+    """Parse a DefenseClaw YAML policy file."""
+    with open(yaml_path) as f:
+        policy = yaml.safe_load(f)
+    return policy
+
+
+def extract_severity_rules(policy: dict) -> list:
+    """Extract severity→action rules from skill_actions section."""
+    rules = []
+    skill_actions = policy.get("skill_actions", {})
+    for severity_name, actions in skill_actions.items():
+        sev_val = SEVERITY_MAP.get(severity_name)
+        if sev_val is None:
+            continue
+        runtime_action = actions.get("runtime", "enable")
+        if runtime_action == "disable":
+            action_val = ACTION_MAP["block"]
+        elif runtime_action == "warn":
+            action_val = ACTION_MAP["warn"]
+        else:
+            continue  # "enable" means ALLOW → no rule needed
+        rules.append((sev_val, action_val))
+    rules.sort(key=lambda x: x[0], reverse=True)  # highest severity first
+    return rules
+
+
+def extract_sequence_rules(policy: dict) -> list:
+    """Extract capability sequence rules from iot_extensions."""
+    rules = []
+    iot_ext = policy.get("iot_extensions", {})
+    sequences = iot_ext.get("capability_sequences", [])
+    for entry in sequences:
+        seq = entry.get("sequence", [])
+        action = ACTION_MAP.get(entry.get("action", "block"), 1)
+        cap_bytes = []
+        for cap_name in seq:
+            cap_val = CAP_MAP.get(cap_name)
+            if cap_val is None:
+                print(f"WARNING: unknown capability '{cap_name}', skipping rule",
+                      file=sys.stderr)
+                break
+            cap_bytes.append(cap_val)
+        else:
+            if len(cap_bytes) <= 4:
+                rules.append((cap_bytes, action))
+    return rules
+
+
+def extract_dest_allowlist(policy: dict) -> list:
+    """Extract destination allowlist from iot_extensions."""
+    iot_ext = policy.get("iot_extensions", {})
+    return iot_ext.get("destination_allowlist", [])
+
+
+def extract_rate_limits(policy: dict) -> dict:
+    """Extract rate limits from iot_extensions."""
+    iot_ext = policy.get("iot_extensions", {})
+    return iot_ext.get("rate_limits", {
+        "tool_calls_per_minute": 60,
+        "network_requests_per_minute": 30,
+        "actuations_per_minute": 10,
+    })
+
+
+def extract_escalation_modes(policy: dict) -> list:
+    """Extract escalation mode table from iot_extensions."""
+    iot_ext = policy.get("iot_extensions", {})
+    modes = iot_ext.get("escalation_mode", {})
+    entries = []
+    for cap_name, mode_name in modes.items():
+        cap_val = CAP_MAP.get(cap_name)
+        mode_val = ESCALATION_MAP.get(mode_name, 0)
+        if cap_val is not None:
+            entries.append((cap_val, mode_val))
+    entries.sort(key=lambda x: x[0])
+    return entries
+
+
+def extract_canary_baseline(policy: dict) -> int:
+    """Extract canary baseline from iot_extensions."""
+    iot_ext = policy.get("iot_extensions", {})
+    canary = iot_ext.get("canary", {})
+    return canary.get("baseline_blocks_per_min", 5)
+
+
+def generate_c_header(policy: dict, version: int) -> str:
+    """Generate C header with compiled policy tables."""
+    severity_rules = extract_severity_rules(policy)
+    sequence_rules = extract_sequence_rules(policy)
+    dest_allowlist = extract_dest_allowlist(policy)
+    rate_limits = extract_rate_limits(policy)
+    escalation_modes = extract_escalation_modes(policy)
+    canary_baseline = extract_canary_baseline(policy)
+
+    lines = [
+        '#ifndef DCLAW_POLICY_TABLES_H',
+        '#define DCLAW_POLICY_TABLES_H',
+        '',
+        '/*',
+        f' * Auto-generated by policy_compiler.py',
+        f' * Policy version: {version}',
+        ' * DO NOT EDIT MANUALLY',
+        ' */',
+        '',
+        '#include "defenseclaw.h"',
+        '',
+        '/* === Severity Rules === */',
+        '',
+        'typedef struct {',
+        '    uint8_t severity;',
+        '    uint8_t action;',
+        '} dclaw_severity_rule_t;',
+        '',
+        'static const dclaw_severity_rule_t severity_rules[] = {',
+    ]
+    for sev, act in severity_rules:
+        lines.append(f'    {{ {sev}, {act} }},')
+    lines.append('};')
+    lines.append(f'static const size_t severity_rules_count = {len(severity_rules)};')
+    lines.append('')
+
+    # Sequence rules
+    lines.append('/* === Capability Sequence Rules === */')
+    lines.append('')
+    lines.append('#define DCLAW_MAX_SEQ_LEN 4')
+    lines.append('')
+    lines.append('typedef struct {')
+    lines.append('    uint8_t seq[DCLAW_MAX_SEQ_LEN];')
+    lines.append('    uint8_t seq_len;')
+    lines.append('    uint8_t action;')
+    lines.append('} dclaw_sequence_rule_t;')
+    lines.append('')
+    lines.append('static const dclaw_sequence_rule_t sequence_rules[] = {')
+    for seq, act in sequence_rules:
+        seq_str = ', '.join(f'0x{b:02X}' for b in seq)
+        pad = ', 0x00' * (4 - len(seq))
+        lines.append(f'    {{ .seq = {{{seq_str}{pad}}}, .seq_len = {len(seq)}, .action = {act} }},')
+    lines.append('};')
+    lines.append(f'static const size_t sequence_rules_count = {len(sequence_rules)};')
+    lines.append('')
+
+    # Destination allowlist
+    lines.append('/* === Destination Allowlist === */')
+    lines.append('')
+    lines.append('static const char *dest_allowlist[] = {')
+    for dest in dest_allowlist:
+        lines.append(f'    "{dest}",')
+    lines.append('};')
+    lines.append(f'static const size_t dest_allowlist_count = {len(dest_allowlist)};')
+    lines.append('')
+
+    # Deny hash list (empty — populated by threat intel)
+    lines.append('/* === Deny Hash List (sorted for binary search) === */')
+    lines.append('')
+    lines.append('static const uint8_t deny_hashes[][32] = {')
+    lines.append('};')
+    lines.append('static const size_t deny_hashes_count = 0;')
+    lines.append('')
+
+    # Escalation table
+    lines.append('/* === Escalation Mode Table === */')
+    lines.append('')
+    lines.append('static const dclaw_escalation_entry_t escalation_table[] = {')
+    for cap, mode in escalation_modes:
+        lines.append(f'    {{ 0x{cap:02X}, {mode} }},')
+    lines.append('};')
+    lines.append(f'static const size_t escalation_table_count = {len(escalation_modes)};')
+    lines.append('')
+
+    # Canary baseline
+    lines.append(f'/* === Canary Baseline === */')
+    lines.append(f'static const uint16_t policy_canary_baseline_blocks_per_min = {canary_baseline};')
+    lines.append('')
+
+    # Rate limits
+    lines.append('/* === Rate Limit Defaults === */')
+    lines.append(f'static const uint16_t policy_rate_tool_calls_per_min = {rate_limits.get("tool_calls_per_minute", 60)};')
+    lines.append(f'static const uint16_t policy_rate_network_per_min = {rate_limits.get("network_requests_per_minute", 30)};')
+    lines.append(f'static const uint16_t policy_rate_actuations_per_min = {rate_limits.get("actuations_per_minute", 10)};')
+    lines.append('')
+    lines.append('#endif /* DCLAW_POLICY_TABLES_H */')
+    lines.append('')
+
+    return '\n'.join(lines)
+
+
+def generate_binary_blob(policy: dict, version: int) -> bytes:
+    """Generate signed binary policy blob for OTA delivery."""
+    severity_rules = extract_severity_rules(policy)
+    sequence_rules = extract_sequence_rules(policy)
+    dest_allowlist = extract_dest_allowlist(policy)
+    canary_baseline = extract_canary_baseline(policy)
+
+    # Build payload
+    payload = bytearray()
+
+    # Severity rules
+    payload.append(len(severity_rules))
+    for sev, act in severity_rules:
+        payload.extend(struct.pack('BB', sev, act))
+
+    # Sequence rules
+    payload.append(len(sequence_rules))
+    for seq, act in sequence_rules:
+        padded = seq + [0] * (4 - len(seq))
+        payload.extend(struct.pack('4sBB', bytes(padded), len(seq), act))
+
+    # Destination allowlist
+    payload.append(len(dest_allowlist))
+    for dest in dest_allowlist:
+        encoded = dest.encode('ascii')[:67]  # max 64 + 3 overhead
+        payload.append(len(encoded))
+        payload.extend(encoded)
+
+    # Header: version(2) + payload_len(2) + canary_baseline(2) + reserved(2)
+    header = struct.pack('>HHHxx', version, len(payload), canary_baseline)
+    blob = header + payload
+
+    return bytes(blob)
+
+
+def sign_blob(blob: bytes, key_path: str) -> bytes:
+    """Sign blob with Ed25519. Returns 64-byte signature."""
+    if key_path and os.path.exists(key_path):
+        try:
+            import nacl.signing
+            with open(key_path, 'rb') as f:
+                key_data = f.read()
+            signing_key = nacl.signing.SigningKey(key_data[:32])
+            signed = signing_key.sign(blob)
+            return signed.signature
+        except ImportError:
+            print("WARNING: PyNaCl not installed. Using dev stub signature.",
+                  file=sys.stderr)
+
+    # Dev stub: signature starts with 0xED marker
+    sig = b'\xED' + hashlib.sha256(blob).digest()[:63]
+    return sig
+
+
+def compute_size_report(c_header: str, binary_blob: bytes, profile: str) -> str:
+    """Generate size validation report."""
+    limit = PROFILE_LIMITS.get(profile, 4096)
+    blob_size = len(binary_blob)
+
+    report_lines = [
+        "Policy compilation report:",
+        f"  C header size:    {len(c_header):>6} bytes",
+        f"  Binary blob size: {blob_size:>6} bytes",
+        f"  Target profile:   {profile}",
+        f"  Partition limit:  {limit:>6} bytes",
+        f"  Remaining:        {limit - blob_size:>6} bytes",
+        "",
+    ]
+
+    if blob_size > limit:
+        report_lines.append(f"  ERROR: Binary blob ({blob_size}B) exceeds "
+                           f"{profile} partition limit ({limit}B)!")
+        report_lines.append("  Reduce dest_allowlist or sequence rules.")
+    else:
+        report_lines.append(f"  OK: Fits within {profile} partition "
+                           f"({blob_size}/{limit} = {100*blob_size//limit}% used)")
+
+    return '\n'.join(report_lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='DefenseClaw Lite Policy Compiler')
+    parser.add_argument('--input', required=True, help='Input YAML policy file')
+    parser.add_argument('--profile', default='standard',
+                       choices=['minimal', 'standard', 'edge'],
+                       help='Target device profile')
+    parser.add_argument('--version', type=int, default=1,
+                       help='Policy version number (monotonic)')
+    parser.add_argument('--target-partition-size', type=int, default=0,
+                       help='Override partition size limit (bytes)')
+    parser.add_argument('--signing-key', default='',
+                       help='Ed25519 private key for signing')
+    parser.add_argument('--output-header', default='policy_tables.h',
+                       help='Output C header path')
+    parser.add_argument('--output-binary', default='policy.bin',
+                       help='Output signed binary blob path')
+    parser.add_argument('--output-report', default='',
+                       help='Output size report path (optional)')
+    args = parser.parse_args()
+
+    if args.target_partition_size > 0:
+        PROFILE_LIMITS[args.profile] = args.target_partition_size
+
+    # Parse policy
+    policy = parse_policy(Path(args.input))
+    print(f"Parsed policy: {policy.get('name', 'unnamed')}")
+
+    # Generate C header
+    c_header = generate_c_header(policy, args.version)
+    os.makedirs(os.path.dirname(args.output_header) or '.', exist_ok=True)
+    with open(args.output_header, 'w') as f:
+        f.write(c_header)
+    print(f"Generated C header: {args.output_header} ({len(c_header)} bytes)")
+
+    # Generate binary blob
+    blob = generate_binary_blob(policy, args.version)
+    signature = sign_blob(blob, args.signing_key)
+    signed_blob = blob + signature
+
+    os.makedirs(os.path.dirname(args.output_binary) or '.', exist_ok=True)
+    with open(args.output_binary, 'wb') as f:
+        f.write(signed_blob)
+    print(f"Generated binary: {args.output_binary} ({len(signed_blob)} bytes)")
+
+    # Size validation (REQ-44)
+    report = compute_size_report(c_header, blob, args.profile)
+    print(f"\n{report}")
+
+    if args.output_report:
+        with open(args.output_report, 'w') as f:
+            f.write(report)
+
+    # Fail if oversized
+    limit = PROFILE_LIMITS[args.profile]
+    if len(blob) > limit:
+        print(f"\nFATAL: Policy blob exceeds {args.profile} partition limit!",
+              file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
