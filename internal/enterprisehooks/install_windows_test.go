@@ -1883,6 +1883,43 @@ func TestInstallWindowsClaudeReclaimsOrphanManagedPolicy(t *testing.T) {
 	}
 }
 
+// TestInstallWindowsClaudeReclaimsReverseOrphanManagedState pins the
+// mirror case: a state sidecar that survived a prior uninstall while
+// the policy file was already removed. The dedicated missing-policy
+// recovery path rejects state whose gateway/service identity does
+// not match the current install (the QA runID pattern changes the
+// cert-scoped service name every reinstall), which historically
+// deadlocked lifecycle capture on any re-run. Reclaim deletes the
+// stale state and the install proceeds as fresh.
+func TestInstallWindowsClaudeReclaimsReverseOrphanManagedState(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	statePath := filepath.Join(filepath.Dir(fixture.policyPath), ".defenseclaw-managed-hooks.state")
+	// The reverse-orphan signature: state metadata bytes on disk
+	// (content is intentionally irrelevant here — reclaim is
+	// signature-based, not content-based) with no policy file next
+	// to them. The fixture's policyPath is already absent.
+	staleState := []byte("{\"schema_version\":2,\"policy_sha256\":\"sha256:deadbeef\"}\n")
+	if err := os.WriteFile(statePath, staleState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsManagedPolicyProtection(statePath, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatalf("Install after reverse orphan reclaim: %v", err)
+	}
+	got, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read post-install state: %v", err)
+	}
+	if bytes.Equal(got, staleState) {
+		t.Fatal("orphan state survived reclaim: install did not replace the pre-existing bytes")
+	}
+	if _, err := os.Stat(fixture.policyPath); err != nil {
+		t.Fatalf("policy file missing after reclaim + install: %v", err)
+	}
+}
+
 func TestInstallWindowsClaudeRefusesAdministratorPolicyEdit(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
