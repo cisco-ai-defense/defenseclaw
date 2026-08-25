@@ -596,9 +596,21 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	if obviousCredentialPlaceholder(candidate) {
 		return false
 	}
+	compact := compactCredential(candidate)
 	// The generic bearer shape has no provider-specific checksum or prefix, so
 	// require a modest entropy floor before elevating arbitrary header examples.
-	return ruleID != "SEC-BEARER" || credentialEntropy(compactCredential(candidate)) >= 2.5
+	if ruleID == "SEC-BEARER" {
+		return credentialEntropy(compact) >= 2.5
+	}
+	// Provider-prefixed keys (AKIA…, sk-…, ghp_…) satisfy their regex on the
+	// fixed prefix alone, so a hand-written filler tail still matches. The
+	// prefix contributes no randomness; once the candidate is long enough for
+	// the measure to mean anything, hold it to a floor too. The bar is set
+	// below the bearer floor because these shapes already proved a prefix.
+	if len(compact) >= 16 && credentialEntropy(compact) < 2.0 {
+		return false
+	}
+	return true
 }
 
 func credentialCandidate(ruleID, match string) string {
@@ -697,6 +709,18 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	compact := compactCredential(normalized)
 	if len(compact) < 8 {
 		return false
+	}
+	// Canonical matching above only fires when the whole candidate is a known
+	// filler word. Authors routinely embed the marker inside a provider-shaped
+	// string ("AKIAEXAMPLEFAKETOKEN0000…"), which satisfies the prefix regex
+	// while being plainly illustrative.
+	for _, marker := range credentialPlaceholderMarkers {
+		if strings.Contains(compact, marker) {
+			return true
+		}
+	}
+	if credentialLowVariety(compact) {
+		return true
 	}
 	for _, sequence := range []string{
 		"abcdefghijklmnopqrstuvwxyz",
@@ -820,4 +844,51 @@ func decimalNumber(value string) int {
 		n = n*10 + int(char-'0')
 	}
 	return n
+}
+
+// credentialPlaceholderMarkers are substrings authors use to signal that a
+// value is illustrative. A random credential of provider length contains one
+// only by vanishing coincidence, so substring matching is safe here while
+// exact-match canonicalization is not sufficient.
+var credentialPlaceholderMarkers = []string{
+	"example",
+	"placeholder",
+	"changeme",
+	"replaceme",
+	"notarealtoken",
+	"notarealsecret",
+	"faketoken",
+	"fakesecret",
+	"fakekey",
+	"dummytoken",
+	"dummysecret",
+	"dummykey",
+	"redactedtest",
+	"sampletoken",
+	"samplekey",
+	"yourkeyhere",
+	"yourtokenhere",
+	"insertkeyhere",
+}
+
+// credentialLowVariety reports whether a candidate is too repetitive to be a
+// generated credential. Filler tails ("AKIA" + forty zeroes) clear every
+// length and prefix check while carrying almost no information.
+func credentialLowVariety(compact string) bool {
+	if len(compact) < 16 {
+		return false
+	}
+	counts := make(map[rune]int)
+	for _, r := range compact {
+		counts[r]++
+	}
+	if len(counts) <= 4 {
+		return true
+	}
+	for _, count := range counts {
+		if count*2 > len(compact) {
+			return true
+		}
+	}
+	return false
 }
