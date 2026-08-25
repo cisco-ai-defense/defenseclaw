@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,10 @@ func TestNewEnterpriseWindowsEnumerateCommandRegistersFlags(t *testing.T) {
 		if flag := cmd.Flags().Lookup(name); flag == nil {
 			t.Fatalf("flag %q not registered", name)
 		}
+	}
+	if !strings.Contains(cmd.Long, "service never rewrites targets.yaml") ||
+		!strings.Contains(cmd.Long, "administrator-run Repair or Upgrade") {
+		t.Fatalf("command documentation does not describe the finite-profile audit boundary:\n%s", cmd.Long)
 	}
 }
 
@@ -138,6 +143,170 @@ func TestRunEnterpriseWindowsEnumerateOnceRefusesNonManagedEnterprise(t *testing
 	}
 	if !strings.Contains(err.Error(), "managed_enterprise") {
 		t.Fatalf("error should cite managed_enterprise: %v", err)
+	}
+}
+
+func TestRunEnterpriseWindowsEnumerateServiceAuditNeverPublishesNewProfile(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "targets.yaml")
+	committed := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{
+			SID:          "S-1-5-21-1000-2000-3000-1001",
+			UserHome:     `C:\Users\Alice`,
+			Connector:    "codex",
+			DataDir:      `C:\Users\Alice\.defenseclaw`,
+			AgentVersion: "1.2.3",
+		},
+	}}
+	disabled := false
+	discovered := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		committed.Targets[0],
+		{
+			SID:       "S-1-5-21-1000-2000-3000-1002",
+			UserHome:  `C:\Users\Bob`,
+			Connector: "codex",
+			DataDir:   `C:\Users\Bob\.defenseclaw`,
+			Enabled:   &disabled,
+		},
+	}}
+
+	previousConfigLoader := enterpriseWindowsEnumerateConfigLoader
+	previousManifestLoader := enterpriseWindowsEnumerateManifestLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	defer func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfigLoader
+		enterpriseWindowsEnumerateManifestLoader = previousManifestLoader
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+	}()
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
+		return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}, nil
+	}
+	loadCount := 0
+	enterpriseWindowsEnumerateManifestLoader = func(path string) (enterprisehooks.Manifest, string, error) {
+		loadCount++
+		if path != manifestPath {
+			t.Fatalf("manifest loader path = %q, want %q", path, manifestPath)
+		}
+		return committed, strings.Repeat("a", 64), nil
+	}
+	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		if opts.ExistingManifestPath != manifestPath {
+			t.Fatalf("enumerator existing manifest = %q, want %q", opts.ExistingManifestPath, manifestPath)
+		}
+		// The package enumerator still has a legacy message describing a new
+		// row as emitted. Audit mode must suppress it because it writes nothing.
+		opts.Logger(discovered.Targets[1].SID, "newly-discovered (SID, codex) row emitted as disabled; admin must enable")
+		return discovered, nil
+	}
+	writerCalled := false
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) {
+		writerCalled = true
+		return false, errors.New("service audit must not call manifest writer")
+	}
+
+	stderr := new(bytes.Buffer)
+	err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifestPath, false)
+	if err != nil {
+		t.Fatalf("service audit: %v", err)
+	}
+	if writerCalled {
+		t.Fatal("service audit called the manifest publication primitive")
+	}
+	if loadCount != 2 {
+		t.Fatalf("authenticated manifest loads = %d, want 2", loadCount)
+	}
+	output := stderr.String()
+	for _, want := range []string{
+		"discovered uncommitted target sid=S-1-5-21-1000-2000-3000-1002 connector=codex",
+		"targets.yaml unchanged",
+		"administrator Repair or Upgrade",
+		"publication=disabled",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("service audit output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "emitted as disabled") {
+		t.Fatalf("service audit retained inaccurate publication log:\n%s", output)
+	}
+}
+
+func TestRunEnterpriseWindowsEnumerateServiceAuditRejectsManifestGenerationChange(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "targets.yaml")
+	committed := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}
+
+	previousConfigLoader := enterpriseWindowsEnumerateConfigLoader
+	previousManifestLoader := enterpriseWindowsEnumerateManifestLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	defer func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfigLoader
+		enterpriseWindowsEnumerateManifestLoader = previousManifestLoader
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+	}()
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
+		return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}, nil
+	}
+	loadCount := 0
+	enterpriseWindowsEnumerateManifestLoader = func(string) (enterprisehooks.Manifest, string, error) {
+		loadCount++
+		return committed, strings.Repeat(string(rune('a'+loadCount-1)), 64), nil
+	}
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		return committed, nil
+	}
+	writerCalled := false
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) {
+		writerCalled = true
+		return false, nil
+	}
+
+	err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifestPath, false)
+	if err == nil || !strings.Contains(err.Error(), "changed during profile audit") {
+		t.Fatalf("manifest generation change error = %v", err)
+	}
+	if writerCalled {
+		t.Fatal("mixed-generation audit called the manifest writer")
+	}
+}
+
+func TestRunEnterpriseWindowsEnumerateOnceRetainsPreCommitPublication(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "targets.yaml")
+	want := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}
+
+	previousConfigLoader := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	defer func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfigLoader
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+	}()
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
+		return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}, nil
+	}
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		return want, nil
+	}
+	writerCalled := false
+	enterpriseWindowsEnumerateManifestWriter = func(path string, got enterprisehooks.Manifest) (bool, error) {
+		writerCalled = true
+		if path != manifestPath || !reflect.DeepEqual(got, want) {
+			t.Fatalf("publication got path=%q manifest=%+v", path, got)
+		}
+		return true, nil
+	}
+
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifestPath, true); err != nil {
+		t.Fatalf("pre-commit --once publication: %v", err)
+	}
+	if !writerCalled {
+		t.Fatal("pre-commit --once did not call the manifest writer")
 	}
 }
 

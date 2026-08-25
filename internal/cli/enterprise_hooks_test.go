@@ -123,6 +123,125 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	}
 }
 
+func TestWriteEnterpriseHookGuardianStateAcceptsExplicitPendingTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
+	}
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	dataDir := t.TempDir()
+	authorizationDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
+	rows := []enterpriseHookReconcileRow{
+		{User: "active", UserHome: "/home/active", Connector: "codex", OK: true},
+		{User: "offline", UserHome: "/home/offline", Connector: "codex", Pending: true},
+	}
+	if err := writeEnterpriseHookGuardianState(
+		dataDir,
+		"/etc/defenseclaw/hook-guardian/targets.yaml",
+		testEnterpriseHookManifestSHA256,
+		rows,
+		0,
+		true,
+	); err != nil {
+		t.Fatalf("writeEnterpriseHookGuardianState: %v", err)
+	}
+	state, exists, err := loadEnterpriseHookGuardianState(dataDir)
+	if err != nil || !exists {
+		t.Fatalf("load state: exists=%t err=%v", exists, err)
+	}
+	authorization, exists, err := loadEnterpriseHookGuardianAuthorization(dataDir)
+	if err != nil || !exists {
+		t.Fatalf("load authorization: exists=%t err=%v", exists, err)
+	}
+	activation, exists, err := loadEnterpriseHookGuardianActivation(dataDir)
+	if err != nil || !exists {
+		t.Fatalf("load activation: exists=%t err=%v", exists, err)
+	}
+	for label, counts := range map[string][4]int{
+		"state":         {state.TargetCount, state.SuccessCount, state.PendingCount, state.FailureCount},
+		"authorization": {authorization.TargetCount, authorization.SuccessCount, authorization.PendingCount, authorization.FailureCount},
+		"activation":    {activation.TargetCount, activation.SuccessCount, activation.PendingCount, activation.FailureCount},
+	} {
+		if counts != [4]int{2, 1, 1, 0} {
+			t.Fatalf("%s counts = %v, want target/success/pending/failure 2/1/1/0", label, counts)
+		}
+	}
+	if !state.OK || !authorization.OK || !activation.OK {
+		t.Fatalf("pending-only disposition was not healthy: state=%t authorization=%t activation=%t", state.OK, authorization.OK, activation.OK)
+	}
+	if len(authorization.ProtectedTargets) != 1 ||
+		authorization.ProtectedTargets[0].User != "active" {
+		t.Fatalf("protected targets = %+v, want only successful active target", authorization.ProtectedTargets)
+	}
+	if issues := enterpriseHookGuardianFailureIssues(state); len(issues) != 0 {
+		t.Fatalf("pending row was reported as a failure: %v", issues)
+	}
+}
+
+func TestEnterpriseHookVerifyDispositionIssuesRejectsStalePendingEvidence(t *testing.T) {
+	t.Run("missing pending target", func(t *testing.T) {
+		run := enterpriseHookVerifyRun{
+			Rows: []enterpriseHookReconcileRow{
+				{SID: "S-1-5-21-1-2-3-1001", Connector: "codex", Pending: true},
+				{SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Pending: true},
+			},
+			Pending: 2,
+		}
+		authorization := enterpriseHookGuardianAuthorization{
+			TargetCount:  1,
+			PendingCount: 1,
+		}
+		activation := enterpriseHookGuardianActivation{
+			TargetCount:  1,
+			PendingCount: 1,
+		}
+		issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation)
+		joined := strings.Join(issues, "; ")
+		for _, want := range []string{
+			"protected authorization target dispositions do not match",
+			"protected activation target dispositions do not match",
+		} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("issues = %v, want %q", issues, want)
+			}
+		}
+	})
+
+	t.Run("activation protected subset drift", func(t *testing.T) {
+		active := enterpriseHookReconcileRow{
+			SID:       "S-1-5-21-1-2-3-1001",
+			Connector: "codex",
+			OK:        true,
+		}
+		run := enterpriseHookVerifyRun{
+			Rows: []enterpriseHookReconcileRow{
+				active,
+				{SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Pending: true},
+			},
+			Pending: 1,
+		}
+		authorization := enterpriseHookGuardianAuthorization{
+			TargetCount:      2,
+			SuccessCount:     1,
+			PendingCount:     1,
+			ProtectedTargets: []enterpriseHookReconcileRow{active},
+		}
+		activation := enterpriseHookGuardianActivation{
+			TargetCount:  2,
+			SuccessCount: 1,
+			PendingCount: 1,
+		}
+		issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation)
+		joined := strings.Join(issues, "; ")
+		if !strings.Contains(joined, "protected activation does not cover") {
+			t.Fatalf("issues = %v, want activation protected-target drift", issues)
+		}
+		if strings.Contains(joined, "protected authorization") {
+			t.Fatalf("canonical authorization was rejected: %v", issues)
+		}
+	})
+}
+
 func TestEnterpriseHookGuardianFailureIssuesExposeTargetCause(t *testing.T) {
 	state := enterpriseHookGuardianState{
 		FailureCount: 2,
@@ -658,6 +777,25 @@ func TestEnterpriseHookRowMatchRejectsMismatchedAuthoritativeSID(t *testing.T) {
 		"codex",
 	) {
 		t.Fatal("mismatched SIDs fell back to matching user/home authorization")
+	}
+}
+
+func TestEnterpriseHookRowMatchRejectsSIDReboundToDifferentProfile(t *testing.T) {
+	row := enterpriseHookReconcileRow{
+		User:      "alice",
+		UserHome:  filepath.Clean(`C:\Users\alice`),
+		SID:       "S-1-5-21-111-222-333-1001",
+		Connector: "codex",
+		OK:        true,
+	}
+	if enterpriseHookRowMatches(
+		row,
+		"alice",
+		filepath.Clean(`C:\Profiles\rebound`),
+		row.SID,
+		"codex",
+	) {
+		t.Fatal("matching SID carried protected authorization to a different profile path")
 	}
 }
 

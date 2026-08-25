@@ -88,6 +88,13 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     winget_discovery = installer[winget_start:discovery_start]
     discovery = installer[discovery_start:renderer_start]
     renderer = installer[renderer_start:execution_start]
+    shorthand_render_start = installer.index(
+        "$renderedManifestBody = Get-DefenseClawRenderedEnterpriseTargets"
+    )
+    shorthand_render_end = installer.index(
+        "$renderRoot = $bootstrapEnvironment.Path", shorthand_render_start
+    )
+    shorthand_render = installer[shorthand_render_start:shorthand_render_end]
 
     assert 'rule_pack_dir: ""' in config_renderer
     assert "Get-DefenseClawConnectorJsonMetadataVersion" in discovery
@@ -132,18 +139,21 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "Get-DefenseClawConnectorMetadataVersion" in renderer
     assert "Resolve-DefenseClawConnectorMetadataVersion" in renderer
     assert "Select-DefenseClawActiveInteractiveUserProfiles" in renderer
-    assert (
-        "-RequireActiveSession:($Action -eq 'Install' -and -not $NoStart)"
-        in installer
-    )
+    assert "-DeferInactiveProfiles:" in shorthand_render
+    assert "'Install', 'Upgrade', 'Repair'" in shorthand_render
+    assert "-not $NoStart" in shorthand_render
     assert "-NativeCandidateObserved $nativeCandidateObserved" in renderer
     assert "-DiscoveryFailed $metadataDiscoveryFailed" in renderer
     assert "$users = @(" in renderer
+    assert "$Profiles" in renderer
     assert "agent_version:" in renderer
     assert "enabled: false" in renderer
     assert renderer.index('AppendLine("    agent_version:') < renderer.index(
         "AppendLine('    enabled: true')"
     )
+    assert renderer.index("AppendLine('    enabled: true')") < renderer.index(
+        "if ($deferTarget)"
+    ) < renderer.index("AppendLine('    deferred: true')")
     assert "@attacker/not-amp" in smoke
     assert "target renderer emitted an enabled/version contract mismatch" in smoke
     assert "GetActiveSessionSIDs" in installer
@@ -152,13 +162,16 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "native_active_session_discovery_verified" in smoke
     assert "-ActiveSessionSIDs $ActiveSessionSIDs" in renderer
     assert (
-        "disconnected WTS user entered the initial authoritative target set"
+        "disconnected WTS user did not receive exactly three deferred enabled targets"
         in smoke
     )
     assert (
-        "no-start or servicing shorthand silently omitted a planned user"
+        "active WTS user did not receive exactly three immediate enabled targets"
         in smoke
     )
+    assert "missing-version target was enabled or marked deferred" in smoke
+    assert "no-start shorthand silently omitted a planned user" in smoke
+    assert "no-start shorthand marked a planned user deferred" in smoke
     assert (
         "official WinGet Claude package was not discovered exactly once"
         in smoke

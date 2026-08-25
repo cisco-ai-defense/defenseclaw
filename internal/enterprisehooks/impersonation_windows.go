@@ -475,9 +475,35 @@ func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, er
 		}
 		return impersonation, nil
 	}
-	detail := ""
 	if len(queryFailures) > 0 {
-		detail = "; token query failures: " + strings.Join(queryFailures, "; ")
+		return 0, fmt.Errorf(
+			"enterprise hooks: active Windows session token queries failed while resolving target SID %s: %s",
+			target,
+			strings.Join(queryFailures, "; "),
+		)
 	}
-	return 0, fmt.Errorf("enterprise hooks: no active interactive session token matches explicit target SID %s; guardian will retry%s", target, detail)
+	return 0, &WindowsTargetSessionUnavailableError{SID: target.String()}
+}
+
+// RequireWindowsEnterpriseTargetSession authenticates that an exact active
+// token currently exists for the manifest SID and profile. It performs no
+// profile mutation; callers must still re-resolve the token inside the actual
+// impersonated operation so logout/session-reuse races fail closed.
+func RequireWindowsEnterpriseTargetSession(ownerSID, expectedHome string) error {
+	target, err := validateWindowsEnterpriseTargetSID(ownerSID)
+	if err != nil {
+		return err
+	}
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return err
+	}
+	token, err := windowsEnterpriseTargetTokenResolver(target)
+	if err != nil {
+		return err
+	}
+	defer token.Close()
+	if err := validateWindowsEnterpriseTargetToken(token, target); err != nil {
+		return err
+	}
+	return validateWindowsEnterpriseTokenProfile(token, expectedHome)
 }

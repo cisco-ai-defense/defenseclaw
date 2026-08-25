@@ -69,6 +69,7 @@ func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
 				SID:          "S-1-5-21-111-222-333-1002",
 				Connector:    "Cursor",
 				AgentVersion: "1.7.0",
+				Deferred:     true,
 			},
 			{
 				UserHome:     `C:\Users\disabled`,
@@ -101,6 +102,163 @@ func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
 	if len(cursor) != 1 || cursor[0].SID != "S-1-5-21-111-222-333-1002" ||
 		!sameWindowsEnterprisePathCLI(cursor[0].DataDir, filepath.Join(homeB, ".defenseclaw")) {
 		t.Fatalf("Cursor targets = %+v", cursor)
+	}
+	if !targets[2].Deferred {
+		t.Fatal("deferred manifest authorization was not preserved in teardown identity")
+	}
+}
+
+func TestWindowsManagedHooksTeardownPendingTargetsAreNarrow(t *testing.T) {
+	active := windowsManagedHooksTeardownTarget{
+		Connector: "codex",
+		SID:       "S-1-5-21-111-222-333-1001",
+		DataDir:   `C:\Users\alice\.defenseclaw`,
+	}
+	pending := windowsManagedHooksTeardownTarget{
+		Connector: "cursor",
+		SID:       "S-1-5-21-111-222-333-1002",
+		DataDir:   `C:\Users\bob\.defenseclaw`,
+		Deferred:  true,
+	}
+	targets := []windowsManagedHooksTeardownTarget{active, pending}
+	if err := validateWindowsManagedHooksPendingTargetSubset(
+		targets,
+		[]windowsManagedHooksTeardownTarget{pending},
+		windowsManagedHooksActivated,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if windowsManagedHooksTeardownSelectorExpected(
+		pending,
+		[]windowsManagedHooksTeardownTarget{pending},
+		windowsManagedHooksActivated,
+	) {
+		t.Fatal("pending target unexpectedly requires a runtime selector")
+	}
+	if !windowsManagedHooksTeardownSelectorExpected(
+		active,
+		[]windowsManagedHooksTeardownTarget{pending},
+		windowsManagedHooksActivated,
+	) {
+		t.Fatal("active target did not retain its exact selector requirement")
+	}
+
+	unauthorized := pending
+	unauthorized.Deferred = false
+	if err := validateWindowsManagedHooksPendingTargetSubset(
+		targets,
+		[]windowsManagedHooksTeardownTarget{unauthorized},
+		windowsManagedHooksActivated,
+	); err == nil {
+		t.Fatal("pending target without manifest deferred authorization was accepted")
+	}
+	if err := validateWindowsManagedHooksPendingTargetSubset(
+		targets,
+		[]windowsManagedHooksTeardownTarget{pending},
+		windowsManagedHooksNeverActivated,
+	); err == nil {
+		t.Fatal("never-activated deployment accepted current pending evidence")
+	}
+}
+
+func TestWindowsManagedHooksTeardownSchemaFiveCannotAuthorizeDeferredState(t *testing.T) {
+	legacyTarget := windowsManagedHooksTeardownTarget{
+		Connector: "codex",
+		SID:       "S-1-5-21-111-222-333-1001",
+		DataDir:   `C:\Users\alice\.defenseclaw`,
+	}
+	legacy := windowsManagedHooksTeardownJournal{
+		SchemaVersion: 5,
+		Targets:       []windowsManagedHooksTeardownTarget{legacyTarget},
+	}
+	current := legacy
+	current.SchemaVersion = windowsManagedHooksTeardownJournalSchema
+	if !validWindowsManagedHooksTeardownJournalSchema(legacy, current) {
+		t.Fatal("exact schema-5 non-deferred recovery journal was rejected")
+	}
+
+	deferredTarget := legacyTarget
+	deferredTarget.Deferred = true
+	current.Targets = []windowsManagedHooksTeardownTarget{deferredTarget}
+	current.PendingTargets = []windowsManagedHooksTeardownTarget{deferredTarget}
+	if validWindowsManagedHooksTeardownJournalSchema(legacy, current) {
+		t.Fatal("schema-5 journal was allowed to authorize deferred pending state")
+	}
+}
+
+func TestValidateWindowsManagedHooksTeardownJournalAcceptsOnlyExactPendingAbsence(t *testing.T) {
+	active := windowsManagedHooksTeardownTarget{
+		Connector: "codex",
+		SID:       "S-1-5-21-111-222-333-1001",
+		DataDir:   `C:\Users\alice\.defenseclaw`,
+	}
+	pending := windowsManagedHooksTeardownTarget{
+		Connector: "codex",
+		SID:       "S-1-5-21-111-222-333-1002",
+		DataDir:   `C:\Users\bob\.defenseclaw`,
+		Deferred:  true,
+	}
+	targets := []windowsManagedHooksTeardownTarget{active, pending}
+	fingerprint, err := windowsManagedHooksTeardownFingerprint(targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetBody := []byte(`{"generation_id":"0123456789abcdef0123456789abcdef"}`)
+	targetDigestBytes := sha256.Sum256(targetBody)
+	targetDigest := "sha256:" + hex.EncodeToString(targetDigestBytes[:])
+	identity := windowsManagedHooksTeardownJournal{
+		SchemaVersion:          windowsManagedHooksTeardownJournalSchema,
+		Phase:                  "captured",
+		ManifestPath:           `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		ManifestSHA256:         strings.Repeat("a", 64),
+		ManifestFingerprint:    fingerprint,
+		ActivationState:        windowsManagedHooksActivated,
+		DeploymentGenerationID: strings.Repeat("b", 32),
+		HookBinary:             `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:            "127.0.0.1:18970",
+		GatewayServiceName:     "DefenseClawGateway",
+		Targets:                targets,
+		PendingTargets:         []windowsManagedHooksTeardownTarget{pending},
+		CodexPolicyActive:      true,
+		CodexTargets: []connector.WindowsCodexManagedRuntimeTarget{
+			{SID: active.SID, DataDir: active.DataDir},
+			{SID: pending.SID, DataDir: pending.DataDir},
+		},
+		SelectorTargets: []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot{
+			{
+				SchemaVersion: 1,
+				Connector:     active.Connector,
+				TargetSID:     active.SID,
+				Existed:       true,
+				Target:        targetBody,
+				TargetSHA256:  targetDigest,
+				CAS: enterprisehooks.WindowsManagedRuntimeSelectorTargetCAS{
+					Exists:       true,
+					GenerationID: strings.Repeat("c", 32),
+					BundleSHA256: "sha256:" + strings.Repeat("d", 64),
+					TargetSHA256: targetDigest,
+				},
+			},
+			{
+				SchemaVersion: 1,
+				Connector:     pending.Connector,
+				TargetSID:     pending.SID,
+			},
+		},
+	}
+	if err := validateWindowsManagedHooksTeardownJournal(identity, identity); err != nil {
+		t.Fatal(err)
+	}
+
+	tampered := identity
+	tampered.SelectorTargets = append(
+		[]enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot(nil),
+		identity.SelectorTargets...,
+	)
+	tampered.SelectorTargets[1] = identity.SelectorTargets[0]
+	tampered.SelectorTargets[1].TargetSID = pending.SID
+	if err := validateWindowsManagedHooksTeardownJournal(tampered, identity); err == nil {
+		t.Fatal("pending target with a selector enrollment was accepted")
 	}
 }
 

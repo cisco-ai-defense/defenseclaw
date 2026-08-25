@@ -483,40 +483,87 @@ function Invoke-RenderedEnterpriseTargetsActiveSessionProbe {
             }
         )
         $rendered = Get-DefenseClawRenderedEnterpriseTargets `
-            -Connectors @('codex', 'claudecode', 'cursor') `
+            -Connectors @('codex', 'claudecode', 'cursor', 'missing-version') `
             -Profiles $profiles `
             -ActiveSessionSIDs @(
                 $activeSID,
                 'not-a-sid'
             ) `
-            -RequireActiveSession
+            -DeferInactiveProfiles
         $blocks = @(
             [regex]::Split($rendered, '(?m)(?=^  - user: )') |
                 Where-Object { $_.StartsWith('  - user: ') }
         )
-        if ($blocks.Count -ne 3 -or
-            [regex]::Matches(
-                $rendered,
-                '(?m)^    sid: "' + [regex]::Escape($activeSID) + '"\r?$'
-            ).Count -ne 3 -or
-            [regex]::Matches(
-                $rendered,
-                '(?m)^    enabled: true\r?$'
-            ).Count -ne 3) {
-            throw 'active WTS user did not receive exactly three enabled targets'
+        $activeBlocks = @(
+            $blocks |
+                Where-Object {
+                    $_ -match (
+                        '(?m)^    sid: "' +
+                        [regex]::Escape($activeSID) +
+                        '"\r?$'
+                    )
+                }
+        )
+        $disconnectedBlocks = @(
+            $blocks |
+                Where-Object {
+                    $_ -match (
+                        '(?m)^    sid: "' +
+                        [regex]::Escape($disconnectedSID) +
+                        '"\r?$'
+                    )
+                }
+        )
+        $activeImmediateBlocks = @(
+            $activeBlocks |
+                Where-Object {
+                    $_ -match '(?m)^    enabled: true\r?$' -and
+                    $_ -notmatch '(?m)^    deferred: true\r?$'
+                }
+        )
+        $disconnectedDeferredBlocks = @(
+            $disconnectedBlocks |
+                Where-Object {
+                    $_ -match '(?m)^    enabled: true\r?$' -and
+                    $_ -match '(?m)^    deferred: true\r?$'
+                }
+        )
+        if ($blocks.Count -ne 8 -or
+            $activeBlocks.Count -ne 4 -or
+            $disconnectedBlocks.Count -ne 4 -or
+            $activeImmediateBlocks.Count -ne 3) {
+            throw 'active WTS user did not receive exactly three immediate enabled targets'
         }
-        if ($rendered.Contains($disconnectedSID) -or
-            $rendered.Contains('disconnected-user')) {
-            throw 'disconnected WTS user entered the initial authoritative target set'
+        if ($disconnectedDeferredBlocks.Count -ne 3) {
+            throw 'disconnected WTS user did not receive exactly three deferred enabled targets'
         }
-        # Install -NoStart and explicit shorthand servicing define a durable
-        # all-profile plan rather than claiming immediate Guardian coverage.
+        $missingVersionBlocks = @(
+            $blocks |
+                Where-Object {
+                    $_ -match '(?m)^    connector: "missing-version"\r?$'
+                }
+        )
+        foreach ($block in $missingVersionBlocks) {
+            if ($block -notmatch '(?m)^    enabled: false\r?$' -or
+                $block -match '(?m)^    agent_version:' -or
+                $block -match '(?m)^    deferred:') {
+                throw 'missing-version target was enabled or marked deferred'
+            }
+        }
+        if ($missingVersionBlocks.Count -ne 2) {
+            throw 'target renderer omitted a missing-version profile row'
+        }
+        # -NoStart defines a full all-profile plan without claiming immediate
+        # Guardian activation or giving any row deferred readiness semantics.
         $plannedRendered = Get-DefenseClawRenderedEnterpriseTargets `
-            -Connectors @('codex', 'claudecode', 'cursor') `
+            -Connectors @('codex', 'claudecode', 'cursor', 'missing-version') `
             -Profiles $profiles
         if (-not $plannedRendered.Contains($disconnectedSID) -or
             -not $plannedRendered.Contains('disconnected-user')) {
-            throw 'no-start or servicing shorthand silently omitted a planned user'
+            throw 'no-start shorthand silently omitted a planned user'
+        }
+        if ($plannedRendered -match '(?m)^    deferred:') {
+            throw 'no-start shorthand marked a planned user deferred'
         }
     }
     finally {

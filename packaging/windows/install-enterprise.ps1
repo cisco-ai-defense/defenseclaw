@@ -39,11 +39,13 @@ param(
     # comma-separated list whose first entry becomes guardrail.connector
     # (primary) and every entry becomes both a targets.yaml row (one per
     # eligible interactive-user profile) and a guardrail.connectors map entry.
-    # An activating fresh Install initially enables only profiles with
-    # WTSActive sessions; the protected enumerator records other eligible
-    # profiles as disabled. Install -NoStart and Upgrade/Repair preserve their
-    # existing all-profile shorthand behavior because they define a durable
-    # planned enrollment rather than requiring immediate activation here.
+    # An Install/Upgrade/Repair that will start services renders every current
+    # eligible profile. Rows with WTSActive sessions are immediate; enabled
+    # rows for disconnected profiles carry `deferred: true` so Guardian can
+    # leave their first reconcile pending until the exact user token exists.
+    # A row whose connector version cannot be accepted stays disabled and is
+    # never deferred. -NoStart keeps the full planned manifest non-deferred
+    # because it makes no activation/readiness claim in this transaction.
     # Both are mutually exclusive with -Config / -Manifest and -DeferredConfig.
     [ValidateSet('', 'observe', 'action')]
     [string]$Mode = '',
@@ -1726,15 +1728,10 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
         }) | Out-Null
     }
     if ($RequireActiveSession) {
-        # An activating fresh shorthand installation has no deferred target
-        # receipt: every enabled row must reconcile immediately, and Guardian
-        # can mutate a profile only through an exact WTS Active token. The
-        # synchronous enumerator later adds every other eligible ProfileList
-        # row as disabled, preserving discovery without making a disconnected
-        # user an impossible activation requirement. No-start and servicing
-        # deliberately keep the all-profile behavior because they establish or
-        # preserve a durable planned enrollment rather than claiming immediate
-        # coverage in this rendering step.
+        # Keep this low-level active-only query available to callers that need
+        # it. The shorthand renderer intentionally enumerates the complete
+        # finite profile set instead, then uses the same selector to distinguish
+        # immediate rows from authenticated deferred rows.
         return @(
             Select-DefenseClawActiveInteractiveUserProfiles `
                 -Profiles $out.ToArray() `
@@ -2797,47 +2794,45 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         [Parameter(Mandatory)][string[]]$Connectors,
         [object[]]$Profiles,
         [string[]]$ActiveSessionSIDs,
-        [switch]$RequireActiveSession
+        [switch]$DeferInactiveProfiles
     )
-    if (-not $RequireActiveSession -and
+    if (-not $DeferInactiveProfiles -and
         $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
-        throw 'ActiveSessionSIDs requires RequireActiveSession'
+        throw 'ActiveSessionSIDs requires DeferInactiveProfiles'
     }
     $sb = [Text.StringBuilder]::new()
     [void]$sb.AppendLine('version: 1')
     [void]$sb.AppendLine('targets:')
     $users = @(
         if ($PSBoundParameters.ContainsKey('Profiles')) {
-            if ($RequireActiveSession) {
-                if (-not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
-                    $native = Initialize-DefenseClawBootstrapNativePath
-                    $ActiveSessionSIDs = @($native::GetActiveSessionSIDs())
-                }
-                Select-DefenseClawActiveInteractiveUserProfiles `
-                    -Profiles $Profiles `
-                    -ActiveSessionSIDs $ActiveSessionSIDs
-            }
-            else {
-                $Profiles
-            }
+            $Profiles
         }
         else {
-            if ($PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
-                Get-DefenseClawEligibleInteractiveUserProfiles `
-                    -RequireActiveSession:$RequireActiveSession `
-                    -ActiveSessionSIDs $ActiveSessionSIDs
-            }
-            else {
-                Get-DefenseClawEligibleInteractiveUserProfiles `
-                    -RequireActiveSession:$RequireActiveSession
-            }
+            Get-DefenseClawEligibleInteractiveUserProfiles
         }
     )
     if ($users.Count -eq 0) {
-        # An empty manifest is valid YAML. The protected enumerator records a
-        # later-discovered profile as disabled pending explicit administrator
-        # promotion; the bootstrap install simply lands with no rows for now.
+        # An empty manifest is valid YAML. This finite-profile shorthand
+        # transaction simply has no current eligible users to enroll.
         return $sb.ToString()
+    }
+    $activeProfiles = @()
+    if ($DeferInactiveProfiles) {
+        if (-not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
+            $native = Initialize-DefenseClawBootstrapNativePath
+            $ActiveSessionSIDs = @($native::GetActiveSessionSIDs())
+        }
+        $activeProfiles = @(
+            Select-DefenseClawActiveInteractiveUserProfiles `
+                -Profiles $users `
+                -ActiveSessionSIDs $ActiveSessionSIDs
+        )
+    }
+    $activeProfileSIDs = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($activeProfile in $activeProfiles) {
+        [void]$activeProfileSIDs.Add(([string]$activeProfile.SID).Trim())
     }
     # Windows managed_enterprise's manifest validator refuses any
     # `enabled: true` target without an `agent_version` that also meets
@@ -2856,6 +2851,10 @@ function Get-DefenseClawRenderedEnterpriseTargets {
         'cursor'     = '1.7.0'
     }
     foreach ($u in $users) {
+        $deferTarget = (
+            $DeferInactiveProfiles -and
+            -not $activeProfileSIDs.Contains(([string]$u.SID).Trim())
+        )
         foreach ($c in $Connectors) {
             $version = ''
             $nativeCandidateObserved = $false
@@ -2896,6 +2895,9 @@ function Get-DefenseClawRenderedEnterpriseTargets {
             else {
                 [void]$sb.AppendLine("    agent_version: `"$version`"")
                 [void]$sb.AppendLine('    enabled: true')
+                if ($deferTarget) {
+                    [void]$sb.AppendLine('    deferred: true')
+                }
             }
         }
     }
@@ -2989,7 +2991,9 @@ try {
             -Mode $Mode -Connectors $renderedConnectors
         $renderedManifestBody = Get-DefenseClawRenderedEnterpriseTargets `
             -Connectors $renderedConnectors `
-            -RequireActiveSession:($Action -eq 'Install' -and -not $NoStart)
+            -DeferInactiveProfiles:($Action -in @(
+                    'Install', 'Upgrade', 'Repair'
+                ) -and -not $NoStart)
         $renderRoot = $bootstrapEnvironment.Path
         $renderedConfigPath = [IO.Path]::Combine($renderRoot, 'rendered-config.yaml')
         $renderedManifestPath = [IO.Path]::Combine($renderRoot, 'rendered-targets.yaml')

@@ -608,6 +608,39 @@ func captureWindowsManagedRuntimeSelectorTargetPlatform(
 	return snapshot, err
 }
 
+// verifyWindowsManagedRuntimeSelectorTargetAbsentPlatform is the read-only
+// pending-enrollment proof. It deliberately does not acquire/create the
+// selector mutation lock: the selector itself is published atomically, and a
+// later concurrent selection merely makes the next hook/Guardian pass active.
+func verifyWindowsManagedRuntimeSelectorTargetAbsentPlatform(
+	opts WindowsManagedRuntimeSelectorSnapshotOptions,
+) error {
+	opts, _, err := validateWindowsManagedRuntimeSelectorSnapshotOptions(opts)
+	if err != nil {
+		return err
+	}
+	selector, _, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, true)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	entry, selected := windowsManagedRuntimeSelectorTargetForSID(selector, opts.TargetSID)
+	if !selected {
+		return nil
+	}
+	if err := validateWindowsManagedRuntimeSelectorTargetAgainstSnapshot(entry, opts); err != nil {
+		return fmt.Errorf(
+			"enterprise hooks: deferred target has a mismatched selected runtime: %w",
+			err,
+		)
+	}
+	return errors.New(
+		"enterprise hooks: deferred target already has a selected runtime without protected Guardian authorization",
+	)
+}
+
 func restoreWindowsManagedRuntimeSelectorTargetCASPlatform(
 	opts WindowsManagedRuntimeSelectorRestoreOptions,
 ) error {

@@ -28,7 +28,7 @@ import (
 
 const (
 	windowsManagedHooksTeardownSchema        = 4
-	windowsManagedHooksTeardownJournalSchema = 5
+	windowsManagedHooksTeardownJournalSchema = 6
 	windowsManagedHooksTeardownJournalMax    = 32 << 20
 	windowsManagedHooksTeardownJournalFile   = "managed-hooks-teardown-journal.json"
 	windowsManagedHooksTeardownTargetMax     = 384
@@ -41,6 +41,7 @@ type windowsManagedHooksTeardownTarget struct {
 	SID          string `json:"sid"`
 	DataDir      string `json:"data_dir"`
 	AgentVersion string `json:"agent_version"`
+	Deferred     bool   `json:"deferred,omitempty"`
 }
 
 type windowsManagedHooksTeardownJournal struct {
@@ -55,6 +56,7 @@ type windowsManagedHooksTeardownJournal struct {
 	GatewayAddr            string                                                        `json:"gateway_addr"`
 	GatewayServiceName     string                                                        `json:"gateway_service_name"`
 	Targets                []windowsManagedHooksTeardownTarget                           `json:"targets"`
+	PendingTargets         []windowsManagedHooksTeardownTarget                           `json:"pending_targets,omitempty"`
 	ClaudeTargetSIDs       []string                                                      `json:"claude_target_sids"`
 	Claude                 enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot    `json:"claude"`
 	CodexPolicyActive      bool                                                          `json:"codex_policy_active"`
@@ -285,6 +287,17 @@ func runWindowsManagedHooksTeardown(
 		GatewayServiceName:     opts.GatewayServiceName,
 		Targets:                targets,
 	}
+	if activation.State == windowsManagedHooksActivated {
+		identity.PendingTargets, err = windowsManagedHooksPendingTargetsFromGuardian(
+			runtimeDir,
+			report.ManifestPath,
+			manifestSHA256,
+			targets,
+		)
+		if err != nil {
+			return fail(err)
+		}
+	}
 	identity.ClaudeTargetSIDs,
 		identity.CodexPolicyActive,
 		identity.CodexTargets,
@@ -473,6 +486,7 @@ func prepareWindowsManagedHooksTeardown(
 	}
 	selectorTargets, err := captureWindowsManagedHooksRuntimeSelectors(
 		identity.Targets,
+		identity.PendingTargets,
 		identity.HookBinary,
 		identity.ActivationState,
 	)
@@ -894,6 +908,7 @@ func windowsManagedHooksRuntimeSelectorOptions(
 
 func captureWindowsManagedHooksRuntimeSelectors(
 	targets []windowsManagedHooksTeardownTarget,
+	pendingTargets []windowsManagedHooksTeardownTarget,
 	hookBinary string,
 	activationState string,
 ) ([]enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot, error) {
@@ -914,7 +929,11 @@ func captureWindowsManagedHooksRuntimeSelectors(
 				err,
 			)
 		}
-		expectedPresent := activationState == windowsManagedHooksActivated
+		expectedPresent := windowsManagedHooksTeardownSelectorExpected(
+			target,
+			pendingTargets,
+			activationState,
+		)
 		if snapshot.Existed != expectedPresent || snapshot.CAS.Exists != expectedPresent {
 			state := "absent"
 			if expectedPresent {
@@ -1073,6 +1092,54 @@ func windowsManagedHooksTeardownTargetForSelector(
 	return windowsManagedHooksTeardownTarget{}, false
 }
 
+func windowsManagedHooksTeardownSelectorExpected(
+	target windowsManagedHooksTeardownTarget,
+	pendingTargets []windowsManagedHooksTeardownTarget,
+	activationState string,
+) bool {
+	if activationState != windowsManagedHooksActivated {
+		return false
+	}
+	for _, pending := range pendingTargets {
+		if pending.Connector == target.Connector &&
+			strings.EqualFold(pending.SID, target.SID) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateWindowsManagedHooksPendingTargetSubset(
+	targets []windowsManagedHooksTeardownTarget,
+	pendingTargets []windowsManagedHooksTeardownTarget,
+	activationState string,
+) error {
+	if activationState != windowsManagedHooksActivated && len(pendingTargets) != 0 {
+		return errors.New("never-activated teardown journal contains pending target evidence")
+	}
+	allowed := make(map[string]windowsManagedHooksTeardownTarget, len(targets))
+	for _, target := range targets {
+		key := target.Connector + "\x00" + strings.ToUpper(target.SID)
+		allowed[key] = target
+	}
+	seen := make(map[string]struct{}, len(pendingTargets))
+	for _, pending := range pendingTargets {
+		key := pending.Connector + "\x00" + strings.ToUpper(pending.SID)
+		target, ok := allowed[key]
+		if !ok || target != pending {
+			return errors.New("pending teardown target is outside the protected manifest")
+		}
+		if !pending.Deferred {
+			return errors.New("pending teardown target is not authorized for deferred enrollment")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("pending teardown target set contains a duplicate")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
 func verifyWindowsManagedHooksTeardownClean(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	targets []windowsManagedHooksTeardownTarget,
@@ -1150,17 +1217,21 @@ func verifyWindowsManagedHooksTeardownInstalled(
 			return errors.New("managed runtime selector snapshot count does not match the teardown manifest")
 		}
 		for _, expected := range selectorTargets {
-			expectedPresent := identity.ActivationState == windowsManagedHooksActivated
+			target, ok := windowsManagedHooksTeardownTargetForSelector(expected, identity.Targets)
+			if !ok {
+				return errors.New("managed runtime selector snapshot does not match the teardown manifest")
+			}
+			expectedPresent := windowsManagedHooksTeardownSelectorExpected(
+				target,
+				identity.PendingTargets,
+				identity.ActivationState,
+			)
 			if expected.Existed != expectedPresent || expected.CAS.Exists != expectedPresent {
 				return fmt.Errorf(
 					"managed runtime selector snapshot has the wrong activation state for %s target %s",
 					expected.Connector,
 					expected.TargetSID,
 				)
-			}
-			target, ok := windowsManagedHooksTeardownTargetForSelector(expected, identity.Targets)
-			if !ok {
-				return errors.New("managed runtime selector snapshot does not match the teardown manifest")
 			}
 			current, err := enterprisehooks.CaptureWindowsManagedRuntimeSelectorTarget(
 				windowsManagedHooksRuntimeSelectorOptions(target, opts.HookBinary),
@@ -1399,6 +1470,7 @@ func windowsManagedHooksTeardownTargets(
 			SID:          sid.String(),
 			DataDir:      dataDir,
 			AgentVersion: strings.TrimSpace(target.AgentVersion),
+			Deferred:     target.IsDeferred(),
 		}
 		targets = append(targets, row)
 		switch connectorName {
@@ -1441,7 +1513,7 @@ func windowsManagedHooksTeardownFingerprint(
 func validateWindowsManagedHooksTeardownJournal(
 	journal, identity windowsManagedHooksTeardownJournal,
 ) error {
-	if journal.SchemaVersion != windowsManagedHooksTeardownJournalSchema ||
+	if !validWindowsManagedHooksTeardownJournalSchema(journal, identity) ||
 		journal.ManifestPath != identity.ManifestPath ||
 		journal.ManifestSHA256 != identity.ManifestSHA256 ||
 		journal.ManifestFingerprint != identity.ManifestFingerprint ||
@@ -1452,6 +1524,7 @@ func validateWindowsManagedHooksTeardownJournal(
 		journal.GatewayServiceName != identity.GatewayServiceName ||
 		journal.CodexPolicyActive != identity.CodexPolicyActive ||
 		len(journal.Targets) != len(identity.Targets) ||
+		len(journal.PendingTargets) != len(identity.PendingTargets) ||
 		len(journal.ClaudeTargetSIDs) != len(identity.ClaudeTargetSIDs) ||
 		len(journal.CodexTargets) != len(identity.CodexTargets) ||
 		len(journal.CursorTargets) != len(identity.CursorTargets) {
@@ -1467,6 +1540,18 @@ func validateWindowsManagedHooksTeardownJournal(
 		if journal.Targets[index] != identity.Targets[index] {
 			return errors.New("managed-hook teardown journal target set changed")
 		}
+	}
+	for index := range identity.PendingTargets {
+		if journal.PendingTargets[index] != identity.PendingTargets[index] {
+			return errors.New("managed-hook teardown journal pending target set changed")
+		}
+	}
+	if err := validateWindowsManagedHooksPendingTargetSubset(
+		journal.Targets,
+		journal.PendingTargets,
+		journal.ActivationState,
+	); err != nil {
+		return err
 	}
 	for index := range identity.ClaudeTargetSIDs {
 		if journal.ClaudeTargetSIDs[index] != identity.ClaudeTargetSIDs[index] {
@@ -1493,11 +1578,16 @@ func validateWindowsManagedHooksTeardownJournal(
 			snapshot.TargetSID != target.SID {
 			return errors.New("managed-hook teardown journal contains an invalid selector snapshot")
 		}
-		if journal.ActivationState == windowsManagedHooksNeverActivated {
+		expectedPresent := windowsManagedHooksTeardownSelectorExpected(
+			target,
+			journal.PendingTargets,
+			journal.ActivationState,
+		)
+		if !expectedPresent {
 			if snapshot.Existed || snapshot.CAS.Exists || len(snapshot.Target) != 0 ||
 				snapshot.TargetSHA256 != "" || snapshot.CAS.GenerationID != "" ||
 				snapshot.CAS.BundleSHA256 != "" || snapshot.CAS.TargetSHA256 != "" {
-				return errors.New("never-activated teardown journal contains a selector enrollment")
+				return errors.New("pending or never-activated teardown target contains a selector enrollment")
 			}
 			continue
 		}
@@ -1571,6 +1661,33 @@ func validateWindowsManagedHooksTeardownJournal(
 		return errors.New("managed-hook teardown journal contains an invalid Cursor snapshot")
 	}
 	return nil
+}
+
+func validWindowsManagedHooksTeardownJournalSchema(
+	journal, identity windowsManagedHooksTeardownJournal,
+) bool {
+	if journal.SchemaVersion == windowsManagedHooksTeardownJournalSchema {
+		return true
+	}
+	// Schema 5 predates deferred enrollment. It remains valid only for an
+	// exact legacy deployment whose manifest and transaction carry no deferred
+	// or pending target state. This preserves authenticated interrupted-uninstall
+	// recovery without letting an old journal authorize the new exception.
+	if journal.SchemaVersion != 5 || len(journal.PendingTargets) != 0 ||
+		len(identity.PendingTargets) != 0 {
+		return false
+	}
+	for _, target := range journal.Targets {
+		if target.Deferred {
+			return false
+		}
+	}
+	for _, target := range identity.Targets {
+		if target.Deferred {
+			return false
+		}
+	}
+	return true
 }
 
 func windowsManagedHooksValidGenerationID(value string) bool {

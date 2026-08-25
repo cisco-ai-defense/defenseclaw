@@ -392,6 +392,40 @@ func TestWindowsManagedRuntimeGenerationGCFailsClosedWhenSelectedHooksAreAbsent(
 	}
 }
 
+func TestWindowsDeferredPendingProofRejectsSelectedRuntime(t *testing.T) {
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	opts := WindowsManagedRuntimeSelectorSnapshotOptions{
+		Connector:      fixture.options.Connector,
+		TargetSID:      fixture.options.TargetSID,
+		DataDir:        fixture.options.DataDir,
+		HookExecutable: fixture.options.HookExecutable,
+	}
+	if err := verifyWindowsManagedRuntimeSelectorTargetAbsentPlatform(opts); err != nil {
+		t.Fatalf("absent selector target was not accepted as pending: %v", err)
+	}
+	selector := windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     opts.Connector,
+		Targets: []windowsManagedRuntimeSelectorTarget{{
+			Connector:          opts.Connector,
+			SID:                opts.TargetSID,
+			DataDir:            opts.DataDir,
+			HookExecutable:     opts.HookExecutable,
+			GatewayAddr:        "127.0.0.1:18970",
+			GatewayServiceName: "DefenseClawGateway",
+			GenerationID:       strings.Repeat("a", 32),
+			BundleSHA256:       "sha256:" + strings.Repeat("b", 64),
+		}},
+	}
+	if err := publishWindowsManagedRuntimeSelector(selector); err != nil {
+		t.Fatalf("publish selected target fixture: %v", err)
+	}
+	err := verifyWindowsManagedRuntimeSelectorTargetAbsentPlatform(opts)
+	if err == nil || !strings.Contains(err.Error(), "without protected Guardian authorization") {
+		t.Fatalf("selected selector target was accepted as pending: %v", err)
+	}
+}
+
 type windowsManagedRuntimeGenerationMissingHooksGCFixture struct {
 	options WindowsManagedRuntimeGenerationGCOptions
 	target  *windows.SID

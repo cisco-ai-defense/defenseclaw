@@ -44,6 +44,18 @@ func TestLoadManifestRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadManifestRejectsDisabledDeferredTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	data := []byte("version: 1\ntargets:\n  - user: alice\n    connector: codex\n    enabled: false\n    deferred: true\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	_, err := LoadManifest(path)
+	if err == nil || !strings.Contains(err.Error(), "cannot be both disabled and deferred") {
+		t.Fatalf("LoadManifest error = %v, want contradictory deferred-state rejection", err)
+	}
+}
+
 func TestLoadManifestRejectsTrailingDocument(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
 	data := []byte("version: 1\ntargets: []\n---\nversion: 1\ntargets: []\n")

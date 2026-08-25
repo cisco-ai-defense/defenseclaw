@@ -14081,9 +14081,9 @@ function Assert-DefenseClawManagedServiceConfigurations {
     # Spec 005 D1: third service. Same account model + privilege set
     # as the guardian (needs SeImpersonate + SeBackup + SeRestore for
     # per-user profile walks). Shares the guardian's log path — the
-    # enumerator writes one line per cycle to hook-guardian.log rather
-    # than a separate hook-enumerator.log, matching what LocalSystem
-    # can chown without touching a third log-file ACL surface. ImagePath
+    # enumerator records its read-only profile audit there rather than
+    # using a separate hook-enumerator.log, matching what LocalSystem can
+    # chown without touching a third log-file ACL surface. ImagePath
     # differs from guardian's watch command: `enterprise windows
     # enumerate --manifest <path> --interval 5m`.
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
@@ -19113,9 +19113,9 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -ServicingTransaction
         # Spec 005 D1: teardown order enumerator → guardian → gateway.
-        # The enumerator writes targets.yaml; removing it first stops
-        # further writes so the guardian's final reconcile pass sees a
-        # stable file. Guardian teardown after remains unchanged.
+        # The running enumerator is read-only, but removing it first freezes
+        # profile-audit activity while Guardian and its authenticated manifest
+        # are retired. Guardian teardown after remains unchanged.
         $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
         Assert-DefenseClawOwnedServiceOrAbsent `
             -Name $enumeratorServiceName `

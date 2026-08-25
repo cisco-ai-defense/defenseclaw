@@ -472,13 +472,16 @@ func enterpriseHooksInstallError(cmd *cobra.Command, err error) error {
 }
 
 type enterpriseHookReconcileRow struct {
-	User      string                         `json:"user,omitempty"`
-	UserHome  string                         `json:"user_home,omitempty"`
-	SID       string                         `json:"sid,omitempty"`
-	Connector string                         `json:"connector"`
-	OK        bool                           `json:"ok"`
-	Error     string                         `json:"error,omitempty"`
-	Result    *enterprisehooks.InstallResult `json:"result,omitempty"`
+	User      string `json:"user,omitempty"`
+	UserHome  string `json:"user_home,omitempty"`
+	SID       string `json:"sid,omitempty"`
+	Connector string `json:"connector"`
+	OK        bool   `json:"ok"`
+	// Pending is valid only for an administrator-authored deferred manifest
+	// row whose exact WTSActive token is currently unavailable.
+	Pending bool                           `json:"pending,omitempty"`
+	Error   string                         `json:"error,omitempty"`
+	Result  *enterprisehooks.InstallResult `json:"result,omitempty"`
 }
 
 type enterpriseHookReconcileRun struct {
@@ -486,6 +489,7 @@ type enterpriseHookReconcileRun struct {
 	ManifestSHA256      string
 	Rows                []enterpriseHookReconcileRow
 	Failures            int
+	Pending             int
 	StateErr            error
 	WatchDirs           []string
 	WatchExclusiveFiles []string // DC-only writers: react to any event
@@ -525,6 +529,8 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		}
 		if row.OK {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled\n", Style("✓", "fg=green", "bold"), label)
+		} else if row.Pending {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), label)
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), label, row.Error)
 		}
@@ -637,8 +643,8 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	if report.OK {
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d/%d targets verified)\n",
-			Style("✓", "fg=green", "bold"), state.SuccessCount, state.TargetCount)
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d verified, %d pending, %d total)\n",
+			Style("✓", "fg=green", "bold"), state.SuccessCount, state.PendingCount, state.TargetCount)
 		return nil
 	}
 	for _, issue := range report.Errors {
@@ -660,7 +666,7 @@ func enterpriseHooksStatusError(cmd *cobra.Command, report enterpriseHookStatusR
 func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []string {
 	issues := make([]string, 0, state.FailureCount)
 	for _, row := range state.Results {
-		if row.OK {
+		if row.OK || row.Pending {
 			continue
 		}
 		detail := strings.TrimSpace(row.Error)
@@ -712,9 +718,21 @@ func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianStat
 		return enterpriseHookGuardianState{}, true, fmt.Errorf("parse hook guardian state %s: trailing content", path)
 	}
 	if state.Version != 1 ||
-		state.TargetCount < 0 || state.SuccessCount < 0 || state.FailureCount < 0 ||
-		state.SuccessCount+state.FailureCount != state.TargetCount || len(state.Results) != state.TargetCount {
+		state.TargetCount < 0 || state.SuccessCount < 0 || state.FailureCount < 0 || state.PendingCount < 0 ||
+		state.SuccessCount+state.FailureCount+state.PendingCount != state.TargetCount || len(state.Results) != state.TargetCount {
 		return enterpriseHookGuardianState{}, true, fmt.Errorf("hook guardian state %s has invalid schema or target counts", path)
+	}
+	observedPending := 0
+	for _, row := range state.Results {
+		if row.Pending {
+			observedPending++
+		}
+		if row.Pending && (row.OK || row.Result != nil || strings.TrimSpace(row.Error) != "") {
+			return enterpriseHookGuardianState{}, true, fmt.Errorf("hook guardian state %s has a noncanonical pending target", path)
+		}
+	}
+	if observedPending != state.PendingCount {
+		return enterpriseHookGuardianState{}, true, fmt.Errorf("hook guardian state %s has inconsistent pending rows", path)
 	}
 	return state, true, nil
 }
@@ -737,14 +755,14 @@ func compareEnterpriseHookGuardianRecords(
 	if err := managed.ValidateHookGuardianFreshness(activation.UpdatedAt, now); err != nil {
 		issues = append(issues, fmt.Sprintf("protected guardian activation is not fresh: %v", err))
 	}
-	if !state.OK || state.FailureCount != 0 || state.SuccessCount != state.TargetCount {
-		issues = append(issues, fmt.Sprintf("last guardian reconcile is incomplete (%d/%d targets succeeded)", state.SuccessCount, state.TargetCount))
+	if !state.OK || state.FailureCount != 0 || state.SuccessCount+state.PendingCount != state.TargetCount {
+		issues = append(issues, fmt.Sprintf("last guardian reconcile is incomplete (%d succeeded, %d pending, %d total)", state.SuccessCount, state.PendingCount, state.TargetCount))
 	}
-	if !authorization.OK || authorization.FailureCount != 0 || authorization.SuccessCount != authorization.TargetCount {
-		issues = append(issues, fmt.Sprintf("protected guardian authorization is incomplete (%d/%d targets succeeded)", authorization.SuccessCount, authorization.TargetCount))
+	if !authorization.OK || authorization.FailureCount != 0 || authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount {
+		issues = append(issues, fmt.Sprintf("protected guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount))
 	}
 	if state.TargetCount != authorization.TargetCount || state.SuccessCount != authorization.SuccessCount ||
-		state.FailureCount != authorization.FailureCount {
+		state.FailureCount != authorization.FailureCount || state.PendingCount != authorization.PendingCount {
 		issues = append(issues, "guardian state and protected authorization target counts do not match")
 	}
 	if state.UpdatedAt == "" || authorization.UpdatedAt == "" || state.UpdatedAt != authorization.UpdatedAt {
@@ -760,16 +778,18 @@ func compareEnterpriseHookGuardianRecords(
 		issues = append(issues, "protected guardian activation does not identify the legacy record pair")
 	}
 	if !activation.OK || activation.FailureCount != 0 ||
-		activation.SuccessCount != activation.TargetCount {
+		activation.SuccessCount+activation.PendingCount != activation.TargetCount {
 		issues = append(issues, fmt.Sprintf(
-			"protected guardian activation is incomplete (%d/%d targets succeeded)",
+			"protected guardian activation is incomplete (%d succeeded, %d pending, %d total)",
 			activation.SuccessCount,
+			activation.PendingCount,
 			activation.TargetCount,
 		))
 	}
 	if activation.TargetCount != state.TargetCount ||
 		activation.SuccessCount != state.SuccessCount ||
-		activation.FailureCount != state.FailureCount {
+		activation.FailureCount != state.FailureCount ||
+		activation.PendingCount != state.PendingCount {
 		issues = append(issues, "protected guardian activation target counts do not match")
 	}
 	if expected := strings.TrimSpace(expectedManifest); expected != "" && !sameEnterpriseHookPath(state.Manifest, expected) {
@@ -783,13 +803,14 @@ func compareEnterpriseHookGuardianRecords(
 		issues = append(issues, fmt.Sprintf("guardian activation records manifest SHA-256 %s, expected %s", activation.ManifestSHA256, expected))
 	}
 	if state.OK && authorization.OK {
+		protectedRows := enterpriseHookProtectedReconcileRows(state.Results)
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(state.Results, authorization.ProtectedTargets, "authorization")...,
+			compareEnterpriseHookProtectedTargetSets(protectedRows, authorization.ProtectedTargets, "authorization")...,
 		)
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(state.Results, activation.ProtectedTargets, "activation")...,
+			compareEnterpriseHookProtectedTargetSets(protectedRows, activation.ProtectedTargets, "activation")...,
 		)
 	} else {
 		for _, row := range state.Results {
@@ -809,6 +830,16 @@ func compareEnterpriseHookGuardianRecords(
 		}
 	}
 	return issues
+}
+
+func enterpriseHookProtectedReconcileRows(rows []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+	protected := make([]enterpriseHookReconcileRow, 0, len(rows))
+	for _, row := range rows {
+		if row.OK {
+			protected = append(protected, row)
+		}
+	}
+	return protected
 }
 
 // compareEnterpriseHookProtectedTargetSets diffs the reconcile-time target
@@ -895,7 +926,30 @@ type enterpriseHookVerifyRun struct {
 	Manifest         string
 	Rows             []enterpriseHookReconcileRow
 	Failures         int
+	Pending          int
 	AuthorizationErr error
+}
+
+func enterpriseHookDeferredPendingAfterSessionError(
+	target enterprisehooks.ManifestTarget,
+	previouslyProtected bool,
+	err error,
+) (bool, error) {
+	if err == nil || !target.IsDeferred() || previouslyProtected ||
+		!enterprisehooks.IsWindowsTargetSessionUnavailable(err) {
+		return false, err
+	}
+	available, checkErr := enterpriseHookDeferredTargetSessionAvailable(target)
+	if checkErr != nil {
+		return false, checkErr
+	}
+	if available {
+		// The session changed between the mutating operation and the bounded
+		// recheck. Preserve the original failure so this cycle cannot claim a
+		// pending state from a stale observation; the next cycle retries.
+		return false, err
+	}
+	return true, nil
 }
 
 const enterpriseHookVerifyGenerationAttempts = 5
@@ -947,6 +1001,8 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 	for _, row := range run.Rows {
 		if row.OK {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row))
+		} else if row.Pending {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row))
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), enterpriseHookTargetLabel(row), row.Error)
 		}
@@ -1117,8 +1173,8 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 	} else if !exists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is missing")
 	} else if !authorization.OK || authorization.FailureCount != 0 ||
-		authorization.SuccessCount != authorization.TargetCount {
-		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d/%d targets succeeded)", authorization.SuccessCount, authorization.TargetCount)
+		authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount {
+		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount)
 	} else if freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); freshnessErr != nil {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is not fresh: %w", freshnessErr)
 	} else if activationErr != nil {
@@ -1168,6 +1224,27 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 			row.SID = resolved.sid
 			row.UserHome = resolved.home
 		}
+		var previousProtection enterpriseHookPreviousProtection
+		if targetErr == nil {
+			previousProtection, targetErr = previousEnterpriseHookProtection(
+				cfg.DataDir,
+				target.User,
+				resolved.home,
+				resolved.sid,
+				target.Connector,
+			)
+		}
+		if targetErr == nil && target.IsDeferred() &&
+			!previousProtection.PreviouslyProtected {
+			var available bool
+			available, targetErr = enterpriseHookDeferredTargetSessionAvailable(target)
+			if targetErr == nil && !available {
+				row.Pending = true
+				run.Pending++
+				run.Rows = append(run.Rows, row)
+				continue
+			}
+		}
 		token := ""
 		otlpToken := ""
 		if targetErr == nil {
@@ -1216,6 +1293,18 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				targetErr = fmt.Errorf("protected authorization does not cover target")
 			}
 		}
+		var deferredPending bool
+		deferredPending, targetErr = enterpriseHookDeferredPendingAfterSessionError(
+			target,
+			previousProtection.PreviouslyProtected,
+			targetErr,
+		)
+		if deferredPending {
+			row.Pending = true
+			run.Pending++
+			run.Rows = append(run.Rows, row)
+			continue
+		}
 		if targetErr != nil {
 			row.OK = false
 			row.Error = targetErr.Error()
@@ -1223,12 +1312,79 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		}
 		run.Rows = append(run.Rows, row)
 	}
-	if run.AuthorizationErr == nil && exists {
-		if issues := compareEnterpriseHookProtectedTargetSets(run.Rows, authorization.ProtectedTargets, "authorization"); len(issues) > 0 {
+	if run.AuthorizationErr == nil && exists && activationExists {
+		if issues := enterpriseHookVerifyDispositionIssues(
+			run,
+			authorization,
+			activation,
+		); len(issues) > 0 {
 			run.AuthorizationErr = fmt.Errorf("%s", strings.Join(issues, "; "))
 		}
 	}
 	return run, nil
+}
+
+func enterpriseHookVerifyDispositionIssues(
+	run enterpriseHookVerifyRun,
+	authorization enterpriseHookGuardianAuthorization,
+	activation enterpriseHookGuardianActivation,
+) []string {
+	protected := enterpriseHookProtectedReconcileRows(run.Rows)
+	wantTargets := len(run.Rows)
+	wantSuccesses := len(protected)
+	wantPending := run.Pending
+	wantFailures := run.Failures
+	var issues []string
+	if authorization.TargetCount != wantTargets ||
+		authorization.SuccessCount != wantSuccesses ||
+		authorization.PendingCount != wantPending ||
+		authorization.FailureCount != wantFailures {
+		issues = append(issues, fmt.Sprintf(
+			"protected authorization target dispositions do not match current verification (got %d succeeded, %d pending, %d failed, %d total; want %d succeeded, %d pending, %d failed, %d total)",
+			authorization.SuccessCount,
+			authorization.PendingCount,
+			authorization.FailureCount,
+			authorization.TargetCount,
+			wantSuccesses,
+			wantPending,
+			wantFailures,
+			wantTargets,
+		))
+	}
+	if activation.TargetCount != wantTargets ||
+		activation.SuccessCount != wantSuccesses ||
+		activation.PendingCount != wantPending ||
+		activation.FailureCount != wantFailures {
+		issues = append(issues, fmt.Sprintf(
+			"protected activation target dispositions do not match current verification (got %d succeeded, %d pending, %d failed, %d total; want %d succeeded, %d pending, %d failed, %d total)",
+			activation.SuccessCount,
+			activation.PendingCount,
+			activation.FailureCount,
+			activation.TargetCount,
+			wantSuccesses,
+			wantPending,
+			wantFailures,
+			wantTargets,
+		))
+	}
+	issues = append(
+		issues,
+		compareEnterpriseHookProtectedTargetSets(
+			protected,
+			authorization.ProtectedTargets,
+			"authorization",
+		)...,
+	)
+	issues = append(
+		issues,
+		compareEnterpriseHookProtectedTargetSets(
+			protected,
+			activation.ProtectedTargets,
+			"activation",
+		)...,
+	)
+	sort.Strings(issues)
+	return issues
 }
 
 func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcileRun, error) {
@@ -1272,6 +1428,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
+	pending := 0
+	pendingTargets := make([]enterprisehooks.ManifestTarget, 0)
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
@@ -1287,9 +1445,34 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		token := ""
 		otlpToken := ""
+		var previousProtection enterpriseHookPreviousProtection
 		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
 		if err == nil {
 			row.SID = strings.TrimSpace(resolved.sid)
+			row.UserHome = strings.TrimSpace(resolved.home)
+			var authorizationErr error
+			previousProtection, authorizationErr = previousEnterpriseHookProtection(
+				cfg.DataDir,
+				target.User,
+				resolved.home,
+				resolved.sid,
+				target.Connector,
+			)
+			if authorizationErr != nil {
+				err = authorizationErr
+			}
+		}
+		if err == nil && target.IsDeferred() &&
+			!previousProtection.PreviouslyProtected {
+			var available bool
+			available, err = enterpriseHookDeferredTargetSessionAvailable(target)
+			if err == nil && !available {
+				row.Pending = true
+				pending++
+				pendingTargets = append(pendingTargets, target)
+				rows = append(rows, row)
+				continue
+			}
 		}
 		if err == nil {
 			var tokenErr error
@@ -1306,16 +1489,6 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			}
 		}
 		if err == nil {
-			previousProtection, authorizationErr := previousEnterpriseHookProtection(
-				cfg.DataDir,
-				target.User,
-				resolved.home,
-				resolved.sid,
-				target.Connector,
-			)
-			if authorizationErr != nil {
-				err = authorizationErr
-			}
 			opts := enterprisehooks.InstallOptions{
 				ConnectorName:                      target.Connector,
 				UserHome:                           resolved.home,
@@ -1354,7 +1527,22 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			}
 			if err == nil {
 				var result enterprisehooks.InstallResult
-				result, err = enterprisehooks.Install(ctx, opts)
+				if previousProtection.PreviouslyProtected {
+					result, err = enterprisehooks.Verify(ctx, opts)
+					if err != nil {
+						var available bool
+						available, err = enterpriseHookTargetSessionAvailable(target)
+						if err == nil && available {
+							result, err = enterprisehooks.Install(ctx, opts)
+						} else if err == nil {
+							err = fmt.Errorf(
+								"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
+							)
+						}
+					}
+				} else {
+					result, err = enterprisehooks.Install(ctx, opts)
+				}
 				if err == nil {
 					row.OK = true
 					row.UserHome = result.UserHome
@@ -1362,6 +1550,19 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					row.Result = &result
 				}
 			}
+		}
+		var deferredPending bool
+		deferredPending, err = enterpriseHookDeferredPendingAfterSessionError(
+			target,
+			previousProtection.PreviouslyProtected,
+			err,
+		)
+		if deferredPending {
+			row.Pending = true
+			pending++
+			pendingTargets = append(pendingTargets, target)
+			rows = append(rows, row)
+			continue
 		}
 		if err != nil {
 			failures++
@@ -1373,7 +1574,14 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 
 	var enrollmentErr error
 	if failures == 0 {
-		enrollmentErr = syncEnterpriseHookManagedEnrollments(manifest, apiAddr, true)
+		enrollmentErr = stageEnterpriseHookDeferredManagedPolicies(
+			manifest,
+			pendingTargets,
+			apiAddr,
+		)
+		if enrollmentErr == nil {
+			enrollmentErr = syncEnterpriseHookManagedEnrollments(manifest, apiAddr, true)
+		}
 	}
 	stateErr := writeEnterpriseHookGuardianState(
 		cfg.DataDir,
@@ -1391,6 +1599,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	run.Rows = rows
 	run.Failures = failures
+	run.Pending = pending
 	run.StateErr = stateErr
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
@@ -1513,13 +1722,13 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			triggerTag = fmt.Sprintf(" trigger_path=%q trigger_op=%s", lastTriggerPath, lastTriggerOp)
 		}
 		if changed {
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d%s\n", reason, status, len(run.Rows), run.Failures, len(watched), triggerTag)
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d pending=%d failures=%d watch_dirs=%d%s\n", reason, status, len(run.Rows), run.Pending, run.Failures, len(watched), triggerTag)
 		} else {
 			// Log at DEBUG-ish cadence: one line per no-change
 			// reconcile is fine and load-bearing for triage (we still
 			// want to know the guardian is alive), but keep it
 			// distinguishable from a real repair.
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d no_change=true%s\n", reason, status, len(run.Rows), run.Failures, len(watched), triggerTag)
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d pending=%d failures=%d watch_dirs=%d no_change=true%s\n", reason, status, len(run.Rows), run.Pending, run.Failures, len(watched), triggerTag)
 		}
 		lastTriggerPath = ""
 		lastTriggerOp = 0
@@ -2119,6 +2328,7 @@ type enterpriseHookGuardianState struct {
 	TargetCount      int                          `json:"target_count"`
 	SuccessCount     int                          `json:"success_count"`
 	FailureCount     int                          `json:"failure_count"`
+	PendingCount     int                          `json:"pending_count,omitempty"`
 	Results          []enterpriseHookReconcileRow `json:"results"`
 	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets,omitempty"`
 }
@@ -2130,6 +2340,7 @@ type enterpriseHookGuardianAuthorization struct {
 	TargetCount      int                          `json:"target_count"`
 	SuccessCount     int                          `json:"success_count"`
 	FailureCount     int                          `json:"failure_count"`
+	PendingCount     int                          `json:"pending_count,omitempty"`
 	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets"`
 }
 
@@ -2147,6 +2358,7 @@ type enterpriseHookGuardianActivation struct {
 	TargetCount      int                          `json:"target_count"`
 	SuccessCount     int                          `json:"success_count"`
 	FailureCount     int                          `json:"failure_count"`
+	PendingCount     int                          `json:"pending_count,omitempty"`
 	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets"`
 }
 
@@ -2172,10 +2384,23 @@ func writeEnterpriseHookGuardianState(
 	}
 	reconcileID := hex.EncodeToString(reconcileIDBytes)
 	successes := 0
+	pending := 0
 	for _, row := range rows {
+		if row.OK && row.Pending {
+			return fmt.Errorf("hook guardian reconcile row cannot be both successful and pending")
+		}
+		if row.Pending && (row.Result != nil || strings.TrimSpace(row.Error) != "") {
+			return fmt.Errorf("hook guardian pending row contains result or error state")
+		}
 		if row.OK {
 			successes++
 		}
+		if row.Pending {
+			pending++
+		}
+	}
+	if successes+pending+failures != len(rows) {
+		return fmt.Errorf("hook guardian reconcile rows have inconsistent target dispositions")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	previous, _, err := loadEnterpriseHookGuardianAuthorization(dataDir)
@@ -2186,10 +2411,11 @@ func writeEnterpriseHookGuardianState(
 	authorization := enterpriseHookGuardianAuthorization{
 		Version:          1,
 		UpdatedAt:        now,
-		OK:               complete && failures == 0 && successes == len(rows),
+		OK:               complete && failures == 0 && successes+pending == len(rows),
 		TargetCount:      len(rows),
 		SuccessCount:     successes,
 		FailureCount:     failures,
+		PendingCount:     pending,
 		ProtectedTargets: protected,
 	}
 	authorizationData, err := json.MarshalIndent(authorization, "", "  ")
@@ -2238,10 +2464,11 @@ func writeEnterpriseHookGuardianState(
 		Version:      1,
 		UpdatedAt:    now,
 		Manifest:     strings.TrimSpace(manifest),
-		OK:           complete && failures == 0,
+		OK:           complete && failures == 0 && successes+pending == len(rows),
 		TargetCount:  len(rows),
 		SuccessCount: successes,
 		FailureCount: failures,
+		PendingCount: pending,
 		Results:      rows,
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -2279,10 +2506,11 @@ func writeEnterpriseHookGuardianState(
 		ReconcileID:      reconcileID,
 		Manifest:         strings.TrimSpace(manifest),
 		ManifestSHA256:   manifestSHA256,
-		OK:               complete && failures == 0 && successes == len(rows),
+		OK:               complete && failures == 0 && successes+pending == len(rows),
 		TargetCount:      len(rows),
 		SuccessCount:     successes,
 		FailureCount:     failures,
+		PendingCount:     pending,
 		ProtectedTargets: protected,
 	}
 	activationData, err := json.MarshalIndent(activation, "", "  ")
@@ -2401,14 +2629,14 @@ func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuar
 	if state.Version != 1 {
 		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s has unsupported version %d", path, state.Version)
 	}
-	if state.TargetCount < 0 || state.SuccessCount < 0 || state.FailureCount < 0 ||
-		state.SuccessCount+state.FailureCount != state.TargetCount {
+	if state.TargetCount < 0 || state.SuccessCount < 0 || state.FailureCount < 0 || state.PendingCount < 0 ||
+		state.SuccessCount+state.FailureCount+state.PendingCount != state.TargetCount {
 		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s has inconsistent target counts", path)
 	}
 	rows := make([]enterpriseHookReconcileRow, 0, len(state.ProtectedTargets))
 	seen := map[string]struct{}{}
 	for _, row := range state.ProtectedTargets {
-		if !row.OK {
+		if !row.OK || row.Pending {
 			return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s contains an unsuccessful protected target", path)
 		}
 		key := enterpriseHookProtectedTargetKey(row)
@@ -2463,14 +2691,14 @@ func loadEnterpriseHookGuardianActivation(dataDir string) (enterpriseHookGuardia
 		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
 		!validEnterpriseHookHex(activation.ManifestSHA256, sha256.Size) ||
 		strings.TrimSpace(activation.Manifest) == "" ||
-		activation.TargetCount < 0 || activation.SuccessCount < 0 || activation.FailureCount < 0 ||
-		activation.SuccessCount+activation.FailureCount != activation.TargetCount {
+		activation.TargetCount < 0 || activation.SuccessCount < 0 || activation.FailureCount < 0 || activation.PendingCount < 0 ||
+		activation.SuccessCount+activation.FailureCount+activation.PendingCount != activation.TargetCount {
 		return enterpriseHookGuardianActivation{}, true, fmt.Errorf("hook guardian activation %s has an invalid schema", path)
 	}
 	rows := make([]enterpriseHookReconcileRow, 0, len(activation.ProtectedTargets))
 	seen := map[string]struct{}{}
 	for _, row := range activation.ProtectedTargets {
-		if !row.OK {
+		if !row.OK || row.Pending {
 			return enterpriseHookGuardianActivation{}, true, fmt.Errorf("hook guardian activation %s contains an unsuccessful protected target", path)
 		}
 		key := enterpriseHookProtectedTargetKey(row)
@@ -2615,7 +2843,19 @@ func enterpriseHookRowMatches(row enterpriseHookReconcileRow, userName, userHome
 	rowSID := strings.TrimSpace(row.SID)
 	sid = strings.TrimSpace(sid)
 	if rowSID != "" || sid != "" {
-		return rowSID != "" && sid != "" && strings.EqualFold(rowSID, sid)
+		if rowSID == "" || sid == "" || !strings.EqualFold(rowSID, sid) {
+			return false
+		}
+		// A SID match alone is not enough on Windows: a stale ProfileList
+		// binding must not carry prior authorization to a different home.
+		if userHome != "" {
+			rowHome := strings.TrimSpace(row.UserHome)
+			if rowHome == "" && row.Result != nil {
+				rowHome = row.Result.UserHome
+			}
+			return rowHome != "" && sameEnterpriseHookPath(rowHome, userHome)
+		}
+		return true
 	}
 	if userName != "" && strings.TrimSpace(row.User) == userName {
 		return true

@@ -130,9 +130,9 @@ type EnumerateOptions struct {
 // row), the enumerator prefers the one whose `ProfileImagePath`
 // mtime is newer.
 //
-// AgentVersion + Enabled preservation: for each (SID, Connector) row
+// AgentVersion + Enabled + Deferred preservation: for each (SID, Connector) row
 // that already exists in `opts.ExistingManifestPath` (if set), the
-// pre-existing AgentVersion + Enabled fields are carried over. New
+// pre-existing AgentVersion + Enabled + Deferred fields are carried over. New
 // rows — those discovered by the ProfileList walk that had no
 // counterpart in the file — start with `Enabled: false` and empty
 // AgentVersion so the guardian's LoadManifest skips schema-validation
@@ -401,7 +401,7 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 	return previous
 }
 
-// applyPreviousRowState copies AgentVersion + Enabled from the
+// applyPreviousRowState copies AgentVersion + Enabled + Deferred from the
 // existing manifest into `row` if a match is found. If no match, it
 // leaves both fields at their zero values — Enabled stays nil (the
 // default-enabled behaviour), but since AgentVersion is empty the
@@ -417,6 +417,7 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	if prev, ok := previous[key]; ok {
 		row.AgentVersion = prev.AgentVersion
 		row.Enabled = prev.Enabled
+		row.Deferred = prev.Deferred
 		row.User = prev.User
 		row.UID = prev.UID
 		row.GID = prev.GID

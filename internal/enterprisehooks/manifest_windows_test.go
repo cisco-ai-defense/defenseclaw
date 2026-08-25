@@ -116,3 +116,27 @@ targets:
 		t.Fatalf("LoadManifest error = %v, want explicit agent_version rejection", err)
 	}
 }
+
+func TestLoadManifestWindowsAcceptsEnabledDeferredTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(path, []byte(`
+version: 1
+targets:
+  - user_home: 'C:\Users\alice'
+    sid: S-1-5-21-1-2-3-1001
+    connector: codex
+    agent_version: codex-cli 0.142.0
+    enabled: true
+    deferred: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Targets) != 1 || !manifest.Targets[0].IsEnabled() ||
+		!manifest.Targets[0].IsDeferred() {
+		t.Fatalf("manifest = %+v, want one enabled deferred target", manifest)
+	}
+}

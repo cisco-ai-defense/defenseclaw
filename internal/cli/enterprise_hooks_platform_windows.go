@@ -26,6 +26,52 @@ var enterpriseHookSIDProfilePath = windowsEnterpriseHookSIDProfilePath
 
 var enterpriseHookWindowsSystemDirectory = windows.GetSystemDirectory
 
+var enterpriseHookWindowsTargetSessionCheck = enterprisehooks.RequireWindowsEnterpriseTargetSession
+var enterpriseHookWindowsDeferredPendingCheck = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
+var enterpriseHookClaudePolicyIdentityVerifier = enterprisehooks.VerifyWindowsClaudeManagedPolicyIdentity
+var enterpriseHookCursorPolicyIdentityVerifier = enterprisehooks.VerifyWindowsCursorManagedPolicyIdentity
+
+func enterpriseHookTargetSessionAvailable(
+	target enterprisehooks.ManifestTarget,
+) (bool, error) {
+	err := enterpriseHookWindowsTargetSessionCheck(
+		strings.TrimSpace(target.SID),
+		strings.TrimSpace(target.UserHome),
+	)
+	if err == nil {
+		return true, nil
+	}
+	if enterprisehooks.IsWindowsTargetSessionUnavailable(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func enterpriseHookDeferredTargetSessionAvailable(
+	target enterprisehooks.ManifestTarget,
+) (bool, error) {
+	available, err := enterpriseHookTargetSessionAvailable(target)
+	if err != nil || available {
+		return available, err
+	}
+	if pendingErr := enterpriseHookWindowsDeferredPendingCheck(target); pendingErr != nil {
+		return false, pendingErr
+	}
+	return false, nil
+}
+
+func stageEnterpriseHookDeferredManagedPolicies(
+	manifest enterprisehooks.Manifest,
+	pending []enterprisehooks.ManifestTarget,
+	apiAddr string,
+) error {
+	return enterprisehooks.StageWindowsEnterpriseDeferredPolicies(
+		manifest,
+		pending,
+		apiAddr,
+	)
+}
+
 func syncEnterpriseHookManagedEnrollments(
 	manifest enterprisehooks.Manifest,
 	apiAddr string,
@@ -317,10 +363,49 @@ func verifyEnterpriseHookManagedEnrollments(
 	if cursorActive != (len(desiredCursor) > 0) || len(currentCursor) != len(desiredCursor) {
 		return fmt.Errorf("Cursor protected SID enrollment does not match the enabled manifest")
 	}
+	if err := verifyWindowsEnterpriseManagedPolicyIdentities(
+		codexOpts,
+		claudeActive,
+		currentCodex,
+		cursorActive,
+	); err != nil {
+		return err
+	}
 	for index := range desiredCursor {
 		if !strings.EqualFold(currentCursor[index].SID, desiredCursor[index].SID) ||
 			!sameWindowsEnterprisePathCLI(currentCursor[index].DataDir, desiredCursor[index].DataDir) {
 			return fmt.Errorf("Cursor protected SID enrollment does not match the enabled manifest")
+		}
+	}
+	return nil
+}
+
+func verifyWindowsEnterpriseManagedPolicyIdentities(
+	codexOpts connector.WindowsCodexMachineRequirementsOptions,
+	claudeActive bool,
+	currentCodex connector.WindowsCodexManagedRuntimeRegistry,
+	cursorActive bool,
+) error {
+	if claudeActive {
+		if err := enterpriseHookClaudePolicyIdentityVerifier(
+			codexOpts.HookBinary,
+			codexOpts.GatewayAddr,
+			codexOpts.GatewayServiceName,
+		); err != nil {
+			return err
+		}
+	}
+	if currentCodex.Active && (currentCodex.GatewayAddr != codexOpts.GatewayAddr ||
+		currentCodex.GatewayServiceName != codexOpts.GatewayServiceName) {
+		return fmt.Errorf("Codex protected machine identity does not match the gateway deployment")
+	}
+	if cursorActive {
+		if err := enterpriseHookCursorPolicyIdentityVerifier(
+			codexOpts.HookBinary,
+			codexOpts.GatewayAddr,
+			codexOpts.GatewayServiceName,
+		); err != nil {
+			return err
 		}
 	}
 	return nil

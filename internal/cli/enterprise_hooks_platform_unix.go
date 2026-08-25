@@ -16,6 +16,24 @@ var enterpriseHookSIDProfilePath = func(string) (string, error) {
 	return "", fmt.Errorf("SID-only targets are supported only on native Windows")
 }
 
+func enterpriseHookDeferredTargetSessionAvailable(
+	enterprisehooks.ManifestTarget,
+) (bool, error) {
+	return false, fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
+}
+
+func enterpriseHookTargetSessionAvailable(enterprisehooks.ManifestTarget) (bool, error) {
+	return true, nil
+}
+
+func stageEnterpriseHookDeferredManagedPolicies(
+	enterprisehooks.Manifest,
+	[]enterprisehooks.ManifestTarget,
+	string,
+) error {
+	return nil
+}
+
 func syncEnterpriseHookManagedEnrollments(
 	enterprisehooks.Manifest,
 	string,

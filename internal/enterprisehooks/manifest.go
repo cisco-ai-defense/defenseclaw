@@ -32,6 +32,11 @@ type ManifestTarget struct {
 	DataDir      string `json:"data_dir,omitempty" yaml:"data_dir,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty" yaml:"agent_version,omitempty"`
 	Enabled      *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// Deferred authorizes the Windows Guardian to leave this otherwise-enabled
+	// target pending while no exact WTSActive token exists for its manifest SID.
+	// The bit lives in the administrator-owned, digest-bound manifest so an
+	// ordinary disabled row can never be mistaken for automatic enrollment.
+	Deferred bool `json:"deferred,omitempty" yaml:"deferred,omitempty"`
 }
 
 const enterpriseHookManifestMaxBytes int64 = 4 << 20
@@ -137,6 +142,12 @@ func LoadManifestWithSHA256(path string) (Manifest, string, error) {
 	}
 	seen := map[string]int{}
 	for i, target := range manifest.Targets {
+		if target.Deferred && target.Enabled != nil && !*target.Enabled {
+			return Manifest{}, "", fmt.Errorf(
+				"enterprise hooks: target %d cannot be both disabled and deferred",
+				i,
+			)
+		}
 		if target.Enabled != nil && !*target.Enabled {
 			continue
 		}
@@ -172,4 +183,8 @@ func manifestTargetKey(target ManifestTarget) string {
 
 func (t ManifestTarget) IsEnabled() bool {
 	return t.Enabled == nil || *t.Enabled
+}
+
+func (t ManifestTarget) IsDeferred() bool {
+	return t.Deferred
 }

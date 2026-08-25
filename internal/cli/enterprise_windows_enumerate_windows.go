@@ -19,6 +19,8 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,9 +37,9 @@ import (
 // `StartInterval = 300` (5 minutes).
 const enterpriseWindowsEnumerateDefaultInterval = 5 * time.Minute
 
-// enterpriseWindowsEnumerateInitialCycleDelay bounds the "first
-// cycle" wait so a `--deferred-config` fresh-install install path
-// doesn't have to wait a full 5-minute interval before hooks appear.
+// enterpriseWindowsEnumerateInitialCycleDelay bounds the first audit
+// wait so a `--deferred-config` service start doesn't have to wait a
+// full 5-minute interval before profile drift is reported.
 // Set to 30 s so the gateway + guardian services publish their
 // "starting" health lines FIRST (each takes ~5-10 s on a cold-boot);
 // the enumerator's first cycle then runs, and any hooked-in health
@@ -72,11 +74,11 @@ type enterpriseWindowsEnumerateOptions struct {
 //     exits. Used by the installer's fresh-install path (replaces
 //     the retired inline PowerShell walk at
 //     `DefenseClawEnterprise.psm1:3663-3736`).
-//   - default (no `--once`): enters the interval-loop the SCM
-//     service invokes at boot. Sleeps `--interval` (default 5m)
-//     between cycles; each cycle is bounded by
-//     `enterpriseWindowsEnumerateCycleTimeout`; ctx-cancel
-//     (SCM stop signal) returns within a bounded window.
+//   - default (no `--once`): enters the read-only interval-loop the
+//     SCM service invokes at boot. It audits the current profile set
+//     against the authenticated committed manifest but never changes
+//     authorization. New profiles require an administrator Repair or
+//     Upgrade.
 //
 // Spec 005 REQ-03, REQ-04, REQ-13, REQ-18, REQ-19.
 func newEnterpriseWindowsEnumerateCommand() *cobra.Command {
@@ -86,27 +88,26 @@ func newEnterpriseWindowsEnumerateCommand() *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "enumerate",
-		Short: "Refresh targets.yaml from the current local user profile set",
+		Short: "Publish pre-commit targets or audit committed Windows enrollment",
 		Long: `Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList to
 discover local user profiles, filter to interactive users (S-1-5-21-…), and
-regenerate the hook-guardian's targets.yaml so newly-created user profiles
-receive hooks without an administrator invoking 'enterprise windows repair'.
+compare them with the hook-guardian's authenticated targets.yaml.
 
 Two modes:
 
-  * default: enter an interval-loop suitable for an SCM ImagePath.
-    Sleeps --interval (default 5m) between cycles; the first cycle
-    fires within 30 s of service start so a deferred-config install
-    does not wait a full interval for hooks to appear.
+  * default: enter a read-only audit loop suitable for an SCM ImagePath.
+    The service never rewrites targets.yaml and never authorizes a profile
+    created after deployment commit. Newly discovered or changed profiles
+    are reported for an administrator-run Repair or Upgrade.
 
   * --once: run a single cycle synchronously and exit. Used by the
-    fresh-install path to seed targets.yaml before the enumerator
-    service is up.
+    installer to publish targets.yaml before deployment commit. This is
+    the only mode that writes the manifest.
 
-The enumerator validates the protected AdminDirectory parent, stages each
-update under the exact AdminFile owner/group/DACL contract, and publishes it
-with an ACL-preserving atomic replacement. Unsafe reparse points, hard links,
-or noncanonical access rules fail closed before replacing a known-good file.
+Both modes authenticate the manifest's ancestry, exact AdminFile descriptor,
+regular-file identity, link contract, and schema. --once stages an authorized
+update under the exact AdminFile contract and publishes it atomically. Service
+audits fail closed on trust drift and leave the committed manifest untouched.
 
 Managed-enterprise Windows only. macOS's LaunchDaemon-based
 'hook-enumerator' + render-targets.sh already covers the darwin
@@ -155,19 +156,21 @@ func runEnterpriseWindowsEnumerate(
 		manifestPath, opts.interval, opts.once, opts.initialDelay)
 
 	if opts.once {
-		return runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath)
+		return runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true)
 	}
 
 	return runEnterpriseWindowsEnumerateInterval(ctx, stderr, opts, manifestPath)
 }
 
-// runEnterpriseWindowsEnumerateSingleCycle runs one bounded cycle
-// and returns. Used by both `--once` and the interval-loop's
-// tick handler.
+// runEnterpriseWindowsEnumerateSingleCycle runs one bounded cycle and returns.
+// publish=true is reserved for the installer's pre-commit --once path. The
+// long-running SCM service always passes publish=false so a profile discovered
+// after commit cannot become authorized without an administrator lifecycle.
 func runEnterpriseWindowsEnumerateSingleCycle(
 	ctx context.Context,
 	stderr io.Writer,
 	manifestPath string,
+	publish bool,
 ) error {
 	cycleCtx, cancel := context.WithTimeout(ctx, enterpriseWindowsEnumerateCycleTimeout)
 	defer cancel()
@@ -189,9 +192,13 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		return fmt.Errorf("enterprise windows enumerate: deployment_mode=%q is not managed_enterprise; refusing to run", cfg.DeploymentMode)
 	}
 
-	logf := enumerationLoggerForStderr(stderr)
 	start := time.Now()
-	manifest, err := enterprisehooks.EnumerateWindows(cycleCtx, cfg, enterprisehooks.EnumerateOptions{
+	if !publish {
+		return runEnterpriseWindowsEnumerateAuditCycle(cycleCtx, stderr, cfg, manifestPath, start)
+	}
+
+	logf := enumerationLoggerForStderr(stderr)
+	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		Logger:               logf,
 	})
@@ -199,7 +206,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		return fmt.Errorf("enterprise windows enumerate: walk profiles: %w", err)
 	}
 
-	changed, err := enterprisehooks.WriteTargetsManifestAtomic(manifestPath, manifest)
+	changed, err := enterpriseWindowsEnumerateManifestWriter(manifestPath, manifest)
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
 	}
@@ -214,6 +221,97 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN cycle exceeded 10 s target: %s\n", elapsed)
 	}
 	return nil
+}
+
+// runEnterpriseWindowsEnumerateAuditCycle compares the current ProfileList
+// view with one authenticated committed manifest generation. The second load
+// detects an administrator Repair/Upgrade racing the audit; mixed generations
+// are discarded rather than reported or published.
+func runEnterpriseWindowsEnumerateAuditCycle(
+	ctx context.Context,
+	stderr io.Writer,
+	cfg *config.Config,
+	manifestPath string,
+	start time.Time,
+) error {
+	committed, beforeDigest, err := enterpriseWindowsEnumerateManifestLoader(manifestPath)
+	if err != nil {
+		return fmt.Errorf("enterprise windows enumerate: authenticate committed manifest: %w", err)
+	}
+	discovered, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, enterprisehooks.EnumerateOptions{
+		ExistingManifestPath: manifestPath,
+		Logger:               enumerationAuditLoggerForStderr(stderr),
+	})
+	if err != nil {
+		return fmt.Errorf("enterprise windows enumerate: audit profiles: %w", err)
+	}
+	_, afterDigest, err := enterpriseWindowsEnumerateManifestLoader(manifestPath)
+	if err != nil {
+		return fmt.Errorf("enterprise windows enumerate: reauthenticate committed manifest: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(beforeDigest), strings.TrimSpace(afterDigest)) {
+		return errors.New("enterprise windows enumerate: committed manifest changed during profile audit; discarding mixed-generation result")
+	}
+
+	newTargets, changedTargets, absentTargets := enterpriseWindowsEnumerationAuditDelta(committed, discovered)
+	for _, target := range newTargets {
+		fmt.Fprintf(stderr, "[hook-enumerator] discovered uncommitted target sid=%s connector=%s; targets.yaml unchanged; run an administrator Repair or Upgrade to authorize enrollment\n",
+			target.SID, target.Connector)
+	}
+	for _, target := range changedTargets {
+		fmt.Fprintf(stderr, "[hook-enumerator] discovered identity drift for committed target sid=%s connector=%s; targets.yaml unchanged; run an administrator Repair or Upgrade to revise enrollment\n",
+			target.SID, target.Connector)
+	}
+	for _, target := range absentTargets {
+		fmt.Fprintf(stderr, "[hook-enumerator] committed target is not currently discoverable sid=%s connector=%s; authorization retained unchanged; run an administrator Repair or Upgrade to revise enrollment\n",
+			target.SID, target.Connector)
+	}
+
+	elapsed := time.Since(start)
+	fmt.Fprintf(stderr, "[hook-enumerator] audit complete authorized_users=%d authorized_targets=%d new_targets=%d changed_targets=%d absent_targets=%d publication=disabled elapsed=%s\n",
+		countDistinctSIDs(committed.Targets), len(committed.Targets), len(newTargets), len(changedTargets), len(absentTargets), elapsed)
+	if elapsed > 10*time.Second {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN audit exceeded 10 s target: %s\n", elapsed)
+	}
+	return nil
+}
+
+func enterpriseWindowsEnumerationAuditDelta(
+	committed enterprisehooks.Manifest,
+	discovered enterprisehooks.Manifest,
+) (newTargets, changedTargets, absentTargets []enterprisehooks.ManifestTarget) {
+	committedByKey := make(map[string]enterprisehooks.ManifestTarget, len(committed.Targets))
+	for _, target := range committed.Targets {
+		committedByKey[enterpriseWindowsEnumerationTargetKey(target)] = target
+	}
+	discoveredByKey := make(map[string]enterprisehooks.ManifestTarget, len(discovered.Targets))
+	for _, target := range discovered.Targets {
+		key := enterpriseWindowsEnumerationTargetKey(target)
+		discoveredByKey[key] = target
+		prior, ok := committedByKey[key]
+		if !ok {
+			newTargets = append(newTargets, target)
+			continue
+		}
+		if !reflect.DeepEqual(prior, target) {
+			changedTargets = append(changedTargets, target)
+		}
+	}
+	for key, target := range committedByKey {
+		if _, ok := discoveredByKey[key]; !ok {
+			absentTargets = append(absentTargets, target)
+		}
+	}
+	for _, targets := range [][]enterprisehooks.ManifestTarget{newTargets, changedTargets, absentTargets} {
+		sort.Slice(targets, func(i, j int) bool {
+			return enterpriseWindowsEnumerationTargetKey(targets[i]) < enterpriseWindowsEnumerationTargetKey(targets[j])
+		})
+	}
+	return newTargets, changedTargets, absentTargets
+}
+
+func enterpriseWindowsEnumerationTargetKey(target enterprisehooks.ManifestTarget) string {
+	return strings.ToUpper(strings.TrimSpace(target.SID)) + "\x00" + strings.ToLower(strings.TrimSpace(target.Connector))
 }
 
 // runEnterpriseWindowsEnumerateInterval is the interval-loop entry.
@@ -239,7 +337,7 @@ func runEnterpriseWindowsEnumerateInterval(
 	// First cycle: log the outcome but do NOT bail on a transient
 	// "config missing" error — the whole point of REQ-04 is to
 	// tolerate deferred-config boots.
-	if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
+	if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, false); err != nil {
 		if !isEnterpriseWindowsEnumerateConfigMissing(err) {
 			fmt.Fprintf(stderr, "[hook-enumerator] initial cycle failed: %v\n", err)
 		}
@@ -252,7 +350,7 @@ func runEnterpriseWindowsEnumerateInterval(
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
+			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, false); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
 					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
 				}
@@ -266,6 +364,18 @@ func runEnterpriseWindowsEnumerateInterval(
 // summary lines use.
 func enumerationLoggerForStderr(w io.Writer) enterprisehooks.EnumerationLogger {
 	return func(subject, reason string) {
+		fmt.Fprintf(w, "[hook-enumerator] skipped %s: %s\n", subject, reason)
+	}
+}
+
+// enumerationAuditLoggerForStderr suppresses the enumerator's legacy
+// "emitted as disabled" message for new rows because service mode emits
+// nothing. The audit delta prints an explicit Repair/Upgrade instruction.
+func enumerationAuditLoggerForStderr(w io.Writer) enterprisehooks.EnumerationLogger {
+	return func(subject, reason string) {
+		if strings.Contains(reason, "newly-discovered") && strings.Contains(reason, "emitted as disabled") {
+			return
+		}
 		fmt.Fprintf(w, "[hook-enumerator] skipped %s: %s\n", subject, reason)
 	}
 }
@@ -290,6 +400,12 @@ func countDistinctSIDs(targets []enterprisehooks.ManifestTarget) int {
 var enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
 	return enterpriseHooksWindowsConfigLoader()
 }
+
+var (
+	enterpriseWindowsEnumerateManifestLoader    = loadWindowsTargetRuntimeManifest
+	enterpriseWindowsEnumerateProfileEnumerator = enterprisehooks.EnumerateWindows
+	enterpriseWindowsEnumerateManifestWriter    = enterprisehooks.WriteTargetsManifestAtomic
+)
 
 // isEnterpriseWindowsEnumerateConfigMissing recognises the specific
 // "config.yaml is not on disk yet" error so the interval loop can

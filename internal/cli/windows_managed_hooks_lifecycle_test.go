@@ -609,6 +609,132 @@ func TestValidateLegacyWindowsManagedHooksGuardianActivationIsExact(t *testing.T
 	}
 }
 
+func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset(t *testing.T) {
+	manifestSHA256 := strings.Repeat("a", 64)
+	ctx := windowsManagedHooksLifecycleContext{
+		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		targets: []windowsManagedHooksTeardownTarget{
+			{
+				Connector: "codex",
+				SID:       "S-1-5-21-111-222-333-1001",
+				DataDir:   `C:\Users\alice\.defenseclaw`,
+			},
+			{
+				Connector: "cursor",
+				SID:       "S-1-5-21-111-222-333-1002",
+				DataDir:   `C:\Users\bob\.defenseclaw`,
+				Deferred:  true,
+			},
+		},
+	}
+	active := enterpriseHookReconcileRow{
+		Connector: "codex",
+		SID:       ctx.targets[0].SID,
+		UserHome:  `C:\Users\alice`,
+		OK:        true,
+	}
+	pending := enterpriseHookReconcileRow{
+		Connector: "cursor",
+		SID:       ctx.targets[1].SID,
+		UserHome:  `C:\Users\bob`,
+		Pending:   true,
+	}
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        "2026-08-25T00:00:00Z",
+		ReconcileID:      strings.Repeat("f", 32),
+		Manifest:         ctx.manifestPath,
+		ManifestSHA256:   manifestSHA256,
+		OK:               true,
+		TargetCount:      2,
+		SuccessCount:     1,
+		PendingCount:     1,
+		ProtectedTargets: []enterpriseHookReconcileRow{active},
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        activation.UpdatedAt,
+		OK:               true,
+		TargetCount:      2,
+		SuccessCount:     1,
+		PendingCount:     1,
+		ProtectedTargets: []enterpriseHookReconcileRow{active},
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    activation.UpdatedAt,
+		Manifest:     ctx.manifestPath,
+		OK:           true,
+		TargetCount:  2,
+		SuccessCount: 1,
+		PendingCount: 1,
+		Results:      []enterpriseHookReconcileRow{active, pending},
+	}
+	pendingTargets, err := validateWindowsManagedHooksGuardianActivation(
+		activation,
+		authorization,
+		state,
+		ctx,
+		manifestSHA256,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pendingTargets) != 1 || pendingTargets[0] != ctx.targets[1] {
+		t.Fatalf("pending targets = %+v", pendingTargets)
+	}
+
+	unauthorized := ctx
+	unauthorized.targets = append([]windowsManagedHooksTeardownTarget(nil), ctx.targets...)
+	unauthorized.targets[1].Deferred = false
+	if _, err := validateWindowsManagedHooksGuardianActivation(
+		activation,
+		authorization,
+		state,
+		unauthorized,
+		manifestSHA256,
+	); err == nil {
+		t.Fatal("pending Guardian row without deferred manifest authorization was accepted")
+	}
+
+	tamperedActivation := activation
+	tamperedActivation.ProtectedTargets = append(
+		[]enterpriseHookReconcileRow(nil),
+		activation.ProtectedTargets...,
+	)
+	tamperedActivation.ProtectedTargets = append(tamperedActivation.ProtectedTargets, enterpriseHookReconcileRow{
+		Connector: pending.Connector,
+		SID:       pending.SID,
+		OK:        true,
+	})
+	if _, err := validateWindowsManagedHooksGuardianActivation(
+		tamperedActivation,
+		authorization,
+		state,
+		ctx,
+		manifestSHA256,
+	); err == nil {
+		t.Fatal("pending row was accepted as a protected runtime target")
+	}
+
+	tamperedState := state
+	tamperedState.Results = append([]enterpriseHookReconcileRow(nil), state.Results...)
+	tamperedState.Results[1].Result = &enterprisehooks.InstallResult{
+		Connector: "cursor",
+		UserHome:  `C:\Users\bob`,
+		DataDir:   ctx.targets[1].DataDir,
+	}
+	if _, err := validateWindowsManagedHooksGuardianActivation(
+		activation,
+		authorization,
+		tamperedState,
+		ctx,
+		manifestSHA256,
+	); err == nil {
+		t.Fatal("pending row with contradictory installed runtime evidence was accepted")
+	}
+}
+
 // validateWindowsManagedHooksLifecycleJournal compares the transaction ID,
 // ManifestPath, HookBinary, and GatewayServiceName against identity, so
 // GatewayAddr and Targets are intentionally allowed to drift after a staged

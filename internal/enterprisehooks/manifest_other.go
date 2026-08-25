@@ -5,9 +5,18 @@
 
 package enterprisehooks
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
-func validateManifestPlatformTarget(_ int, _ ManifestTarget) error {
+func validateManifestPlatformTarget(index int, target ManifestTarget) error {
+	if target.Deferred {
+		return fmt.Errorf(
+			"enterprise hooks: target %d uses Windows-only deferred enrollment",
+			index,
+		)
+	}
 	return nil
 }
 

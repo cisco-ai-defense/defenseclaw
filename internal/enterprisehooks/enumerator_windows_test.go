@@ -512,7 +512,7 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 }
 
 // TestApplyPreviousRowStatePreservesAgentVersion asserts the
-// AgentVersion + Enabled preservation invariant spec 005 REQ-08's
+// AgentVersion + Enabled + Deferred preservation invariant spec 005 REQ-08's
 // design says: a row that already exists in the file keeps its
 // agent_version + enabled state across enumeration cycles. A NEW
 // row starts with Enabled=false so LoadManifest's schema validation
@@ -525,10 +525,11 @@ func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 			Connector:    "codex",
 			AgentVersion: "0.145.0",
 			Enabled:      &enabled,
+			Deferred:     true,
 		},
 	}
 
-	// Match: preserve AgentVersion + Enabled.
+	// Match: preserve AgentVersion + Enabled + Deferred.
 	matched := ManifestTarget{
 		SID:       "s-1-5-21-1000-2000-3000-1001", // deliberate case
 		Connector: "codex",
@@ -539,6 +540,9 @@ func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 	}
 	if matched.Enabled == nil || !*matched.Enabled {
 		t.Fatal("existing-row Enabled=true not preserved")
+	}
+	if !matched.Deferred {
+		t.Fatal("existing-row Deferred=true not preserved")
 	}
 
 	// No match: emit disabled with empty AgentVersion.
