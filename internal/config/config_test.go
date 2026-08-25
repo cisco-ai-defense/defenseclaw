@@ -648,6 +648,49 @@ func TestManagedEnterpriseListenerBindingsModeMatrix(t *testing.T) {
 	}
 }
 
+func TestManagedEnterpriseWindowsPeerAuthKnobsAreRejected(t *testing.T) {
+	// Runs on all platforms via the same predicate; validator's
+	// runtime.GOOS check means only the Windows branch enforces
+	// rejection. On non-Windows we still exercise the happy path.
+	cases := []struct {
+		name          string
+		mode          string
+		team, sig, id []string
+		wantOnWindows string // substring that must appear on Windows
+	}{
+		{name: "unmanaged_allows_anything", mode: "", team: []string{"team"}, wantOnWindows: ""},
+		{name: "managed_empty_allowed", mode: "managed_enterprise", wantOnWindows: ""},
+		{name: "managed_team_ids_windows_rejects", mode: "managed_enterprise", team: []string{"team"}, wantOnWindows: "managed.allowed_team_ids"},
+		{name: "managed_signing_ids_windows_rejects", mode: "managed_enterprise", sig: []string{"sig"}, wantOnWindows: "managed.allowed_signing_ids"},
+		{name: "managed_bundle_ids_windows_rejects", mode: "managed_enterprise", id: []string{"bundle"}, wantOnWindows: "managed.allowed_bundle_ids"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DeploymentMode = c.mode
+			cfg.Managed.AllowedTeamIDs = c.team
+			cfg.Managed.AllowedSigningIDs = c.sig
+			cfg.Managed.AllowedBundleIDs = c.id
+			err := validateManagedEnterpriseWindowsPeerAuthKnobs(cfg)
+			if runtime.GOOS != "windows" {
+				if err != nil {
+					t.Fatalf("non-windows: got err=%v, want nil (validator scoped to windows)", err)
+				}
+				return
+			}
+			if c.wantOnWindows == "" {
+				if err != nil {
+					t.Fatalf("windows: got err=%v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantOnWindows) {
+				t.Fatalf("windows: err = %v, want substring %q", err, c.wantOnWindows)
+			}
+		})
+	}
+}
+
 func TestIsLoopbackListenerHost(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "127.99.1.2", "::1", "[::1]", "localhost", " LOCALHOST "} {
 		if !isLoopbackListenerHost(host) {

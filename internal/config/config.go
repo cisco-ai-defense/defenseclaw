@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -2515,6 +2516,12 @@ func loadConfigSource(
 			}
 			return nil, err
 		}
+		if err := validateManagedEnterpriseWindowsPeerAuthKnobs(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_ipc_peer_auth_unsupported_on_windows")
+			}
+			return nil, err
+		}
 	}
 
 	cfg.Gateway.ConfigReload.Mode = normalizeGatewayConfigReloadMode(cfg.Gateway.ConfigReload.Mode)
@@ -2735,6 +2742,56 @@ func validateManagedEnterpriseListenerBindings(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// validateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
+// managed_enterprise config on Windows that carries non-empty
+// AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs. Those allowlists
+// only take effect on macOS / linux, where LOCAL_PEERCRED-style peer
+// credentials give the AF_UNIX IPC surface a real accept-time codesign
+// check. On Windows the AF_UNIX kernel implementation exposes no peer
+// credential API, so the values are silently discarded by
+// newCodesignValidatingListener (peerauth_windows.go, deferred_windows
+// posture). Accepting them from config and dropping them at start-time
+// is a config-honesty gap: an operator setting an allowlist expecting
+// hardening ends up with an AF_UNIX socket whose only access boundary
+// is the file DACL. Refusing to load makes that gap loud instead of
+// silent; the deferred Windows peer-auth mechanism belongs to parity
+// plan §4.4 and is not something operators can enable from config.
+//
+// Non-managed builds keep operator config verbatim per the existing
+// unmanaged/BYOD contract (unmanaged doesn't ship the IPC surface at
+// all outside dev rigs), so this validator is scoped to
+// managed_enterprise on Windows.
+func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	var offending []string
+	if len(cfg.Managed.AllowedTeamIDs) != 0 {
+		offending = append(offending, "managed.allowed_team_ids")
+	}
+	if len(cfg.Managed.AllowedSigningIDs) != 0 {
+		offending = append(offending, "managed.allowed_signing_ids")
+	}
+	if len(cfg.Managed.AllowedBundleIDs) != 0 {
+		offending = append(offending, "managed.allowed_bundle_ids")
+	}
+	if len(offending) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"config: %s cannot be set on Windows in the initial-cut managed IPC "+
+			"peer-auth posture (spec 004): the AF_UNIX socket has no peer-"+
+			"credential API on Windows, so any allowlist here would be silently "+
+			"discarded. Remove these keys from config.yaml; the socket DACL is "+
+			"the enforcement boundary until parity plan §4.4 lands the Windows "+
+			"peer-auth mechanism.",
+		strings.Join(offending, ", "),
+	)
 }
 
 func isLoopbackListenerHost(host string) bool {
