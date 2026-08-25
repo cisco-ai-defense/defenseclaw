@@ -182,13 +182,19 @@ func TestManagedWindowsMultiConnectorNoChangeReconcileKeepsCanonicalInodes(t *te
 			); err != nil {
 				t.Fatalf("reconcile %s managed runtime: %v", connectorName, err)
 			}
+			entry := HookContractLockEntry{
+				Connector:    connectorName,
+				ContractID:   connectorName + "-hooks-v1",
+				HookFailMode: "closed",
+			}
+			if connectorName == "claudecode" {
+				entry.HookScriptDigests = map[string]string{
+					windowsHookBinaryName: "sha256:current-launcher",
+				}
+			}
 			if err := SaveHookContractLockEntryForMode(
 				dataDir,
-				HookContractLockEntry{
-					Connector:    connectorName,
-					ContractID:   connectorName + "-hooks-v1",
-					HookFailMode: "closed",
-				},
+				entry,
 				true,
 			); err != nil {
 				t.Fatalf("save %s managed contract: %v", connectorName, err)
@@ -196,6 +202,17 @@ func TestManagedWindowsMultiConnectorNoChangeReconcileKeepsCanonicalInodes(t *te
 		}
 	}
 	reconcile()
+	entryTimestamps := make(map[string]string, len(connectors))
+	for _, connectorName := range connectors {
+		entry, err := LoadHookContractLockEntryForMode(dataDir, connectorName, true)
+		if err != nil {
+			t.Fatalf("load %s managed contract: %v", connectorName, err)
+		}
+		entryTimestamps[connectorName] = entry.UpdatedAt
+		if connectorName != "claudecode" && len(entry.HookScriptDigests) != 0 {
+			t.Fatalf("%s managed contract is not sparse: %v", connectorName, entry.HookScriptDigests)
+		}
+	}
 
 	paths := []string{
 		filepath.Join(dataDir, "hooks", ".hookcfg"),
@@ -220,6 +237,23 @@ func TestManagedWindowsMultiConnectorNoChangeReconcileKeepsCanonicalInodes(t *te
 	}
 
 	reconcile()
+	for _, connectorName := range connectors {
+		entry, err := LoadHookContractLockEntryForMode(dataDir, connectorName, true)
+		if err != nil {
+			t.Fatalf("reload %s managed contract: %v", connectorName, err)
+		}
+		if entry.UpdatedAt != entryTimestamps[connectorName] {
+			t.Fatalf(
+				"no-change %s reconcile advanced contract timestamp from %q to %q",
+				connectorName,
+				entryTimestamps[connectorName],
+				entry.UpdatedAt,
+			)
+		}
+		if connectorName != "claudecode" && len(entry.HookScriptDigests) != 0 {
+			t.Fatalf("%s repeated managed contract is not sparse: %v", connectorName, entry.HookScriptDigests)
+		}
+	}
 	for _, path := range paths {
 		body, err := os.ReadFile(path)
 		if err != nil {

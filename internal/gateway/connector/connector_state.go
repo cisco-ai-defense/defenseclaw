@@ -562,7 +562,7 @@ func saveHookContractLockEntry(
 		if lock.Connectors == nil {
 			lock.Connectors = map[string]HookContractLockEntry{}
 		}
-		_, entryAlreadyExists := lock.Connectors[entry.Connector]
+		previousEntry, entryAlreadyExists := lock.Connectors[entry.Connector]
 		recoveringMissingEntry := managedEnterprise && !entryAlreadyExists &&
 			(recoveredLockUpdatedAt != "" || recoveredEntryUpdatedAt != "")
 		if recoveringMissingEntry {
@@ -599,44 +599,41 @@ func saveHookContractLockEntry(
 				}
 			}
 		}
-		if launcherDigest := entry.HookScriptDigests[windowsHookBinaryName]; launcherDigest != "" {
-			for name, peer := range lock.Connectors {
-				if peer.HookScriptDigests == nil {
-					peer.HookScriptDigests = map[string]string{}
-				}
-				if peer.HookScriptDigests[windowsHookBinaryName] != launcherDigest {
-					peer.HookScriptDigests[windowsHookBinaryName] = launcherDigest
-					lock.Connectors[name] = peer
-					lockChanged = true
-				}
-			}
-		}
+		// Keep native-launcher evidence connector-scoped. Managed Codex and
+		// Cursor entries intentionally have no script digests and validate the
+		// trusted launcher independently. Mutating those peer entries from a
+		// Claude save makes their next sparse save look like a contract change,
+		// advancing their timestamps and immutable generations forever.
 		removeSharedHookScriptDigests(entry.HookScriptDigests)
 		entryChanged := true
-		if previous, ok := lock.Connectors[entry.Connector]; ok {
-			previousComparison, entryComparison := previous, entry
+		if entryAlreadyExists {
+			previousComparison, entryComparison := previousEntry, entry
 			previousComparison.UpdatedAt, entryComparison.UpdatedAt = "", ""
 			if reflect.DeepEqual(previousComparison, entryComparison) {
 				entryChanged = false
-				entry.UpdatedAt = previous.UpdatedAt
+				entry.UpdatedAt = previousEntry.UpdatedAt
 			}
 		}
 		if !entryChanged && !lockChanged && !forceRefresh {
 			return nil
 		}
 		nowTime := time.Now().UTC()
-		now := nowTime.Format(time.RFC3339)
+		now := ""
 		if recoveringMissingEntry {
 			now = recoveredLockUpdatedAt
-		}
-		if forceRefresh {
-			now = nowTime.Format(time.RFC3339Nano)
-			if now == entry.UpdatedAt {
-				now = nowTime.Add(time.Nanosecond).Format(time.RFC3339Nano)
+		} else {
+			previousTimes := []string{lock.UpdatedAt}
+			if entryChanged || forceRefresh {
+				previousTimes = append(previousTimes, previousEntry.UpdatedAt)
 			}
-		}
-		if entry.UpdatedAt == "" || forceRefresh {
-			entry.UpdatedAt = now
+			now = nextHookContractTimestamp(nowTime, previousTimes...)
+			if entryChanged || forceRefresh {
+				// The immutable managed runtime uses this connector-scoped
+				// timestamp as its lock-entry identity. Generate it at commit
+				// time and make it strictly newer than the prior entry even
+				// when two real changes occur within the same wall-clock second.
+				entry.UpdatedAt = now
+			}
 		}
 		lock.UpdatedAt = now
 		lock.Connectors[entry.Connector] = entry
@@ -646,6 +643,17 @@ func saveHookContractLockEntry(
 		}
 		return hookRuntimeFileWriter(managedEnterprise)(path, append(data, '\n'), 0o600)
 	})
+}
+
+func nextHookContractTimestamp(now time.Time, previous ...string) string {
+	next := now.UTC()
+	for _, raw := range previous {
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw))
+		if err == nil && !next.After(parsed) {
+			next = parsed.Add(time.Nanosecond)
+		}
+	}
+	return next.Format(time.RFC3339Nano)
 }
 
 // ManagedHookContractTimestamps returns the authenticated bounded timestamps
@@ -706,7 +714,14 @@ func ClearHookContractLockEntryForMode(
 			if len(lock.Connectors) == 0 {
 				lock.SharedHookScriptDigests = nil
 			}
-			lock.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			previousTimes := []string{lock.UpdatedAt}
+			for _, peer := range lock.Connectors {
+				previousTimes = append(previousTimes, peer.UpdatedAt)
+			}
+			lock.UpdatedAt = nextHookContractTimestamp(
+				time.Now(),
+				previousTimes...,
+			)
 		}
 		hookDir := filepath.Join(dataDir, "hooks")
 		if _, statErr := os.Stat(hookDir); os.IsNotExist(statErr) {

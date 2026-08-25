@@ -1359,32 +1359,180 @@ func TestHookContractLockRejectsPartialSharedDigestSet(t *testing.T) {
 	}
 }
 
-func TestHookContractLockNormalizesSharedLauncherDigestAcrossPeers(t *testing.T) {
+func TestHookContractLockKeepsLauncherEvidenceConnectorScoped(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
-	legacy := hookContractLock{
-		Version: 1,
+	const oldTimestamp = "2026-08-24T10:00:00Z"
+	existing := hookContractLock{
+		Version:   hookContractLockVersion,
+		UpdatedAt: oldTimestamp,
 		Connectors: map[string]HookContractLockEntry{
-			"claudecode": {Connector: "claudecode", HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-claude"}},
-			"codex":      {Connector: "codex", HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-codex"}},
+			"claudecode": {
+				Connector:         "claudecode",
+				HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-claude"},
+				UpdatedAt:         oldTimestamp,
+			},
+			"codex": {
+				Connector:         "codex",
+				HookScriptDigests: map[string]string{windowsHookBinaryName: "sha256:old-codex"},
+				UpdatedAt:         oldTimestamp,
+			},
+			"cursor": {
+				Connector: "cursor",
+				UpdatedAt: oldTimestamp,
+			},
 		},
 	}
-	body, err := json.Marshal(legacy)
+	body, err := json.Marshal(existing)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	selected := legacy.Connectors["claudecode"]
-	selected.HookScriptDigests[windowsHookBinaryName] = "sha256:current-launcher"
+	selected := HookContractLockEntry{
+		Connector: "claudecode",
+		HookScriptDigests: map[string]string{
+			windowsHookBinaryName: "sha256:current-launcher",
+		},
+	}
 	if err := SaveHookContractLockEntry(dir, selected); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"claudecode", "codex"} {
-		entry := LoadHookContractLockEntry(dir, name)
-		if got := entry.HookScriptDigests[windowsHookBinaryName]; got != "sha256:current-launcher" {
-			t.Fatalf("%s launcher digest=%q", name, got)
-		}
+	claude := LoadHookContractLockEntry(dir, "claudecode")
+	if got := claude.HookScriptDigests[windowsHookBinaryName]; got != "sha256:current-launcher" {
+		t.Fatalf("Claude launcher digest=%q", got)
+	}
+	if claude.UpdatedAt == oldTimestamp {
+		t.Fatal("Claude launcher change did not advance its connector timestamp")
+	}
+	codex := LoadHookContractLockEntry(dir, "codex")
+	if got := codex.HookScriptDigests[windowsHookBinaryName]; got != "sha256:old-codex" {
+		t.Fatalf("Claude save rewrote Codex-owned launcher evidence: %q", got)
+	}
+	if codex.UpdatedAt != oldTimestamp {
+		t.Fatalf("Claude save advanced Codex timestamp to %q", codex.UpdatedAt)
+	}
+	cursor := LoadHookContractLockEntry(dir, "cursor")
+	if len(cursor.HookScriptDigests) != 0 {
+		t.Fatalf("Claude save populated sparse Cursor digests: %v", cursor.HookScriptDigests)
+	}
+	if cursor.UpdatedAt != oldTimestamp {
+		t.Fatalf("Claude save advanced Cursor timestamp to %q", cursor.UpdatedAt)
+	}
+
+	if err := SaveHookContractLockEntry(
+		dir,
+		HookContractLockEntry{Connector: "claudecode"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	claude = LoadHookContractLockEntry(dir, "claudecode")
+	if len(claude.HookScriptDigests) != 0 {
+		t.Fatalf("Claude launcher removal retained stale evidence: %v", claude.HookScriptDigests)
+	}
+	codex = LoadHookContractLockEntry(dir, "codex")
+	if got := codex.HookScriptDigests[windowsHookBinaryName]; got != "sha256:old-codex" {
+		t.Fatalf("Claude launcher removal rewrote Codex-owned evidence: %q", got)
+	}
+	if codex.UpdatedAt != oldTimestamp {
+		t.Fatalf("Claude launcher removal advanced Codex timestamp to %q", codex.UpdatedAt)
+	}
+}
+
+func TestHookContractLockChangedEntryTimestampIsStrictlyMonotonic(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	existing := hookContractLock{
+		Version:   hookContractLockVersion,
+		UpdatedAt: future,
+		Connectors: map[string]HookContractLockEntry{
+			"cursor": {
+				Connector:    "cursor",
+				ContractID:   "cursor-hooks-v1",
+				HookFailMode: "open",
+				UpdatedAt:    future,
+			},
+		},
+	}
+	body, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed := existing.Connectors["cursor"]
+	changed.HookFailMode = "closed"
+	if err := SaveHookContractLockEntry(dir, changed); err != nil {
+		t.Fatal(err)
+	}
+	stored := loadHookContractLock(dir)
+	got := stored.Connectors["cursor"].UpdatedAt
+	oldTime, err := time.Parse(time.RFC3339Nano, future)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTime, err := time.Parse(time.RFC3339Nano, got)
+	if err != nil {
+		t.Fatalf("changed entry timestamp %q is invalid: %v", got, err)
+	}
+	if !gotTime.After(oldTime) {
+		t.Fatalf("changed entry timestamp %q is not newer than %q", got, future)
+	}
+	lockTime, err := time.Parse(time.RFC3339Nano, stored.UpdatedAt)
+	if err != nil || lockTime.Before(gotTime) {
+		t.Fatalf("lock timestamp %q does not cover entry timestamp %q", stored.UpdatedAt, got)
+	}
+}
+
+func TestHookContractLockClearKeepsGlobalTimestampAfterSurvivingPeer(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	existing := hookContractLock{
+		Version:   hookContractLockVersion,
+		UpdatedAt: future,
+		Connectors: map[string]HookContractLockEntry{
+			"claudecode": {
+				Connector: "claudecode",
+				UpdatedAt: future,
+			},
+			"cursor": {
+				Connector: "cursor",
+				UpdatedAt: future,
+			},
+		},
+	}
+	body, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookContractLockFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearHookContractLockEntry(dir, "claudecode"); err != nil {
+		t.Fatal(err)
+	}
+	stored := loadHookContractLock(dir)
+	if _, exists := stored.Connectors["claudecode"]; exists {
+		t.Fatal("cleared connector remains in contract lock")
+	}
+	peer, exists := stored.Connectors["cursor"]
+	if !exists || peer.UpdatedAt != future {
+		t.Fatalf("surviving peer changed during clear: %+v", peer)
+	}
+	lockTime, err := time.Parse(time.RFC3339Nano, stored.UpdatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerTime, err := time.Parse(time.RFC3339Nano, peer.UpdatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lockTime.After(peerTime) {
+		t.Fatalf("clear timestamp %q is not after surviving peer %q", stored.UpdatedAt, peer.UpdatedAt)
+	}
+	if _, _, err := ManagedHookContractTimestamps(dir, "cursor"); err != nil {
+		t.Fatalf("surviving managed timestamp pair is invalid after clear: %v", err)
 	}
 }
 
