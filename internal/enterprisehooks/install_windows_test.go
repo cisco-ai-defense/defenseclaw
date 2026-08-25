@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1846,7 +1847,18 @@ func TestVerifyWindowsClaudeIsReadOnlyAndDoesNotImpersonate(t *testing.T) {
 	}
 }
 
-func TestInstallWindowsClaudeRefusesForeignManagedPolicy(t *testing.T) {
+// TestInstallWindowsClaudeReclaimsOrphanManagedPolicy pins the recovery
+// contract for "policy on disk without ownership state metadata" — the
+// exact signature of a partial prior uninstall that removed the state
+// sidecar but left the policy file behind (typically an ACL race on
+// Program Files). Prior to this contract every re-install on such a
+// machine was permanently blocked with "ownership metadata is incomplete."
+//
+// After reclaim: the orphan bytes are deleted and Install proceeds as
+// fresh install. The path is DefenseClaw's declared namespace, so a
+// foreign author placing content at this exact path (filename literally
+// contains "defenseclaw") is opting into our ownership boundary.
+func TestInstallWindowsClaudeReclaimsOrphanManagedPolicy(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	foreign := []byte("{\"hooks\":{\"PreToolUse\":[]}}\n")
 	if err := os.WriteFile(fixture.policyPath, foreign, 0o600); err != nil {
@@ -1855,12 +1867,19 @@ func TestInstallWindowsClaudeRefusesForeignManagedPolicy(t *testing.T) {
 	if err := setWindowsManagedPolicyProtection(fixture.policyPath, false, true); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Install(context.Background(), windowsManagedInstallOptions(fixture))
-	if err == nil || !strings.Contains(err.Error(), "ownership metadata is incomplete") {
-		t.Fatalf("Install error = %v, want foreign-policy refusal", err)
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatalf("Install after orphan reclaim: %v", err)
 	}
-	if got, err := os.ReadFile(fixture.policyPath); err != nil || string(got) != string(foreign) {
-		t.Fatalf("foreign policy changed: %q err=%v", got, err)
+	got, err := os.ReadFile(fixture.policyPath)
+	if err != nil {
+		t.Fatalf("read post-install policy: %v", err)
+	}
+	if bytes.Equal(got, foreign) {
+		t.Fatal("orphan policy survived reclaim: install did not overwrite the pre-existing bytes")
+	}
+	statePath := filepath.Join(filepath.Dir(fixture.policyPath), ".defenseclaw-managed-hooks.state")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state sidecar missing after reclaim + install: %v", err)
 	}
 }
 

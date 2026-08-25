@@ -122,6 +122,14 @@ func CaptureWindowsClaudeManagedPolicySnapshot(
 			return err
 		}
 		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
+		// Reclaim any orphaned policy left by a partial prior uninstall
+		// before we snapshot. Otherwise ownership validation below deadlocks
+		// re-install on the "policy-without-state" asymmetry that a partial
+		// teardown always produces. No-op unless the exact orphan signature
+		// is observed on disk.
+		if err := reclaimOrphanClaudeManagedPolicy(path, statePath); err != nil {
+			return err
+		}
 		policy, err := snapshotWindowsManagedFileWithLimit(
 			path,
 			windowsClaudeManagedPolicyLimit,
@@ -198,6 +206,16 @@ func ReadWindowsClaudeManagedPolicyTargets() ([]string, bool, error) {
 	policyInfo, policyErr := os.Lstat(path)
 	stateInfo, stateErr := os.Lstat(statePath)
 	if errors.Is(policyErr, os.ErrNotExist) && errors.Is(stateErr, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	// Orphaned policy without ownership state — a partial uninstall
+	// left the policy file behind. Report "no active policy" so the
+	// caller treats this as a fresh-install scenario; the downstream
+	// Capture step will physically reclaim the orphan before the
+	// install writes its own artifacts. This function stays read-only
+	// on purpose — deletion is an install-time side effect owned by
+	// CaptureWindowsClaudeManagedPolicySnapshot.
+	if policyErr == nil && errors.Is(stateErr, os.ErrNotExist) {
 		return nil, false, nil
 	}
 	if policyErr == nil && !policyInfo.Mode().IsRegular() {
@@ -1364,6 +1382,16 @@ func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.Setup
 		return "", nil, err
 	}
 	statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
+	// Reclaim any orphaned policy left by a partial prior uninstall
+	// before we snapshot. Otherwise ownership validation below refuses
+	// this write forever on any machine whose previous teardown could
+	// not fully remove the policy file. No-op unless the exact orphan
+	// signature (policy file present, state sidecar absent) is on
+	// disk. See reclaimOrphanClaudeManagedPolicy for the trust
+	// argument.
+	if err := reclaimOrphanClaudeManagedPolicy(path, statePath); err != nil {
+		return "", nil, err
+	}
 	policySnapshot, err := snapshotWindowsManagedFile(path)
 	if err != nil {
 		return "", nil, err
@@ -2260,6 +2288,74 @@ func equalWindowsClaudeTargetSIDs(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+// reclaimOrphanClaudeManagedPolicy deletes a stale Claude managed
+// policy file whose ownership state sidecar is missing. This
+// asymmetry can only be produced by a partial uninstall that
+// removed the state sidecar but could not remove the policy file
+// itself (typically an ACL race on Program Files or a Windows
+// installer rollback aborted mid-transaction). Without recovery,
+// every subsequent install fails at ownership validation forever.
+//
+// The file path is DefenseClaw's declared namespace
+// (managed-settings.d/90-defenseclaw.json — the filename literally
+// says "defenseclaw"), so a foreign author placing content there
+// is opting into our ownership boundary. Neither Claude Code nor
+// third parties write to this exact path in supported deployments.
+//
+// The function is a no-op unless BOTH conditions hold:
+//   - policy file exists AND is a regular file
+//   - state sidecar does not exist
+//
+// This asymmetry is the exact signature of an orphaned artifact.
+// Any other combination (both present, both absent, or a state
+// sidecar without a policy) routes through the strict ownership
+// path in validateExistingWindowsManagedPolicyOwnership.
+//
+// A stderr line is emitted whenever a reclaim happens so operators
+// tailing gateway.err.log see the recovery in the audit trail.
+func reclaimOrphanClaudeManagedPolicy(policyPath, statePath string) error {
+	policyInfo, policyErr := os.Lstat(policyPath)
+	if errors.Is(policyErr, os.ErrNotExist) {
+		return nil
+	}
+	if policyErr != nil {
+		return fmt.Errorf(
+			"enterprise hooks: probe Claude managed policy for orphan reclaim: %w",
+			policyErr,
+		)
+	}
+	if _, stateErr := os.Lstat(statePath); stateErr == nil {
+		return nil
+	} else if !errors.Is(stateErr, os.ErrNotExist) {
+		return fmt.Errorf(
+			"enterprise hooks: probe Claude managed state for orphan reclaim: %w",
+			stateErr,
+		)
+	}
+	if !policyInfo.Mode().IsRegular() {
+		return fmt.Errorf(
+			"enterprise hooks: refusing to reclaim non-regular Claude managed policy path: %s",
+			policyPath,
+		)
+	}
+	if err := os.Remove(policyPath); err != nil {
+		return fmt.Errorf(
+			"enterprise hooks: reclaim orphan Claude managed policy %s (state sidecar %s is missing): %w",
+			policyPath,
+			statePath,
+			err,
+		)
+	}
+	fmt.Fprintf(
+		os.Stderr,
+		"[enterprise-hooks] reclaimed orphan Claude managed policy at %s "+
+			"(state sidecar %s missing; prior uninstall did not fully clean up)\n",
+		policyPath,
+		statePath,
+	)
+	return nil
 }
 
 func snapshotWindowsManagedFile(path string) (windowsManagedFileSnapshot, error) {
