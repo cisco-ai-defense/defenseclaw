@@ -96,7 +96,7 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.local` | object |  |  |  |
 | `observability.local.path` | string |  |  | Defaults dynamically to <data_dir>/audit.db. |
 | `observability.local.judge_bodies_path` | string |  |  | Defaults dynamically to <data_dir>/judge_bodies.db. |
-| `observability.local.retention_days` | integer | `90` |  | Zero retains event, evidence, and judge-body history forever and requires a persistent capacity warning. The maximum is the largest whole-day period representable as a Go time.Duration. |
+| `observability.local.retention_days` | integer | `7` |  | Zero retains event, evidence, and judge-body history forever and requires a persistent capacity warning. The maximum is the largest whole-day period representable as a Go time.Duration. |
 | `observability.destinations` | array |  |  |  |
 | `observability.destinations[].name` | constraint |  |  | Required. |
 | `observability.destinations[].kind` | constant |  | `"jsonl"` | Required. |

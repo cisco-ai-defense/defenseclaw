@@ -1014,7 +1014,6 @@ func sanitizeEvidence(s string) string {
 	return s
 }
 
-
 // lineNumberAtOffset converts a byte offset into a 1-based line number.
 // Findings are emitted with no file path for content scans, so the line is
 // the only positional anchor an operator gets when triaging a match inside a

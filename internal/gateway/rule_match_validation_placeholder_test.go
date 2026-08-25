@@ -7,10 +7,9 @@ import "testing"
 // session where a synthetic token in a test file raised CRITICAL findings.
 func TestAcceptedCredentialMatch_RejectsEmbeddedPlaceholders(t *testing.T) {
 	rejected := []struct{ name, rule, candidate string }{
-		{"embedded example+fake marker", "SEC-AWS-KEY", "AKIAEXAMPLEFAKETOKEN0000000000000000000000000000000000000000000"},
+		{"filler tail dominated by one character", "SEC-AWS-KEY", "AKIAEXAMPLEFAKETOKEN0000000000000000000000000000000000000000000"},
 		{"zero filler tail", "SEC-AWS-KEY", "AKIA0000000000000000000000"},
-		{"documented AWS example", "SEC-AWS-KEY", "IOSFODNN7EXAMPLE"},
-		{"placeholder word embedded", "SEC-OPENAI", "sk-placeholder-not-a-real-key-here"},
+		{"documented AWS example", "SEC-AWS-KEY", "AKIAIOSFODNN7EXAMPLE"},
 		{"single repeated char", "SEC-OPENAI", "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 	}
 	for _, tc := range rejected {
@@ -29,6 +28,10 @@ func TestAcceptedCredentialMatch_StillDetectsRealShapedCredentials(t *testing.T)
 		{"random AWS key id", "SEC-AWS-KEY", "AKIA3FKJ2M5NQ7XZ8BWV"},
 		{"random AWS key id 2", "SEC-AWS-KEY", "AKIAQZ7T4YN2WVKD9RJH"},
 		{"random openai key", "SEC-OPENAI", "sk-proj-9Xk2mQ7vTz4RbN8pLwGh3JdY6CfA5sEu"},
+		// Regression guard: a real credential may contain a filler word. This
+		// codebase never rejects on spelling, only on structure.
+		{"real token containing the word example", "SEC-BEARER", "live-example-q7Vx2M9p4Rk8T3n6"},
+		{"weak but real password", "SEC-CONNSTR", "postgres://user:changeme123@host.example/db"},
 		{"high-entropy bearer", "SEC-BEARER", "fe58289546a78110469da64533f35d1064603756"},
 	}
 	for _, tc := range accepted {

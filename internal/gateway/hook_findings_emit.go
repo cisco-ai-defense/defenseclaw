@@ -586,7 +586,6 @@ func appendHookEvaluationDetails(details string, eval hookEvaluationContext) str
 	return strings.Join(parts, " ")
 }
 
-
 // optionalLineNumber maps the zero "not computed" sentinel onto the nil the
 // audit schema expects, so an unknown line is absent rather than line 0.
 func optionalLineNumber(line int) *int {
@@ -596,7 +595,6 @@ func optionalLineNumber(line int) *int {
 	value := line
 	return &value
 }
-
 
 // admitNewInspectFindings drops findings the dedupe window has seen recently.
 // A verdict whose findings are all suppressed still flows through as a

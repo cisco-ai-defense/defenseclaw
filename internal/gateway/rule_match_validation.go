@@ -721,15 +721,10 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	if len(compact) < 8 {
 		return false
 	}
-	// Canonical matching above only fires when the whole candidate is a known
-	// filler word. Authors routinely embed the marker inside a provider-shaped
-	// string ("AKIAEXAMPLEFAKETOKEN0000…"), which satisfies the prefix regex
-	// while being plainly illustrative.
-	for _, marker := range credentialPlaceholderMarkers {
-		if strings.Contains(compact, marker) {
-			return true
-		}
-	}
+	// Deliberately NOT matched on spelling: a real credential may contain
+	// "example" or "changeme" (Bearer live-example-… is a genuine token, and
+	// changeme123 is a genuine weak password). Only structural emptiness —
+	// too little variety to be generated — rejects a candidate here.
 	if credentialLowVariety(compact) {
 		return true
 	}
@@ -855,31 +850,6 @@ func decimalNumber(value string) int {
 		n = n*10 + int(char-'0')
 	}
 	return n
-}
-
-// credentialPlaceholderMarkers are substrings authors use to signal that a
-// value is illustrative. A random credential of provider length contains one
-// only by vanishing coincidence, so substring matching is safe here while
-// exact-match canonicalization is not sufficient.
-var credentialPlaceholderMarkers = []string{
-	"example",
-	"placeholder",
-	"changeme",
-	"replaceme",
-	"notarealtoken",
-	"notarealsecret",
-	"faketoken",
-	"fakesecret",
-	"fakekey",
-	"dummytoken",
-	"dummysecret",
-	"dummykey",
-	"redactedtest",
-	"sampletoken",
-	"samplekey",
-	"yourkeyhere",
-	"yourtokenhere",
-	"insertkeyhere",
 }
 
 // credentialLowVariety reports whether a candidate is too repetitive to be a
