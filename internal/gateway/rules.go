@@ -53,6 +53,11 @@ type RuleFinding struct {
 	Confidence float64  `json:"confidence"`
 	Evidence   string   `json:"evidence,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
+	// LineNumber is the 1-based line of the scanned text the match started
+	// on. Zero means "not computed". Findings previously reached the audit
+	// store with no location of any kind, so a CRITICAL could not be told
+	// apart from a false positive without re-deriving the match by hand.
+	LineNumber int `json:"line_number,omitempty"`
 	// ToolCapabilityClass is set for tool-call inspection findings
 	// from the invoked tool's name (via guardrail.ClassifyToolName).
 	// Empty for content-only matches; the emission pipeline then
@@ -853,6 +858,7 @@ func scanRuleCategoriesWithOptions(
 				Confidence: rule.Confidence,
 				Evidence:   sanitizeEvidence(evidence),
 				Tags:       rule.Tags,
+				LineNumber: lineNumberAtOffset(text, loc[0]),
 			}
 
 			f = adjustConfidence(toolName, f)
@@ -885,6 +891,9 @@ func scanRuleCategoriesWithOptions(
 
 				evidence := normalized[loc[0]:minInt(loc[1], loc[0]+80)]
 
+				// LineNumber is intentionally left zero here: this loop matches
+				// against shell-normalized text, so an offset into it does not
+				// correspond to a line in the content the operator would read.
 				f := RuleFinding{
 					RuleID:     rule.ID,
 					Title:      rule.Title + " (obfuscated)",
@@ -1003,4 +1012,22 @@ func sanitizeEvidence(s string) string {
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.ReplaceAll(s, "\t", " ")
 	return s
+}
+
+
+// lineNumberAtOffset converts a byte offset into a 1-based line number.
+// Findings are emitted with no file path for content scans, so the line is
+// the only positional anchor an operator gets when triaging a match inside a
+// multi-line tool result.
+func lineNumberAtOffset(text string, offset int) int {
+	if offset < 0 || offset > len(text) {
+		return 0
+	}
+	line := 1
+	for i := 0; i < offset; i++ {
+		if text[i] == '\n' {
+			line++
+		}
+	}
+	return line
 }
