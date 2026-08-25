@@ -442,9 +442,40 @@ func newWindowsManagedRuntimeGenerationMissingHooksGCFixture(
 	target := user.User.Sid
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
-	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, dataDir, target); err != nil {
+	descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target)
+	if err != nil {
+		t.Fatalf("build protected data-root descriptor: %v", err)
+	}
+	if err := runWindowsTestThreadImpersonatedAsSelf(func() error {
+		parent, err := openWindowsTargetDirectoryRoot(home)
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(parent)
+		if err := validateWindowsGuardianACLHandle(parent, target, true, false, true); err != nil {
+			return fmt.Errorf("authenticate fixture profile root: %w", err)
+		}
+		dataHandle, created, err := openOrCreateWindowsTargetDirectory(
+			parent,
+			".defenseclaw",
+			descriptor,
+		)
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(dataHandle)
+		if !created {
+			return errors.New("fixture data root already existed")
+		}
+		return validateWindowsTargetOwnedDirectoryHandle(
+			dataHandle,
+			dataDir,
+			target,
+		)
+	}); err != nil {
 		t.Fatalf("create protected data root without hooks: %v", err)
 	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
 	if _, err := os.Lstat(filepath.Join(dataDir, "hooks")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing-hooks fixture unexpectedly has a hooks child: %v", err)
 	}
