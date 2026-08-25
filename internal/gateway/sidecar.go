@@ -3916,16 +3916,29 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 	// bytes.NewReader avoids the []byte → string → *strings.Reader copy pair
 	// that the previous encoding did on the 4 MiB read buffer for every check.
 	//
-	// DisallowUnknownFields is deliberately NOT set here. The version-tolerance
-	// block below already accepts version==0 files during a lockstep upgrade
-	// window (T5.6). The symmetric case is guardian-ahead-of-gateway: the
-	// guardian ships in the AVC payload and can roll to a schema with an added
-	// protected_targets field before the gateway on the same host has been
-	// upgraded. A strict decoder would refuse the new schema and publish
-	// guardian_verified=false on a correctly-protected host. Since the
-	// authorization file is administrator-owned and every consumed field is
-	// already validated by name below, unknown fields are safely ignored.
+	// Version-gated schema strictness. Peek at the version field via a
+	// lenient probe pass; then:
+	//   * version <= currentGuardianAuthorizationVersion (1) — strict decode
+	//     (DisallowUnknownFields). Same-or-older schema files must match the
+	//     type contract exactly; an unrecognized field on a version==1 payload
+	//     is a schema-authoring bug we want the decoder to surface.
+	//   * version > current — lenient decode. Guardian-ahead-of-gateway is a
+	//     supported skew direction (guardian ships in the AVC payload and can
+	//     roll to a schema with an added protected_targets field before the
+	//     gateway on the same host has upgraded). Unknown fields are ignored;
+	//     the fields we DO consume are still validated by name below.
+	//
+	// This resolves the asymmetry Vineeth flagged in the PR-767 review while
+	// keeping the same-version schema check green.
+	const currentGuardianAuthorizationVersion = 1
+	var versionProbe struct {
+		Version int `json:"version"`
+	}
+	_ = json.Unmarshal(data, &versionProbe)
 	decoder := json.NewDecoder(bytes.NewReader(data))
+	if versionProbe.Version <= currentGuardianAuthorizationVersion {
+		decoder.DisallowUnknownFields()
+	}
 	if err := decoder.Decode(&authorization); err != nil {
 		return false, fmt.Sprintf("parse hook guardian authorization: %v", err)
 	}
@@ -3934,13 +3947,11 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		return false, "parse hook guardian authorization: trailing content"
 	}
 	// Accept version==0 (pre-spec-005 files that omit the `version`
-	// key entirely — JSON decode leaves the int zero) alongside the
-	// current version==1 envelope. This keeps macOS hosts covered
-	// during a non-lockstep upgrade where the gateway rolls to
-	// spec-005+ before the guardian process on the same host has
-	// re-published its authorization file (T5.6). Anything above 1 is
-	// an unknown-future format and stays rejected.
-	if authorization.Version < 0 || authorization.Version > 1 {
+	// key — JSON decode leaves the int zero) and any version >= 1: on a
+	// higher version the lenient decode above already ensured we only
+	// consumed the fields we know. Negative versions are the only
+	// unsupported case (malformed producer).
+	if authorization.Version < 0 {
 		return false, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
 	}
 	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {

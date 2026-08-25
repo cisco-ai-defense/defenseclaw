@@ -917,7 +917,7 @@ func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t 
 		"target_count":1,
 		"success_count":1,
 		"failure_count":0,
-		"protected_targets":[{"user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
+		"protected_targets":[{"sid":"S-1-5-21-1-2-3-1001","user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
 	}`, fresh))
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write authorization: %v", err)
@@ -937,7 +937,7 @@ func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t 
 		"target_count":2,
 		"success_count":1,
 		"failure_count":1,
-		"protected_targets":[{"user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
+		"protected_targets":[{"sid":"S-1-5-21-1-2-3-1001","user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
 	}`, fresh))
 	if err := os.WriteFile(path, partial, 0o644); err != nil {
 		t.Fatalf("write partial authorization: %v", err)
@@ -962,6 +962,7 @@ func TestManagedGuardianCoverageAcceptsSerializedInstallResultContract(t *testin
 		TargetCount:  1,
 		SuccessCount: 1,
 		ProtectedTargets: []managedGuardianAuthorizationTarget{{
+			SID:       "S-1-5-21-1-2-3-1001",
 			User:      "alice",
 			UserHome:  "/home/alice",
 			Connector: "codex",
