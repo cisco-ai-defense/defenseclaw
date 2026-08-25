@@ -947,6 +947,33 @@ func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t 
 	}
 }
 
+func TestManagedGuardianCoverageAcceptsDeferredTargets(t *testing.T) {
+	authorizationDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
+	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+	fresh := time.Now().UTC().Format(time.RFC3339)
+	data := []byte(fmt.Sprintf(`{
+		"version":1,
+		"updated_at":%q,
+		"ok":true,
+		"target_count":2,
+		"success_count":1,
+		"pending_count":1,
+		"failure_count":0,
+		"protected_targets":[{"sid":"S-1-5-21-1-2-3-1001","user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
+	}`, fresh))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
+
+	if ok, reason := managedGuardianCoversConnectors("unused", []string{"codex"}); !ok {
+		t.Fatalf("deferred authorization coverage = false: %s", reason)
+	}
+}
+
 func TestManagedGuardianCoverageAcceptsSerializedInstallResultContract(t *testing.T) {
 	authorizationDir := t.TempDir()
 	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
@@ -1013,6 +1040,21 @@ func TestManagedGuardianCoverageRejectsInvalidAuthorizationLedger(t *testing.T) 
 			"target_count":2,"success_count":1,"failure_count":1,
 			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
 		}`, fresh)},
+		{name: "negative_pending_count", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
+			"target_count":1,"success_count":1,"pending_count":-1,"failure_count":0,
+			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
+		}`, fresh)},
+		{name: "inconsistent_pending_count", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
+			"target_count":3,"success_count":1,"pending_count":1,"failure_count":0,
+			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
+		}`, fresh)},
+		{name: "overflowing_success_and_pending_counts", data: fmt.Sprintf(`{
+			"version":1,"updated_at":%q,"ok":true,
+			"target_count":%d,"success_count":%d,"pending_count":1,"failure_count":0,
+			"protected_targets":[]
+		}`, fresh, int(^uint(0)>>1), int(^uint(0)>>1))},
 		{name: "stale_extra_target", data: fmt.Sprintf(`{
 			"version":1,"updated_at":%q,"ok":true,
 			"target_count":1,"success_count":1,"failure_count":0,

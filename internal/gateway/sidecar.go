@@ -3876,6 +3876,7 @@ type managedGuardianAuthorization struct {
 	TargetCount      int                                  `json:"target_count"`
 	SuccessCount     int                                  `json:"success_count"`
 	FailureCount     int                                  `json:"failure_count"`
+	PendingCount     int                                  `json:"pending_count,omitempty"`
 	ProtectedTargets []managedGuardianAuthorizationTarget `json:"protected_targets"`
 }
 
@@ -3973,13 +3974,16 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		authorization.TargetCount < 0 ||
 		authorization.SuccessCount < 0 ||
 		authorization.FailureCount < 0 ||
+		authorization.PendingCount < 0 ||
 		authorization.FailureCount != 0 ||
-		authorization.SuccessCount != authorization.TargetCount ||
-		authorization.TargetCount != len(authorization.ProtectedTargets) {
+		authorization.SuccessCount > authorization.TargetCount ||
+		authorization.PendingCount != authorization.TargetCount-authorization.SuccessCount ||
+		authorization.SuccessCount != len(authorization.ProtectedTargets) {
 		return false, fmt.Sprintf(
-			"hook guardian authorization is incomplete (%d/%d targets succeeded, %d failed)",
+			"hook guardian authorization is incomplete (%d/%d targets succeeded, %d pending, %d failed)",
 			authorization.SuccessCount,
 			authorization.TargetCount,
+			authorization.PendingCount,
 			authorization.FailureCount,
 		)
 	}
