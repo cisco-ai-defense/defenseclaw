@@ -1161,6 +1161,75 @@ func managedHookScriptDigests(
 	return out, nil
 }
 
+// VerifyManagedSharedHookScriptDigests verifies the one authenticated digest
+// set shared by every connector in a managed target runtime. It is deliberately
+// separate from HookContractLockDrifted: compatibility drift should reach the
+// repair path, while this check proves that the bytes currently selected by
+// the protected contract have not been modified in place.
+//
+// expectedOwnerSID is required on Windows so each opened artifact is also
+// bound to the exact target-owned protected DACL. The platform validator runs
+// on the same handle that is hashed; a path-only ACL check would leave a swap
+// window between authorization and digesting.
+func VerifyManagedSharedHookScriptDigests(dataDir, expectedOwnerSID string) error {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" || !filepath.IsAbs(dataDir) {
+		return errors.New("managed shared hook digest data directory is not absolute")
+	}
+	if runtime.GOOS == "windows" && strings.TrimSpace(expectedOwnerSID) == "" {
+		return errors.New("managed shared hook target SID is empty")
+	}
+	dataDir = filepath.Clean(dataDir)
+	lock, err := loadManagedHookContractLockForOwner(dataDir, expectedOwnerSID)
+	if err != nil {
+		return fmt.Errorf("load authenticated managed hook contract: %w", err)
+	}
+	expectedNames := append([]string{}, genericHookScripts...)
+	expectedNames = append(expectedNames, hookHelperScripts...)
+	sort.Strings(expectedNames)
+	if len(lock.SharedHookScriptDigests) != len(expectedNames) {
+		return fmt.Errorf(
+			"managed hook contract has %d shared script digests, want %d",
+			len(lock.SharedHookScriptDigests),
+			len(expectedNames),
+		)
+	}
+	for _, name := range expectedNames {
+		expectedDigest, ok := lock.SharedHookScriptDigests[name]
+		if !ok {
+			return fmt.Errorf("managed hook contract has no shared script digest for %s", name)
+		}
+		if !strings.HasPrefix(expectedDigest, "sha256:") ||
+			!validLowerHexSHA256(strings.TrimPrefix(expectedDigest, "sha256:")) {
+			return fmt.Errorf("managed hook contract has an invalid shared script digest for %s", name)
+		}
+		path := filepath.Join(dataDir, "hooks", name)
+		actualDigest, exists, err := stableManagedArtifactDigestForOwner(
+			path,
+			"managed shared hook script "+name,
+			managedHookRuntimeArtifactMaxBytes,
+			expectedOwnerSID,
+		)
+		if err != nil {
+			return fmt.Errorf("verify managed shared hook script %s: %w", path, err)
+		}
+		if !exists {
+			return fmt.Errorf("managed shared hook script is missing: %s", path)
+		}
+		if actualDigest != expectedDigest {
+			return fmt.Errorf("managed shared hook script digest mismatch: %s", path)
+		}
+	}
+	after, err := loadManagedHookContractLockForOwner(dataDir, expectedOwnerSID)
+	if err != nil {
+		return fmt.Errorf("reload authenticated managed hook contract: %w", err)
+	}
+	if !reflect.DeepEqual(lock, after) {
+		return errors.New("managed hook contract changed during shared script verification")
+	}
+	return nil
+}
+
 func pathInsideConnectorDataDir(dataDir, path string) bool {
 	base, err := filepath.Abs(dataDir)
 	if err != nil {
@@ -1182,6 +1251,14 @@ func pathInsideConnectorDataDir(dataDir, path string) bool {
 func stableManagedArtifactDigest(
 	path, label string,
 	maxBytes int64,
+) (string, bool, error) {
+	return stableManagedArtifactDigestForOwner(path, label, maxBytes, "")
+}
+
+func stableManagedArtifactDigestForOwner(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
 ) (string, bool, error) {
 	if maxBytes <= 0 {
 		return "", false, fmt.Errorf("%s has an invalid digest limit", label)
@@ -1212,6 +1289,9 @@ func stableManagedArtifactDigest(
 		return "", true, fmt.Errorf("%s changed identity before digest", label)
 	}
 	if err := validateHookRuntimeOpenedFile(file, label); err != nil {
+		return "", true, err
+	}
+	if err := validateManagedSharedHookOpenedFile(file, expectedOwnerSID); err != nil {
 		return "", true, err
 	}
 	hashOnce := func() ([sha256.Size]byte, int64, error) {
@@ -1656,16 +1736,24 @@ func loadHookContractLockForUpdate(
 }
 
 func loadManagedHookContractLock(dataDir string) (hookContractLock, error) {
+	return loadManagedHookContractLockForOwner(dataDir, "")
+}
+
+func loadManagedHookContractLockForOwner(
+	dataDir,
+	expectedOwnerSID string,
+) (hookContractLock, error) {
 	empty := hookContractLock{Version: 1, Connectors: map[string]HookContractLockEntry{}}
 	if strings.TrimSpace(dataDir) == "" {
 		return empty, nil
 	}
 	path := filepath.Join(dataDir, hookContractLockFile)
-	data, exists, err := readStableManagedRuntimeFile(
+	data, exists, err := readStableManagedRuntimeFileForOwner(
 		path,
 		"managed hook contract lock",
 		true,
 		managedHookContractLockMaxBytes,
+		expectedOwnerSID,
 	)
 	if err != nil {
 		return hookContractLock{}, err

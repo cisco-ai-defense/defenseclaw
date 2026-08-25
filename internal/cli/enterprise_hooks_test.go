@@ -1172,9 +1172,10 @@ func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
 
 func TestEnterpriseHookWatchOwnedEventActionable(t *testing.T) {
 	exclusivePath := filepath.FromSlash("/home/alice/.defenseclaw/hooks/codex-hook.sh")
+	contractSharedPath := filepath.FromSlash("/home/alice/.defenseclaw/hooks/inspect-request.sh")
 	sharedPath := filepath.FromSlash("/home/alice/.codex/config.toml")
 	unownedPath := filepath.FromSlash("/home/alice/.codex/history.jsonl")
-	exclusiveOwned := map[string]struct{}{exclusivePath: {}}
+	exclusiveOwned := map[string]struct{}{exclusivePath: {}, contractSharedPath: {}}
 	sharedOwned := map[string]struct{}{sharedPath: {}}
 
 	for _, tc := range []struct {
@@ -1187,6 +1188,13 @@ func TestEnterpriseHookWatchOwnedEventActionable(t *testing.T) {
 		{
 			name:      "exclusive write remains actionable",
 			event:     fsnotify.Event{Name: exclusivePath, Op: fsnotify.Write},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "contract-digested shared hook write is actionable",
+			event:     fsnotify.Event{Name: contractSharedPath, Op: fsnotify.Write},
 			exclusive: exclusiveOwned,
 			shared:    sharedOwned,
 			want:      true,
@@ -1244,6 +1252,90 @@ func TestEnterpriseHookWatchOwnedEventActionable(t *testing.T) {
 				t.Fatalf("enterpriseHookWatchOwnedEventActionable(%+v) = %v, want %v", tc.event, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnterpriseHookVerifyOrRepairTargetReportsOnlySuccessfulRepair(t *testing.T) {
+	previousVerifier := enterpriseHookReconcileVerifier
+	previousInstaller := enterpriseHookReconcileInstaller
+	previousSession := enterpriseHookReconcileSessionAvailable
+	t.Cleanup(func() {
+		enterpriseHookReconcileVerifier = previousVerifier
+		enterpriseHookReconcileInstaller = previousInstaller
+		enterpriseHookReconcileSessionAvailable = previousSession
+	})
+
+	target := enterprisehooks.ManifestTarget{Connector: "claudecode"}
+	opts := enterprisehooks.InstallOptions{ConnectorName: "claudecode"}
+	verifyErr := errors.New("shared hook digest mismatch")
+	installCalls := 0
+	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return enterprisehooks.InstallResult{}, verifyErr
+	}
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) {
+		return true, nil
+	}
+	enterpriseHookReconcileInstaller = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		installCalls++
+		return enterprisehooks.InstallResult{Connector: "claudecode"}, nil
+	}
+	result, repaired, err := enterpriseHookVerifyOrRepairTarget(
+		context.Background(), target, opts, true,
+	)
+	if err != nil || !repaired || result.Connector != "claudecode" || installCalls != 1 {
+		t.Fatalf("successful repair: result=%+v repaired=%t install_calls=%d err=%v", result, repaired, installCalls, err)
+	}
+
+	installErr := errors.New("repair publication failed")
+	enterpriseHookReconcileInstaller = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return enterprisehooks.InstallResult{}, installErr
+	}
+	_, repaired, err = enterpriseHookVerifyOrRepairTarget(
+		context.Background(), target, opts, true,
+	)
+	if !errors.Is(err, installErr) || repaired {
+		t.Fatalf("failed repair: repaired=%t err=%v, want false/%v", repaired, err, installErr)
+	}
+
+	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return enterprisehooks.InstallResult{Connector: "claudecode"}, nil
+	}
+	_, repaired, err = enterpriseHookVerifyOrRepairTarget(
+		context.Background(), target, opts, true,
+	)
+	if err != nil || repaired {
+		t.Fatalf("clean verification: repaired=%t err=%v, want false/nil", repaired, err)
+	}
+}
+
+func TestEnterpriseHookReconcileLogReportsRepairAsChange(t *testing.T) {
+	run := enterpriseHookReconcileRun{
+		Rows:    []enterpriseHookReconcileRow{{Connector: "claudecode", OK: true}},
+		Repairs: 1,
+	}
+	changed := enterpriseHookReconcileChanged("stable", "stable", run.Repairs)
+	if !changed {
+		t.Fatal("successful repair with stable rows was classified as no change")
+	}
+	var output bytes.Buffer
+	writeEnterpriseHookReconcileLog(
+		&output,
+		"fsnotify",
+		"ok",
+		run,
+		3,
+		changed,
+		"",
+	)
+	if got := output.String(); !strings.Contains(got, "repairs=1") || strings.Contains(got, "no_change=true") {
+		t.Fatalf("repair log = %q, want repairs=1 without no_change=true", got)
+	}
+	serialized, err := json.Marshal(run)
+	if err != nil {
+		t.Fatalf("marshal reconcile run: %v", err)
+	}
+	if bytes.Contains(serialized, []byte("Repairs")) || bytes.Contains(serialized, []byte("repairs")) {
+		t.Fatalf("internal repair counter leaked into serialized state: %s", serialized)
 	}
 }
 

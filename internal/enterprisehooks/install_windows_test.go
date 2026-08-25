@@ -1847,6 +1847,150 @@ func TestVerifyWindowsClaudeIsReadOnlyAndDoesNotImpersonate(t *testing.T) {
 	}
 }
 
+func TestVerifyWindowsClaudeRejectsAndInstallRepairsTamperedSharedHook(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Install: %v", err)
+	}
+	path := filepath.Join(fixture.home, ".defenseclaw", "hooks", "inspect-tool.sh")
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read canonical shared hook: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("tampered shared hook\n"), 0o600); err != nil {
+		t.Fatalf("tamper shared hook: %v", err)
+	}
+
+	if _, err := Verify(context.Background(), opts); err == nil ||
+		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
+		t.Fatalf("Verify after shared-hook tamper = %v, want digest rejection", err)
+	}
+
+	opts.AllowMissingHookConfigRepair = true
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair Install: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read repaired shared hook: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("repair Install did not restore the contract-digested shared hook")
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify after shared-hook repair: %v", err)
+	}
+}
+
+func TestVerifyWindowsClaudeRepairsAtomicSharedHookReplacementWithoutAdvancingContract(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Install: %v", err)
+	}
+	dataDir := filepath.Join(fixture.home, ".defenseclaw")
+	path := filepath.Join(dataDir, "hooks", "inspect-request.sh")
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read canonical shared hook: %v", err)
+	}
+	lockTime, entryTime, err := connector.ManagedHookContractTimestamps(dataDir, "claudecode")
+	if err != nil {
+		t.Fatalf("read contract identity before replacement: %v", err)
+	}
+
+	replacement := path + ".user-replacement"
+	if err := os.WriteFile(replacement, []byte("atomically replaced shared hook\n"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err := hardenWindowsUserRuntime(
+		fixture.home,
+		dataDir,
+		[]string{replacement},
+		fixture.targetSID,
+	); err != nil {
+		t.Fatalf("make replacement structurally canonical: %v", err)
+	}
+	from, err := winpath.UTF16Ptr(replacement)
+	if err != nil {
+		t.Fatalf("encode replacement path: %v", err)
+	}
+	to, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		t.Fatalf("encode managed path: %v", err)
+	}
+	if err := windows.MoveFileEx(
+		from,
+		to,
+		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
+	); err != nil {
+		t.Fatalf("atomically replace managed hook: %v", err)
+	}
+
+	if _, err := Verify(context.Background(), opts); err == nil ||
+		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
+		t.Fatalf("Verify after atomic replacement = %v, want digest rejection", err)
+	}
+	opts.AllowMissingHookConfigRepair = true
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair Install: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read repaired shared hook: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("repair Install did not restore the atomically replaced shared hook")
+	}
+	afterLockTime, afterEntryTime, err := connector.ManagedHookContractTimestamps(dataDir, "claudecode")
+	if err != nil {
+		t.Fatalf("read contract identity after repair: %v", err)
+	}
+	if afterLockTime != lockTime || afterEntryTime != entryTime {
+		t.Fatalf(
+			"repair advanced authenticated contract identity: before=%s/%s after=%s/%s",
+			lockTime,
+			entryTime,
+			afterLockTime,
+			afterEntryTime,
+		)
+	}
+}
+
+func TestVerifyWindowsClaudeRejectsNoncanonicalSharedHookProtection(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Install: %v", err)
+	}
+	path := filepath.Join(fixture.home, ".defenseclaw", "hooks", "inspect-tool.sh")
+	setWindowsTestUntrustedWriteDACL(t, path, fixture.targetSID)
+
+	if _, err := Verify(context.Background(), opts); err == nil ||
+		!strings.Contains(err.Error(), "shared hook protection is noncanonical") {
+		t.Fatalf("Verify with noncanonical shared-hook DACL = %v, want protection rejection", err)
+	}
+}
+
+func TestManagedSharedHookVerifierRejectsNoncanonicalContractLockProtection(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Install: %v", err)
+	}
+	dataDir := filepath.Join(fixture.home, ".defenseclaw")
+	lockPath := filepath.Join(dataDir, "hook_contract_lock.json")
+	setWindowsTestUntrustedWriteDACL(t, lockPath, fixture.targetSID)
+
+	if err := connector.VerifyManagedSharedHookScriptDigests(
+		dataDir,
+		fixture.targetSID.String(),
+	); err == nil || !strings.Contains(err.Error(), "protection is noncanonical") {
+		t.Fatalf("shared-hook verifier with noncanonical contract-lock DACL = %v, want protection rejection", err)
+	}
+}
+
 // TestInstallWindowsClaudeReclaimsOrphanManagedPolicy pins the recovery
 // contract for "policy on disk without ownership state metadata" — the
 // exact signature of a partial prior uninstall that removed the state

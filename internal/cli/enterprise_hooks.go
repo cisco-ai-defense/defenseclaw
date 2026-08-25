@@ -490,10 +490,48 @@ type enterpriseHookReconcileRun struct {
 	Rows                []enterpriseHookReconcileRow
 	Failures            int
 	Pending             int
+	Repairs             int `json:"-"`
 	StateErr            error
 	WatchDirs           []string
 	WatchExclusiveFiles []string // DC-only writers: react to any event
 	WatchSharedFiles    []string // agent + DC writers: react only to Create/Remove/Rename
+}
+
+var (
+	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
+	enterpriseHookReconcileInstaller        = enterprisehooks.Install
+	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
+)
+
+// enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
+// the operation that proves it. A target is repaired only when it was already
+// protected, verification failed, its authenticated session was available,
+// and the subsequent install completed successfully.
+func enterpriseHookVerifyOrRepairTarget(
+	ctx context.Context,
+	target enterprisehooks.ManifestTarget,
+	opts enterprisehooks.InstallOptions,
+	previouslyProtected bool,
+) (enterprisehooks.InstallResult, bool, error) {
+	if !previouslyProtected {
+		result, err := enterpriseHookReconcileInstaller(ctx, opts)
+		return result, false, err
+	}
+	result, err := enterpriseHookReconcileVerifier(ctx, opts)
+	if err == nil {
+		return result, false, nil
+	}
+	available, err := enterpriseHookReconcileSessionAvailable(target)
+	if err != nil {
+		return enterprisehooks.InstallResult{}, false, err
+	}
+	if !available {
+		return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+			"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
+		)
+	}
+	result, err = enterpriseHookReconcileInstaller(ctx, opts)
+	return result, err == nil, err
 }
 
 func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
@@ -1530,6 +1568,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
 	pending := 0
+	repairs := 0
 	pendingTargets := make([]enterprisehooks.ManifestTarget, 0)
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
@@ -1628,23 +1667,17 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			}
 			if err == nil {
 				var result enterprisehooks.InstallResult
-				if previousProtection.PreviouslyProtected {
-					result, err = enterprisehooks.Verify(ctx, opts)
-					if err != nil {
-						var available bool
-						available, err = enterpriseHookTargetSessionAvailable(target)
-						if err == nil && available {
-							result, err = enterprisehooks.Install(ctx, opts)
-						} else if err == nil {
-							err = fmt.Errorf(
-								"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
-							)
-						}
-					}
-				} else {
-					result, err = enterprisehooks.Install(ctx, opts)
-				}
+				var repaired bool
+				result, repaired, err = enterpriseHookVerifyOrRepairTarget(
+					ctx,
+					target,
+					opts,
+					previousProtection.PreviouslyProtected,
+				)
 				if err == nil {
+					if repaired {
+						repairs++
+					}
 					row.OK = true
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
@@ -1701,6 +1734,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	run.Rows = rows
 	run.Failures = failures
 	run.Pending = pending
+	run.Repairs = repairs
 	run.StateErr = stateErr
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
@@ -1812,7 +1846,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			status = "attention"
 		}
 		rowsHash := enterpriseHookReconcileRowsHash(run.Rows)
-		changed := rowsHash != lastRowsHash
+		changed := enterpriseHookReconcileChanged(rowsHash, lastRowsHash, run.Repairs)
 		lastRowsHash = rowsHash
 		triggerTag := ""
 		if reason == "fsnotify" && lastTriggerPath != "" {
@@ -1822,15 +1856,15 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// the noise so it can be reclassified or filtered.
 			triggerTag = fmt.Sprintf(" trigger_path=%q trigger_op=%s", lastTriggerPath, lastTriggerOp)
 		}
-		if changed {
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d pending=%d failures=%d watch_dirs=%d%s\n", reason, status, len(run.Rows), run.Pending, run.Failures, len(watched), triggerTag)
-		} else {
-			// Log at DEBUG-ish cadence: one line per no-change
-			// reconcile is fine and load-bearing for triage (we still
-			// want to know the guardian is alive), but keep it
-			// distinguishable from a real repair.
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d pending=%d failures=%d watch_dirs=%d no_change=true%s\n", reason, status, len(run.Rows), run.Pending, run.Failures, len(watched), triggerTag)
-		}
+		writeEnterpriseHookReconcileLog(
+			cmd.ErrOrStderr(),
+			reason,
+			status,
+			run,
+			len(watched),
+			changed,
+			triggerTag,
+		)
 		lastTriggerPath = ""
 		lastTriggerOp = 0
 		if run.StateErr != nil {
@@ -2293,6 +2327,53 @@ func enterpriseHookReconcileRowsHash(rows []enterpriseHookReconcileRow) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// enterpriseHookReconcileChanged treats an authenticated successful repair as
+// a change even when the stable row outcome remains OK before and after it.
+// Otherwise a restored hook would be mislabeled no_change=true.
+func enterpriseHookReconcileChanged(rowsHash, previousRowsHash string, repairs int) bool {
+	return repairs > 0 || rowsHash != previousRowsHash
+}
+
+func writeEnterpriseHookReconcileLog(
+	writer io.Writer,
+	reason,
+	status string,
+	run enterpriseHookReconcileRun,
+	watchDirs int,
+	changed bool,
+	triggerTag string,
+) {
+	if changed {
+		fmt.Fprintf(
+			writer,
+			"[hook-guardian] reconcile reason=%s status=%s targets=%d pending=%d failures=%d repairs=%d watch_dirs=%d%s\n",
+			reason,
+			status,
+			len(run.Rows),
+			run.Pending,
+			run.Failures,
+			run.Repairs,
+			watchDirs,
+			triggerTag,
+		)
+		return
+	}
+	// Log at DEBUG-ish cadence: one line per no-change reconcile is useful
+	// for liveness triage, but it must remain distinguishable from a repair.
+	fmt.Fprintf(
+		writer,
+		"[hook-guardian] reconcile reason=%s status=%s targets=%d pending=%d failures=%d repairs=%d watch_dirs=%d no_change=true%s\n",
+		reason,
+		status,
+		len(run.Rows),
+		run.Pending,
+		run.Failures,
+		run.Repairs,
+		watchDirs,
+		triggerTag,
+	)
 }
 
 func enterpriseHooksManagedMutationPreflight() error {

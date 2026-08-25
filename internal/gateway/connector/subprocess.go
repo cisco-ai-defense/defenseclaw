@@ -1082,6 +1082,21 @@ func readStableManagedRuntimeFile(
 	allowMissing bool,
 	maxBytes int64,
 ) ([]byte, bool, error) {
+	return readStableManagedRuntimeFileForOwner(
+		path,
+		label,
+		allowMissing,
+		maxBytes,
+		"",
+	)
+}
+
+func readStableManagedRuntimeFileForOwner(
+	path, label string,
+	allowMissing bool,
+	maxBytes int64,
+	expectedOwnerSID string,
+) ([]byte, bool, error) {
 	if maxBytes <= 0 {
 		return nil, false, fmt.Errorf("%s has an invalid read limit", label)
 	}
@@ -1116,6 +1131,9 @@ func readStableManagedRuntimeFile(
 		return nil, false, fmt.Errorf("%s changed identity before open", label)
 	}
 	if err := validateHookRuntimeOpenedFile(file, label); err != nil {
+		return nil, false, err
+	}
+	if err := validateManagedSharedHookOpenedFile(file, expectedOwnerSID); err != nil {
 		return nil, false, err
 	}
 	readOnce := func() ([]byte, error) {

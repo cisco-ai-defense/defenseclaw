@@ -955,6 +955,15 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: current managed Claude runtime sidecars are invalid: %w", err)
 	}
+	if err := connector.VerifyManagedSharedHookScriptDigests(
+		target.dataDir,
+		target.targetSID.String(),
+	); err != nil {
+		return fmt.Errorf(
+			"enterprise hooks: current managed Claude shared hook runtime is invalid: %w",
+			err,
+		)
+	}
 	return nil
 }
 

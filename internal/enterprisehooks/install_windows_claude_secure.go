@@ -491,6 +491,15 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 	); err != nil {
 		return lock, fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err)
 	}
+	if err := connector.VerifyManagedSharedHookScriptDigests(
+		dataDir,
+		targetSID.String(),
+	); err != nil {
+		return lock, fmt.Errorf(
+			"enterprise hooks: managed Claude shared hook runtime is invalid: %w",
+			err,
+		)
+	}
 	lock, err = connector.LoadHookContractLockEntryForMode(
 		dataDir,
 		conn.Name(),

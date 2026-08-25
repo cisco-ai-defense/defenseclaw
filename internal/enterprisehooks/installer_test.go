@@ -826,16 +826,19 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 	}
 
 	// EXCLUSIVE-writer files: DC-only artifacts that render to
-	// the same bytes on every reconcile for a given connector.
-	// Two categories qualify: the connector-specific hook script
-	// (codex-hook.sh — written by only this connector's Install)
-	// and the scoped token sidecar (.hook-codex.token — one per
-	// connector). Any event on these is meaningful because
-	// atomicWriteFile short-circuits when content matches, so
-	// only real churn triggers events.
+	// the same bytes on every reconcile. This includes the
+	// connector-specific hook and scoped token as well as every
+	// contract-digested shared script. The shared scripts are
+	// connector-independent, so adding them does not reintroduce
+	// cross-connector publication churn.
 	wantExclusive := []string{
 		filepath.Join(hookDir, "codex-hook.sh"),
 		filepath.Join(hookDir, ".hook-codex.token"),
+		filepath.Join(hookDir, "inspect-tool.sh"),
+		filepath.Join(hookDir, "inspect-request.sh"),
+		filepath.Join(hookDir, "inspect-response.sh"),
+		filepath.Join(hookDir, "inspect-tool-response.sh"),
+		filepath.Join(hookDir, "_hardening.sh"),
 	}
 	for _, w := range wantExclusive {
 		if !sliceContains(own.ExclusiveWriter, w) {
@@ -848,26 +851,14 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 		}
 	}
 
-	// Regression guard: shared-across-connectors artifacts must
-	// NOT be in either set. Including them creates a fsnotify
-	// rename storm because every reconcile rewrites the file once
-	// per active connector with slightly different bytes, and
-	// each rewrite fires a REMOVE event that our loop treats as a
-	// tamper. Excluding them means the 5-min backstop reconcile
-	// is the only thing that re-lays them, which is fine — users
-	// don't tamper with these helpers directly (they invoke the
-	// connector-specific hook, and THAT is in the allowlist).
+	// Regression guard: merged sidecars that are not
+	// contract-digested scripts remain outside both ownership sets.
 	wantExcluded := []string{
-		filepath.Join(hookDir, "inspect-tool.sh"),
-		filepath.Join(hookDir, "inspect-request.sh"),
-		filepath.Join(hookDir, "inspect-response.sh"),
-		filepath.Join(hookDir, "inspect-tool-response.sh"),
-		filepath.Join(hookDir, "_hardening.sh"),
 		filepath.Join(hookDir, ".hookcfg"),
 	}
 	for _, w := range wantExcluded {
 		if sliceContains(own.ExclusiveWriter, w) {
-			t.Fatalf("%s must NOT be in ExclusiveWriter — it is shared across connectors and re-rendered by every Install() with different bytes, which fires an fsnotify REMOVE storm every reconcile", w)
+			t.Fatalf("%s must NOT be in ExclusiveWriter", w)
 		}
 		if sliceContains(own.SharedWriter, w) {
 			t.Fatalf("%s must NOT be in SharedWriter either", w)

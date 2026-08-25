@@ -1238,6 +1238,67 @@ func TestHookContractLockStoresSharedScriptsOnce(t *testing.T) {
 	}
 }
 
+func TestVerifyManagedSharedHookScriptDigestsRejectsManagedTamperAndIgnoresUserHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows owner/DACL enforcement is covered by the native enterprise-hooks fixture")
+	}
+	dir := testenv.PrivateTempDir(t)
+	hookDir := filepath.Join(dir, "hooks")
+	opts := SetupOpts{
+		DataDir:           dir,
+		APIAddr:           "127.0.0.1:18970",
+		HookFailMode:      "closed",
+		ManagedEnterprise: true,
+	}
+	conn := NewClaudeCodeConnector()
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		t.Fatalf("write canonical hooks: %v", err)
+	}
+	if err := SaveHookContractLockEntry(
+		dir,
+		NewHookContractLockEntry(opts, conn, "test-build"),
+	); err != nil {
+		t.Fatalf("save canonical contract: %v", err)
+	}
+	if err := VerifyManagedSharedHookScriptDigests(dir, ""); err != nil {
+		t.Fatalf("verify canonical shared hooks: %v", err)
+	}
+
+	// User-owned hooks are outside the exact five-name contract and must not
+	// become part of Guardian's repair authority.
+	if err := os.WriteFile(
+		filepath.Join(hookDir, "my-user-hook.sh"),
+		[]byte("#!/bin/sh\nexit 0\n"),
+		0o700,
+	); err != nil {
+		t.Fatalf("write user hook: %v", err)
+	}
+	if err := VerifyManagedSharedHookScriptDigests(dir, ""); err != nil {
+		t.Fatalf("user hook affected managed verification: %v", err)
+	}
+
+	lockPath := filepath.Join(dir, hookContractLockFile)
+	lockBefore, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read contract before tamper: %v", err)
+	}
+	managedPath := filepath.Join(hookDir, "inspect-request.sh")
+	if err := os.WriteFile(managedPath, []byte("tampered\n"), 0o700); err != nil {
+		t.Fatalf("tamper managed hook: %v", err)
+	}
+	if err := VerifyManagedSharedHookScriptDigests(dir, ""); err == nil ||
+		!strings.Contains(err.Error(), "shared hook script digest mismatch") {
+		t.Fatalf("managed tamper verification = %v, want digest mismatch", err)
+	}
+	lockAfter, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read contract after tamper: %v", err)
+	}
+	if !bytes.Equal(lockAfter, lockBefore) {
+		t.Fatal("verification blessed modified bytes by changing the contract lock")
+	}
+}
+
 func TestHookContractLockMigratesDivergentLegacySharedDigests(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
 	hookDir := filepath.Join(dir, "hooks")
