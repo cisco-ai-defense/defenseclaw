@@ -59,6 +59,17 @@ param(
     [switch]$CoreHardeningCertification,
 
     [switch]$NoStart,
+    # -Purge removes managed state during uninstall. When a
+    # committed StateRoot exists, the ordinary state-root authenticated
+    # purge runs. When no StateRoot exists to authenticate against —
+    # the case for a partially applied install that failed before
+    # StateRoot creation — Purge falls back to a bounded DefenseClaw-
+    # namespace sweep (services, roots, per-connector managed
+    # artifacts, per-user runtimes, residual service registry keys).
+    # There is no separate opt-in for the sweep; a single install per
+    # box is the product model, so a Purge that cannot find its scope
+    # to authenticate is by definition a Purge that should just wipe
+    # whatever DefenseClaw state remains.
     [switch]$Purge,
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,

@@ -18461,6 +18461,178 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     return $result
 }
 
+# Remove-DefenseClawSweepPath is the bounded delete helper backing
+# Invoke-DefenseClawNamespaceSweep. It never traverses outside the
+# passed path and it survives ACLs left behind by services that were
+# already deleted — takeown + icacls first, then Remove-Item.
+function Remove-DefenseClawSweepPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path)) { return }
+    try {
+        & takeown.exe /F $Path /A /R /D Y 2>$null | Out-Null
+        & icacls.exe $Path /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null | Out-Null
+    } catch {}
+    Microsoft.PowerShell.Management\Remove-Item `
+        -LiteralPath $Path -Force -Recurse -ErrorAction SilentlyContinue
+}
+
+# Invoke-DefenseClawNamespaceSweep is the -Force uninstall backstop.
+# It runs only when the committed authenticated purge cannot: no
+# StateRoot to authenticate against, no metadata tombstone, but
+# the operator has passed -Purge -Force meaning "wipe whatever
+# DefenseClaw state exists on this box, best effort, don't refuse
+# because you can't identify what installed it."
+#
+# The scope is the DefenseClaw namespace, not an arbitrary
+# operator-supplied path — the caller doesn't pick what gets deleted.
+# Every path here is a hard-coded DefenseClaw-owned surface (services
+# whose name matches DefenseClaw*, our per-connector managed
+# artifacts, our per-user runtime directories, our machine roots).
+#
+# Not called on the healthy path — the ordinary state-root-scoped
+# authenticated cleanup runs first. This is a recovery-only branch.
+function Invoke-DefenseClawNamespaceSweep {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+
+    # 1. Live processes that would hold file handles on paths we're
+    #    about to delete. Killed by best-effort Stop-Process before
+    #    the SCM stops so we don't wait on gateway shutdown.
+    foreach ($name in @(
+        'defenseclaw-gateway',
+        'defenseclaw-cmid-broker',
+        'defenseclaw-hook',
+        'defenseclaw-enterprise-setup',
+        'defenseclaw'
+    )) {
+        Microsoft.PowerShell.Management\Get-Process -Name $name -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Microsoft.PowerShell.Management\Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            }
+    }
+
+    # 2. All DefenseClaw-* SCM services (production or cert-scoped).
+    #    sc.exe delete leaves the service in MARKED_FOR_DELETION until
+    #    the last handle closes; the registry-key sweep below removes
+    #    the residual entry so a fresh install with the same name
+    #    isn't blocked.
+    Microsoft.PowerShell.Management\Get-Service -Name 'DefenseClaw*' -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Microsoft.PowerShell.Management\Stop-Service `
+                -Name $_.Name -Force -ErrorAction SilentlyContinue
+            & sc.exe stop $_.Name 2>$null | Out-Null
+            & sc.exe delete $_.Name 2>$null | Out-Null
+        }
+
+    # 3. Machine-wide DefenseClaw roots. Both the production names
+    #    (DefenseClaw) and every cert-scoped runID's DefenseClaw-Cert
+    #    subtree, plus the DefenseClaw-Lifecycle lock/intent directory
+    #    that holds authenticated rollback-intent JSON blobs.
+    foreach ($root in @(
+        (Microsoft.PowerShell.Management\Join-Path `
+            $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
+        (Microsoft.PowerShell.Management\Join-Path `
+            $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw'),
+        (Microsoft.PowerShell.Management\Join-Path `
+            $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw-Cert'),
+        (Microsoft.PowerShell.Management\Join-Path `
+            $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Cert'),
+        (Microsoft.PowerShell.Management\Join-Path `
+            $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle')
+    )) {
+        Remove-DefenseClawSweepPath -Path $root
+    }
+
+    # 4. Per-connector managed artifacts. These live in each agent's
+    #    own directory (ClaudeCode, Cursor, OpenAI\Codex) so we
+    #    delete only DefenseClaw-namespaced entries — the agent's
+    #    own files must survive.
+    $claudeManagedDir = Microsoft.PowerShell.Management\Join-Path `
+        (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'ClaudeCode') `
+        'managed-settings.d'
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $claudeManagedDir) {
+        try {
+            & takeown.exe /F $claudeManagedDir /A /R /D Y 2>$null | Out-Null
+            & icacls.exe $claudeManagedDir /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null | Out-Null
+        } catch {}
+        Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $claudeManagedDir -Force -ErrorAction SilentlyContinue |
+            Microsoft.PowerShell.Core\Where-Object {
+                $_.Name -like '*defenseclaw*' -or
+                $_.Name -like '.defenseclaw*' -or
+                $_.Name -eq '90-defenseclaw.json'
+            } |
+            ForEach-Object {
+                Microsoft.PowerShell.Management\Remove-Item `
+                    -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
+            }
+    }
+    foreach ($agentDir in @(
+        (Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'Cursor'),
+        (Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'OpenAI\Codex')
+    )) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $agentDir)) { continue }
+        try {
+            & takeown.exe /F $agentDir /A /R /D Y 2>$null | Out-Null
+            & icacls.exe $agentDir /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null | Out-Null
+        } catch {}
+        Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $agentDir -Force -ErrorAction SilentlyContinue |
+            Microsoft.PowerShell.Core\Where-Object {
+                $_.Name -like '*defenseclaw*' -or
+                $_.Name -like '.defenseclaw*' -or
+                $_.Name -eq 'hooks.json' -or
+                $_.Name -eq 'requirements.toml'
+            } |
+            ForEach-Object {
+                Microsoft.PowerShell.Management\Remove-Item `
+                    -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
+            }
+    }
+
+    # 5. Per-user protected runtime dir. Every interactive profile on
+    #    the box gets .defenseclaw/ removed. This is the directory
+    #    that accumulates .managed-runtime-<connector>-*.json bundles
+    #    from failed rollbacks and reconcile thrash.
+    $usersRoot = Microsoft.PowerShell.Management\Join-Path $script:SystemDrive 'Users'
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $usersRoot) {
+        Microsoft.PowerShell.Management\Get-ChildItem `
+            -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Remove-DefenseClawSweepPath -Path (
+                    Microsoft.PowerShell.Management\Join-Path $_.FullName '.defenseclaw'
+                )
+            }
+    }
+
+    # 6. Residual service registry keys. sc.exe delete on a service
+    #    with a live handle leaves the HKLM key with the DELETED flag,
+    #    which blocks re-creating a service with the same name. We
+    #    remove the key outright so a future install with matching
+    #    identity is free to register.
+    Microsoft.PowerShell.Management\Get-ChildItem `
+        -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services' `
+        -ErrorAction SilentlyContinue |
+        Microsoft.PowerShell.Core\Where-Object { $_.PSChildName -like 'DefenseClaw*' } |
+        ForEach-Object {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+    return [pscustomobject]@{
+        schema_version = 1
+        ok = $true
+        action = 'uninstall'
+        installed = $false
+        purged = $true
+        namespace_sweep = $true
+        cached_enterprise_clients_require_reload = $true
+        errors = @()
+    }
+}
+
 function Invoke-DefenseClawPreLayoutRecovery {
     param(
         [Parameter(Mandatory)][string]$Action,
@@ -18697,9 +18869,32 @@ function Invoke-DefenseClawPreLayoutRecovery {
         if (-not (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.StateRoot `
                 -PathType Container)) {
+            # No committed StateRoot exists to authenticate a scoped
+            # purge against — typical of a partially applied install
+            # that failed before StateRoot creation. Under the product
+            # model (single install per machine), Uninstall -Purge
+            # means "wipe DefenseClaw state regardless"; the ordinary
+            # authenticated purge above stays the primary path when
+            # its scope is intact, and this branch is the fallback
+            # for the recovery case. The sweep is bounded to the
+            # DefenseClaw namespace: services (DefenseClaw*), machine
+            # roots (DefenseClaw / DefenseClaw-Cert / DefenseClaw-
+            # Lifecycle), per-connector managed artifacts under the
+            # agent directories, per-user .defenseclaw runtimes, and
+            # residual service registry keys.
+            if ($Purge) {
+                $sweepResult = Invoke-DefenseClawNamespaceSweep `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName
+                return [pscustomobject]@{
+                    handled = $true
+                    result = $sweepResult
+                }
+            }
             throw (
-                'Uninstall -Purge requires either an existing managed ' +
-                'StateRoot or its authenticated state-purge intent'
+                'Uninstall requires either an existing managed StateRoot ' +
+                'or -Purge to widen recovery to a DefenseClaw namespace sweep'
             )
         }
         if ((Microsoft.PowerShell.Management\Test-Path `

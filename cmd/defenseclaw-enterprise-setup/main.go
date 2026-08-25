@@ -61,7 +61,19 @@ type enterpriseSetupOptions struct {
 	GuardianServiceName           string
 	CertificationCodexHome        string
 	NoStart                       bool
-	Purge                         bool
+	// Purge widens uninstall past service teardown to state removal.
+	// When a committed StateRoot exists, an authenticated purge runs
+	// (scope-checked against metadata). When no StateRoot exists to
+	// authenticate against — the case for a partially applied install
+	// that failed before StateRoot creation — Purge falls back to a
+	// bounded DefenseClaw-namespace sweep: DefenseClaw* services,
+	// DefenseClaw/DefenseClaw-Cert/DefenseClaw-Lifecycle roots, the
+	// per-connector managed artifacts under ClaudeCode/Cursor/Codex,
+	// per-user .defenseclaw runtime directories, and residual service
+	// registry keys. The sweep never touches paths outside the
+	// DefenseClaw namespace — the caller doesn't pick what gets
+	// deleted.
+	Purge bool
 	JSON                          bool
 	AllowUnsigned                 bool
 	CoreHardeningCertification    bool
@@ -158,7 +170,7 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	flags.StringVar(&opts.GuardianServiceName, "guardian-service-name", "", "certification-only guardian service name")
 	flags.StringVar(&opts.CertificationCodexHome, "certification-codex-home", "", "certification-only CODEX_HOME")
 	flags.BoolVar(&opts.NoStart, "no-start", false, "install services disabled and stopped")
-	flags.BoolVar(&opts.Purge, "purge", false, "remove managed state during uninstall")
+	flags.BoolVar(&opts.Purge, "purge", false, "remove managed state during uninstall (authenticated purge when StateRoot exists; namespace sweep when it doesn't)")
 	flags.BoolVar(&opts.JSON, "json", false, "emit machine-readable lifecycle output")
 	flags.BoolVar(&opts.AllowUnsigned, "allow-unsigned", false, "allow only exact disposable certification scope")
 	flags.BoolVar(&opts.CoreHardeningCertification, "core-hardening-certification", false, "run the unsigned core-only certification profile")
