@@ -104,10 +104,6 @@ func (a *APIServer) emitInspectVerdictFindings(
 	}
 
 	inspectFindings := ruleFindingsToInspect(verdict.DetailedFindings, target)
-	// Collapse repeats of the same match on the same content. This filters
-	// persistence only: the hook's own per-call response is built from the
-	// verdict, so the caller still sees feedback on every tool call.
-	inspectFindings = admitNewInspectFindings(defaultFindingDedupe, scannerEnum, target, inspectFindings)
 	src := scanner.InspectFindingSource{
 		Scanner:    scannerEnum,
 		Target:     target,
@@ -594,25 +590,4 @@ func optionalLineNumber(line int) *int {
 	}
 	value := line
 	return &value
-}
-
-// admitNewInspectFindings drops findings the dedupe window has seen recently.
-// A verdict whose findings are all suppressed still flows through as a
-// zero-finding scan, which the emission pipeline already handles: the scan
-// itself did happen and the operator's scan counter should say so.
-func admitNewInspectFindings(
-	cache *findingDedupeCache,
-	scannerName, target string,
-	in []scanner.InspectFinding,
-) []scanner.InspectFinding {
-	if len(in) == 0 {
-		return in
-	}
-	out := in[:0:0]
-	for _, f := range in {
-		if cache.admit(scannerName, target, f.RuleID, f.Evidence) {
-			out = append(out, f)
-		}
-	}
-	return out
 }
