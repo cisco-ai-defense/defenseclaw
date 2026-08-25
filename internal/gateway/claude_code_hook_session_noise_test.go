@@ -62,10 +62,16 @@ func TestSessionNoise_SecretInResultStillDetected(t *testing.T) {
 		ToolName:      "Bash",
 		ToolInput:     map[string]interface{}{"command": "grep defenseclaw ~/.claude/settings.json"},
 		ToolResponse: map[string]interface{}{
-			"stdout": "\"OTEL_EXPORTER_OTLP_HEADERS\": \"authorization=Bearer redacted-test-token-not-a-secret\"",
+			"stdout": "\"OTEL_EXPORTER_OTLP_HEADERS\": \"authorization=Bearer 7c1d94ab30f6e582b47d0c9315ae6f28d51b83c4\"",
 		},
 	})
 	t.Logf("SECRET-PATH findings=%v would_block=%v", resp.Findings, resp.WouldBlock)
+	// This is the boundary #750/#755 deliberately kept: command rules stop at
+	// tool output, secret rules do not. A synthetic-but-realistic token must
+	// still be reported, or the placeholder tightening has gone too far.
+	if !containsString(resp.Findings, "SEC-BEARER:Bearer token in header") {
+		t.Errorf("findings=%v, want secret detection retained on tool output", resp.Findings)
+	}
 }
 
 func TestSessionNoise_DirectoryListingWithEnvFile(t *testing.T) {
