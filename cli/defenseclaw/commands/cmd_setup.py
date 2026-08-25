@@ -6031,7 +6031,9 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
                 "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
             )
         elif connector == "codex":
-            click.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
+            click.echo(
+                "    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>"
+            )
         else:
             click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
     if connector == "codex":
@@ -12450,3 +12452,131 @@ def _show_splunk_credentials(data_dir: str) -> None:
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# setup training
+# ---------------------------------------------------------------------------
+
+
+@setup.command("training")
+@click.option("--enable", is_flag=True, help="Enable training pipeline.")
+@click.option("--disable", is_flag=True, help="Disable training pipeline.")
+@click.option("--status", is_flag=True, help="Show training status.")
+@pass_ctx
+def setup_training(app: AppContext, enable: bool, disable: bool, status: bool) -> None:
+    """Configure model training pipeline.
+
+    When enabled, DefenseClaw captures traces and trains local models
+    for continuous improvement.
+
+    \b
+    Examples:
+      defenseclaw setup training --enable
+      defenseclaw setup training --disable
+      defenseclaw setup training --status
+    """
+    if enable and disable:
+        raise click.UsageError("Cannot use --enable and --disable together.")
+
+    if status or (not enable and not disable):
+        click.echo()
+        click.echo("  Training Pipeline Status")
+        click.echo("  ════════════════════════")
+        if not app.cfg.training.enabled:
+            click.echo("    Status: disabled")
+            click.echo()
+            click.echo("    Enable with: defenseclaw setup training --enable")
+            return
+        click.echo("    Status:  enabled")
+        backend = app.cfg.training.backend or "not set"
+        click.echo(f"    Backend: {backend}")
+        click.echo()
+        return
+
+    if enable:
+        import platform
+        import shutil
+        import subprocess as _sp
+
+        app.cfg.training.enabled = True
+        if not app.cfg.training.backend:
+            app.cfg.training.backend = "mlx-lm-lora" if platform.system() == "Darwin" else "unsloth"
+
+        click.echo()
+        click.echo("  Setting up training pipeline...")
+        click.echo()
+
+        # 1. Install training backend
+        backend = app.cfg.training.backend
+        if backend == "mlx-lm-lora":
+            already = shutil.which("mlx-lm-lora") or _sp.run(
+                ["pip", "show", "mlx-lm-lora"], capture_output=True
+            ).returncode == 0
+            if already:
+                click.echo("  ✓ mlx-lm-lora already installed")
+            else:
+                click.echo("  Installing mlx-lm-lora...")
+                result = _sp.run(["pip", "install", "-U", "mlx-lm-lora"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    click.echo("  ✓ mlx-lm-lora installed")
+                else:
+                    click.echo(f"  ✗ mlx-lm-lora install failed: {result.stderr.strip()[:200]}")
+                    click.echo("    Install manually: pip install mlx-lm-lora")
+        elif backend == "unsloth":
+            if _sp.run(["pip", "show", "unsloth"], capture_output=True).returncode == 0:
+                click.echo("  ✓ unsloth already installed")
+            else:
+                click.echo("  Installing unsloth...")
+                result = _sp.run(["pip", "install", "unsloth"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    click.echo("  ✓ unsloth installed")
+                else:
+                    click.echo(f"  ✗ unsloth install failed: {result.stderr.strip()[:200]}")
+                    click.echo("    Install manually: pip install unsloth")
+
+        # 2. Install llama-server (model hosting)
+        if shutil.which("llama-server"):
+            click.echo("  ✓ llama-server already installed")
+        else:
+            click.echo("  Installing llama.cpp (llama-server)...")
+            if platform.system() == "Darwin":
+                result = _sp.run(["brew", "install", "llama.cpp"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    click.echo("  ✓ llama-server installed (via brew)")
+                else:
+                    click.echo("  ✗ brew install failed. Install manually: brew install llama.cpp")
+            else:
+                click.echo("  ⚠ Install llama-server manually:")
+                click.echo("    Linux: download from https://github.com/ggml-org/llama.cpp/releases")
+
+        # 3. Verify Docker (needed for SR)
+        docker_ok = _sp.run(["docker", "info"], capture_output=True).returncode == 0
+        if docker_ok:
+            click.echo("  ✓ Docker is running")
+        else:
+            click.echo("  ⚠ Docker not running (needed for semantic router)")
+
+        # 4. Set defaults
+        if not app.cfg.training.llama_server_port:
+            app.cfg.training.llama_server_port = 8090
+        if not app.cfg.training.models_dir:
+            import os
+            app.cfg.training.models_dir = os.path.join(app.cfg.data_dir, "models")
+
+        # 5. Save config
+        app.cfg.save()
+        click.echo()
+        click.echo("  ✓ Training pipeline enabled")
+        click.echo(f"    Backend:      {app.cfg.training.backend}")
+        click.echo(f"    Models dir:   {app.cfg.training.models_dir}")
+        click.echo(f"    llama-server: port {app.cfg.training.llama_server_port}")
+        click.echo()
+        click.echo("  Next: add training categories to config.yaml under training.categories[]")
+        click.echo("  Then restart gateway: defenseclaw-gateway restart")
+
+    if disable:
+        app.cfg.training.enabled = False
+        app.cfg.save()
+        click.echo()
+        click.echo("  ✓ Training pipeline disabled")

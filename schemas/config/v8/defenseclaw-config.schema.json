@@ -162,6 +162,82 @@
     },
     "managed": {
       "$ref": "#/$defs/managedIPC"
+    },
+    "routing": {
+      "type": "object",
+      "description": "Semantic routing configuration for model selection based on request signals.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "algorithm": {
+          "type": "string"
+        },
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "embedding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "llm_classifier": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "models": {
+          "type": "array"
+        },
+        "signals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        },
+        "decisions": {
+          "type": "array"
+        }
+      }
+    },
+    "training": {
+      "type": "object",
+      "description": "GRPO training pipeline configuration for model improvement.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "models_dir": {
+          "type": "string"
+        },
+        "llama_server_port": {
+          "type": "integer"
+        },
+        "training_timeout_hours": {
+          "type": "integer"
+        },
+        "trace_retention_days": {
+          "type": "integer"
+        },
+        "base_models": {
+          "type": "array"
+        },
+        "categories": {
+          "type": "array"
+        }
+      }
     }
   },
   "$defs": {
@@ -209,291 +285,703 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "model": { "$ref": "#/$defs/boundedString" },
-        "provider": { "$ref": "#/$defs/boundedString" },
-        "api_key": { "type": "string", "maxLength": 65536 },
-        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "base_url": { "type": "string", "maxLength": 8192 },
-        "timeout": { "type": "integer", "minimum": 0, "maximum": 86400, "default": 30 },
-        "max_retries": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 2 },
-        "instance_name": { "$ref": "#/$defs/boundedString" },
-        "forward_custom_headers": { "type": "boolean", "default": true },
-        "region": { "$ref": "#/$defs/boundedString" },
-        "tls": { "$ref": "#/$defs/llmTLS" },
-        "bedrock": { "$ref": "#/$defs/bedrock" },
-        "vertex": { "$ref": "#/$defs/vertex" },
-        "azure": { "$ref": "#/$defs/azure" },
-        "extra_headers": { "$ref": "#/$defs/stringMap" }
+        "model": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "provider": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "api_key": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "base_url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 30
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 2
+        },
+        "instance_name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "forward_custom_headers": {
+          "type": "boolean",
+          "default": true
+        },
+        "region": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "tls": {
+          "$ref": "#/$defs/llmTLS"
+        },
+        "bedrock": {
+          "$ref": "#/$defs/bedrock"
+        },
+        "vertex": {
+          "$ref": "#/$defs/vertex"
+        },
+        "azure": {
+          "$ref": "#/$defs/azure"
+        },
+        "extra_headers": {
+          "$ref": "#/$defs/stringMap"
+        }
       }
     },
     "llmTLS": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "ca_cert_file": { "$ref": "#/$defs/boundedString" },
-        "ca_cert_pem": { "type": "string", "maxLength": 1048576 },
-        "insecure_skip_verify": { "type": "boolean", "default": false }
+        "ca_cert_file": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "ca_cert_pem": {
+          "type": "string",
+          "maxLength": 1048576
+        },
+        "insecure_skip_verify": {
+          "type": "boolean",
+          "default": false
+        }
       }
     },
     "bedrock": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "region": { "$ref": "#/$defs/boundedString" },
+        "region": {
+          "$ref": "#/$defs/boundedString"
+        },
         "auth_mode": {
           "type": "string",
-          "enum": ["api_key", "iam_credentials", "profile", "instance_role"]
+          "enum": [
+            "api_key",
+            "iam_credentials",
+            "profile",
+            "instance_role"
+          ]
         },
-        "access_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "secret_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "session_token_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "profile_name": { "$ref": "#/$defs/boundedString" },
-        "inference_profile": { "$ref": "#/$defs/boundedString" },
-        "deployment_aliases": { "$ref": "#/$defs/stringMap" }
+        "access_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "secret_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "session_token_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "profile_name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "inference_profile": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "deployment_aliases": {
+          "$ref": "#/$defs/stringMap"
+        }
       }
     },
     "vertex": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "project_id": { "$ref": "#/$defs/boundedString" },
-        "region": { "$ref": "#/$defs/boundedString" },
+        "project_id": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "region": {
+          "$ref": "#/$defs/boundedString"
+        },
         "auth_mode": {
           "type": "string",
-          "enum": ["service_account", "adc", "workload_identity"]
+          "enum": [
+            "service_account",
+            "adc",
+            "workload_identity"
+          ]
         },
-        "service_account_json_env": { "$ref": "#/$defs/envNameOrEmpty" }
+        "service_account_json_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        }
       }
     },
     "azure": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "endpoint": { "type": "string", "maxLength": 8192 },
-        "api_version": { "$ref": "#/$defs/boundedString" },
-        "auth_mode": { "type": "string", "enum": ["api_key", "managed_identity"] },
-        "deployment_aliases": { "$ref": "#/$defs/stringMap" }
+        "endpoint": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "api_version": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "auth_mode": {
+          "type": "string",
+          "enum": [
+            "api_key",
+            "managed_identity"
+          ]
+        },
+        "deployment_aliases": {
+          "$ref": "#/$defs/stringMap"
+        }
       }
     },
     "inspectLLM": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "provider": { "$ref": "#/$defs/boundedString" },
-        "model": { "$ref": "#/$defs/boundedString" },
-        "api_key": { "type": "string", "maxLength": 65536 },
-        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "base_url": { "type": "string", "maxLength": 8192 },
-        "timeout": { "type": "integer", "minimum": 0, "maximum": 86400, "default": 30 },
-        "max_retries": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 3 }
+        "provider": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "model": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "api_key": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "base_url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 30
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 3
+        }
       }
     },
     "ciscoAIDefense": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "endpoint": { "type": "string", "maxLength": 8192, "default": "https://us.api.inspect.aidefense.security.cisco.com" },
-        "api_key": { "type": "string", "maxLength": 65536 },
-        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 3000 },
-        "enabled_rules": { "$ref": "#/$defs/stringList" },
-        "scan_hook_surface": { "type": "boolean", "default": true }
+        "endpoint": {
+          "type": "string",
+          "maxLength": 8192,
+          "default": "https://us.api.inspect.aidefense.security.cisco.com"
+        },
+        "api_key": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000,
+          "default": 3000
+        },
+        "enabled_rules": {
+          "$ref": "#/$defs/stringList"
+        },
+        "scan_hook_surface": {
+          "type": "boolean",
+          "default": true
+        }
       }
     },
     "scanners": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "skill_scanner": { "$ref": "#/$defs/skillScanner" },
-        "mcp_scanner": { "$ref": "#/$defs/mcpScanner" },
-        "plugin_scanner": { "$ref": "#/$defs/boundedString" },
-        "plugin_llm": { "$ref": "#/$defs/llm" },
-        "codeguard": { "$ref": "#/$defs/boundedString" }
+        "skill_scanner": {
+          "$ref": "#/$defs/skillScanner"
+        },
+        "mcp_scanner": {
+          "$ref": "#/$defs/mcpScanner"
+        },
+        "plugin_scanner": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "plugin_llm": {
+          "$ref": "#/$defs/llm"
+        },
+        "codeguard": {
+          "$ref": "#/$defs/boundedString"
+        }
       }
     },
     "skillScanner": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "binary": { "$ref": "#/$defs/boundedString" },
-        "use_llm": { "type": "boolean" },
-        "use_behavioral": { "type": "boolean" },
-        "enable_meta": { "type": "boolean" },
-        "use_trigger": { "type": "boolean" },
-        "use_virustotal": { "type": "boolean" },
-        "use_aidefense": { "type": "boolean" },
-        "llm_consensus_runs": { "type": "integer", "minimum": 0, "maximum": 1000 },
-        "policy": { "$ref": "#/$defs/boundedString" },
-        "lenient": { "type": "boolean" },
-        "llm": { "$ref": "#/$defs/llm" },
-        "virustotal_api_key": { "type": "string", "maxLength": 65536 },
-        "virustotal_api_key_env": { "$ref": "#/$defs/envNameOrEmpty" }
+        "binary": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "use_llm": {
+          "type": "boolean"
+        },
+        "use_behavioral": {
+          "type": "boolean"
+        },
+        "enable_meta": {
+          "type": "boolean"
+        },
+        "use_trigger": {
+          "type": "boolean"
+        },
+        "use_virustotal": {
+          "type": "boolean"
+        },
+        "use_aidefense": {
+          "type": "boolean"
+        },
+        "llm_consensus_runs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "policy": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "lenient": {
+          "type": "boolean"
+        },
+        "llm": {
+          "$ref": "#/$defs/llm"
+        },
+        "virustotal_api_key": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "virustotal_api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        }
       }
     },
     "mcpScanner": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "binary": { "$ref": "#/$defs/boundedString" },
-        "analyzers": { "$ref": "#/$defs/boundedString" },
-        "scan_prompts": { "type": "boolean" },
-        "scan_resources": { "type": "boolean" },
-        "scan_instructions": { "type": "boolean" },
-        "llm": { "$ref": "#/$defs/llm" }
+        "binary": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "analyzers": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "scan_prompts": {
+          "type": "boolean"
+        },
+        "scan_resources": {
+          "type": "boolean"
+        },
+        "scan_instructions": {
+          "type": "boolean"
+        },
+        "llm": {
+          "$ref": "#/$defs/llm"
+        }
       }
     },
     "openShell": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "binary": { "$ref": "#/$defs/boundedString" },
-        "policy_dir": { "$ref": "#/$defs/boundedString" },
-        "mode": { "type": "string", "maxLength": 64 },
-        "version": { "type": "string", "maxLength": 128, "default": "0.6.2" },
-        "sandbox_home": { "$ref": "#/$defs/boundedString" },
-        "auto_pair": { "type": ["boolean", "null"], "default": true },
-        "host_networking": { "type": "boolean", "default": true }
+        "binary": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "policy_dir": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "mode": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 128,
+          "default": "0.6.2"
+        },
+        "sandbox_home": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "auto_pair": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": true
+        },
+        "host_networking": {
+          "type": "boolean",
+          "default": true
+        }
       }
     },
     "watch": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "debounce_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 500 },
-        "auto_block": { "type": "boolean", "default": true },
-        "allow_list_bypass_scan": { "type": "boolean", "default": true },
-        "rescan_enabled": { "type": "boolean", "default": true },
-        "rescan_interval_min": { "type": "integer", "minimum": 0, "maximum": 525600, "default": 60 },
-        "rescan_content_gated": { "type": "boolean", "default": true }
+        "debounce_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000,
+          "default": 500
+        },
+        "auto_block": {
+          "type": "boolean",
+          "default": true
+        },
+        "allow_list_bypass_scan": {
+          "type": "boolean",
+          "default": true
+        },
+        "rescan_enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "rescan_interval_min": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 525600,
+          "default": 60
+        },
+        "rescan_content_gated": {
+          "type": "boolean",
+          "default": true
+        }
       }
     },
     "firewall": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "config_file": { "$ref": "#/$defs/boundedString" },
-        "rules_file": { "$ref": "#/$defs/boundedString" },
-        "anchor_name": { "$ref": "#/$defs/boundedString" }
+        "config_file": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "rules_file": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "anchor_name": {
+          "$ref": "#/$defs/boundedString"
+        }
       }
     },
     "guardrailMode": {
       "type": "string",
-      "enum": ["observe", "action"]
+      "enum": [
+        "observe",
+        "action"
+      ]
     },
     "guardrailModeOrInherit": {
       "type": "string",
-      "enum": ["", "observe", "action"]
+      "enum": [
+        "",
+        "observe",
+        "action"
+      ]
     },
     "detectionStrategy": {
       "type": "string",
-      "enum": ["regex_only", "regex_judge", "judge_first"]
+      "enum": [
+        "regex_only",
+        "regex_judge",
+        "judge_first"
+      ]
     },
     "detectionStrategyOrInherit": {
       "type": "string",
-      "enum": ["", "regex_only", "regex_judge", "judge_first"]
+      "enum": [
+        "",
+        "regex_only",
+        "regex_judge",
+        "judge_first"
+      ]
     },
     "hilt": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "min_severity": { "type": "string", "enum": ["", "LOW", "MEDIUM", "HIGH", "CRITICAL"] }
+        "enabled": {
+          "type": "boolean"
+        },
+        "min_severity": {
+          "type": "string",
+          "enum": [
+            "",
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "CRITICAL"
+          ]
+        }
       }
     },
     "judge": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "injection": { "type": "boolean" },
-        "pii": { "type": "boolean" },
-        "pii_prompt": { "type": "boolean" },
-        "pii_completion": { "type": "boolean" },
-        "tool_injection": { "type": "boolean" },
-        "exfil": { "type": "boolean" },
-        "timeout": { "type": "number", "minimum": 0, "maximum": 86400, "default": 30 },
+        "enabled": {
+          "type": "boolean"
+        },
+        "injection": {
+          "type": "boolean"
+        },
+        "pii": {
+          "type": "boolean"
+        },
+        "pii_prompt": {
+          "type": "boolean"
+        },
+        "pii_completion": {
+          "type": "boolean"
+        },
+        "tool_injection": {
+          "type": "boolean"
+        },
+        "exfil": {
+          "type": "boolean"
+        },
+        "timeout": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 30
+        },
         "hook_connectors": {
           "type": "array",
           "maxItems": 256,
           "items": {
             "anyOf": [
-              { "const": "*" },
-              { "$ref": "#/$defs/connectorName" }
+              {
+                "const": "*"
+              },
+              {
+                "$ref": "#/$defs/connectorName"
+              }
             ]
           }
         },
-        "hook_timeout": { "type": "number", "minimum": 0, "maximum": 86400 },
-        "llm": { "$ref": "#/$defs/llm" },
-        "model": { "$ref": "#/$defs/boundedString" },
-        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "api_base": { "type": "string", "maxLength": 8192 },
-        "fallbacks": { "$ref": "#/$defs/stringList" },
-        "adjudication_timeout": { "type": "number", "minimum": 0, "maximum": 86400, "default": 5 }
+        "hook_timeout": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 86400
+        },
+        "llm": {
+          "$ref": "#/$defs/llm"
+        },
+        "model": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "api_base": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "fallbacks": {
+          "$ref": "#/$defs/stringList"
+        },
+        "adjudication_timeout": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 5
+        }
       }
     },
     "perConnectorGuardrail": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "$ref": "#/$defs/guardrailModeOrInherit" },
-        "hilt": { "$ref": "#/$defs/hilt" },
-        "hook_fail_mode": { "type": "string", "enum": ["", "open", "closed"] },
-        "block_message": { "$ref": "#/$defs/boundedString" },
-        "rule_pack_dir": { "$ref": "#/$defs/boundedString" },
-        "enabled": { "type": "boolean" }
+        "mode": {
+          "$ref": "#/$defs/guardrailModeOrInherit"
+        },
+        "hilt": {
+          "$ref": "#/$defs/hilt"
+        },
+        "hook_fail_mode": {
+          "type": "string",
+          "enum": [
+            "",
+            "open",
+            "closed"
+          ]
+        },
+        "block_message": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "rule_pack_dir": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
     "guardrail": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "mode": { "$ref": "#/$defs/guardrailMode" },
-        "scanner_mode": { "type": "string", "enum": ["local", "remote", "both"] },
-        "host": { "$ref": "#/$defs/boundedString" },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "connector": { "$ref": "#/$defs/boundedString" },
-        "allow_empty_providers": { "type": "boolean", "default": false },
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/guardrailMode"
+        },
+        "scanner_mode": {
+          "type": "string",
+          "enum": [
+            "local",
+            "remote",
+            "both"
+          ]
+        },
+        "host": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "connector": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "allow_empty_providers": {
+          "type": "boolean",
+          "default": false
+        },
         "allow_private_upstreams": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "llm": { "$ref": "#/$defs/llm" },
-        "model": { "$ref": "#/$defs/boundedString", "deprecated": true },
-        "model_name": { "$ref": "#/$defs/boundedString", "deprecated": true },
-        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty", "deprecated": true },
-        "api_base": { "type": "string", "maxLength": 8192, "deprecated": true },
-        "original_model": { "$ref": "#/$defs/boundedString" },
-        "block_message": { "$ref": "#/$defs/boundedString" },
-        "stream_buffer_bytes": { "type": "integer", "minimum": 0, "maximum": 1073741824 },
-        "rule_pack_dir": { "$ref": "#/$defs/boundedString" },
-        "judge": { "$ref": "#/$defs/judge" },
-        "hilt": { "$ref": "#/$defs/hilt" },
-        "detection_strategy": { "$ref": "#/$defs/detectionStrategy" },
-        "detection_strategy_prompt": { "$ref": "#/$defs/detectionStrategyOrInherit" },
-        "detection_strategy_completion": { "$ref": "#/$defs/detectionStrategyOrInherit" },
-        "detection_strategy_tool_call": { "$ref": "#/$defs/detectionStrategyOrInherit" },
-        "judge_sweep": { "type": "boolean" },
+        "llm": {
+          "$ref": "#/$defs/llm"
+        },
+        "model": {
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true
+        },
+        "model_name": {
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true
+        },
+        "api_key_env": {
+          "$ref": "#/$defs/envNameOrEmpty",
+          "deprecated": true
+        },
+        "api_base": {
+          "type": "string",
+          "maxLength": 8192,
+          "deprecated": true
+        },
+        "original_model": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "block_message": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "stream_buffer_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "rule_pack_dir": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "judge": {
+          "$ref": "#/$defs/judge"
+        },
+        "hilt": {
+          "$ref": "#/$defs/hilt"
+        },
+        "detection_strategy": {
+          "$ref": "#/$defs/detectionStrategy"
+        },
+        "detection_strategy_prompt": {
+          "$ref": "#/$defs/detectionStrategyOrInherit"
+        },
+        "detection_strategy_completion": {
+          "$ref": "#/$defs/detectionStrategyOrInherit"
+        },
+        "detection_strategy_tool_call": {
+          "$ref": "#/$defs/detectionStrategyOrInherit"
+        },
+        "judge_sweep": {
+          "type": "boolean"
+        },
         "retain_judge_bodies": {
           "type": "boolean",
           "default": true,
           "description": "Whether raw judge responses are retained in the local forensic store."
         },
-        "judge_persist_queue_depth": { "type": "integer", "minimum": 0, "maximum": 1048576, "default": 1024 },
-        "allow_unknown_llm_domains": { "type": "boolean", "default": false },
+        "judge_persist_queue_depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 1024
+        },
+        "allow_unknown_llm_domains": {
+          "type": "boolean",
+          "default": false
+        },
         "llm_role": {
           "type": "string",
-          "enum": ["", "judge_only", "judge_and_agent"]
+          "enum": [
+            "",
+            "judge_only",
+            "judge_and_agent"
+          ]
         },
-        "hook_fail_mode": { "type": "string", "enum": ["open", "closed"], "default": "closed" },
-        "hook_self_heal": { "type": "boolean", "default": true },
-        "hook_self_heal_debounce_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 500 },
+        "hook_fail_mode": {
+          "type": "string",
+          "enum": [
+            "open",
+            "closed"
+          ],
+          "default": "closed"
+        },
+        "hook_self_heal": {
+          "type": "boolean",
+          "default": true
+        },
+        "hook_self_heal_debounce_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000,
+          "default": 500
+        },
         "connectors": {
           "type": "object",
           "maxProperties": 256,
-          "propertyNames": { "$ref": "#/$defs/connectorName" },
-          "additionalProperties": { "$ref": "#/$defs/perConnectorGuardrail" }
+          "propertyNames": {
+            "$ref": "#/$defs/connectorName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/perConnectorGuardrail"
+          }
         }
       }
     },
@@ -501,79 +989,177 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "take_action": { "type": "boolean" },
-        "dirs": { "$ref": "#/$defs/stringList" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "take_action": {
+          "type": "boolean"
+        },
+        "dirs": {
+          "$ref": "#/$defs/stringList"
+        }
       }
     },
     "gatewayWatcherMCP": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "take_action": { "type": "boolean" }
+        "take_action": {
+          "type": "boolean"
+        }
       }
     },
     "gatewayWatcher": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "skill": { "$ref": "#/$defs/gatewayWatcherAsset" },
-        "plugin": { "$ref": "#/$defs/gatewayWatcherAsset" },
-        "mcp": { "$ref": "#/$defs/gatewayWatcherMCP" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "skill": {
+          "$ref": "#/$defs/gatewayWatcherAsset"
+        },
+        "plugin": {
+          "$ref": "#/$defs/gatewayWatcherAsset"
+        },
+        "mcp": {
+          "$ref": "#/$defs/gatewayWatcherMCP"
+        }
       }
     },
     "watchdog": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "interval": { "type": "integer", "minimum": 0, "maximum": 86400, "default": 30 },
-        "debounce": { "type": "integer", "minimum": 0, "maximum": 1000000, "default": 2 }
+        "enabled": {
+          "type": "boolean"
+        },
+        "interval": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 30
+        },
+        "debounce": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000,
+          "default": 2
+        }
       }
     },
     "gateway": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "host": { "$ref": "#/$defs/boundedString" },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "token": { "type": "string", "maxLength": 65536 },
-        "token_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "tls": { "type": "boolean" },
-        "tls_skip_verify": { "type": "boolean" },
-        "device_key_file": { "$ref": "#/$defs/boundedString" },
-        "auto_approve_safe": { "type": "boolean" },
-        "reconnect_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 800 },
-        "max_reconnect_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 15000 },
-        "approval_timeout_s": { "type": "integer", "minimum": 0, "maximum": 86400, "default": 30 },
-        "api_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 18970 },
-        "api_bind": { "$ref": "#/$defs/boundedString" },
-        "fleet_mode": { "type": "string", "enum": ["", "auto", "enabled", "disabled"], "default": "auto" },
+        "host": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "token": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "token_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "tls": {
+          "type": "boolean"
+        },
+        "tls_skip_verify": {
+          "type": "boolean"
+        },
+        "device_key_file": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "auto_approve_safe": {
+          "type": "boolean"
+        },
+        "reconnect_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000,
+          "default": 800
+        },
+        "max_reconnect_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000,
+          "default": 15000
+        },
+        "approval_timeout_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 30
+        },
+        "api_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 18970
+        },
+        "api_bind": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "fleet_mode": {
+          "type": "string",
+          "enum": [
+            "",
+            "auto",
+            "enabled",
+            "disabled"
+          ],
+          "default": "auto"
+        },
         "config_reload": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "mode": { "type": "string", "enum": ["hot", "restart"], "default": "hot" }
+            "mode": {
+              "type": "string",
+              "enum": [
+                "hot",
+                "restart"
+              ],
+              "default": "hot"
+            }
           }
         },
-        "watcher": { "$ref": "#/$defs/gatewayWatcher" },
-        "watchdog": { "$ref": "#/$defs/watchdog" }
+        "watcher": {
+          "$ref": "#/$defs/gatewayWatcher"
+        },
+        "watchdog": {
+          "$ref": "#/$defs/watchdog"
+        }
       }
     },
     "cloudAuth": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "type": "string", "enum": ["cmid"] },
-        "lib_path": { "$ref": "#/$defs/pathString" }
+        "mode": {
+          "type": "string",
+          "enum": [
+            "cmid"
+          ]
+        },
+        "lib_path": {
+          "$ref": "#/$defs/pathString"
+        }
       }
     },
     "managedIPC": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "socket_path": { "$ref": "#/$defs/pathString" },
+        "socket_path": {
+          "$ref": "#/$defs/pathString"
+        },
         "socket_mode": {
           "type": "string",
           "pattern": "^0?[0-7]{3}$"
@@ -582,19 +1168,25 @@
           "type": "array",
           "maxItems": 256,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/boundedString" }
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
         },
         "allowed_signing_ids": {
           "type": "array",
           "maxItems": 256,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/boundedString" }
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
         },
         "allowed_bundle_ids": {
           "type": "array",
           "maxItems": 256,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/boundedString" }
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
         }
       }
     },
@@ -602,96 +1194,221 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "file": { "type": "string", "enum": ["none", "quarantine"] },
-        "runtime": { "type": "string", "enum": ["disable", "enable"] },
-        "install": { "type": "string", "enum": ["block", "allow", "none"] }
+        "file": {
+          "type": "string",
+          "enum": [
+            "none",
+            "quarantine"
+          ]
+        },
+        "runtime": {
+          "type": "string",
+          "enum": [
+            "disable",
+            "enable"
+          ]
+        },
+        "install": {
+          "type": "string",
+          "enum": [
+            "block",
+            "allow",
+            "none"
+          ]
+        }
       }
     },
     "actionMatrix": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "critical": { "$ref": "#/$defs/severityAction" },
-        "high": { "$ref": "#/$defs/severityAction" },
-        "medium": { "$ref": "#/$defs/severityAction" },
-        "low": { "$ref": "#/$defs/severityAction" },
-        "info": { "$ref": "#/$defs/severityAction" }
+        "critical": {
+          "$ref": "#/$defs/severityAction"
+        },
+        "high": {
+          "$ref": "#/$defs/severityAction"
+        },
+        "medium": {
+          "$ref": "#/$defs/severityAction"
+        },
+        "low": {
+          "$ref": "#/$defs/severityAction"
+        },
+        "info": {
+          "$ref": "#/$defs/severityAction"
+        }
       }
     },
     "assetPolicyRule": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/boundedString" },
-        "connector": { "$ref": "#/$defs/boundedString" },
-        "reason": { "$ref": "#/$defs/boundedString" },
-        "url": { "type": "string", "maxLength": 8192 },
-        "command": { "$ref": "#/$defs/boundedString" },
-        "args_prefix": { "$ref": "#/$defs/stringList" },
-        "transport": { "$ref": "#/$defs/boundedString" },
-        "source_path_contains": { "$ref": "#/$defs/stringList" }
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "connector": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "reason": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "command": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "args_prefix": {
+          "$ref": "#/$defs/stringList"
+        },
+        "transport": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "source_path_contains": {
+          "$ref": "#/$defs/stringList"
+        }
       }
     },
     "assetPolicyRules": {
       "type": "array",
       "maxItems": 16384,
-      "items": { "$ref": "#/$defs/assetPolicyRule" }
+      "items": {
+        "$ref": "#/$defs/assetPolicyRule"
+      }
     },
     "assetRuntimeDetection": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "terminal_commands": { "type": "boolean" },
-        "unknown_terminal_mcp": { "type": "string", "enum": ["", "observe", "action"] }
+        "enabled": {
+          "type": "boolean"
+        },
+        "terminal_commands": {
+          "type": "boolean"
+        },
+        "unknown_terminal_mcp": {
+          "type": "string",
+          "enum": [
+            "",
+            "observe",
+            "action"
+          ]
+        }
       }
     },
     "assetTypePolicy": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "default": { "type": "string", "enum": ["allow", "deny", "block"] },
-        "registry_required": { "type": "boolean" },
-        "registry_empty_action": { "type": "string", "enum": ["deny", "block", "allow", "warn"] },
-        "registry": { "$ref": "#/$defs/assetPolicyRules" },
-        "allowed": { "$ref": "#/$defs/assetPolicyRules" },
-        "denied": { "$ref": "#/$defs/assetPolicyRules" },
-        "runtime_detection": { "$ref": "#/$defs/assetRuntimeDetection" }
+        "default": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny",
+            "block"
+          ]
+        },
+        "registry_required": {
+          "type": "boolean"
+        },
+        "registry_empty_action": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "block",
+            "allow",
+            "warn"
+          ]
+        },
+        "registry": {
+          "$ref": "#/$defs/assetPolicyRules"
+        },
+        "allowed": {
+          "$ref": "#/$defs/assetPolicyRules"
+        },
+        "denied": {
+          "$ref": "#/$defs/assetPolicyRules"
+        },
+        "runtime_detection": {
+          "$ref": "#/$defs/assetRuntimeDetection"
+        }
       }
     },
     "perConnectorAssetTypePolicy": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "default": { "type": "string", "enum": ["", "allow", "deny", "block"] },
-        "registry_required": { "type": "boolean" },
-        "registry_empty_action": { "type": "string", "enum": ["", "deny", "block", "allow", "warn"] }
+        "default": {
+          "type": "string",
+          "enum": [
+            "",
+            "allow",
+            "deny",
+            "block"
+          ]
+        },
+        "registry_required": {
+          "type": "boolean"
+        },
+        "registry_empty_action": {
+          "type": "string",
+          "enum": [
+            "",
+            "deny",
+            "block",
+            "allow",
+            "warn"
+          ]
+        }
       }
     },
     "perConnectorAssetPolicy": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "$ref": "#/$defs/guardrailModeOrInherit" },
-        "mcp": { "$ref": "#/$defs/perConnectorAssetTypePolicy" },
-        "skill": { "$ref": "#/$defs/perConnectorAssetTypePolicy" },
-        "plugin": { "$ref": "#/$defs/perConnectorAssetTypePolicy" }
+        "mode": {
+          "$ref": "#/$defs/guardrailModeOrInherit"
+        },
+        "mcp": {
+          "$ref": "#/$defs/perConnectorAssetTypePolicy"
+        },
+        "skill": {
+          "$ref": "#/$defs/perConnectorAssetTypePolicy"
+        },
+        "plugin": {
+          "$ref": "#/$defs/perConnectorAssetTypePolicy"
+        }
       }
     },
     "assetPolicy": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "mode": { "$ref": "#/$defs/guardrailMode" },
-        "mcp": { "$ref": "#/$defs/assetTypePolicy" },
-        "skill": { "$ref": "#/$defs/assetTypePolicy" },
-        "plugin": { "$ref": "#/$defs/assetTypePolicy" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/guardrailMode"
+        },
+        "mcp": {
+          "$ref": "#/$defs/assetTypePolicy"
+        },
+        "skill": {
+          "$ref": "#/$defs/assetTypePolicy"
+        },
+        "plugin": {
+          "$ref": "#/$defs/assetTypePolicy"
+        },
         "connectors": {
           "type": "object",
           "maxProperties": 256,
-          "propertyNames": { "$ref": "#/$defs/connectorName" },
-          "additionalProperties": { "$ref": "#/$defs/perConnectorAssetPolicy" }
+          "propertyNames": {
+            "$ref": "#/$defs/connectorName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/perConnectorAssetPolicy"
+          }
         }
       }
     },
@@ -699,16 +1416,55 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "id": { "$ref": "#/$defs/boundedString" },
-        "kind": { "type": "string", "enum": ["", "clawhub", "smithery", "skills_sh", "http_yaml", "http_json", "git", "file"] },
-        "url": { "type": "string", "maxLength": 8192 },
-        "content": { "type": "string", "enum": ["", "skill", "mcp", "both"] },
-        "auth_env": { "$ref": "#/$defs/envNameOrEmpty" },
-        "enabled": { "type": "boolean" },
-        "auto_sync": { "type": "boolean" },
-        "sync_interval_hours": { "type": "integer", "minimum": 0, "maximum": 876000 },
-        "last_sync": { "$ref": "#/$defs/boundedString" },
-        "last_status": { "$ref": "#/$defs/boundedString" }
+        "id": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "",
+            "clawhub",
+            "smithery",
+            "skills_sh",
+            "http_yaml",
+            "http_json",
+            "git",
+            "file"
+          ]
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "content": {
+          "type": "string",
+          "enum": [
+            "",
+            "skill",
+            "mcp",
+            "both"
+          ]
+        },
+        "auth_env": {
+          "$ref": "#/$defs/envNameOrEmpty"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "auto_sync": {
+          "type": "boolean"
+        },
+        "sync_interval_hours": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 876000
+        },
+        "last_sync": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "last_status": {
+          "$ref": "#/$defs/boundedString"
+        }
       }
     },
     "registries": {
@@ -718,7 +1474,9 @@
         "sources": {
           "type": "array",
           "maxItems": 4096,
-          "items": { "$ref": "#/$defs/registrySource" }
+          "items": {
+            "$ref": "#/$defs/registrySource"
+          }
         }
       }
     },
@@ -726,46 +1484,86 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "$ref": "#/$defs/guardrailModeOrInherit" }
+        "mode": {
+          "$ref": "#/$defs/guardrailModeOrInherit"
+        }
       }
     },
     "applicationProtectionConnector": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "min_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-        "guardrail": { "$ref": "#/$defs/perConnectorGuardrail" },
-        "asset_policy": { "$ref": "#/$defs/applicationProtectionAssetPolicy" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "min_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "guardrail": {
+          "$ref": "#/$defs/perConnectorGuardrail"
+        },
+        "asset_policy": {
+          "$ref": "#/$defs/applicationProtectionAssetPolicy"
+        }
       }
     },
     "applicationProtection": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean", "default": false },
-        "min_confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.8 },
-        "remove_when_gone": { "type": "boolean", "default": false },
-        "gone_after_min": { "type": "integer", "minimum": 0, "maximum": 5256000, "default": 60 },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "min_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.8
+        },
+        "remove_when_gone": {
+          "type": "boolean",
+          "default": false
+        },
+        "gone_after_min": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5256000,
+          "default": 60
+        },
         "include_connectors": {
           "type": "array",
           "maxItems": 256,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/connectorName" }
+          "items": {
+            "$ref": "#/$defs/connectorName"
+          }
         },
         "exclude_connectors": {
           "type": "array",
           "maxItems": 256,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/connectorName" }
+          "items": {
+            "$ref": "#/$defs/connectorName"
+          }
         },
-        "guardrail": { "$ref": "#/$defs/perConnectorGuardrail" },
-        "asset_policy": { "$ref": "#/$defs/applicationProtectionAssetPolicy" },
+        "guardrail": {
+          "$ref": "#/$defs/perConnectorGuardrail"
+        },
+        "asset_policy": {
+          "$ref": "#/$defs/applicationProtectionAssetPolicy"
+        },
         "connectors": {
           "type": "object",
           "maxProperties": 256,
-          "propertyNames": { "$ref": "#/$defs/connectorName" },
-          "additionalProperties": { "$ref": "#/$defs/applicationProtectionConnector" }
+          "propertyNames": {
+            "$ref": "#/$defs/connectorName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/applicationProtectionConnector"
+          }
         }
       }
     },
@@ -773,16 +1571,25 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "hook": { "type": "boolean", "default": true },
-        "guardrail": { "type": "boolean", "default": true },
-        "asset_policy": { "type": "boolean", "default": true }
+        "hook": {
+          "type": "boolean",
+          "default": true
+        },
+        "guardrail": {
+          "type": "boolean",
+          "default": true
+        },
+        "asset_policy": {
+          "type": "boolean",
+          "default": true
+        }
       }
     },
     "duration": {
       "oneOf": [
         {
           "type": "string",
-          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*$"
         },
         {
           "type": "integer",
@@ -794,13 +1601,34 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "block_enforced": { "type": "boolean", "default": true },
-        "block_would_block": { "type": "boolean", "default": false },
-        "hitl_approval": { "type": "boolean", "default": true },
-        "sources": { "$ref": "#/$defs/notificationSources" },
-        "dedup_window": { "$ref": "#/$defs/duration", "default": "30s" },
-        "max_per_minute": { "type": "integer", "minimum": 0, "maximum": 1000000, "default": 12 }
+        "enabled": {
+          "type": "boolean"
+        },
+        "block_enforced": {
+          "type": "boolean",
+          "default": true
+        },
+        "block_would_block": {
+          "type": "boolean",
+          "default": false
+        },
+        "hitl_approval": {
+          "type": "boolean",
+          "default": true
+        },
+        "sources": {
+          "$ref": "#/$defs/notificationSources"
+        },
+        "dedup_window": {
+          "$ref": "#/$defs/duration",
+          "default": "30s"
+        },
+        "max_per_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000,
+          "default": 12
+        }
       }
     },
     "pathString": {
