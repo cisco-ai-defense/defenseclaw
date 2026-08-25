@@ -52,15 +52,15 @@ var requiredPayloadFiles = []string{
 }
 
 type enterpriseSetupOptions struct {
-	Action                        string
-	Config                        string
-	Manifest                      string
-	InstallRoot                   string
-	StateRoot                     string
-	GatewayServiceName            string
-	GuardianServiceName           string
-	CertificationCodexHome        string
-	NoStart                       bool
+	Action                 string
+	Config                 string
+	Manifest               string
+	InstallRoot            string
+	StateRoot              string
+	GatewayServiceName     string
+	GuardianServiceName    string
+	CertificationCodexHome string
+	NoStart                bool
 	// Purge widens uninstall past service teardown to state removal.
 	// When a committed StateRoot exists, an authenticated purge runs
 	// (scope-checked against metadata). When no StateRoot exists to
@@ -73,7 +73,7 @@ type enterpriseSetupOptions struct {
 	// registry keys. The sweep never touches paths outside the
 	// DefenseClaw namespace — the caller doesn't pick what gets
 	// deleted.
-	Purge bool
+	Purge                         bool
 	JSON                          bool
 	AllowUnsigned                 bool
 	CoreHardeningCertification    bool
