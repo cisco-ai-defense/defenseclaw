@@ -382,38 +382,46 @@ not an administrator authority even though it is a machine service.
    authoritative defense against a determined elevated attacker.
 3. A target without an active, safe WTS token cannot be repaired. The guardian
    records failure and retries rather than writing the profile as LocalSystem.
-3. Application control and vendor MDM/GPO policy are optional defense-in-depth
+   The activating install-time `-Mode` / `-Connector` shorthand therefore
+   seeds enabled rows only for eligible `WTSActive` profile SIDs. The protected
+   enumerator retains other discovered profiles as disabled rows pending an
+   explicit administrator lifecycle action; it does not treat them as
+   authenticated deferred enrollment. `Install -NoStart` keeps the complete
+   planned all-user enrollment because it makes no immediate readiness claim.
+   An explicit manifest that enables a disconnected target remains
+   authoritative and fails readiness until the exact SID has an active token.
+4. Application control and vendor MDM/GPO policy are optional defense-in-depth
    controls, not features DefenseClaw can synthesize. Their absence does not
    block managed-hook readiness, but leaves the user-owned hook race described
    above as a residual risk. If an enterprise claims these controls, it must
    certify them independently.
-4. Local port squatting cannot forge an allow verdict because the connected
+5. Local port squatting cannot forge an allow verdict because the connected
    peer PID must be the exact SCM gateway PID, but it can still deny
    availability. Target-owned file reads and comparisons are bounded, and an
    authorized oversized runtime leaf is quarantined for repair, but disk-full,
    handle exhaustion, continuously generated new data, and broader endpoint
    resource starvation remain availability residuals. SCM recovery, monitoring,
    and endpoint resource controls reduce but do not eliminate them.
-5. A target can deny access to or replace its entire OS profile root, or create
+6. A target can deny access to or replace its entire OS profile root, or create
    a wrong-owner obstruction that the target token cannot safely remove.
    DefenseClaw deliberately fails health rather than taking ownership or
    rewriting broad Windows/OneDrive/enterprise profile ACLs. Endpoint profile
    policy and monitoring must treat this broader self-denial as an endpoint
    availability event.
-6. A removed target may retain an old connector-scoped hook credential until
+7. A removed target may retain an old connector-scoped hook credential until
    that connector token is rotated and remaining enabled targets are
    reconciled. The credential cannot authorize management or another
    connector's route, but decommission procedures must rotate it rather than
    relying only on manifest removal.
-7. Static policy inspection cannot prove effective client behavior. Fleet
+8. Static policy inspection cannot prove effective client behavior. Fleet
    acceptance must include real approved Codex and Claude invocations against
    the deployed policy stack and require managed hook contact or a blocked
    operation. Stock Codex 0.144.3 currently fails this requirement.
-8. An elevated administrator can disable or replace the deployment. Restrict
+9. An elevated administrator can disable or replace the deployment. Restrict
    local-administrator membership and audit lifecycle activity.
-9. Authenticode establishes publisher integrity, not rollout intent. Enterprise
+10. Authenticode establishes publisher integrity, not rollout intent. Enterprise
    software distribution should pin approved versions and hashes.
-10. A client process can cache the enterprise Program Files hook command before
+11. A client process can cache the enterprise Program Files hook command before
     an administrator decommissions DefenseClaw. Because purge intentionally
     removes that binary, the old process may report a hook-launch failure.
     Decommission procedures must close or restart Codex and Claude; only a

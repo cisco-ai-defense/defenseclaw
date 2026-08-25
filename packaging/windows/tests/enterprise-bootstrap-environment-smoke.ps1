@@ -143,6 +143,36 @@ function Invoke-ProtectedEnvironmentProbe {
                 throw 'home drive/path or PowerShell module-analysis cache was not pinned'
             }
 
+            # Compile and execute the production WTS interop while the one-shot
+            # compiler/cache environment is still protected. The synthetic
+            # target-rendering probe below pins selection semantics; this call
+            # independently catches PS 5.1 Add-Type, struct-layout, entry-point,
+            # and native buffer-management regressions on a real Windows host.
+            $nativePath = Initialize-DefenseClawBootstrapNativePath
+            $activeSessionSIDs = @($nativePath::GetActiveSessionSIDs())
+            $canonicalActiveSessionSIDs = @(
+                foreach ($activeSessionSID in $activeSessionSIDs) {
+                    $canonical = [Security.Principal.SecurityIdentifier]::new(
+                        [string]$activeSessionSID
+                    ).Value
+                    if (-not $canonical.StartsWith(
+                            'S-1-5-21-',
+                            [StringComparison]::OrdinalIgnoreCase
+                        )) {
+                        throw "native WTS discovery returned a non-user SID: $canonical"
+                    }
+                    $canonical
+                }
+            )
+            $orderedUniqueActiveSessionSIDs = @(
+                $canonicalActiveSessionSIDs |
+                    Sort-Object -Unique
+            )
+            if (($canonicalActiveSessionSIDs -join ',') -cne
+                ($orderedUniqueActiveSessionSIDs -join ',')) {
+                throw 'native WTS discovery did not return a canonical sorted unique SID set'
+            }
+
             $sections = [Security.AccessControl.AccessControlSections]::Owner `
                 -bor [Security.AccessControl.AccessControlSections]::Group `
                 -bor [Security.AccessControl.AccessControlSections]::Access
@@ -236,6 +266,7 @@ function Invoke-ProtectedEnvironmentProbe {
             exact_acl = $true
             all_environment_paths_pinned = $true
             module_analysis_cache_disabled = $true
+            native_active_session_discovery_verified = $true
             nested_cleanup_verified = $true
             environment_restore_verified = $true
             hostile_fixture_cleanup_verified = $true
@@ -417,6 +448,75 @@ function Invoke-RenderedEnterpriseTargetsVersionProbe {
                     -Value $hostileVersion)
             )) {
             throw 'target renderer accepted a YAML-shaping metadata version'
+        }
+    }
+    finally {
+        if ([IO.Directory]::Exists($fixtureRoot)) {
+            [IO.Directory]::Delete($fixtureRoot, $true)
+        }
+    }
+    return $true
+}
+
+function Invoke-RenderedEnterpriseTargetsActiveSessionProbe {
+    $fixtureRoot = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        "DefenseClaw-ActiveTargets-$([Guid]::NewGuid().ToString('N'))"
+    )
+    $activeHome = [IO.Path]::Combine($fixtureRoot, 'active')
+    $disconnectedHome = [IO.Path]::Combine($fixtureRoot, 'disconnected')
+    [void][IO.Directory]::CreateDirectory($activeHome)
+    [void][IO.Directory]::CreateDirectory($disconnectedHome)
+    $activeSID = 'S-1-5-21-1000-2000-3000-1001'
+    $disconnectedSID = 'S-1-5-21-1000-2000-3000-1002'
+    try {
+        $profiles = @(
+            [pscustomobject]@{
+                SID = $activeSID
+                UserName = 'active-user'
+                UserHome = $activeHome
+            },
+            [pscustomobject]@{
+                SID = $disconnectedSID
+                UserName = 'disconnected-user'
+                UserHome = $disconnectedHome
+            }
+        )
+        $rendered = Get-DefenseClawRenderedEnterpriseTargets `
+            -Connectors @('codex', 'claudecode', 'cursor') `
+            -Profiles $profiles `
+            -ActiveSessionSIDs @(
+                $activeSID,
+                'not-a-sid'
+            ) `
+            -RequireActiveSession
+        $blocks = @(
+            [regex]::Split($rendered, '(?m)(?=^  - user: )') |
+                Where-Object { $_.StartsWith('  - user: ') }
+        )
+        if ($blocks.Count -ne 3 -or
+            [regex]::Matches(
+                $rendered,
+                '(?m)^    sid: "' + [regex]::Escape($activeSID) + '"\r?$'
+            ).Count -ne 3 -or
+            [regex]::Matches(
+                $rendered,
+                '(?m)^    enabled: true\r?$'
+            ).Count -ne 3) {
+            throw 'active WTS user did not receive exactly three enabled targets'
+        }
+        if ($rendered.Contains($disconnectedSID) -or
+            $rendered.Contains('disconnected-user')) {
+            throw 'disconnected WTS user entered the initial authoritative target set'
+        }
+        # Install -NoStart and explicit shorthand servicing define a durable
+        # all-profile plan rather than claiming immediate Guardian coverage.
+        $plannedRendered = Get-DefenseClawRenderedEnterpriseTargets `
+            -Connectors @('codex', 'claudecode', 'cursor') `
+            -Profiles $profiles
+        if (-not $plannedRendered.Contains($disconnectedSID) -or
+            -not $plannedRendered.Contains('disconnected-user')) {
+            throw 'no-start or servicing shorthand silently omitted a planned user'
         }
     }
     finally {
@@ -1574,6 +1674,8 @@ if (-not [bool]$status.ok -or [bool]$status.installed -or
 $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
 $renderedTargetsVersionContract = Invoke-RenderedEnterpriseTargetsVersionProbe
+$renderedTargetsActiveSessionContract =
+    Invoke-RenderedEnterpriseTargetsActiveSessionProbe
 $claudeWinGetMetadataContract = Invoke-ClaudeWinGetMetadataVersionProbe
 $codexWinGetMetadataContract = Invoke-CodexWinGetMetadataVersionProbe
 $renderedConfigEmbeddedRulePack = Invoke-RenderedEnterpriseConfigRulePackProbe
@@ -1698,6 +1800,8 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$single.all_environment_paths_pinned
     module_analysis_cache_disabled =
         [bool]$single.module_analysis_cache_disabled
+    native_active_session_discovery_verified =
+        [bool]$single.native_active_session_discovery_verified
     nested_cleanup_verified = [bool]$single.nested_cleanup_verified
     environment_restore_verified =
         [bool]$single.environment_restore_verified
@@ -1707,6 +1811,8 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$collisionRejected
     rendered_targets_version_contract =
         [bool]$renderedTargetsVersionContract
+    rendered_targets_active_session_contract =
+        [bool]$renderedTargetsActiveSessionContract
     claude_winget_metadata_contract =
         [bool]$claudeWinGetMetadataContract
     codex_winget_metadata_contract =

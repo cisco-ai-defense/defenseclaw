@@ -131,6 +131,11 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     assert "$matched -gt 32" in winget_discovery
     assert "Get-DefenseClawConnectorMetadataVersion" in renderer
     assert "Resolve-DefenseClawConnectorMetadataVersion" in renderer
+    assert "Select-DefenseClawActiveInteractiveUserProfiles" in renderer
+    assert (
+        "-RequireActiveSession:($Action -eq 'Install' -and -not $NoStart)"
+        in installer
+    )
     assert "-NativeCandidateObserved $nativeCandidateObserved" in renderer
     assert "-DiscoveryFailed $metadataDiscoveryFailed" in renderer
     assert "$users = @(" in renderer
@@ -141,6 +146,19 @@ def test_windows_shorthand_targets_require_metadata_versions() -> None:
     )
     assert "@attacker/not-amp" in smoke
     assert "target renderer emitted an enabled/version contract mismatch" in smoke
+    assert "GetActiveSessionSIDs" in installer
+    assert "WTSEnumerateSessionsW" in installer
+    assert "row.State != WTSConnectState.Active" in installer
+    assert "native_active_session_discovery_verified" in smoke
+    assert "-ActiveSessionSIDs $ActiveSessionSIDs" in renderer
+    assert (
+        "disconnected WTS user entered the initial authoritative target set"
+        in smoke
+    )
+    assert (
+        "no-start or servicing shorthand silently omitted a planned user"
+        in smoke
+    )
     assert (
         "official WinGet Claude package was not discovered exactly once"
         in smoke
@@ -1264,11 +1282,13 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "restricted_environment_module_status",
                 "all_environment_paths_pinned",
                 "module_analysis_cache_disabled",
+                "native_active_session_discovery_verified",
                 "nested_cleanup_verified",
                 "environment_restore_verified",
                 "hostile_fixture_cleanup_verified",
                 "existing_collision_rejected_without_acl_seizure",
                 "rendered_targets_version_contract",
+                "rendered_targets_active_session_contract",
                 "claude_winget_metadata_contract",
                 "rendered_config_embedded_rule_pack",
                 "concurrent_workers",
@@ -1507,10 +1527,13 @@ def test_windows_packaging_smokes_run_on_every_available_engine(
         assert report["restricted_environment_certification_status_scope"] is True
         assert report["all_environment_paths_pinned"] is True
         assert report["module_analysis_cache_disabled"] is True
+        assert report["native_active_session_discovery_verified"] is True
         assert report["nested_cleanup_verified"] is True
         assert report["environment_restore_verified"] is True
         assert report["hostile_fixture_cleanup_verified"] is True
         assert report["existing_collision_rejected_without_acl_seizure"] is True
+        assert report["rendered_targets_version_contract"] is True
+        assert report["rendered_targets_active_session_contract"] is True
         assert int(report["concurrent_workers"]) == 6
         assert report["concurrent_roots_unique"] is True
         assert report["concurrent_cleanup_verified"] is True

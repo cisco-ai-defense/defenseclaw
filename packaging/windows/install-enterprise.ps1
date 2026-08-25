@@ -38,9 +38,13 @@ param(
     # -Mode is passed verbatim to guardrail.mode; -Connector is a
     # comma-separated list whose first entry becomes guardrail.connector
     # (primary) and every entry becomes both a targets.yaml row (one per
-    # eligible interactive-user profile) and a guardrail.connectors map
-    # entry. Both are mutually exclusive with -Config / -Manifest and
-    # with -DeferredConfig.
+    # eligible interactive-user profile) and a guardrail.connectors map entry.
+    # An activating fresh Install initially enables only profiles with
+    # WTSActive sessions; the protected enumerator records other eligible
+    # profiles as disabled. Install -NoStart and Upgrade/Repair preserve their
+    # existing all-profile shorthand behavior because they define a durable
+    # planned enrollment rather than requiring immediate activation here.
+    # Both are mutually exclusive with -Config / -Manifest and -DeferredConfig.
     [ValidateSet('', 'observe', 'action')]
     [string]$Mode = '',
     [string]$Connector = '',
@@ -207,12 +211,35 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 
 namespace $nativeNamespace
 {
     public static class NativePath
     {
+        private enum WTSConnectState
+        {
+            Active = 0,
+            Connected = 1,
+            ConnectQuery = 2,
+            Shadow = 3,
+            Disconnected = 4,
+            Idle = 5,
+            Listen = 6,
+            Reset = 7,
+            Down = 8,
+            Init = 9
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WTSSessionInfo
+        {
+            public int SessionId;
+            public IntPtr WindowStationName;
+            public WTSConnectState State;
+        }
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         private static extern uint GetDriveTypeW(string rootPathName);
 
@@ -248,6 +275,27 @@ namespace $nativeNamespace
             string deviceName,
             [Out] char[] targetPath,
             int maximumLength);
+
+        [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WTSEnumerateSessionsW(
+            IntPtr server,
+            int reserved,
+            int version,
+            out IntPtr sessions,
+            out int count);
+
+        [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WTSQuerySessionInformationW(
+            IntPtr server,
+            int sessionId,
+            int informationClass,
+            out IntPtr buffer,
+            out int bytesReturned);
+
+        [DllImport("wtsapi32.dll")]
+        private static extern void WTSFreeMemory(IntPtr memory);
 
         private static string QueryDevice(string deviceName)
         {
@@ -299,6 +347,101 @@ namespace $nativeNamespace
                 throw new InvalidOperationException(
                     operation + " returned a malformed MULTI_SZ value");
             return values;
+        }
+
+        private static string QuerySessionText(
+            int sessionId,
+            int informationClass,
+            string field)
+        {
+            IntPtr buffer = IntPtr.Zero;
+            int bytesReturned = 0;
+            try
+            {
+                if (!WTSQuerySessionInformationW(
+                        IntPtr.Zero,
+                        sessionId,
+                        informationClass,
+                        out buffer,
+                        out bytesReturned))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "WTSQuerySessionInformation failed for session " +
+                        sessionId + " " + field);
+                if (buffer == IntPtr.Zero || bytesReturned <= 2)
+                    return String.Empty;
+                return Marshal.PtrToStringUni(buffer) ?? String.Empty;
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                    WTSFreeMemory(buffer);
+            }
+        }
+
+        public static string[] GetActiveSessionSIDs()
+        {
+            IntPtr sessions = IntPtr.Zero;
+            int count = 0;
+            if (!WTSEnumerateSessionsW(
+                    IntPtr.Zero,
+                    0,
+                    1,
+                    out sessions,
+                    out count))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "WTSEnumerateSessions failed");
+            try
+            {
+                if (count < 0 || count > 4096 ||
+                    (count > 0 && sessions == IntPtr.Zero))
+                    throw new InvalidOperationException(
+                        "WTSEnumerateSessions returned an invalid session set");
+                int size = Marshal.SizeOf(typeof(WTSSessionInfo));
+                HashSet<string> active = new HashSet<string>(
+                    StringComparer.OrdinalIgnoreCase);
+                for (int index = 0; index < count; index++)
+                {
+                    IntPtr pointer = new IntPtr(
+                        sessions.ToInt64() + checked(index * size));
+                    WTSSessionInfo row = (WTSSessionInfo)Marshal.PtrToStructure(
+                        pointer,
+                        typeof(WTSSessionInfo));
+                    if (row.State != WTSConnectState.Active)
+                        continue;
+                    // WTSUserName=5 and WTSDomainName=7.
+                    string user = QuerySessionText(
+                        row.SessionId,
+                        5,
+                        "user name").Trim();
+                    if (String.IsNullOrEmpty(user))
+                        throw new InvalidOperationException(
+                            "WTS Active session " + row.SessionId +
+                            " has no user name");
+                    string domain = QuerySessionText(
+                        row.SessionId,
+                        7,
+                        "domain name").Trim();
+                    NTAccount account = String.IsNullOrEmpty(domain)
+                        ? new NTAccount(user)
+                        : new NTAccount(domain, user);
+                    SecurityIdentifier sid = (SecurityIdentifier)account.Translate(
+                        typeof(SecurityIdentifier));
+                    if (sid.Value.StartsWith(
+                            "S-1-5-21-",
+                            StringComparison.OrdinalIgnoreCase))
+                        active.Add(sid.Value);
+                }
+                List<string> ordered = new List<string>(active);
+                ordered.Sort(StringComparer.OrdinalIgnoreCase);
+                return ordered.ToArray();
+            }
+            finally
+            {
+                if (sessions != IntPtr.Zero)
+                    WTSFreeMemory(sessions);
+            }
         }
 
         public static uint GetDriveType(string root)
@@ -1480,15 +1623,74 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     return $sb.ToString()
 }
 
+function Select-DefenseClawActiveInteractiveUserProfiles {
+    param(
+        [AllowEmptyCollection()][object[]]$Profiles = @(),
+        [AllowEmptyCollection()][string[]]$ActiveSessionSIDs = @()
+    )
+
+    $active = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($rawSID in @($ActiveSessionSIDs)) {
+        if ([string]::IsNullOrWhiteSpace([string]$rawSID)) { continue }
+        try {
+            $candidate = [Security.Principal.SecurityIdentifier]::new(
+                ([string]$rawSID).Trim()
+            )
+        }
+        catch { continue }
+        if ($candidate.Value.StartsWith(
+                'S-1-5-21-',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            [void]$active.Add($candidate.Value)
+        }
+    }
+    $selected = [Collections.Generic.List[object]]::new()
+    foreach ($profile in @($Profiles)) {
+        if ($null -eq $profile -or
+            $null -eq $profile.PSObject.Properties['SID']) {
+            continue
+        }
+        $rawProfileSID = ([string]$profile.SID).Trim()
+        try {
+            $profileSID = [Security.Principal.SecurityIdentifier]::new(
+                $rawProfileSID
+            )
+        }
+        catch { continue }
+        if ($profileSID.Value.StartsWith(
+                'S-1-5-21-',
+                [StringComparison]::OrdinalIgnoreCase
+            ) -and
+            $active.Contains($profileSID.Value)) {
+            $selected.Add($profile)
+        }
+    }
+    return $selected.ToArray()
+}
+
 function Get-DefenseClawEligibleInteractiveUserProfiles {
+    param(
+        [switch]$RequireActiveSession,
+        [string[]]$ActiveSessionSIDs
+    )
+
+    if (-not $RequireActiveSession -and
+        $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
+        throw 'ActiveSessionSIDs requires RequireActiveSession'
+    }
+    if ($RequireActiveSession -and
+        -not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
+        $native = Initialize-DefenseClawBootstrapNativePath
+        $ActiveSessionSIDs = @($native::GetActiveSessionSIDs())
+    }
+
     # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
-    # and return one PSCustomObject per eligible interactive user
-    # (SID starts with S-1-5-21-, has a resolvable ProfileImagePath
-    # that exists on disk, and the SID translates to a live NTAccount).
-    # Mirrors internal/enterprisehooks/enumerator_windows.go's
-    # listWindowsUserProfiles filter chain — same rejection semantics
-    # so the shorthand-rendered targets.yaml matches what the running
-    # enumerator would re-render on its next tick.
+    # and return one PSCustomObject per eligible interactive user (SID starts
+    # with S-1-5-21-, has a resolvable ProfileImagePath that exists on disk, and
+    # the SID translates to a live NTAccount).
     $rootKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
     $out = [Collections.Generic.List[psobject]]::new()
     if (-not (Test-Path -LiteralPath $rootKey)) {
@@ -1522,6 +1724,22 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
             UserName = $userName
             UserHome = ([IO.Path]::GetFullPath($image)).TrimEnd('\')
         }) | Out-Null
+    }
+    if ($RequireActiveSession) {
+        # An activating fresh shorthand installation has no deferred target
+        # receipt: every enabled row must reconcile immediately, and Guardian
+        # can mutate a profile only through an exact WTS Active token. The
+        # synchronous enumerator later adds every other eligible ProfileList
+        # row as disabled, preserving discovery without making a disconnected
+        # user an impossible activation requirement. No-start and servicing
+        # deliberately keep the all-profile behavior because they establish or
+        # preserve a durable planned enrollment rather than claiming immediate
+        # coverage in this rendering step.
+        return @(
+            Select-DefenseClawActiveInteractiveUserProfiles `
+                -Profiles $out.ToArray() `
+                -ActiveSessionSIDs $ActiveSessionSIDs
+        )
     }
     return $out.ToArray()
 }
@@ -2577,24 +2795,48 @@ function Resolve-DefenseClawConnectorMetadataVersion {
 function Get-DefenseClawRenderedEnterpriseTargets {
     param(
         [Parameter(Mandatory)][string[]]$Connectors,
-        [object[]]$Profiles
+        [object[]]$Profiles,
+        [string[]]$ActiveSessionSIDs,
+        [switch]$RequireActiveSession
     )
+    if (-not $RequireActiveSession -and
+        $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
+        throw 'ActiveSessionSIDs requires RequireActiveSession'
+    }
     $sb = [Text.StringBuilder]::new()
     [void]$sb.AppendLine('version: 1')
     [void]$sb.AppendLine('targets:')
     $users = @(
         if ($PSBoundParameters.ContainsKey('Profiles')) {
-            $Profiles
+            if ($RequireActiveSession) {
+                if (-not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
+                    $native = Initialize-DefenseClawBootstrapNativePath
+                    $ActiveSessionSIDs = @($native::GetActiveSessionSIDs())
+                }
+                Select-DefenseClawActiveInteractiveUserProfiles `
+                    -Profiles $Profiles `
+                    -ActiveSessionSIDs $ActiveSessionSIDs
+            }
+            else {
+                $Profiles
+            }
         }
         else {
-            Get-DefenseClawEligibleInteractiveUserProfiles
+            if ($PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
+                Get-DefenseClawEligibleInteractiveUserProfiles `
+                    -RequireActiveSession:$RequireActiveSession `
+                    -ActiveSessionSIDs $ActiveSessionSIDs
+            }
+            else {
+                Get-DefenseClawEligibleInteractiveUserProfiles `
+                    -RequireActiveSession:$RequireActiveSession
+            }
         }
     )
     if ($users.Count -eq 0) {
-        # An empty manifest is valid YAML; the guardian re-scans on its
-        # interval, so a new user appearing after install is picked up
-        # by the enumerator without a reinstall. The bootstrap install
-        # simply lands with no rows for now.
+        # An empty manifest is valid YAML. The protected enumerator records a
+        # later-discovered profile as disabled pending explicit administrator
+        # promotion; the bootstrap install simply lands with no rows for now.
         return $sb.ToString()
     }
     # Windows managed_enterprise's manifest validator refuses any
@@ -2746,7 +2988,8 @@ try {
         $renderedConfigBody = Get-DefenseClawRenderedEnterpriseConfig `
             -Mode $Mode -Connectors $renderedConnectors
         $renderedManifestBody = Get-DefenseClawRenderedEnterpriseTargets `
-            -Connectors $renderedConnectors
+            -Connectors $renderedConnectors `
+            -RequireActiveSession:($Action -eq 'Install' -and -not $NoStart)
         $renderRoot = $bootstrapEnvironment.Path
         $renderedConfigPath = [IO.Path]::Combine($renderRoot, 'rendered-config.yaml')
         $renderedManifestPath = [IO.Path]::Combine($renderRoot, 'rendered-targets.yaml')
