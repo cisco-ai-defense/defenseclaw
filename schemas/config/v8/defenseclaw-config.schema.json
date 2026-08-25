@@ -1507,7 +1507,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 106751,
-          "default": 90,
+          "default": 7,
           "description": "Zero retains event, evidence, and judge-body history forever and requires a persistent capacity warning. The maximum is the largest whole-day period representable as a Go time.Duration."
         }
       },

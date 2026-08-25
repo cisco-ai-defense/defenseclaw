@@ -39,7 +39,7 @@ func TestCompileObservabilityV8AbsentAndEmptyDefaults(t *testing.T) {
 			t.Errorf("default bucket %q = %+v", bucket.Bucket, bucket)
 		}
 	}
-	if snapshot.Local.RetentionDays != 90 || snapshot.TracePolicy.Sampler != "parentbased_always_on" ||
+	if snapshot.Local.RetentionDays != ObservabilityV8DefaultRetentionDays || snapshot.TracePolicy.Sampler != "parentbased_always_on" ||
 		snapshot.MetricPolicy.ExportIntervalSeconds != 60 || snapshot.MetricPolicy.Temporality != "delta" {
 		t.Fatalf("effective defaults = local=%+v trace=%+v metric=%+v", snapshot.Local, snapshot.TracePolicy, snapshot.MetricPolicy)
 	}

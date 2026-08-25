@@ -230,7 +230,7 @@ func applyObservabilityV8Collect(target *ObservabilityV8EffectiveCollect, source
 }
 
 func compileObservabilityV8Local(source ObservabilityV8LocalSource) (ObservabilityV8EffectiveLocal, error) {
-	retentionDays := 90
+	retentionDays := ObservabilityV8DefaultRetentionDays
 	if source.RetentionDays != nil {
 		retentionDays = *source.RetentionDays
 	}
