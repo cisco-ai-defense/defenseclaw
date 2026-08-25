@@ -140,6 +140,7 @@ def _scan_one_connector(
     """
     from defenseclaw.inventory.claw_inventory import (
         build_claw_aibom,
+        claw_aibom_changed,
         claw_aibom_to_scan_result,
         enrich_with_policy,
         format_claw_aibom_human,
@@ -158,7 +159,10 @@ def _scan_one_connector(
     )
     result = claw_aibom_to_scan_result(inv, app.cfg)
 
-    if app.logger:
+    # The inventory sweep re-runs every ai_discovery.process_interval_s across
+    # every active connector. Persisting the per-category INFO findings on each
+    # pass wrote thousands of identical rows a day; log only on real change.
+    if app.logger and claw_aibom_changed(inv, app.cfg, connector=label):
         app.logger.log_scan(result)
 
     errors = inv.get("errors", [])

@@ -24,6 +24,7 @@ Commands are dispatched in parallel via ``ThreadPoolExecutor`` and deduplicated
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -2812,3 +2813,89 @@ def _enumerate_mcp_filesystem(
             row["env_keys"] = sorted(entry.env.keys())
         rows.append(row)
     return rows
+
+
+# Categories mirrored by :func:`claw_aibom_to_scan_result`. Kept as a module
+# constant so the digest and the finding emitter can never drift apart.
+_AIBOM_CATEGORY_KEYS = (
+    "skills",
+    "plugins",
+    "mcp",
+    "agents",
+    "tools",
+    "model_providers",
+    "memory",
+)
+
+
+def _strip_volatile(node: Any) -> Any:
+    """Drop provenance stamps so an unchanged environment hashes identically."""
+    if isinstance(node, dict):
+        return {k: _strip_volatile(v) for k, v in sorted(node.items()) if k != "provenance"}
+    if isinstance(node, list):
+        return [_strip_volatile(v) for v in node]
+    return node
+
+
+def claw_aibom_digest(inv: dict[str, Any]) -> str:
+    """Stable SHA-256 over the inventory categories only.
+
+    Provenance carries a per-run binary/config stamp, so it is stripped before
+    hashing: two sweeps of an unchanged environment must yield one digest.
+    """
+    payload = {key: _strip_volatile(inv.get(key, [])) for key in _AIBOM_CATEGORY_KEYS}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _aibom_digest_state_path(cfg: Config) -> str:
+    return os.path.join(getattr(cfg, "data_dir", "") or ".", "aibom_last_digest.json")
+
+
+def claw_aibom_changed(inv: dict[str, Any], cfg: Config, connector: str | None = None) -> bool:
+    """Report whether this inventory differs from the last one persisted.
+
+    The sweep runs on ``ai_discovery.process_interval_s`` (60s by default)
+    across every active connector, and :func:`claw_aibom_to_scan_result`
+    emits one INFO finding per category unconditionally. That wrote ~42
+    identical rows per minute into ``scan_findings`` — 45k rows collapsing to
+    13 distinct fingerprints in one observed deployment — which buried real
+    findings and inflated the audit database.
+
+    Keying persistence on content means an unchanged environment costs
+    nothing while a genuine change is still recorded exactly once.
+
+    On any state-file error this returns ``True``: losing an inventory record
+    is worse than writing a duplicate, so the failure mode is the old
+    behaviour, not silence.
+    """
+    key = connector or "default"
+    digest = claw_aibom_digest(inv)
+    path = _aibom_digest_state_path(cfg)
+
+    previous: dict[str, Any] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            previous = loaded
+    except FileNotFoundError:
+        previous = {}
+    except (OSError, ValueError):
+        return True
+
+    if previous.get(key) == digest:
+        return False
+
+    previous[key] = digest
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(previous, handle, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        return True
+    return True
