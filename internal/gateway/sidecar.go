@@ -2044,6 +2044,12 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 		return nil
 	}
 	m.bindObservabilityV8(metricRuntime)
+	// Wire per-request availability into /health so a dropped CMID
+	// auth after inspector construction is visible without a reload.
+	// The client fires this on every Inspect() call — failure paths
+	// publish the error to setInspectionAvailability, success paths
+	// publish nil so a self-healing lane clears the fail flag.
+	m.bindAvailabilityObserver(s.setInspectionAvailability)
 	return m
 }
 
@@ -2106,12 +2112,18 @@ func (s *Sidecar) logCMIDBuildLane(lane string) {
 // agent unavailable after the retry ladder). The error is surfaced so
 // the caller can take the fail-closed path.
 //
-// T5.2 note: every call — cached or fresh — updates
-// setInspectionAvailability with the latest Refresh outcome, so
-// /health cannot lag reality. Previously setInspectionAvailability
-// only fired on the first successful build; a cached provider whose
-// upstream auth later dropped kept reporting inspection_available=true
-// while every inspect call failed.
+// T5.2 note (construction-time signal): every call to this helper —
+// cached or fresh — updates setInspectionAvailability with the latest
+// Refresh outcome. But this helper is ONLY reached from inspector
+// construction (newManagedInspector) and the boot guardrail; it does
+// NOT run on every inspection. Per-inspection availability is fed by
+// the CiscoDefenseClawInspectClient's availability observer (wired at
+// construction in newManagedInspector via bindAvailabilityObserver),
+// which fires on every Token() outcome. Together the two paths mean
+// /health reflects reality within one inspection latency of a lane
+// state change — construction-time signal picks up config reloads,
+// per-request signal picks up in-flight auth drops on a live cached
+// provider.
 func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
 	s.cmidProviderMu.Lock()
 	defer s.cmidProviderMu.Unlock()

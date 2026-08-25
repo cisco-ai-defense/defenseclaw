@@ -869,13 +869,19 @@ def _validated_preinit_trusted_binary_prefixes(
             continue
         seen.add(key)
         resolved_values.append(resolved)
-    for entry, reason in quarantined:
-        click.echo(
-            f"warning: skipping pre-init trusted binary prefix "
-            f"{entry!r} ({reason}); config file: {cfg_path}; "
-            f"fix with `defenseclaw setup trusted-paths remove {entry!r}`",
-            err=True,
-        )
+    if quarantined:
+        import shlex
+        for entry, reason in quarantined:
+            # {entry!r} would render a Python repr ('D:\\staging\\bin'),
+            # which isn't a valid shell argument. Use shlex.quote for the
+            # command portion so cut-and-paste works verbatim.
+            click.echo(
+                f"warning: skipping pre-init trusted binary prefix "
+                f"{entry} ({reason}); config file: {cfg_path}; "
+                f"fix with `defenseclaw setup trusted-paths remove "
+                f"{shlex.quote(entry)}`",
+                err=True,
+            )
     return tuple(resolved_values)
 
 

@@ -73,6 +73,16 @@ enum ServiceAvailability {
 // managed-enterprise UCB drop lifecycle:
 //   - UNSPECIFIED: non-managed-enterprise or unknown (proto3 default).
 //   - WAITING_FOR_CONFIG: gateway daemon has not yet loaded config.yaml.
+//     Reserved value. The current gateway build does NOT publish this
+//     state on the initial-boot path — rootPersistentPreRunE blocks in
+//     waitForConfigV8Managed before the SidecarHealth object is
+//     constructed, so during the actual config-wait window there is
+//     no health surface for AVC to poll (connect refused, not
+//     WAITING_FOR_CONFIG). Kept in the enum for wire-compat with
+//     existing AVC UI clients and reserved for a future hot-reload
+//     path that flips SetDaemonConfigLoaded(false) at reload start.
+//     UI implementers should treat this value as observable-but-rare
+//     and MUST NOT hard-fail on receiving it.
 //   - WAITING_FOR_TARGETS: config.yaml loaded, hook-guardian has not
 //     yet loaded targets.yaml.
 //   - READY: both files loaded, hook enforcement engaged.

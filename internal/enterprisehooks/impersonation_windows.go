@@ -214,6 +214,17 @@ func validateWindowsEnterpriseTargetToken(token windows.Token, target *windows.S
 var windowsEnterpriseTokenAdvisoryLoggerMu sync.Mutex
 var windowsEnterpriseTokenAdvisoryLastEmit = map[string]time.Time{}
 
+// windowsEnterpriseTokenAdvisoryLastEmit is a rate-limit ledger keyed by
+// SID+advisory. On single-user boxes it stays under a handful of entries
+// forever, but on multi-user hosts (RDS/Citrix session hosts, VDI, kiosk
+// pools with rotating profiles) each distinct elevated principal that
+// ever showed up adds one entry, permanently. Cap the map so a host that
+// churns through 10K profiles doesn't grow the guardian process's map
+// unbounded. When the cap trips, evict the entry whose last emit is
+// oldest — it will simply re-emit next time it's seen, which is the
+// intended posture anyway.
+const windowsEnterpriseTokenAdvisoryLastEmitCap = 4096
+
 func logWindowsEnterpriseTokenElevationAdvisory(target *windows.SID, advisory string) {
 	if target == nil {
 		return
@@ -225,6 +236,23 @@ func logWindowsEnterpriseTokenElevationAdvisory(target *windows.SID, advisory st
 	if seen && now.Sub(last) < 60*time.Second {
 		windowsEnterpriseTokenAdvisoryLoggerMu.Unlock()
 		return
+	}
+	if len(windowsEnterpriseTokenAdvisoryLastEmit) >= windowsEnterpriseTokenAdvisoryLastEmitCap {
+		// Evict the single oldest entry. O(n) scan is acceptable at
+		// this cadence — the cap only trips on hosts with >4K distinct
+		// elevated principals over the process lifetime, and even then
+		// each admission does at most one eviction.
+		var oldestKey string
+		var oldestTime time.Time
+		for k, t := range windowsEnterpriseTokenAdvisoryLastEmit {
+			if oldestKey == "" || t.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = t
+			}
+		}
+		if oldestKey != "" {
+			delete(windowsEnterpriseTokenAdvisoryLastEmit, oldestKey)
+		}
 	}
 	windowsEnterpriseTokenAdvisoryLastEmit[key] = now
 	windowsEnterpriseTokenAdvisoryLoggerMu.Unlock()

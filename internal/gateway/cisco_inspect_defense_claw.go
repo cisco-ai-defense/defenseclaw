@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -68,6 +69,16 @@ type CiscoDefenseClawInspectClient struct {
 	// constant tokenUnavailableWarnCooldown for the rationale.
 	tokenWarnMu   sync.Mutex
 	tokenLastWarn time.Time
+
+	// availabilityObserverMu guards availabilityObserver. Set once via
+	// bindAvailabilityObserver at construction and read on every
+	// Inspect() so /health.inspection_available reflects the outcome
+	// of the per-request Token()/Refresh() attempt — not just the
+	// most recent ensureCMIDProvider call. Nil-safe: opensource /
+	// test callers that construct the client without wiring the
+	// sidecar leave this nil and the callback is skipped.
+	availabilityObserverMu sync.RWMutex
+	availabilityObserver   func(error)
 }
 
 // Compile-time assertion: the managed client satisfies Inspector.
@@ -132,6 +143,32 @@ func (c *CiscoDefenseClawInspectClient) observabilityV8Runtime() hookLifecycleMe
 	c.observabilityV8Mu.RLock()
 	defer c.observabilityV8Mu.RUnlock()
 	return c.observabilityV8
+}
+
+// bindAvailabilityObserver installs a callback the client fires on
+// every per-request Token()/Refresh() outcome so /health can reflect
+// reality between inspector-construction events. Sidecar wires this
+// to setInspectionAvailability in newManagedInspector — see the T5.2
+// note in ensureCMIDProvider.
+func (c *CiscoDefenseClawInspectClient) bindAvailabilityObserver(observer func(error)) {
+	if c == nil {
+		return
+	}
+	c.availabilityObserverMu.Lock()
+	c.availabilityObserver = observer
+	c.availabilityObserverMu.Unlock()
+}
+
+func (c *CiscoDefenseClawInspectClient) notifyAvailability(err error) {
+	if c == nil {
+		return
+	}
+	c.availabilityObserverMu.RLock()
+	observer := c.availabilityObserver
+	c.availabilityObserverMu.RUnlock()
+	if observer != nil {
+		observer(err)
+	}
 }
 
 // warnTokenUnavailable emits a rate-limited operator-visible stderr
@@ -227,8 +264,22 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		// above lands in the structured events pipeline; this line
 		// is for humans reading the log live.
 		c.warnTokenUnavailable(err)
+		// Per-request availability signal: /health flips to
+		// inspection_available=false the moment the managed cloud
+		// lane can no longer mint a bearer token, without waiting
+		// for the next inspector reconstruction. If err is nil (empty
+		// token), synthesize one so the health surface still learns
+		// the state changed.
+		if err == nil {
+			err = errors.New("managed cloud token is empty")
+		}
+		c.notifyAvailability(err)
 		return nil
 	}
+	// Token available — publish healthy on the availability channel so a
+	// recovered lane (e.g. after a transient CMID Refresh failure) is
+	// reflected in /health without waiting for reload.
+	c.notifyAvailability(nil)
 
 	// Body: messages[].content is the DefenseClaw MessageContent shape
 	// ({"text": ...}), matching the proto and the sample curl in the
