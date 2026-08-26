@@ -288,7 +288,7 @@ rules:
       defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
       f.data_flows.exists(d, d.from_command_id == dst.id &&
       d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
-    pattern: '(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
+    pattern: '(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw|-urlencode)?\s+@-|-d\s+@-|(?:--form|-F)\s+[^;\n]*=@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
     title: "Environment variable dump"
     severity: HIGH
     confidence: 0.80
@@ -330,7 +330,7 @@ rules:
       defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
       f.data_flows.exists(d, d.from_command_id == dst.id &&
       d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
-    pattern: '(?i)\b(?:cat|type|Get-Content)\b[^|;\n]*(?:\.env|credentials|\.git-credentials|\.netrc|_netrc|\.npmrc|\.pypirc|config\.json|/token)\s*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
+    pattern: '(?i)\b(?:cat|type|Get-Content)\b[^|;\n]*(?:\.env|credentials|\.git-credentials|\.netrc|_netrc|\.npmrc|\.pypirc|config\.json|/token)\s*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw|-urlencode)?\s+@-|-d\s+@-|(?:--form|-F)\s+[^;\n]*=@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
     title: "Sensitive read piped to external upload"
     severity: CRITICAL
     confidence: 0.96
