@@ -734,8 +734,20 @@ func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *te
 	if err != nil || !beforeRuntime.Registered || beforeRuntime.GenerationID == "" {
 		t.Fatalf("resolve initial immutable runtime: %+v err=%v", beforeRuntime, err)
 	}
+	beforeBundle, beforeBundleSecurity := snapshotWindowsManagedRuntimeBundle(
+		t,
+		dataDir,
+		"claudecode",
+		beforeRuntime.GenerationID,
+	)
 	want := snapshotWindowsRuntimeContentAndSecurity(t, dataDir)
-	removeWindowsManagedRuntimeGenerationSnapshots(want)
+	removeExactWindowsManagedRuntimeGenerationSnapshot(
+		t,
+		want,
+		dataDir,
+		"claudecode",
+		beforeRuntime.GenerationID,
+	)
 	if err := os.RemoveAll(dataDir); err != nil {
 		t.Fatal(err)
 	}
@@ -750,8 +762,44 @@ func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *te
 		rebuilt.HookContractEntryUpdatedAt != result.HookContractEntryUpdatedAt {
 		t.Fatalf("rebuilt recovery timestamps drifted: %+v", rebuilt)
 	}
+	afterRuntime, err := ResolveWindowsManagedHookRuntime(
+		fixture.hookExe,
+		"claudecode",
+	)
+	if err != nil || !afterRuntime.Registered || afterRuntime.GenerationID == "" {
+		t.Fatalf("resolve rebuilt immutable runtime: %+v err=%v", afterRuntime, err)
+	}
+	if afterRuntime.GenerationID == beforeRuntime.GenerationID {
+		t.Fatal("deleted immutable runtime was not republished under a new generation identity")
+	}
+	afterBundle, afterBundleSecurity := snapshotWindowsManagedRuntimeBundle(
+		t,
+		dataDir,
+		"claudecode",
+		afterRuntime.GenerationID,
+	)
+	if beforeBundle != afterBundle {
+		t.Fatalf(
+			"rebuilt immutable bundle contract drifted:\nbefore=%+v\n after=%+v",
+			beforeBundle,
+			afterBundle,
+		)
+	}
+	if afterBundleSecurity != beforeBundleSecurity {
+		t.Fatalf(
+			"rebuilt immutable bundle security drifted:\nbefore=%s\n after=%s",
+			beforeBundleSecurity,
+			afterBundleSecurity,
+		)
+	}
 	got := snapshotWindowsRuntimeContentAndSecurity(t, dataDir)
-	removeWindowsManagedRuntimeGenerationSnapshots(got)
+	removeExactWindowsManagedRuntimeGenerationSnapshot(
+		t,
+		got,
+		dataDir,
+		"claudecode",
+		afterRuntime.GenerationID,
+	)
 	if len(got) != len(want) {
 		t.Fatalf("rebuilt runtime entries = %d, want %d", len(got), len(want))
 	}
@@ -765,16 +813,8 @@ func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *te
 			)
 		}
 	}
-	afterRuntime, err := ResolveWindowsManagedHookRuntime(
-		fixture.hookExe,
-		"claudecode",
-	)
-	if err != nil || !afterRuntime.Registered || afterRuntime.GenerationID == "" {
-		t.Fatalf("resolve rebuilt immutable runtime: %+v err=%v", afterRuntime, err)
-	}
-	if afterRuntime.GenerationID == beforeRuntime.GenerationID {
-		t.Fatal("deleted immutable runtime was not republished under a new generation identity")
-	}
+	// The random publication identity changes while every resolved runtime
+	// field, including the private scoped token, remains equivalent.
 	beforeRuntime.GenerationID = ""
 	afterRuntime.GenerationID = ""
 	if beforeRuntime != afterRuntime {
@@ -2831,12 +2871,69 @@ func snapshotWindowsRuntimeContentAndSecurity(
 	return snapshot
 }
 
-func removeWindowsManagedRuntimeGenerationSnapshots(snapshot map[string]string) {
+func snapshotWindowsManagedRuntimeBundle(
+	t *testing.T,
+	dataDir string,
+	connectorName string,
+	generationID string,
+) (windowsManagedRuntimeBundle, string) {
+	t.Helper()
+	bundlePath, err := windowsManagedRuntimeBundlePath(
+		dataDir,
+		connectorName,
+		generationID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := decodeWindowsManagedRuntimeBundle(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.GenerationID != generationID {
+		t.Fatalf(
+			"managed runtime bundle generation = %q, want %q",
+			bundle.GenerationID,
+			generationID,
+		)
+	}
+	bundle.GenerationID = ""
+	return bundle, windowsTestSecurityDescriptorString(t, bundlePath)
+}
+
+func removeExactWindowsManagedRuntimeGenerationSnapshot(
+	t *testing.T,
+	snapshot map[string]string,
+	dataDir string,
+	connectorName string,
+	generationID string,
+) {
+	t.Helper()
+	bundlePath, err := windowsManagedRuntimeBundlePath(
+		dataDir,
+		connectorName,
+		generationID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(dataDir, bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snapshot[relative]; !ok {
+		t.Fatalf("runtime snapshot omitted selected generation %s", relative)
+	}
+	delete(snapshot, relative)
 	for relative := range snapshot {
 		if _, _, ok := parseWindowsManagedRuntimeBundleLeaf(
 			filepath.Base(relative),
 		); ok {
-			delete(snapshot, relative)
+			t.Fatalf("runtime snapshot contains unexpected extra generation %s", relative)
 		}
 	}
 }

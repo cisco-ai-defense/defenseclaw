@@ -788,8 +788,13 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 	}
 	if freshInstall < 0 || freshServices < 0 || freshCapture < 0 ||
 		enumeratorRefresh < 0 || targetPreparation < 0 ||
-		snapshot > freshServices || freshServices > enumeratorRefresh ||
+		snapshot > freshInstall || freshInstall > freshServices ||
+		freshServices > enumeratorRefresh ||
 		enumeratorRefresh > targetPreparation || targetPreparation > freshCapture ||
+		!strings.Contains(
+			installLike[freshInstall:freshServices],
+			"if ($Action -eq 'Install') {",
+		) ||
 		!strings.Contains(
 			installLike[freshServices:enumeratorRefresh],
 			"-BindInstallPreparationSID",
