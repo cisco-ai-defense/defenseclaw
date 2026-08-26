@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -118,6 +119,14 @@ type Sidecar struct {
 	exporterHealthMetricMu         sync.Mutex
 	exporterHealthMetricGeneration uint64
 	exporterHealthMetricCounters   map[exporterHealthMetricKey]uint64
+	// destinationCircuit* retains only the last-observed circuit state per
+	// destination for the active graph generation. It exists so a durable
+	// health log is emitted exactly once per state transition instead of once
+	// per 15s poll, and so a fresh config generation cannot inherit a stale
+	// "closed" baseline that would suppress a real reopen as a no-op.
+	destinationCircuitMu         sync.Mutex
+	destinationCircuitGeneration uint64
+	destinationCircuitState      map[string]delivery.CircuitState
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc

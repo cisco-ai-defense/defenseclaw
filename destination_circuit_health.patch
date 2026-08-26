@@ -1,0 +1,577 @@
+diff --git a/bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/gateway_health.xml b/bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/gateway_health.xml
+index efd94393..1fc34263 100644
+--- a/bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/gateway_health.xml
++++ b/bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/gateway_health.xml
+@@ -1,13 +1,13 @@
+ <dashboard version="1.1">
+   <label>DefenseClaw Gateway Health</label>
+-  <description>Operational health for the DefenseClaw gateway: circuit breaker state, verdict rates, sink failures, guardrail latency, and schema violations. Mirrors the Grafana overview health-at-a-glance and SLO panels.</description>
++  <description>Operational health for the DefenseClaw gateway: circuit breaker state across all destinations, verdict rates, sink failures, guardrail latency, and schema violations. Mirrors the Grafana overview health-at-a-glance and SLO panels.</description>
+ 
+   <row>
+     <panel>
+-      <title>Circuit breaker state (Splunk HEC sink)</title>
++      <title>Circuit breaker state (worst destination)</title>
+       <single>
+         <search>
+-          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | stats latest(circuit_state) as circuit_state latest(circuit_state_num) as circuit_state_num by component | stats max(circuit_state_num) as worst_state | eval state_label=case(worst_state=0, "closed", worst_state=1, "half-open", worst_state=2, "open", 1=1, "unknown")</query>
++          <query>`defenseclaw_circuit_breaker_events` | stats latest(circuit_state) as circuit_state latest(circuit_state_num) as circuit_state_num by destination | stats max(circuit_state_num) as worst_state | eval state_label=case(worst_state=0, "closed", worst_state=1, "half-open", worst_state=2, "open", 1=1, "unknown")</query>
+           <earliest>-24h</earliest>
+           <latest>now</latest>
+         </search>
+@@ -79,10 +79,10 @@
+ 
+   <row>
+     <panel>
+-      <title>Circuit breaker state over time</title>
++      <title>Circuit breaker state over time (by destination)</title>
+       <chart>
+         <search>
+-          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | timechart span=5m max(circuit_state_num) as circuit_state_num | eval circuit_state=case(circuit_state_num=0, "closed", circuit_state_num=1, "half-open", circuit_state_num=2, "open", 1=1, "unknown")</query>
++          <query>`defenseclaw_circuit_breaker_events` | timechart span=5m max(circuit_state_num) as circuit_state_num by destination limit=8 useother=f</query>
+           <earliest>-1h</earliest>
+           <latest>now</latest>
+         </search>
+@@ -136,10 +136,10 @@
+ 
+   <row>
+     <panel>
+-      <title>Recent circuit breaker state changes</title>
++      <title>Recent circuit breaker state changes (all destinations)</title>
+       <table>
+         <search>
+-          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | table timestamp component circuit_state action severity details | sort - timestamp | head 25</query>
++          <query>`defenseclaw_circuit_breaker_events` | table timestamp destination circuit_state action severity details | sort - timestamp | head 25</query>
+           <earliest>-24h</earliest>
+           <latest>now</latest>
+         </search>
+diff --git a/bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/macros.conf b/bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/macros.conf
+index 5dc6bb2b..06231106 100644
+--- a/bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/macros.conf
++++ b/bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/macros.conf
+@@ -353,7 +353,12 @@ definition = `defenseclaw_sink_events_base` | search severity="ERROR" OR severit
+ iseval = 0
+ 
+ [defenseclaw_circuit_breaker_events]
+-definition = `defenseclaw_signal_scope` | `defenseclaw_common_fields` | search action="circuit_breaker.*" OR action="*circuit*" | eval circuit_state=coalesce(circuit_state, "(unknown)"), circuit_state_num=case(circuit_state="closed", 0, circuit_state="half-open", 1, circuit_state="open", 2, 1=1, -1)
++# Fixed to match the v8 destination-circuit health log (emitted for every
++# destination kind on open/close transitions via
++# internal/gateway/destination_circuit_observability_v8.go), not just Splunk
++# HEC. The prior action="circuit_breaker.*" pattern matched a v7-era event
++# that no code path emits anymore, so this panel showed no data.
++definition = `defenseclaw_signal_scope` | `defenseclaw_common_fields` | search action="circuit_breaker_open" OR action="circuit_breaker_closed" | eval circuit_state=case(action="circuit_breaker_open", "open", action="circuit_breaker_closed", "closed", 1=1, "(unknown)"), circuit_state_num=case(circuit_state="closed", 0, circuit_state="half-open", 1, circuit_state="open", 2, 1=1, -1), destination=component
+ iseval = 0
+ 
+ [defenseclaw_schema_violation_events]
+diff --git a/internal/gateway/capacity_observability_v8.go b/internal/gateway/capacity_observability_v8.go
+index bd7c9308..656d277b 100644
+--- a/internal/gateway/capacity_observability_v8.go
++++ b/internal/gateway/capacity_observability_v8.go
+@@ -74,6 +74,7 @@ func (s *Sidecar) recordCapacityObservabilityV8(ctx context.Context, observedAt
+ 	_, _ = runtimeOwner.RecordGeneratedMetricBatch(ctx, s.capacityMetricBatch(ctx, observedAt))
+ 	if healthRuntime, ok := lifecycle.(exporterHealthMetricV8Runtime); ok {
+ 		s.recordExporterHealthMetricsV8(ctx, observedAt, healthRuntime)
++		s.recordDestinationCircuitHealthLogsV8(ctx, observedAt, healthRuntime)
+ 	}
+ }
+ 
+diff --git a/internal/gateway/destination_circuit_observability_v8.go b/internal/gateway/destination_circuit_observability_v8.go
+new file mode 100644
+index 00000000..e6e2c7e7
+--- /dev/null
++++ b/internal/gateway/destination_circuit_observability_v8.go
+@@ -0,0 +1,229 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: Apache-2.0
++
++package gateway
++
++import (
++	"context"
++	"fmt"
++	"math"
++	"time"
++
++	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
++	"github.com/defenseclaw/defenseclaw/internal/observability"
++	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
++	"github.com/defenseclaw/defenseclaw/internal/observability/router"
++	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
++	"github.com/google/uuid"
++)
++
++const destinationCircuitV8Producer = "gateway.destination_circuit"
++
++// recordDestinationCircuitHealthLogsV8 is the sibling of
++// recordExporterHealthMetricsV8: it shares the same 15s destination-health
++// poll but is intentionally NOT gated behind the exporter-error metric
++// family. A destination circuit opening is a durable health transition in
++// its own right, and disabling the (unrelated) exporter-error metric family
++// must not silently blind an operator to circuit state.
++func (s *Sidecar) recordDestinationCircuitHealthLogsV8(
++	ctx context.Context,
++	observedAt time.Time,
++	runtime exporterHealthMetricV8Runtime,
++) {
++	if s == nil || ctx == nil || observedAt.IsZero() || runtime == nil {
++		return
++	}
++	emitter := s.observabilityV8Emitter()
++	if emitter == nil {
++		return
++	}
++	health, err := runtime.DestinationHealthSnapshot(ctx)
++	if err != nil || health.Generation == 0 || health.PlanDigest == "" {
++		return
++	}
++	s.recordDestinationCircuitTransitionsV8(ctx, observedAt, emitter, health)
++}
++
++// recordDestinationCircuitTransitionsV8 diffs the current per-destination
++// circuit state against the last-observed state for the active graph
++// generation and emits exactly one durable health log per open or close
++// transition. Half-open (probe) states are intentionally not logged: a
++// cooldown probe firing every few seconds during an outage would flood the
++// durable log with events that carry no new operator-facing information
++// beyond the open/closed boundary already captured.
++//
++// A fresh config generation resets the tracked baseline instead of carrying
++// state forward, so a destination that reloads into an already-open circuit
++// is correctly reported as newly open rather than silently treated as a
++// continuation of a prior generation's outage.
++func (s *Sidecar) recordDestinationCircuitTransitionsV8(
++	ctx context.Context,
++	observedAt time.Time,
++	emitter sidecarRuntimeEmitter,
++	health observabilityruntime.DestinationHealthSnapshot,
++) {
++	if s == nil || ctx == nil || emitter == nil || observedAt.IsZero() ||
++		health.Generation == 0 || health.PlanDigest == "" {
++		return
++	}
++
++	s.destinationCircuitMu.Lock()
++	if s.destinationCircuitGeneration != health.Generation {
++		s.destinationCircuitGeneration = health.Generation
++		s.destinationCircuitState = make(map[string]delivery.CircuitState, len(health.Destinations))
++	}
++	if s.destinationCircuitState == nil {
++		s.destinationCircuitState = make(map[string]delivery.CircuitState, len(health.Destinations))
++	}
++
++	type transition struct {
++		name                string
++		kind                string
++		state               delivery.CircuitState
++		previous            delivery.CircuitState
++		consecutiveFailures uint64
++		lastFailureClass    delivery.FailureClass
++	}
++	var transitions []transition
++
++	for _, destination := range health.Destinations {
++		if !destination.Enabled || !observability.IsStableToken(destination.Name) {
++			continue
++		}
++		previous, seen := s.destinationCircuitState[destination.Name]
++		current := destination.CircuitState
++		if current == "" {
++			current = delivery.CircuitClosed
++		}
++		s.destinationCircuitState[destination.Name] = current
++		if !seen {
++			// First observation for this destination in this generation.
++			// Only report it if it starts life already open -- a routine
++			// first-seen "closed" baseline is not a transition.
++			if current != delivery.CircuitOpen {
++				continue
++			}
++			previous = delivery.CircuitClosed
++		}
++		if previous == current {
++			continue
++		}
++		if current != delivery.CircuitOpen && current != delivery.CircuitClosed {
++			// Half-open: tracked as the new baseline above, but not logged.
++			continue
++		}
++		transitions = append(transitions, transition{
++			name: destination.Name, kind: string(destination.Kind),
++			state: current, previous: previous,
++			consecutiveFailures: destination.ConsecutiveFailures,
++			lastFailureClass:    destination.LastFailureClass,
++		})
++	}
++	s.destinationCircuitMu.Unlock()
++
++	for _, t := range transitions {
++		_ = emitDestinationCircuitTransitionV8(ctx, emitter, observedAt, t.name, t.kind, t.state, t.consecutiveFailures, t.lastFailureClass)
++	}
++}
++
++func emitDestinationCircuitTransitionV8(
++	ctx context.Context,
++	emitter sidecarRuntimeEmitter,
++	observedAt time.Time,
++	destinationName string,
++	destinationKind string,
++	state delivery.CircuitState,
++	consecutiveFailures uint64,
++	lastFailureClass delivery.FailureClass,
++) error {
++	if ctx == nil || emitter == nil {
++		return &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
++	}
++
++	opened := state == delivery.CircuitOpen
++	action := "circuit_breaker_closed"
++	eventName := observability.TelemetryEventSubsystemRestored
++	severity := observability.SeverityMedium
++	// DefenseClawHealthState is a schema-enforced enum
++	// ({ready,starting,stopped,degraded,failed,restored}); the specific
++	// circuit-open/circuit-closed distinction lives in the free-form action
++	// field below instead, which is what the Splunk macro keys off.
++	healthState := "restored"
++	var errorCode observability.Optional[string]
++	var errorSummary observability.Optional[string]
++	if opened {
++		action = "circuit_breaker_open"
++		eventName = observability.TelemetryEventSubsystemDegraded
++		severity = observability.SeverityHigh
++		healthState = "degraded"
++		errorCode = observability.Present("destination_circuit_open")
++		errorSummary = observability.Present(fmt.Sprintf(
++			"destination_kind=%s consecutive_failures=%d last_failure_class=%s",
++			destinationKind, consecutiveFailures, string(lastFailureClass),
++		))
++	}
++
++	producerKey := observability.ProducerKey(gatewaylog.EventError)
++	classification := observability.ClassificationContext{
++		Bucket:      observability.BucketPlatformHealth,
++		EventName:   observability.EventName(eventName),
++		RawSeverity: string(severity),
++		MandatoryFacts: observability.MandatoryFacts{
++			DurableHealthTransition: true,
++		},
++	}
++	metadata, err := router.NewClassifiedLogMetadata(
++		observability.ProducerGatewayEvent,
++		producerKey,
++		classification,
++		observability.SourceGateway,
++		"",
++		observability.ProducerKey(action),
++	)
++	if err != nil {
++		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
++	}
++
++	_, err = emitter.Emit(ctx, metadata, func(
++		snapshot observabilityruntime.EmitContext,
++		admission router.Admission,
++	) (observability.Record, error) {
++		if snapshot.Generation() > math.MaxInt64 ||
++			(admission != router.AdmissionOrdinary && admission != router.AdmissionFloor) {
++			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
++		}
++		builder, buildErr := observability.NewFamilyBuilder(
++			observability.ClockFunc(func() time.Time { return observedAt }),
++			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
++		)
++		if buildErr != nil {
++			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
++		}
++		envelope := gatewayGeneratedEnvelope(
++			ctx, snapshot, observability.SourceGateway, "", destinationCircuitV8Producer, action, "delivery",
++		)
++		if opened {
++			return builder.BuildLogSubsystemDegraded(observability.LogSubsystemDegradedInput{
++				Envelope:                         envelope,
++				Severity:                         observability.Present(severity),
++				LogLevel:                         observability.Present(observability.LogLevelWarn),
++				Outcome:                          observability.OutcomeFailed,
++				DefenseClawHealthSubsystem:       destinationName,
++				DefenseClawHealthState:           healthState,
++				DefenseClawHealthErrorSummary:    errorSummary,
++				DefenseClawSchemaErrorCode:       errorCode,
++				MandatoryDurableHealthTransition: true,
++			})
++		}
++		return builder.BuildLogSubsystemRestored(observability.LogSubsystemRestoredInput{
++			Envelope:                         envelope,
++			Severity:                         observability.Present(severity),
++			LogLevel:                         observability.Present(observability.LogLevelInfo),
++			Outcome:                          observability.OutcomeCompleted,
++			DefenseClawHealthSubsystem:       destinationName,
++			DefenseClawHealthState:           healthState,
++			MandatoryDurableHealthTransition: true,
++		})
++	})
++	return err
++}
+diff --git a/internal/gateway/destination_circuit_observability_v8_test.go b/internal/gateway/destination_circuit_observability_v8_test.go
+new file mode 100644
+index 00000000..689ea577
+--- /dev/null
++++ b/internal/gateway/destination_circuit_observability_v8_test.go
+@@ -0,0 +1,215 @@
++// Copyright 2026 Cisco Systems, Inc. and its affiliates
++// SPDX-License-Identifier: Apache-2.0
++
++package gateway
++
++import (
++	"database/sql"
++	"encoding/json"
++	"testing"
++	"time"
++
++	"github.com/defenseclaw/defenseclaw/internal/config"
++	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
++	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
++)
++
++func destinationHealthSnapshotFixture(
++	generation uint64,
++	name string,
++	state delivery.CircuitState,
++	consecutiveFailures uint64,
++) observabilityruntime.DestinationHealthSnapshot {
++	return observabilityruntime.DestinationHealthSnapshot{
++		Generation: generation,
++		PlanDigest: "digest-fixture",
++		Destinations: []observabilityruntime.DestinationHealth{
++			{
++				Name: name, Kind: config.ObservabilityV8DestinationSplunkHEC, Enabled: true,
++				CircuitState:        state,
++				ConsecutiveFailures: consecutiveFailures,
++				LastFailureClass:    delivery.FailureClassTransient,
++			},
++		},
++	}
++}
++
++func queryDestinationCircuitLog(
++	t *testing.T,
++	dbPath string,
++	action string,
++) (mandatory int, subsystem string, healthState string, errorCode string) {
++	t.Helper()
++	database, err := sql.Open("sqlite", dbPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer database.Close()
++	var raw string
++	row := database.QueryRow(`SELECT mandatory, projected_record_json FROM audit_events
++		WHERE bucket = 'platform.health' AND action = ?`, action)
++	if err := row.Scan(&mandatory, &raw); err != nil {
++		t.Fatal(err)
++	}
++	var projected struct {
++		Body map[string]any `json:"body"`
++	}
++	if err := json.Unmarshal([]byte(raw), &projected); err != nil {
++		t.Fatal(err)
++	}
++	subsystem, _ = projected.Body["defenseclaw.health.subsystem"].(string)
++	healthState, _ = projected.Body["defenseclaw.health.state"].(string)
++	errorCode, _ = projected.Body["defenseclaw.schema.error_code"].(string)
++	return mandatory, subsystem, healthState, errorCode
++}
++
++func countDestinationCircuitLogs(t *testing.T, dbPath string, action string) int {
++	t.Helper()
++	database, err := sql.Open("sqlite", dbPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer database.Close()
++	var count int
++	row := database.QueryRow(`SELECT COUNT(*) FROM audit_events
++		WHERE bucket = 'platform.health' AND action = ?`, action)
++	if err := row.Scan(&count); err != nil {
++		t.Fatal(err)
++	}
++	return count
++}
++
++// TestDestinationCircuitTransitionV8EmitsOpenThenClosedExactlyOnce exercises
++// the closed -> open -> open -> closed sequence a real cooldown/probe cycle
++// produces and asserts a durable log fires only on the two genuine
++// transitions, not on the repeated "still open" poll in between.
++func TestDestinationCircuitTransitionV8EmitsOpenThenClosedExactlyOnce(t *testing.T) {
++	runtime, capture := newProxyGeneratedTraceRuntime(t)
++	ctx, _ := platformHealthCorrelatedContext(t)
++	sidecar := &Sidecar{}
++
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitClosed, 0),
++	)
++	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open"); got != 0 {
++		t.Fatalf("unexpected open log after first closed observation: count=%d", got)
++	}
++
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitOpen, 3),
++	)
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitOpen, 4),
++	)
++	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open"); got != 1 {
++		t.Fatalf("expected exactly one open transition log, got %d", got)
++	}
++	mandatory, subsystem, healthState, errorCode := queryDestinationCircuitLog(
++		t, capture.store.DatabasePath(), "circuit_breaker_open",
++	)
++	if mandatory != 1 || subsystem != "soc_primary" || healthState != "degraded" ||
++		errorCode != "destination_circuit_open" {
++		t.Fatalf("open transition projection wrong: mandatory=%d subsystem=%s state=%s code=%s",
++			mandatory, subsystem, healthState, errorCode)
++	}
++
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitHalfOpen, 4),
++	)
++	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_closed"); got != 0 {
++		t.Fatalf("half-open probe must not emit a closed log, got %d", got)
++	}
++
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitClosed, 0),
++	)
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitClosed, 0),
++	)
++	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_closed"); got != 1 {
++		t.Fatalf("expected exactly one closed transition log, got %d", got)
++	}
++	mandatory, subsystem, healthState, _ = queryDestinationCircuitLog(
++		t, capture.store.DatabasePath(), "circuit_breaker_closed",
++	)
++	if mandatory != 1 || subsystem != "soc_primary" || healthState != "restored" {
++		t.Fatalf("closed transition projection wrong: mandatory=%d subsystem=%s state=%s",
++			mandatory, subsystem, healthState)
++	}
++}
++
++// TestDestinationCircuitTransitionV8FirstSeenClosedIsNotLogged guards against
++// a noisy false-positive "restored" log for every destination on every
++// process start: a destination observed for the first time in a generation
++// that is already closed is the routine baseline, not a recovery.
++func TestDestinationCircuitTransitionV8FirstSeenClosedIsNotLogged(t *testing.T) {
++	runtime, capture := newProxyGeneratedTraceRuntime(t)
++	ctx, _ := platformHealthCorrelatedContext(t)
++	sidecar := &Sidecar{}
++
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(7, "s3_export", delivery.CircuitClosed, 0),
++	)
++	openCount := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open")
++	closedCount := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_closed")
++	if openCount != 0 || closedCount != 0 {
++		t.Fatalf("first-seen closed destination must not log a transition: open=%d closed=%d",
++			openCount, closedCount)
++	}
++}
++
++// TestDestinationCircuitTransitionV8FirstSeenOpenIsLogged guards the inverse:
++// a config reload that resolves directly into an already-broken destination
++// (for example the process restarted mid-outage) must still surface an open
++// log, since silence here would hide a real ongoing outage.
++func TestDestinationCircuitTransitionV8FirstSeenOpenIsLogged(t *testing.T) {
++	runtime, capture := newProxyGeneratedTraceRuntime(t)
++	ctx, _ := platformHealthCorrelatedContext(t)
++	sidecar := &Sidecar{}
++
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(9, "s3_export", delivery.CircuitOpen, 5),
++	)
++	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open"); got != 1 {
++		t.Fatalf("expected exactly one open transition log for first-seen open destination, got %d", got)
++	}
++}
++
++// TestDestinationCircuitTransitionV8GenerationResetReopensBaseline confirms a
++// new config generation cannot inherit a stale "open" baseline from a prior
++// generation and thereby suppress a genuinely new open transition as a
++// no-op duplicate.
++func TestDestinationCircuitTransitionV8GenerationResetReopensBaseline(t *testing.T) {
++	runtime, capture := newProxyGeneratedTraceRuntime(t)
++	ctx, _ := platformHealthCorrelatedContext(t)
++	sidecar := &Sidecar{}
++
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitOpen, 3),
++	)
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitClosed, 0),
++	)
++	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open"); got != 1 {
++		t.Fatalf("expected one open log from generation 1, got %d", got)
++	}
++
++	// New generation reopens for the same destination name.
++	sidecar.recordDestinationCircuitTransitionsV8(
++		ctx, time.Now().UTC(), runtime,
++		destinationHealthSnapshotFixture(2, "soc_primary", delivery.CircuitOpen, 1),
++	)
++	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open"); got != 2 {
++		t.Fatalf("expected a second open log after generation reset, got %d", got)
++	}
++}
+diff --git a/internal/gateway/sidecar.go b/internal/gateway/sidecar.go
+index 95ae38cd..608692bc 100644
+--- a/internal/gateway/sidecar.go
++++ b/internal/gateway/sidecar.go
+@@ -48,6 +48,7 @@ import (
+ 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+ 	"github.com/defenseclaw/defenseclaw/internal/notify"
+ 	"github.com/defenseclaw/defenseclaw/internal/observability"
++	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+ 	"github.com/defenseclaw/defenseclaw/internal/policy"
+ 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+ 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
+@@ -118,6 +119,14 @@ type Sidecar struct {
+ 	exporterHealthMetricMu         sync.Mutex
+ 	exporterHealthMetricGeneration uint64
+ 	exporterHealthMetricCounters   map[exporterHealthMetricKey]uint64
++	// destinationCircuit* retains only the last-observed circuit state per
++	// destination for the active graph generation. It exists so a durable
++	// health log is emitted exactly once per state transition instead of once
++	// per 15s poll, and so a fresh config generation cannot inherit a stale
++	// "closed" baseline that would suppress a real reopen as a no-op.
++	destinationCircuitMu         sync.Mutex
++	destinationCircuitGeneration uint64
++	destinationCircuitState      map[string]delivery.CircuitState
+ 
+ 	alertCtx    context.Context
+ 	alertCancel context.CancelFunc
+
+// TestDestinationCircuitTransitionV8DebugEmitError is a temporary diagnostic
+// test to surface the actual error from emitDestinationCircuitTransitionV8
+// (normally discarded by the caller) while root-causing a test failure.
+// Remove before opening the PR.
+func TestDestinationCircuitTransitionV8DebugEmitError(t *testing.T) {
+	runtime, _ := newProxyGeneratedTraceRuntime(t)
+	ctx, _ := platformHealthCorrelatedContext(t)
+
+	err := emitDestinationCircuitTransitionV8(
+		ctx, runtime, time.Now().UTC(), "soc_primary", "splunk_hec",
+		delivery.CircuitOpen, 3, delivery.FailureClassTransient,
+	)
+	if err != nil {
+		t.Fatalf("emitDestinationCircuitTransitionV8 returned error: %v", err)
+	}
+}

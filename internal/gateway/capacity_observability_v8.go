@@ -74,6 +74,7 @@ func (s *Sidecar) recordCapacityObservabilityV8(ctx context.Context, observedAt 
 	_, _ = runtimeOwner.RecordGeneratedMetricBatch(ctx, s.capacityMetricBatch(ctx, observedAt))
 	if healthRuntime, ok := lifecycle.(exporterHealthMetricV8Runtime); ok {
 		s.recordExporterHealthMetricsV8(ctx, observedAt, healthRuntime)
+		s.recordDestinationCircuitHealthLogsV8(ctx, observedAt, healthRuntime)
 	}
 }
 
