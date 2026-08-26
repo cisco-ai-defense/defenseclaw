@@ -18470,8 +18470,10 @@ function Remove-DefenseClawSweepPath {
     if ([string]::IsNullOrWhiteSpace($Path)) { return }
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path)) { return }
     try {
-        & takeown.exe /F $Path /A /R /D Y 2>$null | Out-Null
-        & icacls.exe $Path /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null | Out-Null
+        & takeown.exe /F $Path /A /R /D Y 2>$null |
+            Microsoft.PowerShell.Core\Out-Null
+        & icacls.exe $Path /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null |
+            Microsoft.PowerShell.Core\Out-Null
     } catch {}
     Microsoft.PowerShell.Management\Remove-Item `
         -LiteralPath $Path -Force -Recurse -ErrorAction SilentlyContinue
@@ -18510,7 +18512,7 @@ function Invoke-DefenseClawNamespaceSweep {
         'defenseclaw'
     )) {
         Microsoft.PowerShell.Management\Get-Process -Name $name -ErrorAction SilentlyContinue |
-            ForEach-Object {
+            Microsoft.PowerShell.Core\ForEach-Object {
                 Microsoft.PowerShell.Management\Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
             }
     }
@@ -18521,11 +18523,13 @@ function Invoke-DefenseClawNamespaceSweep {
     #    the residual entry so a fresh install with the same name
     #    isn't blocked.
     Microsoft.PowerShell.Management\Get-Service -Name 'DefenseClaw*' -ErrorAction SilentlyContinue |
-        ForEach-Object {
+        Microsoft.PowerShell.Core\ForEach-Object {
             Microsoft.PowerShell.Management\Stop-Service `
                 -Name $_.Name -Force -ErrorAction SilentlyContinue
-            & sc.exe stop $_.Name 2>$null | Out-Null
-            & sc.exe delete $_.Name 2>$null | Out-Null
+            & sc.exe stop $_.Name 2>$null |
+                Microsoft.PowerShell.Core\Out-Null
+            & sc.exe delete $_.Name 2>$null |
+                Microsoft.PowerShell.Core\Out-Null
         }
 
     # 3. Machine-wide DefenseClaw roots. Both the production names
@@ -18556,8 +18560,10 @@ function Invoke-DefenseClawNamespaceSweep {
         'managed-settings.d'
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $claudeManagedDir) {
         try {
-            & takeown.exe /F $claudeManagedDir /A /R /D Y 2>$null | Out-Null
-            & icacls.exe $claudeManagedDir /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null | Out-Null
+            & takeown.exe /F $claudeManagedDir /A /R /D Y 2>$null |
+                Microsoft.PowerShell.Core\Out-Null
+            & icacls.exe $claudeManagedDir /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null |
+                Microsoft.PowerShell.Core\Out-Null
         } catch {}
         Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $claudeManagedDir -Force -ErrorAction SilentlyContinue |
             Microsoft.PowerShell.Core\Where-Object {
@@ -18565,7 +18571,7 @@ function Invoke-DefenseClawNamespaceSweep {
                 $_.Name -like '.defenseclaw*' -or
                 $_.Name -eq '90-defenseclaw.json'
             } |
-            ForEach-Object {
+            Microsoft.PowerShell.Core\ForEach-Object {
                 Microsoft.PowerShell.Management\Remove-Item `
                     -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
             }
@@ -18576,8 +18582,10 @@ function Invoke-DefenseClawNamespaceSweep {
     )) {
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $agentDir)) { continue }
         try {
-            & takeown.exe /F $agentDir /A /R /D Y 2>$null | Out-Null
-            & icacls.exe $agentDir /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null | Out-Null
+            & takeown.exe /F $agentDir /A /R /D Y 2>$null |
+                Microsoft.PowerShell.Core\Out-Null
+            & icacls.exe $agentDir /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null |
+                Microsoft.PowerShell.Core\Out-Null
         } catch {}
         Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $agentDir -Force -ErrorAction SilentlyContinue |
             Microsoft.PowerShell.Core\Where-Object {
@@ -18586,7 +18594,7 @@ function Invoke-DefenseClawNamespaceSweep {
                 $_.Name -eq 'hooks.json' -or
                 $_.Name -eq 'requirements.toml'
             } |
-            ForEach-Object {
+            Microsoft.PowerShell.Core\ForEach-Object {
                 Microsoft.PowerShell.Management\Remove-Item `
                     -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
             }
@@ -18600,7 +18608,7 @@ function Invoke-DefenseClawNamespaceSweep {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $usersRoot) {
         Microsoft.PowerShell.Management\Get-ChildItem `
             -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue |
-            ForEach-Object {
+            Microsoft.PowerShell.Core\ForEach-Object {
                 Remove-DefenseClawSweepPath -Path (
                     Microsoft.PowerShell.Management\Join-Path $_.FullName '.defenseclaw'
                 )
@@ -18616,7 +18624,7 @@ function Invoke-DefenseClawNamespaceSweep {
         -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services' `
         -ErrorAction SilentlyContinue |
         Microsoft.PowerShell.Core\Where-Object { $_.PSChildName -like 'DefenseClaw*' } |
-        ForEach-Object {
+        Microsoft.PowerShell.Core\ForEach-Object {
             Microsoft.PowerShell.Management\Remove-Item `
                 -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
         }

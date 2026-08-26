@@ -727,7 +727,15 @@ func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *te
 		t.Fatalf("install omitted protected recovery timestamps: %+v", result)
 	}
 	dataDir := filepath.Join(fixture.home, ".defenseclaw")
+	beforeRuntime, err := ResolveWindowsManagedHookRuntime(
+		fixture.hookExe,
+		"claudecode",
+	)
+	if err != nil || !beforeRuntime.Registered || beforeRuntime.GenerationID == "" {
+		t.Fatalf("resolve initial immutable runtime: %+v err=%v", beforeRuntime, err)
+	}
 	want := snapshotWindowsRuntimeContentAndSecurity(t, dataDir)
+	removeWindowsManagedRuntimeGenerationSnapshots(want)
 	if err := os.RemoveAll(dataDir); err != nil {
 		t.Fatal(err)
 	}
@@ -743,6 +751,7 @@ func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *te
 		t.Fatalf("rebuilt recovery timestamps drifted: %+v", rebuilt)
 	}
 	got := snapshotWindowsRuntimeContentAndSecurity(t, dataDir)
+	removeWindowsManagedRuntimeGenerationSnapshots(got)
 	if len(got) != len(want) {
 		t.Fatalf("rebuilt runtime entries = %d, want %d", len(got), len(want))
 	}
@@ -755,6 +764,25 @@ func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *te
 				actual,
 			)
 		}
+	}
+	afterRuntime, err := ResolveWindowsManagedHookRuntime(
+		fixture.hookExe,
+		"claudecode",
+	)
+	if err != nil || !afterRuntime.Registered || afterRuntime.GenerationID == "" {
+		t.Fatalf("resolve rebuilt immutable runtime: %+v err=%v", afterRuntime, err)
+	}
+	if afterRuntime.GenerationID == beforeRuntime.GenerationID {
+		t.Fatal("deleted immutable runtime was not republished under a new generation identity")
+	}
+	beforeRuntime.GenerationID = ""
+	afterRuntime.GenerationID = ""
+	if beforeRuntime != afterRuntime {
+		t.Fatalf(
+			"rebuilt immutable runtime contract drifted:\nbefore=%+v\n after=%+v",
+			beforeRuntime,
+			afterRuntime,
+		)
 	}
 }
 
@@ -1106,8 +1134,12 @@ func TestWindowsClaudeManagedLifecycleOwnershipSurvivesRuntimeDamage(t *testing.
 	if err := os.Remove(tokenPath); err != nil {
 		t.Fatal(err)
 	}
-	if _, registered, err := ResolveWindowsClaudeManagedHookRuntime(fixture.hookExe); err == nil || registered {
-		t.Fatalf("damaged managed runtime resolved: registered=%v err=%v", registered, err)
+	// Hooks consume the already-selected immutable generation. Damage to the
+	// mutable publication remains visible to Guardian/lifecycle Verify, but it
+	// must not create an enforcement outage while that complete generation is
+	// still authenticated.
+	if _, registered, err := ResolveWindowsClaudeManagedHookRuntime(fixture.hookExe); err != nil || !registered {
+		t.Fatalf("immutable runtime stopped resolving after mutable damage: registered=%v err=%v", registered, err)
 	}
 	if err := VerifyWindowsClaudeManagedLifecycleRuntime(dataDir, managedRuntimeVersion); err == nil ||
 		!strings.Contains(err.Error(), ".hook-claudecode.token") {
@@ -2032,21 +2064,13 @@ func TestInstallWindowsClaudeReclaimsOrphanManagedPolicy(t *testing.T) {
 	}
 }
 
-// TestInstallWindowsClaudeReclaimsReverseOrphanManagedState pins the
-// mirror case: a state sidecar that survived a prior uninstall while
-// the policy file was already removed. The dedicated missing-policy
-// recovery path rejects state whose gateway/service identity does
-// not match the current install (the QA runID pattern changes the
-// cert-scoped service name every reinstall), which historically
-// deadlocked lifecycle capture on any re-run. Reclaim deletes the
-// stale state and the install proceeds as fresh.
-func TestInstallWindowsClaudeReclaimsReverseOrphanManagedState(t *testing.T) {
+// A state sidecar without its policy can still authenticate exact
+// missing-policy recovery. Invalid bytes must fail closed and remain intact;
+// treating every reverse orphan as fresh state would erase the evidence before
+// its digest, service identity, and target enrollment were checked.
+func TestInstallWindowsClaudeRejectsInvalidReverseOrphanManagedState(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	statePath := filepath.Join(filepath.Dir(fixture.policyPath), ".defenseclaw-managed-hooks.state")
-	// The reverse-orphan signature: state metadata bytes on disk
-	// (content is intentionally irrelevant here — reclaim is
-	// signature-based, not content-based) with no policy file next
-	// to them. The fixture's policyPath is already absent.
 	staleState := []byte("{\"schema_version\":2,\"policy_sha256\":\"sha256:deadbeef\"}\n")
 	if err := os.WriteFile(statePath, staleState, 0o600); err != nil {
 		t.Fatal(err)
@@ -2054,18 +2078,19 @@ func TestInstallWindowsClaudeReclaimsReverseOrphanManagedState(t *testing.T) {
 	if err := setWindowsManagedPolicyProtection(statePath, false, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
-		t.Fatalf("Install after reverse orphan reclaim: %v", err)
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err == nil ||
+		!strings.Contains(err.Error(), "missing-policy recovery") {
+		t.Fatalf("Install error = %v, want invalid reverse-orphan refusal", err)
 	}
 	got, err := os.ReadFile(statePath)
 	if err != nil {
-		t.Fatalf("read post-install state: %v", err)
+		t.Fatalf("read refused reverse-orphan state: %v", err)
 	}
-	if bytes.Equal(got, staleState) {
-		t.Fatal("orphan state survived reclaim: install did not replace the pre-existing bytes")
+	if !bytes.Equal(got, staleState) {
+		t.Fatal("refused reverse-orphan recovery changed the protected state bytes")
 	}
-	if _, err := os.Stat(fixture.policyPath); err != nil {
-		t.Fatalf("policy file missing after reclaim + install: %v", err)
+	if _, err := os.Lstat(fixture.policyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused reverse-orphan recovery published a policy: %v", err)
 	}
 }
 
@@ -2135,7 +2160,7 @@ func TestInstallWindowsClaudeRollsBackRuntimeAndPolicy(t *testing.T) {
 	}
 }
 
-func TestInstallWindowsClaudeRollsBackNewManagedPolicyDirectories(t *testing.T) {
+func TestInstallWindowsClaudeRollsBackArtifactsAndRetainsSelectorLock(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	policyDir := filepath.Dir(fixture.policyPath)
 	policyRoot := filepath.Dir(policyDir)
@@ -2157,9 +2182,33 @@ func TestInstallWindowsClaudeRollsBackNewManagedPolicyDirectories(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "injected state publication failure") {
 		t.Fatalf("Install error = %v, want injected rollback failure", err)
 	}
-	for _, path := range []string{policyDir, policyRoot} {
+	selectorPath := filepath.Join(policyDir, windowsManagedRuntimeSelectorFile)
+	for _, path := range []string{
+		fixture.policyPath,
+		filepath.Join(policyDir, windowsClaudeManagedStateFile),
+		selectorPath,
+	} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("new managed policy directory survived rollback at %s: %v", path, err)
+			t.Fatalf("active managed artifact survived rollback at %s: %v", path, err)
+		}
+	}
+	selectorLock := filepath.Join(policyDir, windowsManagedRuntimeSelectorLockFile)
+	if err := validateWindowsManagedRuntimeMachineFileProtection(
+		selectorLock,
+		false,
+	); err != nil {
+		t.Fatalf("persistent selector lock is not canonical: %v", err)
+	}
+	entries, err := os.ReadDir(policyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != windowsManagedRuntimeSelectorLockFile {
+		t.Fatalf("rollback policy directory entries = %v, want only persistent selector lock", entries)
+	}
+	for _, path := range []string{policyRoot, policyDir} {
+		if err := validateWindowsManagedPolicyDirectoryProtection(path); err != nil {
+			t.Fatalf("retained selector directory is not canonical at %s: %v", path, err)
 		}
 	}
 }
@@ -2780,6 +2829,16 @@ func snapshotWindowsRuntimeContentAndSecurity(
 		t.Fatal(err)
 	}
 	return snapshot
+}
+
+func removeWindowsManagedRuntimeGenerationSnapshots(snapshot map[string]string) {
+	for relative := range snapshot {
+		if _, _, ok := parseWindowsManagedRuntimeBundleLeaf(
+			filepath.Base(relative),
+		); ok {
+			delete(snapshot, relative)
+		}
+	}
 }
 
 func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {

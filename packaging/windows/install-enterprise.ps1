@@ -1041,11 +1041,15 @@ function Test-DefenseClawBootstrapPathExists {
         [void][IO.File]::GetAttributes($Path)
         return $true
     }
-    catch [IO.FileNotFoundException] {
-        return $false
-    }
-    catch [IO.DirectoryNotFoundException] {
-        return $false
+    catch {
+        # Windows PowerShell 5.1 wraps failures from static .NET method calls
+        # in MethodInvocationException. Treat only a missing path anywhere in
+        # that inner-exception chain as absent; every other error remains a
+        # fail-closed cleanup failure.
+        if (Test-DefenseClawBootstrapMissingPathError -Exception $_.Exception) {
+            return $false
+        }
+        throw
     }
 }
 
@@ -1070,60 +1074,71 @@ function Assert-DefenseClawBootstrapCleanupEntry {
         )) {
         throw "refusing bootstrap cleanup outside exact capability root: $full"
     }
-    $attributes = [IO.File]::GetAttributes($full)
-    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "refusing bootstrap cleanup through a reparse point: $full"
-    }
-    $isDirectory =
-        ($attributes -band [IO.FileAttributes]::Directory) -ne 0
-    if ($isDirectory -ne $Directory) {
-        throw "bootstrap cleanup object type changed: $full"
-    }
-    $sections = [Security.AccessControl.AccessControlSections]::Owner `
-        -bor [Security.AccessControl.AccessControlSections]::Access
-    $security = if ($Directory) {
-        Get-DefenseClawBootstrapDirectorySecurity `
-            -Directory ([IO.DirectoryInfo]::new($full)) `
-            -Sections $sections
-    }
-    else {
-        Get-DefenseClawBootstrapFileSecurity `
-            -File ([IO.FileInfo]::new($full)) `
-            -Sections $sections
-    }
-    $accessSDDL = $security.GetSecurityDescriptorSddlForm(
-        [Security.AccessControl.AccessControlSections]::Access
-    )
-    if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
-        -not $accessSDDL.StartsWith(
-            'D:',
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
-        throw "refusing bootstrap cleanup of an object with a null DACL: $full"
-    }
-    $ownerSID = $security.GetOwner(
-        [Security.Principal.SecurityIdentifier]
-    ).Value
-    if ($ownerSID -notin $AllowedOwnerSIDs) {
-        throw "refusing bootstrap cleanup of untrusted owner $ownerSID`: $full"
-    }
-    $rules = $security.GetAccessRules(
-        $true,
-        $true,
-        [Security.Principal.SecurityIdentifier]
-    )
-    foreach ($rule in $rules) {
-        if ($rule.AccessControlType -ne
-            [Security.AccessControl.AccessControlType]::Allow) {
-            continue
+    try {
+        $attributes = [IO.File]::GetAttributes($full)
+        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "refusing bootstrap cleanup through a reparse point: $full"
         }
-        $sid = ConvertTo-DefenseClawBootstrapSID `
-            -Identity $rule.IdentityReference
-        if ($sid -notin $AllowedAccessSIDs) {
-            throw "refusing bootstrap cleanup of untrusted access by $sid`: $full"
+        $isDirectory =
+            ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+        if ($isDirectory -ne $Directory) {
+            throw "bootstrap cleanup object type changed: $full"
         }
+        $sections = [Security.AccessControl.AccessControlSections]::Owner `
+            -bor [Security.AccessControl.AccessControlSections]::Access
+        $security = if ($Directory) {
+            Get-DefenseClawBootstrapDirectorySecurity `
+                -Directory ([IO.DirectoryInfo]::new($full)) `
+                -Sections $sections
+        }
+        else {
+            Get-DefenseClawBootstrapFileSecurity `
+                -File ([IO.FileInfo]::new($full)) `
+                -Sections $sections
+        }
+        $accessSDDL = $security.GetSecurityDescriptorSddlForm(
+            [Security.AccessControl.AccessControlSections]::Access
+        )
+        if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
+            -not $accessSDDL.StartsWith(
+                'D:',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "refusing bootstrap cleanup of an object with a null DACL: $full"
+        }
+        $ownerSID = $security.GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+        if ($ownerSID -notin $AllowedOwnerSIDs) {
+            throw "refusing bootstrap cleanup of untrusted owner $ownerSID`: $full"
+        }
+        $rules = $security.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        )
+        foreach ($rule in $rules) {
+            if ($rule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow) {
+                continue
+            }
+            $sid = ConvertTo-DefenseClawBootstrapSID `
+                -Identity $rule.IdentityReference
+            if ($sid -notin $AllowedAccessSIDs) {
+                throw "refusing bootstrap cleanup of untrusted access by $sid`: $full"
+            }
+        }
+        return $full
     }
-    return $full
+    catch {
+        # Compiler/toolchain scratch entries may retire themselves between the
+        # directory enumeration and this authenticated inspection. Absence is
+        # already the desired cleanup state; every other error still aborts.
+        if (Test-DefenseClawBootstrapMissingPathError -Exception $_.Exception) {
+            return $null
+        }
+        throw
+    }
 }
 
 function Test-DefenseClawBootstrapMissingPathError {
@@ -1167,17 +1182,21 @@ function Remove-DefenseClawBootstrapEnvironment {
     $pending.Push($root)
     while ($pending.Count -gt 0) {
         $directory = $pending.Pop()
-        [void](Assert-DefenseClawBootstrapCleanupEntry `
+        $validatedDirectory = Assert-DefenseClawBootstrapCleanupEntry `
             -Path $directory `
             -Root $root `
             -AllowedAccessSIDs $Context.AllowedAccessSIDs `
             -AllowedOwnerSIDs $Context.AllowedOwnerSIDs `
-            -Directory $true)
+            -Directory $true
+        if ($null -eq $validatedDirectory) {
+            continue
+        }
         $directories.Add($directory)
-        $enumerator = [IO.Directory]::EnumerateFileSystemEntries(
-            $directory
-        ).GetEnumerator()
+        $enumerator = $null
         try {
+            $enumerator = [IO.Directory]::EnumerateFileSystemEntries(
+                $directory
+            ).GetEnumerator()
             while ($enumerator.MoveNext()) {
                 $entry = [IO.Path]::GetFullPath([string]$enumerator.Current)
                 $attributes = Get-DefenseClawBootstrapEntryAttributes -Path $entry
@@ -1193,18 +1212,29 @@ function Remove-DefenseClawBootstrapEnvironment {
                     $pending.Push($entry)
                 }
                 else {
-                    [void](Assert-DefenseClawBootstrapCleanupEntry `
+                    $validatedEntry = Assert-DefenseClawBootstrapCleanupEntry `
                         -Path $entry `
                         -Root $root `
                         -AllowedAccessSIDs $Context.AllowedAccessSIDs `
                         -AllowedOwnerSIDs $Context.AllowedOwnerSIDs `
-                        -Directory $false)
+                        -Directory $false
+                    if ($null -eq $validatedEntry) {
+                        continue
+                    }
                     $files.Add($entry)
                 }
             }
         }
+        catch {
+            if (-not (Test-DefenseClawBootstrapMissingPathError `
+                    -Exception $_.Exception)) {
+                throw
+            }
+        }
         finally {
-            $enumerator.Dispose()
+            if ($null -ne $enumerator) {
+                $enumerator.Dispose()
+            }
         }
     }
     foreach ($file in $files) {

@@ -15,7 +15,10 @@ import (
 
 func TestLoadManifestWithSHA256BindsExactParsedBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
-	data := []byte("version: 1\ntargets:\n  - user: alice\n    connector: codex\n")
+	// Keep this digest-specific fixture platform-neutral. Disabled targets are
+	// parsed but deliberately do not require a live Windows SID/profile/version
+	// tuple, which belongs to the platform validation tests.
+	data := []byte("version: 1\ntargets:\n  - user: alice\n    connector: codex\n    enabled: false\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}

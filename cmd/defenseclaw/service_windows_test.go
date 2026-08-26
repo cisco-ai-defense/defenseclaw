@@ -560,6 +560,7 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 	writer := windowsPowerShellFunction(t, module, "Write-DefenseClawJsonAtomic")
 	diagnostic := windowsPowerShellFunction(t, module, "ConvertTo-DefenseClawBoundedDiagnostic")
 	guardianStatus := windowsPowerShellFunction(t, module, "Get-DefenseClawGuardianStatusReport")
+	guardianCoverage := windowsPowerShellFunction(t, module, "Test-DefenseClawGuardianCoverageReport")
 	guardianWait := windowsPowerShellFunction(t, module, "Wait-DefenseClawFreshGuardianReconcile")
 	services := windowsPowerShellFunction(t, module, "Set-DefenseClawManagedServices")
 	requirements := windowsPowerShellFunction(t, module, "Invoke-DefenseClawCodexRequirementsCommand")
@@ -607,7 +608,9 @@ func TestWindowsEnterpriseModuleUsesBoundedProcessAndCanonicalJSONContracts(t *t
 	}
 	if !strings.Contains(guardianStatus, "without a valid JSON report") ||
 		!strings.Contains(guardianWait, "last_status=$lastStatus") ||
-		!strings.Contains(guardianWait, "PSObject.Properties['errors']") {
+		!strings.Contains(guardianWait, "Test-DefenseClawGuardianCoverageReport") ||
+		!strings.Contains(guardianWait, "-Value $coverage.reason") ||
+		!strings.Contains(guardianCoverage, "PSObject.Properties['errors']") {
 		t.Fatal("fresh guardian wait discards the bounded status failure diagnostic")
 	}
 	for _, contract := range []string{
@@ -757,29 +760,40 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 		!strings.Contains(servicePreparation, "-DeferAutomaticStart") {
 		t.Fatal("transactional service preparation does not register disabled services before SID-dependent ACLs")
 	}
-	freshInstall := strings.Index(installLike, "# A clean install has no NT SERVICE identities")
-	freshServices := -1
-	if freshInstall >= 0 {
-		freshServices = strings.Index(
-			installLike[freshInstall:],
-			"Set-DefenseClawManagedServicesForTransaction `",
-		)
-		if freshServices >= 0 {
-			freshServices += freshInstall
-		}
-	}
+	freshInstall := strings.Index(
+		installLike,
+		"# New-DefenseClawTransaction has durably recorded every managed",
+	)
+	freshServices := strings.Index(
+		installLike,
+		"Set-DefenseClawManagedServicesForTransaction `",
+	)
+	enumeratorRefresh := strings.Index(
+		installLike,
+		"Invoke-DefenseClawEnumeratorRefresh `",
+	)
+	targetPreparation := strings.Index(
+		installLike,
+		"$targetRuntimePlan = Invoke-DefenseClawTargetRuntimePreparation `",
+	)
 	freshCapture := -1
-	if freshServices >= 0 {
+	if targetPreparation >= 0 {
 		freshCapture = strings.Index(
-			installLike[freshServices:],
+			installLike[targetPreparation:],
 			"Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `",
 		)
 		if freshCapture >= 0 {
-			freshCapture += freshServices
+			freshCapture += targetPreparation
 		}
 	}
 	if freshInstall < 0 || freshServices < 0 || freshCapture < 0 ||
-		snapshot > freshServices || freshServices > freshCapture {
+		enumeratorRefresh < 0 || targetPreparation < 0 ||
+		snapshot > freshServices || freshServices > enumeratorRefresh ||
+		enumeratorRefresh > targetPreparation || targetPreparation > freshCapture ||
+		!strings.Contains(
+			installLike[freshServices:enumeratorRefresh],
+			"-BindInstallPreparationSID",
+		) {
 		t.Fatal("clean install can resolve the gateway virtual account before transaction-owned service registration")
 	}
 	upgradeCapture := strings.Index(

@@ -208,18 +208,13 @@ func ReadWindowsClaudeManagedPolicyTargets() ([]string, bool, error) {
 	if errors.Is(policyErr, os.ErrNotExist) && errors.Is(stateErr, os.ErrNotExist) {
 		return nil, false, nil
 	}
-	// Orphaned artifact — either the policy file or the state sidecar
-	// exists but not both. A partial prior uninstall left one behind.
-	// Report "no active policy" so the caller treats this as a
-	// fresh-install scenario; the downstream Capture step will
-	// physically reclaim the orphan before the install writes its own
-	// artifacts. This function stays read-only on purpose — deletion is
-	// an install-time side effect owned by
-	// CaptureWindowsClaudeManagedPolicySnapshot / reclaimOrphanClaude
-	// ManagedPolicy.
-	policyExistsForOrphan := policyErr == nil
-	stateExistsForOrphan := stateErr == nil
-	if policyExistsForOrphan != stateExistsForOrphan {
+	// A policy file without its DefenseClaw state sidecar is a forward
+	// orphan in our declared namespace. Report it inactive so the later
+	// authenticated mutation path can reclaim it. The reverse shape is
+	// different: an existing state sidecar can authenticate exact
+	// missing-policy recovery, so it must continue through strict validation
+	// rather than being silently treated as absent.
+	if policyErr == nil && errors.Is(stateErr, os.ErrNotExist) {
 		return nil, false, nil
 	}
 	if policyErr == nil && !policyInfo.Mode().IsRegular() {
@@ -2303,103 +2298,56 @@ func equalWindowsClaudeTargetSIDs(left, right []string) bool {
 	return true
 }
 
-// reclaimOrphanClaudeManagedPolicy deletes stale artifacts from a
-// partial prior uninstall that leaves the machine in an asymmetric
-// state — either the policy file or the state sidecar exists but
-// not both. Both files are DefenseClaw-owned (the policy filename
-// literally contains "defenseclaw"; the state file is a hidden
-// DefenseClaw metadata sidecar). Without this reclaim, every
-// subsequent install fails at ownership validation forever.
-//
-// Two orphan signatures trigger a reclaim:
-//   - forward orphan: policy file present, state sidecar absent —
-//     typical of a teardown that removed the state file first but
-//     could not remove the policy (ACL race on Program Files, or
-//     the installer rollback aborted before the second delete).
-//   - reverse orphan: state sidecar present, policy file absent —
-//     the mirror case. The dedicated missing-policy recovery path
-//     can only reconstruct from state metadata whose gateway/
-//     service identity matches the CURRENT install; on any
-//     reinstall that changes the cert-scoped service name (the
-//     QA runID pattern), recovery rejects the state and lifecycle
-//     capture deadlocks. Deleting the stale state is the safe
-//     recovery — it is metadata about a policy that no longer
-//     exists on disk.
-//
-// The function is a no-op unless EXACTLY one of the two files
-// exists. Both-present routes through the strict ownership path
-// in validateExistingWindowsManagedPolicyOwnership; both-absent
-// is a clean fresh-install signature.
+// reclaimOrphanClaudeManagedPolicy deletes only a stale policy file whose
+// ownership sidecar is absent. That forward orphan is in DefenseClaw's
+// declared 90-defenseclaw.json namespace and cannot authenticate any prior
+// state. A reverse orphan is deliberately not reclaimed here: its sidecar is
+// the authority for validateWindowsClaudeMissingPolicyRecovery, so deleting
+// it before validating schema, canonical bytes, policy digest, hook/service
+// identity, and target enrollment would turn tampered state into a fresh
+// install.
 //
 // A stderr line is emitted whenever a reclaim happens so operators
 // tailing gateway.err.log see the recovery in the audit trail.
 func reclaimOrphanClaudeManagedPolicy(policyPath, statePath string) error {
 	policyInfo, policyErr := os.Lstat(policyPath)
-	stateInfo, stateErr := os.Lstat(statePath)
-	if policyErr != nil && !errors.Is(policyErr, os.ErrNotExist) {
+	if errors.Is(policyErr, os.ErrNotExist) {
+		return nil
+	}
+	if policyErr != nil {
 		return fmt.Errorf(
 			"enterprise hooks: probe Claude managed policy for orphan reclaim: %w",
 			policyErr,
 		)
 	}
-	if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
+	if _, stateErr := os.Lstat(statePath); stateErr == nil {
+		return nil
+	} else if !errors.Is(stateErr, os.ErrNotExist) {
 		return fmt.Errorf(
 			"enterprise hooks: probe Claude managed state for orphan reclaim: %w",
 			stateErr,
 		)
 	}
-	policyExists := policyErr == nil
-	stateExists := stateErr == nil
-	// Both absent or both present — the strict ownership path handles
-	// these correctly. Only asymmetric orphans need reclaim here.
-	if policyExists == stateExists {
-		return nil
-	}
-	if policyExists {
-		if !policyInfo.Mode().IsRegular() {
-			return fmt.Errorf(
-				"enterprise hooks: refusing to reclaim non-regular Claude managed policy path: %s",
-				policyPath,
-			)
-		}
-		if err := os.Remove(policyPath); err != nil {
-			return fmt.Errorf(
-				"enterprise hooks: reclaim orphan Claude managed policy %s (state sidecar %s is missing): %w",
-				policyPath,
-				statePath,
-				err,
-			)
-		}
-		fmt.Fprintf(
-			os.Stderr,
-			"[enterprise-hooks] reclaimed orphan Claude managed policy at %s "+
-				"(state sidecar %s missing; prior uninstall did not fully clean up)\n",
-			policyPath,
-			statePath,
-		)
-		return nil
-	}
-	// Reverse orphan: state sidecar exists without its policy.
-	if !stateInfo.Mode().IsRegular() {
+	if !policyInfo.Mode().IsRegular() {
 		return fmt.Errorf(
-			"enterprise hooks: refusing to reclaim non-regular Claude managed state path: %s",
-			statePath,
+			"enterprise hooks: refusing to reclaim non-regular Claude managed policy path: %s",
+			policyPath,
 		)
 	}
-	if err := os.Remove(statePath); err != nil {
+	if err := os.Remove(policyPath); err != nil {
 		return fmt.Errorf(
-			"enterprise hooks: reclaim orphan Claude managed state %s (policy file %s is missing): %w",
-			statePath,
+			"enterprise hooks: reclaim orphan Claude managed policy %s (state sidecar %s is missing): %w",
 			policyPath,
+			statePath,
 			err,
 		)
 	}
 	fmt.Fprintf(
 		os.Stderr,
-		"[enterprise-hooks] reclaimed orphan Claude managed state sidecar at %s "+
-			"(policy file %s missing; prior uninstall did not fully clean up)\n",
-		statePath,
+		"[enterprise-hooks] reclaimed orphan Claude managed policy at %s "+
+			"(state sidecar %s missing; prior uninstall did not fully clean up)\n",
 		policyPath,
+		statePath,
 	)
 	return nil
 }

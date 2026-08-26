@@ -1629,11 +1629,32 @@ foreach ($name in @(
     'New-DefenseClawBootstrapEnvironment',
     'Remove-DefenseClawBootstrapEnvironment',
     'Restore-DefenseClawBootstrapEnvironment',
-    'Assert-DefenseClawBootstrapOneShotRoot'
+    'Assert-DefenseClawBootstrapOneShotRoot',
+    'Assert-DefenseClawBootstrapCleanupEntry',
+    'Test-DefenseClawBootstrapPathExists'
 )) {
     if ($null -eq (Get-Command -Name $name -CommandType Function)) {
         throw "production bootstrap definition is unavailable: $name"
     }
+}
+$retiredCleanupRoot = [IO.Path]::Combine(
+    $expectedWindows,
+    'Temp',
+    ('DefenseClaw-Bootstrap-Retired-' + [Guid]::NewGuid().ToString('N'))
+)
+$retiredCleanupEntry = [IO.Path]::Combine(
+    $retiredCleanupRoot,
+    'retired-toolchain-scratch.tmp'
+)
+$retiredCleanupResult = Assert-DefenseClawBootstrapCleanupEntry `
+    -Path $retiredCleanupEntry `
+    -Root $retiredCleanupRoot `
+    -AllowedAccessSIDs @('S-1-5-18') `
+    -AllowedOwnerSIDs @('S-1-5-18') `
+    -Directory $false
+if ($null -ne $retiredCleanupResult -or
+    (Test-DefenseClawBootstrapPathExists -Path $retiredCleanupEntry)) {
+    throw 'already-retired bootstrap scratch entry was not treated as absent'
 }
 
 if ($Worker) {
