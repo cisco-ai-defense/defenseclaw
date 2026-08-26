@@ -21,7 +21,7 @@ func TestCompileLocalAppliesSevenDayDefaultWhenUnset(t *testing.T) {
 }
 
 func TestCompileLocalHonoursExplicitOverride(t *testing.T) {
-	for _, days := range []int{0, 1, 30, 365} {
+	for _, days := range []int{0, 1, 30, 90, 365} {
 		value := days
 		got, err := compileObservabilityV8Local(ObservabilityV8LocalSource{RetentionDays: &value})
 		if err != nil {

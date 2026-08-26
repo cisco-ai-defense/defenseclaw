@@ -481,7 +481,7 @@ func TestDefenseClawConfigV8SchemaCompilesAndValidates(t *testing.T) {
 			"local": map[string]any{
 				"path":              "~/.defenseclaw/audit.db",
 				"judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
-				"retention_days":    90,
+				"retention_days":    7,
 			},
 			"destinations": []any{
 				map[string]any{

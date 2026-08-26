@@ -20,6 +20,19 @@ deleted.
 
 ### Observability v8
 
+- Defaults an omitted `observability.local.retention_days` to a rolling seven-day
+  local SQLite window. The startup-and-six-hour reaper applies that UTC cutoff
+  in dependency order; it drains expired or bounded guardrail-chain dependencies
+  before eligible unreferenced `correlation_events`, while preserving active
+  cursors, pending operations, unexpired receipts, and their graph anchors.
+  Explicit values still win,
+  including `0` for unbounded retention. Deleted pages remain reusable by
+  SQLite, but the database file does not shrink automatically;
+  the separate OPA `audit.retention_days` policy is unchanged. This changes the
+  prior omitted default from 90 days: an existing v8 configuration without an
+  explicit value adopts seven days on its first upgraded gateway startup and
+  deletes eligible days 8–90. Set an explicit longer value before upgrading if
+  that history must be preserved.
 - Replaces separate `otel`, `audit_sinks`, and global redaction policy with one
   strict `config_version: 8` `observability` graph for bucket collection,
   mandatory local SQLite history, redaction profiles, routing, retention,
