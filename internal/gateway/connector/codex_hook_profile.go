@@ -233,17 +233,29 @@ func codexReasonOrDefault(reason string) string {
 // before calling profile.Respond. Kept format-compatible with the
 // typed gateway helper so JSONEq fixtures pass under both flag states.
 func codexAdditionalContextForProfile(rawAction, severity, reason string, wouldBlock bool) string {
+	return BuildCodexAdditionalContext(rawAction, severity, reason, wouldBlock)
+}
+
+// BuildCodexAdditionalContext is the single source of truth for the
+// Codex hook advisory sentence used by the connector profile Respond
+// path and the gateway's action-mode collector. Keeping one builder
+// prevents the two operator-visible strings from drifting after later
+// wording changes.
+func BuildCodexAdditionalContext(rawAction, severity, reason string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
+	lead := "DefenseClaw observed"
+	finding := fmt.Sprintf("a %s Codex hook finding", severity)
 	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
+		// A full clause cannot take the article that follows "observed".
+		lead = "DefenseClaw would block this in action mode:"
+		finding = fmt.Sprintf("%s Codex hook finding", severity)
 	}
 	if reason == "" {
-		return fmt.Sprintf("%s a %s Codex hook finding.", prefix, severity)
+		return fmt.Sprintf("%s %s.", lead, finding)
 	}
-	return fmt.Sprintf("%s a %s Codex hook finding: %s", prefix, severity, reason)
+	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 // hookFirstString returns the first non-empty stringified value among

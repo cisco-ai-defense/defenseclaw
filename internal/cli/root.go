@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -112,13 +114,33 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	activeObservabilityV8Startup = nil
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
 	var err error
-	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
+	cfgPath := config.ConfigPath()
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
 	if err != nil {
-		return fmt.Errorf("failed to load v8 config — run 'defenseclaw upgrade' first: %w", err)
+		// Spec 003 B2: in managed_enterprise, tolerate a missing
+		// config.yaml at startup by fsnotify-waiting for UCB to drop
+		// it. Non-managed-enterprise deployments (OSS / SaaS / DP /
+		// CP) retain the existing fail-fast; the pin-based gate
+		// makes sure a wait loop never starts outside its intended
+		// scope. See docs/specs/003-windows-deferred-config/.
+		retry, waitErr := enterConfigWaitLoopIfManaged(cmd.Context(), cfgPath, err, cmd.ErrOrStderr())
+		if waitErr != nil {
+			return waitErr
+		}
+		if !retry {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
+		if err != nil {
+			// The wait declared config.yaml present; a second
+			// failure now is a real parse/permission problem, not
+			// another missing-file case worth waiting through.
+			return fmt.Errorf("failed to load config after wait: %w", err)
+		}
 	}
 	version.SetBinaryVersion(appVersion)
 	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
-		if err := safefile.ProtectDirectory(auditDir); err != nil {
+		if err := managed.PrepareServiceRuntimeDir(cfg.DeploymentMode, auditDir, "audit store directory"); err != nil {
 			return fmt.Errorf("failed to prepare audit store directory: %w", err)
 		}
 	}
@@ -205,7 +227,7 @@ func loadGatewayCommandConfigOnly() error {
 	var err error
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
 	if err != nil {
-		return fmt.Errorf("failed to load v8 config — run 'defenseclaw upgrade' first: %w", err)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 	version.SetBinaryVersion(appVersion)
 
@@ -281,6 +303,18 @@ func prepareCompiledObservabilityV8Startup(c *config.Config, loaded *loadedConfi
 	}, nil
 }
 
+// SetCommandName selects one of the two release-owned names for the shared Go
+// executable. The enterprise package installs the same command surface as
+// defenseclaw.exe for administrator lifecycle operations and as
+// defenseclaw-gateway.exe for SCM hosting. Arbitrary argv[0] values are never
+// reflected into help or diagnostics.
+func SetCommandName(name string) {
+	switch name {
+	case "defenseclaw", "defenseclaw-gateway":
+		rootCmd.Use = name
+	}
+}
+
 func init() {
 	rootCmd.Flags().BoolVar(&versionJSON, "version-json", false, "emit the exact build version as JSON and exit")
 }
@@ -289,10 +323,51 @@ func init() {
 // os.Exit call belongs in main() so deferred cleanup (PersistentPostRun)
 // always executes.
 func Execute() int {
-	return exitCodeFor(rootCmd.Execute())
+	return ExecuteContext(context.Background())
 }
 
-// exitCodeFor is the pure error-to-int mapping Execute delegates to.
+// ExecuteContext runs the root command with a caller-owned lifetime.
+//
+// Interactive invocations use Execute, which preserves the historical
+// background context. A native Windows Service Control Manager host uses this
+// entry point so SERVICE_CONTROL_STOP and SERVICE_CONTROL_SHUTDOWN can cancel
+// the long-running gateway or hook-guardian command without terminating the
+// process abruptly.
+//
+// Two error-carrier contracts converge here after the
+// windows-enterprise-integration merge:
+//
+//   - *scrubExitError (main-branch, see enterprise_hooks_scrub.go)
+//     ships a specific rc for `enterprise hooks scrub` (rc 2/3/4/5).
+//   - *exitCodeError (integration-branch, see exit_code.go) ships a
+//     specific rc for the withExitCode helper the Windows enterprise
+//     lifecycle command uses (rc 1603 on preflight failures).
+//
+// exitCodeFor handles the scrub carrier; commandExitCode handles the
+// integration carrier. Layered so exitCodeFor wins on ambiguity —
+// scrub is the more specific subcommand.
+func ExecuteContext(ctx context.Context) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	err := rootCmd.ExecuteContext(ctx)
+	if err == nil {
+		return 0
+	}
+	// Cancellation is the expected completion path for an SCM stop. Do not
+	// report it as a service failure or trigger failure-recovery restarts.
+	if errors.Is(err, context.Canceled) {
+		return 0
+	}
+	// scrubExitError check first (main-branch contract).
+	if rc := exitCodeFor(err); rc != 1 {
+		return rc
+	}
+	// integration-branch withExitCode helper.
+	return commandExitCode(err)
+}
+
+// exitCodeFor is the pure error-to-int mapping for the scrub subcommand.
 // Kept split so tests can drive it directly without spinning up the
 // root Cobra command.
 //

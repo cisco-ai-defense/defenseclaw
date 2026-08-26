@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2214,57 +2216,84 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	}
 }
 
-// TestRunScan_SingleFlight (H-1) verifies that two concurrent scans
-// serialize on the per-service mutex instead of racing on the state
-// store / detector fanout. Without the lock the JSON ai_discovery_state
-// snapshot can be clobbered when the API-trigger path falls through to
-// runScan() at the same moment a scheduled tick fires.
+// TestRunScan_SingleFlight (H-1) verifies that concurrent scans serialize on
+// the per-service mutex instead of racing on the state store / detector
+// fanout. It uses the single-flight boundary directly so the assertion does
+// not depend on the duration of a host-specific full inventory scan.
 func TestRunScan_SingleFlight(t *testing.T) {
-	tmp := t.TempDir()
-	dataDir := filepath.Join(tmp, "data")
-	home := filepath.Join(tmp, "home")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		t.Fatalf("mkdir dataDir: %v", err)
-	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatalf("mkdir home: %v", err)
-	}
+	svc := &ContinuousDiscoveryService{}
 
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled:         true,
-		Mode:            "enhanced",
-		DataDir:         dataDir,
-		HomeDir:         home,
-		MaxFilesPerScan: 5,
-		MaxFileBytes:    32 * 1024,
-	}, []AISignature{testAISignature()})
-	if svc == nil {
-		t.Fatal("expected non-nil service")
-	}
-	cleanupPreparedDiscoveryService(t, svc)
+	const scanCount = 8
+	start := make(chan struct{})
+	release := make(chan struct{})
+	entered := make(chan struct{}, scanCount)
+	results := make(chan error, scanCount)
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	var wg sync.WaitGroup
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
 
-	// Spawn N concurrent runScan goroutines; if the mutex is wired
-	// correctly all of them should complete without races (a -race
-	// build catches concurrent map writes / store.Save races
-	// otherwise). Each call is allowed to fail due to environmental
-	// reasons (e.g. detectors finding nothing on a clean tmp tree);
-	// what we are asserting is the absence of a panic and a clean
-	// exit for every goroutine.
-	const N = 8
-	done := make(chan struct{}, N)
-	for i := 0; i < N; i++ {
+	wg.Add(scanCount)
+	for i := 0; i < scanCount; i++ {
 		go func() {
-			defer func() { done <- struct{}{} }()
-			_, _ = svc.runScan(context.Background(), true, "test-concurrent")
+			defer wg.Done()
+			<-start
+			_, err := svc.runScanSingleFlight(context.Background(), func() (AIDiscoveryReport, error) {
+				current := active.Add(1)
+				defer active.Add(-1)
+				for previous := maxActive.Load(); current > previous; previous = maxActive.Load() {
+					if maxActive.CompareAndSwap(previous, current) {
+						break
+					}
+				}
+
+				var lockErr error
+				if svc.scanMu.TryLock() {
+					svc.scanMu.Unlock()
+					lockErr = errors.New("scan work entered without holding scanMu")
+				}
+				entered <- struct{}{}
+				<-release
+				return AIDiscoveryReport{}, lockErr
+			})
+			results <- err
 		}()
 	}
-	timeout := time.After(15 * time.Second)
-	for i := 0; i < N; i++ {
-		select {
-		case <-done:
-		case <-timeout:
-			t.Fatalf("runScan goroutines did not finish — possible deadlock or unbounded wait")
+	defer func() {
+		releaseAll()
+		wg.Wait()
+	}()
+
+	close(start)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first scan did not enter the controlled critical section")
+	}
+
+	// The first controlled scan is still blocked inside the critical section.
+	// A successful TryLock here would prove that runScanSingleFlight failed to
+	// retain the per-service mutex around its scan work.
+	if svc.scanMu.TryLock() {
+		svc.scanMu.Unlock()
+		t.Error("scanMu was not held while controlled scan work was active")
+	}
+
+	releaseAll()
+	wg.Wait()
+	close(results)
+
+	for err := range results {
+		if err != nil {
+			t.Errorf("controlled scan: %v", err)
 		}
+	}
+	if got := len(entered) + 1; got != scanCount {
+		t.Errorf("controlled scans entered = %d, want %d", got, scanCount)
+	}
+	if got := maxActive.Load(); got != 1 {
+		t.Errorf("concurrent controlled scans = %d, want 1", got)
 	}
 }
 

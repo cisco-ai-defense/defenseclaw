@@ -6,6 +6,7 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -147,7 +148,20 @@ type ownedHookContractInspector interface {
 	ownedHookContractPresent(SetupOpts) (bool, error)
 }
 
+type ownedHookContractContextInspector interface {
+	ownedHookContractPresentContext(context.Context, SetupOpts) (bool, error)
+}
+
 func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
+	return OwnedHooksPresentContext(context.Background(), conn, opts)
+}
+
+// OwnedHooksPresentContext is the cancellable form used by managed guardians
+// when a connector's effective policy check may perform bounded external work.
+func OwnedHooksPresentContext(ctx context.Context, conn Connector, opts SetupOpts) (bool, error) {
+	if inspector, ok := conn.(ownedHookContractContextInspector); ok {
+		return inspector.ownedHookContractPresentContext(ctx, opts)
+	}
 	if inspector, ok := conn.(ownedHookContractInspector); ok {
 		return inspector.ownedHookContractPresent(opts)
 	}

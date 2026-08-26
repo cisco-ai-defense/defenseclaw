@@ -610,6 +610,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     from defenseclaw.ux import CLIRenderer
 
     data_dir = default_data_path()
+    trusted_binary_prefixes = _validated_preinit_trusted_binary_prefixes(data_dir)
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
     interactive_wizard = False
@@ -761,6 +762,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         # invalid values.
         human_approval=primary["human_approval"],
         hilt_min_severity=primary["hilt_min_severity"] or "",
+        trusted_binary_prefixes=trusted_binary_prefixes,
     )
     report = run_first_run(opts)
 
@@ -831,6 +833,56 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         click.echo("  Configured connectors: " + ", ".join(activated))
     if report.status == "needs_attention":
         raise SystemExit(1)
+
+
+def _validated_preinit_trusted_binary_prefixes(
+    data_dir: str | os.PathLike[str],
+) -> tuple[str, ...] | None:
+    """Snapshot exact config-backed trust before the init transaction."""
+
+    from defenseclaw import config as cfg_mod
+
+    if not os.path.lexists(cfg_mod.config_path_for_data_dir(data_dir)):
+        return None
+    cfg_path = cfg_mod.config_path_for_data_dir(data_dir)
+    cfg = cfg_mod.load(data_dir=os.fspath(data_dir))
+    values = tuple(cfg.ai_discovery.trusted_binary_prefixes or ())
+    resolved_values: list[str] = []
+    quarantined: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in values:
+        resolved, error = agent_discovery.validate_trusted_prefix(str(raw))
+        if not resolved or error:
+            # `setup trusted-paths add --force` can persist an entry that
+            # later fails validation (writable parent, missing directory,
+            # etc.). Aborting init leaves no CLI-visible recovery path:
+            # the operator has to hand-edit the config file to unblock
+            # subsequent runs. Quarantine the offending entry, warn
+            # visibly with the fix hint, and let init proceed on the
+            # remaining valid prefixes. The persisted list itself is
+            # untouched here — the operator can inspect / correct via
+            # the setup subcommands. See Vineeth review of PR #767, #3.
+            quarantined.append((str(raw), error or "invalid path"))
+            continue
+        key = agent_discovery._path_key(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved_values.append(resolved)
+    if quarantined:
+        import shlex
+        for entry, reason in quarantined:
+            # {entry!r} would render a Python repr ('D:\\staging\\bin'),
+            # which isn't a valid shell argument. Use shlex.quote for the
+            # command portion so cut-and-paste works verbatim.
+            click.echo(
+                f"warning: skipping pre-init trusted binary prefix "
+                f"{entry} ({reason}); config file: {cfg_path}; "
+                f"fix with `defenseclaw setup trusted-paths remove "
+                f"{shlex.quote(entry)}`",
+                err=True,
+            )
+    return tuple(resolved_values)
 
 
 def _parse_connector_list(raw: str | None) -> list[str]:

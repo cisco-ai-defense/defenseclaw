@@ -33,7 +33,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -630,6 +630,16 @@ func (c *Client) tryAuthRepair(connectErr error) {
 //
 // hooks/.token is skipped when the hooks directory is missing (e.g.
 // connector not yet set up); that's not an error.
+//
+// T5.8 symmetry note: both writes below go through
+// managed.WriteServiceRuntimeFile with the same PinnedDeploymentMode +
+// (implicit) WindowsServiceAccountEnv lookup, so a transient unset of
+// either env produces the same failure at both call sites — surfaced
+// as the clear "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT is not set" error
+// from T3.5 rather than a divergent pair of "untrusted-owner" vs
+// "not-owned-by-caller" wrapper errors. When one call fails the other
+// is skipped, so the file pair cannot end up with a mixed old/new
+// token from a partial rotation.
 func persistRefreshedToken(dataDir, newToken string) error {
 	if err := updateEnvFileToken(filepath.Join(dataDir, ".env"), newToken); err != nil {
 		return fmt.Errorf("update .env: %w", err)
@@ -638,7 +648,9 @@ func persistRefreshedToken(dataDir, newToken string) error {
 	hookTokenPath := filepath.Join(dataDir, "hooks", ".token")
 	if _, err := os.Stat(filepath.Dir(hookTokenPath)); err == nil {
 		content := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", newToken)
-		if err := safefile.WritePrivate(hookTokenPath, []byte(content)); err != nil {
+		if err := managed.WriteServiceRuntimeFile(
+			managed.PinnedDeploymentMode(), hookTokenPath, "gateway hook token", []byte(content),
+		); err != nil {
 			return fmt.Errorf("write hooks/.token: %w", err)
 		}
 	}
@@ -689,7 +701,9 @@ func updateEnvFileToken(path, newToken string) error {
 	}
 	out := strings.Join(lines, "\n") + "\n"
 
-	return safefile.WritePrivate(path, []byte(out))
+	return managed.WriteServiceRuntimeFile(
+		managed.PinnedDeploymentMode(), path, "gateway dotenv", []byte(out),
+	)
 }
 
 // shouldAutoRepair returns true when auth auto-repair should be attempted.

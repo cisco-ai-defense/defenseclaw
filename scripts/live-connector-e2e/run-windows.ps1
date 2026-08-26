@@ -1528,22 +1528,32 @@ function Invoke-DangerousHook(
     [string]$Sentinel
 ) {
     $before = @(Get-EventLines $script:GatewayJsonl).Count
-    $payloadObject = [IO.File]::ReadAllText($Payload) | ConvertFrom-Json -ErrorAction Stop
+    $hookEvent = if ($Connector -eq 'amp') { 'tool.call' } else { "PreTool-$Name" }
+    $payloadObject = [IO.File]::ReadAllText($Payload) |
+        ConvertFrom-Json -ErrorAction Stop
     $sessionID = [string](Get-JsonPropertyValue $payloadObject 'session_id')
     $nativeHookEvent = [string](Get-JsonPropertyValue $payloadObject 'hook_event_name')
-    $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'tool_call_id')
-    $cliEvent = if ($Connector -eq 'amp') { 'tool.call' } else { "PreTool-$Name" }
-    $result = Invoke-Tool (Resolve-ContractHookTool) @('hook', '--connector', $Connector, '--event', $cliEvent) @(0, 2) $Payload
-
-    $decision = $null
-    for ($attempt = 0; $attempt -lt 30 -and $null -eq $decision; $attempt++) {
-        Start-Sleep -Milliseconds 100
-        $decision = Get-LatestHookDecision `
-            -Path $script:GatewayJsonl -Name $Connector -Since $before `
-            -SessionID $sessionID -HookEvent $nativeHookEvent `
-            -ToolInvocationID $toolInvocationID
+    if ([string]::IsNullOrWhiteSpace($nativeHookEvent)) {
+        $nativeHookEvent = $hookEvent
     }
-    if ($null -eq $decision) { throw "$Name did not emit a connector hook_decision" }
+    $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'tool_call_id')
+    if ([string]::IsNullOrWhiteSpace($toolInvocationID)) {
+        throw "$Name dangerous-command payload has no tool-call identity"
+    }
+    $result = Invoke-Tool (Resolve-ContractHookTool) @('hook', '--connector', $Connector, '--event', $hookEvent) @(0, 2) $Payload
+
+    $evidence = Wait-GatewayEvidenceAfter `
+        -Path $script:GatewayJsonl -Name $Connector -Since $before `
+        -RequireBlock $false -TimeoutMilliseconds 10000 `
+        -SessionID $sessionID -HookEvent $nativeHookEvent `
+        -ToolInvocationID $toolInvocationID
+    $decision = Get-LatestHookDecision `
+        -Path $script:GatewayJsonl -Name $Connector -Since $before `
+        -SessionID $sessionID -HookEvent $nativeHookEvent `
+        -ToolInvocationID $toolInvocationID
+    if (-not $evidence.ConnectorEvent -or $null -eq $decision) {
+        throw "$Name did not emit its exact connector hook_decision"
+    }
     $telemetryMode = if ($Mode -eq 'action') { 'enforce' } else { 'observe' }
     if ([string]$decision.mode -ne $telemetryMode) { throw "$Name mode=$($decision.mode), expected $telemetryMode" }
     $decisionRuleIDs = @(
@@ -1562,10 +1572,11 @@ function Invoke-DangerousHook(
     $requestID = [string]$decision.request_id
     if ([string]::IsNullOrWhiteSpace($requestID)) { throw "$Name hook_decision has no request identity" }
     if ($Expected -eq 'block') {
-		$evidence = Wait-GatewayEvidenceAfter `
-			-Path $script:GatewayJsonl -Name $Connector -Since $before `
-			-RequireBlock $true -SessionID $sessionID -HookEvent $nativeHookEvent `
-			-ToolInvocationID $toolInvocationID -ExpectedRequestID $requestID
+        $evidence = Wait-GatewayEvidenceAfter `
+            -Path $script:GatewayJsonl -Name $Connector -Since $before `
+            -RequireBlock $true -TimeoutMilliseconds 10000 `
+            -SessionID $sessionID -HookEvent $nativeHookEvent `
+            -ToolInvocationID $toolInvocationID -ExpectedRequestID $requestID
         $hasBlockVerdict = [bool]$evidence.BlockVerdict
     } else {
         $hasBlockVerdict = Test-BlockVerdict `

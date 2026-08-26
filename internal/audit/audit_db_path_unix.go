@@ -13,7 +13,7 @@ import (
 	"syscall"
 )
 
-func openAuditDBFileNoFollow(path string, create bool) (*os.File, error) {
+func openAuditDBFileNoFollow(path string, create, _ bool) (*os.File, error) {
 	flags := syscall.O_RDWR | syscall.O_CLOEXEC | syscall.O_NOFOLLOW
 	if create {
 		flags |= syscall.O_CREAT | syscall.O_EXCL
@@ -29,6 +29,14 @@ func openAuditDBFileNoFollow(path string, create bool) (*os.File, error) {
 	}
 	return file, nil
 }
+
+func auditDBPlatformFileNeedsHardening(*os.File) (bool, error) { return false, nil }
+
+// Preserve the Unix sidecar repair seam: chmod/permission hardening remains
+// handle-bound and is intentionally repeated during sidecar discovery.
+func auditDBPlatformSidecarNeedsHardening(*os.File) (bool, error) { return true, nil }
+
+func auditDBPlatformHardeningNeedsCapabilityReopen() bool { return false }
 
 func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)

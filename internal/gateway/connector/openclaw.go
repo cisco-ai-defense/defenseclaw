@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/firewall"
 )
 
 // openClawExtensionFS holds the runtime files of the DefenseClaw OpenClaw
@@ -122,9 +124,13 @@ func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
 // findings. This list is *additive* over the static firewall
 // defaults — repeating api.openai.com here would be harmless but is
 // elided to keep the per-connector contribution honest. See S3.3.
+//
+// A deployment inspecting through another region or through preview adds its
+// own host from config with firewall.MergeAIDefenseEndpoint; the connector
+// itself only names the default origin.
 func (c *OpenClawConnector) AllowedHosts() []string {
 	return []string{
-		"us.api.inspect.aidefense.security.cisco.com",
+		firewall.AIDefenseAllowlistHost(""),
 	}
 }
 

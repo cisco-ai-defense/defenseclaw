@@ -288,6 +288,19 @@ func TestPrepareAuditDBSidecarReplacementCannotRedirectPlatformACLRepair(t *test
 	if prepared != nil {
 		prepared.close()
 	}
+	if runtime.GOOS == "windows" {
+		// The fixture was explicitly protected above. Windows must recognize
+		// that canonical descriptor and avoid acquiring WRITE_DAC or invoking
+		// the ACL-repair seam at all; native tests cover the unprotected repair
+		// and handle-identity race path.
+		if replaced {
+			t.Fatal("protected Windows sidecar was needlessly reopened for ACL repair")
+		}
+		if err != nil {
+			t.Fatalf("protected Windows sidecar reopen failed: %v", err)
+		}
+		return
+	}
 	if !replaced {
 		t.Fatal("sidecar platform-ACL replacement hook did not execute")
 	}

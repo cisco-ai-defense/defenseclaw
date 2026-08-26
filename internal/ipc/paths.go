@@ -53,15 +53,35 @@ const (
 //
 //  1. cfg.Managed.SocketPath (verbatim)
 //  2. $DEFENSECLAW_IPC_SOCKET (dev / test rigs only)
-//  3. managed_enterprise → filepath.Join(filepath.Dir(cfg.DataDir), "ipc", SocketFileName)
+//  3. managed_enterprise → resolveManagedIPCSocketPath(cfg):
+//     - linux/darwin: filepath.Join(filepath.Dir(cfg.DataDir),
+//     "ipc", SocketFileName)
+//     - windows:      filepath.Join(<TrustedProgramData>, "Cisco",
+//     "Cisco Secure Client", "DefenseClaw", "ipc",
+//     SocketFileName). See spec 004 REQ-02. Returns "" when
+//     TrustedProgramData resolution fails; the caller's
+//     ResolveSocketPath empty-check turns that into a
+//     distinguishable "ipc: resolve socket path: empty"
+//     server-start error rather than a fall-through to a
+//     per-user path.
 //  4. otherwise → filepath.Join(cfg.DataDir, "ipc", SocketFileName)
 //
 // The env override is intentionally ignored in managed_enterprise so
 // a systemd unit drop-in or launchd env inheritance cannot redirect
-// the enterprise-owned socket path. Operators who need to move the
-// socket in production must set cfg.Managed.SocketPath explicitly.
+// the enterprise-owned socket path. On linux/darwin an operator can
+// still move the socket in production by setting cfg.Managed.SocketPath
+// — that value is honored verbatim by the resolver above (there is no
+// linux/darwin-side validator; ownership + mode checks at server
+// start-up are the trust boundary). On Windows the socket path is
+// fixed to <TrustedProgramData>/Cisco/Cisco Secure Client/DefenseClaw/
+// ipc/SocketFileName: validateWindowsSocketPathOverride (in
+// internal/ipc/server_windows.go) refuses any override whose parent
+// does not equal the trusted root, so cfg.Managed.SocketPath is
+// effectively non-configurable there.
 //
-// Never returns an error: rule 4 always produces a value.
+// Never returns an error: rule 4 always produces a value (rule 3 may
+// return "" on Windows when the TrustedProgramData registry lookup
+// fails — the server refuses to start in that case).
 func ResolveSocketPath(cfg *config.Config) string {
 	if cfg == nil {
 		return ""
@@ -75,7 +95,7 @@ func ResolveSocketPath(cfg *config.Config) string {
 		}
 	}
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		return filepath.Join(filepath.Dir(cfg.DataDir), "ipc", SocketFileName)
+		return resolveManagedIPCSocketPath(cfg)
 	}
 	return filepath.Join(cfg.DataDir, "ipc", SocketFileName)
 }

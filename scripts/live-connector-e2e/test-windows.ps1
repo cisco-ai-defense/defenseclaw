@@ -1135,6 +1135,10 @@ private-secret-name = "DefenseClaw must remain redacted"
         $harnessText,
         '(?s)function Invoke-Hook\b.*?(?=\r?\nfunction )'
     ).Value
+    $invokeDangerousHookFunction = [regex]::Match(
+        $harnessText,
+        '(?s)function Invoke-DangerousHook\b.*?(?=\r?\nfunction )'
+    ).Value
     Assert-True ($invokeHookFunction -match 'Wait-GatewayEvidenceAfter' -and
         $invokeHookFunction -match '-SessionID \$sessionID' -and
         $invokeHookFunction -match '-HookEvent \$hookEvent' -and
@@ -1143,6 +1147,13 @@ private-secret-name = "DefenseClaw must remain redacted"
         $invokeHookFunction -match 'New-AmpHookPayloadOccurrence' -and
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
         'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
+    Assert-True ($invokeDangerousHookFunction -match 'Wait-GatewayEvidenceAfter' -and
+        $invokeDangerousHookFunction -match '-TimeoutMilliseconds 10000' -and
+        $invokeDangerousHookFunction -match '-SessionID \$sessionID' -and
+        $invokeDangerousHookFunction -match '-HookEvent \$nativeHookEvent' -and
+        $invokeDangerousHookFunction -match '-ToolInvocationID \$toolInvocationID' -and
+        $invokeDangerousHookFunction -notmatch 'attempt -lt 30') `
+        'dangerous-command evidence uses exact bounded polling instead of the flaky generic three-second loop'
     Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode, amp\].*?windows-native-required:') `
         'required Windows contract matrix contains Codex, Claude Code, and Amp'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'

@@ -5,11 +5,35 @@
 package enterprisehooks
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadManifestWithSHA256BindsExactParsedBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	// Keep this digest-specific fixture platform-neutral. Disabled targets are
+	// parsed but deliberately do not require a live Windows SID/profile/version
+	// tuple, which belongs to the platform validation tests.
+	data := []byte("version: 1\ntargets:\n  - user: alice\n    connector: codex\n    enabled: false\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, digest, err := LoadManifestWithSHA256(path)
+	if err != nil {
+		t.Fatalf("LoadManifestWithSHA256: %v", err)
+	}
+	want := sha256.Sum256(data)
+	if digest != hex.EncodeToString(want[:]) {
+		t.Fatalf("digest = %q, want exact-byte digest %x", digest, want)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].Connector != "codex" {
+		t.Fatalf("manifest = %+v, want parsed Codex target", manifest)
+	}
+}
 
 func TestLoadManifestRejectsUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
@@ -20,6 +44,18 @@ func TestLoadManifestRejectsUnknownFields(t *testing.T) {
 	_, err := LoadManifest(path)
 	if err == nil || !strings.Contains(err.Error(), "field enabld not found") {
 		t.Fatalf("LoadManifest error = %v, want unknown-field rejection", err)
+	}
+}
+
+func TestLoadManifestRejectsDisabledDeferredTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	data := []byte("version: 1\ntargets:\n  - user: alice\n    connector: codex\n    enabled: false\n    deferred: true\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	_, err := LoadManifest(path)
+	if err == nil || !strings.Contains(err.Error(), "cannot be both disabled and deferred") {
+		t.Fatalf("LoadManifest error = %v, want contradictory deferred-state rejection", err)
 	}
 }
 
@@ -49,17 +85,21 @@ func TestLoadManifestAcceptsEmptyDocument(t *testing.T) {
 	}
 }
 
-func TestLoadManifestAcceptsSIDOnlyTarget(t *testing.T) {
+func TestLoadManifestRejectsSparseOversizedInput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
-	data := []byte("version: 1\ntargets:\n  - sid: S-1-5-21-111-222-333-1001\n    connector: claudecode\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	manifest, err := LoadManifest(path)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		t.Fatalf("LoadManifest: %v", err)
+		t.Fatal(err)
 	}
-	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != "S-1-5-21-111-222-333-1001" {
-		t.Fatalf("targets = %+v, want SID-only target", manifest.Targets)
+	if err := file.Truncate(enterpriseHookManifestMaxBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadManifest(path)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("LoadManifest oversized error = %v, want bounded refusal", err)
 	}
 }
