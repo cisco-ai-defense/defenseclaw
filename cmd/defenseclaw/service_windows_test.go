@@ -764,6 +764,13 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 		installLike,
 		"# New-DefenseClawTransaction has durably recorded every managed",
 	)
+	freshInstallBranch := -1
+	if freshInstall >= 0 {
+		freshInstallBranch = strings.LastIndex(
+			installLike[:freshInstall],
+			"if ($Action -eq 'Install') {",
+		)
+	}
 	freshServices := strings.Index(
 		installLike,
 		"Set-DefenseClawManagedServicesForTransaction `",
@@ -786,15 +793,12 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 			freshCapture += targetPreparation
 		}
 	}
-	if freshInstall < 0 || freshServices < 0 || freshCapture < 0 ||
+	if freshInstallBranch < 0 || freshInstall < 0 || freshServices < 0 || freshCapture < 0 ||
 		enumeratorRefresh < 0 || targetPreparation < 0 ||
-		snapshot > freshInstall || freshInstall > freshServices ||
+		snapshot > freshInstallBranch || freshInstallBranch > freshInstall ||
+		freshInstall > freshServices ||
 		freshServices > enumeratorRefresh ||
 		enumeratorRefresh > targetPreparation || targetPreparation > freshCapture ||
-		!strings.Contains(
-			installLike[freshInstall:freshServices],
-			"if ($Action -eq 'Install') {",
-		) ||
 		!strings.Contains(
 			installLike[freshServices:enumeratorRefresh],
 			"-BindInstallPreparationSID",
