@@ -45,7 +45,7 @@ rules:
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-REVSHELL-PYTHON
-    pattern: '(?i)python[23]?\s+-c\s+[^\n]{0,400}?socket\s*\.\s*socket\s*\([^\n]{0,200}?\.\s*connect\s*\('
+    pattern: '(?is)python[23]?\s+-c\s+.{0,400}?socket\s*\.\s*socket\s*\(.{0,200}?\.\s*connect\s*\('
     title: "Python reverse shell"
     severity: CRITICAL
     confidence: 0.90

