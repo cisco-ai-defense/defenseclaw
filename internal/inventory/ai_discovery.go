@@ -967,6 +967,15 @@ func (s *ContinuousDiscoveryService) AddReportObserver(fn AIDiscoveryReportObser
 }
 
 func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
+	return s.runScanSingleFlight(ctx, func() (AIDiscoveryReport, error) {
+		return s.runScanOnce(ctx, full, source)
+	})
+}
+
+func (s *ContinuousDiscoveryService) runScanSingleFlight(
+	ctx context.Context,
+	scan func() (AIDiscoveryReport, error),
+) (AIDiscoveryReport, error) {
 	// Single-flight: the scheduled-tick path, the process-tick
 	// path, and the API-triggered ScanNow path can all reach this
 	// function concurrently. Without the mutex, classifyAndPersist
@@ -985,7 +994,10 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 	if err := ctx.Err(); err != nil {
 		return AIDiscoveryReport{}, err
 	}
+	return scan()
+}
 
+func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
 	start := time.Now()
 	scanID := newScanID()
 	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
