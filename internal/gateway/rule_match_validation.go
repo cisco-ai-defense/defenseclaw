@@ -581,20 +581,9 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	if ruleID == "SEC-PRIVKEY" {
 		return true
 	}
-	// DefenseClaw installs its own gateway token into the agent config files it
-	// manages, so reading one of those files surfaces the product's own secret.
-	// That is configuration, not a finding. Check the raw match as well as the
-	// extracted candidate: the token appears bare in some managed files and
-	// behind a "Bearer " prefix in others.
-	if isSelfIssuedCredential(match) {
-		return false
-	}
 	candidate := credentialCandidate(ruleID, match)
 	if candidate == "" {
 		return true
-	}
-	if isSelfIssuedCredential(candidate) {
-		return false
 	}
 	// A URI with user-info has already proved a credential-bearing structure.
 	// Never hide weak/default passwords based on their spelling.

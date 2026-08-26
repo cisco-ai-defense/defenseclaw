@@ -190,11 +190,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if cfg == nil || cfg.ConfigVersion != config.ObservabilityV8ConfigVersion {
 		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw upgrade' first")
 	}
-	// The gateway token is written into every managed agent config (the OTLP
-	// header block repeats it), so reading one of those files surfaces our own
-	// secret to the credential rules. Register it before any scanning starts.
-	RegisterSelfIssuedCredential(cfg.Gateway.ResolvedToken())
-
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
 	// before creating a client or returning any runnable sidecar state.

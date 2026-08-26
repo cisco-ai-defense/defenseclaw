@@ -29,6 +29,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,7 @@ from typing import Any, NamedTuple, TypedDict
 
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
+from defenseclaw.file_lock import locked_file_update
 from defenseclaw.inventory.plugin_directories import (
     discover_plugin_directories,
     read_amp_plugin_source,
@@ -2852,8 +2854,93 @@ def _aibom_digest_state_path(cfg: Config) -> str:
     return os.path.join(getattr(cfg, "data_dir", "") or ".", "aibom_last_digest.json")
 
 
+def _load_aibom_digest_state(
+    path: str, *, recover_corrupt: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    """Load the digest map, distinguishing an empty file from an unreadable one."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except FileNotFoundError:
+        return {}, True
+    except OSError:
+        return {}, False
+    except ValueError:
+        return {}, recover_corrupt
+    if not isinstance(loaded, dict):
+        return {}, recover_corrupt
+    return loaded, True
+
+
+def pending_claw_aibom_digest(
+    inv: dict[str, Any], cfg: Config, connector: str | None = None,
+) -> str | None:
+    """Return the digest that needs logging, without advancing the checkpoint.
+
+    An unreadable state file deliberately returns the current digest. Callers
+    then log again rather than risk dropping an inventory transition.
+    """
+    key = connector or "default"
+    digest = claw_aibom_digest(inv)
+    previous, readable = _load_aibom_digest_state(_aibom_digest_state_path(cfg))
+    if readable and previous.get(key) == digest:
+        return None
+    return digest
+
+
+def commit_claw_aibom_digest(
+    digest: str, cfg: Config, connector: str | None = None,
+) -> bool:
+    """Checkpoint an AIBOM digest after its scan was acknowledged.
+
+    The state is re-read immediately before the atomic replace so another
+    connector's checkpoint is preserved. Any state-file failure returns
+    ``False``; the next sweep will emit a duplicate rather than lose a record.
+    """
+    path = _aibom_digest_state_path(cfg)
+    tmp = ""
+    fd = -1
+    try:
+        with locked_file_update(path):
+            # A successfully admitted scan is the safe point to repair a
+            # malformed checkpoint. Genuine I/O failures still leave state
+            # untouched so the next sweep retries rather than risking loss.
+            previous, readable = _load_aibom_digest_state(
+                path, recover_corrupt=True,
+            )
+            if not readable:
+                return False
+            previous[connector or "default"] = digest
+
+            directory = os.path.dirname(path) or "."
+            fd, tmp = tempfile.mkstemp(
+                prefix=".aibom_last_digest.", suffix=".tmp", dir=directory,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = -1
+                json.dump(previous, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            tmp = ""
+    except (OSError, ValueError):
+        return False
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return True
+
+
 def claw_aibom_changed(inv: dict[str, Any], cfg: Config, connector: str | None = None) -> bool:
-    """Report whether this inventory differs from the last one persisted.
+    """Report whether this inventory differs and persist its digest.
 
     The sweep runs on ``ai_discovery.process_interval_s`` (60s by default)
     across every active connector, and :func:`claw_aibom_to_scan_result`
@@ -2863,39 +2950,16 @@ def claw_aibom_changed(inv: dict[str, Any], cfg: Config, connector: str | None =
     findings and inflated the audit database.
 
     Keying persistence on content means an unchanged environment costs
-    nothing while a genuine change is still recorded exactly once.
+    nothing while a genuine change is still recorded exactly once. Command
+    paths that emit a scan must instead use :func:`pending_claw_aibom_digest`
+    and call :func:`commit_claw_aibom_digest` only after logging succeeds.
 
     On any state-file error this returns ``True``: losing an inventory record
     is worse than writing a duplicate, so the failure mode is the old
     behaviour, not silence.
     """
-    key = connector or "default"
-    digest = claw_aibom_digest(inv)
-    path = _aibom_digest_state_path(cfg)
-
-    previous: dict[str, Any] = {}
-    try:
-        with open(path, encoding="utf-8") as handle:
-            loaded = json.load(handle)
-        if isinstance(loaded, dict):
-            previous = loaded
-    except FileNotFoundError:
-        previous = {}
-    except (OSError, ValueError):
-        return True
-
-    if previous.get(key) == digest:
+    digest = pending_claw_aibom_digest(inv, cfg, connector=connector)
+    if digest is None:
         return False
-
-    previous[key] = digest
-    try:
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(previous, handle, sort_keys=True)
-        os.replace(tmp, path)
-    except OSError:
-        return True
+    commit_claw_aibom_digest(digest, cfg, connector=connector)
     return True
