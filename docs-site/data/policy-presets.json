@@ -535,7 +535,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-PYTHON",
-                  "pattern": "(?i)python[23]?\\s+-c\\s+.*socket.*connect",
+                  "pattern": "(?i)python[23]?\\s+-c\\s+[^\\n]{0,400}?socket\\s*\\.\\s*socket\\s*\\([^\\n]{0,200}?\\.\\s*connect\\s*\\(",
                   "title": "Python reverse shell",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -766,7 +766,7 @@
                 },
                 {
                   "id": "CMD-WGET-POST",
-                  "pattern": "(?i)\\bwget\\b\\s+.*--post-(?:data|file)",
+                  "pattern": "(?i)\\bwget\\b[^;\\n]*--post-(?:data|file)",
                   "title": "wget POST data exfil",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -777,7 +777,7 @@
                 },
                 {
                   "id": "CMD-SOCAT-EXEC",
-                  "pattern": "(?i)\\bsocat\\b\\s+.*\\bEXEC\\b",
+                  "pattern": "(?i)\\bsocat\\b[^;\\n]*\\bEXEC\\b",
                   "title": "socat with EXEC (reverse shell)",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -2954,7 +2954,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-PYTHON",
-                  "pattern": "(?i)python[23]?\\s+-c\\s+.*socket.*connect",
+                  "pattern": "(?i)python[23]?\\s+-c\\s+[^\\n]{0,400}?socket\\s*\\.\\s*socket\\s*\\([^\\n]{0,200}?\\.\\s*connect\\s*\\(",
                   "title": "Python reverse shell",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -3185,7 +3185,7 @@
                 },
                 {
                   "id": "CMD-WGET-POST",
-                  "pattern": "(?i)\\bwget\\b\\s+.*--post-(?:data|file)",
+                  "pattern": "(?i)\\bwget\\b[^;\\n]*--post-(?:data|file)",
                   "title": "wget POST data exfil",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -3196,7 +3196,7 @@
                 },
                 {
                   "id": "CMD-SOCAT-EXEC",
-                  "pattern": "(?i)\\bsocat\\b\\s+.*\\bEXEC\\b",
+                  "pattern": "(?i)\\bsocat\\b[^;\\n]*\\bEXEC\\b",
                   "title": "socat with EXEC (reverse shell)",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -5269,7 +5269,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-PYTHON",
-                  "pattern": "(?i)python[23]?\\s+-c\\s+.*socket.*connect",
+                  "pattern": "(?i)python[23]?\\s+-c\\s+[^\\n]{0,400}?socket\\s*\\.\\s*socket\\s*\\([^\\n]{0,200}?\\.\\s*connect\\s*\\(",
                   "title": "Python reverse shell",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -5500,7 +5500,7 @@
                 },
                 {
                   "id": "CMD-WGET-POST",
-                  "pattern": "(?i)\\bwget\\b\\s+.*--post-(?:data|file)",
+                  "pattern": "(?i)\\bwget\\b[^;\\n]*--post-(?:data|file)",
                   "title": "wget POST data exfil",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -5511,7 +5511,7 @@
                 },
                 {
                   "id": "CMD-SOCAT-EXEC",
-                  "pattern": "(?i)\\bsocat\\b\\s+.*\\bEXEC\\b",
+                  "pattern": "(?i)\\bsocat\\b[^;\\n]*\\bEXEC\\b",
                   "title": "socat with EXEC (reverse shell)",
                   "severity": "CRITICAL",
                   "confidence": 0.95,

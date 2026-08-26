@@ -607,21 +607,16 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	if obviousCredentialPlaceholder(candidate) {
 		return false
 	}
-	compact := compactCredential(candidate)
 	// The generic bearer shape has no provider-specific checksum or prefix, so
 	// require a modest entropy floor before elevating arbitrary header examples.
-	if ruleID == "SEC-BEARER" {
-		return credentialEntropy(compact) >= 2.5
-	}
-	// Provider-prefixed keys (AKIA…, sk-…, ghp_…) satisfy their regex on the
-	// fixed prefix alone, so a hand-written filler tail still matches. The
-	// prefix contributes no randomness; once the candidate is long enough for
-	// the measure to mean anything, hold it to a floor too. The bar is set
-	// below the bearer floor because these shapes already proved a prefix.
-	if len(compact) >= 16 && credentialEntropy(compact) < 2.0 {
-		return false
-	}
-	return true
+	//
+	// Deliberately NOT extended to provider-prefixed keys. A padded synthetic
+	// token and a leaked credential are indistinguishable by character variety:
+	// the security corpus asserts that ghp_abc123ffff… (36 f's) MUST be
+	// detected, while an AKIA key with a zero-filler tail looks the same to any
+	// entropy or repetition measure. Where the two cannot be separated, the
+	// product's choice is to report.
+	return ruleID != "SEC-BEARER" || credentialEntropy(compactCredential(candidate)) >= 2.5
 }
 
 func credentialCandidate(ruleID, match string) string {
@@ -720,13 +715,6 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	compact := compactCredential(normalized)
 	if len(compact) < 8 {
 		return false
-	}
-	// Deliberately NOT matched on spelling: a real credential may contain
-	// "example" or "changeme" (Bearer live-example-… is a genuine token, and
-	// changeme123 is a genuine weak password). Only structural emptiness —
-	// too little variety to be generated — rejects a candidate here.
-	if credentialLowVariety(compact) {
-		return true
 	}
 	for _, sequence := range []string{
 		"abcdefghijklmnopqrstuvwxyz",
@@ -850,26 +838,4 @@ func decimalNumber(value string) int {
 		n = n*10 + int(char-'0')
 	}
 	return n
-}
-
-// credentialLowVariety reports whether a candidate is too repetitive to be a
-// generated credential. Filler tails ("AKIA" + forty zeroes) clear every
-// length and prefix check while carrying almost no information.
-func credentialLowVariety(compact string) bool {
-	if len(compact) < 16 {
-		return false
-	}
-	counts := make(map[rune]int)
-	for _, r := range compact {
-		counts[r]++
-	}
-	if len(counts) <= 4 {
-		return true
-	}
-	for _, count := range counts {
-		if count*2 > len(compact) {
-			return true
-		}
-	}
-	return false
 }
