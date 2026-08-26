@@ -1520,15 +1520,32 @@ function Invoke-DangerousHook(
 ) {
     $before = @(Get-EventLines $script:GatewayJsonl).Count
     $hookEvent = if ($Connector -eq 'amp') { 'tool.call' } else { "PreTool-$Name" }
+    $payloadObject = [IO.File]::ReadAllText($Payload) |
+        ConvertFrom-Json -ErrorAction Stop
+    $sessionID = [string](Get-JsonPropertyValue $payloadObject 'session_id')
+    $nativeHookEvent = [string](Get-JsonPropertyValue $payloadObject 'hook_event_name')
+    if ([string]::IsNullOrWhiteSpace($nativeHookEvent)) {
+        $nativeHookEvent = $hookEvent
+    }
+    $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'tool_call_id')
+    if ([string]::IsNullOrWhiteSpace($toolInvocationID)) {
+        throw "$Name dangerous-command payload has no tool-call identity"
+    }
     $result = Invoke-Tool (Resolve-ContractHookTool) @('hook', '--connector', $Connector, '--event', $hookEvent) @(0, 2) $Payload
 
-    $decision = $null
-    for ($attempt = 0; $attempt -lt 30 -and $null -eq $decision; $attempt++) {
-        Start-Sleep -Milliseconds 100
-        $decision = Get-LatestHookDecision $script:GatewayJsonl $Connector $before
+    $evidence = Wait-GatewayEvidenceAfter `
+        -Path $script:GatewayJsonl -Name $Connector -Since $before `
+        -RequireBlock $true -TimeoutMilliseconds 10000 `
+        -SessionID $sessionID -HookEvent $nativeHookEvent `
+        -ToolInvocationID $toolInvocationID
+    $decision = Get-LatestHookDecision `
+        -Path $script:GatewayJsonl -Name $Connector -Since $before `
+        -SessionID $sessionID -HookEvent $nativeHookEvent `
+        -ToolInvocationID $toolInvocationID
+    if (-not $evidence.ConnectorEvent -or $null -eq $decision) {
+        throw "$Name did not emit its exact connector hook_decision"
     }
-    if ($null -eq $decision) { throw "$Name did not emit a connector hook_decision" }
-    if (-not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$Name has no underlying gateway block verdict" }
+    if (-not $evidence.BlockVerdict) { throw "$Name has no exact underlying gateway block verdict" }
     if ([string]$decision.raw_action -ne 'block') { throw "$Name raw_action=$($decision.raw_action), expected block" }
     $telemetryMode = if ($Mode -eq 'action') { 'enforce' } else { 'observe' }
     if ([string]$decision.mode -ne $telemetryMode) { throw "$Name mode=$($decision.mode), expected $telemetryMode" }
