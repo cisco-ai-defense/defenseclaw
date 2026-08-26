@@ -28,17 +28,13 @@ const destinationCircuitV8Producer = "gateway.destination_circuit"
 func (s *Sidecar) recordDestinationCircuitHealthLogsV8(
 	ctx context.Context,
 	observedAt time.Time,
-	runtime exporterHealthMetricV8Runtime,
+	health observabilityruntime.DestinationHealthSnapshot,
 ) {
-	if s == nil || ctx == nil || observedAt.IsZero() || runtime == nil {
+	if s == nil || ctx == nil || observedAt.IsZero() {
 		return
 	}
 	emitter := s.observabilityV8Emitter()
 	if emitter == nil {
-		return
-	}
-	health, err := runtime.DestinationHealthSnapshot(ctx)
-	if err != nil || health.Generation == 0 || health.PlanDigest == "" {
 		return
 	}
 	s.recordDestinationCircuitTransitionsV8(ctx, observedAt, emitter, health)
@@ -90,12 +86,18 @@ func (s *Sidecar) recordDestinationCircuitTransitionsV8(
 		if !destination.Enabled || !observability.IsStableToken(destination.Name) {
 			continue
 		}
-		previous, seen := s.destinationCircuitState[destination.Name]
 		current := destination.CircuitState
 		if current == "" {
 			current = delivery.CircuitClosed
 		}
-		s.destinationCircuitState[destination.Name] = current
+		if current != delivery.CircuitOpen && current != delivery.CircuitClosed {
+			// Half-open: a cooldown probe in flight. Never becomes the
+			// tracked baseline, so a failed probe that reopens the circuit
+			// is still recognized as a genuine transition instead of being
+			// compared against a stale "half-open" baseline and missed.
+			continue
+		}
+		previous, seen := s.destinationCircuitState[destination.Name]
 		if !seen {
 			// First observation for this destination in this generation.
 			// Only report it if it starts life already open -- a routine
@@ -108,10 +110,6 @@ func (s *Sidecar) recordDestinationCircuitTransitionsV8(
 		if previous == current {
 			continue
 		}
-		if current != delivery.CircuitOpen && current != delivery.CircuitClosed {
-			// Half-open: tracked as the new baseline above, but not logged.
-			continue
-		}
 		transitions = append(transitions, transition{
 			name: destination.Name, kind: string(destination.Kind),
 			state: current, previous: previous,
@@ -122,7 +120,15 @@ func (s *Sidecar) recordDestinationCircuitTransitionsV8(
 	s.destinationCircuitMu.Unlock()
 
 	for _, t := range transitions {
-		_ = emitDestinationCircuitTransitionV8(ctx, emitter, observedAt, t.name, t.kind, t.state, t.consecutiveFailures, t.lastFailureClass)
+		if err := emitDestinationCircuitTransitionV8(ctx, emitter, observedAt, t.name, t.kind, t.state, t.consecutiveFailures, t.lastFailureClass); err != nil {
+			// Do not commit the new baseline: leave the prior state in
+			// place so the next poll re-observes this as an unreported
+			// transition and retries, instead of silently losing it.
+			continue
+		}
+		s.destinationCircuitMu.Lock()
+		s.destinationCircuitState[t.name] = t.state
+		s.destinationCircuitMu.Unlock()
 	}
 }
 

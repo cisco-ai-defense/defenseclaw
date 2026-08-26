@@ -214,3 +214,53 @@ func TestDestinationCircuitTransitionV8GenerationResetReopensBaseline(t *testing
 	}
 
 }
+
+// TestDestinationCircuitTransitionV8HalfOpenDoesNotResetBaseline guards
+// against a stale-baseline bug: a half-open cooldown probe must never
+// replace the tracked "open" baseline. If it did, an open -> half-open ->
+// open sequence (the probe failing and the circuit reopening) would be
+// misread as a brand-new transition and logged a second time, even though
+// it is the same ongoing outage.
+func TestDestinationCircuitTransitionV8HalfOpenDoesNotResetBaseline(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	ctx, _ := platformHealthCorrelatedContext(t)
+	sidecar := &Sidecar{}
+
+	sidecar.recordDestinationCircuitTransitionsV8(
+		ctx, time.Now().UTC(), runtime,
+		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitOpen, 3),
+	)
+	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open"); got != 1 {
+		t.Fatalf("expected exactly one open log before the probe, got %d", got)
+	}
+
+	sidecar.recordDestinationCircuitTransitionsV8(
+		ctx, time.Now().UTC(), runtime,
+		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitHalfOpen, 4),
+	)
+	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open"); got != 1 {
+		t.Fatalf("half-open probe must not itself log or reset the baseline, got %d open logs", got)
+	}
+	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_closed"); got != 0 {
+		t.Fatalf("half-open probe must not log a closed transition, got %d", got)
+	}
+
+	// The probe fails and the circuit reopens. This must NOT be treated as
+	// a new transition, since the baseline was never moved off "open".
+	sidecar.recordDestinationCircuitTransitionsV8(
+		ctx, time.Now().UTC(), runtime,
+		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitOpen, 5),
+	)
+	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_open"); got != 1 {
+		t.Fatalf("expected still exactly one open log after a failed probe reopened the same outage, got %d", got)
+	}
+
+	// A genuine recovery is still correctly recognized afterward.
+	sidecar.recordDestinationCircuitTransitionsV8(
+		ctx, time.Now().UTC(), runtime,
+		destinationHealthSnapshotFixture(1, "soc_primary", delivery.CircuitClosed, 0),
+	)
+	if got := countDestinationCircuitLogs(t, capture.store.DatabasePath(), "circuit_breaker_closed"); got != 1 {
+		t.Fatalf("expected exactly one closed log after genuine recovery, got %d", got)
+	}
+}
