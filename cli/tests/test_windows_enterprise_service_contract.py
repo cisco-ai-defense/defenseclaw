@@ -5226,3 +5226,70 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "Get-DefenseClawServiceSIDForRecovery" in module
     assert "GetDirectorySecuritySnapshotNoFollow" in module
     assert "SetDirectoryDaclNoFollow" in module
+
+
+def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
+    """Missing metadata must never turn purge into a machine-wide wildcard."""
+    module = read(MODULE)
+    fallback = module[
+        module.index("function Invoke-DefenseClawExactScopeRecoveryPurge") :
+        module.index("function Invoke-DefenseClawPreLayoutRecovery")
+    ]
+    pre_layout = module[
+        module.index("function Invoke-DefenseClawPreLayoutRecovery") :
+        module.index("function Invoke-DefenseClawReconcileLifecycle")
+    ]
+
+    assert "namespace-root-cleanup" in fallback
+    assert "validate_only = $true" in fallback
+    assert "expected_identity" in fallback
+    assert "gateway_service_sid = $gatewaySID" in fallback
+    assert "allowed_directory_descriptors" not in fallback
+    assert "allowed_file_descriptors" not in fallback
+    assert "quarantine_descriptor" not in fallback
+    assert "Get-DefenseClawManagedServiceNames" in fallback
+    assert "Assert-DefenseClawOwnedServiceOrAbsent" in fallback
+    assert "Revoke-DefenseClawManagedIPCServiceAccess" in fallback
+    assert "exact_scope_recovery = $true" in fallback
+    assert "unattributed_user_state_preserved = $true" in fallback
+    source_reject = fallback.index("$cleanupSourcePath.StartsWith(")
+    service_validation = fallback.index("Get-DefenseClawManagedServiceNames")
+    assert source_reject < service_validation
+    assert "rerun Uninstall -Purge from external Setup" in fallback
+    validate_only = fallback.index(
+        "# With exact services stopped, prove the whole root is canonical"
+    )
+    quiesce = fallback.index(
+        "# Quiesce every surviving exact service"
+    )
+    ipc_revoke = fallback.index(
+        "# Retire the exact shared-IPC writer"
+    )
+    destructive_root_cleanup = fallback.index("$request.validate_only = $false")
+    service_delete = fallback.index(
+        "# Root retirement succeeded. Reauthenticate each remaining exact SCM row"
+    )
+    assert quiesce < validate_only < ipc_revoke < destructive_root_cleanup
+    assert destructive_root_cleanup < service_delete
+    quiesce_body = fallback[quiesce:ipc_revoke]
+    assert "Set-DefenseClawServiceStartMode" in quiesce_body
+    assert "Stop-DefenseClawService -Name $name" in quiesce_body
+    assert "Remove-DefenseClawService" not in fallback[:service_delete]
+    assert "Remove-DefenseClawService -Name $name" in fallback[service_delete:]
+    assert "-Sources $Sources" in pre_layout
+
+    forbidden = (
+        "takeown.exe",
+        "icacls.exe",
+        "Get-Service -Name 'DefenseClaw*'",
+        "HKLM:\\SYSTEM\\CurrentControlSet\\Services'",
+        "*defenseclaw*",
+        "hooks.json",
+        "requirements.toml",
+        "\\.defenseclaw'",
+    )
+    for token in forbidden:
+        assert token not in fallback
+
+    assert "Invoke-DefenseClawNamespaceSweep" not in module
+    assert "Remove-DefenseClawSweepPath" not in module

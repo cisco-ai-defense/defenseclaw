@@ -178,6 +178,7 @@ func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksTeardownCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsTargetRuntimeCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsNamespacePurgeCommand())
 	// Spec 005 D1: hook-enumerator subcommand. Windows-only; the
 	// whole file is //go:build windows so a non-Windows build never
 	// reaches this registration.
@@ -215,7 +216,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.attestAgentApplicationControl, "attest-agent-application-control", false, "attest that approved-client WDAC or AppLocker rules are live")
 	flags.BoolVar(&opts.attestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "refresh live proof that DefenseClaw is Claude's effective managed-policy source")
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
-	flags.BoolVar(&opts.purge, "purge", false, "remove managed state as well as services and binaries (authenticated purge when a committed StateRoot exists; DefenseClaw-namespace sweep otherwise)")
+	flags.BoolVar(&opts.purge, "purge", false, "remove managed state as well as services and binaries (authenticated purge or fail-closed exact-scope recovery)")
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
 	// Spec 003 Workstream B: UCB-friendly late-config install.
 	// Requires managed-enterprise deployment mode; enforced by the
@@ -315,6 +316,9 @@ func runWindowsEnterpriseLifecycle(
 			))
 		}
 	} else {
+		if strings.EqualFold(strings.TrimSpace(action), "uninstall") {
+			args = append(args, "-NativeCleanupBinary", executable)
+		}
 		selfUpgradeConflict, conflictErr := windowsEnterpriseSelfUpgradeConflict(
 			action,
 			opts.installRoot,

@@ -23,6 +23,7 @@ param(
     [string]$GatewayBinary,
     [string]$HookBinary,
     [string]$CLIBinary,
+    [string]$NativeCleanupBinary,
     [string]$Config,
     [string]$Manifest,
 
@@ -61,15 +62,11 @@ param(
     [switch]$NoStart,
     # -Purge removes managed state during uninstall. When a
     # committed StateRoot exists, the ordinary state-root authenticated
-    # purge runs. When no StateRoot exists to authenticate against —
-    # the case for a partially applied install that failed before
-    # StateRoot creation — Purge falls back to a bounded DefenseClaw-
-    # namespace sweep (services, roots, per-connector managed
-    # artifacts, per-user runtimes, residual service registry keys).
-    # There is no separate opt-in for the sweep; a single install per
-    # box is the product model, so a Purge that cannot find its scope
-    # to authenticate is by definition a Purge that should just wipe
-    # whatever DefenseClaw state remains.
+    # purge runs. If only an exact canonical machine footprint survives,
+    # recovery is limited to this invocation's exact service identities and
+    # install-root inode through a no-follow helper. It never infers ownership
+    # of user runtimes, shared connector configuration, or another scope from
+    # a DefenseClaw-like name.
     [switch]$Purge,
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
@@ -3075,6 +3072,7 @@ try {
         GatewayBinary = $GatewayBinary
         HookBinary = $HookBinary
         CLIBinary = $CLIBinary
+        NativeCleanupBinary = $NativeCleanupBinary
         Config = $Config
         Manifest = $Manifest
         InstallRoot = $InstallRoot

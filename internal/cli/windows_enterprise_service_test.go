@@ -271,6 +271,49 @@ func TestWindowsEnterprisePowerShellArgsPurgeIsExplicit(t *testing.T) {
 	}
 }
 
+func TestRunWindowsEnterpriseUninstallPassesAuthenticatedCleanupExecutable(t *testing.T) {
+	originalRunner := windowsEnterpriseCommandRunner
+	originalScriptFinder := windowsEnterpriseScriptFinder
+	originalExecutableResolver := windowsEnterpriseExecutableResolver
+	t.Cleanup(func() {
+		windowsEnterpriseCommandRunner = originalRunner
+		windowsEnterpriseScriptFinder = originalScriptFinder
+		windowsEnterpriseExecutableResolver = originalExecutableResolver
+	})
+
+	const executable = `C:\protected-stage\defenseclaw.exe`
+	windowsEnterpriseScriptFinder = func(string) (string, error) {
+		return `C:\protected-stage\install-enterprise.ps1`, nil
+	}
+	windowsEnterpriseExecutableResolver = func() (string, error) {
+		return executable, nil
+	}
+	var got []string
+	windowsEnterpriseCommandRunner = func(
+		_ context.Context,
+		_ *cobra.Command,
+		_ string,
+		args []string,
+	) error {
+		got = append([]string(nil), args...)
+		return nil
+	}
+
+	if err := runWindowsEnterpriseLifecycle(
+		context.Background(),
+		&cobra.Command{},
+		"uninstall",
+		&windowsEnterpriseLifecycleOptions{purge: true},
+	); err != nil {
+		t.Fatalf("uninstall lifecycle: %v", err)
+	}
+	wantTail := []string{"-NativeCleanupBinary", executable}
+	if len(got) < len(wantTail) ||
+		!reflect.DeepEqual(got[len(got)-len(wantTail):], wantTail) {
+		t.Fatalf("uninstall args = %#v, want cleanup executable tail %#v", got, wantTail)
+	}
+}
+
 func TestWindowsEnterpriseSelfUninstallCallerRequiresExactInstalledLayout(t *testing.T) {
 	const processID = 4242
 	installer := `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\libexec\install-enterprise.ps1`

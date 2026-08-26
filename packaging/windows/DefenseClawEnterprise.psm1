@@ -15445,6 +15445,7 @@ function Get-DefenseClawLifecycleSources {
         [string]$GatewayBinary,
         [string]$HookBinary,
         [string]$CLIBinary,
+        [string]$NativeCleanupBinary,
         [string]$Config,
         [string]$Manifest,
         [string]$InstallerSource,
@@ -15456,6 +15457,13 @@ function Get-DefenseClawLifecycleSources {
         [switch]$DeferredConfig
     )
     $sources = @{}
+    if (-not [string]::IsNullOrWhiteSpace($NativeCleanupBinary)) {
+        $sources['native_cleanup'] = Get-DefenseClawSourceDescriptor `
+            -Path $NativeCleanupBinary `
+            -Label 'native exact-scope cleanup executable' `
+            -Authenticode `
+            -AllowUnsigned:$AllowUnsigned
+    }
     if ($Action -notin @('Install', 'Upgrade', 'Repair')) {
         return $sources
     }
@@ -18461,173 +18469,492 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
     return $result
 }
 
-# Remove-DefenseClawSweepPath is the bounded delete helper backing
-# Invoke-DefenseClawNamespaceSweep. It never traverses outside the
-# passed path and it survives ACLs left behind by services that were
-# already deleted — takeown + icacls first, then Remove-Item.
-function Remove-DefenseClawSweepPath {
-    param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) { return }
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path)) { return }
-    try {
-        & takeown.exe /F $Path /A /R /D Y 2>$null |
-            Microsoft.PowerShell.Core\Out-Null
-        & icacls.exe $Path /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null |
-            Microsoft.PowerShell.Core\Out-Null
-    } catch {}
-    Microsoft.PowerShell.Management\Remove-Item `
-        -LiteralPath $Path -Force -Recurse -ErrorAction SilentlyContinue
+function Assert-DefenseClawExactScopeServiceSecurity {
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not (Test-DefenseClawServiceExists -Name $Name)) {
+        return
+    }
+    Assert-DefenseClawServiceRegistryAcl -Name $Name
+    $sddlOutput = @(Invoke-DefenseClawNative `
+        -File $script:ScExe `
+        -Arguments @('sdshow', $Name) `
+        -Capture)
+    $sddlLine = @($sddlOutput |
+        Microsoft.PowerShell.Core\Where-Object {
+            ([string]$_).StartsWith(
+                'D:',
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        } |
+        Microsoft.PowerShell.Utility\Select-Object -First 1)
+    if ($sddlLine.Count -ne 1) {
+        throw "service $Name has no readable SCM security descriptor"
+    }
+    $actualSDDL = ([string]$sddlLine[0]).Trim()
+    $saclIndex = $actualSDDL.IndexOf(
+        'S:',
+        [StringComparison]::OrdinalIgnoreCase
+    )
+    $actualDACL = if ($saclIndex -ge 0) {
+        $actualSDDL.Substring(0, $saclIndex)
+    }
+    else {
+        $actualSDDL
+    }
+    if (-not [string]::Equals(
+            $actualDACL,
+            $script:ServiceSDDL,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "service $Name DACL drift: $actualDACL"
+    }
 }
 
-# Invoke-DefenseClawNamespaceSweep is the -Force uninstall backstop.
-# It runs only when the committed authenticated purge cannot: no
-# StateRoot to authenticate against, no metadata tombstone, but
-# the operator has passed -Purge -Force meaning "wipe whatever
-# DefenseClaw state exists on this box, best effort, don't refuse
-# because you can't identify what installed it."
-#
-# The scope is the DefenseClaw namespace, not an arbitrary
-# operator-supplied path — the caller doesn't pick what gets deleted.
-# Every path here is a hard-coded DefenseClaw-owned surface (services
-# whose name matches DefenseClaw*, our per-connector managed
-# artifacts, our per-user runtime directories, our machine roots).
-#
-# Not called on the healthy path — the ordinary state-root-scoped
-# authenticated cleanup runs first. This is a recovery-only branch.
-function Invoke-DefenseClawNamespaceSweep {
+function Assert-DefenseClawExactScopeService {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)]
+        [ValidateSet('Gateway', 'Broker', 'Guardian', 'Enumerator')]
+        [string]$Role
+    )
+    $name = switch ($Role) {
+        'Gateway' { $GatewayServiceName }
+        'Broker' { [string]$Layout.BrokerServiceName }
+        'Guardian' { $GuardianServiceName }
+        'Enumerator' {
+            Get-DefenseClawEnumeratorServiceName `
+                -GuardianServiceName $GuardianServiceName
+        }
+    }
+    if (-not (Test-DefenseClawServiceExists -Name $name)) {
+        return
+    }
+    switch ($Role) {
+        'Gateway' {
+            Assert-DefenseClawOwnedServiceOrAbsent `
+                -Name $name `
+                -ExpectedGatewayPath $Layout.GatewayPath
+        }
+        'Guardian' {
+            Assert-DefenseClawOwnedServiceOrAbsent `
+                -Name $name `
+                -ExpectedGatewayPath $Layout.GatewayPath `
+                -ExpectedManifestPath $Layout.ManifestPath `
+                -Guardian
+        }
+        'Enumerator' {
+            Assert-DefenseClawOwnedServiceOrAbsent `
+                -Name $name `
+                -ExpectedGatewayPath $Layout.GatewayPath `
+                -ExpectedManifestPath $Layout.ManifestPath `
+                -Enumerator
+        }
+        'Broker' {
+            Assert-DefenseClawCMIDBrokerServiceOrAbsent `
+                -Name $name `
+                -ExpectedImage ('"{0}"' -f $Layout.BrokerPath) `
+                -AllowArgumentUpgrade
+            $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+            $image = [string](
+                Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+                    -LiteralPath $serviceKey `
+                    -Name ImagePath
+            )
+            $expectedPrefix = (
+                '"{0}" service --service-name {1} --gateway-service-name {2} ' +
+                '--pipe-name {3} --auth-key "{4}" --cmid-library "'
+            ) -f `
+                $Layout.BrokerPath, $name, $GatewayServiceName,
+                $Layout.BrokerPipeName, $Layout.BrokerAuthKeyPath
+            $expectedSuffix = '" --log "{0}"' -f $Layout.BrokerLogPath
+            if (-not $image.StartsWith(
+                    $expectedPrefix,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                -not $image.EndsWith(
+                    $expectedSuffix,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                $image.Length -le
+                    ($expectedPrefix.Length + $expectedSuffix.Length)) {
+                throw "refusing to remove credential broker service $name with a noncanonical ImagePath"
+            }
+            $library = $image.Substring(
+                $expectedPrefix.Length,
+                $image.Length - $expectedPrefix.Length -
+                    $expectedSuffix.Length
+            )
+            if ($library.IndexOf('"', [StringComparison]::Ordinal) -ge 0 -or
+                -not [string]::Equals(
+                    [IO.Path]::GetFileName($library),
+                    'cmidapi.dll',
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "refusing to remove credential broker service $name with a noncanonical provider path"
+            }
+            $providerRoot = [IO.Path]::Combine(
+                $script:ProgramFiles,
+                'Cisco',
+                'Cisco Secure Client',
+                'CM'
+            )
+            $canonicalLibrary = Assert-DefenseClawDescendant `
+                -Path $library `
+                -Root $providerRoot `
+                -Label 'credential broker service provider library'
+            if (-not [string]::Equals(
+                    $canonicalLibrary,
+                    $library,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "refusing to remove credential broker service $name with a noncanonical provider path"
+            }
+        }
+    }
+    Assert-DefenseClawExactScopeServiceSecurity -Name $name
+}
+
+function Assert-DefenseClawNamespaceRootCleanupReport {
+    param(
+        [Parameter(Mandatory)]$Report,
+        [Parameter(Mandatory)][string]$ExpectedRoot,
+        [AllowEmptyString()][string]$ExpectedIdentity,
+        [Parameter(Mandatory)][bool]$ValidateOnly,
+        [Parameter(Mandatory)][bool]$ExpectedRootPresent
+    )
+    $fields = @(
+        'schema_version',
+        'ok',
+        'root',
+        'expected_identity',
+        'removed',
+        'entries_removed',
+        'error'
+    )
+    foreach ($property in @($Report.PSObject.Properties)) {
+        if ([string]$property.Name -notin $fields) {
+            throw 'exact-root cleanup report contains an unexpected property'
+        }
+    }
+    foreach ($field in $fields) {
+        if ($null -eq $Report.PSObject.Properties[$field]) {
+            throw "exact-root cleanup report is missing $field"
+        }
+    }
+    if (($Report.schema_version -isnot [int32] -and
+            $Report.schema_version -isnot [int64]) -or
+        [int64]$Report.schema_version -ne 1) {
+        throw 'exact-root cleanup report has an unsupported schema version'
+    }
+    foreach ($field in @('ok', 'removed')) {
+        if ($Report.$field -isnot [bool]) {
+            throw "exact-root cleanup report has a non-Boolean $field"
+        }
+    }
+    foreach ($field in @('root', 'expected_identity', 'error')) {
+        if ($Report.$field -isnot [string]) {
+            throw "exact-root cleanup report has a non-string $field"
+        }
+    }
+    if (($Report.entries_removed -isnot [int32] -and
+            $Report.entries_removed -isnot [int64]) -or
+        [int64]$Report.entries_removed -lt 0) {
+        throw 'exact-root cleanup report has an invalid entries_removed count'
+    }
+    if (-not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$Report.root).TrimEnd('\'),
+            [IO.Path]::GetFullPath($ExpectedRoot).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$Report.expected_identity -cne $ExpectedIdentity) {
+        throw 'exact-root cleanup report is not bound to the requested root identity'
+    }
+    if ($ValidateOnly -and
+        ([bool]$Report.removed -or [int64]$Report.entries_removed -ne 0)) {
+        throw 'exact-root validate-only report claims filesystem mutation'
+    }
+    if (-not $ValidateOnly -and [bool]$Report.ok -and
+        ([bool]$Report.removed -ne $ExpectedRootPresent)) {
+        throw 'exact-root cleanup report has an inconsistent removal result'
+    }
+    if ([bool]$Report.ok -and
+        -not [string]::IsNullOrWhiteSpace([string]$Report.error)) {
+        throw 'successful exact-root cleanup report contains an error'
+    }
+    if (-not [bool]$Report.ok -and
+        [string]::IsNullOrWhiteSpace([string]$Report.error)) {
+        throw 'failed exact-root cleanup report omits its error'
+    }
+    return $Report
+}
+
+function Invoke-DefenseClawNamespaceRootCleanup {
+    param(
+        [Parameter(Mandatory)][hashtable]$Source,
+        [Parameter(Mandatory)][Collections.IDictionary]$Request,
+        [Parameter(Mandatory)][string]$RequestPath,
+        [Parameter(Mandatory)][string]$ReportPath,
+        [Parameter(Mandatory)][string]$ExchangeDirectory,
+        [Parameter(Mandatory)][bool]$ExpectedRootPresent
+    )
+    Write-DefenseClawProtectedTextAtomic `
+        -Value ($Request |
+            Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8 -Compress) `
+        -Path $RequestPath `
+        -RequiredRoot $ExchangeDirectory
+    [void](New-DefenseClawTargetRuntimeExchangeFile `
+        -Path $ReportPath `
+        -TransactionDirectory $ExchangeDirectory)
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $Source)
+    $probe = Invoke-DefenseClawProcess `
+        -File ([string]$Source.path) `
+        -Arguments @(
+            'enterprise', 'windows', 'namespace-root-cleanup',
+            '--request', $RequestPath,
+            '--output', $ReportPath
+        )
+    $report = $null
+    try {
+        $report = Assert-DefenseClawNamespaceRootCleanupReport `
+            -Report (Get-DefenseClawTargetRuntimeExchangeValue `
+                -Path $ReportPath `
+                -TransactionDirectory $ExchangeDirectory) `
+            -ExpectedRoot ([string]$Request.root) `
+            -ExpectedIdentity ([string]$Request.expected_identity) `
+            -ValidateOnly ([bool]$Request.validate_only) `
+            -ExpectedRootPresent $ExpectedRootPresent
+    }
+    catch {
+        if ([int]$probe.exit_code -eq 0) {
+            throw
+        }
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
+        throw (
+            "native exact-root cleanup failed with exit $($probe.exit_code): " +
+            "$detail; protected report validation failed: $($_.Exception.Message)"
+        )
+    }
+    if ([int]$probe.exit_code -ne 0 -or -not [bool]$report.ok) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value @(
+            [string]$report.error,
+            $probe.output
+        )
+        throw (
+            "native exact-root cleanup failed with exit $($probe.exit_code): " +
+            $detail
+        )
+    }
+    return $report
+}
+
+# State-absent purge has no authenticated deployment record from which to
+# infer user or shared-connector ownership. It may therefore retire only this
+# invocation's exact four SCM identities, their exact IPC grant, and one
+# canonical install-root inode whose full tree is validated by the native
+# no-follow cleanup primitive.
+function Invoke-DefenseClawExactScopeRecoveryPurge {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName
     )
-
-    # 1. Live processes that would hold file handles on paths we're
-    #    about to delete. Killed by best-effort Stop-Process before
-    #    the SCM stops so we don't wait on gateway shutdown.
-    foreach ($name in @(
-        'defenseclaw-gateway',
-        'defenseclaw-cmid-broker',
-        'defenseclaw-hook',
-        'defenseclaw-enterprise-setup',
-        'defenseclaw'
-    )) {
-        Microsoft.PowerShell.Management\Get-Process -Name $name -ErrorAction SilentlyContinue |
-            Microsoft.PowerShell.Core\ForEach-Object {
-                Microsoft.PowerShell.Management\Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-            }
+    if (-not $Sources.ContainsKey('native_cleanup')) {
+        throw 'exact-scope purge requires the authenticated native cleanup executable'
+    }
+    $nativeCleanup = [hashtable]$Sources['native_cleanup']
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $nativeCleanup)
+    $cleanupSourcePath = [IO.Path]::GetFullPath(
+        [string]$nativeCleanup.path
+    ).TrimEnd('\')
+    $installRootPath = [IO.Path]::GetFullPath(
+        [string]$Layout.InstallRoot
+    ).TrimEnd('\')
+    if ([string]::Equals(
+            $cleanupSourcePath,
+            $installRootPath,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $cleanupSourcePath.StartsWith(
+            $installRootPath + '\',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (
+            'exact-scope purge cannot run its cleanup executable from inside ' +
+            'InstallRoot; rerun Uninstall -Purge from external Setup or a ' +
+            'protected staged CLI'
+        )
     }
 
-    # 2. All DefenseClaw-* SCM services (production or cert-scoped).
-    #    sc.exe delete leaves the service in MARKED_FOR_DELETION until
-    #    the last handle closes; the registry-key sweep below removes
-    #    the residual entry so a fresh install with the same name
-    #    isn't blocked.
-    Microsoft.PowerShell.Management\Get-Service -Name 'DefenseClaw*' -ErrorAction SilentlyContinue |
-        Microsoft.PowerShell.Core\ForEach-Object {
-            Microsoft.PowerShell.Management\Stop-Service `
-                -Name $_.Name -Force -ErrorAction SilentlyContinue
-            & sc.exe stop $_.Name 2>$null |
-                Microsoft.PowerShell.Core\Out-Null
-            & sc.exe delete $_.Name 2>$null |
-                Microsoft.PowerShell.Core\Out-Null
+    $managedServiceNames = @(Get-DefenseClawManagedServiceNames `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName)
+    $expectedServiceNames = @(
+        $GatewayServiceName,
+        [string]$Layout.BrokerServiceName,
+        $GuardianServiceName,
+        (Get-DefenseClawEnumeratorServiceName `
+            -GuardianServiceName $GuardianServiceName)
+    )
+    if ($managedServiceNames.Count -ne 4 -or
+        ($managedServiceNames -join "`n") -cne
+            ($expectedServiceNames -join "`n")) {
+        throw 'exact-scope purge did not resolve exactly four managed services'
+    }
+    # Keep the primary service identity checks visibly inside this destructive
+    # boundary; the role helper repeats them immediately before each delete.
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GatewayServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GuardianServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath `
+        -ExpectedManifestPath $Layout.ManifestPath `
+        -Guardian
+    foreach ($role in @('Gateway', 'Broker', 'Guardian', 'Enumerator')) {
+        Assert-DefenseClawExactScopeService `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Role $role
+    }
+
+    $gatewaySID = Get-DefenseClawServiceSIDForRecovery `
+        -ServiceName $GatewayServiceName
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $rootBefore = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
+        [string]$Layout.InstallRoot
+    )
+    $rootPresent = $null -ne $rootBefore
+    $rootIdentity = if ($rootPresent) {
+        ([string]$rootBefore.Identity).ToLowerInvariant()
+    }
+    else {
+        ''
+    }
+    if ($rootPresent -and
+        $rootIdentity -cnotmatch '^[a-f0-9]{8}:[a-f0-9]{16}$') {
+        throw 'exact-scope install root has an invalid native identity'
+    }
+    $request = [ordered]@{
+        schema_version = 1
+        root = [IO.Path]::GetFullPath(
+            [string]$Layout.InstallRoot
+        ).TrimEnd('\')
+        expected_identity = $rootIdentity
+        gateway_service_sid = $gatewaySID
+        validate_only = $true
+    }
+    $requestPath = Microsoft.PowerShell.Management\Join-Path `
+        $Layout.LifecycleLockDirectory `
+        "namespace-root-cleanup-$($Layout.PurgeScopeSHA256)-request.json"
+    $reportPath = Microsoft.PowerShell.Management\Join-Path `
+        $Layout.LifecycleLockDirectory `
+        "namespace-root-cleanup-$($Layout.PurgeScopeSHA256)-report.json"
+
+    # Quiesce every surviving exact service while retaining its authenticated
+    # SCM row as recovery authority. Quiescence releases mapped binaries so
+    # the native helper can prove exclusive destructive access to every inode;
+    # no IPC grant, service row, registry key, or file is removed yet.
+    foreach ($role in @('Enumerator', 'Guardian', 'Gateway', 'Broker')) {
+        $name = switch ($role) {
+            'Enumerator' { [string]$expectedServiceNames[3] }
+            'Guardian' { [string]$expectedServiceNames[2] }
+            'Gateway' { [string]$expectedServiceNames[0] }
+            'Broker' { [string]$expectedServiceNames[1] }
         }
-
-    # 3. Machine-wide DefenseClaw roots. Both the production names
-    #    (DefenseClaw) and every cert-scoped runID's DefenseClaw-Cert
-    #    subtree, plus the DefenseClaw-Lifecycle lock/intent directory
-    #    that holds authenticated rollback-intent JSON blobs.
-    foreach ($root in @(
-        (Microsoft.PowerShell.Management\Join-Path `
-            $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
-        (Microsoft.PowerShell.Management\Join-Path `
-            $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw'),
-        (Microsoft.PowerShell.Management\Join-Path `
-            $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw-Cert'),
-        (Microsoft.PowerShell.Management\Join-Path `
-            $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Cert'),
-        (Microsoft.PowerShell.Management\Join-Path `
-            $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle')
-    )) {
-        Remove-DefenseClawSweepPath -Path $root
+        if (-not (Test-DefenseClawServiceExists -Name $name)) {
+            continue
+        }
+        Assert-DefenseClawExactScopeService `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Role $role
+        Set-DefenseClawServiceStartMode `
+            -Name $name `
+            -StartMode 4
+        Stop-DefenseClawService -Name $name
+        Assert-DefenseClawExactScopeService `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Role $role
     }
 
-    # 4. Per-connector managed artifacts. These live in each agent's
-    #    own directory (ClaudeCode, Cursor, OpenAI\Codex) so we
-    #    delete only DefenseClaw-namespaced entries — the agent's
-    #    own files must survive.
-    $claudeManagedDir = Microsoft.PowerShell.Management\Join-Path `
-        (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'ClaudeCode') `
-        'managed-settings.d'
-    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $claudeManagedDir) {
-        try {
-            & takeown.exe /F $claudeManagedDir /A /R /D Y 2>$null |
-                Microsoft.PowerShell.Core\Out-Null
-            & icacls.exe $claudeManagedDir /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null |
-                Microsoft.PowerShell.Core\Out-Null
-        } catch {}
-        Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $claudeManagedDir -Force -ErrorAction SilentlyContinue |
-            Microsoft.PowerShell.Core\Where-Object {
-                $_.Name -like '*defenseclaw*' -or
-                $_.Name -like '.defenseclaw*' -or
-                $_.Name -eq '90-defenseclaw.json'
-            } |
-            Microsoft.PowerShell.Core\ForEach-Object {
-                Microsoft.PowerShell.Management\Remove-Item `
-                    -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
-            }
+    # With exact services stopped, prove the whole root is canonical and that
+    # every inode can be opened with the same no-sharing destructive access
+    # required by the removal pass. Failure leaves all SCM rows available for
+    # an authenticated retry and does not revoke IPC or mutate the filesystem.
+    [void](Invoke-DefenseClawNamespaceRootCleanup `
+        -Source $nativeCleanup `
+        -Request $request `
+        -RequestPath $requestPath `
+        -ReportPath $reportPath `
+        -ExchangeDirectory $Layout.LifecycleLockDirectory `
+        -ExpectedRootPresent $rootPresent)
+
+    # Retire the exact shared-IPC writer while SCM still authenticates the
+    # captured gateway SID. If IPC or root cleanup fails, every surviving row
+    # remains stopped and disabled for an authenticated retry.
+    $gatewayServicePresent = Test-DefenseClawServiceExists `
+        -Name $GatewayServiceName
+    if ($gatewayServicePresent) {
+        Assert-DefenseClawExactScopeService `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Role Gateway
+        [void](Revoke-DefenseClawManagedIPCServiceAccess `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewayServiceSID $gatewaySID `
+            -TransactionCreatedServicePresent)
     }
-    foreach ($agentDir in @(
-        (Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'Cursor'),
-        (Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'OpenAI\Codex')
-    )) {
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $agentDir)) { continue }
-        try {
-            & takeown.exe /F $agentDir /A /R /D Y 2>$null |
-                Microsoft.PowerShell.Core\Out-Null
-            & icacls.exe $agentDir /grant 'BUILTIN\Administrators:(OI)(CI)F' /T /C 2>$null |
-                Microsoft.PowerShell.Core\Out-Null
-        } catch {}
-        Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $agentDir -Force -ErrorAction SilentlyContinue |
-            Microsoft.PowerShell.Core\Where-Object {
-                $_.Name -like '*defenseclaw*' -or
-                $_.Name -like '.defenseclaw*' -or
-                $_.Name -eq 'hooks.json' -or
-                $_.Name -eq 'requirements.toml'
-            } |
-            Microsoft.PowerShell.Core\ForEach-Object {
-                Microsoft.PowerShell.Management\Remove-Item `
-                    -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
-            }
+    else {
+        [void](Revoke-DefenseClawManagedIPCServiceAccess `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewayServiceSID $gatewaySID)
     }
 
-    # 5. Per-user protected runtime dir. Every interactive profile on
-    #    the box gets .defenseclaw/ removed. This is the directory
-    #    that accumulates .managed-runtime-<connector>-*.json bundles
-    #    from failed rollbacks and reconcile thrash.
-    $usersRoot = Microsoft.PowerShell.Management\Join-Path $script:SystemDrive 'Users'
-    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $usersRoot) {
-        Microsoft.PowerShell.Management\Get-ChildItem `
-            -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue |
-            Microsoft.PowerShell.Core\ForEach-Object {
-                Remove-DefenseClawSweepPath -Path (
-                    Microsoft.PowerShell.Management\Join-Path $_.FullName '.defenseclaw'
-                )
-            }
-    }
+    $request.validate_only = $false
+    [void](Invoke-DefenseClawNamespaceRootCleanup `
+        -Source $nativeCleanup `
+        -Request $request `
+        -RequestPath $requestPath `
+        -ReportPath $reportPath `
+        -ExchangeDirectory $Layout.LifecycleLockDirectory `
+        -ExpectedRootPresent $rootPresent)
 
-    # 6. Residual service registry keys. sc.exe delete on a service
-    #    with a live handle leaves the HKLM key with the DELETED flag,
-    #    which blocks re-creating a service with the same name. We
-    #    remove the key outright so a future install with matching
-    #    identity is free to register.
-    Microsoft.PowerShell.Management\Get-ChildItem `
-        -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services' `
-        -ErrorAction SilentlyContinue |
-        Microsoft.PowerShell.Core\Where-Object { $_.PSChildName -like 'DefenseClaw*' } |
-        Microsoft.PowerShell.Core\ForEach-Object {
+    # Root retirement succeeded. Reauthenticate each remaining exact SCM row
+    # immediately before deleting it; similarly named or drifted rows remain
+    # untouched and fail the recovery closed.
+    foreach ($role in @('Enumerator', 'Guardian', 'Gateway', 'Broker')) {
+        Assert-DefenseClawExactScopeService `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Role $role
+        $name = switch ($role) {
+            'Enumerator' { [string]$expectedServiceNames[3] }
+            'Guardian' { [string]$expectedServiceNames[2] }
+            'Gateway' { [string]$expectedServiceNames[0] }
+            'Broker' { [string]$expectedServiceNames[1] }
+        }
+        Remove-DefenseClawService -Name $name
+    }
+    foreach ($path in @($requestPath, $reportPath)) {
+        if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $path `
+                -PathType Leaf) {
             Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                -LiteralPath $path `
+                -Force
         }
+    }
 
     return [pscustomobject]@{
         schema_version = 1
@@ -18635,7 +18962,8 @@ function Invoke-DefenseClawNamespaceSweep {
         action = 'uninstall'
         installed = $false
         purged = $true
-        namespace_sweep = $true
+        exact_scope_recovery = $true
+        unattributed_user_state_preserved = $true
         cached_enterprise_clients_require_reload = $true
         errors = @()
     }
@@ -18645,6 +18973,7 @@ function Invoke-DefenseClawPreLayoutRecovery {
     param(
         [Parameter(Mandatory)][string]$Action,
         [Parameter(Mandatory)][hashtable]$Layout,
+        [hashtable]$Sources = @{},
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$Purge,
@@ -18877,22 +19206,15 @@ function Invoke-DefenseClawPreLayoutRecovery {
         if (-not (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.StateRoot `
                 -PathType Container)) {
-            # No committed StateRoot exists to authenticate a scoped
-            # purge against — typical of a partially applied install
-            # that failed before StateRoot creation. Under the product
-            # model (single install per machine), Uninstall -Purge
-            # means "wipe DefenseClaw state regardless"; the ordinary
-            # authenticated purge above stays the primary path when
-            # its scope is intact, and this branch is the fallback
-            # for the recovery case. The sweep is bounded to the
-            # DefenseClaw namespace: services (DefenseClaw*), machine
-            # roots (DefenseClaw / DefenseClaw-Cert / DefenseClaw-
-            # Lifecycle), per-connector managed artifacts under the
-            # agent directories, per-user .defenseclaw runtimes, and
-            # residual service registry keys.
+            # Without authenticated StateRoot metadata, no user runtime or
+            # shared connector state can be attributed to this scope. Purge
+            # is therefore restricted to the exact four service identities,
+            # their exact shared-IPC grant, and this scope's one canonical,
+            # identity-pinned InstallRoot.
             if ($Purge) {
-                $sweepResult = Invoke-DefenseClawNamespaceSweep `
+                $sweepResult = Invoke-DefenseClawExactScopeRecoveryPurge `
                     -Layout $Layout `
+                    -Sources $Sources `
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName
                 return [pscustomobject]@{
@@ -18902,7 +19224,7 @@ function Invoke-DefenseClawPreLayoutRecovery {
             }
             throw (
                 'Uninstall requires either an existing managed StateRoot ' +
-                'or -Purge to widen recovery to a DefenseClaw namespace sweep'
+                'or -Purge for exact-scope recovery'
             )
         }
         if ((Microsoft.PowerShell.Management\Test-Path `
@@ -20191,6 +20513,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$GatewayBinary,
         [string]$HookBinary,
         [string]$CLIBinary,
+        [string]$NativeCleanupBinary,
         [string]$Config,
         [string]$Manifest,
         [string]$InstallRoot = (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
@@ -20410,6 +20733,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -GatewayBinary $GatewayBinary `
         -HookBinary $HookBinary `
         -CLIBinary $CLIBinary `
+        -NativeCleanupBinary $NativeCleanupBinary `
         -Config $Config `
         -Manifest $Manifest `
         -InstallerSource $InstallerSource `
@@ -20448,6 +20772,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         $preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery `
             -Action $Action `
             -Layout $layout `
+            -Sources $sources `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -Purge:$Purge `
