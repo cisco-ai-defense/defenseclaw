@@ -37,7 +37,7 @@ var defaultRuleCategories = []ruleCategory{
 			{ID: "SEC-TWILIO", Pattern: regexp.MustCompile("SK[0-9a-fA-F]{32}"), Title: "Twilio API key", Severity: "HIGH", Confidence: 0.8, Tags: []string{"credential"}},
 			{ID: "SEC-NPM-TOKEN", Pattern: regexp.MustCompile("npm_[a-zA-Z0-9]{36,}"), Title: "npm access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 			{ID: "SEC-PYPI-TOKEN", Pattern: regexp.MustCompile("pypi-[A-Za-z0-9\\-_]{50,}"), Title: "PyPI API token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-			{ID: "SEC-HEX-SECRET", Pattern: regexp.MustCompile("(?i)(?:secret(?:_key)?|api[_-]?key|access[_-]?token|auth[_-]?token)\\s*[=:]\\s*[\"'][a-f0-9]{32,}[\"']"), Title: "Hex-encoded secret in assignment", Severity: "HIGH", Confidence: 0.72, Tags: []string{"credential"}},
+			{ID: "SEC-HEX-SECRET", Pattern: regexp.MustCompile("(?i)(?:secret(?:_key)?|api[_-]?key|[a-z0-9]{0,24}[_-]?token)\\s*[=:]\\s*[\"']?[a-f0-9]{32,}\\b"), Title: "Hex-encoded secret in assignment", Severity: "HIGH", Confidence: 0.72, Tags: []string{"credential"}},
 		},
 	},
 	{

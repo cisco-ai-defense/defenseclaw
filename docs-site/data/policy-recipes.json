@@ -2856,7 +2856,7 @@
       "kind": "rule:secret",
       "body": {
         "id": "SEC-HEX-SECRET",
-        "pattern": "(?i)(?:secret(?:_key)?|api[_-]?key|access[_-]?token|auth[_-]?token)\\s*[=:]\\s*[\"'][a-f0-9]{32,}[\"']",
+        "pattern": "(?i)(?:secret(?:_key)?|api[_-]?key|[a-z0-9]{0,24}[_-]?token)\\s*[=:]\\s*[\"']?[a-f0-9]{32,}\\b",
         "title": "Hex-encoded secret in assignment",
         "severity": "HIGH",
         "confidence": 0.72,
