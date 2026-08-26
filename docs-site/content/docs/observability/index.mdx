@@ -233,6 +233,11 @@ failures, bounded failure class, and open deadline. Transient-open and
 half-open states are warnings; an open authentication, permanent-payload, or
 unsafe-endpoint circuit is a failed Doctor check.
 
+Splunk local-mode operators additionally see circuit open and close
+transitions as durable health log events on the DefenseClaw Gateway Health
+dashboard, since these are logged once per transition rather than sampled as
+a point-in-time metric.
+
 The circuit is runtime suppression, not a silent policy edit. It does not
 rewrite `config.yaml` or permanently disable a route. Repair the destination
 credential or endpoint and reload the gateway. If export is no longer wanted,
