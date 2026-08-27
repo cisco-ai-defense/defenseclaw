@@ -514,7 +514,7 @@ namespace DefenseClaw.Windows.Tests
         -StateRoot (Join-Path $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw')
     $expectedCodexParent = Join-Path $script:ProgramData 'OpenAI\Codex'
     $expectedManagedIPCDirectory = Join-Path `
-        $script:ProgramData `
+        $script:ProgramFiles `
         'Cisco\Cisco Secure Client\DefenseClaw\ipc'
     if (-not [string]::Equals(
         [string]$layout.ManagedIPCDirectory,

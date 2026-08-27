@@ -20,13 +20,20 @@ import (
 )
 
 // windowsManagedIPCRelativeDir is the subpath under
-// TrustedProgramData that holds the DefenseClaw UDS socket. The
+// TrustedProgramFiles that holds the DefenseClaw UDS socket. The
 // literal is fixed by the AVC integration contract: Cisco Secure
 // Client's Windows GUI dials this exact path. Changing it requires
 // a coordinated change with the AVC packaging team.
 //
 // The final socket path is
-// `<TrustedProgramData>\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock`.
+// `<TrustedProgramFiles>\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock`.
+//
+// Historical note: earlier builds placed this under TrustedProgramData
+// (ProgramData is the Windows convention for mutable machine state).
+// The AVC release-26.8.4 integration moved it under TrustedProgramFiles
+// so both peers dial the same known-root prefix. The virtual service
+// SID granted DACL rights on this directory during install can bind /
+// unlink the socket under Program Files just as under ProgramData.
 //
 // See spec 004 REQ-02 and parity plan §4.2 C1.
 var windowsManagedIPCRelativeDir = filepath.Join(
@@ -34,12 +41,12 @@ var windowsManagedIPCRelativeDir = filepath.Join(
 )
 
 // resolveManagedIPCSocketPath returns the managed-enterprise UDS
-// socket path on Windows. Resolves `TrustedProgramData` through the
+// socket path on Windows. Resolves `TrustedProgramFiles` through the
 // same fail-closed registry path env_config_windows.go uses so the
-// user-supplied `%ProgramData%` env cannot redirect the socket
+// user-supplied `%ProgramFiles%` env cannot redirect the socket
 // off-disk or into a per-user profile.
 //
-// Returns "" when TrustedProgramData resolution fails; the caller
+// Returns "" when TrustedProgramFiles resolution fails; the caller
 // (ResolveSocketPath in paths.go) turns that into a distinguishable
 // "ipc: resolve socket path: empty" server-start error rather than
 // falling back to a per-user path.
@@ -47,9 +54,9 @@ var windowsManagedIPCRelativeDir = filepath.Join(
 // Spec 004 REQ-02.
 func resolveManagedIPCSocketPath(cfg *config.Config) string {
 	_ = cfg // reserved: a future spec may consult cfg.Managed for override plumbing
-	programData, err := winpath.TrustedProgramData()
-	if err != nil || programData == "" {
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil || programFiles == "" {
 		return ""
 	}
-	return filepath.Join(programData, windowsManagedIPCRelativeDir, SocketFileName)
+	return filepath.Join(programFiles, windowsManagedIPCRelativeDir, SocketFileName)
 }
