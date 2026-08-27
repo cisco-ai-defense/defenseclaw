@@ -109,7 +109,7 @@ func buildHookModelResponseLogRecord(
 	content string,
 	finishReasons []string,
 ) (observability.Record, error) {
-	finishReasons = uniqueNonEmpty(finishReasons)
+	finishReasons = hookModelV8FinishReasons(finishReasons)
 	messages, originalBytes, reported, state, structured := hookModelV8OutputMessages(content, finishReasons)
 	outcome, _, _ := hookModelV8TerminalResult(meta)
 	severity := observability.SeverityInfo
@@ -280,7 +280,7 @@ func applyHookModelRequestLogIdentity(input *observability.LogModelRequestInput,
 	input.DefenseClawSessionResumed = observability.Present(meta.SessionResumed)
 	input.GenAIProviderName = hookModelV8OptionalText(meta.Provider)
 	input.GenAIRequestModel = hookModelV8OptionalID(meta.Model)
-	input.GenAIResponseID = hookModelV8OptionalID(meta.ResponseID)
+	input.GenAIResponseID = hookModelV8OptionalID(meta.reportedResponseID())
 	input.DefenseClawModelRequestID = hookModelV8OptionalID(meta.PromptID)
 	input.DefenseClawModelResponseID = hookModelV8OptionalID(meta.ResponseID)
 }
@@ -321,7 +321,7 @@ func applyHookModelResponseLogIdentity(input *observability.LogModelResponseInpu
 	input.DefenseClawSessionResumed = request.DefenseClawSessionResumed
 	input.GenAIProviderName = request.GenAIProviderName
 	input.GenAIRequestModel = request.GenAIRequestModel
-	input.GenAIResponseModel = hookModelV8OptionalID(meta.Model)
+	input.GenAIResponseModel = hookModelV8OptionalID(meta.ResponseModel)
 	input.GenAIResponseID = request.GenAIResponseID
 	input.DefenseClawModelRequestID = request.DefenseClawModelRequestID
 	input.DefenseClawModelResponseID = request.DefenseClawModelResponseID

@@ -2559,7 +2559,7 @@
             "properties": {
               "name": { "type": "string", "minLength": 1, "maxLength": 128 },
               "provider": { "type": "string", "minLength": 1, "maxLength": 4096 },
-              "model": { "type": "string", "minLength": 1, "maxLength": 4096 },
+              "model": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
               "base_url": { "$ref": "#/$defs/boundedString" },
               "api_key_env": { "$ref": "#/$defs/envName" },
               "capabilities": { "$ref": "#/$defs/stringList" }

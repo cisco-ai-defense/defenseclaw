@@ -12,11 +12,16 @@ import (
 )
 
 var (
-	routingEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	routingVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
+	routingEnvNamePattern         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	routingModelIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+	routingVersionPattern         = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
 )
 
-const routingSupportedVersion = "0.3.0"
+const (
+	routingProviderMaxBytes        = 4096
+	routingModelIdentifierMaxBytes = 256
+	routingSupportedVersion        = "0.3.0"
+)
 
 // Validate checks the operator-facing routing contract before the gateway
 // writes a generated semantic-router config or starts a container. It is
@@ -68,11 +73,20 @@ func (r *RoutingConfig) Validate() error {
 		if strings.TrimSpace(model.Provider) != model.Provider {
 			return fmt.Errorf("models[%d].provider %q must not contain surrounding whitespace", i, model.Provider)
 		}
+		if len(model.Provider) > routingProviderMaxBytes {
+			return fmt.Errorf("models[%d].provider must not exceed %d bytes", i, routingProviderMaxBytes)
+		}
 		if strings.TrimSpace(model.Model) == "" {
 			return fmt.Errorf("models[%d].model must be non-empty", i)
 		}
 		if strings.TrimSpace(model.Model) != model.Model {
 			return fmt.Errorf("models[%d].model %q must not contain surrounding whitespace", i, model.Model)
+		}
+		if len(model.Model) > routingModelIdentifierMaxBytes {
+			return fmt.Errorf("models[%d].model must not exceed %d bytes", i, routingModelIdentifierMaxBytes)
+		}
+		if !routingModelIdentifierPattern.MatchString(model.Model) {
+			return fmt.Errorf("models[%d].model must match identifier-v1 (%s)", i, routingModelIdentifierPattern.String())
 		}
 		if model.BaseURL != "" {
 			if err := validateRoutingURL(fmt.Sprintf("models[%d].base_url", i), model.BaseURL); err != nil {

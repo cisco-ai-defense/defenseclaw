@@ -611,6 +611,59 @@ func TestDefenseClawConfigV8RoutingSchemaValidation(t *testing.T) {
 		}
 	})
 
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "valid Ollama colon model identifier", model: "library/qwen2.5:0.5b"},
+		{name: "valid 256 byte model identifier", model: strings.Repeat("a", 256)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := map[string]any{
+				"config_version": 8,
+				"routing": map[string]any{
+					"enabled": true,
+					"models": []any{map[string]any{
+						"name":     "local",
+						"provider": "ollama",
+						"model":    tc.model,
+					}},
+				},
+			}
+			if err := schema.Validate(doc); err != nil {
+				t.Fatalf("valid routing model rejected: %v", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "empty model identifier", model: ""},
+		{name: "model identifier with spaces", model: "qwen 2.5:0.5b"},
+		{name: "oversized model identifier", model: strings.Repeat("a", 257)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := map[string]any{
+				"config_version": 8,
+				"routing": map[string]any{
+					"enabled": true,
+					"models": []any{map[string]any{
+						"name":     "invalid",
+						"provider": "ollama",
+						"model":    tc.model,
+					}},
+				},
+			}
+			if err := schema.Validate(doc); err == nil {
+				t.Fatalf("routing config with model %q should be rejected", tc.model)
+			}
+		})
+	}
+
 	t.Run("invalid port zero", func(t *testing.T) {
 		t.Parallel()
 		doc := map[string]any{

@@ -31,6 +31,26 @@ func TestRoutingConfigValidateAcceptsConfiguredBackends(t *testing.T) {
 	}
 }
 
+func TestRoutingConfigValidateAcceptsIdentifierV1ProviderModels(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "Ollama colon ID", model: "qwen2.5:0.5b"},
+		{name: "namespaced Ollama ID", model: "library/llama3.2:latest"},
+		{name: "provider-qualified ID", model: "anthropic.claude-sonnet-4-6"},
+		{name: "256 byte boundary", model: strings.Repeat("a", 256)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validRoutingConfigForTest()
+			cfg.Models[0].Model = tc.model
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() = %v", err)
+			}
+		})
+	}
+}
+
 func TestRoutingConfigValidateRemoteEndpointTransportPolicy(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -95,6 +115,10 @@ func TestRoutingConfigValidateRejectsInvalidRelationships(t *testing.T) {
 		}, want: "unsupported"},
 		{name: "invalid signal operator", edit: func(c *RoutingConfig) { c.Signals.Keywords[0].Operator = "XOR" }, want: "AND or OR"},
 		{name: "invalid key env", edit: func(c *RoutingConfig) { c.Models[1].APIKeyEnv = "not-valid!" }, want: "environment variable"},
+		{name: "oversized provider", edit: func(c *RoutingConfig) { c.Models[0].Provider = strings.Repeat("p", 4097) }, want: "4096 bytes"},
+		{name: "empty model", edit: func(c *RoutingConfig) { c.Models[0].Model = "" }, want: "non-empty"},
+		{name: "model with spaces", edit: func(c *RoutingConfig) { c.Models[0].Model = "qwen 2.5:0.5b" }, want: "identifier-v1"},
+		{name: "oversized model", edit: func(c *RoutingConfig) { c.Models[0].Model = strings.Repeat("a", 257) }, want: "256 bytes"},
 		{name: "credential in URL", edit: func(c *RoutingConfig) { c.Models[0].BaseURL = "https://user:pass@example.test/v1" }, want: "embedded credentials"},
 		{name: "query in URL", edit: func(c *RoutingConfig) { c.Models[0].BaseURL = "http://127.0.0.1:11434/v1?token=secret" }, want: "URL query"},
 		{name: "public plaintext backend", edit: func(c *RoutingConfig) { c.Models[0].BaseURL = "http://api.example.test/v1" }, want: "must use https"},

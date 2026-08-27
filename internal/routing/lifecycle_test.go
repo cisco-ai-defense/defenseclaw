@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -26,10 +27,12 @@ func TestLifecycle_NewDefaults(t *testing.T) {
 }
 
 func TestLifecycle_DockerRunArgsAreLoopbackReadOnlyAndVersioned(t *testing.T) {
+	configDir := filepath.FromSlash("/var/lib/defenseclaw/semantic-router")
+	configPath := filepath.Join(configDir, "config.yaml")
 	lc := NewLifecycle(LifecycleConfig{
-		ConfigPath: "/var/lib/defenseclaw/semantic-router/config.yaml",
+		ConfigPath: configPath,
 		Port:       9191,
-		DataDir:    "/var/lib/defenseclaw/semantic-router",
+		DataDir:    configDir,
 		Version:    TestedVersion,
 	})
 	args, err := lc.dockerRunArgs()
@@ -39,7 +42,9 @@ func TestLifecycle_DockerRunArgsAreLoopbackReadOnlyAndVersioned(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"127.0.0.1:9191:8080",
-		"/var/lib/defenseclaw/semantic-router:/app/config:ro",
+		// Bind sources are host paths and therefore use native separators;
+		// the destination is a path inside the Linux router container.
+		configDir + ":/app/config:ro",
 		"ghcr.io/vllm-project/semantic-router/vllm-sr:v" + TestedVersion,
 		testedImageDigest,
 		"--cap-drop=ALL",

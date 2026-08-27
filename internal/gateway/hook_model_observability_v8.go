@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"regexp"
 	"strings"
@@ -19,7 +20,14 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const hookModelV8Producer = "gateway.hook.model"
+const (
+	hookModelV8Producer                     = "gateway.hook.model"
+	hookModelV8MaxFinishReasonItems         = 256
+	hookModelV8MaxFinishReasonUTF8Bytes     = 4096
+	hookModelV8MaxFinishReasonsEncodedBytes = 4096
+	hookModelV8MaxOutputFinishReasonBytes   = 256
+	hookModelV8MaxMetadataBytes             = 4096
+)
 
 type hookModelV8Observation struct {
 	meta                llmEventMeta
@@ -363,9 +371,7 @@ func hookModelV8ModelInput(observation hookModelV8Observation) observability.Spa
 	if technicalFailure {
 		input.Status = observability.NewTraceStatusError(input.ErrorType)
 	}
-	if provider := strings.TrimSpace(observation.provider); provider != "" {
-		input.GenAIProviderName = observability.Present(provider)
-	}
+	input.GenAIProviderName = hookModelV8OptionalText(observation.provider)
 	if observation.responseModel != "" {
 		input.GenAIResponseModel = observability.Present(observation.responseModel)
 	}
@@ -397,7 +403,7 @@ func hookModelV8ModelInput(observation hookModelV8Observation) observability.Spa
 	if observation.toolCallCount > 0 {
 		input.DefenseClawModelToolCallCount = observability.Present(observation.toolCallCount)
 	}
-	input.GenAIResponseID = hookModelV8OptionalID(meta.ResponseID)
+	input.GenAIResponseID = hookModelV8OptionalID(meta.reportedResponseID())
 	input.DefenseClawModelRequestID = hookModelV8OptionalID(meta.PromptID)
 	input.DefenseClawModelResponseID = hookModelV8OptionalID(meta.ResponseID)
 	applyHookModelV8ModelFacts(&input, observation)
@@ -455,7 +461,7 @@ func applyHookModelV8AgentFacts(
 	if observation.responseModel != "" {
 		input.GenAIResponseModel = observability.Present(observation.responseModel)
 	}
-	input.GenAIResponseID = hookModelV8OptionalID(meta.ResponseID)
+	input.GenAIResponseID = hookModelV8OptionalID(meta.reportedResponseID())
 	input.DefenseClawModelRequestID = hookModelV8OptionalID(meta.PromptID)
 	input.DefenseClawModelResponseID = hookModelV8OptionalID(meta.ResponseID)
 }
@@ -548,10 +554,7 @@ func hookModelV8OutputMessages(
 	if !reported {
 		return observability.TelemetryStructuredGenAIOutputMessages{}, 0, false, state, false
 	}
-	finishReason := observability.Absent[string]()
-	if len(finishReasons) > 0 {
-		finishReason = observability.Present(finishReasons[0])
-	}
+	finishReason := hookModelV8OutputFinishReason(finishReasons)
 	bounded, fitted := hookModelV8FitContent(bounded, func(candidate string) error {
 		return observability.ValidateTelemetryStructuredGenAIOutputMessages(
 			hookModelV8OutputMessage(candidate, finishReason),
@@ -663,25 +666,48 @@ func hookModelV8OptionalID(value string) observability.Optional[string] {
 }
 
 func hookModelV8FinishReasons(values []string) []string {
-	result := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
+	capacity := len(values)
+	if capacity > hookModelV8MaxFinishReasonItems {
+		capacity = hookModelV8MaxFinishReasonItems
+	}
+	result := make([]string, 0, capacity)
+	seen := make(map[string]struct{}, capacity)
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" || len(value) > 4096 {
+		if value == "" || !utf8.ValidString(value) || len(value) > hookModelV8MaxFinishReasonUTF8Bytes {
 			continue
 		}
 		if _, exists := seen[value]; exists {
 			continue
 		}
+		candidate := append(result, value)
+		encoded, err := json.Marshal(candidate)
+		if err != nil || len(encoded) > hookModelV8MaxFinishReasonsEncodedBytes {
+			continue
+		}
 		seen[value] = struct{}{}
-		result = append(result, value)
+		result = candidate
+		if len(result) == hookModelV8MaxFinishReasonItems {
+			break
+		}
 	}
 	return result
 }
 
+func hookModelV8OutputFinishReason(values []string) observability.Optional[string] {
+	if len(values) == 0 {
+		return observability.Absent[string]()
+	}
+	value := strings.TrimSpace(values[0])
+	if value == "" || !utf8.ValidString(value) || len(value) > hookModelV8MaxOutputFinishReasonBytes {
+		return observability.Absent[string]()
+	}
+	return observability.Present(value)
+}
+
 func hookModelV8OptionalText(value string) observability.Optional[string] {
 	value = strings.TrimSpace(value)
-	if value != "" {
+	if value != "" && utf8.ValidString(value) && len(value) <= hookModelV8MaxMetadataBytes {
 		return observability.Present(value)
 	}
 	return observability.Absent[string]()
