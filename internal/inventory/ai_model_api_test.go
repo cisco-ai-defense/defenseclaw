@@ -914,6 +914,8 @@ func TestLocalModelAPILifecycleCompletesPagedInventoryBeforeMarkingRemoval(t *te
 func TestRunScanCancellationDoesNotPersistPartialModelInventory(t *testing.T) {
 	var block atomic.Bool
 	started := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			w.WriteHeader(http.StatusOK)
@@ -925,6 +927,7 @@ func TestRunScanCancellationDoesNotPersistPartialModelInventory(t *testing.T) {
 			default:
 				close(started)
 			}
+			cancel()
 			<-r.Context().Done()
 			return
 		}
@@ -949,20 +952,14 @@ func TestRunScanCancellationDoesNotPersistPartialModelInventory(t *testing.T) {
 	observability := &captureAIDiscoveryV8{}
 	svc.BindObservabilityV8(observability)
 	block.Store(true)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, runErr := svc.runScan(ctx, true, "test-cancel")
-		done <- runErr
-	}()
+	_, err = svc.runScan(ctx, true, "test-cancel")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled scan err = %v, want context.Canceled", err)
+	}
 	select {
 	case <-started:
-		cancel()
-	case <-time.After(time.Second):
+	default:
 		t.Fatal("cancelled scan did not reach model endpoint")
-	}
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled scan err = %v, want context.Canceled", err)
 	}
 	if observability.trace == nil || observability.trace.abortCall != 1 || len(observability.trace.ended) != 0 {
 		t.Fatalf("cancelled v8 observation was not aborted cleanly: %+v", observability.trace)

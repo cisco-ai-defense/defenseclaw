@@ -2198,14 +2198,22 @@ func genericHookAdditionalContext(connectorName, rawAction, severity, reason str
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
+	// Both branches keep the "a <SEVERITY> <connector> hook finding"
+	// phrase so telemetry consumers that grep on that prefix (T5.9
+	// finding: earlier revision dropped the "a" from the block path
+	// and consumers keyed on "a HIGH" / "a CRITICAL" stopped matching)
+	// continue to match either shape. The lead clause differs to keep
+	// the block-mode intent unambiguous ("would block ..." reads
+	// distinctly from "observed ...").
+	lead := "DefenseClaw observed"
 	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
+		lead = "DefenseClaw would block this in action mode:"
 	}
+	finding := fmt.Sprintf("a %s %s hook finding", severity, connectorName)
 	if reason == "" {
-		return fmt.Sprintf("%s a %s %s hook finding.", prefix, severity, connectorName)
+		return fmt.Sprintf("%s %s.", lead, finding)
 	}
-	return fmt.Sprintf("%s a %s %s hook finding: %s", prefix, severity, connectorName, reason)
+	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 // connectorReason renders the user-facing reason string surfaced by

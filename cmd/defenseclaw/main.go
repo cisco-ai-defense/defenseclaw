@@ -17,7 +17,10 @@
 package main
 
 import (
+	"context"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli"
 )
@@ -29,7 +32,33 @@ var (
 )
 
 func main() {
+	if commandName := releaseCommandNameForExecutable(); commandName != "" {
+		cli.SetCommandName(commandName)
+	}
 	cli.SetVersion(version)
 	cli.SetBuildInfo(commit, date)
+	if handled, code := runWindowsService(func(ctx context.Context) int {
+		return cli.ExecuteContext(ctx)
+	}); handled {
+		os.Exit(code)
+	}
 	os.Exit(cli.Execute())
+}
+
+func releaseCommandNameForExecutable() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return releaseCommandNameForPath(executable)
+}
+
+func releaseCommandNameForPath(executable string) string {
+	base := filepath.Base(executable)
+	extension := filepath.Ext(base)
+	base = strings.TrimSuffix(base, extension)
+	if strings.EqualFold(base, "defenseclaw") {
+		return "defenseclaw"
+	}
+	return ""
 }

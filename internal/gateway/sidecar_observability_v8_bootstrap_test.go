@@ -171,7 +171,7 @@ func managedAIDBootstrapRawWithoutEndpoint(dataDir string) []byte {
 
 func managedAIDReloadRaw(endpoint string) []byte {
 	return []byte(fmt.Sprintf(
-		"config_version: 8\ncisco_ai_defense:\n  endpoint: %q\nobservability: {}\n",
+		"config_version: 8\ndeployment_mode: managed_enterprise\ncisco_ai_defense:\n  endpoint: %q\nobservability: {}\n",
 		endpoint,
 	))
 }
@@ -303,7 +303,11 @@ func TestManagedReloadCandidateUsesEffectiveConfigBeforeEquivalence(t *testing.T
 
 func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
-	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	// This component fixture runs as the test user, not as a pinned Windows
+	// virtual service account. Keep the process identity honest while the
+	// effective config and exact reload source independently exercise managed
+	// destination ownership; redaction's managed service-pin contract has its
+	// own Windows tests.
 	first := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("managed destination resolved credentials or sent during bootstrap")
 	}))

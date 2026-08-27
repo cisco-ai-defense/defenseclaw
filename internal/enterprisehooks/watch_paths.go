@@ -153,11 +153,11 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 // class of event.
 //
 //	ExclusiveWriter files are ones only DefenseClaw ever writes to:
-//	  hook scripts, _hardening.sh, .hook-<connector>.token sidecars,
-//	  backup archives, generated executables. ANY event on these
-//	  (Write, Chmod, Remove, Rename) is a real signal — either user
-//	  tampering or the guardian's own reconcile tail, both worth
-//	  acting on.
+//	  connector-specific and shared contract-digested hook scripts,
+//	  _hardening.sh, .hook-<connector>.token sidecars, backup archives,
+//	  generated executables. ANY event on these (Write, Chmod, Remove,
+//	  Rename) is a real signal — either user tampering or the guardian's
+//	  own reconcile tail, both worth acting on.
 //
 //	SharedWriter files are ones the agent itself writes to during
 //	  normal use in addition to DefenseClaw's patches:
@@ -198,6 +198,9 @@ type WatchOwnership struct {
 // tampering with it won't fire a repair (guarded by the reconciler
 // test that installs + tampers + expects repair).
 func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
+	if ownership, handled, err := platformWatchOwnedFiles(opts); handled {
+		return ownership, err
+	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
 		return WatchOwnership{}, err
@@ -322,37 +325,15 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		}
 		// HookScripts contains BOTH the connector-specific hook
 		// (codex-hook.sh / claude-code-hook.sh / cursor-hook.sh) AND
-		// the four generic inspect-*.sh scripts that are shared
-		// across every connector. Only the connector-specific one is
-		// safe to include in the watch allowlist:
-		//
-		//   * codex-hook.sh (etc.) is written by exactly ONE
-		//     connector's Install(), with a stable rendered body —
-		//     no cross-connector content drift, atomicFileAlreadyMatches
-		//     short-circuits on repeated reconciles.
-		//
-		//   * inspect-tool.sh (etc.) is written by EVERY connector's
-		//     Install(), each rendering it with different bytes
-		//     (X-DefenseClaw-Connector: <name>, .hook-<name>.token,
-		//     etc.). So each reconcile's second and third connector
-		//     see a content mismatch, rename over the same file, and
-		//     macOS surfaces the rename as an fsnotify REMOVE — which
-		//     our loop then treats as a tamper. Excluding them from
-		//     the fsnotify allowlist entirely means the 5-min backstop
-		//     reconcile is the only thing that re-lays them, which
-		//     is fine: users don't tamper with the generic helpers
-		//     directly (they invoke the connector-specific hook, and
-		//     THAT is watched).
-		genericScripts := map[string]struct{}{
-			"inspect-tool.sh":          {},
-			"inspect-request.sh":       {},
-			"inspect-response.sh":      {},
-			"inspect-tool-response.sh": {},
-		}
+		// the four generic inspect-*.sh scripts shared across every
+		// connector. The shared scripts are rendered exclusively from
+		// install-wide inputs, so repeated connector installs produce
+		// identical bytes and the atomic writer is a no-op. They are
+		// also covered by shared_hook_script_digests in the authenticated
+		// contract lock. Treat all of them as DefenseClaw-only files so
+		// an in-place Write reaches the repair path; the settle/debounce
+		// guards continue to absorb DefenseClaw's own publication tail.
 		for _, p := range footprint.HookScripts {
-			if _, isGeneric := genericScripts[filepath.Base(p)]; isGeneric {
-				continue
-			}
 			addExclusive(p)
 		}
 		for _, p := range footprint.GeneratedFiles {
@@ -362,21 +343,15 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 			addExclusive(p)
 		}
 		// Hook sidecars: the .token / .hookcfg / _hardening.sh files
-		// under ~/.defenseclaw/hooks/. Of these, only the per-
-		// connector scoped token (.hook-<connector>.token) is stable
-		// per reconcile — the others are either shared across
-		// connectors (_hardening.sh, .hookcfg) or unused legacy
-		// (.token). Same rationale as the generic scripts above:
-		// including cross-connector shared files here means every
-		// reconcile rewrites them once per connector, producing
-		// fsnotify rename storms. The scoped-token file remains in
-		// the allowlist because it's the primary bypass vector — a
-		// user replacing it with a wrong token disables inspection
-		// silently.
+		// under ~/.defenseclaw/hooks/. The connector-scoped token and
+		// _hardening.sh are stable DefenseClaw-only artifacts. The
+		// latter is part of shared_hook_script_digests and must react to
+		// in-place writes just like the inspect scripts. The merged
+		// .hookcfg and unused legacy .token remain excluded because
+		// they are not stable connector-scoped files.
 		sharedSidecars := map[string]struct{}{
-			".token":        {},
-			".hookcfg":      {},
-			"_hardening.sh": {},
+			".token":   {},
+			".hookcfg": {},
 		}
 		sidecarFiles, sidecarErr := hookSidecarFiles(dataDir, conn.Name())
 		if sidecarErr != nil {

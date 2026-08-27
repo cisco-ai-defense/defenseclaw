@@ -1623,33 +1623,15 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 	}
 	hooks := ensureJSONObject(cfg, "hooks")
 	cfg["version"] = 1
-	for _, event := range []string{
-		"sessionStart",
-		"sessionEnd",
-		"preToolUse",
-		"postToolUse",
-		"postToolUseFailure",
-		"subagentStart",
-		"subagentStop",
-		"beforeShellExecution",
-		"beforeMCPExecution",
-		"afterShellExecution",
-		"afterMCPExecution",
-		"beforeReadFile",
-		"beforeTabFileRead",
-		"afterFileEdit",
-		"afterTabFileEdit",
-		"beforeSubmitPrompt",
-		"afterAgentResponse",
-		"afterAgentThought",
-		"stop",
-		"preCompact",
-		"workspaceOpen",
-	} {
+	for _, event := range cursorHookEvents {
 		entry := map[string]interface{}{
-			"type":       "command",
-			"command":    shellWord(hookScript),
-			"timeout":    30000,
+			"type":    "command",
+			"command": shellWord(hookScript),
+			// Cursor's hooks.json timeout is in seconds; use the same
+			// shared constant the enterprise writer emits so a bug in
+			// one place cannot deviate. A raw 30000 was 30000 seconds
+			// (>8 hours), long enough for a hung hook to freeze Cursor.
+			"timeout":    windowsCursorEnterpriseHookTimeoutSeconds,
 			"failClosed": failClosed,
 		}
 		// Replace instead of merely appending. This both migrates the previous
