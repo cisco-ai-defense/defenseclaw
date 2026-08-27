@@ -82,7 +82,7 @@
       <title>Circuit breaker state over time (by destination)</title>
       <chart>
         <search>
-          <query>`defenseclaw_circuit_breaker_events` | timechart span=5m max(circuit_state_num) as circuit_state_num by destination limit=8 useother=f | filldown</query>
+          <query>`defenseclaw_circuit_breaker_events` | timechart span=5m latest(circuit_state_num) as circuit_state_num by destination limit=0 useother=f | filldown</query>
           <earliest>-1h</earliest>
           <latest>now</latest>
         </search>
