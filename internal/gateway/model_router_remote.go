@@ -19,12 +19,15 @@ import (
 // classify/intent API. It gets a routing decision (which model to use) without
 // forwarding the request — DefenseClaw handles forwarding via Bifrost.
 type RemoteRouterClient struct {
-	endpoint string // e.g. "http://127.0.0.1:8080"
-	timeout  time.Duration
-	client   *http.Client
-	backends map[string]ModelRouterBackend
-	dotenv   string
+	endpoint     string // e.g. "http://127.0.0.1:8080"
+	timeout      time.Duration
+	client       *http.Client
+	healthClient *http.Client
+	backends     map[string]ModelRouterBackend
+	dotenv       string
 }
+
+const remoteRouterHealthTimeout = 2 * time.Second
 
 // NewRemoteRouterClient creates a client for the semantic router API server.
 func NewRemoteRouterClient(endpoint string, timeoutMs int) *RemoteRouterClient {
@@ -53,6 +56,14 @@ func newRemoteRouterClient(endpoint string, timeoutMs int, backends []ModelRoute
 			backendByName[name] = backend
 		}
 	}
+	transport := &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	checkRedirect := func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &RemoteRouterClient{
 		endpoint: strings.TrimRight(endpoint, "/"),
 		timeout:  timeout,
@@ -63,14 +74,17 @@ func newRemoteRouterClient(endpoint string, timeoutMs int, backends []ModelRoute
 			// Routing endpoints are operator-configured trust boundaries. Do not
 			// let an endpoint redirect prompts or user metadata to a different
 			// origin without that origin appearing explicitly in config.yaml.
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			CheckRedirect: checkRedirect,
+			Transport:     transport,
+		},
+		// Health probes have an availability budget independent from the
+		// latency-sensitive classification path. Keep the same transport and
+		// redirect boundary while preventing a 50ms classifier timeout from
+		// clamping the sidecar's two-second health probe.
+		healthClient: &http.Client{
+			Timeout:       remoteRouterHealthTimeout,
+			CheckRedirect: checkRedirect,
+			Transport:     transport,
 		},
 	}
 }
@@ -246,16 +260,16 @@ var _ ModelRouter = (*RemoteRouterClient)(nil)
 
 // Healthy checks if the SR service is reachable.
 func (c *RemoteRouterClient) Healthy(ctx context.Context) bool {
-	if c == nil {
+	if c == nil || c.healthClient == nil {
 		return false
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	reqCtx, cancel := context.WithTimeout(ctx, remoteRouterHealthTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, c.endpoint+"/health", nil)
 	if err != nil {
 		return false
 	}
-	resp, err := c.client.Do(req)
+	resp, err := c.healthClient.Do(req)
 	if err != nil {
 		return false
 	}

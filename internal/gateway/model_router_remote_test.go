@@ -194,6 +194,30 @@ func TestRemoteRouterClientHealthy(t *testing.T) {
 	}
 }
 
+func TestRemoteRouterClientHealthBudgetDoesNotInheritClassificationTimeout(t *testing.T) {
+	const responseDelay = 100 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(responseDelay)
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/classify/intent":
+			_ = json.NewEncoder(w).Encode(classifyResponse{RecommendedModel: "fast"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewRemoteRouterClient(srv.URL, 50)
+	if !client.Healthy(context.Background()) {
+		t.Fatal("health response within the probe budget inherited the shorter classification timeout")
+	}
+	if got := client.Route(context.Background(), &ModelRouterInput{}); got != nil {
+		t.Fatalf("classification exceeded its latency budget: decision = %+v", got)
+	}
+}
+
 func routerResponseServer(t *testing.T, alias string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -7,6 +7,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -37,6 +39,17 @@ func (c *channelModelRouterHealthChecker) Healthy(ctx context.Context) bool {
 type blockingModelRouterHealthChecker struct {
 	started chan struct{}
 	once    sync.Once
+}
+
+type reportingModelRouterHealthChecker struct {
+	checker   modelRouterHealthChecker
+	completed chan bool
+}
+
+func (c *reportingModelRouterHealthChecker) Healthy(ctx context.Context) bool {
+	result := c.checker.Healthy(ctx)
+	c.completed <- result
+	return result
 }
 
 func (c *blockingModelRouterHealthChecker) Healthy(ctx context.Context) bool {
@@ -216,6 +229,50 @@ func TestRunModelRouterHealthMonitorBoundsProbe(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("router health monitor did not stop after cancellation")
+	}
+}
+
+func TestRunModelRouterHealthMonitorUsesProbeBudgetIndependentOfClassification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	health := NewSidecarHealth()
+	health.SetRouting(StateRunning, "", nil)
+	sidecar := &Sidecar{health: health}
+	checker := &reportingModelRouterHealthChecker{
+		checker:   NewRemoteRouterClient(srv.URL, 5),
+		completed: make(chan bool, 1),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sidecar.runModelRouterHealthMonitor(ctx, checker, nil, time.Millisecond, 100*time.Millisecond)
+	}()
+
+	select {
+	case healthy := <-checker.completed:
+		if !healthy {
+			t.Fatal("health monitor clamped the probe to the classifier timeout")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("router health probe did not complete")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("router health monitor did not stop after cancellation")
+	}
+	if got := health.Snapshot().Routing.State; got != StateRunning {
+		t.Fatalf("healthy slow probe degraded routing state: got %q", got)
 	}
 }
 

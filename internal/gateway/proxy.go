@@ -2670,7 +2670,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	promptID := ""
 	pendingRoutedPrompt := false
 	pendingPromptMeta := llmEventMeta{}
-	pendingPromptContext := r.Context()
+	var pendingPromptRedactionEnabled *bool
+	pendingPromptHasRedactionDecision := false
 	preCallSeverity := "" // populated by guardrail inspection; fed to model router
 	inspectionText := promptInspectionText(userText)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
@@ -2723,11 +2724,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 		if deferRoutedPrompt {
 			// The canonical model.request record must describe the backend request
-			// DefenseClaw actually dispatches. Preserve blocked prompts immediately,
-			// but wait for an allowed router decision before fixing model/provider.
+			// DefenseClaw actually dispatches. Wait for both an allowed router
+			// decision and the generated model span before fixing model/provider and
+			// correlation; a pre-call block is not a model request.
 			pendingRoutedPrompt = true
 			pendingPromptMeta = meta
-			pendingPromptContext = promptEmitContext
+			if deferManagedPrompt {
+				pendingPromptRedactionEnabled = verdict.RedactionEnabled
+				pendingPromptHasRedactionDecision = true
+			}
 		} else if deferManagedPrompt {
 			promptID = p.emitLLMPromptEventV8(promptEmitContext, meta, userText, req.RawBody)
 		}
@@ -2740,12 +2745,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		requestTrace.AddGuardrailOverlay(overlay)
 
 		if verdict.Action == "block" && mode == "action" {
-			if pendingRoutedPrompt {
-				promptID = p.emitLLMPromptEventV8(
-					pendingPromptContext, pendingPromptMeta, userText, req.RawBody,
-				)
-				pendingRoutedPrompt = false
-			}
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
@@ -2830,9 +2829,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 		}
 	}
-	emitPendingRoutedPrompt := func() {
+	emitPendingRoutedPrompt := func(ctx context.Context) string {
 		if !pendingRoutedPrompt {
-			return
+			return promptID
+		}
+		if ctx == nil {
+			ctx = r.Context()
+		}
+		if pendingPromptHasRedactionDecision {
+			ctx = withRedactionDecision(ctx, pendingPromptRedactionEnabled)
 		}
 		_, selectedPromptProvider := p.llmSystemAndProvider(req.Model)
 		if req.TargetURL != "" {
@@ -2846,9 +2851,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		pendingPromptMeta.Provider = selectedPromptProvider
 		pendingPromptMeta.Model = req.Model
 		promptID = p.emitLLMPromptEventV8(
-			pendingPromptContext, pendingPromptMeta, userText, req.RawBody,
+			ctx, pendingPromptMeta, userText, req.RawBody,
 		)
 		pendingRoutedPrompt = false
+		return promptID
 	}
 	recordForwardedHeaders := func() {
 		if forwardedHeaderCount == 0 {
@@ -2885,11 +2891,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			return
 		}
-		emitPendingRoutedPrompt()
 		recordForwardedHeaders()
 		p.rawForwardChatCompletion(
 			w, r, body, &req, routedProvider, mode, customBlockMsg,
-			agentCtx, promptID, requestTrace, &traceResult,
+			agentCtx, promptID, emitPendingRoutedPrompt, requestTrace, &traceResult,
 		)
 		return
 	}
@@ -2922,13 +2927,12 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 		return
 	}
-	emitPendingRoutedPrompt()
 	recordForwardedHeaders()
 
 	if req.Stream {
-		p.handleStreamingRequest(w, r, &req, routedProvider, mode, customBlockMsg, upstream, agentCtx, promptID, requestTrace, &traceResult)
+		p.handleStreamingRequest(w, r, &req, routedProvider, mode, customBlockMsg, upstream, agentCtx, promptID, emitPendingRoutedPrompt, requestTrace, &traceResult)
 	} else {
-		p.handleNonStreamingRequest(w, r, &req, routedProvider, mode, customBlockMsg, upstream, agentCtx, promptID, requestTrace, &traceResult)
+		p.handleNonStreamingRequest(w, r, &req, routedProvider, mode, customBlockMsg, upstream, agentCtx, promptID, emitPendingRoutedPrompt, requestTrace, &traceResult)
 	}
 }
 
@@ -2966,7 +2970,7 @@ func (p *GuardrailProxy) emitProxyModelFailureV8(
 	p.emitLLMResponseEventV8(terminalCtx, meta, output, "", finishReasons)
 }
 
-func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, routedProvider, mode, customBlockMsg string, upstream LLMProvider, agentCtx context.Context, promptID string, requestTrace *proxyV8RequestTrace, traceResult *proxyV8TraceResult) {
+func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, routedProvider, mode, customBlockMsg string, upstream LLMProvider, agentCtx context.Context, promptID string, emitPrompt func(context.Context) string, requestTrace *proxyV8RequestTrace, traceResult *proxyV8TraceResult) {
 	aliasModel := req.Model
 	fmt.Fprintf(os.Stderr, "[guardrail] → upstream (non-streaming) model=%q messages=%d\n", req.Model, len(req.Messages))
 
@@ -2985,6 +2989,13 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			defer modelTrace.Abort()
 			defer func() { modelTrace.Finish(*traceResult) }()
 		}
+	}
+	if emitPrompt != nil {
+		emitCtx := r.Context()
+		if modelTrace != nil && modelTrace.model != nil {
+			emitCtx = llmCtx
+		}
+		promptID = emitPrompt(emitCtx)
 	}
 
 	resp, err := upstream.ChatCompletion(r.Context(), req)
@@ -3106,7 +3117,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, routedProvider, mode, customBlockMsg string, upstream LLMProvider, agentCtx context.Context, promptID string, requestTrace *proxyV8RequestTrace, traceResult *proxyV8TraceResult) {
+func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, routedProvider, mode, customBlockMsg string, upstream LLMProvider, agentCtx context.Context, promptID string, emitPrompt func(context.Context) string, requestTrace *proxyV8RequestTrace, traceResult *proxyV8TraceResult) {
 	const sseRoute = "/v1/chat/completions"
 	var sseBytes int64
 	if _, ok := w.(http.Flusher); !ok {
@@ -3136,14 +3147,22 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	if selected := strings.TrimSpace(routedProvider); selected != "" {
 		providerName = selected
 	}
+	llmCtx := agentCtx
 	var modelTrace *proxyV8ModelTrace
 	if requestTrace != nil {
 		modelInput := p.proxyV8ModelInput(agentCtx, req, providerName, llmStartTime.UTC())
-		agentCtx, modelTrace = requestTrace.StartModel(agentCtx, modelInput)
+		llmCtx, modelTrace = requestTrace.StartModel(agentCtx, modelInput)
 		if modelTrace != nil {
 			defer modelTrace.Abort()
 			defer func() { modelTrace.Finish(*traceResult) }()
 		}
+	}
+	if emitPrompt != nil {
+		emitCtx := r.Context()
+		if modelTrace != nil && modelTrace.model != nil {
+			emitCtx = llmCtx
+		}
+		promptID = emitPrompt(emitCtx)
 	}
 
 	// Open/close metrics are registered after model construction so the close
@@ -3151,7 +3170,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// live. This keeps a long stream and its metrics on one immutable graph even
 	// when configuration reloads mid-response.
 	sseStart := time.Now()
-	emitLifecycle(agentCtx, "stream", "stream.open", map[string]string{"route": sseRoute})
+	emitLifecycle(llmCtx, "stream", "stream.open", map[string]string{"route": sseRoute})
 	streamMetricRuntime := p.proxyOperationalV8Runtime()
 	if requestTrace != nil {
 		streamMetricRuntime = requestTrace.metricRuntime()
@@ -3159,14 +3178,14 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	if modelTrace != nil && modelTrace.model != nil {
 		streamMetricRuntime = modelTrace.model
 	}
-	p.recordProxyStreamV8(agentCtx, streamMetricRuntime, sseRoute, "open", observability.OutcomeAttempted, 0, 0)
+	p.recordProxyStreamV8(llmCtx, streamMetricRuntime, sseRoute, "open", observability.OutcomeAttempted, 0, 0)
 	sseOutcome := "ok"
 	sseMetricOutcome := observability.OutcomeCompleted
 	defer func() {
 		elapsed := time.Since(sseStart)
 		ms := elapsed.Milliseconds()
 		bytes := atomic.LoadInt64(&sseBytes)
-		terminalCtx, terminalCancel := proxyV8TerminalTelemetryContext(agentCtx)
+		terminalCtx, terminalCancel := proxyV8TerminalTelemetryContext(llmCtx)
 		defer terminalCancel()
 		emitLifecycle(terminalCtx, "stream", "stream.close", map[string]string{
 			"route":       sseRoute,
@@ -3228,13 +3247,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 
 		const midStreamScanInterval = 500
 		if accumulated.Len()-lastScanLen >= midStreamScanInterval && mode == "action" {
-			midVerdict := p.inspector.InspectMidStream(agentCtx, "completion", accumulated.String(),
+			midVerdict := p.inspector.InspectMidStream(llmCtx, "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
 			p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
 					midVerdict.Severity, redaction.Reason(midVerdict.Reason))
-				overlay := p.recordTelemetry(agentCtx, "completion", aliasModel, midVerdict, 0, mode, true)
+				overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, midVerdict, 0, mode, true)
 				modelTrace.AddGuardrailOverlay(overlay)
 				p.enqueueBlockNotification(midVerdict, "completion", aliasModel)
 				streamBlocked = true
@@ -3281,13 +3300,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// before reaching the buffer threshold). Run a guardrail check first.
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
 		if accumulated.Len() > 0 && mode == "action" {
-			initVerdict := p.inspector.InspectMidStream(agentCtx, "completion", accumulated.String(),
+			initVerdict := p.inspector.InspectMidStream(llmCtx, "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
 			p.resolveConfirm(r.Context(), r, initVerdict, "completion", aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
 					initVerdict.Severity, redaction.Reason(initVerdict.Reason))
-				overlay := p.recordTelemetry(agentCtx, "completion", aliasModel, initVerdict, 0, mode, true)
+				overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, initVerdict, 0, mode, true)
 				modelTrace.AddGuardrailOverlay(overlay)
 				p.enqueueBlockNotification(initVerdict, "completion", aliasModel)
 				streamBlocked = true
@@ -3318,7 +3337,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 		sseOutcome = lifecycleOutcome
 		sseMetricOutcome = failureOutcome
-		terminalCtx, terminalCancel := proxyV8TerminalTelemetryContext(agentCtx)
+		terminalCtx, terminalCancel := proxyV8TerminalTelemetryContext(llmCtx)
 		emitGatewayError(terminalCtx, gatewaylog.SubsystemStream, gatewaylog.ErrCodeUpstreamError,
 			fmt.Sprintf("upstream stream error: %v", err), err)
 		recordGatewayErrorV8(
@@ -3343,7 +3362,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		blockedMeta.PromptID = promptID
 		blockedMeta.ResponseID = firstNonEmpty(streamResponseID, stableLLMEventID("response", blockedMeta.Source, blockedMeta.SessionID, blockedMeta.RequestID, req.Model, "blocked"))
 		blockedMeta.ResponseIDReported = strings.TrimSpace(streamResponseID) != ""
-		p.emitLLMResponseEventV8(agentCtx, blockedMeta, "", "", append(streamFinishReasons, "blocked"))
+		p.emitLLMResponseEventV8(llmCtx, blockedMeta, "", "", append(streamFinishReasons, "blocked"))
 		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
 		blockChunk := StreamChunk{
 			ID: "chatcmpl-blocked", Object: "chat.completion.chunk",
@@ -3363,7 +3382,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		content := accumulated.String()
 		t0 := time.Now()
 
-		postCtx, postCancel := p.postCallContext(agentCtx)
+		postCtx, postCancel := p.postCallContext(llmCtx)
 		postCtx = proxyGuardrailWithoutEnforcement(postCtx)
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
@@ -3379,7 +3398,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		p.logPostCall(aliasModel, content, verdict, elapsed, &ChatUsage{
 			PromptTokens: ptrOr(tokIn, 0), CompletionTokens: ptrOr(tokOut, 0),
 		})
-		overlay := p.recordTelemetry(agentCtx, "completion", aliasModel, verdict, elapsed, mode, false)
+		overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, verdict, elapsed, mode, false)
 		modelTrace.AddGuardrailOverlay(overlay)
 
 	}
@@ -3396,7 +3415,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	streamResponseMeta.ResponseIDReported = strings.TrimSpace(streamResponseID) != ""
 	if len(assembledTC) > 0 {
 		if verdict := p.inspectToolCalls(r.Context(), assembledTC); verdict != nil {
-			overlay := p.recordTelemetry(agentCtx, "tool-call", aliasModel, verdict, 0, mode,
+			overlay := p.recordTelemetry(llmCtx, "tool-call", aliasModel, verdict, 0, mode,
 				verdict.Action == "block" && mode == "action")
 			modelTrace.AddGuardrailOverlay(overlay)
 			if verdict.Action == "block" && mode == "action" {
@@ -3414,19 +3433,19 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			}
 		}
 		if !tcBlocked && !streamFailed {
-			p.emitOpenAIToolCallEvents(agentCtx, streamResponseMeta, assembledTC)
+			p.emitOpenAIToolCallEvents(llmCtx, streamResponseMeta, assembledTC)
 		}
 	}
 	if tcBlocked {
 		streamFinishReasons = append(streamFinishReasons, "blocked")
-		p.emitLLMResponseEventV8(agentCtx, streamResponseMeta, "", "", streamFinishReasons)
+		p.emitLLMResponseEventV8(llmCtx, streamResponseMeta, "", "", streamFinishReasons)
 	} else if streamFailed {
 		p.emitProxyModelFailureV8(
-			agentCtx, r, req, providerName, promptID, streamResponseModel,
+			llmCtx, r, req, providerName, promptID, streamResponseModel,
 			streamResponseID, streamFailureLifecycle, accumulated.String(), streamFinishReasons,
 		)
 	} else {
-		p.emitLLMResponseEventV8(agentCtx, streamResponseMeta, accumulated.String(), accumulated.String(), streamFinishReasons)
+		p.emitLLMResponseEventV8(llmCtx, streamResponseMeta, accumulated.String(), accumulated.String(), streamFinishReasons)
 	}
 	if tcBlocked {
 		*traceResult = proxyV8TraceResult{
@@ -5360,6 +5379,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	customBlockMsg string,
 	agentCtx context.Context,
 	promptID string,
+	emitPrompt func(context.Context) string,
 	requestTrace *proxyV8RequestTrace,
 	traceResult *proxyV8TraceResult,
 ) {
@@ -5401,6 +5421,13 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 				}
 			}()
 		}
+	}
+	if emitPrompt != nil {
+		emitCtx := r.Context()
+		if modelTrace != nil && modelTrace.model != nil {
+			emitCtx = llmCtx
+		}
+		promptID = emitPrompt(emitCtx)
 	}
 	failModel := func(errorType string, cause error) {
 		failTrace(errorType, cause)

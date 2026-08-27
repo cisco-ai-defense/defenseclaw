@@ -114,6 +114,54 @@ func latestStoredModelTerminalV8(t *testing.T, capture *proxyCanonicalCapture) s
 	return terminal
 }
 
+func assertStoredModelRequestAndResponseCorrelation(
+	t *testing.T,
+	capture *proxyCanonicalCapture,
+	wantTraceID, wantSpanID string,
+) {
+	t.Helper()
+	database, err := sql.Open("sqlite", capture.store.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	canonicalRows, err := database.Query(`
+		SELECT event_name, projected_record_json
+		FROM audit_events
+		WHERE event_name IN (?, ?)`,
+		observability.TelemetryEventModelRequest,
+		observability.TelemetryEventModelResponse,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer canonicalRows.Close()
+	correlated := map[string]int{}
+	for canonicalRows.Next() {
+		var eventName, projectedJSON string
+		if err := canonicalRows.Scan(&eventName, &projectedJSON); err != nil {
+			t.Fatal(err)
+		}
+		var projected map[string]any
+		if err := json.Unmarshal([]byte(projectedJSON), &projected); err != nil {
+			t.Fatal(err)
+		}
+		correlation, _ := projected["correlation"].(map[string]any)
+		if correlation["trace_id"] != wantTraceID || correlation["span_id"] != wantSpanID {
+			t.Fatalf("routed %s correlation=%v want model=%s/%s",
+				eventName, correlation, wantTraceID, wantSpanID)
+		}
+		correlated[eventName]++
+	}
+	if err := canonicalRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if correlated[observability.TelemetryEventModelRequest] != 1 ||
+		correlated[observability.TelemetryEventModelResponse] != 1 {
+		t.Fatalf("routed correlated model logs=%v", correlated)
+	}
+}
+
 func (i *countingAllowInspector) Inspect(
 	_ context.Context,
 	direction string,
@@ -219,6 +267,114 @@ func TestSemanticRouterRawForwardRewritesModelAndClearsOriginalCredential(t *tes
 	attributes := proxyCanonicalAttributes(t, model.Record())
 	if got := attributes["gen_ai.request.model"]; got != "qwen2.5:0.5b" {
 		t.Fatalf("routed model trace request model = %#v, want qwen2.5:0.5b", got)
+	}
+	assertStoredModelRequestAndResponseCorrelation(
+		t, capture, model.TraceID().String(), model.SpanID().String(),
+	)
+}
+
+func TestSemanticRouterPreCallBlockEmitsNoModelTelemetry(t *testing.T) {
+	provider := &mockProvider{}
+	inspector := newMockInspector()
+	inspector.setVerdict("prompt", &ScanVerdict{
+		Action: "block", Severity: "CRITICAL", Reason: "prompt blocked before routing",
+	})
+	proxy := newTestProxy(t, provider, inspector, "action")
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	proxy.SetDefaultAgentName("zeptoclaw")
+	proxy.bindObservabilityV8Trace(runtime)
+	proxy.SetModelRouter(staticModelRouter{decision: &ModelRouterDecision{
+		Provider: "ollama", TargetURL: "http://127.0.0.1:11434", TargetURLOverride: true,
+		Model: "qwen2.5:0.5b", Reason: "decision=small-route",
+	}})
+
+	body := mustJSON(t, map[string]interface{}{
+		"model": "openai/gpt-4o",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Block this before routing."},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handleChatCompletion(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pre-call block status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.DefenseClawBlocked == nil || !*response.DefenseClawBlocked ||
+		len(response.Choices) != 1 || response.Choices[0].FinishReason == nil ||
+		*response.Choices[0].FinishReason != "content_filter" {
+		t.Fatalf("pre-call block did not preserve synthetic content_filter response: %+v", response)
+	}
+	if provider.getLastReq() != nil || rec.Header().Get("X-Semantic-Router") != "" {
+		t.Fatalf("pre-call block reached routing/upstream: routed=%q upstream=%+v",
+			rec.Header().Get("X-Semantic-Router"), provider.getLastReq())
+	}
+
+	spans := capture.snapshot()
+	agents := proxyGeneratedSpansForFamily(spans, observability.TelemetryFamilyAgentInvoke)
+	models := proxyGeneratedSpansForFamily(spans, observability.TelemetryFamilyModelChat)
+	if len(agents) != 1 || len(models) != 0 {
+		t.Fatalf("pre-call block agent/model spans=%d/%d", len(agents), len(models))
+	}
+	if agents[0].Record().Outcome() != observability.OutcomeBlocked ||
+		agents[0].StatusCode().String() != "Ok" {
+		t.Fatalf("pre-call block agent outcome/status=%s/%s",
+			agents[0].Record().Outcome(), agents[0].StatusCode())
+	}
+	input := proxyGeneratedGuardrailSpan(t, spans, "input")
+	parent, parentOK := input.ParentSpanID()
+	if input.Record().Outcome() != observability.OutcomeBlocked ||
+		input.StatusCode().String() != "Ok" || !parentOK || parent != agents[0].SpanID() ||
+		input.TraceID() != agents[0].TraceID() {
+		t.Fatalf("pre-call block guardrail outcome/status/parent=%s/%s/%s/%t agent=%s trace=%s/%s",
+			input.Record().Outcome(), input.StatusCode(), parent, parentOK, agents[0].SpanID(),
+			input.TraceID(), agents[0].TraceID())
+	}
+	inputAttributes := proxyCanonicalAttributes(t, input.Record())
+	if inputAttributes["defenseclaw.guardrail.decision"] != "block" ||
+		inputAttributes["defenseclaw.guardrail.effective_action"] != "block" ||
+		inputAttributes["defenseclaw.guardrail.enforced"] != true {
+		t.Fatalf("pre-call block guardrail attributes=%v", inputAttributes)
+	}
+
+	database, err := sql.Open("sqlite", capture.store.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var modelEvents int
+	if err := database.QueryRow(`
+		SELECT COUNT(*) FROM audit_events
+		WHERE event_name IN (?, ?, ?)`,
+		observability.TelemetryEventModelRequest,
+		observability.TelemetryEventModelResponse,
+		observability.TelemetryEventModelCallFailed,
+	).Scan(&modelEvents); err != nil {
+		t.Fatal(err)
+	}
+	if modelEvents != 0 {
+		t.Fatalf("pre-call block emitted %d canonical model log(s)", modelEvents)
+	}
+	var blockedEnforcements int
+	if err := database.QueryRow(`
+		SELECT COUNT(*) FROM audit_events
+		WHERE event_name = ?
+		  AND json_extract(projected_record_json, '$.outcome') = ?`,
+		observability.TelemetryEventEnforcementBlockApplied,
+		string(observability.OutcomeBlocked),
+	).Scan(&blockedEnforcements); err != nil {
+		t.Fatal(err)
+	}
+	if blockedEnforcements != 1 {
+		t.Fatalf("pre-call block enforcement rows=%d, want one blocked outcome", blockedEnforcements)
 	}
 }
 
@@ -404,6 +560,9 @@ func TestSemanticRouterRawForwardStreamingKeepsSelectedProviderV8Identity(t *tes
 	if promptRows != 1 || responseRows != 1 {
 		t.Fatalf("routed streaming request/response rows=%d/%d, want 1/1", promptRows, responseRows)
 	}
+	assertStoredModelRequestAndResponseCorrelation(
+		t, capture, model.TraceID().String(), model.SpanID().String(),
+	)
 }
 
 func TestSemanticRouterRawForwardStreamingObserveInspectsCompletionOnce(t *testing.T) {
@@ -608,7 +767,7 @@ func TestSemanticRouterStructuredForwardKeepsSelectedProviderV8Identity(t *testi
 
 	proxy.handleNonStreamingRequest(
 		rec, httpReq, &chatReq, "openrouter", "action", "", provider,
-		agentCtx, "", requestTrace, &traceResult,
+		agentCtx, "", nil, requestTrace, &traceResult,
 	)
 	requestTrace.Finish(traceResult)
 
@@ -654,7 +813,7 @@ func TestSemanticRouterStructuredStreamingFailureEmitsCorrelatedV8Terminal(t *te
 
 	proxy.handleStreamingRequest(
 		rec, httpReq, &chatReq, "openrouter", "action", "", provider,
-		agentCtx, "", requestTrace, &traceResult,
+		agentCtx, "", nil, requestTrace, &traceResult,
 	)
 	requestTrace.Finish(traceResult)
 
@@ -722,7 +881,7 @@ func TestSemanticRouterStructuredNonStreamingFailureEmitsCorrelatedV8Terminal(t 
 
 	proxy.handleNonStreamingRequest(
 		rec, httpReq, &chatReq, "openrouter", "action", "", provider,
-		agentCtx, "", requestTrace, &traceResult,
+		agentCtx, "", nil, requestTrace, &traceResult,
 	)
 	requestTrace.Finish(traceResult)
 
