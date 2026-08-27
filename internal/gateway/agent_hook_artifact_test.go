@@ -64,7 +64,7 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 			})
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			var matched *RuleFinding
 			for index := range findings {
 				if findings[index].RuleID == test.wantRule {
@@ -90,6 +90,94 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 					facts,
 					facts.EnforcementProjection(),
 				)
+			}
+		})
+	}
+
+	t.Run("parser uncertainty telemetry", func(t *testing.T) {
+		path := filepath.Join(dir, "parser-uncertainty.sh")
+		body := []byte("#!/bin/sh\n\"$RUNNER\" -c 'rm -rf /'\n")
+		if err := os.WriteFile(path, body, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		facts := actionfacts.Analyze(actionfacts.Input{
+			Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir,
+		})
+		var telemetry trustedActionTelemetry
+		promotedArtifactFindings(t.Context(), agentHookRequest{
+			ConnectorName: connectorName,
+		}, facts, true, func(observation trustedActionTelemetry) {
+			telemetry.merge(observation)
+		})
+		if telemetry.ParserUncertaintyCount == 0 {
+			t.Fatalf("artifact parser uncertainty telemetry = %+v", telemetry)
+		}
+	})
+}
+
+func TestPromotedArtifactPreservesActiveAgentInstructionContext(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-active-agent-context-test"
+	installDefaultProfileConnector(t, connectorName)
+	dir := t.TempDir()
+
+	for _, test := range []struct {
+		name     string
+		fileName string
+		ruleID   string
+		lost     bool
+	}{
+		{
+			name:     "cached case-insensitive AGENTS.md",
+			fileName: "AGENTS.md",
+			ruleID:   "COG-AGENTS-MD",
+		},
+		{
+			name:     "lost case-insensitive MEMORY.md",
+			fileName: "MEMORY.md",
+			ruleID:   "COG-MEMORY",
+			lost:     true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			activePath := filepath.Join(dir, test.fileName)
+			mutatedPath := filepath.Join(dir, strings.ToLower(test.fileName))
+			scriptPath := filepath.Join(dir, test.fileName+"-mutator.sh")
+			body := fmt.Sprintf("#!/bin/sh\nprintf updated > %q\n", mutatedPath)
+			if err := os.WriteFile(scriptPath, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			input := actionfacts.Input{
+				Tool:    "shell",
+				Command: fmt.Sprintf("bash %q", scriptPath),
+				CWD:     dir,
+			}
+			if test.lost {
+				input.ActiveAgentFilesCaseInsensitiveUncertain = true
+				input.ActiveAgentFilesUncertain = true
+			} else {
+				input.ActiveAgentFiles = []string{activePath}
+				input.ActiveAgentFilesCaseInsensitive = []string{activePath}
+			}
+			outer := actionfacts.Analyze(input)
+
+			for _, preExecution := range []bool{true, false} {
+				t.Run(fmt.Sprintf("pre-execution=%t", preExecution), func(t *testing.T) {
+					findings := promotedArtifactFindings(
+						t.Context(),
+						agentHookRequest{ConnectorName: connectorName},
+						outer,
+						preExecution,
+						nil,
+					)
+					matched := findingWithID(findings, test.ruleID)
+					if matched == nil {
+						t.Fatalf("executed script lost %s: %v outer=%+v", test.ruleID, FindingStrings(findings), outer)
+					}
+					if got := matched.contributesToEnforcement(); got != preExecution {
+						t.Fatalf("enforceable=%t want %t: %+v", got, preExecution, *matched)
+					}
+				})
 			}
 		})
 	}
@@ -201,7 +289,7 @@ func TestPromotedArtifactHonorsPOSIXNoExecScriptMode(t *testing.T) {
 			})
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			matched := findingWithID(findings, "tamper.detector_state_write")
 			if !test.wantFinding {
 				if len(findings) != 0 {
@@ -279,7 +367,7 @@ func TestPromotedArtifactRevokesNoExecPreviewAfterConflictingSources(t *testing.
 			}
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			matched := findingWithID(findings, "tamper.detector_state_write")
 			if matched == nil {
 				t.Fatalf("source conflict lost tamper finding: %v facts=%+v", FindingStrings(findings), facts)
@@ -333,7 +421,7 @@ func TestPOSIXNoExecArtifactPipelineRetainsFinding(t *testing.T) {
 			})
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			matched := findingWithID(findings, "tamper.detector_state_write")
 			if matched == nil {
 				t.Fatalf("no-exec pipeline lost tamper finding: %v facts=%+v", FindingStrings(findings), facts)
@@ -421,6 +509,7 @@ func TestPOSIXNoExecScriptRedirectRetainsStateMutationDetection(t *testing.T) {
 		agentHookRequest{ConnectorName: connectorName},
 		facts,
 		true,
+		nil,
 	); len(findings) != 0 {
 		t.Fatalf("safe redirected script produced artifact findings: %v", FindingStrings(findings))
 	}
@@ -508,7 +597,7 @@ func TestPromotedArtifactUsesInvocationWorkingDirectory(t *testing.T) {
 			})
 			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 				ConnectorName: connectorName,
-			}, facts, true)
+			}, facts, true, nil)
 			got := false
 			for _, finding := range findings {
 				got = got || finding.RuleID == "CMD-RM-RF" && finding.contributesToEnforcement()
@@ -615,7 +704,7 @@ func TestPromotedArtifactOuterControlFlowIsDetectionOnly(t *testing.T) {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: command})
 		findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 			ConnectorName: connectorName,
-		}, facts, true)
+		}, facts, true, nil)
 		var matched *RuleFinding
 		for index := range findings {
 			if findings[index].RuleID == "CMD-RM-RF" {
@@ -659,7 +748,7 @@ func TestPromotedArtifactFactsParticipateInToolChains(t *testing.T) {
 				ConnectorName: connectorName,
 				toolChain:     capture,
 			}
-			_ = promotedArtifactFindings(t.Context(), req, outer, true)
+			_ = promotedArtifactFindings(t.Context(), req, outer, true, nil)
 			projection, _ := projectAgentHookToolChains(
 				req,
 				connector.ToolCallLifecycleContract{},
@@ -705,7 +794,7 @@ func TestPromotedWindowsArtifactFactsParticipateInToolChains(t *testing.T) {
 		ConnectorName: connectorName,
 		toolChain:     capture,
 	}
-	_ = promotedArtifactFindings(t.Context(), req, outer, true)
+	_ = promotedArtifactFindings(t.Context(), req, outer, true, nil)
 	projection, _ := projectAgentHookToolChains(
 		req,
 		connector.ToolCallLifecycleContract{},
@@ -762,6 +851,7 @@ func TestPromotedWindowsArtifactTrailingLineEndingEnforcement(t *testing.T) {
 				agentHookRequest{ConnectorName: connectorName},
 				outer,
 				true,
+				nil,
 			)
 			var matched *RuleFinding
 			for index := range findings {
@@ -827,6 +917,7 @@ func TestPromotedWindowsCMDAndBATFinalBytes(t *testing.T) {
 						agentHookRequest{ConnectorName: connectorName},
 						outer,
 						true,
+						nil,
 					)
 					if test.wantBlock {
 						if len(findings) != 1 || findings[0].RuleID != "CMD-RM-RF" ||
@@ -895,6 +986,7 @@ func TestPromotedArtifactDirectSuffixDoesNotInventInterpreter(t *testing.T) {
 		agentHookRequest{ConnectorName: "artifact-direct-suffix-test"},
 		facts,
 		true,
+		nil,
 	); len(findings) != 0 {
 		t.Fatalf("suffix-only direct path produced findings: %v", FindingStrings(findings))
 	}

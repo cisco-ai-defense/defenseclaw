@@ -877,6 +877,7 @@ type daemonReadinessRequirements struct {
 	guardrailEnabled bool
 	watcherEnabled   bool
 	telemetryEnabled bool
+	routingEnabled   bool
 	// requiredConnectors, verifyConnectorHookTokens, and verifyConnectorOTLP
 	// are transaction-only gates.
 	// Ordinary starts retain multi-connector failure isolation; token rotation
@@ -1237,6 +1238,7 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 		// sidecar telemetry health source.
 		// Match that runtime state instead of waiting forever for "disabled".
 		telemetryEnabled: cfg.ConfigVersion == config.ObservabilityV8ConfigVersion,
+		routingEnabled:   cfg.Routing.Enabled,
 		startedNotBefore: startedNotBefore,
 		expectedDataDir:  cfg.DataDir,
 		listenerHost:     gatewayBindHost(cfg),
@@ -2041,6 +2043,19 @@ func gatewaySnapshotReady(
 	if !subsystemMatchesConfiguredState(snap.Telemetry.State, requirements.telemetryEnabled) {
 		return false, nil
 	}
+	if requirements.routingEnabled {
+		// Semantic routing fails open: a router failure must remain visible to
+		// operators without making the core gateway unavailable. Wait for the
+		// routing lifecycle to reach a terminal startup state, then accept both
+		// healthy and explicitly degraded operation.
+		switch snap.Routing.State {
+		case gateway.StateRunning, gateway.StateError:
+		default:
+			return false, nil
+		}
+	} else if snap.Routing.State != gateway.StateDisabled {
+		return false, nil
+	}
 	return true, nil
 }
 
@@ -2066,6 +2081,7 @@ func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {
 		{name: "guardrail", health: snap.Guardrail},
 		{name: "api", health: snap.API},
 		{name: "telemetry", health: snap.Telemetry},
+		{name: "routing", health: snap.Routing},
 	}
 	if snap.Sandbox != nil {
 		subsystems = append(subsystems, struct {

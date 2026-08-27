@@ -1,0 +1,198 @@
+---
+title: Semantic model routing
+description: Run vLLM Semantic Router as a managed Docker sidecar and route supported proxy traffic between OpenAI-compatible model backends.
+keywords:
+  - DefenseClaw semantic routing
+  - vLLM Semantic Router
+  - setup routing
+  - OpenClaw model routing
+  - ZeptoClaw model routing
+---
+
+Semantic routing lets the DefenseClaw gateway choose a configured model backend
+after prompt inspection and before the upstream request. DefenseClaw starts a
+version-pinned vLLM Semantic Router container, asks it to classify each supported
+request, resolves the returned model alias locally, and then forwards through the
+normal guardrail proxy path.
+
+<Callout title="Proxy connectors only">
+Automatic routing currently applies to **OpenClaw** and **ZeptoClaw** requests that
+reach the proxy as OpenAI-compatible `*/chat/completions` traffic. Hook-based
+connectors—including Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI,
+OpenHands, Antigravity, Hermes, OpenCode, Amp, and OmniGent—keep their existing
+provider path and are not rerouted.
+</Callout>
+
+## Compatibility at a glance
+
+| Traffic path | Semantic routing | Guardrails |
+| --- | --- | --- |
+| OpenClaw or ZeptoClaw → OpenAI Chat Completions proxy | Yes | Pre-call and post-call |
+| Hook-based connector → hook API | No | Existing hook enforcement |
+| OpenAI Responses API (`/v1/responses`) | No | Existing proxy behavior |
+| Anthropic Messages API (`/v1/messages`) | No | Existing proxy behavior |
+| Native Gemini or Bedrock endpoints | No | Existing proxy behavior |
+
+Routing fails open to the connector's original upstream: if the router is unavailable,
+times out, or returns an unknown model alias, DefenseClaw logs the routing failure and
+continues with the original provider selection. Guardrail enforcement does not fail
+open with it.
+
+## Prerequisites
+
+- Docker Desktop or Docker Engine is installed and running.
+- OpenClaw or ZeptoClaw is configured in proxy mode.
+- Every routed backend exposes an OpenAI-compatible Chat Completions endpoint.
+- Each `base_url` is an origin such as `https://api.openai.com`, without
+  `/v1/chat/completions` appended.
+- Provider credentials are stored in process environment variables or
+  `~/.defenseclaw/.env`; never put key values in `config.yaml`.
+
+### Host support
+
+| Mode | Host requirement | Runtime architecture |
+| --- | --- | --- |
+| Managed sidecar | Any supported DefenseClaw host with Docker running Linux containers (Docker Desktop or Docker Engine) | Pinned image includes `linux/amd64` and `linux/arm64` |
+| Remote router | Any supported DefenseClaw host that can reach the configured HTTPS endpoint | Router is operator-owned |
+| Windows-containers mode | Not supported | Use Docker Desktop Linux containers or remote mode |
+
+The managed flow in this change was manually exercised on Apple silicon with
+Docker Desktop. The lifecycle and configuration contract are unit-tested without
+depending on host architecture.
+
+## Configure routing
+
+<Callout title="Activation command, not a model wizard">
+`defenseclaw setup routing --enable` validates and activates an existing routing
+catalog; it does not invent provider or model choices. Add at least one model and
+one fallback decision to `config.yaml` first, then run the command. This keeps
+model names, endpoints, and credential references explicit and reviewable.
+</Callout>
+
+Add the routing block to `~/.defenseclaw/config.yaml`. Model `name` values are the
+aliases returned by the semantic router; `model`, `base_url`, and `api_key_env` are
+resolved inside DefenseClaw and are not sent to the classifier as credentials.
+
+```yaml title="~/.defenseclaw/config.yaml"
+routing:
+  enabled: true
+  version: "0.3.0"
+  port: 8080
+  algorithm: static
+
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-4o-mini
+      base_url: https://api.openai.com
+      api_key_env: OPENAI_API_KEY
+
+    - name: deep
+      provider: openai
+      model: gpt-4.1
+      base_url: https://api.openai.com
+      api_key_env: OPENAI_API_KEY
+
+  signals:
+    keywords:
+      - name: code-request
+        keywords: ["debug", "implement", "refactor"]
+        operator: OR
+
+  decisions:
+    - name: code
+      priority: 100
+      conditions:
+        - type: keyword
+          name: code-request
+      model_refs: [deep]
+
+    - name: default
+      priority: 1
+      model_refs: [fast]
+```
+
+Then enable the managed sidecar:
+
+```bash
+defenseclaw setup routing --enable
+defenseclaw-gateway restart
+```
+
+The setup command checks Docker, saves the routing state, and tells the gateway to
+start the pinned router image on its next launch. The generated router configuration
+lives under `~/.defenseclaw/semantic-router/`; it is runtime state, not a file you
+need to maintain.
+
+### Store routed-model keys with DefenseClaw
+
+Every non-empty `routing.models[].api_key_env` is part of DefenseClaw's normal key
+registry. When routing is enabled, `keys list` marks it as required; keyless local
+models such as Ollama do not create a credential requirement.
+
+```bash
+defenseclaw keys list --missing-only
+defenseclaw keys set OPENAI_API_KEY
+```
+
+The gateway resolves the selected backend's key only after classification. Secret
+values and real provider URLs are not written into the generated router catalog or
+sent in the classifier request. See [Keys and credentials](/docs/reference/keys) for
+storage precedence and automation-safe commands.
+
+<Callout title="Prompt privacy boundary">
+The classifier receives message roles and content because it must evaluate the
+request. In managed mode that traffic stays on the loopback-bound Docker API. A
+configured remote classifier receives the same prompt content, so DefenseClaw
+requires HTTPS for non-local endpoints and does not follow redirects. API keys,
+request headers, tools, user IDs, session IDs, and gateway policy metadata are not
+sent to the v0.3 classifier.
+</Callout>
+
+## Verify the running state
+
+```bash
+defenseclaw setup routing --status
+docker ps --filter label=com.defenseclaw.component=semantic-router
+```
+
+Send a normal request through OpenClaw or ZeptoClaw. A routed response includes:
+
+```text
+X-Semantic-Router: routed
+X-Semantic-Router-Reason: decision=… model=… confidence=…
+```
+
+No separate public chat endpoint is exposed on the router port. Port `8080` is the
+loopback classifier API used by the gateway; clients should continue using their
+normal DefenseClaw connector endpoint. The container uses a read-only config mount,
+a read-only root filesystem, no Linux capabilities, and a digest-pinned multi-platform
+v0.3.0 image.
+
+## Disable routing
+
+```bash
+defenseclaw setup routing --disable
+defenseclaw-gateway restart
+```
+
+Disabling routing leaves connector and guardrail configuration intact. Requests use
+their original provider again after the restart.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Router is enabled but no container appears | Run `docker info`, then restart the gateway. |
+| Requests never show the routing response header | Confirm the connector is OpenClaw or ZeptoClaw and the path ends in `/chat/completions`. |
+| Gateway logs `unknown model alias` | Ensure the router's returned alias exactly matches a `routing.models[].name`. |
+| Routed provider returns authentication errors | Check the named `api_key_env` with `defenseclaw keys list`; do not copy the secret into YAML. |
+| Router startup fails after editing YAML | Validate the configured port, unique model names, decision `model_refs`, and Docker logs for the labeled container. |
+
+<Callout title="Why this is not under bundles/">
+The integration manages one version-pinned container and generates per-install router
+configuration from `config.yaml`. DefenseClaw's `bundles/` directory is reserved for
+versioned operator assets such as Compose stacks, dashboards, and static service
+configuration that must be packaged into the CLI. There is no reusable Compose bundle
+to ship for this lifecycle today.
+</Callout>

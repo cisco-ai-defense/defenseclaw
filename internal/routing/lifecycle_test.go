@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,11 +17,66 @@ func TestLifecycle_NewDefaults(t *testing.T) {
 		// Port not specified
 	})
 
-	if lc.port != 8080 {
-		t.Errorf("expected default port 8080, got %d", lc.port)
+	if lc.port != DefaultAPIPort {
+		t.Errorf("expected default port %d, got %d", DefaultAPIPort, lc.port)
 	}
 	if lc.configPath != "/etc/sr/config.yaml" {
 		t.Errorf("expected configPath /etc/sr/config.yaml, got %s", lc.configPath)
+	}
+}
+
+func TestLifecycle_DockerRunArgsAreLoopbackReadOnlyAndVersioned(t *testing.T) {
+	lc := NewLifecycle(LifecycleConfig{
+		ConfigPath: "/var/lib/defenseclaw/semantic-router/config.yaml",
+		Port:       9191,
+		DataDir:    "/var/lib/defenseclaw/semantic-router",
+		Version:    TestedVersion,
+	})
+	args, err := lc.dockerRunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"127.0.0.1:9191:8080",
+		"/var/lib/defenseclaw/semantic-router:/app/config:ro",
+		"ghcr.io/vllm-project/semantic-router/vllm-sr:v" + TestedVersion,
+		testedImageDigest,
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges:true",
+		"--read-only",
+		"/tmp:rw,noexec,nosuid,size=64m",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("docker args %q missing %q", joined, want)
+		}
+	}
+	if !slices.Contains(args, "--pull=missing") {
+		t.Fatalf("docker args %q missing --pull=missing", joined)
+	}
+	if slices.Contains(args, "--entrypoint") {
+		t.Fatalf("docker args %q should use the versioned image entrypoint", joined)
+	}
+}
+
+func TestLifecycle_RejectsUnsafeVersionBeforeDocker(t *testing.T) {
+	lc := NewLifecycle(LifecycleConfig{Version: "0.3.0;latest"})
+	if _, err := lc.dockerRunArgs(); err == nil || !strings.Contains(err.Error(), "invalid semantic-router version") {
+		t.Fatalf("dockerRunArgs error = %v, want invalid version", err)
+	}
+}
+
+func TestLifecycle_RejectsUntestedVersionBeforeDocker(t *testing.T) {
+	lc := NewLifecycle(LifecycleConfig{Version: "0.4.0"})
+	if _, err := lc.dockerRunArgs(); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("dockerRunArgs error = %v, want unsupported version", err)
+	}
+}
+
+func TestLifecycle_ContainerNameDoesNotExposeDataDirectory(t *testing.T) {
+	lc := NewLifecycle(LifecycleConfig{DataDir: "/Users/alice/private/semantic-router"})
+	if strings.Contains(lc.containerName, "alice") || !strings.HasPrefix(lc.containerName, "defenseclaw-sr-") {
+		t.Fatalf("containerName = %q", lc.containerName)
 	}
 }
 

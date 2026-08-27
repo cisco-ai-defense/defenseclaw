@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -41,10 +42,13 @@ func watchdogShutdownSignals() []os.Signal {
 	return []os.Signal{os.Interrupt, syscall.SIGTERM}
 }
 
-// watchdogStartDir keeps the current working directory on Windows. "/" is not
-// a stable process directory across Windows shells and drives.
-func watchdogStartDir() string {
-	return ""
+// watchdogStartDir keeps the detached watchdog out of the protected data
+// directory. Windows pins a process working directory against rename/delete;
+// inheriting the gateway launcher's data-root cwd makes Doctor's exact custody
+// checks fail while protection is healthy. The executable directory is the
+// trusted, stable launch boundary.
+func watchdogStartDir(executable string) string {
+	return filepath.Dir(filepath.Clean(executable))
 }
 
 // watchdogSysProcAttr returns a SysProcAttr that starts the background

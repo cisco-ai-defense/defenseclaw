@@ -43,6 +43,77 @@ func TestInstallRejectsInvalidNativeWindowsRequestBeforeSideEffects(t *testing.T
 	}
 }
 
+func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("strict managed runtime artifacts are native Windows-only")
+	}
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	const oversizedManagedArtifact = int64(4<<20 + 1)
+	conn := connector.NewClaudeCodeConnector()
+	newOpts := func(dataDir string) connector.SetupOpts {
+		return connector.SetupOpts{
+			DataDir:           dataDir,
+			AgentVersion:      "2.1.152",
+			ManagedEnterprise: true,
+		}
+	}
+	writeSparse := func(t *testing.T, path string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(oversizedManagedArtifact); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("contract lock", func(t *testing.T) {
+		opts := newOpts(t.TempDir())
+		writeSparse(t, filepath.Join(opts.DataDir, "hook_contract_lock.json"))
+
+		err := validateHookContract("action", conn, opts)
+		if err == nil ||
+			!strings.Contains(err.Error(), "enterprise hooks: load hook contract lock:") ||
+			!strings.Contains(err.Error(), "byte limit") {
+			t.Fatalf("managed lock validation error = %v, want bounded load context", err)
+		}
+		opts.ManagedEnterprise = false
+		if err := validateHookContract("action", conn, opts); err != nil {
+			t.Fatalf("unmanaged lock validation changed: %v", err)
+		}
+	})
+
+	t.Run("hook runtime", func(t *testing.T) {
+		opts := newOpts(t.TempDir())
+		unmanagedOpts := opts
+		unmanagedOpts.ManagedEnterprise = false
+		entry := connector.NewHookContractLockEntry(unmanagedOpts, conn, "test-build")
+		if err := connector.SaveHookContractLockEntry(opts.DataDir, entry); err != nil {
+			t.Fatalf("seed contract lock: %v", err)
+		}
+		hookDir := filepath.Join(opts.DataDir, "hooks")
+		if err := os.MkdirAll(hookDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeSparse(t, filepath.Join(hookDir, "_hardening.sh"))
+
+		err := validateHookContract("action", conn, opts)
+		if err == nil ||
+			!strings.Contains(err.Error(), "enterprise hooks: hash managed hook runtime:") ||
+			!strings.Contains(err.Error(), "byte limit") {
+			t.Fatalf("managed runtime validation error = %v, want bounded hash context", err)
+		}
+		if err := validateHookContract("action", conn, unmanagedOpts); err != nil {
+			t.Fatalf("unmanaged runtime validation changed: %v", err)
+		}
+	})
+}
+
 func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
@@ -755,16 +826,19 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 	}
 
 	// EXCLUSIVE-writer files: DC-only artifacts that render to
-	// the same bytes on every reconcile for a given connector.
-	// Two categories qualify: the connector-specific hook script
-	// (codex-hook.sh — written by only this connector's Install)
-	// and the scoped token sidecar (.hook-codex.token — one per
-	// connector). Any event on these is meaningful because
-	// atomicWriteFile short-circuits when content matches, so
-	// only real churn triggers events.
+	// the same bytes on every reconcile. This includes the
+	// connector-specific hook and scoped token as well as every
+	// contract-digested shared script. The shared scripts are
+	// connector-independent, so adding them does not reintroduce
+	// cross-connector publication churn.
 	wantExclusive := []string{
 		filepath.Join(hookDir, "codex-hook.sh"),
 		filepath.Join(hookDir, ".hook-codex.token"),
+		filepath.Join(hookDir, "inspect-tool.sh"),
+		filepath.Join(hookDir, "inspect-request.sh"),
+		filepath.Join(hookDir, "inspect-response.sh"),
+		filepath.Join(hookDir, "inspect-tool-response.sh"),
+		filepath.Join(hookDir, "_hardening.sh"),
 	}
 	for _, w := range wantExclusive {
 		if !sliceContains(own.ExclusiveWriter, w) {
@@ -777,26 +851,14 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 		}
 	}
 
-	// Regression guard: shared-across-connectors artifacts must
-	// NOT be in either set. Including them creates a fsnotify
-	// rename storm because every reconcile rewrites the file once
-	// per active connector with slightly different bytes, and
-	// each rewrite fires a REMOVE event that our loop treats as a
-	// tamper. Excluding them means the 5-min backstop reconcile
-	// is the only thing that re-lays them, which is fine — users
-	// don't tamper with these helpers directly (they invoke the
-	// connector-specific hook, and THAT is in the allowlist).
+	// Regression guard: merged sidecars that are not
+	// contract-digested scripts remain outside both ownership sets.
 	wantExcluded := []string{
-		filepath.Join(hookDir, "inspect-tool.sh"),
-		filepath.Join(hookDir, "inspect-request.sh"),
-		filepath.Join(hookDir, "inspect-response.sh"),
-		filepath.Join(hookDir, "inspect-tool-response.sh"),
-		filepath.Join(hookDir, "_hardening.sh"),
 		filepath.Join(hookDir, ".hookcfg"),
 	}
 	for _, w := range wantExcluded {
 		if sliceContains(own.ExclusiveWriter, w) {
-			t.Fatalf("%s must NOT be in ExclusiveWriter — it is shared across connectors and re-rendered by every Install() with different bytes, which fires an fsnotify REMOVE storm every reconcile", w)
+			t.Fatalf("%s must NOT be in ExclusiveWriter", w)
 		}
 		if sliceContains(own.SharedWriter, w) {
 			t.Fatalf("%s must NOT be in SharedWriter either", w)
@@ -1454,9 +1516,17 @@ func TestInstallRefusesRootTarget(t *testing.T) {
 
 func TestLoadManifestValidatesEnabledTargets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
+	targetIdentity := "  - user: alice\n"
+	if runtime.GOOS == "windows" {
+		// YAML single quotes do not process backslash escapes, so a single
+		// pair per separator is what LoadManifest sees. The doubled
+		// backslashes here were previously making the parsed value
+		// `C:\\Users\\alice`, not the intended `C:\Users\alice`.
+		targetIdentity = "  - user: alice\n    user_home: 'C:\\Users\\alice'\n    sid: S-1-5-21-1-2-3-1001\n"
+	}
 	if err := os.WriteFile(path, []byte(`
 targets:
-  - user: alice
+`+targetIdentity+`
     connector: codex
     agent_version: "codex-cli 0.142.0"
   - enabled: false

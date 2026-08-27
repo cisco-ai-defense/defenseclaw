@@ -44,11 +44,17 @@ var semanticVersionPattern = regexp.MustCompile(`^(?:v)?([0-9]+)\.([0-9]+)\.([0-
 type Component string
 
 const (
-	ComponentGateway  Component = "gateway"
-	ComponentHook     Component = "hook"
-	ComponentLauncher Component = "launcher"
-	ComponentStartup  Component = "startup"
-	ComponentSetup    Component = "setup"
+	ComponentGateway    Component = "gateway"
+	ComponentCMIDBroker Component = "cmid-broker"
+	ComponentHook       Component = "hook"
+	ComponentLauncher   Component = "launcher"
+	ComponentStartup    Component = "startup"
+	ComponentSetup      Component = "setup"
+	// ComponentEnterpriseSetup is deliberately distinct from ComponentSetup.
+	// The ordinary Setup is a per-user, asInvoker application; the enterprise
+	// bootstrap owns machine-wide services and ACLs and must therefore run only
+	// with an elevated administrator token.
+	ComponentEnterpriseSetup Component = "enterprise-setup"
 )
 
 // AllComponents is the complete resource inventory for project-built Windows
@@ -57,10 +63,12 @@ const (
 // identity and resources. CPython and cosign retain their upstream resources.
 var AllComponents = []Component{
 	ComponentGateway,
+	ComponentCMIDBroker,
 	ComponentHook,
 	ComponentLauncher,
 	ComponentStartup,
 	ComponentSetup,
+	ComponentEnterpriseSetup,
 }
 
 // Target identifies a supported Windows build target. Resource manifests and
@@ -104,12 +112,13 @@ func (target Target) specification() (targetSpecification, error) {
 }
 
 type componentMetadata struct {
-	AssemblyName     string
-	Description      string
-	FileDescription  string
-	InternalName     string
-	OriginalFilename string
-	CommonControlsV6 bool
+	AssemblyName         string
+	Description          string
+	FileDescription      string
+	InternalName         string
+	OriginalFilename     string
+	CommonControlsV6     bool
+	RequireAdministrator bool
 }
 
 var componentMetadataByName = map[Component]componentMetadata{
@@ -119,6 +128,13 @@ var componentMetadataByName = map[Component]componentMetadata{
 		FileDescription:  "DefenseClaw Gateway",
 		InternalName:     "defenseclaw-gateway",
 		OriginalFilename: "defenseclaw.exe",
+	},
+	ComponentCMIDBroker: {
+		AssemblyName:     "Cisco.DefenseClaw.CMIDBroker",
+		Description:      "DefenseClaw isolated cloud credential broker",
+		FileDescription:  "DefenseClaw Credential Broker",
+		InternalName:     "defenseclaw-cmid-broker",
+		OriginalFilename: "defenseclaw-cmid-broker.exe",
 	},
 	ComponentHook: {
 		AssemblyName:     "Cisco.DefenseClaw.Hook",
@@ -148,6 +164,15 @@ var componentMetadataByName = map[Component]componentMetadata{
 		InternalName:     "DefenseClawSetup",
 		OriginalFilename: "DefenseClawSetup-x64.exe",
 		CommonControlsV6: true,
+	},
+	ComponentEnterpriseSetup: {
+		AssemblyName:         "Cisco.DefenseClaw.EnterpriseSetup",
+		Description:          "DefenseClaw managed-enterprise Windows setup",
+		FileDescription:      "DefenseClaw Enterprise Setup",
+		InternalName:         "DefenseClawSetupEnterprise",
+		OriginalFilename:     "DefenseClawSetup-Enterprise-x64.exe",
+		CommonControlsV6:     true,
+		RequireAdministrator: true,
 	},
 }
 
@@ -192,9 +217,10 @@ func Manifest(component Component, versionValue string) ([]byte, error) {
 
 // ManifestForTarget returns the canonical UTF-8 RT_MANIFEST/1 bytes for a
 // component and target. The manifest opts every binary into long paths, current
-// Windows compatibility, per-monitor-v2 DPI behavior, and a non-elevating
-// execution context. Setup is the sole executable that creates common controls,
-// so it alone activates v6 and remains restricted to AMD64 certification.
+// Windows compatibility, and per-monitor-v2 DPI behavior. The ordinary Setup
+// remains non-elevating. The separate enterprise Setup requires an administrator
+// because it owns machine-wide services and protected Program Files/ProgramData
+// state. Both Setup variants activate common-controls v6 and are AMD64-only.
 func ManifestForTarget(target Target, component Component, versionValue string) ([]byte, error) {
 	specification, err := target.specification()
 	if err != nil {
@@ -204,7 +230,8 @@ func ManifestForTarget(target Target, component Component, versionValue string) 
 	if !ok {
 		return nil, fmt.Errorf("unsupported Windows resource component %q", component)
 	}
-	if component == ComponentSetup && target != TargetWindowsAMD64 {
+	if (component == ComponentSetup || component == ComponentEnterpriseSetup) &&
+		target != TargetWindowsAMD64 {
 		return nil, fmt.Errorf("Windows setup resources support only %s, got %q", TargetWindowsAMD64, target)
 	}
 	parsed, err := parseVersion(versionValue)
@@ -220,6 +247,10 @@ func ManifestForTarget(target Target, component Component, versionValue string) 
     </dependentAssembly>
   </dependency>`
 	}
+	executionLevel := "asInvoker"
+	if metadata.RequireAdministrator {
+		executionLevel = "requireAdministrator"
+	}
 	manifest := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity name="%s" processorArchitecture="%s" type="win32" version="%d.%d.%d.%d" />
@@ -227,7 +258,7 @@ func ManifestForTarget(target Target, component Component, versionValue string) 
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+        <requestedExecutionLevel level="%s" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>
@@ -244,7 +275,7 @@ func ManifestForTarget(target Target, component Component, versionValue string) 
     </windowsSettings>
   </application>%s
 </assembly>
-`, metadata.AssemblyName, specification.manifestArchitecture, parsed.Fixed[0], parsed.Fixed[1], parsed.Fixed[2], parsed.Fixed[3], metadata.Description, commonControls)
+`, metadata.AssemblyName, specification.manifestArchitecture, parsed.Fixed[0], parsed.Fixed[1], parsed.Fixed[2], parsed.Fixed[3], metadata.Description, executionLevel, commonControls)
 	return []byte(manifest), nil
 }
 

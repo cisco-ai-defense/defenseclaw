@@ -712,6 +712,26 @@ func TestDiffConfigsMarksApplicationProtectionChanged(t *testing.T) {
 	}
 }
 
+func TestDiffConfigsMarksRoutingRestartRequired(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Routing.Enabled = true
+	newCfg.Routing.Models = []config.RoutingModelBackend{{
+		Name:      "fast",
+		Provider:  "openai",
+		Model:     "gpt-4.1-mini",
+		APIKeyEnv: "OPENAI_API_KEY",
+	}}
+
+	diff := diffConfigs(oldCfg, newCfg)
+	if !slices.Contains(diff.Changed, "routing") {
+		t.Fatalf("changed = %v, missing routing", diff.Changed)
+	}
+	if !slices.Contains(diff.RestartRequired, "routing") {
+		t.Fatalf("restart_required = %v, missing routing", diff.RestartRequired)
+	}
+}
+
 func TestDiffConfigsMarksRuntimeTopologyRestartRequired(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := *oldCfg

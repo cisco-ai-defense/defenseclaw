@@ -113,6 +113,29 @@ type Finding struct {
 	// whether rubric reconciliation adjusted the verdict. Freeform
 	// JSON; the correlator and the TUI both read it for explanations.
 	DecisionPath json.RawMessage `json:"decision_path,omitempty"`
+
+	// codeGuardProvenance is minted only while the in-process CodeGuard
+	// scanner evaluates a code-owned rule. It is deliberately private and is
+	// therefore neither accepted from nor emitted to scanner JSON. Callers may
+	// use CodeGuardBuiltinMatch to decide whether a finding carries that
+	// provenance; a decoded or manually assembled Finding always fails closed.
+	codeGuardProvenance codeGuardFindingProvenance
+}
+
+type codeGuardFindingProvenance struct {
+	builtinRuleID string
+}
+
+// CodeGuardBuiltinMatch reports whether this finding was produced by an exact
+// match of a code-owned builtin CodeGuard rule. Rule IDs and scanner names are
+// public metadata and are intentionally insufficient on their own.
+func (f Finding) CodeGuardBuiltinMatch(ruleID string) bool {
+	builtinRuleID := f.codeGuardProvenance.builtinRuleID
+	return builtinRuleID != "" &&
+		ruleID == builtinRuleID &&
+		f.ID == builtinRuleID &&
+		f.RuleID == builtinRuleID &&
+		f.Scanner == "codeguard"
 }
 
 type ScanResult struct {

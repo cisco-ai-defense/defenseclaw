@@ -141,8 +141,10 @@ def _scan_one_connector(
     from defenseclaw.inventory.claw_inventory import (
         build_claw_aibom,
         claw_aibom_to_scan_result,
+        commit_claw_aibom_digest,
         enrich_with_policy,
         format_claw_aibom_human,
+        pending_claw_aibom_digest,
     )
 
     label = connector or (
@@ -158,8 +160,17 @@ def _scan_one_connector(
     )
     result = claw_aibom_to_scan_result(inv, app.cfg)
 
+    # The inventory sweep re-runs every ai_discovery.process_interval_s across
+    # every active connector. Persisting the per-category INFO findings on each
+    # pass wrote thousands of identical rows a day; log only on real change.
     if app.logger:
-        app.logger.log_scan(result)
+        pending_digest = pending_claw_aibom_digest(inv, app.cfg, connector=label)
+        if pending_digest is not None:
+            app.logger.log_scan(result)
+            # Advance only after canonical Observability v8 acknowledges the
+            # scan. If checkpointing fails, the next sweep duplicates this
+            # record instead of silently losing an unacknowledged transition.
+            commit_claw_aibom_digest(pending_digest, app.cfg, connector=label)
 
     errors = inv.get("errors", [])
     if errors:

@@ -209,9 +209,10 @@ def _log_setup_action(
     """Audit a setup mutation without breaking explicit offline staging.
 
     Canonical admission and server responses remain fail-closed.  The only
-    exception is a setup command that explicitly selected ``--no-restart``
-    while the gateway runtime is absent or unreachable; that mode stages
-    configuration for the next gateway start.
+    exception is a setup command that explicitly selected an offline staging
+    option such as ``--no-restart`` or ``--no-verify`` while the gateway
+    runtime is absent or unreachable; those modes stage configuration for the
+    next gateway start.
     """
 
     if not app.logger:
@@ -342,6 +343,26 @@ def setup(
       Use '--add-detected --yes' to add newly installed connectors in observe
       mode without changing the existing active roster or its modes.
     """
+    app = ctx.find_object(AppContext)
+    if (
+        app is not None
+        and app.preinit_setup_bootstrap
+        and ctx.invoked_subcommand != "trusted-paths"
+    ):
+        ux.echo(
+            "DefenseClaw is not initialized — run 'defenseclaw init' first.",
+            err=True,
+        )
+        ctx.exit(1)
+
+    if (
+        ctx.invoked_subcommand != "trusted-paths"
+        and app is not None
+        and app.setup_runtime_deferred
+    ):
+        _initialize_setup_runtime(app, ctx)
+        app.setup_runtime_deferred = False
+
     # Snapshot config.yaml's mtime before the subcommand runs. The
     # result callback below (``_auto_restart_sidecar_after_setup``)
     # compares this to the post-invocation mtime and only restarts the
@@ -364,7 +385,7 @@ def setup(
     # help" to an interactive multi-connector picker (+ scripting flags).
     _dispatch_bare_setup(
         ctx,
-        ctx.find_object(AppContext),
+        app,
         connectors=list(batch_connectors),
         detected=batch_detected,
         add_detected=batch_add_detected,
@@ -373,6 +394,47 @@ def setup(
         restart=batch_restart,
         yes=batch_yes,
     )
+
+
+def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> None:
+    """Validate and initialize every setup path except trusted-paths.
+
+    Root command dispatch cannot see the nested setup child without guessing
+    from raw argv. Deferring this boundary until the setup callback keeps the
+    trusted-path bootstrap genuinely offline while retaining the original
+    fail-closed canonical validation for every other setup command.
+    """
+
+    if app is None or app.cfg is None:
+        ux.echo("DefenseClaw is not initialized — run 'defenseclaw init' first.", err=True)
+        ctx.exit(1)
+
+    from defenseclaw.commands.cmd_config import validate_config
+
+    result = validate_config()
+    if not result.ok:
+        ux.echo("Config validation failed:", err=True)
+        if result.parse_error:
+            ux.echo(f"  ✗ {result.parse_error}", err=True)
+        for issue in result.errors:
+            ux.echo(f"  ✗ {issue}", err=True)
+        ux.echo(
+            "  Run 'defenseclaw config validate' for details, or "
+            "'defenseclaw doctor --fix' to auto-repair.",
+            err=True,
+        )
+        ctx.exit(1)
+
+    from defenseclaw.db import Store
+    from defenseclaw.logger import Logger
+
+    try:
+        app.store = Store(app.cfg.audit_db)
+        app.store.init()
+    except Exception as exc:
+        ux.echo(f"Failed to open audit store: {exc}", err=True)
+        ctx.exit(1)
+    app.logger = Logger.from_config(app.cfg)
 
 
 # Register canonical v8 destination setup.
@@ -1916,11 +1978,12 @@ def _set_config_trusted_bin_prefixes(
     seen: set[str] = set()
     for raw in prefixes:
         resolved, _err = agent_discovery.validate_trusted_prefix(raw)
-        key = resolved or str(raw).strip()
+        entry = resolved or str(raw).strip()
+        key = agent_discovery._path_key(entry) if entry else ""
         if not key or key in seen:
             continue
         seen.add(key)
-        deduped.append(key)
+        deduped.append(entry)
     ai.trusted_binary_prefixes = deduped
     if locked_path is None:
         cfg.save()
@@ -1947,7 +2010,7 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
 # ---------------------------------------------------------------------------
 # `defenseclaw setup trusted-paths` — manage the binary-discovery allow-list.
 #
-# Built-in defaults live in agent_discovery._TRUSTED_BIN_PREFIXES_DEFAULT and
+# Built-in defaults come from agent_discovery._builtin_trusted_bin_prefixes and
 # are read-only here. New operator additions persist to config.yaml under
 # ai_discovery.trusted_binary_prefixes. Legacy .env / process env entries are
 # still listed and honored for backward compatibility.
@@ -1971,10 +2034,20 @@ def _trusted_prefix_status(resolved: str) -> str:
 def _default_resolved_prefixes() -> set[str]:
     """Resolved absolute paths of the built-in (non-removable) defaults."""
     out: set[str] = set()
-    for raw in agent_discovery._TRUSTED_BIN_PREFIXES_DEFAULT:
+    for raw in agent_discovery._builtin_trusted_bin_prefixes():
         resolved, _ = agent_discovery.validate_trusted_prefix(raw)
         if resolved:
             out.add(resolved)
+    return out
+
+
+def _configured_resolved_prefix_keys(cfg) -> set[str]:
+    """Canonical comparison keys explicitly owned by config.yaml."""
+    out: set[str] = set()
+    for raw in _config_trusted_bin_prefixes(cfg):
+        resolved, _ = agent_discovery.validate_trusted_prefix(raw)
+        if resolved:
+            out.add(agent_discovery._path_key(resolved))
     return out
 
 
@@ -1994,9 +2067,10 @@ def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]
 
     def _push(raw: str, source: str, removable: bool) -> None:
         resolved, _err = agent_discovery.validate_trusted_prefix(raw)
-        if not resolved or resolved in seen:
+        key = agent_discovery._path_key(resolved) if resolved else ""
+        if not key or key in seen:
             return
-        seen.add(resolved)
+        seen.add(key)
         rows.append(
             {
                 "path": raw,
@@ -2007,10 +2081,13 @@ def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]
             }
         )
 
-    for raw in agent_discovery._TRUSTED_BIN_PREFIXES_DEFAULT:
-        _push(raw, "default", False)
+    # Operator provenance wins when a configured path later becomes a
+    # built-in default (for example after the Windows HOME/profile changes).
+    # Keeping the config row visible also keeps the explicit entry removable.
     for raw in config_file:
         _push(raw, "config", True)
+    for raw in agent_discovery._builtin_trusted_bin_prefixes():
+        _push(raw, "default", False)
     for raw in env_file:
         _push(raw, "legacy .env", True)
     for raw in env_only:
@@ -2028,7 +2105,8 @@ def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: st
 
 
 @setup.group("trusted-paths")
-def trusted_paths() -> None:
+@click.pass_context
+def trusted_paths(ctx: click.Context) -> None:
     """Manage directories DefenseClaw trusts for connector-binary discovery.
 
     Legacy examples:
@@ -2038,6 +2116,17 @@ def trusted_paths() -> None:
     Homebrew locations; trust additional roots here for bespoke installs.
     Additions persist to ~/.defenseclaw/config.yaml under ai_discovery.trusted_binary_prefixes.
     """
+    app = ctx.find_object(AppContext)
+    if (
+        app is not None
+        and app.preinit_setup_bootstrap
+        and ctx.invoked_subcommand not in {"add", "list", "remove"}
+    ):
+        ux.echo(
+            "DefenseClaw is not initialized — run 'defenseclaw init' first.",
+            err=True,
+        )
+        ctx.exit(1)
 
 
 @trusted_paths.command("list")
@@ -2079,7 +2168,12 @@ def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: boo
     if not resolved:
         _emit_trusted_path_result(as_json, ok=False, path=directory, message=f"invalid path ({err})")
         click.get_current_context().exit(1)
-    if resolved in _default_resolved_prefixes():
+    resolved_key = agent_discovery._path_key(resolved)
+    explicitly_configured = resolved_key in _configured_resolved_prefix_keys(app.cfg)
+    default_keys = {
+        agent_discovery._path_key(path) for path in _default_resolved_prefixes()
+    }
+    if resolved_key in default_keys and not explicitly_configured:
         _emit_trusted_path_result(as_json, ok=True, path=resolved, message="already trusted by default; nothing to do")
         return
     if err and not force:
@@ -2104,7 +2198,12 @@ def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: boo
 def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None:
     """Remove an operator-added trusted prefix (never a built-in default)."""
     resolved, _err = agent_discovery.validate_trusted_prefix(directory)
-    if resolved in _default_resolved_prefixes():
+    resolved_key = agent_discovery._path_key(resolved) if resolved else ""
+    explicitly_configured = resolved_key in _configured_resolved_prefix_keys(app.cfg)
+    default_keys = {
+        agent_discovery._path_key(path) for path in _default_resolved_prefixes()
+    }
+    if resolved_key in default_keys and not explicitly_configured:
         _emit_trusted_path_result(
             as_json, ok=False, path=resolved, message="refusing to remove a built-in default prefix"
         )
@@ -3537,9 +3636,17 @@ def setup_gateway(
             click.echo("  Tip: fix the issues above, then run 'defenseclaw doctor' to re-check.")
             click.echo()
 
-    if app.logger:
-        mode = "remote" if (remote or gw.resolved_token()) else "local"
-        app.logger.log_action(ACTION_SETUP_GATEWAY, "config", f"mode={mode} host={gw.host} port={gw.port}")
+    mode = "remote" if (remote or gw.resolved_token()) else "local"
+    _log_setup_action(
+        app,
+        ACTION_SETUP_GATEWAY,
+        f"mode={mode} host={gw.host} port={gw.port}",
+        # ``--no-verify`` is the explicit offline bootstrap mode used before
+        # the sidecar has started. Suppress only definite runtime
+        # unavailability; server rejections and every other admission failure
+        # remain fatal through _log_setup_action.
+        allow_offline=not verify,
+    )
 
 
 def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> None:
@@ -10082,6 +10189,9 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     Skip conditions:
       * ``app.cfg`` isn't loaded (e.g. ``setup --help``, or a recovery
         invocation that bypassed the loader) — nothing to do.
+      * ``setup trusted-paths`` updates CLI discovery policy, not live gateway
+        state. Skipping also preserves the command's exact ``--json`` output
+        contract for bootstrap automation.
       * config.yaml mtime unchanged — the subcommand was read-only
         (``setup llm --show``, etc.). The bare connector batch is the narrow
         exception: its explicit readiness marker always runs the gate.
@@ -10092,6 +10202,9 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     """
     app = ctx.find_object(AppContext)
     if app is None or app.cfg is None:
+        return
+
+    if ctx.invoked_subcommand == "trusted-paths":
         return
 
     # Subcommand already handled the restart itself (e.g. `setup
@@ -12462,14 +12575,14 @@ def _show_splunk_credentials(data_dir: str) -> None:
 @click.option("--enable", is_flag=True, help="Enable semantic model routing.")
 @click.option("--disable", is_flag=True, help="Disable semantic model routing.")
 @click.option("--status", is_flag=True, help="Show routing status.")
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts.")
+@click.option("--yes", "-y", is_flag=True, help="Accepted for compatibility; this command is non-interactive.")
 @pass_ctx
 def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, yes: bool) -> None:
     """Configure semantic model routing.
 
-    When enabled, DefenseClaw downloads and manages the vLLM Semantic Router
-    as a local subprocess. All routing configuration lives in config.yaml
-    under the 'routing:' section.
+    In managed mode, the gateway owns a minimal vLLM Semantic Router Docker
+    container. Set routing.remote.endpoint to use an operator-managed router
+    instead. Model aliases and decisions live under routing: in config.yaml.
 
     \b
     Examples:
@@ -12477,6 +12590,7 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
       defenseclaw setup routing --disable
       defenseclaw setup routing --status
     """
+    _ = yes  # retained for command-line compatibility; setup has no prompt
     if enable and disable:
         raise click.UsageError("Cannot use --enable and --disable together.")
 
@@ -12485,66 +12599,77 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         return
 
     if enable:
-        import shutil
-        import subprocess as _sp
-
         app.cfg.routing.enabled = True
         if not app.cfg.routing.version:
             app.cfg.routing.version = "0.3.0"
         if not app.cfg.routing.port:
-            app.cfg.routing.port = 8888
+            app.cfg.routing.port = 8080
+
+        _validate_routing_setup_models(app.cfg.routing.models)
+
+        remote_endpoint = str(app.cfg.routing.remote.get("endpoint") or "").strip()
+        mode = "remote" if remote_endpoint else "managed Docker"
 
         click.echo()
-        click.echo("  Setting up semantic model routing...")
+        click.echo("  Configuring semantic model routing...")
         click.echo()
 
-        # 1. Check/install vllm-sr
-        vllm_sr = shutil.which("vllm-sr")
-        if vllm_sr:
-            ver = _sp.run([vllm_sr, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
-            click.echo(f"  ✓ vllm-sr already installed ({ver})")
-        else:
-            click.echo("  Installing vllm-sr...")
-            pip = shutil.which("pip") or "pip"
-            pkg = f"vllm-sr=={app.cfg.routing.version}" if app.cfg.routing.version else "vllm-sr"
-            result = _sp.run([pip, "install", pkg], capture_output=True, text=True, timeout=120)
-            if result.returncode != 0:
-                click.echo(f"  ✗ pip install failed: {result.stderr.strip()}")
-                click.echo("    Install manually: pip install vllm-sr")
-                click.echo("    Then re-run: defenseclaw setup routing --enable")
-                raise click.ClickException("vllm-sr installation failed")
-            vllm_sr = shutil.which("vllm-sr")
-            if vllm_sr:
-                ver = _sp.run([vllm_sr, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
-                click.echo(f"  ✓ vllm-sr installed ({ver})")
-            else:
-                click.echo("  ✗ vllm-sr not found on PATH after install")
-                click.echo("    You may need to add pip's bin directory to PATH")
-                raise click.ClickException("vllm-sr not found on PATH after install")
-
-        # 2. Check Docker
-        docker = shutil.which("docker") or "docker"
-        docker_ok = _sp.run([docker, "info"], capture_output=True, timeout=10).returncode == 0
-        if docker_ok:
+        # Remote routers are operator-owned and do not require local Docker.
+        if not remote_endpoint:
+            docker = shutil.which("docker")
+            if docker is None:
+                raise click.ClickException("Docker is required for managed routing but was not found")
+            try:
+                docker_result = subprocess.run(
+                    [docker, "info"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise click.ClickException(f"failed to check Docker: {exc}") from exc
+            if docker_result.returncode != 0:
+                detail = (docker_result.stderr or docker_result.stdout).strip()
+                suffix = f": {detail}" if detail else ""
+                raise click.ClickException(f"Docker is required for managed routing but is not running{suffix}")
             click.echo("  ✓ Docker is running")
         else:
-            click.echo("  ⚠ Docker is not running (required for vllm-sr serve)")
-            click.echo("    Start Docker before restarting the gateway.")
+            click.echo(f"  ✓ Remote router configured: {remote_endpoint}")
 
-        # 3. Save config
+        # Only save after local prerequisites succeed. A failed Docker check
+        # must not leave the desired config enabled but inactive.
         try:
             app.cfg.save()
         except OSError as exc:
             raise click.ClickException(f"failed to save config: {exc}") from exc
         click.echo()
-        click.echo("  ✓ Semantic routing enabled")
-        click.echo(f"    Version: {app.cfg.routing.version}")
-        click.echo(f"    Port:    {app.cfg.routing.port}")
-        click.echo(f"    Endpoint: http://127.0.0.1:{app.cfg.routing.port}/v1/chat/completions")
+        click.echo("  ✓ Semantic routing configured")
+        click.echo(f"    Mode:       {mode}")
+        if not remote_endpoint:
+            click.echo(f"    Version:    {app.cfg.routing.version}")
+            click.echo(f"    Router API: http://127.0.0.1:{app.cfg.routing.port}")
+        click.echo(f"    Models:     {len(app.cfg.routing.models)}")
+        click.echo("    Scope:      proxy-mode OpenAI chat-completions traffic")
         click.echo()
-        click.echo("  The router will start automatically with the gateway.")
-        if not yes:
-            click.echo("  Restart the gateway to activate: defenseclaw-gateway restart")
+        click.echo("  Activation: gateway restart required")
+        click.echo("  Restart with: defenseclaw-gateway restart")
+
+        # Keep setup and `keys list` aligned without forcing operators to put
+        # enterprise-managed credentials on disk during setup.
+        from defenseclaw.credentials import missing_required  # noqa: PLC0415
+
+        missing_routing_keys = [
+            item.resolution.env_name
+            for item in missing_required(app.cfg)
+            if item.spec.feature == "routing.models"
+        ]
+        if missing_routing_keys:
+            click.echo()
+            click.echo("  Missing routed-model credentials:")
+            for env_name in missing_routing_keys:
+                click.echo(f"    - {env_name}")
+            click.echo("  Add them with: defenseclaw keys set <ENV_NAME>")
 
         _log_setup_action(
             app,
@@ -12562,6 +12687,7 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         click.echo()
         click.echo("  ✓ Semantic routing disabled")
         click.echo("    All requests will use the default provider.")
+        click.echo("    Activation: gateway restart required")
 
         _log_setup_action(
             app,
@@ -12576,14 +12702,54 @@ def _print_routing_status(app: AppContext) -> None:
     click.echo("  Semantic Router Status")
     click.echo("  ══════════════════════")
     if not app.cfg.routing.enabled:
-        click.echo("    Status:  disabled")
+        click.echo("    Configured: disabled")
         click.echo()
         click.echo("    Enable with: defenseclaw setup routing --enable")
         return
-    click.echo("    Status:    enabled")
+    click.echo("    Configured: enabled")
     version = app.cfg.routing.version or "0.3.0 (default)"
-    click.echo(f"    Version:   {version}")
-    port = app.cfg.routing.port or 8888
-    click.echo(f"    Port:      {port}")
+    port = app.cfg.routing.port or 8080
+    remote_endpoint = str(app.cfg.routing.remote.get("endpoint") or "").strip()
+    mode = "remote" if remote_endpoint else "managed Docker"
+    endpoint = remote_endpoint or f"http://127.0.0.1:{port}"
+    click.echo(f"    Mode:       {mode}")
+    if not remote_endpoint:
+        click.echo(f"    Version:    {version}")
+    click.echo(f"    Router API: {endpoint}")
+    click.echo(f"    Models:     {len(app.cfg.routing.models)}")
     click.echo(f"    Algorithm: {app.cfg.routing.algorithm or 'static (default)'}")
+    click.echo(f"    Runtime:    {_routing_health_status(endpoint)}")
+    click.echo("    Scope:      proxy-mode OpenAI chat-completions traffic")
+    click.echo("    Changes require a gateway restart.")
     click.echo()
+
+
+def _validate_routing_setup_models(models: list[dict[str, Any]]) -> None:
+    if not models:
+        raise click.ClickException(
+            "routing.models must contain at least one backend before routing can be enabled",
+        )
+    aliases: set[str] = set()
+    for index, model in enumerate(models):
+        alias = str(model.get("name") or "").strip()
+        provider = str(model.get("provider") or "").strip()
+        provider_model = str(model.get("model") or "").strip()
+        if not alias or not provider or not provider_model:
+            raise click.ClickException(
+                f"routing.models[{index}] requires non-empty name, provider, and model",
+            )
+        if alias in aliases:
+            raise click.ClickException(f"routing model alias is duplicated: {alias}")
+        aliases.add(alias)
+
+
+def _routing_health_status(endpoint: str) -> str:
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    try:
+        request = urllib.request.Request(endpoint.rstrip("/") + "/health", method="GET")
+        with urllib.request.urlopen(request, timeout=2) as response:
+            return "healthy" if response.status == 200 else f"unhealthy (HTTP {response.status})"
+    except (OSError, urllib.error.URLError, ValueError):
+        return "unreachable (gateway may need restart)"

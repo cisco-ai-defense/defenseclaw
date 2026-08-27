@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
@@ -351,10 +352,26 @@ func TestBifrostE2E_ProxyResolveFromHeaders(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// API key resolution: env → dotenv → header chain
+// API key resolution: managed store → env → dotenv → header chain
 // ---------------------------------------------------------------------------
 
 func TestBifrostE2E_APIKeyResolution(t *testing.T) {
+	t.Run("managed_store_takes_precedence", func(t *testing.T) {
+		const envName = "TEST_BIFROST_MANAGED_STORE_KEY"
+		config.SetKey(envName, "from-managed-store")
+		t.Cleanup(func() { config.SetKey(envName, "") })
+		t.Setenv(envName, "from-env")
+		dir := t.TempDir()
+		dotenvPath := dir + "/.env"
+		if err := os.WriteFile(dotenvPath, []byte(envName+"=from-dotenv\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		got := ResolveAPIKey(envName, dotenvPath)
+		if got != "from-managed-store" {
+			t.Errorf("managed store should take precedence, got %q", got)
+		}
+	})
+
 	t.Run("from_env_var", func(t *testing.T) {
 		t.Setenv("TEST_BIFROST_E2E_KEY", "test-api-key-from-env")
 		got := ResolveAPIKey("TEST_BIFROST_E2E_KEY", "")

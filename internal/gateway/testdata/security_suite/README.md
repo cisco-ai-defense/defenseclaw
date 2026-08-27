@@ -56,6 +56,10 @@ ActionFacts tests instead of being duplicated here.
 - `rule_id` — canonical owner expected to match or remain absent.
 - `command`, `argv`, `args`, `dialect`, `cwd`, and `active_home` — structured
   action inputs.
+- `active_agent_files` — optional trusted harness context containing exact
+  absolute `AGENTS.md` or `MEMORY.md` paths for active-file mutation cases. It
+  models connector-authenticated, same-session `InstructionsLoaded` state, not
+  a caller-controlled tool argument or generic payload field.
 - `expect_route` — `semantic`, `fallback`, or `none`.
 - `detection_only` — the finding must not contribute to a block.
 - `no_other_finding` — assert an exact zero-or-one finding result to catch

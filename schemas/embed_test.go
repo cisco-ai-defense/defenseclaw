@@ -482,7 +482,7 @@ func TestDefenseClawConfigV8SchemaCompilesAndValidates(t *testing.T) {
 			"local": map[string]any{
 				"path":              "~/.defenseclaw/audit.db",
 				"judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
-				"retention_days":    90,
+				"retention_days":    7,
 			},
 			"destinations": []any{
 				map[string]any{
@@ -579,12 +579,11 @@ func TestDefenseClawConfigV8RoutingSchemaValidation(t *testing.T) {
 				"algorithm": "hybrid",
 				"models": []any{
 					map[string]any{
-						"name":               "reasoning",
-						"provider":           "anthropic",
-						"model":              "claude-sonnet-4-6",
-						"api_key_env":        "ANTHROPIC_API_KEY",
-						"capabilities":       []any{"reasoning", "analysis"},
-						"cost_per_1k_tokens": 0.003,
+						"name":         "reasoning",
+						"provider":     "anthropic",
+						"model":        "claude-sonnet-4-6",
+						"api_key_env":  "ANTHROPIC_API_KEY",
+						"capabilities": []any{"reasoning", "analysis"},
 					},
 				},
 				"signals": map[string]any{

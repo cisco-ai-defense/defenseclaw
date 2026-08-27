@@ -39,6 +39,9 @@ from defenseclaw.config import (
 
 
 def _cfg_for(tmp: str) -> Config:
+    # macOS exposes /var through /private/var. Production custody correctly
+    # rejects indirect paths, so canonicalize only the test-owned temp root.
+    tmp = os.path.realpath(tmp)
     return Config(
         data_dir=tmp,
         audit_db=os.path.join(tmp, "audit.db"),
@@ -91,12 +94,14 @@ class BootstrapEnvTests(unittest.TestCase):
             self.assertTrue(os.path.isdir(d), f"expected {d} to be created")
 
     def test_first_run_uses_private_directory_creation_for_owned_state(self):
+        from defenseclaw.file_permissions import make_private_directory
+
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         created: list[str] = []
 
         def record_private_directory(path):
             created.append(os.path.abspath(os.fspath(path)))
-            os.makedirs(path, exist_ok=True)
+            make_private_directory(path)
 
         with patch(
             "defenseclaw.file_permissions.make_private_directory",
@@ -244,6 +249,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        self._tmp_root = os.path.realpath(self._tmp.name)
 
     def _pending_config(self, label: str):
         from defenseclaw.bootstrap import (
@@ -252,7 +258,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         )
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, label)
+        data_dir = os.path.join(self._tmp_root, label)
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -288,7 +294,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import __version__, migration_state
         from defenseclaw.migrations import MIGRATIONS, _ver_tuple
 
-        data_dir = os.path.join(self._tmp.name, "fresh")
+        data_dir = os.path.join(self._tmp_root, "fresh")
         report = self._run_first_run(data_dir)
 
         self.assertNotEqual(report.status, "needs_attention")
@@ -309,7 +315,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
 
-        data_dir = os.path.join(self._tmp.name, "none")
+        data_dir = os.path.join(self._tmp_root, "none")
         with (
             patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
             patch("defenseclaw.bootstrap._quiet_guardrail_setup") as connector_setup,
@@ -336,7 +342,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
         from defenseclaw.config import default_config, load, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "none-existing")
+        data_dir = os.path.join(self._tmp_root, "none-existing")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -364,7 +370,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
     def test_no_connector_first_run_preserves_unloadable_existing_config(self):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
 
-        data_dir = os.path.join(self._tmp.name, "none-unloadable")
+        data_dir = os.path.join(self._tmp_root, "none-unloadable")
         config_path = os.path.join(data_dir, "config.yaml")
         os.makedirs(data_dir)
         original = b"config_version: 8\noperator_extension: preserve-me\n"
@@ -392,7 +398,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
     def test_rerun_preserves_bootstrapped_cursor_byte_for_byte(self):
         from defenseclaw import migration_state
 
-        data_dir = os.path.join(self._tmp.name, "rerun")
+        data_dir = os.path.join(self._tmp_root, "rerun")
         self._run_first_run(data_dir)
         cursor_path = migration_state.state_path(data_dir)
         with open(cursor_path, "rb") as stream:
@@ -414,7 +420,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         }
         for label, payload in payloads.items():
             with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp.name, label)
+                data_dir = os.path.join(self._tmp_root, label)
                 os.makedirs(data_dir)
                 cursor_path = migration_state.state_path(data_dir)
                 with open(cursor_path, "wb") as stream:
@@ -429,7 +435,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.config import Config
 
-        data_dir = os.path.join(self._tmp.name, "save-failure")
+        data_dir = os.path.join(self._tmp_root, "save-failure")
         original_save = Config.save
         save_calls = 0
 
@@ -451,7 +457,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "unmarked-existing")
+        data_dir = os.path.join(self._tmp_root, "unmarked-existing")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -469,7 +475,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
         from defenseclaw.db import Store
 
-        data_dir = os.path.join(self._tmp.name, "setup-failure")
+        data_dir = os.path.join(self._tmp_root, "setup-failure")
         stores = []
 
         def track_store(path):
@@ -512,7 +518,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         )
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "version-mismatch")
+        data_dir = os.path.join(self._tmp_root, "version-mismatch")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -547,7 +553,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
             ("changed", {}, "evidence changed during publication"),
         ):
             with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp.name, f"marker-readback-{label}")
+                data_dir = os.path.join(self._tmp_root, f"marker-readback-{label}")
                 with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
                     cfg = default_config()
                     prepare_fresh_v8_config(cfg)
@@ -571,11 +577,11 @@ class FreshMigrationCursorTests(unittest.TestCase):
 
         for label in ("malformed", "public", "symlink"):
             with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp.name, f"unsafe-{label}")
+                data_dir = os.path.join(self._tmp_root, f"unsafe-{label}")
                 os.makedirs(data_dir)
                 marker = fresh_migration_pending_path(data_dir)
                 if label == "symlink":
-                    target = os.path.join(self._tmp.name, "attacker-marker")
+                    target = os.path.join(self._tmp_root, "attacker-marker")
                     with open(target, "w", encoding="utf-8") as stream:
                         stream.write("{}\n")
                     os.symlink(target, marker)
@@ -598,7 +604,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         )
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "corrupt-existing-cursor")
+        data_dir = os.path.join(self._tmp_root, "corrupt-existing-cursor")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -620,7 +626,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.bootstrap import _fresh_migration_pending_path
 
-        data_dir = os.path.join(self._tmp.name, "cursor-retry")
+        data_dir = os.path.join(self._tmp_root, "cursor-retry")
         with patch.object(
             migration_state,
             "save_if_absent",
@@ -659,7 +665,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         )
         from defenseclaw.config import default_config, prepare_fresh_v8_config
 
-        data_dir = os.path.join(self._tmp.name, "cursor-readback-failure")
+        data_dir = os.path.join(self._tmp_root, "cursor-readback-failure")
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = default_config()
             prepare_fresh_v8_config(cfg)
@@ -683,7 +689,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         from defenseclaw import migration_state
         from defenseclaw.bootstrap import _fresh_migration_pending_path
 
-        data_dir = os.path.join(self._tmp.name, "cursor-retry-tampered")
+        data_dir = os.path.join(self._tmp_root, "cursor-retry-tampered")
         with patch.object(
             migration_state,
             "save_if_absent",
@@ -1471,9 +1477,10 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
 
     def test_hook_only_install_does_not_pin_openclaw_token(self):
         from defenseclaw.bootstrap import _apply_gateway_defaults
+        from defenseclaw.file_permissions import make_private_directory
 
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        os.makedirs(cfg.data_dir, exist_ok=True)
+        make_private_directory(cfg.data_dir)
         # Hook-only: codex is the active connector, openclaw is NOT.
         cfg.claw.mode = "codex"
         cfg.guardrail.connector = "codex"
@@ -1490,9 +1497,10 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
 
     def test_openclaw_install_still_pins_openclaw_token(self):
         from defenseclaw.bootstrap import _apply_gateway_defaults
+        from defenseclaw.file_permissions import make_private_directory
 
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        os.makedirs(cfg.data_dir, exist_ok=True)
+        make_private_directory(cfg.data_dir)
         cfg.claw.mode = "openclaw"
         cfg.guardrail.connector = "openclaw"
         cfg.claw.config_file = self._stray_openclaw_json("legit-openclaw-secret")

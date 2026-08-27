@@ -170,8 +170,12 @@ type APIServer struct {
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
-	codexMu                     sync.Mutex
-	codexLastComponentScan      time.Time
+	// activeAgentContext is process-local, authenticated connector context. It
+	// is deliberately separate from hook payloads so tool arguments and generic
+	// request fields cannot assert which agent instruction files are active.
+	activeAgentContext     activeAgentContextCache
+	codexMu                sync.Mutex
+	codexLastComponentScan time.Time
 	// codexAdditionalContextMu protects the bounded, process-local cache used
 	// only to suppress repeated in-chat Observe warnings. Canonical detection,
 	// audit, and notification emission happen before this cache is consulted.
@@ -816,7 +820,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
 	mux.HandleFunc("/api/v1/admin/shutdown", a.handleShutdown)
-	mux.HandleFunc("/routing/v1/chat/completions", a.handleRoutedChatCompletion)
 	mux.HandleFunc("/skill/disable", a.handleSkillDisable)
 	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
@@ -3097,10 +3100,6 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/routing/") && connector.IsLoopback(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
 		route := r.Pattern
 		if route == "" {
 			// Sanitize so the OTLP path-token is never recorded as a
@@ -3191,6 +3190,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
 			if a.hookAPITokenMatches(hookScope, token) {
+				r = r.WithContext(withAuthenticatedHookConnector(
+					PromoteSessionIfAuthenticated(r.Context()),
+					hookScope,
+				))
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -3226,7 +3229,8 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// succeeded, upgrade the previously peeked agent identity
 		// to a fully minted entry so authenticated traffic still
 		// gets a stable agent_instance_id on its emissions.
-		r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
+		ctx = PromoteSessionIfAuthenticated(r.Context())
+		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -3299,10 +3303,6 @@ func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, _ 
 func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/routing/") && connector.IsLoopback(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

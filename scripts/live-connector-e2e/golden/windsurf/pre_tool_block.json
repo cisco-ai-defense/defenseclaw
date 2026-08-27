@@ -7,6 +7,6 @@
   "agent_type": "windsurf-cli",
   "tool_name": "run_command",
   "tool_input": {
-    "command": "cat /etc/shadow"
+    "command": "rm -rf /"
   }
 }

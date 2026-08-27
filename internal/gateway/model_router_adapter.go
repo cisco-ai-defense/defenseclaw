@@ -3,7 +3,8 @@
 
 package gateway
 
-// NewRemoteModelRouter creates a ModelRouter pointing at the given SR endpoint.
-func NewRemoteModelRouter(endpoint string, timeoutMs int) ModelRouter {
-	return NewRemoteRouterClient(endpoint, timeoutMs)
+// NewRemoteModelRouter creates a ModelRouter pointing at the given SR endpoint
+// and resolves classifier aliases against gateway-owned backend configuration.
+func NewRemoteModelRouter(endpoint string, timeoutMs int, backends []ModelRouterBackend, dotenvPath string) ModelRouter {
+	return NewConfiguredRemoteRouterClient(endpoint, timeoutMs, backends, dotenvPath)
 }

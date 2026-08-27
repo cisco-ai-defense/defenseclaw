@@ -1,0 +1,134 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+# Fork-safe validation for the public enterprise Setup boundary. The real
+# CMID-enabled gateway and signed installer are assembled only in the protected
+# release/AVC process; pull-request CI never receives private-repository or
+# signing credentials.
+
+name: Windows Enterprise Setup
+
+on:
+  pull_request:
+    branches:
+      - windows-avc-machine-installer
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-enterprise-setup-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  public-contracts:
+    name: Validate public enterprise Setup contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out DefenseClaw
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test the public installer contracts
+        run: >-
+          go test -count=1
+          ./cmd/defenseclaw-enterprise-setup
+          ./cmd/defenseclaw-setup
+          ./internal/windowsresources
+          ./internal/tools/windowsresources
+
+      - name: Vet the public installer contracts
+        run: >-
+          go vet
+          ./cmd/defenseclaw-enterprise-setup
+          ./cmd/defenseclaw-setup
+          ./internal/windowsresources
+          ./internal/tools/windowsresources
+
+      - name: Cross-compile the native Windows bootstrap and tests
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          go test -c \
+            -o "${RUNNER_TEMP}/defenseclaw-enterprise-setup.test.exe" \
+            ./cmd/defenseclaw-enterprise-setup
+          go build -trimpath \
+            -o "${RUNNER_TEMP}/DefenseClawSetup-Enterprise-x64.exe" \
+            ./cmd/defenseclaw-enterprise-setup
+
+      - name: Parse the public PowerShell assembly boundary
+        shell: pwsh
+        run: |
+          $failures = [Collections.Generic.List[string]]::new()
+          @(
+            'packaging/scripts/lib/assemble.ps1',
+            'packaging/scripts/lib/assert-cisco-signature.ps1',
+            'packaging/scripts/lib/finalize.ps1',
+            'packaging/scripts/lib/repro-flags.ps1',
+            'packaging/windows/install-enterprise.ps1',
+            'packaging/windows/DefenseClawEnterprise.psm1'
+          ) | ForEach-Object {
+            $path = (Resolve-Path -LiteralPath $_).Path
+            $tokens = $null
+            $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile(
+              $path,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            foreach ($parseError in @($errors)) {
+              $failures.Add("${path}: ${parseError}")
+            }
+          }
+          if ($failures.Count) { throw ($failures -join "`n") }
+
+      - name: Validate the managed bundle shell boundary
+        shell: bash
+        run: bash -n packaging/scripts/build-managed-windows-bundle.sh
+
+      - name: Assert GA release-gate refuses the unauthenticated IPC posture
+        shell: bash
+        env:
+          # Force a Windows cross-compile so internal/ipc's Windows
+          # peer-auth stub is in the compile set — the whole point of
+          # the gate is to refuse a release-candidate Windows build
+          # that still carries the initial-cut deferred-auth code
+          # path. See docs/specs/004-windows-ui-ipc/ REQ-18 + REQ-19.
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          set -u
+          # A release-candidate build compiles with -tags ga. The gate
+          # at internal/ipc/authposture_gagate.go must refuse the
+          # build; the PRIMARY check is exit != 0. The undefined-
+          # symbol signature is emitted as a diagnostic hint but is
+          # NOT the pass condition: Go can rephrase its "undefined:"
+          # message (or a maintainer could refactor the gate) without
+          # breaking spec 004's guarantee. See CR
+          # spec-004:PRRT_kwDORuAK-s6ankzo.
+          if output=$(go build -tags ga ./internal/ipc/... 2>&1); then
+            echo "::error::spec 004 GA release-gate did not refuse -tags ga build"
+            echo "$output"
+            exit 1
+          fi
+          if grep -q 'authpostureGAApproved' <<<"$output"; then
+            echo "GA gate refused the build citing the expected authpostureGAApproved symbol (diagnostic OK)"
+          else
+            echo "::warning::spec 004 GA release-gate refused the build, but the error output does NOT mention authpostureGAApproved."
+            echo "::warning::This is not a failure — the gate did its job — but the diagnostic may indicate a refactor or Go version change."
+            echo "Full build output:"
+            echo "$output"
+          fi
+          echo "spec 004 GA release-gate is intact — go build -tags ga refused with non-zero exit"

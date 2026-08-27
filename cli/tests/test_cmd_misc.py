@@ -678,6 +678,68 @@ class TestAIBOMCommand(unittest.TestCase):
         counts = self.app.store.get_counts()
         self.assertEqual(counts.total_scans, 1)
 
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_retries_change_when_observability_admission_fails(
+        self, mock_build, mock_to_scan, mock_enrich
+    ):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.inventory.claw_inventory import claw_aibom_digest
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+        from defenseclaw.models import ScanResult
+
+        baseline = self._make_inventory(skills=[{"id": "baseline"}])
+        changed = self._make_inventory(skills=[{"id": "changed"}])
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.logger = MagicMock()
+
+        mock_build.return_value = baseline
+        first = self.runner.invoke(
+            aibom, ["scan", "--connector", "openclaw"],
+            obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(first.exit_code, 0, first.output)
+
+        state_path = os.path.join(self.app.cfg.data_dir, "aibom_last_digest.json")
+        with open(state_path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["openclaw"], claw_aibom_digest(baseline))
+
+        mock_build.return_value = changed
+        self.app.logger.log_scan.side_effect = CanonicalObservabilityUnavailableError(
+            "gateway unavailable"
+        )
+        with self.assertRaises(CanonicalObservabilityUnavailableError):
+            self.runner.invoke(
+                aibom, ["scan", "--connector", "openclaw"],
+                obj=self.app, catch_exceptions=False,
+            )
+
+        # A failed admission must leave the acknowledged baseline checkpoint
+        # in place so an unchanged retry reaches the logger again.
+        with open(state_path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["openclaw"], claw_aibom_digest(baseline))
+
+        self.app.logger.log_scan.side_effect = None
+        retry = self.runner.invoke(
+            aibom, ["scan", "--connector", "openclaw"],
+            obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(retry.exit_code, 0, retry.output)
+        self.assertEqual(self.app.logger.log_scan.call_count, 3)
+        with open(state_path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["openclaw"], claw_aibom_digest(changed))
+
+        repeat = self.runner.invoke(
+            aibom, ["scan", "--connector", "openclaw"],
+            obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(repeat.exit_code, 0, repeat.output)
+        self.assertEqual(self.app.logger.log_scan.call_count, 3)
+
 
 # ---------------------------------------------------------------------------
 # Setup command (non-interactive)

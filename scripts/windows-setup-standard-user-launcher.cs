@@ -4,9 +4,13 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -38,6 +42,14 @@ namespace DefenseClaw
 
         internal RestrictedSetupProcess(Process process, Stream stdoutStream, Stream stderrStream)
         {
+            if (process == null)
+            {
+                throw new ArgumentNullException("process");
+            }
+            if (process.Handle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("restricted Setup process handle is null");
+            }
             this.process = process;
             this.stdoutStream = stdoutStream;
             this.stderrStream = stderrStream;
@@ -104,7 +116,67 @@ namespace DefenseClaw
 
         public void Kill(bool entireProcessTree)
         {
-            process.Kill(entireProcessTree);
+            var treeKill = typeof(Process).GetMethod("Kill", new Type[] { typeof(bool) });
+            if (entireProcessTree && treeKill != null)
+            {
+                try
+                {
+                    treeKill.Invoke(process, new object[] { true });
+                    return;
+                }
+                catch (TargetInvocationException exception)
+                {
+                    // Kill(bool) raises InvalidOperationException when the
+                    // process has already exited. Treat that as success on
+                    // this branch so the reflection path behaves like the
+                    // ordinary Process.Kill() fallback below.
+                    if (exception.InnerException is InvalidOperationException) return;
+                    // Rethrow WITHOUT the reflection wrapper, but preserve
+                    // the inner stack trace so triage sees where the kill
+                    // actually failed.
+                    if (exception.InnerException != null)
+                    {
+                        ExceptionDispatchInfo.Capture(exception.InnerException).Throw();
+                    }
+                    throw;
+                }
+            }
+            if (entireProcessTree)
+            {
+                string taskkill = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "taskkill.exe");
+                // Process.Start can throw Win32Exception when taskkill.exe is
+                // absent or blocked. Swallow it here so the ordinary Kill()
+                // fallback below still runs — otherwise a missing taskkill
+                // removes the last chance to terminate the child.
+                try
+                {
+                    using (Process killer = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = taskkill,
+                        Arguments = "/PID " + process.Id.ToString(CultureInfo.InvariantCulture) + " /T /F",
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    }))
+                    {
+                        if (killer != null) killer.WaitForExit(30000);
+                    }
+                }
+                catch (Win32Exception)
+                {
+                    // taskkill.exe missing/blocked; fall through to Kill().
+                }
+                if (process.HasExited) return;
+            }
+            try
+            {
+                process.Kill();
+            }
+            catch (InvalidOperationException)
+            {
+                // The process exited between the state check and kill request.
+            }
         }
 
         public bool CompleteOutput(int timeoutMilliseconds)
@@ -202,6 +274,7 @@ namespace DefenseClaw
         private const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
         private const uint TOKEN_DUPLICATE = 0x0002;
         private const uint TOKEN_QUERY = 0x0008;
+        private const uint TOKEN_ADJUST_DEFAULT = 0x0080;
         private const uint DISABLE_MAX_PRIVILEGE = 0x0001;
         private const uint LUA_TOKEN = 0x0004;
         private const uint CREATE_SUSPENDED = 0x00000004;
@@ -210,15 +283,22 @@ namespace DefenseClaw
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
         private const int STARTF_USESTDHANDLES = 0x00000100;
         private static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = new IntPtr(0x00020002);
+        private const int TokenGroups = 2;
         private const int TokenTypeInformation = 8;
         private const int TokenElevationType = 18;
         private const int TokenLinkedToken = 19;
         private const int TokenElevation = 20;
+        private const int TokenIntegrityLevel = 25;
         private const int TokenPrimary = 1;
         private const int TokenElevationTypeDefault = 1;
         private const int TokenElevationTypeFull = 2;
         private const int TokenElevationTypeLimited = 3;
         private const int SecurityImpersonation = 2;
+        private const int ERROR_INSUFFICIENT_BUFFER = 122;
+        private const uint SE_GROUP_ENABLED = 0x00000004;
+        private const uint SE_GROUP_USE_FOR_DENY_ONLY = 0x00000010;
+        private const uint SE_GROUP_INTEGRITY = 0x00000020;
+        private const string MediumIntegritySid = "S-1-16-8192";
 
         private enum LaunchTokenKind
         {
@@ -236,6 +316,26 @@ namespace DefenseClaw
         private struct TOKEN_LINKED_TOKEN
         {
             public IntPtr LinkedToken;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SID_AND_ATTRIBUTES
+        {
+            public IntPtr Sid;
+            public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_GROUPS_HEADER
+        {
+            public uint GroupCount;
+            public SID_AND_ATTRIBUTES FirstGroup;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_MANDATORY_LABEL
+        {
+            public SID_AND_ATTRIBUTES Label;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -375,6 +475,19 @@ namespace DefenseClaw
             ExactSpelling = true,
             SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformationBuffer(
+            IntPtr token,
+            int informationClass,
+            IntPtr information,
+            int informationLength,
+            out int returnLength);
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "GetTokenInformation",
+            ExactSpelling = true,
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetTokenInformationLinkedToken(
             IntPtr token,
             int informationClass,
@@ -382,9 +495,17 @@ namespace DefenseClaw
             int informationLength,
             out int returnLength);
 
-        [DllImport("advapi32.dll", SetLastError = true)]
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "SetTokenInformation",
+            ExactSpelling = true,
+            SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool IsTokenRestricted(IntPtr token);
+        private static extern bool SetTokenInformationIntegrity(
+            IntPtr token,
+            int informationClass,
+            ref TOKEN_MANDATORY_LABEL information,
+            int informationLength);
 
         [DllImport(
             "advapi32.dll",
@@ -477,6 +598,41 @@ namespace DefenseClaw
             return value;
         }
 
+        private static void SetMediumIntegrity(IntPtr token)
+        {
+            SecurityIdentifier identifier = new SecurityIdentifier(MediumIntegritySid);
+            byte[] sid = new byte[identifier.BinaryLength];
+            identifier.GetBinaryForm(sid, 0);
+            GCHandle pinned = GCHandle.Alloc(sid, GCHandleType.Pinned);
+            try
+            {
+                TOKEN_MANDATORY_LABEL label = new TOKEN_MANDATORY_LABEL
+                {
+                    Label = new SID_AND_ATTRIBUTES
+                    {
+                        Sid = pinned.AddrOfPinnedObject(),
+                        Attributes = SE_GROUP_INTEGRITY
+                    }
+                };
+                int size = checked(
+                    Marshal.SizeOf(typeof(TOKEN_MANDATORY_LABEL)) + sid.Length);
+                if (!SetTokenInformationIntegrity(
+                    token,
+                    TokenIntegrityLevel,
+                    ref label,
+                    size))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "SetTokenInformation(TokenIntegrityLevel) failed");
+                }
+            }
+            finally
+            {
+                pinned.Free();
+            }
+        }
+
         private static IntPtr GetLinkedToken(IntPtr sourceToken)
         {
             TOKEN_LINKED_TOKEN linked;
@@ -519,6 +675,85 @@ namespace DefenseClaw
             return primary;
         }
 
+        private static bool IsAdministrator(IntPtr token)
+        {
+            int bufferLength;
+            if (GetTokenInformationBuffer(
+                token,
+                TokenGroups,
+                IntPtr.Zero,
+                0,
+                out bufferLength))
+            {
+                throw new InvalidOperationException(
+                    "GetTokenInformation(TokenGroups) unexpectedly accepted an empty buffer");
+            }
+            int sizingError = Marshal.GetLastWin32Error();
+            if (sizingError != ERROR_INSUFFICIENT_BUFFER || bufferLength <= 0)
+            {
+                throw new Win32Exception(
+                    sizingError,
+                    "GetTokenInformation(TokenGroups) sizing failed");
+            }
+
+            IntPtr buffer = Marshal.AllocHGlobal(bufferLength);
+            try
+            {
+                int returnedLength;
+                if (!GetTokenInformationBuffer(
+                    token,
+                    TokenGroups,
+                    buffer,
+                    bufferLength,
+                    out returnedLength))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "GetTokenInformation(TokenGroups) failed");
+                }
+                int groupOffset = Marshal.OffsetOf(
+                    typeof(TOKEN_GROUPS_HEADER),
+                    "FirstGroup").ToInt32();
+                int groupSize = Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES));
+                uint groupCount = unchecked((uint)Marshal.ReadInt32(buffer));
+                long groupBytes = (long)groupCount * groupSize;
+                if (returnedLength < groupOffset ||
+                    groupBytes > returnedLength - groupOffset)
+                {
+                    throw new InvalidOperationException(
+                        "GetTokenInformation(TokenGroups) returned an invalid group array");
+                }
+
+                SecurityIdentifier administrators = new SecurityIdentifier(
+                    WellKnownSidType.BuiltinAdministratorsSid,
+                    null);
+                for (uint index = 0; index < groupCount; index++)
+                {
+                    IntPtr entry = IntPtr.Add(
+                        buffer,
+                        checked(groupOffset + checked((int)index * groupSize)));
+                    SID_AND_ATTRIBUTES group = (SID_AND_ATTRIBUTES)Marshal.PtrToStructure(
+                        entry,
+                        typeof(SID_AND_ATTRIBUTES));
+                    if (group.Sid == IntPtr.Zero)
+                    {
+                        throw new InvalidOperationException(
+                            "GetTokenInformation(TokenGroups) returned a null group SID");
+                    }
+                    if (administrators.Equals(new SecurityIdentifier(group.Sid)))
+                    {
+                        return (group.Attributes & SE_GROUP_ENABLED) != 0 &&
+                            (group.Attributes & SE_GROUP_USE_FOR_DENY_ONLY) == 0;
+                    }
+                }
+                return false;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
         private static void ValidateStandardUserPrimaryToken(
             IntPtr token,
             LaunchTokenKind kind,
@@ -536,6 +771,11 @@ namespace DefenseClaw
             {
                 throw new InvalidOperationException(label + " token remains elevated");
             }
+            if (IsAdministrator(token))
+            {
+                throw new InvalidOperationException(
+                    label + " token retains enabled administrator membership");
+            }
 
             int elevationType = GetTokenInteger(token, TokenElevationType, "TokenElevationType");
             if (kind == LaunchTokenKind.LinkedLimited)
@@ -547,9 +787,14 @@ namespace DefenseClaw
                 }
                 return;
             }
-            if (!IsTokenRestricted(token))
+            // LUA_TOKEN can mark administrator groups deny-only without adding
+            // a restricting-SID list, so IsTokenRestricted is not the right
+            // proof. Effective membership above plus the default elevation
+            // type is the standard-user contract for this UAC-disabled path.
+            if (elevationType != TokenElevationTypeDefault)
             {
-                throw new InvalidOperationException(label + " fallback token is not restricted");
+                throw new InvalidOperationException(
+                    label + " fallback token is not TokenElevationTypeDefault");
             }
         }
 
@@ -618,6 +863,7 @@ namespace DefenseClaw
                 {
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRestrictedToken failed");
                 }
+                SetMediumIntegrity(launchToken);
                 ValidateStandardUserPrimaryToken(launchToken, kind, "restricted LUA Setup");
                 IntPtr fallback = launchToken;
                 launchToken = IntPtr.Zero;
@@ -680,9 +926,13 @@ namespace DefenseClaw
             try
             {
                 token = OpenToken(GetCurrentProcess(), TOKEN_QUERY);
-                if (IsElevated(token)) return false;
-                return GetTokenInteger(token, TokenElevationType, "TokenElevationType") ==
-                    TokenElevationTypeLimited || IsTokenRestricted(token);
+                if (IsElevated(token) || IsAdministrator(token)) return false;
+                int elevationType = GetTokenInteger(
+                    token,
+                    TokenElevationType,
+                    "TokenElevationType");
+                return elevationType == TokenElevationTypeLimited ||
+                    elevationType == TokenElevationTypeDefault;
             }
             finally
             {
@@ -907,9 +1157,12 @@ namespace DefenseClaw
             bool resumed = false;
             try
             {
+                // CreateRestrictedToken preserves the source handle's access;
+                // TOKEN_ADJUST_DEFAULT is required to lower the fallback MIC.
                 sourceToken = OpenToken(
                     GetCurrentProcess(),
-                    TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY);
+                    TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY |
+                        TOKEN_ADJUST_DEFAULT);
                 if (!IsElevated(sourceToken))
                 {
                     throw new InvalidOperationException(

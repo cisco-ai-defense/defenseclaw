@@ -1510,8 +1510,8 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 106751,
-          "default": 90,
-          "description": "Zero retains event, evidence, and judge-body history forever and requires a persistent capacity warning. The maximum is the largest whole-day period representable as a Go time.Duration."
+          "default": 7,
+          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
         }
       },
       "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."
@@ -2524,9 +2524,21 @@
       "type": "object",
       "additionalProperties": false,
       "description": "Semantic model router configuration for intelligent LLM request routing via vLLM Semantic Router sidecar.",
+      "allOf": [
+        {
+          "if": {
+            "required": ["enabled"],
+            "properties": { "enabled": { "const": true } }
+          },
+          "then": {
+            "required": ["models"],
+            "properties": { "models": { "minItems": 1 } }
+          }
+        }
+      ],
       "properties": {
         "enabled": { "type": "boolean" },
-        "version": { "$ref": "#/$defs/boundedString" },
+        "version": { "type": "string", "enum": ["0.3.0", "v0.3.0"] },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "algorithm": { "$ref": "#/$defs/boundedString" },
         "remote": {
@@ -2534,24 +2546,7 @@
           "additionalProperties": false,
           "properties": {
             "endpoint": { "$ref": "#/$defs/boundedString" },
-            "timeout_ms": { "type": "integer", "minimum": 1 }
-          }
-        },
-        "embedding": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "provider": { "$ref": "#/$defs/boundedString" },
-            "base_url": { "$ref": "#/$defs/boundedString" },
-            "model": { "$ref": "#/$defs/boundedString" }
-          }
-        },
-        "llm_classifier": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "base_url": { "$ref": "#/$defs/boundedString" },
-            "model": { "$ref": "#/$defs/boundedString" }
+            "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 5000 }
           }
         },
         "models": {
@@ -2560,15 +2555,14 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
+            "required": ["name", "provider", "model"],
             "properties": {
-              "name": { "$ref": "#/$defs/boundedString" },
-              "provider": { "$ref": "#/$defs/boundedString" },
-              "model": { "$ref": "#/$defs/boundedString" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "provider": { "type": "string", "minLength": 1, "maxLength": 4096 },
+              "model": { "type": "string", "minLength": 1, "maxLength": 4096 },
               "base_url": { "$ref": "#/$defs/boundedString" },
-              "api_key_env": { "$ref": "#/$defs/boundedString" },
-              "weight": { "type": "integer" },
-              "capabilities": { "$ref": "#/$defs/stringList" },
-              "cost_per_1k_tokens": { "type": "number" }
+              "api_key_env": { "$ref": "#/$defs/envName" },
+              "capabilities": { "$ref": "#/$defs/stringList" }
             }
           }
         },
@@ -2576,11 +2570,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "keywords": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": { "name": { "$ref": "#/$defs/boundedString" }, "keywords": { "$ref": "#/$defs/stringList" }, "operator": { "$ref": "#/$defs/boundedString" } } } },
-            "embedding": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" }, "threshold": { "type": "number" } } },
-            "domain": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" } } },
-            "complexity": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" } } },
-            "context_length": { "type": "object", "additionalProperties": false, "properties": { "thresholds": { "type": "array", "items": { "type": "integer" } } } }
+            "keywords": { "type": "array", "maxItems": 256, "items": { "type": "object", "additionalProperties": false, "required": ["name", "keywords"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 128 }, "keywords": { "type": "array", "minItems": 1, "maxItems": 4096, "items": { "type": "string", "minLength": 1, "maxLength": 4096 } }, "operator": { "type": "string", "enum": ["AND", "OR", "and", "or"] } } } }
           }
         },
         "decisions": {
@@ -2589,12 +2579,13 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
+            "required": ["name", "model_refs"],
             "properties": {
-              "name": { "$ref": "#/$defs/boundedString" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 64 },
               "priority": { "type": "integer" },
-              "conditions": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": { "type": { "$ref": "#/$defs/boundedString" }, "name": { "$ref": "#/$defs/boundedString" } } } },
-              "operator": { "$ref": "#/$defs/boundedString" },
-              "model_refs": { "$ref": "#/$defs/stringList" },
+              "conditions": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["type", "name"], "properties": { "type": { "type": "string", "enum": ["keyword", "KEYWORD"] }, "name": { "type": "string", "minLength": 1, "maxLength": 128 } } } },
+              "operator": { "type": "string", "enum": ["AND", "OR", "and", "or"] },
+              "model_refs": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 128 } },
               "algorithm": { "$ref": "#/$defs/boundedString" }
             }
           }

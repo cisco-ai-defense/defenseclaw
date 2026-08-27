@@ -33,22 +33,47 @@ type Input struct {
 	// ActiveHome is trusted caller context for the identity executing the
 	// action. It must be an absolute POSIX or Windows filesystem path.
 	// ActionFacts never discovers it from process state.
-	ActiveHome  string
-	DialectHint Dialect
+	ActiveHome string
+	// ActiveAgentFiles is trusted connector context containing the exact files
+	// whose instructions are active for this action. Entries must be absolute
+	// filesystem paths. ActionFacts validates, canonicalizes, bounds, and copies
+	// the list; it never discovers active files from argv, CWD, or process state.
+	ActiveAgentFiles []string
+	// ActiveAgentFilesCaseInsensitive is private, trusted connector metadata
+	// captured when an active POSIX file is loaded. Each entry must also occur
+	// in ActiveAgentFiles. It is carried only in process so later policy checks
+	// can honor native case-insensitive filename lookup without filesystem I/O.
+	ActiveAgentFilesCaseInsensitive []string `json:"-"`
+	// ActiveAgentFilesCaseInsensitiveUncertain is private trusted connector
+	// state proving that at least one active POSIX file omitted by bounded cache
+	// loss had case-insensitive filename lookup. It may be true only when
+	// ActiveAgentFilesUncertain is true and is never derived from action input.
+	ActiveAgentFilesCaseInsensitiveUncertain bool `json:"-"`
+	// ActiveAgentFilesUncertain is trusted connector state indicating that the
+	// exact list above may be incomplete because its bounded authority cache
+	// evicted or overflowed an entry, or because an authenticated load named a
+	// recognized instruction path whose native identity could not be proved.
+	// Parsers never derive it from action input.
+	ActiveAgentFilesUncertain bool
+	DialectHint               Dialect
 }
 
 // Facts contains the statically proven subset of one action. Attacker-
 // controlled parse failures are represented by Parse and never returned as
 // errors.
 type Facts struct {
-	Tool       string
-	CWD        string
-	ActiveHome string
-	Parse      ParseResult
-	Commands   []CommandFact
-	Paths      []PathFact
-	Network    []NetworkFact
-	DataFlows  []DataFlowFact
+	Tool                                     string
+	CWD                                      string
+	ActiveHome                               string
+	ActiveAgentFiles                         []string
+	ActiveAgentFilesCaseInsensitive          []string `json:"-"`
+	ActiveAgentFilesCaseInsensitiveUncertain bool     `json:"-"`
+	ActiveAgentFilesUncertain                bool
+	Parse                                    ParseResult
+	Commands                                 []CommandFact
+	Paths                                    []PathFact
+	Network                                  []NetworkFact
+	DataFlows                                []DataFlowFact
 }
 
 // Authoritative reports whether the entire action can be evaluated by migrated

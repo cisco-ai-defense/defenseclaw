@@ -45,7 +45,7 @@ rules:
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-REVSHELL-PYTHON
-    pattern: '(?i)python[23]?\s+-c\s+.*socket.*connect'
+    pattern: '(?is)python[23]?\s+-c\s+.{0,400}?socket\s*\.\s*socket\s*\(.{0,200}?\.\s*connect\s*\('
     title: "Python reverse shell"
     severity: CRITICAL
     confidence: 0.90
@@ -131,10 +131,33 @@ rules:
   - id: CMD-MKFS
     expression: >-
       f.commands.exists(c, c.argv_complete &&
-      c.program != 'dd' &&
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)
-    pattern: '(?i)\bmkfs\b'
+      c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] &&
+      p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
+    pattern: '(?i)\b(?:mkfs(?:\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat|minix))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\b'
     title: "Filesystem format command"
+    severity: CRITICAL
+    confidence: 0.90
+    tags: [destructive]
+  - id: CMD-DEVICE-WIPE
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program != 'dd' &&
+      !(c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs']) &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] &&
+      p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
+    # dd and filesystem formatters retain their dedicated stable rule IDs;
+    # every other proven device write or append is owned here.
+    # Semantic-only: raw mentions of common verbs such as `tee` and `format`
+    # are not evidence of a destructive device write.
+    pattern: 'a^'
+    title: "Destructive write to a disk device"
     severity: CRITICAL
     confidence: 0.90
     tags: [destructive]
@@ -143,7 +166,8 @@ rules:
       f.commands.exists(c, c.argv_complete && c.program == 'dd' &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
-      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] &&
       p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
     pattern: '(?i)\bdd\s+if='
     title: "dd disk write"
@@ -234,13 +258,13 @@ rules:
     confidence: 0.85
     tags: [network, exfiltration]
   - id: CMD-WGET-POST
-    pattern: '(?i)\bwget\b\s+.*--post-(?:data|file)'
+    pattern: '(?i)\bwget\b[^;\n]*--post-(?:data|file)'
     title: "wget POST data exfil"
     severity: HIGH
     confidence: 0.85
     tags: [network, exfiltration]
   - id: CMD-SOCAT-EXEC
-    pattern: '(?i)\bsocat\b\s+.*\bEXEC\b'
+    pattern: '(?i)\bsocat\b[^;\n]*\bEXEC\b'
     title: "socat with EXEC (reverse shell)"
     severity: CRITICAL
     confidence: 0.95
@@ -264,7 +288,7 @@ rules:
       defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
       f.data_flows.exists(d, d.from_command_id == dst.id &&
       d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
-    pattern: '(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
+    pattern: '(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw|-urlencode)?\s+@-|-d\s+@-|(?:--form|-F)\s+[^;\n]*=@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
     title: "Environment variable dump"
     severity: HIGH
     confidence: 0.80
@@ -306,7 +330,7 @@ rules:
       defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
       f.data_flows.exists(d, d.from_command_id == dst.id &&
       d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
-    pattern: '(?i)\b(?:cat|type|Get-Content)\b[^|;\n]*(?:\.env|credentials|\.git-credentials|\.netrc|_netrc|\.npmrc|\.pypirc|config\.json|/token)\s*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
+    pattern: '(?i)\b(?:cat|type|Get-Content)\b[^|;\n]*(?:\.env|credentials|\.git-credentials|\.netrc|_netrc|\.npmrc|\.pypirc|config\.json|/token)\s*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw|-urlencode)?\s+@-|-d\s+@-|(?:--form|-F)\s+[^;\n]*=@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
     title: "Sensitive read piped to external upload"
     severity: CRITICAL
     confidence: 0.96

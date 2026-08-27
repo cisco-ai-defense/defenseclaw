@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -416,7 +417,7 @@ func NewGuardrailProxy(
 		limiter:      rate.NewLimiter(rate.Limit(100), 200),
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
-		modelRouter:  globalModelRouter,
+		modelRouter:  nil,
 	}
 	p.resolveProviderFn = p.resolveProviderFromHeaders
 	return p, nil
@@ -2401,6 +2402,41 @@ func (p *GuardrailProxy) guardUpstreamTargetURL(w http.ResponseWriter, r *http.R
 	return false
 }
 
+// isTrustedRoutedLoopbackTarget permits an operator-configured local model
+// backend selected by the semantic router. The ordinary connector target is
+// still checked by guardUpstreamTargetURL before routing, and non-loopback
+// private targets still require the existing explicit private-upstream
+// allowlist. Keeping this exception to known local provider families prevents
+// a classifier response from turning the proxy into a general localhost SSRF
+// primitive.
+func isTrustedRoutedLoopbackTarget(r *http.Request, targetURL, provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "ollama", "vllm", "lm_studio", "lmstudio", "local":
+	default:
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Port() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return false
+	}
+	// Never route back into the currently serving proxy. This keeps a bad
+	// local backend entry from creating an unbounded request loop.
+	if r != nil {
+		requestHost := r.Host
+		if parsedHost, parsedPort, splitErr := net.SplitHostPort(requestHost); splitErr == nil {
+			parsedHost = strings.ToLower(strings.Trim(parsedHost, "[]"))
+			if parsedPort == u.Port() && (parsedHost == "localhost" || parsedHost == "127.0.0.1" || parsedHost == "::1") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2504,6 +2540,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// providers/utils/utils.go:SetExtraHeaders). Same blocklist /
 	// validation / caps as the passthrough path. Toggled by
 	// llm.forward_custom_headers (default on).
+	forwardedHeaderCount := 0
 	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() {
 		fwd := http.Header{}
 		n, herr := CopyForwardableHeaders(fwd, r.Header)
@@ -2527,12 +2564,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			r = r.WithContext(context.WithValue(r.Context(),
 				schemas.BifrostContextKeyExtraHeaders,
 				map[string][]string(fwd)))
-			// Debug-only per-request count; opt in with DEFENSECLAW_DEBUG=1.
-			// OTel counter carries the steady-state signal.
-			if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
-				fmt.Fprintf(os.Stderr, "[guardrail] chat: forwarded_header_count=%d\n", n)
-			}
-			p.recordProxyForwardedHeadersV8(r.Context(), "chat-completions", "ok", int64(n))
+			forwardedHeaderCount = n
 		}
 	}
 
@@ -2707,44 +2739,82 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// potentially override the target URL, model, or serve from cache.
 	// This runs AFTER guardrails (reuses their signals) and BEFORE the
 	// upstream forward. A nil return gracefully falls through.
+	var routedDecision *ModelRouterDecision
 	if p.modelRouter != nil {
+		routerMeta := proxyLLMEventMeta(p, r, &req, promptProviderName)
+		var routerTools []interface{}
+		if len(req.Tools) > 0 {
+			// Tools are already bounded by the incoming request body limit. If a
+			// provider sent a non-array extension, omit it from classification
+			// rather than failing an otherwise valid guarded request.
+			_ = json.Unmarshal(req.Tools, &routerTools)
+		}
+		routerMetadata := map[string]interface{}{
+			"defenseclaw.connector": p.connectorName(),
+		}
+		if preCallSeverity != "" {
+			routerMetadata["defenseclaw.guardrail.severity"] = preCallSeverity
+		}
 		routerInput := &ModelRouterInput{
-			Model:    req.Model,
-			Messages: req.Messages,
-			Stream:   req.Stream,
-			Severity: preCallSeverity,
+			Model:          req.Model,
+			RequestModel:   req.Model,
+			Messages:       req.Messages,
+			Tools:          routerTools,
+			Stream:         req.Stream,
+			SessionID:      routerMeta.SessionID,
+			ConversationID: routerMeta.SessionID,
+			UserID:         routerMeta.UserID,
+			Metadata:       routerMetadata,
 		}
 		if decision := p.modelRouter.Route(r.Context(), routerInput); decision != nil {
-			if decision.CacheHit && !req.Stream {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("X-Semantic-Router", "cache-hit")
-				w.Header().Set("X-Semantic-Router-Reason", decision.Reason)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write(decision.CachedResponse)
-				// TODO: cached responses should pass through the inspection/telemetry
-				// pipeline before returning, so that post-call guardrails and audit
-				// logging still apply to cache hits.
-				return
+			routedDecision = decision
+			if decision.TargetURLOverride || decision.APIKeyOverride {
+				// A router-selected backend is a new credential boundary. Do not
+				// carry custom headers captured for the connector's original
+				// provider (for example Cookie, Proxy-Authorization, or
+				// provider-specific API-key headers) to the selected backend.
+				// Shadowing the context value with an empty typed map covers both
+				// structured Bifrost dispatch and the raw-forward path while
+				// preserving provider-owned headers and the selected standard key.
+				r = r.WithContext(context.WithValue(
+					r.Context(),
+					schemas.BifrostContextKeyExtraHeaders,
+					map[string][]string{},
+				))
+				forwardedHeaderCount = 0
 			}
 			modelOverride := ""
-			if decision.TargetURL != "" {
+			if decision.TargetURLOverride {
 				req.TargetURL = decision.TargetURL
 			}
 			if decision.Model != "" {
 				modelOverride = decision.Model
 				req.Model = decision.Model
 			}
-			if decision.APIKey != "" {
+			if decision.APIKeyOverride {
 				req.TargetAPIKey = decision.APIKey
 			}
 			w.Header().Set("X-Semantic-Router", "routed")
 			w.Header().Set("X-Semantic-Router-Reason", decision.Reason)
 
 			// Apply model patching if router changed the model and we'll raw-forward.
-			if req.TargetURL != "" && modelOverride != "" {
+			if modelOverride != "" {
 				body = patchModelInBody(body, modelOverride)
+				if len(req.RawBody) > 0 {
+					req.RawBody = patchModelInBody(req.RawBody, modelOverride)
+				}
 			}
 		}
+	}
+	if forwardedHeaderCount > 0 {
+		// Record only headers that survive semantic routing's credential
+		// boundary. The per-request debug signal follows the same semantics.
+		if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+			fmt.Fprintf(os.Stderr, "[guardrail] chat: forwarded_header_count=%d\n", forwardedHeaderCount)
+		}
+		p.recordProxyForwardedHeadersV8(
+			r.Context(), "chat-completions", "ok", int64(forwardedHeaderCount),
+		)
 	}
 
 	// For fetch-intercepted OpenAI-compatible requests, preserve the
@@ -2754,13 +2824,19 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// dropped by the structured provider translation path.
 	if req.TargetURL != "" {
 		// Revalidate the router-selected URL before forwarding.
-		if p.guardUpstreamTargetURL(w, r, req.TargetURL) {
+		trustedLocalRoute := routedDecision != nil && routedDecision.TargetURLOverride &&
+			isTrustedRoutedLoopbackTarget(r, req.TargetURL, routedDecision.Provider)
+		if !trustedLocalRoute && p.guardUpstreamTargetURL(w, r, req.TargetURL) {
 			return
 		}
-		if requestTrace != nil {
-			requestTrace.Abort()
+		routedProvider := ""
+		if routedDecision != nil {
+			routedProvider = routedDecision.Provider
 		}
-		p.rawForwardChatCompletion(w, r, body, &req, mode, customBlockMsg)
+		p.rawForwardChatCompletion(
+			w, r, body, &req, routedProvider, mode, customBlockMsg,
+			agentCtx, promptID, requestTrace, &traceResult,
+		)
 		return
 	}
 
@@ -2770,7 +2846,17 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		writeOpenAIError(w, http.StatusInternalServerError, "proxy misconfigured: no provider resolver")
 		return
 	}
-	upstream := p.resolveProviderFn(&req)
+	var upstream LLMProvider
+	if routedDecision != nil && routedDecision.TargetURLOverride && req.TargetURL == "" {
+		modelArg := compositeModelForUpstream(routedDecision.Provider, req.Model)
+		var err error
+		upstream, err = NewProviderWithBase(modelArg, req.TargetAPIKey, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[routing] routed provider error: %v\n", err)
+		}
+	} else {
+		upstream = p.resolveProviderFn(&req)
+	}
 	if upstream == nil {
 		traceResult.ErrorType = "unsupported_provider"
 		provName, _ := splitModel(req.Model)
@@ -4873,6 +4959,12 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 			LegacyText:         args,
 			Connector:          p.connectorName(),
 			EnforcementCapable: true,
+			recordTelemetry: func(observation trustedActionTelemetry) {
+				p.recordParserUncertaintyMetricV8(
+					ctx,
+					observation.ParserUncertaintyCount,
+				)
+			},
 		})
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the
@@ -5126,14 +5218,56 @@ func (s *sseByteMeter) Flush() {
 // rawForwardChatCompletion preserves the original OpenAI-compatible JSON body
 // for fetch-intercepted requests while keeping DefenseClaw PRE-CALL and
 // POST-CALL guardrail checks active.
-func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http.Request, body []byte, req *ChatRequest, mode, customBlockMsg string) {
+func (p *GuardrailProxy) rawForwardChatCompletion(
+	w http.ResponseWriter,
+	r *http.Request,
+	body []byte,
+	req *ChatRequest,
+	routedProvider string,
+	mode string,
+	customBlockMsg string,
+	agentCtx context.Context,
+	promptID string,
+	requestTrace *proxyV8RequestTrace,
+	traceResult *proxyV8TraceResult,
+) {
+	llmStartTime := time.Now()
+	failTrace := func(errorType string) {
+		if traceResult == nil {
+			return
+		}
+		*traceResult = proxyV8TraceResult{
+			Outcome: observability.OutcomeFailed, ErrorType: errorType,
+			TechnicalFailure: true, UpstreamDuration: time.Since(llmStartTime),
+			Streaming: req != nil && req.Stream,
+		}
+	}
 	targetOrigin := strings.TrimRight(req.TargetURL, "/")
 	if targetOrigin == "" {
+		failTrace("missing_target_url")
 		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
 		return
 	}
 
 	upstreamURL := rawForwardUpstreamURL(targetOrigin, r.URL.RequestURI())
+	providerName := inferProviderFromURL(upstreamURL)
+	if selected := strings.TrimSpace(routedProvider); selected != "" {
+		providerName = selected
+	}
+	llmCtx := agentCtx
+	var modelTrace *proxyV8ModelTrace
+	if requestTrace != nil {
+		modelInput := p.proxyV8ModelInput(agentCtx, req, providerName, llmStartTime.UTC())
+		llmCtx, modelTrace = requestTrace.StartModel(agentCtx, modelInput)
+		if modelTrace != nil {
+			defer modelTrace.Abort()
+			defer func() {
+				if traceResult != nil {
+					modelTrace.Finish(*traceResult)
+				}
+			}()
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -5146,32 +5280,38 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
+		failTrace("upstream_request_invalid")
 		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request")
 		return
 	}
 
-	providerName := inferProviderFromURL(upstreamURL)
 	applyRawForwardRequestHeaders(upReq, r, providerName, req.TargetAPIKey)
 
 	resp, err := doProviderRequest(upReq, p.emitEgress)
 	if err != nil {
+		failTrace("upstream_error")
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	if req.Stream {
-		p.rawForwardChatCompletionStream(w, r, resp, req, mode, customBlockMsg)
+		p.rawForwardChatCompletionStream(
+			w, r, resp, req, mode, customBlockMsg,
+			llmCtx, promptID, modelTrace, traceResult, llmStartTime,
+		)
 		return
 	}
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
 	if err != nil {
+		failTrace("upstream_response_read")
 		writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
 		return
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		failTrace("upstream_http_status")
 		copyRawForwardResponseHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(respBody)
@@ -5179,19 +5319,33 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	}
 
 	completion, usage := extractRawForwardCompletion(respBody, req.Stream)
+	toolCalls := extractRawForwardToolCalls(respBody, false)
+	responseID, responseModel, finishReasons := rawForwardResponseIdentity(respBody)
+	observedResult := proxyV8TraceResult{
+		Outcome: observability.OutcomeCompleted, OutputText: completion, ToolCalls: toolCalls,
+		ResponseModel: responseModel, ResponseID: responseID,
+		FinishReasons: append([]string(nil), finishReasons...), Usage: usage,
+		ToolCallCount: countToolCalls(toolCalls), UpstreamDuration: time.Since(llmStartTime),
+	}
 
 	if completion != "" {
-		postCtx, postCancel := p.postCallContext(r.Context())
+		postCtx, postCancel := p.postCallContext(llmCtx)
 		defer postCancel()
 
 		postStart := time.Now()
 		respMessages := []ChatMessage{{Role: "assistant", Content: completion}}
 		verdict := p.inspector.Inspect(postCtx, "completion", completion, respMessages, req.Model, mode)
 		p.logPostCall(req.Model, completion, verdict, time.Since(postStart), usage)
-		p.recordTelemetry(r.Context(), "completion", req.Model, verdict, time.Since(postStart), mode,
+		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, verdict, time.Since(postStart), mode,
 			verdict != nil && verdict.Action == "block" && mode == "action")
+		modelTrace.AddGuardrailOverlay(overlay)
 
 		if verdict != nil && verdict.Action == "block" && mode == "action" {
+			observedResult.Outcome = observability.OutcomeBlocked
+			observedResult.FinishReasons = append(observedResult.FinishReasons, "blocked")
+			if traceResult != nil {
+				*traceResult = observedResult
+			}
 			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "completion", req.Model)
 			if req.Stream {
@@ -5203,11 +5357,17 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 		}
 	}
 
-	if toolCalls := extractRawForwardToolCalls(respBody, false); len(toolCalls) > 0 {
+	if len(toolCalls) > 0 {
 		if verdict := p.inspectToolCalls(r.Context(), toolCalls); verdict != nil {
-			p.recordTelemetry(r.Context(), "tool-call", req.Model, verdict, 0, mode,
+			overlay := p.recordTelemetry(llmCtx, "tool-call", req.Model, verdict, 0, mode,
 				verdict.Action == "block" && mode == "action")
+			modelTrace.AddGuardrailOverlay(overlay)
 			if verdict.Action == "block" && mode == "action" {
+				observedResult.Outcome = observability.OutcomeBlocked
+				observedResult.FinishReasons = append(observedResult.FinishReasons, "blocked")
+				if traceResult != nil {
+					*traceResult = observedResult
+				}
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
 				p.enqueueBlockNotification(verdict, "completion", req.Model)
@@ -5215,6 +5375,16 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 				return
 			}
 		}
+	}
+	responseMeta := proxyLLMEventMeta(p, r, req, providerName)
+	responseMeta.PromptID = promptID
+	responseMeta.ResponseID = firstNonEmpty(responseID, stableLLMEventID(
+		"response", responseMeta.Source, responseMeta.SessionID, responseMeta.RequestID, req.Model,
+	))
+	responseMeta.ResponseIDReported = strings.TrimSpace(responseID) != ""
+	p.emitLLMResponseEventV8(llmCtx, responseMeta, completion, string(respBody), finishReasons)
+	if traceResult != nil {
+		*traceResult = observedResult
 	}
 
 	copyRawForwardResponseHeaders(w.Header(), resp.Header)
@@ -5230,9 +5400,31 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	_, _ = w.Write(respBody)
 }
 
-func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r *http.Request, resp *http.Response, req *ChatRequest, mode, customBlockMsg string) {
+func (p *GuardrailProxy) rawForwardChatCompletionStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	resp *http.Response,
+	req *ChatRequest,
+	mode string,
+	customBlockMsg string,
+	llmCtx context.Context,
+	promptID string,
+	modelTrace *proxyV8ModelTrace,
+	traceResult *proxyV8TraceResult,
+	llmStartTime time.Time,
+) {
+	failTrace := func(errorType string) {
+		if traceResult == nil {
+			return
+		}
+		*traceResult = proxyV8TraceResult{
+			Outcome: observability.OutcomeFailed, ErrorType: errorType,
+			TechnicalFailure: true, UpstreamDuration: time.Since(llmStartTime), Streaming: true,
+		}
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		failTrace("streaming_unsupported")
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
@@ -5243,6 +5435,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r
 	}
 	w.WriteHeader(resp.StatusCode)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		failTrace("upstream_http_status")
 		_, _ = io.Copy(w, resp.Body)
 		flusher.Flush()
 		return
@@ -5254,6 +5447,10 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r
 	var bufferedTCFrames [][]byte
 	bufferedTCSize := 0
 	streamBlocked := false
+	streamResponseID := ""
+	streamResponseModel := ""
+	streamFinishReasons := []string{}
+	var streamUsage *ChatUsage
 
 	blockStream := func(reason string) {
 		streamBlocked = true
@@ -5265,13 +5462,14 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r
 			return true
 		}
 		content := accumulated.String()
-		postCtx, postCancel := p.postCallContext(r.Context())
+		postCtx, postCancel := p.postCallContext(llmCtx)
 		postCtx = proxyGuardrailWithoutEnforcement(postCtx)
 		verdict := p.inspector.Inspect(postCtx, "completion", content,
 			[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
-		p.recordTelemetry(r.Context(), "completion", req.Model, verdict, 0, mode, false)
+		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, verdict, 0, mode, false)
+		modelTrace.AddGuardrailOverlay(overlay)
 		if verdict != nil && verdict.Action == "block" {
 			p.enqueueBlockNotification(verdict, "completion", req.Model)
 			blockStream(verdict.Reason)
@@ -5285,15 +5483,16 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r
 			return true
 		}
 		if verdict := p.inspectToolCalls(r.Context(), assembled); verdict != nil {
-			p.recordTelemetry(r.Context(), "tool-call", req.Model, verdict, 0, mode,
+			overlay := p.recordTelemetry(llmCtx, "tool-call", req.Model, verdict, 0, mode,
 				verdict.Action == "block" && mode == "action")
+			modelTrace.AddGuardrailOverlay(overlay)
 			if verdict.Action == "block" && mode == "action" {
 				p.enqueueBlockNotification(verdict, "completion", req.Model)
 				blockStream(fmt.Sprintf("tool call blocked — %s", verdict.Reason))
 				return false
 			}
 		}
-		p.emitOpenAIToolCallEvents(r.Context(), proxyLLMEventMeta(p, r, req, inferProviderFromURL(req.TargetURL+req.TargetPath)), assembled)
+		p.emitOpenAIToolCallEvents(llmCtx, proxyLLMEventMeta(p, r, req, inferProviderFromURL(req.TargetURL+req.TargetPath)), assembled)
 		return true
 	}
 	flushBufferedToolCalls := func() {
@@ -5322,6 +5521,19 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r
 				continue
 			}
 			text, toolCalls, finishReason := parseRawForwardSSEPayload(payload)
+			var chunk StreamChunk
+			if json.Unmarshal([]byte(payload), &chunk) == nil {
+				if streamResponseID == "" {
+					streamResponseID = strings.TrimSpace(chunk.ID)
+				}
+				if streamResponseModel == "" {
+					streamResponseModel = strings.TrimSpace(chunk.Model)
+				}
+				if chunk.Usage != nil {
+					usageCopy := *chunk.Usage
+					streamUsage = &usageCopy
+				}
+			}
 			if text != "" {
 				frameText += text
 				accumulated.WriteString(text)
@@ -5332,6 +5544,9 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r
 			}
 			if finishReason == "tool_calls" {
 				frameToolCallFinish = true
+			}
+			if finishReason != "" {
+				streamFinishReasons = append(streamFinishReasons, finishReason)
 			}
 		}
 
@@ -5382,30 +5597,85 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(w http.ResponseWriter, r
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10<<20)
 	var frame bytes.Buffer
+	stopped := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		frame.WriteString(line)
 		frame.WriteByte('\n')
 		if line == "" {
 			if !processFrame(frame.Bytes()) {
-				return
+				stopped = true
+				break
 			}
 			frame.Reset()
 		}
 	}
-	if frame.Len() > 0 && !processFrame(frame.Bytes()) {
-		return
+	if !stopped && frame.Len() > 0 && !processFrame(frame.Bytes()) {
+		stopped = true
 	}
 	if streamBlocked {
+		if traceResult != nil {
+			*traceResult = proxyV8TraceResult{
+				Outcome: observability.OutcomeBlocked, OutputText: accumulated.String(),
+				ToolCalls: tcAcc.JSON(), ResponseModel: streamResponseModel,
+				ResponseID:    streamResponseID,
+				FinishReasons: append(append([]string(nil), streamFinishReasons...), "blocked"),
+				Usage:         streamUsage, ToolCallCount: countToolCalls(tcAcc.JSON()),
+				UpstreamDuration: time.Since(llmStartTime), Streaming: true, Cancelled: true,
+			}
+		}
 		return
 	}
 	if !inspectFinalText() || !inspectBufferedToolCalls() {
+		if traceResult != nil {
+			*traceResult = proxyV8TraceResult{
+				Outcome: observability.OutcomeBlocked, OutputText: accumulated.String(),
+				ToolCalls: tcAcc.JSON(), ResponseModel: streamResponseModel,
+				ResponseID:    streamResponseID,
+				FinishReasons: append(append([]string(nil), streamFinishReasons...), "blocked"),
+				Usage:         streamUsage, ToolCallCount: countToolCalls(tcAcc.JSON()),
+				UpstreamDuration: time.Since(llmStartTime), Streaming: true, Cancelled: true,
+			}
+		}
 		return
 	}
 	flushBufferedToolCalls()
 	if err := scanner.Err(); err != nil {
+		failTrace("upstream_stream_read")
 		fmt.Fprintf(os.Stderr, "[guardrail] raw stream read error: %v\n", err)
+		return
 	}
+	finishReasons := append([]string(nil), streamFinishReasons...)
+	result := proxyV8TraceResult{
+		Outcome: observability.OutcomeCompleted, OutputText: accumulated.String(),
+		ToolCalls: tcAcc.JSON(), ResponseModel: streamResponseModel, ResponseID: streamResponseID,
+		FinishReasons: finishReasons, Usage: streamUsage,
+		ToolCallCount: countToolCalls(tcAcc.JSON()), UpstreamDuration: time.Since(llmStartTime), Streaming: true,
+	}
+	responseMeta := proxyLLMEventMeta(p, r, req, inferProviderFromURL(req.TargetURL+req.TargetPath))
+	responseMeta.PromptID = promptID
+	responseMeta.ResponseID = firstNonEmpty(streamResponseID, stableLLMEventID(
+		"response", responseMeta.Source, responseMeta.SessionID, responseMeta.RequestID, req.Model,
+	))
+	responseMeta.ResponseIDReported = strings.TrimSpace(streamResponseID) != ""
+	p.emitLLMResponseEventV8(llmCtx, responseMeta, accumulated.String(), "", finishReasons)
+	if traceResult != nil {
+		*traceResult = result
+	}
+}
+
+func rawForwardResponseIdentity(respBody []byte) (string, string, []string) {
+	var parsed ChatResponse
+	if json.Unmarshal(respBody, &parsed) != nil {
+		return "", "", nil
+	}
+	finishReasons := make([]string, 0, len(parsed.Choices))
+	for _, choice := range parsed.Choices {
+		if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
+			finishReasons = append(finishReasons, strings.TrimSpace(*choice.FinishReason))
+		}
+	}
+	return strings.TrimSpace(parsed.ID), strings.TrimSpace(parsed.Model), finishReasons
 }
 
 func writeRawForwardBlockedStreamChunk(w http.ResponseWriter, flusher http.Flusher, model, msg string) {
@@ -5479,7 +5749,8 @@ func splitURLPathSegments(path string) []string {
 }
 
 func applyRawForwardRequestHeaders(upReq *http.Request, r *http.Request, providerName, targetAPIKey string) {
-	if fwd, ok := r.Context().Value(schemas.BifrostContextKeyExtraHeaders).(map[string][]string); ok {
+	fwd, forwardedHeaderContextBound := r.Context().Value(schemas.BifrostContextKeyExtraHeaders).(map[string][]string)
+	if forwardedHeaderContextBound {
 		for name, values := range fwd {
 			upReq.Header.Del(name)
 			for _, value := range values {
@@ -5488,7 +5759,7 @@ func applyRawForwardRequestHeaders(upReq *http.Request, r *http.Request, provide
 		}
 	}
 	upReq.Header.Set("Content-Type", "application/json")
-	if upReq.Header.Get("Accept") == "" {
+	if upReq.Header.Get("Accept") == "" && !forwardedHeaderContextBound {
 		if v := r.Header.Get("Accept"); v != "" {
 			upReq.Header.Set("Accept", v)
 		}

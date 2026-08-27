@@ -34,11 +34,6 @@ type ModelRouterInput struct {
 	Messages []ChatMessage
 	Stream   bool
 
-	// Pre-computed guardrail signals (zero-cost reuse).
-	JailbreakScore float64
-	PIIDetected    bool
-	Severity       string
-
 	// Rich context fields for semantic routing.
 	Tools          []interface{}
 	SessionID      string
@@ -53,58 +48,43 @@ type ModelRouterInput struct {
 // ModelRouterDecision is the routing outcome. The proxy uses these fields
 // to override the target URL, model, and API key before forwarding upstream.
 type ModelRouterDecision struct {
+	// Provider is the gateway provider family for Model (for example
+	// "ollama" or "openai"). The classifier returns only an alias; this
+	// value comes from the gateway-owned backend catalog.
+	Provider string
+
 	// TargetURL overrides X-DC-Target-URL (provider base URL).
 	TargetURL string
+	// TargetURLOverride distinguishes clearing the connector's original
+	// upstream from keeping it. Every resolved backend sets this so a route to
+	// a different provider cannot accidentally reuse the original endpoint.
+	TargetURLOverride bool
 
 	// Model overrides the model in the request body.
 	Model string
 
 	// APIKey is the resolved credential for the selected provider.
-	// Empty means keep the existing key resolution path.
+	// Empty means keep the existing key unless APIKeyOverride is true.
 	APIKey string
-
-	// CacheHit indicates the response is served from semantic cache.
-	// When true, CachedResponse contains the full response body.
-	CacheHit       bool
-	CachedResponse []byte
+	// APIKeyOverride distinguishes "clear the original provider credential"
+	// from "keep the original credential". Router-selected base URLs must set
+	// this even for keyless local backends so credentials are never forwarded
+	// across provider trust boundaries.
+	APIKeyOverride bool
 
 	// Reason is a human-readable explanation for observability.
 	Reason string
-
-	// Plugin-enriched fields from the semantic router.
-	SystemPrompt       string
-	ReasoningEffort    string
-	UseReasoning       bool
-	LoRAName           string
-	HeaderMutations    *HeaderMutations
-	RAGDocuments       []RAGDocument
-	CompressedMessages []ChatMessage
-	DecisionName       string
-	Algorithm          string
-	MatchedSignals     map[string]interface{}
-	Warnings           []string
 }
 
-// HeaderMutations describes HTTP header changes the router wants applied
-// to the upstream request.
-type HeaderMutations struct {
-	Add    []HeaderEntry `json:"add,omitempty"`
-	Update []HeaderEntry `json:"update,omitempty"`
-	Delete []string      `json:"delete,omitempty"`
-}
-
-// HeaderEntry is a single header name/value pair.
-type HeaderEntry struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
-
-// RAGDocument represents a retrieved document returned by the router's
-// RAG plugin for injection into the prompt context.
-type RAGDocument struct {
-	Content    string  `json:"content"`
-	Source     string  `json:"source,omitempty"`
-	Similarity float64 `json:"similarity,omitempty"`
+// ModelRouterBackend is the gateway-owned forwarding target for one model
+// alias returned by the semantic router. Credentials stay in DefenseClaw and
+// are never sent to the classifier.
+type ModelRouterBackend struct {
+	Name      string
+	Provider  string
+	Model     string
+	BaseURL   string
+	APIKeyEnv string
 }
 
 // SetModelRouter installs an embedded model router into the proxy.
@@ -113,17 +93,4 @@ type RAGDocument struct {
 // semantic routing (the proxy uses its default path).
 func (p *GuardrailProxy) SetModelRouter(mr ModelRouter) {
 	p.modelRouter = mr
-}
-
-// globalModelRouter holds a model router registered before the proxy is
-// constructed. NewGuardrailProxy picks it up automatically.
-// Safe without synchronization: written once during startup (before serving)
-// and read-only thereafter.
-var globalModelRouter ModelRouter
-
-// RegisterModelRouter registers a model router globally. The proxy picks
-// it up during construction (NewGuardrailProxy). Must be called during
-// startup before the proxy begins serving requests.
-func RegisterModelRouter(mr ModelRouter) {
-	globalModelRouter = mr
 }

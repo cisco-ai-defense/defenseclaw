@@ -323,12 +323,23 @@ observability:
   local:
     path: ~/.defenseclaw/audit.db
     judge_bodies_path: ~/.defenseclaw/judge_bodies.db
-    retention_days: 90
+    retention_days: 7
 ```
 
-`retention_days: 0` means retain indefinitely and produces a capacity warning.
-Raw judge-body capture is controlled separately by
-`guardrail.retain_judge_bodies`.
+Seven days is also the default when `retention_days` is omitted. The gateway
+runs the graph-aware SQLite reaper after startup readiness and every six hours;
+CLI-only writes are reaped the next time the gateway starts. Existing v8
+configurations that omitted the field therefore adopt seven days on their first
+start after upgrade. Set an explicit value before upgrading if the installation
+must preserve a longer local window. `retention_days: 0` retains indefinitely
+and produces a capacity warning.
+
+The reaper removes eligible event, evidence, judge-body, and correlation rows
+in dependency order. SQLite can reuse the freed pages, but the database file
+does not shrink automatically. Raw judge-body capture is
+controlled separately by `guardrail.retain_judge_bodies`; the OPA
+`audit.retention_days` input is a distinct policy and does not configure this
+SQLite reaper.
 
 ## Choose an operator view
 

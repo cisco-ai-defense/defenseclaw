@@ -1166,6 +1166,101 @@ func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action s
 	return nil
 }
 
+func runDeferredUninstallConnectorVerifyWithEnv(
+	transaction setupTransaction,
+	gatewayPath, connectorName string,
+	env []string,
+) error {
+	if transaction.Action != "uninstall" || !validSetupTransactionID(transaction.ID) {
+		return errors.New("deferred connector verification requires an exact uninstall transaction")
+	}
+	if !pathExists(gatewayPath) {
+		return fmt.Errorf("connector %s verify requires the selected trusted gateway binary", connectorName)
+	}
+	setupExecutable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve deferred cleanup Setup parent: %w", err)
+	}
+	setupExecutable, err = filepath.Abs(setupExecutable)
+	if err != nil || !samePath(setupExecutable, transaction.MaintenancePath) ||
+		!strings.EqualFold(filepath.Base(setupExecutable), setupArtifactName) {
+		return errors.New("deferred connector verification is not running from the transaction-owned Setup executable")
+	}
+	setupProcessPath, setupStartIdentity, err := currentSetupProcessIdentity()
+	if err != nil {
+		return fmt.Errorf("resolve deferred cleanup Setup process identity: %w", err)
+	}
+	if !samePath(setupProcessPath, setupExecutable) ||
+		!validSetupProcessStartIdentity(setupStartIdentity) {
+		return errors.New("deferred connector verification is not running in the authenticated Setup process instance")
+	}
+	transactionRoot, err := defaultTransactionRoot()
+	if err != nil {
+		return fmt.Errorf("resolve deferred cleanup transaction root: %w", err)
+	}
+	recordPath := deferredUninstallCleanupPath(transactionRoot)
+	args, err := deferredUninstallConnectorVerifyCommandArgs(
+		transaction,
+		setupExecutable,
+		setupStartIdentity,
+		recordPath,
+		connectorName,
+		env,
+	)
+	if err != nil {
+		return err
+	}
+	output, err := runCapturedSetupCommand(
+		setupControlCommandTimeout,
+		env,
+		gatewayPath,
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"connector %s verify failed: %w: %s",
+			connectorName,
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	return nil
+}
+
+func deferredUninstallConnectorVerifyCommandArgs(
+	transaction setupTransaction,
+	setupExecutable, setupStartIdentity, recordPath, connectorName string,
+	env []string,
+) ([]string, error) {
+	if transaction.Action != "uninstall" || !validSetupTransactionID(transaction.ID) ||
+		!samePath(setupExecutable, transaction.MaintenancePath) ||
+		!validSetupProcessStartIdentity(setupStartIdentity) {
+		return nil, errors.New("deferred connector verification arguments are not bound to the uninstall transaction")
+	}
+	args, err := connectorLifecycleCommandArgs(
+		transaction.DataRoot,
+		connectorName,
+		"verify",
+		env,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connector %s verify config home: %w", connectorName, err)
+	}
+	args = append(
+		args,
+		"--internal-setup-parent", setupExecutable,
+		"--internal-setup-start-identity", setupStartIdentity,
+		"--internal-deferred-cleanup-record", recordPath,
+		"--internal-deferred-cleanup-transaction", transaction.ID,
+	)
+	return args, nil
+}
+
+func validSetupProcessStartIdentity(value string) bool {
+	identity, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && identity > 0 && value == strconv.FormatInt(identity, 10)
+}
+
 func connectorLifecycleCommandArgs(dataRoot, connectorName, action string, env []string) ([]string, error) {
 	configHome, err := connectorLifecycleConfigHome(env, connectorName)
 	if err != nil {
@@ -2189,7 +2284,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 	}
 	if manifest.DistributionFlavor != "oss" {
 		return fmt.Errorf(
-			"unsupported payload distribution flavor %q; managed-enterprise requires the private Windows CMID release overlay",
+			"unsupported payload distribution flavor %q; the per-user Setup accepts only oss",
 			manifest.DistributionFlavor,
 		)
 	}

@@ -50,6 +50,17 @@ Authoritative ActionFacts own the semantic decision; unsupported or ambiguous
 input keeps the legacy fallback. Each migrated owner emits one canonical
 finding rather than independent regex and CEL findings.
 
+Semantic-only rules use the intentionally never-matching RE2 sentinel `a^`
+when a raw command mention cannot safely serve as fallback evidence.
+
+All trusted-action findings cross a final same-rule proof gate before they can
+affect a block decision. A complete code-owned semantic proof, a complete exact
+built-in CodeGuard proof, or a bounded code-owned exact fallback proof may
+independently authorize enforcement. Raw or custom regex matches, custom
+CodeGuard matches, parser-shadow evidence, partial or invalid facts, and proof
+for another rule remain detection-only unless a separate complete proof is
+pinned to that same rule; lexical metadata alone never authorizes.
+
 Durable ordered-chain enforcement is limited to authenticated connector hooks
 with canonical connector/session correlation. The audit store persists only
 bounded masks and fingerprints, never raw commands, arguments, paths, URLs, or

@@ -30,6 +30,8 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"C2-METADATA-AWS",
 		"CMD-CRONTAB",
 		"CMD-SYSTEMCTL",
+		"COG-AGENTS-MD",
+		"COG-MEMORY",
 		"COG-OPENCLAW-JSON",
 		"PATH-ETC-SUDOERS",
 		"PATH-HISTORY",
@@ -82,15 +84,491 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 	}
 }
 
-func TestSemanticHistoryTamperExpressionCompiles(t *testing.T) {
+func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name             string
+		ruleID           string
+		command          string
+		dialect          actionfacts.Dialect
+		activeFiles      []string
+		contextUncertain bool
+		want             bool
+		wantSafe         bool
+	}{
+		{
+			name:        "active AGENTS mutation",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			want:        true,
+		},
+		{
+			name:        "unresolved POSIX parent variant is not declared safe",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/AGENTS.md",
+			activeFiles: []string{"/Repo/AGENTS.md"},
+		},
+		{
+			name:        "untrusted lowercase active basename stays inactive",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/agents.md",
+			activeFiles: []string{"/repo/agents.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "Windows path identity folds case",
+			ruleID:      "COG-AGENTS-MD",
+			command:     `Set-Content -LiteralPath 'C:\Repo\AGENTS.md' -Value updated`,
+			dialect:     actionfacts.DialectPowerShell,
+			activeFiles: []string{`c:\repo\agents.MD`},
+			want:        true,
+		},
+		{
+			name:        "Windows distinct path is not declared safe",
+			ruleID:      "COG-AGENTS-MD",
+			command:     `Set-Content -LiteralPath 'C:\Repo\AGENTS.md' -Value updated`,
+			dialect:     actionfacts.DialectPowerShell,
+			activeFiles: []string{`C:\Other\AGENTS.md`},
+		},
+		{
+			name:        "active MEMORY mutation",
+			ruleID:      "COG-MEMORY",
+			command:     "printf updated >> /repo/MEMORY.md",
+			activeFiles: []string{"/repo/MEMORY.md"},
+			want:        true,
+		},
+		{
+			name:        "ordinary active-file read",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "cat /repo/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "distinct same basename is not declared safe",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/other/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+		},
+		{
+			name:        "external alias shape is not declared safe",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /tmp/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+		},
+		{
+			name:        "fixture alias shape is not declared safe",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/testdata/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+		},
+		{
+			name:        "other instruction kind proves known empty",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /tmp/AGENTS.md",
+			activeFiles: []string{"/repo/MEMORY.md"},
+			wantSafe:    true,
+		},
+		{
+			name:     "missing active context",
+			ruleID:   "COG-MEMORY",
+			command:  "printf updated > /repo/MEMORY.md",
+			wantSafe: true,
+		},
+		{
+			name:             "uncertain context fails closed for exact mutation",
+			ruleID:           "COG-MEMORY",
+			command:          "printf updated > /repo/MEMORY.md",
+			contextUncertain: true,
+			want:             true,
+		},
+		{
+			name:             "uncertain context does not declare folded basename safe",
+			ruleID:           "COG-AGENTS-MD",
+			command:          "printf updated > /repo/agents.md",
+			contextUncertain: true,
+		},
+		{
+			name:             "uncertain context preserves Windows case folding",
+			ruleID:           "COG-AGENTS-MD",
+			command:          `Set-Content -LiteralPath 'C:\Repo\agents.md' -Value updated`,
+			dialect:          actionfacts.DialectPowerShell,
+			contextUncertain: true,
+			want:             true,
+		},
+		{
+			name:             "uncertain context does not turn reads into mutations",
+			ruleID:           "COG-AGENTS-MD",
+			command:          "cat /repo/AGENTS.md",
+			contextUncertain: true,
+			wantSafe:         true,
+		},
+		{
+			name:        "filename mention",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "rg -n AGENTS.md internal/gateway",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "external path mention",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "echo /tmp/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			wantSafe:    true,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool:                      "shell",
+				Command:                   test.command,
+				DialectHint:               test.dialect,
+				CWD:                       "/repo",
+				ActiveHome:                "/home/alice",
+				ActiveAgentFiles:          test.activeFiles,
+				ActiveAgentFilesUncertain: test.contextUncertain,
+			})
+			requireAuthoritativeIntegrityFacts(t, facts)
+			owner, ok := semanticIntegrityPersistenceOwners[test.ruleID]
+			if !ok {
+				t.Fatalf("owner %q is missing", test.ruleID)
+			}
+			if got := owner.prerequisite(facts); got != test.want {
+				t.Fatalf("prerequisite=%t, want %t; facts=%+v", got, test.want, facts)
+			}
+			if !test.want {
+				if got := owner.suppressFallback(facts); got != test.wantSafe {
+					t.Fatalf("safe negative=%t, want %t; facts=%+v", got, test.wantSafe, facts)
+				}
+			}
+		})
+	}
+}
+
+func TestActiveAgentInstructionMutationUsesCachedPOSIXCaseSemantics(t *testing.T) {
+	const activePath = "/repo/AGENTS.md"
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool:                            "shell",
+		Command:                         "printf updated > /repo/agents.md",
+		CWD:                             "/repo",
+		ActiveAgentFiles:                []string{activePath},
+		ActiveAgentFilesCaseInsensitive: []string{activePath},
+	})
+	requireAuthoritativeIntegrityFacts(t, facts)
+	owner := semanticIntegrityPersistenceOwners["COG-AGENTS-MD"]
+	if !owner.prerequisite(facts) {
+		t.Fatalf("cached basename casing alias did not match: %+v", facts)
+	}
+	if projected := facts.EnforcementProjection(); !owner.prerequisite(projected) {
+		t.Fatalf(
+			"eligible active mutation did not survive enforcement projection: %+v",
+			projected,
+		)
+	}
+
+	facts.ActiveAgentFilesCaseInsensitive = nil
+	if owner.prerequisite(facts) || owner.suppressFallback(facts) {
+		t.Fatalf("unmarked POSIX case variant was declared safe: %+v", facts)
+	}
+
+	parentVariant := actionfacts.Analyze(actionfacts.Input{
+		Tool:                            "shell",
+		Command:                         "printf updated > /repo/agents.md",
+		CWD:                             "/repo",
+		ActiveAgentFiles:                []string{"/Repo/AGENTS.md"},
+		ActiveAgentFilesCaseInsensitive: []string{"/Repo/AGENTS.md"},
+	})
+	if owner.prerequisite(parentVariant) || owner.suppressFallback(parentVariant) {
+		t.Fatalf("unproven parent alias was enforced or declared safe: %+v", parentVariant)
+	}
+	if activeAgentInstructionPathsMatch(
+		activePath,
+		"/repo/AGENTſ.md",
+		actionfacts.PathFlavorPOSIX,
+		true,
+	) {
+		t.Fatal("ASCII load proof accepted a Unicode simple-fold alias")
+	}
+}
+
+func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) {
+	const connector = "active-instruction-filesystem-identity-dispatch"
+	installDefaultProfileConnector(t, connector)
+
+	dispatch := func(input actionfacts.Input) []RuleFinding {
+		return dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:              input,
+			LegacyText:         input.Command,
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+	}
+
+	t.Run("cached POSIX filename casing alias enforces", func(t *testing.T) {
+		const activePath = "/repo/AGENTS.md"
+		const command = "printf updated > /repo/agents.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                            "shell",
+			Command:                         command,
+			CWD:                             "/repo",
+			ActiveAgentFiles:                []string{activePath},
+			ActiveAgentFilesCaseInsensitive: []string{activePath},
+		}), "COG-AGENTS-MD")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("cached case alias finding = %+v, want enforcement", finding)
+		}
+	})
+
+	t.Run("unmarked POSIX casing alias remains detection only", func(t *testing.T) {
+		const command = "printf updated > /repo/agents.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          command,
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("unmarked POSIX case alias finding = %+v, want detection-only", finding)
+		}
+	})
+
+	t.Run("uncertain context does not fold candidate casing", func(t *testing.T) {
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                      "shell",
+			Command:                   "printf updated > /repo/agents.md",
+			CWD:                       "/repo",
+			ActiveAgentFilesUncertain: true,
+		}), "COG-AGENTS-MD"); finding != nil && finding.contributesToEnforcement() {
+			t.Fatalf("uncertain context enforced a folded-case candidate: %+v", *finding)
+		}
+	})
+
+	t.Run("uncertain context folds only with lost case proof", func(t *testing.T) {
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                                     "shell",
+			Command:                                  "printf updated > /repo/agents.md",
+			CWD:                                      "/repo",
+			ActiveAgentFilesCaseInsensitiveUncertain: true,
+			ActiveAgentFilesUncertain:                true,
+		}), "COG-AGENTS-MD")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("lost case proof did not enforce folded candidate: %+v", finding)
+		}
+	})
+
+	t.Run("uncertain context checks retained exact entries first", func(t *testing.T) {
+		const activePath = "/repo/AGENTS.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                            "shell",
+			Command:                         "printf updated > /repo/agents.md",
+			CWD:                             "/repo",
+			ActiveAgentFiles:                []string{activePath},
+			ActiveAgentFilesCaseInsensitive: []string{activePath},
+			ActiveAgentFilesUncertain:       true,
+		}), "COG-AGENTS-MD")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("retained exact case proof was ignored: %+v", finding)
+		}
+	})
+
+	t.Run("cached basename proof does not enforce parent alias", func(t *testing.T) {
+		const activePath = "/Repo/AGENTS.md"
+		const command = "printf updated > /repo/agents.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                            "shell",
+			Command:                         command,
+			CWD:                             "/repo",
+			ActiveAgentFiles:                []string{activePath},
+			ActiveAgentFilesCaseInsensitive: []string{activePath},
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("unproven parent alias finding = %+v, want detection-only", finding)
+		}
+	})
+
+	t.Run("distinct same-kind POSIX path remains detection only", func(t *testing.T) {
+		const activePath = "/repo/MEMORY.md"
+		const command = "printf updated > /repo/unrelated/memory.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:                            "shell",
+			Command:                         command,
+			CWD:                             "/repo",
+			ActiveAgentFiles:                []string{activePath},
+			ActiveAgentFilesCaseInsensitive: []string{activePath},
+		}), "COG-MEMORY")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("distinct same-kind finding = %+v, want detection-only", finding)
+		}
+	})
+
+	t.Run("external lexical alias remains detection only", func(t *testing.T) {
+		const command = "printf updated > /tmp/AGENTS.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          command,
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("external alias finding = %+v, want detection-only", finding)
+		}
+	})
+
+	t.Run("fixture-shaped lexical alias remains detection only", func(t *testing.T) {
+		const command = "printf updated > /repo/testdata/AGENTS.md"
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          command,
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf("fixture alias finding = %+v, want detection-only", finding)
+		}
+	})
+
+	t.Run("known-empty instruction context stays quiet", func(t *testing.T) {
+		for _, activeFiles := range [][]string{
+			nil,
+			{"/repo/MEMORY.md"},
+		} {
+			if finding := findingWithID(dispatch(actionfacts.Input{
+				Tool:             "shell",
+				Command:          "printf updated > /tmp/AGENTS.md",
+				CWD:              "/repo",
+				ActiveAgentFiles: activeFiles,
+			}), "COG-AGENTS-MD"); finding != nil {
+				t.Fatalf("known-empty context produced finding: %+v", *finding)
+			}
+		}
+	})
+
+	t.Run("distinct active-file read stays quiet", func(t *testing.T) {
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          "cat /tmp/AGENTS.md",
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD"); finding != nil {
+			t.Fatalf("read-only alias produced finding: %+v", *finding)
+		}
+	})
+
+	t.Run("external active-file mention stays quiet", func(t *testing.T) {
+		if finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "shell",
+			Command:          "echo /tmp/AGENTS.md",
+			CWD:              "/repo",
+			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
+		}), "COG-AGENTS-MD"); finding != nil {
+			t.Fatalf("external path mention produced finding: %+v", *finding)
+		}
+	})
+
+	t.Run("Windows case folding enforces", func(t *testing.T) {
+		const command = `Set-Content -LiteralPath 'C:\Repo\agents.md' -Value updated`
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "PowerShell",
+			Command:          command,
+			CWD:              `C:\Repo`,
+			ActiveAgentFiles: []string{`c:\repo\AGENTS.MD`},
+		}), "COG-AGENTS-MD")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("Windows case-folded finding = %+v, want enforcement", finding)
+		}
+	})
+
+	t.Run("preview active mutation cannot borrow unrelated execution", func(t *testing.T) {
+		const command = `Set-Content -LiteralPath 'C:\Repo\AGENTS.md' -Value preview -WhatIf; Set-Content -LiteralPath 'C:\Repo\notes.txt' -Value updated`
+		finding := findingWithID(dispatch(actionfacts.Input{
+			Tool:             "PowerShell",
+			Command:          command,
+			CWD:              `C:\Repo`,
+			ActiveAgentFiles: []string{`C:\Repo\AGENTS.md`},
+		}), "COG-AGENTS-MD")
+		if finding == nil || finding.contributesToEnforcement() {
+			t.Fatalf(
+				"preview mutation finding = %+v, want detection-only",
+				finding,
+			)
+		}
+	})
+}
+
+func TestActiveAgentInstructionMutationUnresolvedCandidateIsNotSafe(t *testing.T) {
+	t.Parallel()
+
+	facts := actionfacts.Facts{
+		Parse: actionfacts.ParseResult{Status: actionfacts.StatusComplete},
+		Commands: []actionfacts.CommandFact{{
+			ID:           1,
+			Kind:         actionfacts.CommandKindProcess,
+			Effect:       actionfacts.EffectExecute,
+			Program:      "printf",
+			Executable:   "printf",
+			Argv:         []string{"printf", "updated", "AGENTS.md"},
+			ArgvComplete: true,
+			Operations:   []actionfacts.OperationKind{actionfacts.OperationWrite},
+		}},
+	}
+	owner := semanticIntegrityPersistenceOwners["COG-AGENTS-MD"]
+	if owner.prerequisite(facts) {
+		t.Fatal("unresolved instruction-file candidate satisfied the semantic owner")
+	}
+	if owner.suppressFallback(facts) {
+		t.Fatal("unresolved instruction-file candidate suppressed detection fallback")
+	}
+}
+
+func TestSemanticIntegrityPersistenceExpressionsCompile(t *testing.T) {
 	t.Parallel()
 
 	compiler, err := semantic.NewCompiler()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, code := compiler.Compile(semanticHistoryTamperExpression); code != semantic.CompileOK {
-		t.Fatalf("compile code = %q", code)
+	for name, expression := range map[string]string{
+		"history tamper":                    semanticHistoryTamperExpression,
+		"active agent instruction mutation": semanticActiveAgentInstructionMutationExpression,
+	} {
+		if _, code := compiler.Compile(expression); code != semantic.CompileOK {
+			t.Fatalf("%s compile code = %q", name, code)
+		}
+	}
+}
+
+func TestGeneratedActiveInstructionRulesUseFilesystemNeutralExpression(t *testing.T) {
+	t.Parallel()
+
+	generation := snapshotRulePackGeneration("")
+	if generation == nil {
+		t.Fatal("default rule generation is unavailable")
+	}
+	want := map[string]bool{
+		"COG-AGENTS-MD": false,
+		"COG-MEMORY":    false,
+	}
+	for _, candidate := range generation.semanticRules {
+		if _, ok := want[candidate.rule.ID]; !ok {
+			continue
+		}
+		if candidate.rule.Expression != semanticActiveAgentInstructionMutationExpression {
+			t.Fatalf(
+				"%s expression = %q, want filesystem-neutral owner gate",
+				candidate.rule.ID,
+				candidate.rule.Expression,
+			)
+		}
+		want[candidate.rule.ID] = true
+	}
+	for ruleID, found := range want {
+		if !found {
+			t.Fatalf("default semantic rule %q is missing", ruleID)
+		}
 	}
 }
 
@@ -147,6 +625,7 @@ func TestIntegrityPersistenceCommandPrerequisites(t *testing.T) {
 		{"crontab list", "crontab -l", "", "CMD-CRONTAB", false},
 		{"crontab removal", "crontab -r", "", "CMD-CRONTAB", false},
 		{"systemctl enable", "systemctl enable --now demo.service", "", "CMD-SYSTEMCTL", true},
+		{"systemctl detached job mode", "systemctl --job-mode fail enable demo.service", "", "CMD-SYSTEMCTL", true},
 		{"systemctl status", "systemctl status demo.service", "", "CMD-SYSTEMCTL", false},
 		{"systemctl dry run", "systemctl --dry-run enable demo.service", "", "CMD-SYSTEMCTL", false},
 		{"launchctl bootstrap", "launchctl bootstrap gui/501 /Library/LaunchAgents/demo.plist", "", "CMD-SYSTEMCTL", true},
@@ -210,6 +689,12 @@ func TestIntegrityPersistenceCommandPrerequisites(t *testing.T) {
 				)
 			}
 		})
+	}
+
+	if verb, ok := integrityFirstPositional([]string{
+		"systemctl", "--future-mode", "enable", "demo.service",
+	}); ok || verb != "" {
+		t.Fatalf("unknown detached option produced verb %q", verb)
 	}
 
 	if gitNoVerify([]string{"commit", "-m", "-n"}) {
@@ -643,6 +1128,42 @@ func TestIntegrityPersistenceEndpointPrecision(t *testing.T) {
 	if metadataOwner.prerequisite(public) ||
 		!metadataOwner.suppressFallback(public) {
 		t.Fatalf("public metadata-looking endpoint was not a safe negative: %+v", public)
+	}
+}
+
+func TestCloudMetadataPrerequisiteRequiresHTTPFamily(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		scheme string
+		want   bool
+	}{
+		{scheme: "http", want: true},
+		{scheme: "HTTPS", want: true},
+		{scheme: "smtp"},
+		{scheme: "smtps"},
+		{scheme: ""},
+	} {
+		test := test
+		t.Run("scheme="+test.scheme, func(t *testing.T) {
+			t.Parallel()
+			facts := actionfacts.Facts{
+				Commands: []actionfacts.CommandFact{{
+					ID:         1,
+					Effect:     actionfacts.EffectExecute,
+					Operations: []actionfacts.OperationKind{actionfacts.OperationFetch},
+				}},
+				Network: []actionfacts.NetworkFact{{
+					CommandID:      1,
+					Action:         actionfacts.NetworkDownload,
+					Scheme:         test.scheme,
+					NormalizedHost: "169.254.169.254",
+				}},
+			}
+			if got := cloudMetadataPrerequisite(facts); got != test.want {
+				t.Fatalf("cloudMetadataPrerequisite(%q) = %t, want %t", test.scheme, got, test.want)
+			}
+		})
 	}
 }
 

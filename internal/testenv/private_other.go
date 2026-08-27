@@ -7,6 +7,7 @@ package testenv
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -22,7 +23,15 @@ func AssertPrivateDirectory(t testing.TB, path string) {
 
 func PrivateTempDir(t *testing.T) string {
 	t.Helper()
-	return t.TempDir()
+	dir := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("canonicalize private temp dir %s: %v", dir, err)
+	}
+	if err := os.Chmod(canonical, 0o700); err != nil {
+		t.Fatalf("protect private temp dir %s: %v", canonical, err)
+	}
+	return canonical
 }
 
 func assertPrivateMode(t testing.TB, path string, want os.FileMode) {

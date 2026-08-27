@@ -127,7 +127,7 @@ allow-list for additional containment.
 
 <Callout title="Treat local event history as sensitive data">
 The mandatory database is configured by `observability.local` (by default,
-`~/.defenseclaw/audit.db`) and retains 90 days on a fresh configuration. Set
+`~/.defenseclaw/audit.db`) and retains seven days on a fresh configuration. Set
 `observability.local.retention_days` to the reviewed retention period and limit
 host access to the DefenseClaw data directory. A global
 `observability.defaults.redaction_profile` or a bucket
@@ -136,7 +136,8 @@ only that export trust boundary. Verify the effective result with
 `defenseclaw config show --effective --section observability` and
 `defenseclaw observability plan`. See [Redaction](/docs/reference/redaction) for
 the resolution order and [Observability](/docs/observability#local-history)
-for retention behavior.
+for retention behavior. Retention removes eligible rows and makes their pages
+available for SQLite reuse, but the database file does not shrink automatically.
 </Callout>
 
 #### Decision aids — should I turn this on?

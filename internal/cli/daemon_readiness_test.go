@@ -36,6 +36,7 @@ func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gate
 		Watcher:   gateway.SubsystemHealth{State: gateway.StateDisabled},
 		Guardrail: gateway.SubsystemHealth{State: guardrailState},
 		Telemetry: gateway.SubsystemHealth{State: gateway.StateDisabled},
+		Routing:   gateway.SubsystemHealth{State: gateway.StateDisabled},
 	}
 }
 
@@ -197,6 +198,18 @@ func TestDaemonReadinessRequirementsExpectCanonicalV8Telemetry(t *testing.T) {
 	}
 }
 
+func TestDaemonReadinessRequirementsIncludeSemanticRouting(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{}); requirements.routingEnabled {
+		t.Fatal("disabled semantic routing was required during daemon readiness")
+	}
+
+	cfg.Routing.Enabled = true
+	if requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{}); !requirements.routingEnabled {
+		t.Fatal("enabled semantic routing was omitted from daemon readiness")
+	}
+}
+
 func TestDaemonReadinessRequirementsUseEffectiveGuardrailPosture(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Guardrail.Enabled = true
@@ -281,6 +294,31 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	fallback.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Mode: "observe", HookFailMode: "open"}
 	if err := verifyRotationConfigState(fallback, mixed); err != nil {
 		t.Fatalf("exact mixed connector state rejected: %v", err)
+	}
+}
+
+func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {Mode: "observe", HookFailMode: "open"},
+		"codex":      {Mode: "observe", HookFailMode: "open"},
+	}
+
+	state, err := rotationConnectorStateFromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Connectors) != 2 {
+		t.Fatalf("connector state rows = %d, want 2: %#v", len(state.Connectors), state.Connectors)
+	}
+	for _, row := range state.Connectors {
+		if row.HookFailMode != "closed" {
+			t.Errorf("managed %s persisted fail mode = %q, want closed", row.Name, row.HookFailMode)
+		}
 	}
 }
 
@@ -1460,8 +1498,47 @@ func TestPrintDaemonStartResultOnlyRendersReadySuccess(t *testing.T) {
 	out := captureStdout(t, func() {
 		printDaemonStartResult(42, readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
 	})
-	if !strings.Contains(out, "OK (PID 42)") || strings.Contains(out, "STARTING") {
+	if !strings.Contains(out, "OK (PID 42)") || !strings.Contains(out, "routing:off") || strings.Contains(out, "STARTING") {
 		t.Fatalf("output = %q, want READY-only success rendering", out)
+	}
+}
+
+func TestGatewaySnapshotReadyTreatsSemanticRoutingErrorAsDegradedSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		routingEnabled bool
+		routingState   gateway.SubsystemState
+		wantReady      bool
+	}{
+		{name: "disabled finalized", routingState: gateway.StateDisabled, wantReady: true},
+		{name: "disabled but unexpectedly running", routingState: gateway.StateRunning},
+		{name: "enabled healthy", routingEnabled: true, routingState: gateway.StateRunning, wantReady: true},
+		{name: "enabled degraded", routingEnabled: true, routingState: gateway.StateError, wantReady: true},
+		{name: "enabled still starting", routingEnabled: true, routingState: gateway.StateStarting},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+			snap.Routing = gateway.SubsystemHealth{State: tc.routingState, LastError: "classifier unavailable"}
+			ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{
+				guardrailEnabled: true,
+				routingEnabled:   tc.routingEnabled,
+			})
+			if err != nil || ready != tc.wantReady {
+				t.Fatalf("routing readiness = %v, error = %v, want ready=%v", ready, err, tc.wantReady)
+			}
+		})
+	}
+}
+
+func TestPrintDaemonStartResultSurfacesDegradedSemanticRouting(t *testing.T) {
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Routing = gateway.SubsystemHealth{
+		State:     gateway.StateError,
+		LastError: "classifier unavailable",
+	}
+	out := captureStdout(t, func() { printDaemonStartResult(42, snap) })
+	if !strings.Contains(out, "OK (PID 42)") || !strings.Contains(out, "routing:error") {
+		t.Fatalf("output = %q, want degraded routing state in successful start summary", out)
 	}
 }
 

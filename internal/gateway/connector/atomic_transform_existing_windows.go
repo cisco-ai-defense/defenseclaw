@@ -425,15 +425,15 @@ func atomicTransformProtectionDigest(file *os.File) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("canonicalize Windows protection DACL: %w", err)
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	currentSID, err := windowsEffectiveUserSID()
 	if err != nil {
 		return "", fmt.Errorf("resolve current Windows user for protection witness: %w", err)
 	}
-	if currentUser == nil || currentUser.User.Sid == nil {
+	if currentSID == nil {
 		return "", fmt.Errorf("resolve current Windows user for protection witness: missing SID")
 	}
-	if owner.Equals(currentUser.User.Sid) {
-		dacl = atomicTransformCanonicalPrivateDACLOrder(dacl, currentUser.User.Sid.String())
+	if owner.Equals(currentSID) {
+		dacl = atomicTransformCanonicalPrivateDACLOrder(dacl, currentSID.String())
 	}
 	canonical := "O:" + owner.String() + "G:" + group.String() + dacl
 	return atomicTransformDigest([]byte(canonical)), nil

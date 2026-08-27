@@ -2196,7 +2196,7 @@ def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> Non
     for expected in (
         'title="Treat local event history as sensitive data"',
         "observability.local.retention_days",
-        "retains 90 days",
+        "retains seven days",
         "observability.defaults.redaction_profile",
         "also governs SQLite",
         "only that export trust boundary",

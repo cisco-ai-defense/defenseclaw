@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "guardrail",
+    "semantic-routing",
     "sandbox",
     "unified-llm-key",
     "skill-scanner",

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -21,19 +22,50 @@ type RemoteRouterClient struct {
 	endpoint string // e.g. "http://127.0.0.1:8080"
 	timeout  time.Duration
 	client   *http.Client
+	backends map[string]ModelRouterBackend
+	dotenv   string
 }
 
 // NewRemoteRouterClient creates a client for the semantic router API server.
 func NewRemoteRouterClient(endpoint string, timeoutMs int) *RemoteRouterClient {
+	return newRemoteRouterClient(endpoint, timeoutMs, nil, "")
+}
+
+// NewConfiguredRemoteRouterClient creates a classifier client that resolves
+// returned model aliases to gateway-owned forwarding targets.
+func NewConfiguredRemoteRouterClient(endpoint string, timeoutMs int, backends []ModelRouterBackend, dotenvPath string) *RemoteRouterClient {
+	return newRemoteRouterClient(endpoint, timeoutMs, backends, dotenvPath)
+}
+
+func newRemoteRouterClient(endpoint string, timeoutMs int, backends []ModelRouterBackend, dotenvPath string) *RemoteRouterClient {
 	timeout := time.Duration(timeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 100 * time.Millisecond
 	}
+	backendByName := make(map[string]ModelRouterBackend, len(backends))
+	for _, backend := range backends {
+		name := strings.TrimSpace(backend.Name)
+		if name == "" {
+			continue
+		}
+		backend.Name = name
+		if _, exists := backendByName[name]; !exists {
+			backendByName[name] = backend
+		}
+	}
 	return &RemoteRouterClient{
-		endpoint: endpoint,
+		endpoint: strings.TrimRight(endpoint, "/"),
 		timeout:  timeout,
+		backends: backendByName,
+		dotenv:   dotenvPath,
 		client: &http.Client{
 			Timeout: timeout,
+			// Routing endpoints are operator-configured trust boundaries. Do not
+			// let an endpoint redirect prompts or user metadata to a different
+			// origin without that origin appearing explicitly in config.yaml.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
 				MaxIdleConns:        10,
 				MaxIdleConnsPerHost: 10,
@@ -45,17 +77,9 @@ func NewRemoteRouterClient(endpoint string, timeoutMs int) *RemoteRouterClient {
 
 // classifyRequest is the JSON body sent to POST /api/v1/classify/intent.
 type classifyRequest struct {
-	Messages   []classifyMessage      `json:"messages"`
-	Text       string                 `json:"text,omitempty"`
-	Model      string                 `json:"model,omitempty"`
-	Tools      []interface{}          `json:"tools,omitempty"`
-	Stream     bool                   `json:"stream,omitempty"`
-	SessionID  string                 `json:"session_id,omitempty"`
-	UserID     string                 `json:"user_id,omitempty"`
-	UserGroups []string               `json:"user_groups,omitempty"`
-	Headers    map[string]string      `json:"headers,omitempty"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
-	Options    *classifyOptions       `json:"options,omitempty"`
+	Messages []classifyMessage `json:"messages"`
+	Text     string            `json:"text,omitempty"`
+	Options  *classifyOptions  `json:"options,omitempty"`
 }
 
 type classifyMessage struct {
@@ -72,62 +96,11 @@ type classifyResponse struct {
 	RecommendedModel string                 `json:"recommended_model"`
 	RoutingDecision  string                 `json:"routing_decision"`
 	Classification   classifyClassification `json:"classification"`
-	MatchedSignals   map[string]interface{} `json:"matched_signals"`
-	DecisionResult   classifyDecisionResult `json:"decision_result"`
-	// Plugin outputs
-	PluginOutputs    *classifyPluginOutputs `json:"plugin_outputs,omitempty"`
-	Warnings         []string               `json:"warnings,omitempty"`
-	SessionTelemetry map[string]interface{} `json:"session_telemetry,omitempty"`
 }
 
 type classifyClassification struct {
 	Category   string  `json:"category"`
 	Confidence float64 `json:"confidence"`
-}
-
-type classifyDecisionResult struct {
-	DecisionName string  `json:"decision_name"`
-	Confidence   float64 `json:"confidence"`
-}
-
-type classifyPluginOutputs struct {
-	CachedResponse   *cachedResponsePayload   `json:"cached_response,omitempty"`
-	SystemPrompt     string                   `json:"system_prompt,omitempty"`
-	ReasoningEffort  string                   `json:"reasoning_effort,omitempty"`
-	UseReasoning     bool                     `json:"use_reasoning,omitempty"`
-	LoRAName         string                   `json:"lora_name,omitempty"`
-	HeaderMutations  *headerMutationsPayload  `json:"header_mutations,omitempty"`
-	RAGContext       []ragDocument            `json:"rag_context,omitempty"`
-	CompressedPrompt *compressedPromptPayload `json:"compressed_prompt,omitempty"`
-	ToolsFiltered    []string                 `json:"tools_filtered,omitempty"`
-	ToolsBlocked     []string                 `json:"tools_blocked,omitempty"`
-}
-
-type cachedResponsePayload struct {
-	Body    json.RawMessage   `json:"body"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Status  int               `json:"status,omitempty"`
-}
-
-type headerMutationsPayload struct {
-	Add    []headerEntry `json:"add,omitempty"`
-	Update []headerEntry `json:"update,omitempty"`
-	Delete []string      `json:"delete,omitempty"`
-}
-
-type headerEntry struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
-
-type ragDocument struct {
-	Content    string  `json:"content"`
-	Source     string  `json:"source,omitempty"`
-	Similarity float64 `json:"similarity,omitempty"`
-}
-
-type compressedPromptPayload struct {
-	Messages []classifyMessage `json:"messages"`
 }
 
 func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput) *ModelRouterDecision {
@@ -140,23 +113,12 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 		msgs[i] = classifyMessage{Role: m.Role, Content: m.Content}
 	}
 
-	// Build request with rich context from ModelRouterInput.
+	// v0.3's IntentRequest accepts only text, messages, and options. Keep
+	// gateway-only identity, headers, tools, and policy metadata out of this
+	// trust boundary rather than relying on the classifier to ignore them.
 	reqBody := classifyRequest{
-		Messages:   msgs,
-		Model:      input.RequestModel,
-		Tools:      input.Tools,
-		Stream:     input.Stream,
-		SessionID:  input.SessionID,
-		UserID:     input.UserID,
-		UserGroups: input.UserGroups,
-		Headers:    input.Headers,
-		Metadata:   input.Metadata,
-		Options:    &classifyOptions{ReturnProbabilities: true},
-	}
-
-	// Fall back to input.Model if RequestModel is empty.
-	if reqBody.Model == "" {
-		reqBody.Model = input.Model
+		Messages: msgs,
+		Options:  &classifyOptions{ReturnProbabilities: true},
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -183,10 +145,11 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// Capture limited error body for debugging, then drain remaining.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		// A classifier may echo request content in its error body. Never copy
+		// that body into persistent gateway.log; the HTTP status is sufficient
+		// for bounded operational diagnosis.
 		_, _ = io.Copy(io.Discard, resp.Body)
-		fmt.Fprintf(os.Stderr, "[routing] sr error %d: %s\n", resp.StatusCode, body)
+		fmt.Fprintf(os.Stderr, "[routing] classifier returned HTTP %d; falling back to default provider\n", resp.StatusCode)
 		return nil
 	}
 
@@ -200,70 +163,86 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 		return nil
 	}
 
+	routerDecision := boundedRouterLabel(classResp.RoutingDecision, 64)
+	recommendedAlias := boundedRouterLabel(classResp.RecommendedModel, 128)
+	if recommendedAlias == "" {
+		return nil
+	}
 	reason := fmt.Sprintf("decision=%s model=%s confidence=%.2f",
-		classResp.RoutingDecision, classResp.RecommendedModel, classResp.Classification.Confidence)
+		routerDecision, recommendedAlias, classResp.Classification.Confidence)
 
 	decision := &ModelRouterDecision{
-		Model:          classResp.RecommendedModel,
-		Reason:         reason,
-		DecisionName:   classResp.DecisionResult.DecisionName,
-		Algorithm:      classResp.RoutingDecision,
-		MatchedSignals: classResp.MatchedSignals,
-		Warnings:       classResp.Warnings,
+		Model:  recommendedAlias,
+		Reason: reason,
 	}
 
-	// Enrich decision with plugin outputs if present.
-	if po := classResp.PluginOutputs; po != nil {
-		decision.SystemPrompt = po.SystemPrompt
-		decision.ReasoningEffort = po.ReasoningEffort
-		decision.UseReasoning = po.UseReasoning
-		decision.LoRAName = po.LoRAName
-
-		// Convert cached response.
-		if po.CachedResponse != nil && po.CachedResponse.Body != nil {
-			decision.CacheHit = true
-			decision.CachedResponse = []byte(po.CachedResponse.Body)
+	// The classifier returns a configured alias, not necessarily the provider
+	// model ID. Resolve it locally so API keys never cross the classifier trust
+	// boundary and transparent proxy routing can actually change providers.
+	if len(c.backends) > 0 {
+		backend, ok := c.backends[recommendedAlias]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "[routing] unknown model alias %q: falling back to default provider\n", recommendedAlias)
+			return nil
 		}
-
-		// Convert header mutations.
-		if po.HeaderMutations != nil {
-			hm := &HeaderMutations{
-				Delete: po.HeaderMutations.Delete,
-			}
-			for _, e := range po.HeaderMutations.Add {
-				hm.Add = append(hm.Add, HeaderEntry{Name: e.Name, Value: e.Value})
-			}
-			for _, e := range po.HeaderMutations.Update {
-				hm.Update = append(hm.Update, HeaderEntry{Name: e.Name, Value: e.Value})
-			}
-			decision.HeaderMutations = hm
+		model := strings.TrimSpace(backend.Model)
+		if model == "" {
+			fmt.Fprintf(os.Stderr, "[routing] model alias %q has no provider model: falling back to default provider\n", recommendedAlias)
+			return nil
 		}
-
-		// Convert RAG context documents.
-		if len(po.RAGContext) > 0 {
-			docs := make([]RAGDocument, len(po.RAGContext))
-			for i, d := range po.RAGContext {
-				docs[i] = RAGDocument{
-					Content:    d.Content,
-					Source:     d.Source,
-					Similarity: d.Similarity,
+		provider := strings.TrimSpace(backend.Provider)
+		if provider == "" {
+			fmt.Fprintf(os.Stderr, "[routing] model alias %q has no provider: falling back to default provider\n", recommendedAlias)
+			return nil
+		}
+		decision.Provider = provider
+		decision.Model = model
+		decision.TargetURL = strings.TrimRight(strings.TrimSpace(backend.BaseURL), "/")
+		decision.TargetURLOverride = true
+		// A routing decision always establishes a new credential boundary. Even
+		// when the selected backend is keyless, clear the connector's original
+		// provider key rather than forwarding it to a different backend.
+		decision.APIKeyOverride = true
+		if backend.APIKeyEnv != "" {
+			if tokenResolver != nil {
+				resolved, err := tokenResolver(ctx, provider)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[routing] managed credential resolution failed for provider %q: %v\n", provider, err)
+					return nil
 				}
+				decision.APIKey = strings.TrimSpace(resolved)
+			} else {
+				decision.APIKey = ResolveAPIKey(backend.APIKeyEnv, c.dotenv)
 			}
-			decision.RAGDocuments = docs
-		}
-
-		// Convert compressed prompt messages.
-		if po.CompressedPrompt != nil && len(po.CompressedPrompt.Messages) > 0 {
-			compressed := make([]ChatMessage, len(po.CompressedPrompt.Messages))
-			for i, m := range po.CompressedPrompt.Messages {
-				compressed[i] = ChatMessage{Role: m.Role, Content: m.Content}
+			if decision.APIKey == "" {
+				fmt.Fprintf(os.Stderr, "[routing] credential %q for model alias %q is unavailable: falling back to default provider\n", backend.APIKeyEnv, recommendedAlias)
+				return nil
 			}
-			decision.CompressedMessages = compressed
 		}
 	}
 
 	return decision
 }
+
+func boundedRouterLabel(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || limit <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		if b.Len()+len(string(r)) > limit {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+var _ ModelRouter = (*RemoteRouterClient)(nil)
 
 // Healthy checks if the SR service is reachable.
 func (c *RemoteRouterClient) Healthy(ctx context.Context) bool {

@@ -23,9 +23,21 @@ func setEnterpriseHookAuthorizationOwnership(path string) error {
 	if err != nil {
 		return err
 	}
+	serviceSID, err := enterpriseWindowsGatewayServiceSID()
+	if err != nil {
+		return err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	return setEnterpriseWindowsManagedProtection(path, owner, info.IsDir())
+	servicePermissions := windows.ACCESS_MASK(windows.GENERIC_READ)
+	if info.IsDir() {
+		servicePermissions |= windows.GENERIC_EXECUTE
+	}
+	return setEnterpriseWindowsManagedProtection(path, owner, serviceSID, servicePermissions, info.IsDir())
+}
+
+func setEnterpriseHookGuardianStateOwnership(path string) error {
+	return setEnterpriseHookAuthorizationOwnership(path)
 }

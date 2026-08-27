@@ -50,3 +50,7 @@ func setEnterpriseHookAuthorizationOwnership(path string) error {
 	}
 	return os.Chown(path, 0, gid)
 }
+
+func setEnterpriseHookGuardianStateOwnership(path string) error {
+	return setEnterpriseHookAuthorizationOwnership(path)
+}
