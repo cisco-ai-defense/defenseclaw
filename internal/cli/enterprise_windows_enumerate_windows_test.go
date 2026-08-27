@@ -42,9 +42,10 @@ func TestNewEnterpriseWindowsEnumerateCommandRegistersFlags(t *testing.T) {
 			t.Fatalf("flag %q not registered", name)
 		}
 	}
-	if !strings.Contains(cmd.Long, "service never rewrites targets.yaml") ||
-		!strings.Contains(cmd.Long, "administrator-run Repair or Upgrade") {
-		t.Fatalf("command documentation does not describe the finite-profile audit boundary:\n%s", cmd.Long)
+	if !strings.Contains(cmd.Long, "publishes an updated targets.yaml") ||
+		!strings.Contains(cmd.Long, "auto-authorizing newly-discovered") ||
+		!strings.Contains(cmd.Long, "macOS parity") {
+		t.Fatalf("command documentation does not describe the macOS-parity auto-authorize posture:\n%s", cmd.Long)
 	}
 }
 

@@ -383,13 +383,27 @@ not an administrator authority even though it is a machine service.
 3. A target without an active, safe WTS token cannot be repaired. The guardian
    records failure and retries rather than writing the profile as LocalSystem.
    The activating install-time `-Mode` / `-Connector` shorthand therefore
-   seeds enabled rows only for eligible `WTSActive` profile SIDs. The protected
-   enumerator retains other discovered profiles as disabled rows pending an
-   explicit administrator lifecycle action; it does not treat them as
-   authenticated deferred enrollment. `Install -NoStart` keeps the complete
-   planned all-user enrollment because it makes no immediate readiness claim.
-   An explicit manifest that enables a disconnected target remains
-   authoritative and fails readiness until the exact SID has an active token.
+   seeds enabled rows only for eligible `WTSActive` profile SIDs.
+
+   Post-install, the SCM hook-enumerator runs on a 5-minute interval and
+   auto-authorizes newly-discovered `(SID, Connector)` rows whose per-user
+   profile contains a supported CLI (parity with macOS
+   `render-targets.sh`; see
+   `internal/enterprisehooks/agent_version_windows.go` for the per-connector
+   probe). Managed-enterprise deployments are administrator-controlled at
+   the *policy* layer — which connectors are pushed, and which SID scope
+   the guardian authorization ledger accepts — not at the per-device
+   authorization layer. A local admin who can create an interactive user
+   (`S-1-5-21-…`) on the target machine can therefore cause that user to
+   be enrolled on the next enumerator tick; this is the accepted cost of
+   parity with macOS, whose `launchd`-driven `render-targets.sh` operates
+   under the same posture. The exact SID membership check (row W-28
+   above) still fail-closes on an unregistered SID between enumerator
+   ticks, and the guardian authorization ledger records every enrollment
+   for audit. `Install -NoStart` keeps the complete planned all-user
+   enrollment because it makes no immediate readiness claim. An explicit
+   manifest that enables a disconnected target remains authoritative and
+   fails readiness until the exact SID has an active token.
 4. Application control and vendor MDM/GPO policy are optional defense-in-depth
    controls, not features DefenseClaw can synthesize. Their absence does not
    block managed-hook readiness, but leaves the user-owned hook race described
