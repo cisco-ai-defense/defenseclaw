@@ -104,10 +104,12 @@ Two modes:
   * default: enter an interval loop suitable for an SCM ImagePath. On every
     tick the service publishes an updated targets.yaml, auto-authorizing
     newly-discovered (SID, Connector) rows whose per-user profile contains
-    a supported CLI. Profiles with no discoverable CLI are silently skipped
-    (macOS parity). The byte-identical short-circuit in
-    WriteTargetsManifestAtomic keeps steady-state ticks free of file
-    mutation.
+    a supported CLI. Profiles with no discoverable CLI are omitted from the
+    manifest without failing the cycle — the per-row reason is emitted to
+    stderr under the '[hook-enumerator] skipped ...' line so an operator
+    can see why a specific user was left out (macOS parity). The
+    byte-identical short-circuit in WriteTargetsManifestAtomic keeps
+    steady-state ticks free of file mutation.
 
   * --once: run a single cycle synchronously and exit. Used by the
     installer to publish targets.yaml before deployment commit.

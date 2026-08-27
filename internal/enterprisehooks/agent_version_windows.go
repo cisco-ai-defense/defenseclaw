@@ -260,7 +260,17 @@ func windowsAgentVersionExplain(profileHome, connectorName string) (string, stri
 			case strings.Contains(msg, "exceeds bounded size"):
 				lastReason = "candidate exceeds bounded size"
 			default:
-				lastReason = fmt.Sprintf("candidate read failed: %v", err)
+				// Path-free reason on purpose: os.PathError.Error()
+				// embeds the candidate absolute path, which the
+				// enumerator forwards to `logfSafely` unredacted.
+				// Formatting `err` with `%v` would leak that path
+				// to every operator tailing gateway.err.log
+				// (including any operator without filesystem
+				// visibility into that user profile). The
+				// categorized reasons above cover the common
+				// diagnostic shapes; anything else is just
+				// "candidate read failed."
+				lastReason = "candidate read failed"
 			}
 			continue
 		}

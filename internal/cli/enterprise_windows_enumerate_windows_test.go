@@ -50,7 +50,7 @@ func TestNewEnterpriseWindowsEnumerateCommandRegistersFlags(t *testing.T) {
 	// this check.
 	if !strings.Contains(cmd.Long, "publishes an updated targets.yaml") ||
 		!strings.Contains(cmd.Long, "auto-authorizing") ||
-		!strings.Contains(cmd.Long, "silently skipped") ||
+		!strings.Contains(cmd.Long, "omitted from the manifest without failing the cycle") ||
 		!strings.Contains(cmd.Long, "macOS parity") {
 		t.Fatalf("command documentation does not describe the macOS-parity auto-authorize posture:\n%s", cmd.Long)
 	}
