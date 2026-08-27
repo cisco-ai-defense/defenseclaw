@@ -211,7 +211,13 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				Connector: conn,
 				DataDir:   dataDir,
 			}
-			applyPreviousRowState(&row, previous, opts.Logger)
+			if !applyPreviousRowState(&row, previous, opts.Logger) {
+				// New (SID, Connector) row with no discoverable per-user
+				// agent-version — dropped for macOS parity. The
+				// enumerator's audit-complete summary reflects the
+				// skip.
+				continue
+			}
 			targets = append(targets, row)
 		}
 	}
@@ -401,17 +407,42 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 	return previous
 }
 
-// applyPreviousRowState copies AgentVersion + Enabled + Deferred from the
-// existing manifest into `row` if a match is found. If no match, it
-// leaves both fields at their zero values — Enabled stays nil (the
-// default-enabled behaviour), but since AgentVersion is empty the
-// row cannot be enabled (LoadManifest's requireAgentVersion check
-// runs on enabled rows). To keep new rows well-formed in that state
-// we explicitly disable them so LoadManifest's per-row validation
-// skips them, avoiding a load-time reject.
-func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarget, logf EnumerationLogger) {
+// applyPreviousRowState resolves `row`'s AgentVersion + Enabled +
+// Deferred + User/UID/GID for either a known-from-prior-manifest
+// (SID, Connector) pair or a newly-discovered one.
+//
+// Returns `true` when the row should be emitted, `false` when the
+// caller should drop it.
+//
+//   - Previously-known (SID, Connector): copy AgentVersion +
+//     Enabled + Deferred + User/UID/GID from the prior row and
+//     return true. Preserving the operator's prior Enabled
+//     decision means a disabled prior row stays disabled, and an
+//     enabled prior row stays enabled with its recorded
+//     AgentVersion.
+//   - Newly-discovered (SID, Connector): consult
+//     `discoverWindowsAgentVersion` to see whether this user's
+//     profile contains a supported per-user install of the
+//     connector's CLI.
+//   - If a version is discoverable: emit the row with
+//     `Enabled: true`, `Deferred: false`, `AgentVersion: <found>`.
+//     This is the auto-authorize path — parity with macOS
+//     render-targets.sh, which emits enabled rows for any
+//     (user × connector) whose CLI is present.
+//   - If no version is discoverable: return false. The caller
+//     drops the row entirely — parity with macOS, which never
+//     emits a row for a user whose CLI is not installed.
+//
+// The historical "emit disabled, wait for admin Repair" branch is
+// gone. Managed-enterprise deployments are admin-driven at the
+// policy layer (which connectors are pushed, which SID
+// membership), not the per-device authorization layer; the
+// enumerator's job is discovery. See
+// docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md residual-risk section for
+// the new posture.
+func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarget, logf EnumerationLogger) bool {
 	if row == nil {
-		return
+		return false
 	}
 	key := previousManifestKey(row.SID, row.Connector)
 	if prev, ok := previous[key]; ok {
@@ -421,17 +452,35 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		row.User = prev.User
 		row.UID = prev.UID
 		row.GID = prev.GID
-		return
+		return true
 	}
-	// New (SID, Connector) row: keep AgentVersion empty and mark
-	// Enabled=false so LoadManifest's schema validation skips this
-	// target. An admin or UCB flow promotes it later by writing the
-	// AgentVersion + flipping Enabled=true. This preserves the
-	// security posture — a new user profile is DISCOVERED by the
-	// enumerator but does not auto-hook without operator intent.
-	disabled := false
-	row.Enabled = &disabled
-	logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row emitted as disabled; admin must supply agent_version + enable", row.Connector))
+	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
+	if version == "" {
+		logfSafely(
+			logf,
+			row.SID,
+			fmt.Sprintf(
+				"newly-discovered (SID, %s) row skipped: %s",
+				row.Connector,
+				reason,
+			),
+		)
+		return false
+	}
+	enabled := true
+	row.AgentVersion = version
+	row.Enabled = &enabled
+	row.Deferred = false
+	logfSafely(
+		logf,
+		row.SID,
+		fmt.Sprintf(
+			"newly-discovered (SID, %s) row auto-authorized at version %s",
+			row.Connector,
+			version,
+		),
+	)
+	return true
 }
 
 func previousManifestKey(sid, connector string) string {
