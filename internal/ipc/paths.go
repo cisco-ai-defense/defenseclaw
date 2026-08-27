@@ -56,10 +56,10 @@ const (
 //  3. managed_enterprise → resolveManagedIPCSocketPath(cfg):
 //     - linux/darwin: filepath.Join(filepath.Dir(cfg.DataDir),
 //     "ipc", SocketFileName)
-//     - windows:      filepath.Join(<TrustedProgramData>, "Cisco",
+//     - windows:      filepath.Join(<TrustedProgramFiles>, "Cisco",
 //     "Cisco Secure Client", "DefenseClaw", "ipc",
 //     SocketFileName). See spec 004 REQ-02. Returns "" when
-//     TrustedProgramData resolution fails; the caller's
+//     TrustedProgramFiles resolution fails; the caller's
 //     ResolveSocketPath empty-check turns that into a
 //     distinguishable "ipc: resolve socket path: empty"
 //     server-start error rather than a fall-through to a
@@ -73,14 +73,14 @@ const (
 // — that value is honored verbatim by the resolver above (there is no
 // linux/darwin-side validator; ownership + mode checks at server
 // start-up are the trust boundary). On Windows the socket path is
-// fixed to <TrustedProgramData>/Cisco/Cisco Secure Client/DefenseClaw/
+// fixed to <TrustedProgramFiles>/Cisco/Cisco Secure Client/DefenseClaw/
 // ipc/SocketFileName: validateWindowsSocketPathOverride (in
 // internal/ipc/server_windows.go) refuses any override whose parent
 // does not equal the trusted root, so cfg.Managed.SocketPath is
 // effectively non-configurable there.
 //
 // Never returns an error: rule 4 always produces a value (rule 3 may
-// return "" on Windows when the TrustedProgramData registry lookup
+// return "" on Windows when the TrustedProgramFiles registry lookup
 // fails — the server refuses to start in that case).
 func ResolveSocketPath(cfg *config.Config) string {
 	if cfg == nil {

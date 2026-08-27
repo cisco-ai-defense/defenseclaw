@@ -34,25 +34,25 @@ func TestResolveManagedIPCSocketPathWindowsHonoursExplicitOverride(t *testing.T)
 	}
 }
 
-// TestResolveManagedIPCSocketPathWindowsProducesProgramDataPath
+// TestResolveManagedIPCSocketPathWindowsProducesProgramFilesPath
 // asserts the default resolver produces a path under
-// TrustedProgramData. On CI (`CI=true`) a failed TrustedProgramData
+// TrustedProgramFiles. On CI (`CI=true`) a failed TrustedProgramFiles
 // resolution is a hard failure — a regression in winpath would
-// otherwise produce a green build while leaving the ProgramData
+// otherwise produce a green build while leaving the Program Files
 // path unverified. On a developer laptop the test skips
 // gracefully because the registry key may legitimately be
 // unreadable outside of a real Windows managed_enterprise
 // install. See CR spec-004:PRRT_kwDORuAK-s6ankzr.
-func TestResolveManagedIPCSocketPathWindowsProducesProgramDataPath(t *testing.T) {
+func TestResolveManagedIPCSocketPathWindowsProducesProgramFilesPath(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: string(config.DeploymentModeManagedEnterprise)}
 	got := ResolveSocketPath(cfg)
 	if got == "" {
 		if os.Getenv("CI") != "" {
-			t.Fatalf("TrustedProgramData resolution returned empty on a CI runner — winpath registry access must succeed for the managed IPC surface")
+			t.Fatalf("TrustedProgramFiles resolution returned empty on a CI runner — winpath registry access must succeed for the managed IPC surface")
 		}
-		t.Skip("TrustedProgramData resolution failed on this host; running outside CI so skipping")
+		t.Skip("TrustedProgramFiles resolution failed on this host; running outside CI so skipping")
 	}
-	// Expected shape: <programData>\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock
+	// Expected shape: <programFiles>\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock
 	if !strings.HasSuffix(got, filepath.Join(windowsManagedIPCRelativeDir, SocketFileName)) {
 		t.Fatalf("socket path missing expected suffix: got %q, want ending %q",
 			got, filepath.Join(windowsManagedIPCRelativeDir, SocketFileName))
