@@ -42,8 +42,15 @@ func TestNewEnterpriseWindowsEnumerateCommandRegistersFlags(t *testing.T) {
 			t.Fatalf("flag %q not registered", name)
 		}
 	}
+	// Each substring is deliberately short enough to stay within one
+	// line of the raw Long block — strings.Contains is byte-level,
+	// so phrases that span the Long block's line-wrap (e.g.
+	// "auto-authorizing newly-discovered" is rendered with a
+	// newline+indent between the two words) would spuriously fail
+	// this check.
 	if !strings.Contains(cmd.Long, "publishes an updated targets.yaml") ||
-		!strings.Contains(cmd.Long, "auto-authorizing newly-discovered") ||
+		!strings.Contains(cmd.Long, "auto-authorizing") ||
+		!strings.Contains(cmd.Long, "silently skipped") ||
 		!strings.Contains(cmd.Long, "macOS parity") {
 		t.Fatalf("command documentation does not describe the macOS-parity auto-authorize posture:\n%s", cmd.Long)
 	}

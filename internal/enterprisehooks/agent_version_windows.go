@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,64 @@ func windowsAgentVersionCandidatePaths(profileHome, connectorName string) []stri
 	}
 }
 
+// readBoundedWindowsAgentPackageJSON opens `candidate`, applies the
+// trust checks (reparse-chain rejection, regular-file check), and
+// returns at most `windowsAgentVersionMaxBytes` bytes. Any of these
+// conditions returns a non-nil error and empty payload:
+//
+//   - `candidate` is empty or its ancestor chain crosses a Windows
+//     junction / symlink (per `winpath.RejectReparseChain`);
+//   - the target is a symlink / non-regular file;
+//   - `os.Open` fails;
+//   - `io.ReadAll` on an `io.LimitReader(f, max+1)` returns more
+//     than `windowsAgentVersionMaxBytes` bytes — i.e. the on-disk
+//     file grew past the ceiling between check and read.
+//
+// The +1-byte trick lets the caller distinguish "read exactly `max`
+// bytes and the file is at least that big" from "file is strictly
+// larger than `max`, we should reject" without ever allocating a
+// slice larger than `max + 1`. This closes the Lstat -> ReadFile
+// race a hostile profile owner could exploit to force the
+// LocalSystem enumerator to allocate an arbitrarily large buffer:
+// even if the file grew between checks, our read is capped.
+//
+// The old shape — `os.Lstat` (size check) then `os.ReadFile` (no
+// cap) — was flagged by CodeRabbit as a resource-exhaustion
+// vector. This helper is the fix.
+func readBoundedWindowsAgentPackageJSON(candidate string) ([]byte, error) {
+	if strings.TrimSpace(candidate) == "" {
+		return nil, errors.New("empty candidate path")
+	}
+	// Ancestor reparse-point rejection: refuses to open any path
+	// whose parent chain crosses a Windows junction or symbolic
+	// link. Mirrors the treatment applied to the enumerator's
+	// ProfileImagePath reads (see enumerator_windows.go).
+	if err := winpath.RejectReparseChain(candidate); err != nil {
+		return nil, err
+	}
+	// Lstat is retained as a fast-path for the leaf shape check
+	// (symlink / non-regular files bypass reading entirely). The
+	// authoritative size check runs on the opened handle below.
+	if info, err := os.Lstat(candidate); err != nil {
+		return nil, err
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("candidate is not a regular file: mode=%s", info.Mode())
+	}
+	f, err := os.Open(candidate)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, windowsAgentVersionMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > windowsAgentVersionMaxBytes {
+		return nil, fmt.Errorf("candidate exceeds bounded size %d", windowsAgentVersionMaxBytes)
+	}
+	return data, nil
+}
+
 // readWindowsAgentVersionCandidate applies the trust checks and
 // bounded read to one candidate path. Returns the version string
 // and `true` iff the file exists, its ancestor chain contains no
@@ -145,34 +204,8 @@ func windowsAgentVersionCandidatePaths(profileHome, connectorName string) []stri
 // complete` summary line, which reports how many `(SID, Connector)`
 // rows were emitted vs skipped.
 func readWindowsAgentVersionCandidate(candidate string) (string, bool) {
-	if strings.TrimSpace(candidate) == "" {
-		return "", false
-	}
-	// Ancestor reparse-point rejection: refuses to open any path
-	// whose parent chain crosses a Windows junction or symbolic
-	// link. Mirrors the treatment applied to the enumerator's
-	// ProfileImagePath reads (see enumerator_windows.go).
-	if err := winpath.RejectReparseChain(candidate); err != nil {
-		return "", false
-	}
-	info, err := os.Lstat(candidate)
+	data, err := readBoundedWindowsAgentPackageJSON(candidate)
 	if err != nil {
-		return "", false
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return "", false
-	}
-	if info.Size() > windowsAgentVersionMaxBytes {
-		return "", false
-	}
-	data, err := os.ReadFile(candidate)
-	if err != nil {
-		return "", false
-	}
-	// Double-bounded — a race that appended between Lstat and
-	// ReadFile still hits the ceiling. Reject rather than parse
-	// arbitrary bytes.
-	if int64(len(data)) > windowsAgentVersionMaxBytes {
 		return "", false
 	}
 	var parsed windowsAgentPackageJSON
@@ -207,34 +240,28 @@ func windowsAgentVersionExplain(profileHome, connectorName string) (string, stri
 	}
 	var lastReason string
 	for _, candidate := range candidates {
-		if err := winpath.RejectReparseChain(candidate); err != nil {
-			lastReason = "ancestor reparse chain refused"
-			continue
-		}
-		info, err := os.Lstat(candidate)
+		data, err := readBoundedWindowsAgentPackageJSON(candidate)
 		if err != nil {
+			// Preserve the historical operator-facing reason
+			// strings where the caller distinguishes shapes; the
+			// bounded helper collapses reparse / regular-file /
+			// size errors into typed messages we can categorize
+			// here without leaking full paths.
 			if errors.Is(err, os.ErrNotExist) {
 				lastReason = fmt.Sprintf("no %s package.json under this profile", connectorName)
-			} else {
-				lastReason = fmt.Sprintf("candidate lstat failed: %v", err)
+				continue
 			}
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			lastReason = "candidate is not a regular file"
-			continue
-		}
-		if info.Size() > windowsAgentVersionMaxBytes {
-			lastReason = "candidate exceeds bounded size"
-			continue
-		}
-		data, err := os.ReadFile(candidate)
-		if err != nil {
-			lastReason = fmt.Sprintf("candidate read failed: %v", err)
-			continue
-		}
-		if int64(len(data)) > windowsAgentVersionMaxBytes {
-			lastReason = "candidate grew past bounded size mid-read"
+			msg := err.Error()
+			switch {
+			case strings.Contains(msg, "reparse"):
+				lastReason = "ancestor reparse chain refused"
+			case strings.Contains(msg, "regular file"):
+				lastReason = "candidate is not a regular file"
+			case strings.Contains(msg, "exceeds bounded size"):
+				lastReason = "candidate exceeds bounded size"
+			default:
+				lastReason = fmt.Sprintf("candidate read failed: %v", err)
+			}
 			continue
 		}
 		var parsed windowsAgentPackageJSON

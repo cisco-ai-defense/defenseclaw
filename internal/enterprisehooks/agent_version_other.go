@@ -10,27 +10,16 @@
 
 //go:build !windows
 
+// The Windows per-connector agent-version probe
+// (`discoverWindowsAgentVersion`, `windowsAgentVersionExplain`) is
+// defined in `agent_version_windows.go` under a `//go:build windows`
+// tag and is only referenced by the equally-Windows-tagged
+// `enumerator_windows.go`. There is no non-Windows caller of those
+// symbols and therefore no stub is needed here — `golangci-lint`'s
+// `unused` analyzer flagged the prior stubs (returning empty
+// unconditionally) as dead code across the non-Windows build. This
+// file is intentionally empty apart from the package clause so the
+// file layout mirrors the Windows sibling without smuggling dead
+// symbols into the darwin / linux build.
+
 package enterprisehooks
-
-// discoverWindowsAgentVersion is a Windows-only feature — this stub
-// exists so the package compiles cross-platform. The macOS
-// enumerator (packaging/macos/lib/render-targets.sh) already covers
-// the darwin side via `discover_agent_version`; nothing about this
-// Go function is invoked on non-Windows OSes. The stub returns
-// empty so any accidental non-Windows caller would drop the row,
-// which is the safe default.
-func discoverWindowsAgentVersion(profileHome, connectorName string) string {
-	_ = profileHome
-	_ = connectorName
-	return ""
-}
-
-// windowsAgentVersionExplain matches its Windows counterpart's
-// signature so callers can share the same reason-reporting shape
-// across platforms. Non-Windows callers always get the "unsupported
-// platform" explanation.
-func windowsAgentVersionExplain(profileHome, connectorName string) (string, string) {
-	_ = profileHome
-	_ = connectorName
-	return "", "windows agent-version discovery is not compiled on this platform"
-}
