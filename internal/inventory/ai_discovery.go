@@ -719,6 +719,31 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	if opts.HomeDir == "" {
 		opts.HomeDir, _ = platformDiscoveryHomeDir()
 	}
+	// Windows service-context override. When no caller-supplied HomeDirs
+	// are set and the platform enumerator finds real interactive-user
+	// profiles (HKLM\...\ProfileList → S-1-5-21-... SIDs), prefer those
+	// over the current-user Known Folder — the sidecar runs as a service
+	// account whose ~ resolves to a virtual C:\Windows\ServiceProfiles
+	// path, so a bare-~ scan never sees any real .claude/.codex/.cursor
+	// directories. On non-Windows this returns nil (launchd/systemd-user
+	// already scope the process to the right $HOME). HomeDir is repointed
+	// at the first real profile so ScanRoots=["~"] still resolves to a
+	// meaningful root and downstream helpers that read opts.HomeDir keep
+	// working.
+	//
+	// Gated on ManagedEnterprise: only in managed installs (where the
+	// enterprise admin has consented to fleet-wide inventory of every
+	// enrolled user) do we cross the single-user → all-users boundary.
+	// Unmanaged / dev installs keep the historical single-user posture —
+	// the current process's own ~ is the only scan surface, so a
+	// developer running a local build does not silently start reading
+	// their coworkers' dotdirs on a shared workstation.
+	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
+		if platformHomes := platformDiscoveryHomeDirs(); len(platformHomes) > 0 {
+			opts.HomeDirs = platformHomes
+			opts.HomeDir = platformHomes[0]
+		}
+	}
 	// Dedupe HomeDirs and ensure HomeDir participates so single-user
 	// installs (unmanaged / dev) keep working without a config change.
 	// Order-preserving so detectors return signals in a stable order

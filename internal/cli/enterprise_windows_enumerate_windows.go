@@ -230,6 +230,16 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
 	}
+	// Sibling pass: ensure the CertGateway service SID has Read+Execute on
+	// each enrolled user's inventory dotdirs (~/.claude, ~/.codex, …). The
+	// gateway runs under a virtual service account whose access to user
+	// profiles is not implicit; without this grant the AI discovery scanner
+	// walks the right paths but ReadDir returns access-denied and every
+	// skill/plugin/rule/mcp signal is suppressed. Idempotent; per-directory
+	// failures log-only so one bad DACL doesn't block the enumerator cycle.
+	if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(manifest, "", logf); grantErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
+	}
 	elapsed := time.Since(start)
 
 	fmt.Fprintf(stderr, "[hook-enumerator] cycle complete users=%d targets=%d changed=%t elapsed=%s\n",

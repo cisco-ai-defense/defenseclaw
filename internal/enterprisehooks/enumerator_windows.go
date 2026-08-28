@@ -63,12 +63,6 @@ var windowsHookConnectors = map[string]struct{}{
 	"cursor":     {},
 }
 
-// EnumerationLogger receives one line per user profile the enumerator
-// dropped or annotated, so an operator can debug WHY a specific user
-// isn't getting hooked. Matches the macOS `_enumerate_users_warn`
-// shape. Nil is safe (drops are silent).
-type EnumerationLogger func(subject, reason string)
-
 // EnumerateOptions controls a single enumeration cycle. All fields
 // are optional.
 type EnumerateOptions struct {
