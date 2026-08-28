@@ -512,11 +512,12 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 }
 
 // TestApplyPreviousRowStatePreservesAgentVersion asserts the
-// AgentVersion + Enabled + Deferred preservation invariant spec 005 REQ-08's
-// design says: a row that already exists in the file keeps its
-// agent_version + enabled state across enumeration cycles. A NEW
-// row starts with Enabled=false so LoadManifest's schema validation
-// skips it (avoiding a load-time reject on empty AgentVersion).
+// AgentVersion + Enabled + Deferred preservation invariant spec
+// 005 REQ-08's design says: a row that already exists in the file
+// keeps its agent_version + enabled state across enumeration
+// cycles. A NEW row is auto-authorized at the per-user CLI's
+// discovered version (macOS parity) — or dropped entirely if no
+// per-user CLI is present.
 func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 	enabled := true
 	previous := map[string]ManifestTarget{
@@ -534,7 +535,9 @@ func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 		SID:       "s-1-5-21-1000-2000-3000-1001", // deliberate case
 		Connector: "codex",
 	}
-	applyPreviousRowState(&matched, previous, nil)
+	if !applyPreviousRowState(&matched, previous, nil) {
+		t.Fatal("existing-row emission signal: want true, got false")
+	}
 	if matched.AgentVersion != "0.145.0" {
 		t.Fatalf("existing-row AgentVersion not preserved: got %q, want %q", matched.AgentVersion, "0.145.0")
 	}
@@ -544,18 +547,54 @@ func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 	if !matched.Deferred {
 		t.Fatal("existing-row Deferred=true not preserved")
 	}
+}
 
-	// No match: emit disabled with empty AgentVersion.
+// TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI
+// pins the macOS-parity auto-authorize path: a newly-discovered
+// (SID, Connector) whose per-user profile contains a supported CLI
+// (via the package.json probe added in the previous commit) is
+// emitted with Enabled=true, AgentVersion set to the discovered
+// value, and Deferred=false.
+func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")
+	writeWindowsAgentPackageJSON(t, dir, "0.42.0")
+
 	fresh := ManifestTarget{
 		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
+		Connector: "codex",
+	}
+	if !applyPreviousRowState(&fresh, nil, nil) {
+		t.Fatal("new row with discoverable CLI: emission signal want true, got false")
+	}
+	if fresh.AgentVersion != "0.42.0" {
+		t.Fatalf("new row AgentVersion: got %q, want 0.42.0", fresh.AgentVersion)
+	}
+	if fresh.Enabled == nil || !*fresh.Enabled {
+		t.Fatal("new row Enabled: want pointer-to-true")
+	}
+	if fresh.Deferred {
+		t.Fatal("new row Deferred: want false")
+	}
+}
+
+// TestApplyPreviousRowStateDropsNewRowWithoutDiscoverableCLI pins
+// the macOS-parity silent-skip: a newly-discovered (SID, Connector)
+// whose per-user profile has NO supported CLI is dropped entirely.
+// applyPreviousRowState returns false; the caller in EnumerateWindows
+// treats false as "skip this row" (no target emitted).
+func TestApplyPreviousRowStateDropsNewRowWithoutDiscoverableCLI(t *testing.T) {
+	home := t.TempDir()
+	// No package.json under home — every probe path is absent.
+
+	fresh := ManifestTarget{
+		SID:       "S-1-5-21-9999-8888-7777-1001",
+		UserHome:  home,
 		Connector: "claudecode",
 	}
-	applyPreviousRowState(&fresh, previous, nil)
-	if fresh.AgentVersion != "" {
-		t.Fatalf("fresh row: AgentVersion should be empty; got %q", fresh.AgentVersion)
-	}
-	if fresh.Enabled == nil || *fresh.Enabled {
-		t.Fatal("fresh row: Enabled should be pointer-to-false")
+	if applyPreviousRowState(&fresh, nil, nil) {
+		t.Fatal("new row without discoverable CLI: emission signal want false, got true (row would have been emitted)")
 	}
 }
 
