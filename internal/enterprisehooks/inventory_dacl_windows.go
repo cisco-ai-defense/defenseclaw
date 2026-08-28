@@ -158,7 +158,19 @@ func ensureInventoryReadACE(path string, sid *windows.SID) (inventoryDACLResult,
 	if err != nil {
 		return inventoryDACLSkippedMissing, fmt.Errorf("inspect DACL: %w", err)
 	}
-	if existing != nil && daclContainsInventoryReadACE(existing, sid) {
+	// Refuse to touch a directory that has no explicit DACL. `existing == nil`
+	// after a successful `sd.DACL()` means the descriptor carries a null DACL
+	// (everyone-allowed semantics, not a missing-info error). Passing that
+	// through `ACLFromEntries(entries, nil)` would build an ACL containing
+	// only our gateway grant and `SetNamedSecurityInfo` would replace the
+	// null DACL with a DACL granting exclusively the gateway service SID —
+	// silently stripping access from every other principal. Skip and surface
+	// the anomaly via the failed counter so an operator can investigate the
+	// unusual permission state.
+	if existing == nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("null DACL on %s; refusing to replace with sole gateway-service ACE", path)
+	}
+	if daclContainsInventoryReadACE(existing, sid) {
 		return inventoryDACLAlreadyPresent, nil
 	}
 	entry := windows.EXPLICIT_ACCESS{
@@ -187,14 +199,27 @@ func ensureInventoryReadACE(path string, sid *windows.SID) (inventoryDACLResult,
 }
 
 // daclContainsInventoryReadACE reports whether `acl` already contains an
-// allow-access ACE granting `sid` at least Read+Execute. Used as an idempotency
-// short-circuit so repeat ticks skip the (get, merge, set) round-trip when the
-// ACE is already present.
+// allow-access ACE granting `sid` at least Read+Execute with the same
+// inheritance semantics we would install. Used as an idempotency short-circuit
+// so repeat ticks skip the (get, merge, set) round-trip when the ACE is
+// already present in the exact shape we need.
+//
+// Inheritance requirements match the `SUB_CONTAINERS_AND_OBJECTS_INHERIT` flag
+// set we pass to `ACLFromEntries`: both OBJECT_INHERIT_ACE (files) and
+// CONTAINER_INHERIT_ACE (subdirs) must be present, and neither
+// NO_PROPAGATE_INHERIT_ACE nor INHERIT_ONLY_ACE may be set — an ACE that
+// grants the parent but does not propagate to children is NOT equivalent for
+// our purposes (the scanner reads files INSIDE the dotdirs, not the dotdir
+// itself), and an INHERIT_ONLY_ACE that doesn't apply to the parent leaves
+// the traversal grant absent. Rebuilding the ACL is preferable to leaving a
+// half-configured ACE in place.
 func daclContainsInventoryReadACE(acl *windows.ACL, sid *windows.SID) bool {
 	if acl == nil || sid == nil {
 		return false
 	}
 	const wantMask = uint32(windows.GENERIC_READ | windows.GENERIC_EXECUTE)
+	const requiredInherit = uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
+	const forbiddenInherit = uint8(windows.NO_PROPAGATE_INHERIT_ACE | windows.INHERIT_ONLY_ACE)
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
@@ -207,9 +232,17 @@ func daclContainsInventoryReadACE(acl *windows.ACL, sid *windows.SID) bool {
 		if aceSID == nil || !windows.EqualSid(aceSID, sid) {
 			continue
 		}
-		if uint32(ace.Mask)&wantMask == wantMask {
-			return true
+		if uint32(ace.Mask)&wantMask != wantMask {
+			continue
 		}
+		flags := ace.Header.AceFlags
+		if flags&requiredInherit != requiredInherit {
+			continue
+		}
+		if flags&forbiddenInherit != 0 {
+			continue
+		}
+		return true
 	}
 	return false
 }

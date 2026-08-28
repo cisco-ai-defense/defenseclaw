@@ -730,7 +730,15 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	// at the first real profile so ScanRoots=["~"] still resolves to a
 	// meaningful root and downstream helpers that read opts.HomeDir keep
 	// working.
-	if len(opts.HomeDirs) == 0 {
+	//
+	// Gated on ManagedEnterprise: only in managed installs (where the
+	// enterprise admin has consented to fleet-wide inventory of every
+	// enrolled user) do we cross the single-user → all-users boundary.
+	// Unmanaged / dev installs keep the historical single-user posture —
+	// the current process's own ~ is the only scan surface, so a
+	// developer running a local build does not silently start reading
+	// their coworkers' dotdirs on a shared workstation.
+	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
 		if platformHomes := platformDiscoveryHomeDirs(); len(platformHomes) > 0 {
 			opts.HomeDirs = platformHomes
 			opts.HomeDir = platformHomes[0]
