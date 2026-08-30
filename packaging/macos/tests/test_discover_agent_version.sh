@@ -74,6 +74,27 @@ t_claudecode_via_native_current_symlink() {
   assert_eq "${got}" "2.1.173" "claudecode version from native ~/.local/share/claude/current symlink"
 }
 
+t_claudecode_via_claude_desktop_embedded_bundle() {
+  # Regression for the customer bundle 0827_0914 (jlunde). Claude Desktop
+  # bundles Claude Code under ~/Library/Application Support/Claude/
+  # claude-code/<X.Y.Z>/claude.app/... and drops a shim at
+  # ~/.local/bin/claude pointing to the deep binary. The shim-basename
+  # walk gives up at "claude"/"MacOS" (both non-semver) so the version
+  # must come from the version-labelled bundle directory 4 hops above
+  # the terminal binary. jlunde's actual box had 2.1.219 embedded; use
+  # the same value here as a concrete regression pin. Ported from PR
+  # #798 (author @rucpande, AIFW-32990).
+  local home; home="$(mktest_tmp)"
+  local bin="${home}/Library/Application Support/Claude/claude-code/2.1.219/claude.app/Contents/MacOS/claude"
+  mkdir -p "$(dirname -- "${bin}")"
+  : > "${bin}"
+  chmod 0755 "${bin}"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.219" "claudecode version from Claude Desktop embedded bundle"
+}
+
 t_claudecode_via_native_versions_dir_no_symlink() {
   # Partial-install fallback: no `current` symlink yet, but versions/*
   # is populated. Discovery must pick the highest semver-shaped basename.
@@ -368,6 +389,7 @@ run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "claudecode via native current symlink"                  t_claudecode_via_native_current_symlink
+run_case "claudecode via Claude Desktop embedded bundle"          t_claudecode_via_claude_desktop_embedded_bundle
 run_case "claudecode via native versions/*  (no symlink)"         t_claudecode_via_native_versions_dir_no_symlink
 run_case "claudecode native broken current symlink falls back"    t_claudecode_native_broken_current_symlink_falls_back
 run_case "claudecode native install wins over stale npm"          t_claudecode_native_wins_over_stale_npm

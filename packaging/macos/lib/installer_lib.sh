@@ -470,6 +470,45 @@ _native_claudecode_version_from_dir() {
   fi
 }
 
+# _claude_desktop_embedded_version_from_home HOME -> echoes the highest
+# embedded Claude Code version or "".
+#
+# Claude Desktop bundles Claude Code per user under:
+#
+#   ~/Library/Application Support/Claude/claude-code/<X.Y.Z>/claude.app/
+#     Contents/MacOS/claude
+#
+# and drops a convenience shim at ~/.local/bin/claude pointing into that
+# tree. The shim's basename-walk in _native_claudecode_version_from_bin
+# stops at "claude" / "MacOS" (neither is semver-shaped) so the version
+# has to be extracted from the parent-dir chain of the concrete binary.
+#
+# The desktop application version is not the Claude Code version, so the
+# version-labelled embedded bundle directory is the authoritative metadata
+# source. Metadata-only: readdir + basename, no exec of a desktop- or
+# user-bundled binary during installer discovery.
+#
+# Ported from PR #798 (author @rucpande, AIFW-32990) into this release-
+# branch fix — see docs/PLAN-consolidate-hook-enumerator.md for the
+# larger main-branch consolidation this probe eventually lives inside.
+_claude_desktop_embedded_version_from_home() {
+  local home="$1"
+  local root="${home}/Library/Application Support/Claude/claude-code"
+  [[ -d "${root}" ]] || return 0
+  local -r semver_re='^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$'
+  local bin version_dir version best=""
+  for bin in "${root}"/*/claude.app/Contents/MacOS/claude; do
+    [[ -x "${bin}" ]] || continue
+    version_dir="$(dirname -- "$(dirname -- "$(dirname -- "$(dirname -- "${bin}")")")")"
+    version="$(basename -- "${version_dir}")"
+    [[ "${version}" =~ ${semver_re} ]] || continue
+    if [[ -z "${best}" ]] || _semver_gt "${version}" "${best}"; then
+      best="${version}"
+    fi
+  done
+  [[ -n "${best}" ]] && echo "${best}"
+}
+
 # _semver_gt A B -> exit 0 iff A > B under SemVer 2.0.0 precedence.
 #
 # Ordering is: MAJOR.MINOR.PATCH first (numeric), then prerelease tail.
@@ -895,6 +934,17 @@ discover_agent_version() {
       # meets MIN_CLAUDECODE_VERSION; if nothing clears the minimum,
       # the highest overall is still emitted so the Go hook gate
       # reports drift rather than the noisier "unversioned".
+      #
+      # Claude Desktop-bundled probe first: newer Claude Desktop builds
+      # ship the CLI under ~/Library/Application Support/Claude/
+      # claude-code/<X.Y.Z>/ and drop a shim at ~/.local/bin/claude
+      # whose readlink target is the deep binary — the shim's
+      # basename-walk yields "claude"/"MacOS" (both non-semver) so we
+      # have to consult the bundle directory directly. Ported from
+      # PR #798 (author @rucpande, AIFW-32990).
+      v="$(_claude_desktop_embedded_version_from_home "${home}")"
+      [[ -n "${v}" ]] && versions+=("${v}")
+
       for base in \
         "${home}/.local/share/claude" \
         /opt/claude \
