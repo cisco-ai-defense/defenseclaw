@@ -619,6 +619,50 @@ _read_json_version() {
   _read_json_field "${path}" "version"
 }
 
+# _claude_desktop_embedded_version_from_home HOME -> echoes the highest
+# Claude Code version bundled inside Claude Desktop, or "".
+#
+# Claude Desktop bundles Claude Code per user under:
+#
+#   ~/Library/Application Support/Claude/claude-code/<X.Y.Z>/claude.app/
+#     Contents/MacOS/claude
+#
+# and drops a convenience shim at ~/.local/bin/claude pointing into that
+# tree. The shim-basename walk in the npm/PATH probe below stops at
+# "claude" / "MacOS" (neither is semver-shaped) so the version has to be
+# extracted from the parent-dir chain of the concrete binary — 4 hops
+# above the terminal binary. The Claude Desktop application version is
+# not the Claude Code version, so the version-labelled embedded bundle
+# directory is the authoritative metadata source.
+#
+# Metadata-only: readdir + basename, no exec of a desktop- or user-
+# bundled binary during installer discovery.
+#
+# Ported from PR #785 (release-26.7.3 backport of PR #798 / AIFW-32990,
+# author @rucpande) — the customer bundle 0827_0914 (jlunde) had
+# 2.1.219 embedded here and got silently dropped by the npm-only probe.
+# The consolidated Go implementation in
+# docs/PLAN-consolidate-hook-enumerator.md will supersede this bash
+# probe alongside the rest of `discover_agent_version` (Appendix B row 6).
+_claude_desktop_embedded_version_from_home() {
+  local home="$1"
+  local root="${home}/Library/Application Support/Claude/claude-code"
+  [[ -d "${root}" ]] || return 0
+  local -r semver_re='^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$'
+  local bin version_dir version best=""
+  for bin in "${root}"/*/claude.app/Contents/MacOS/claude; do
+    [[ -x "${bin}" ]] || continue
+    version_dir="$(dirname -- "$(dirname -- "$(dirname -- "$(dirname -- "${bin}")")")")"
+    version="$(basename -- "${version_dir}")"
+    [[ "${version}" =~ ${semver_re} ]] || continue
+    if [[ -z "${best}" ]] || \
+       [[ "$(printf '%s\n%s\n' "${best}" "${version}" | sort -V | tail -1)" == "${version}" ]]; then
+      best="${version}"
+    fi
+  done
+  [[ -n "${best}" ]] && echo "${best}"
+}
+
 discover_agent_version() {
   local connector="$1"
   local home="$2"
@@ -728,7 +772,23 @@ discover_agent_version() {
       ;;
     claudecode)
       # Claude Code ships both as a standalone npm CLI (has a
-      # package.json we can read) and as a Cursor / VS Code extension.
+      # package.json we can read) and as a Cursor / VS Code extension,
+      # AND as a per-user Claude Desktop-bundled binary.
+      #
+      # Probe order:
+      #   1. Claude Desktop-bundled — ~/Library/Application Support/Claude/
+      #      claude-code/<X.Y.Z>/claude.app/... — the shim at
+      #      ~/.local/bin/claude points here on newer Claude Desktop
+      #      builds and the shim-basename walk yields "claude"/"MacOS"
+      #      which fails the semver regex. Consulting the version-labelled
+      #      parent directory is the only way to recover the version.
+      #      Regression on customer bundle 0827_0914 (jlunde, AIFW-32990).
+      #   2. npm-global / Cursor / VS Code extension package.json
+      #      (historical baseline).
+      local v
+      v="$(_claude_desktop_embedded_version_from_home "${home}")"
+      if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json \
@@ -737,7 +797,7 @@ discover_agent_version() {
         "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
         "${home}"/.vscode/extensions/anthropic.claude-code-*/package.json; do
         [[ -f "${pkg}" ]] || continue
-        local v; v="$(_probe_json_version "${pkg}" claudecode)"
+        v="$(_probe_json_version "${pkg}" claudecode)"
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
       ;;
