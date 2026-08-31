@@ -10,6 +10,7 @@ from defenseclaw.platform_support import (
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_CONNECTORS,
+    WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
     WINDOWS_UNSUPPORTED_CONNECTORS,
     WINDOWS_UNSUPPORTED_FEATURES,
@@ -20,13 +21,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_windows_release_metadata_is_exact() -> None:
     assert WINDOWS_SUPPORTED_CONNECTORS == {"codex", "claudecode", "amp", "hermes"}
+    assert WINDOWS_PREVIEW_CONNECTORS == {"cursor", "opencode"}
     assert WINDOWS_NOT_CERTIFIED_CONNECTORS == {
-        "cursor",
         "windsurf",
         "geminicli",
         "copilot",
         "antigravity",
-        "opencode",
     }
     assert WINDOWS_UNSUPPORTED_CONNECTORS == {"openhands", "omnigent", "openclaw", "zeptoclaw"}
     assert WINDOWS_CERTIFIED_ARCHITECTURES == {"amd64"}
@@ -53,6 +53,8 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
     assert "| Codex | `codex` | **Supported**" in text
     assert "| Claude Code | `claudecode` | **Supported**" in text
     assert "| Hermes Agent | `hermes` | **Supported**" in text
+    assert "| OpenCode | `opencode` | **Preview**" in text
+    assert "| Cursor | `cursor` | **Preview**" in text
     assert "local observability" in text
     assert "Local Splunk" in text
     assert "Hyper-V backend" in text
@@ -117,7 +119,11 @@ def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64()
 
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
     assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
-    assert '"codex",\n    "claudecode",\n    "amp",\n    "hermes",\n    "none"' in installer
+    assert (
+        '"codex",\n    "claudecode",\n    "hermes",\n    "cursor",\n'
+        '    "opencode",\n    "amp",\n    "none"'
+        in installer
+    )
 
 
 def test_connector_matrix_delegates_current_support_to_the_website() -> None:

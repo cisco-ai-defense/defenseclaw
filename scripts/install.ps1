@@ -85,10 +85,10 @@ $CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersi
 $ConnectorChoices = @(
     "codex",
     "claudecode",
-    "amp",
     "hermes",
-    "opencode",
     "cursor",
+    "opencode",
+    "amp",
     "none"
 )
 $HookConnectors = @()
