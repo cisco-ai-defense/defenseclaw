@@ -363,7 +363,7 @@ func TestEmitGatewayEvents_PerSignalPayloadCarriesGroupConfidence(t *testing.T) 
 		Signals: signals,
 	}
 	snap := buildComponentRollupSnapshot(report.Signals, svc.confidenceParams)
-	svc.emitGatewayEvents(context.Background(), report, snap)
+	svc.emitGatewayEvents(context.Background(), report, snap, true)
 
 	events := captured.events()
 	if len(events) != 3 {
@@ -430,7 +430,7 @@ func TestFanoutReport_OTelAndGatewayPayloadAgree(t *testing.T) {
 		},
 	}
 
-	svc.fanoutReport(context.Background(), report)
+	svc.fanoutReport(context.Background(), report, true)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
@@ -495,7 +495,7 @@ func TestFanoutReport_SkipsSnapshotWhenDefaultConfig(t *testing.T) {
 			evidenceSignal("a", "pypi", "openai", "1.0.0", "ws-1", AIStateNew, "package_manifest"),
 		},
 	}
-	svc.fanoutReport(context.Background(), report)
+	svc.fanoutReport(context.Background(), report, true)
 
 	events := captured.events()
 	if len(events) != 1 {
@@ -662,7 +662,7 @@ func TestEmitGatewayEvents_StampsCorrelationFromContext(t *testing.T) {
 	defer span.End()
 	wantTrace := span.SpanContext().TraceID().String()
 
-	svc.emitGatewayEvents(ctx, report, componentRollupSnapshot{})
+	svc.emitGatewayEvents(ctx, report, componentRollupSnapshot{}, true)
 
 	events := captured.events()
 	if len(events) != 1 {
