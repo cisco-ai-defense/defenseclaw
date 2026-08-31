@@ -155,12 +155,15 @@ type AIDiscoveryOptions struct {
 	// HomeDir is kept for backward compatibility and continues to
 	// anchor "~" expansion in candidate paths.
 	HomeDirs []string
-	// ManagedEnterprise mirrors deployment_mode == managed_enterprise. It
-	// gates the managed endpoint-inventory callback and the v8 observer
-	// EmitReport publish to the full-scan cadence (ScanIntervalMin) — the
-	// intra-cycle process tick is treated as a local refresh only. Canonical
-	// v8 scan-trace telemetry (StartScan / detector traces / End) remains
-	// owned by the bound observability runtime and fires on every tick.
+	// ManagedEnterprise mirrors deployment_mode == managed_enterprise at
+	// construction time. It is a static hint, not the live cadence gate:
+	// the sidecar can install/clear the managed endpoint-inventory callback
+	// on a running service across config reloads, so the fanoutReport gate
+	// keys on the live callback presence (see the SetManagedInventoryEmitHook
+	// contract) — the intra-cycle process tick is treated as a local refresh
+	// only whenever a managed callback is currently installed. Canonical v8
+	// scan-trace telemetry (StartScan / detector traces / End) remains owned
+	// by the bound observability runtime and fires on every tick.
 	ManagedEnterprise bool
 }
 
@@ -1130,16 +1133,28 @@ func (s *ContinuousDiscoveryService) notifyReportObservers(ctx context.Context, 
 // managed_enterprise ships to AI Defense on the full-scan cadence
 // only, not on every process tick.
 func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport, full bool) {
-	// managed_enterprise ships the endpoint inventory to AI Defense
-	// on the FULL-scan cadence (ScanIntervalMin) only. The intra-cycle
-	// process-only tick (ProcessIntervalSec) is a local refresh — the
-	// non-process detectors do not re-run on it, so replaying the
-	// carried-forward inventory + firing the connector/MCP hook every
-	// process tick would flood the AID event-ingest endpoint without
-	// adding new information. Non-managed mode is unaffected: it has
-	// no managedInventoryEmit hook installed and the observer emission
-	// is per-report by design for local telemetry sinks.
-	if !full && s.opts.ManagedEnterprise {
+	// Read the live managed-mode signal once and reuse it for both
+	// the cadence gate and the hook fire below. Deployment mode can
+	// change without rebuilding this service (see the pre-existing
+	// contract at SetManagedInventoryEmitHook), so gating on
+	// construction-time s.opts.ManagedEnterprise would let the gate
+	// drift from the live mode after a config reload that swapped
+	// the hook without an aiRestart. Hook-presence is the same
+	// live-mode indicator the hook-fire path below uses.
+	s.managedInventoryEmitMu.RLock()
+	emit := s.managedInventoryEmit
+	s.managedInventoryEmitMu.RUnlock()
+	// managed_enterprise (live: hook installed) ships the endpoint
+	// inventory to AI Defense on the FULL-scan cadence
+	// (ScanIntervalMin) only. The intra-cycle process-only tick
+	// (ProcessIntervalSec) is a local refresh — the non-process
+	// detectors do not re-run on it, so replaying the
+	// carried-forward inventory + firing the connector/MCP hook
+	// every process tick would flood the AID event-ingest endpoint
+	// without adding new information. Non-managed mode (live: no
+	// hook installed) is unaffected; the observer emission is
+	// per-report by design for local telemetry sinks.
+	if !full && emit != nil {
 		return
 	}
 	observer := s.observabilityV8Snapshot()
@@ -1167,12 +1182,10 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 		}
 		_ = observer.EmitReport(ctx, reportForObservabilityV8(report), components)
 	}
-	// Hook installation is the live managed-mode gate. Deployment mode can
-	// change without rebuilding this service, so construction-time options
-	// must not suppress a callback installed by a later config generation.
-	s.managedInventoryEmitMu.RLock()
-	emit := s.managedInventoryEmit
-	s.managedInventoryEmitMu.RUnlock()
+	// emit is the same live managed-mode indicator snapshot read at
+	// the top of this function; reuse it so a concurrent
+	// SetManagedInventoryEmitHook can't cause the gate decision and
+	// the hook fire to disagree within one fanout.
 	if emit != nil {
 		emit(ctx)
 	}

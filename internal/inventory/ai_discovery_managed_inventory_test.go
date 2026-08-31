@@ -94,23 +94,98 @@ func TestFanoutReport_ManagedSkipsNonFullTick(t *testing.T) {
 }
 
 // TestFanoutReport_NonManagedIgnoresFullFlag pins that non-managed
-// mode publishes on every tick (full or process) — its state filter
-// downstream already keeps per-tick emission delta-only. The non-full
-// gate must not accidentally suppress non-managed emitters.
+// mode (live: no managedInventoryEmit hook installed) publishes on
+// every tick regardless of full. The cadence gate must key on the
+// live hook presence — not on any construction-time hint — so a
+// service without a managed callback keeps feeding local v8 sinks on
+// the intra-cycle process tick.
 func TestFanoutReport_NonManagedIgnoresFullFlag(t *testing.T) {
-	var hookCalls int
-	capture := &captureAIDiscoveryV8{}
-	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{ManagedEnterprise: false}}
-	service.BindObservabilityV8(capture)
-	service.SetManagedInventoryEmitHook(func(context.Context) { hookCalls++ })
-
-	service.fanoutReport(t.Context(), managedInventoryReport(), true)
-	service.fanoutReport(t.Context(), managedInventoryReport(), false)
-
-	if hookCalls != 2 {
-		t.Fatalf("non-managed must fire the installed hook on every tick regardless of full, got %d calls", hookCalls)
+	for _, full := range []bool{true, false} {
+		full := full
+		t.Run(map[bool]string{true: "full", false: "process"}[full], func(t *testing.T) {
+			capture := &captureAIDiscoveryV8{}
+			service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{ManagedEnterprise: false}}
+			service.BindObservabilityV8(capture)
+			// No managed hook installed => live unmanaged. Both tick kinds
+			// must emit the v8 report to local sinks.
+			service.fanoutReport(t.Context(), managedInventoryReport(), full)
+			if len(capture.reports) != 1 {
+				t.Fatalf("non-managed (no hook) must emit v8 report for full=%v, got %d", full, len(capture.reports))
+			}
+		})
 	}
-	if len(capture.reports) != 2 {
-		t.Fatalf("non-managed must publish on every tick regardless of full, got %d reports", len(capture.reports))
-	}
+}
+
+// TestFanoutReport_LiveTransitionsGateNonFullTick pins that the
+// fanoutReport cadence gate follows the live managed-mode signal
+// (hook presence), not the construction-time opts.ManagedEnterprise
+// hint. On unmanaged->managed the process tick begins to skip
+// immediately after SetManagedInventoryEmitHook is called; on
+// managed->unmanaged the process tick resumes emitting as soon as
+// the hook is cleared. Guards against drift when a config reload
+// swaps the hook without rebuilding the discovery service.
+func TestFanoutReport_LiveTransitionsGateNonFullTick(t *testing.T) {
+	t.Run("unmanaged_to_managed_live_install_skips_non_full_tick", func(t *testing.T) {
+		capture := &captureAIDiscoveryV8{}
+		var hookCalls int
+		// Construction-time opts flag is intentionally the OPPOSITE of
+		// the live-managed target below, to prove the gate does not key
+		// on it.
+		service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{ManagedEnterprise: false}}
+		service.BindObservabilityV8(capture)
+
+		// Baseline: no hook (live unmanaged). Process tick emits.
+		service.fanoutReport(t.Context(), managedInventoryReport(), false)
+		if len(capture.reports) != 1 {
+			t.Fatalf("baseline live-unmanaged process tick must emit v8 report, got %d", len(capture.reports))
+		}
+
+		// Live install: managed callback wired without a service
+		// rebuild. Subsequent process ticks must skip both v8 emission
+		// and the callback fire.
+		service.SetManagedInventoryEmitHook(func(context.Context) { hookCalls++ })
+		service.fanoutReport(t.Context(), managedInventoryReport(), false)
+		if len(capture.reports) != 1 {
+			t.Fatalf("after live managed install, process tick must skip v8 emission (still %d reports); got %d", 1, len(capture.reports))
+		}
+		if hookCalls != 0 {
+			t.Fatalf("after live managed install, process tick must skip hook fire, got %d calls", hookCalls)
+		}
+
+		// Full-scan tick after live install must both emit and fire.
+		service.fanoutReport(t.Context(), managedInventoryReport(), true)
+		if len(capture.reports) != 2 {
+			t.Fatalf("full tick after live managed install must emit v8 report, got %d", len(capture.reports))
+		}
+		if hookCalls != 1 {
+			t.Fatalf("full tick after live managed install must fire hook once, got %d", hookCalls)
+		}
+	})
+
+	t.Run("managed_to_unmanaged_live_clear_resumes_non_full_tick", func(t *testing.T) {
+		capture := &captureAIDiscoveryV8{}
+		var hookCalls int
+		// Construction-time opts flag is intentionally the OPPOSITE of
+		// the live-unmanaged target below.
+		service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{ManagedEnterprise: true}}
+		service.BindObservabilityV8(capture)
+		service.SetManagedInventoryEmitHook(func(context.Context) { hookCalls++ })
+
+		// Baseline: hook installed (live managed). Process tick skips.
+		service.fanoutReport(t.Context(), managedInventoryReport(), false)
+		if len(capture.reports) != 0 || hookCalls != 0 {
+			t.Fatalf("baseline live-managed process tick must skip: reports=%d hookCalls=%d", len(capture.reports), hookCalls)
+		}
+
+		// Live clear: hook removed without a service rebuild. Process
+		// ticks must resume emitting the v8 report; no hook to fire.
+		service.SetManagedInventoryEmitHook(nil)
+		service.fanoutReport(t.Context(), managedInventoryReport(), false)
+		if len(capture.reports) != 1 {
+			t.Fatalf("after live managed clear, process tick must resume v8 emission, got %d", len(capture.reports))
+		}
+		if hookCalls != 0 {
+			t.Fatalf("after live managed clear, hook must not fire, got %d calls", hookCalls)
+		}
+	})
 }
