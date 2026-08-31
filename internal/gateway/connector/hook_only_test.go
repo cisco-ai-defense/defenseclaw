@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -41,7 +43,7 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 		scope      string
 		configBase string
 	}{
-		{NewHermesConnector(), false, false, "user", "config.yaml"},
+		{NewHermesConnector(), false, true, "user", "config.yaml"},
 		{NewCursorConnector(), true, true, "user", "hooks.json"},
 		{NewWindsurfConnector(), false, false, "user", "hooks.json"},
 		{NewGeminiCLIConnector(), false, true, "user", "settings.json"},
@@ -758,13 +760,11 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 	}
 }
 
-// TestHermesSetup_WritesFullLifecycleAndAutoAccept pins the
-// hermes-hooks-v1 setup contract: Setup must register every lifecycle
-// event in the cli-config.yaml `hooks:` block AND set hooks_auto_accept
-// so the hooks actually register on non-TTY/gateway runs (Hermes
-// silently skips un-accepted hooks there). Teardown must heal a
-// previously-missing config back to absent.
-func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
+// TestHermesSetup_WritesFullLifecycleAndScopedApprovals pins the
+// hermes-hooks-v7 setup contract: Setup registers all 23 events and provisions
+// only the corresponding exact consent records. The operator-wide
+// hooks_auto_accept switch remains untouched.
+func TestHermesSetup_WritesFullLifecycleAndScopedApprovals(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, ".hermes", "config.yaml")
 	prev := HermesConfigPathOverride
@@ -772,7 +772,10 @@ func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
 	t.Cleanup(func() { HermesConfigPathOverride = prev })
 
 	conn := NewHermesConnector()
-	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	opts := SetupOpts{
+		DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970",
+		APIToken: "tok-test", HookFailMode: "closed",
+	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -781,20 +784,52 @@ func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read hermes config after setup: %v", err)
 	}
-	if v, _ := cfg["hooks_auto_accept"].(bool); !v {
-		t.Fatalf("hooks_auto_accept not set true after setup: %#v", cfg["hooks_auto_accept"])
+	if _, ok := cfg["hooks_auto_accept"]; ok {
+		t.Fatalf("setup manufactured operator-wide hooks_auto_accept: %#v", cfg["hooks_auto_accept"])
 	}
 	hooks, ok := cfg["hooks"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("hooks block missing or wrong type: %#v", cfg["hooks"])
 	}
-	for _, event := range []string{
-		"pre_llm_call", "pre_tool_call", "post_tool_call", "post_llm_call",
-		"on_session_start", "on_session_end", "on_session_finalize", "on_session_reset",
-		"subagent_start", "subagent_stop",
-	} {
+	if got, want := len(hooks), len(hermesHookEvents); got != want {
+		t.Fatalf("Hermes hook event count = %d, want %d; got keys %v", got, want, mapKeys(hooks))
+	}
+	for _, spec := range hermesHookEvents {
+		event := spec.event
 		if _, ok := hooks[event]; !ok {
 			t.Errorf("hooks block missing lifecycle event %q; got keys %v", event, mapKeys(hooks))
+		}
+	}
+	preTool, ok := hooks["pre_tool_call"].([]interface{})
+	if !ok || len(preTool) != 1 {
+		t.Fatalf("pre_tool_call hooks = %#v, want one managed entry", hooks["pre_tool_call"])
+	}
+	preToolEntry, ok := preTool[0].(map[string]interface{})
+	if !ok || preToolEntry["fail_closed"] != true {
+		t.Fatalf("pre_tool_call fail_closed = %#v, want true", preToolEntry)
+	}
+	allowlistPath := filepath.Join(filepath.Dir(cfgPath), hermesAllowlistFileName)
+	allowlist, err := readHermesAllowlist(allowlistPath)
+	if err != nil {
+		t.Fatalf("read Hermes allowlist after setup: %v", err)
+	}
+	approvals := allowlist["approvals"].([]interface{})
+	if got, want := len(approvals), len(hermesHookEvents); got != want {
+		t.Fatalf("Hermes approval count = %d, want %d", got, want)
+	}
+	wantCommand := shellWord(conn.hookCommand(opts))
+	seen := map[string]bool{}
+	for _, raw := range approvals {
+		entry, ok := raw.(map[string]interface{})
+		if !ok || entry[hermesAllowlistOwnerField] != true || entry["command"] != wantCommand {
+			t.Fatalf("invalid scoped Hermes approval: %#v", raw)
+		}
+		event, _ := entry["event"].(string)
+		seen[event] = true
+	}
+	for _, spec := range hermesHookEvents {
+		if !seen[spec.event] {
+			t.Errorf("allowlist missing scoped approval for %q", spec.event)
 		}
 	}
 
@@ -805,6 +840,11 @@ func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
 		t.Fatalf("config still exists after teardown of previously-missing config")
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat after teardown: %v", err)
+	}
+	if _, err := os.Stat(allowlistPath); err == nil {
+		t.Fatalf("allowlist still exists after teardown of previously-missing file")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat allowlist after teardown: %v", err)
 	}
 }
 
@@ -822,6 +862,11 @@ func TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig(t *testing.T) 
 	pristine := "hooks_auto_accept: false\nhooks:\n  pre_tool_call:\n    - command: /usr/local/bin/my-own-hook.sh\n"
 	if err := os.WriteFile(cfgPath, []byte(pristine), 0o600); err != nil {
 		t.Fatalf("write pristine config: %v", err)
+	}
+	allowlistPath := filepath.Join(filepath.Dir(cfgPath), hermesAllowlistFileName)
+	pristineAllowlist := "{\n  \"approvals\": [\n    {\"event\": \"pre_tool_call\", \"command\": \"foreign-hook\", \"approved_at\": \"2026-01-01T00:00:00Z\"}\n  ]\n}\n"
+	if err := os.WriteFile(allowlistPath, []byte(pristineAllowlist), 0o600); err != nil {
+		t.Fatalf("write pristine allowlist: %v", err)
 	}
 	prev := HermesConfigPathOverride
 	HermesConfigPathOverride = cfgPath
@@ -850,6 +895,230 @@ func TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig(t *testing.T) 
 	}
 	if string(got) != pristine {
 		t.Fatalf("teardown did not heal config to pristine bytes\n got: %q\nwant: %q", string(got), pristine)
+	}
+	gotAllowlist, err := os.ReadFile(allowlistPath)
+	if err != nil {
+		t.Fatalf("read allowlist after teardown: %v", err)
+	}
+	if string(gotAllowlist) != pristineAllowlist {
+		t.Fatalf("teardown did not heal allowlist to pristine bytes\n got: %q\nwant: %q", string(gotAllowlist), pristineAllowlist)
+	}
+}
+
+func TestPatchHermesHooksAndAllowlistAreScopedAndIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	pristineConfig := "hooks_auto_accept: false\nhooks:\n  pre_tool_call:\n    - command: foreign-hook\n"
+	if err := os.WriteFile(configPath, []byte(pristineConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executablePath := filepath.Join(dir, "managed", windowsHookBinaryName)
+	if err := os.MkdirAll(filepath.Dir(executablePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executablePath, []byte("test executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setHookBinaryOverride(t, executablePath)
+	command := windowsHermesDirectHookCommand(defenseclawHookBinary())
+	if err := patchHermesHooks(configPath, command, true); err != nil {
+		t.Fatalf("patch Hermes hooks: %v", err)
+	}
+	firstConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesHooks(configPath, command, true); err != nil {
+		t.Fatalf("repeat Hermes hook patch: %v", err)
+	}
+	secondConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstConfig, secondConfig) {
+		t.Fatal("repeated Hermes hook patch changed the managed config")
+	}
+	cfg, err := readYAMLObject(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if autoAccept, ok := cfg["hooks_auto_accept"].(bool); !ok || autoAccept {
+		t.Fatalf("hooks_auto_accept changed: %#v", cfg["hooks_auto_accept"])
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok || len(hooks) != len(hermesHookEvents) {
+		t.Fatalf("Hermes hooks = %#v, want %d events", hooks, len(hermesHookEvents))
+	}
+	preTool, ok := hooks["pre_tool_call"].([]interface{})
+	if !ok || len(preTool) != 2 {
+		t.Fatalf("pre_tool_call hooks = %#v, want foreign plus managed", hooks["pre_tool_call"])
+	}
+	managed, ok := preTool[1].(map[string]interface{})
+	if !ok || managed["command"] != command || managed["fail_closed"] != true {
+		t.Fatalf("managed pre_tool_call hook = %#v", preTool[1])
+	}
+
+	allowlistPath := filepath.Join(dir, hermesAllowlistFileName)
+	pristineAllowlist := "{\n  \"approvals\": [\n    {\"event\": \"pre_tool_call\", \"command\": \"foreign-hook\"}\n  ]\n}\n"
+	if err := os.WriteFile(allowlistPath, []byte(pristineAllowlist), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesAllowlist(allowlistPath, command, executablePath); err != nil {
+		t.Fatalf("patch Hermes allowlist: %v", err)
+	}
+	firstAllowlist, err := os.ReadFile(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesAllowlist(allowlistPath, command, executablePath); err != nil {
+		t.Fatalf("repeat Hermes allowlist patch: %v", err)
+	}
+	secondAllowlist, err := os.ReadFile(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstAllowlist, secondAllowlist) {
+		t.Fatal("repeated Hermes allowlist patch changed the consent registry")
+	}
+	allowlist, err := readHermesAllowlist(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvals := allowlist["approvals"].([]interface{})
+	if got, want := len(approvals), len(hermesHookEvents)+1; got != want {
+		t.Fatalf("approval count = %d, want %d", got, want)
+	}
+	ownedEvents := map[string]bool{}
+	for index, raw := range approvals {
+		entry, ok := raw.(map[string]interface{})
+		if !ok {
+			t.Fatalf("approval %d = %#v", index, raw)
+		}
+		if index == 0 {
+			if entry["command"] != "foreign-hook" || entry[hermesAllowlistOwnerField] != nil {
+				t.Fatalf("foreign approval changed: %#v", entry)
+			}
+			continue
+		}
+		if entry["command"] != command || entry[hermesAllowlistOwnerField] != true ||
+			entry["script_mtime_at_approval"] == nil {
+			t.Fatalf("managed approval = %#v", entry)
+		}
+		event, _ := entry["event"].(string)
+		ownedEvents[event] = true
+	}
+	for _, spec := range hermesHookEvents {
+		if !ownedEvents[spec.event] {
+			t.Errorf("missing managed approval for %q", spec.event)
+		}
+	}
+}
+
+func TestPatchHermesAllowlistRefreshesOwnedLauncherEvidence(t *testing.T) {
+	dir := t.TempDir()
+	allowlistPath := filepath.Join(dir, hermesAllowlistFileName)
+	executablePath := filepath.Join(dir, windowsHookBinaryName)
+	if err := os.WriteFile(executablePath, []byte("first launcher"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := windowsHermesDirectHookCommand(executablePath)
+	if err := patchHermesAllowlist(allowlistPath, command, executablePath); err != nil {
+		t.Fatal(err)
+	}
+	before, err := readHermesAllowlist(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEntry := before["approvals"].([]interface{})[0].(map[string]interface{})
+	beforeMTime, _ := beforeEntry["script_mtime_at_approval"].(string)
+
+	upgradedAt := time.Now().Add(2 * time.Minute)
+	if err := os.Chtimes(executablePath, upgradedAt, upgradedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesAllowlist(allowlistPath, command, executablePath); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(executablePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMTime := hermesTimestamp(info.ModTime())
+	after, err := readHermesAllowlist(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range after["approvals"].([]interface{}) {
+		entry := raw.(map[string]interface{})
+		if got := entry["script_mtime_at_approval"]; got != wantMTime {
+			t.Fatalf("event %v launcher evidence = %v, want %q", entry["event"], got, wantMTime)
+		}
+	}
+	if beforeMTime == wantMTime {
+		t.Fatalf("launcher mtime did not change: %q", wantMTime)
+	}
+	refreshedBytes, err := os.ReadFile(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesAllowlist(allowlistPath, command, executablePath); err != nil {
+		t.Fatal(err)
+	}
+	idempotentBytes, err := os.ReadFile(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(refreshedBytes, idempotentBytes) {
+		t.Fatal("unchanged upgraded launcher rewrote Hermes approvals")
+	}
+}
+
+func TestPatchHermesHooksReplacesStaleDefenseClawNativeCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	staleCommand := windowsQuoteExe(filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName)) +
+		" " + nativeHookFlag + "hermes"
+	foreignCommand := `/usr/local/bin/operator-hook`
+	pristineConfig := fmt.Sprintf(
+		"hooks:\n  pre_tool_call:\n    - command: '%s'\n    - command: '%s'\n",
+		strings.ReplaceAll(foreignCommand, "'", "''"),
+		strings.ReplaceAll(staleCommand, "'", "''"),
+	)
+	if err := os.WriteFile(configPath, []byte(pristineConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	currentBinary := filepath.Join(dir, "current", windowsHookBinaryName)
+	setHookBinaryOverride(t, currentBinary)
+	currentCommand := windowsHermesDirectHookCommand(defenseclawHookBinary())
+	if err := patchHermesHooks(configPath, currentCommand, true); err != nil {
+		t.Fatalf("patch Hermes hooks: %v", err)
+	}
+	cfg, err := readYAMLObject(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks = %#v", cfg["hooks"])
+	}
+	preTool, ok := hooks["pre_tool_call"].([]interface{})
+	if !ok || len(preTool) != 2 {
+		t.Fatalf("pre_tool_call hooks = %#v, want foreign plus current", hooks["pre_tool_call"])
+	}
+	foreign, _ := preTool[0].(map[string]interface{})
+	current, _ := preTool[1].(map[string]interface{})
+	if foreign["command"] != foreignCommand {
+		t.Fatalf("foreign hook changed: %#v", foreign)
+	}
+	if current["command"] != currentCommand || current["fail_closed"] != true {
+		t.Fatalf("current managed hook = %#v", current)
+	}
+	for _, raw := range preTool {
+		entry, _ := raw.(map[string]interface{})
+		if entry["command"] == staleCommand {
+			t.Fatalf("stale DefenseClaw hook survived reconciliation: %#v", entry)
+		}
 	}
 }
 
@@ -1612,7 +1881,7 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		{name: "cursor_supports_fail_closed", connector: NewCursorConnector(), wantFailMode: "closed"},
 		{name: "geminicli_supports_fail_closed", connector: NewGeminiCLIConnector(), wantFailMode: "closed"},
 		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
-		{name: "hermes_downgrades_to_fail_open", connector: NewHermesConnector(), wantFailMode: "open"},
+		{name: "hermes_supports_fail_closed", connector: NewHermesConnector(), wantFailMode: "closed"},
 		{name: "copilot_downgrades_to_fail_open", connector: NewCopilotConnector(), wantFailMode: "open"},
 	}
 

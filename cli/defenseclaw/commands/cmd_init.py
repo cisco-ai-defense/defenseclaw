@@ -516,7 +516,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"    {ux.accent('defenseclaw mcp scan --all')}   " + ux.dim("Scan configured MCP servers"))
     click.echo(
         f"    {ux.accent('defenseclaw setup <connector>')} "
-        + ux.dim("Add another agent (codex, claudecode, amp)")
+        + ux.dim("Add another agent (codex, claudecode, amp, hermes)")
     )
 
     store.close()

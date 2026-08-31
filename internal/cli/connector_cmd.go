@@ -272,6 +272,8 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		variable = "CODEX_HOME"
 	case "claudecode":
 		variable = "CLAUDE_CONFIG_DIR"
+	case "hermes":
+		variable = "HERMES_HOME"
 	case "amp":
 		// Amp does not expose a config-home environment override. The
 		// validated path is carried in SetupOpts.ConfigHome instead, so this

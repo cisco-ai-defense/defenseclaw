@@ -1296,7 +1296,7 @@ func TestTeardownSupersededConnectorsSwitchesConnector(t *testing.T) {
 func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *testing.T) {
 	transaction := setupTransaction{
 		DataRoot:           `C:\Users\tester\.defenseclaw`,
-		PreviousConnectors: []string{"codex", "claudecode", "amp"},
+		PreviousConnectors: []string{"codex", "claudecode", "amp", "hermes"},
 		TargetConnector:    "none",
 	}
 	var calls []string
@@ -1311,6 +1311,7 @@ func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *test
 		"codex:teardown", "codex:verify",
 		"claudecode:teardown", "claudecode:verify",
 		"amp:teardown", "amp:verify",
+		"hermes:teardown", "hermes:verify",
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("connector opt-out calls = %v, want %v", calls, want)
@@ -1391,6 +1392,7 @@ func TestResolvePreviousConnectorHomeUsesBackupBindingWithoutInstallState(t *tes
 	}{
 		{"codex", "config.toml", "codex_config_backup.json"},
 		{"claudecode", "settings.json", "claudecode_backup.json"},
+		{"hermes", "config", "hermes_backup.json"},
 	} {
 		t.Run(test.connector, func(t *testing.T) {
 			dataRoot := t.TempDir()
@@ -1425,6 +1427,29 @@ func TestResolvePreviousConnectorHomeUsesBackupBindingWithoutInstallState(t *tes
 				t.Fatalf("resolved previous connector home = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestInferManagedHermesHomeAcceptsPR655LegacyBackupName(t *testing.T) {
+	dataRoot := t.TempDir()
+	backupPath := filepath.Join(dataRoot, "connector_backups", "hermes", "config.yaml.json")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(t.TempDir(), "hermes-custom-home")
+	if err := os.WriteFile(
+		backupPath,
+		[]byte(fmt.Sprintf(`{"path":%q}`, filepath.Join(want, "config.yaml"))),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := inferManagedConnectorHome(dataRoot, "hermes", "config", `C:\fallback`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, want) {
+		t.Fatalf("inferred legacy Hermes home = %q, want %q", got, want)
 	}
 }
 

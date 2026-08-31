@@ -103,8 +103,8 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         "Amp and the DefenseClaw system policy plugin are supported on native Windows x64.",
     ),
     "hermes": ConnectorPlatformSupport(
-        NOT_CERTIFIED,
-        "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
+        SUPPORTED,
+        "Hermes Agent 0.20.6 and DefenseClaw native hooks are supported on native Windows x64.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,

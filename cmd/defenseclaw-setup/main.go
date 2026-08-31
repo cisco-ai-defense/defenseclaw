@@ -176,6 +176,7 @@ type options struct {
 	CleanupTransaction string
 	CodexHome          string
 	ClaudeConfigDir    string
+	HermesHome         string
 	// PreserveConnectorConfiguration is internal transaction intent, never a
 	// command-line property. Servicing an existing install without an explicit
 	// connector or mode selection must refresh its owned registrations in place
@@ -249,6 +250,7 @@ type installState struct {
 	Mode                   string            `json:"mode"`
 	CodexHome              string            `json:"codex_home,omitempty"`
 	ClaudeConfigDir        string            `json:"claude_config_dir,omitempty"`
+	HermesHome             string            `json:"hermes_home,omitempty"`
 	UnsignedLocalArtifact  bool              `json:"unsigned_local_artifact"`
 	ReleaseSigningRequired bool              `json:"release_signing_required"`
 	Toolchain              map[string]string `json:"toolchain"`
@@ -487,6 +489,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	// must never depend on a later process inheriting the same environment.
 	opts.CodexHome = transaction.CodexHome
 	opts.ClaudeConfigDir = transaction.ClaudeConfigDir
+	opts.HermesHome = transaction.HermesHome
 	if err := beginSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, err
 	}
@@ -889,9 +892,9 @@ func requestedServices(opts options, previous serviceState) serviceState {
 
 func connectorsForNativeUninstall(state *installState, dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
-	connectors := make([]string, 0, 3)
+	connectors := make([]string, 0, 4)
 	add := func(name string) {
-		if (name == "codex" || name == "claudecode" || name == "amp") && !seen[name] {
+		if (name == "codex" || name == "claudecode" || name == "amp" || name == "hermes") && !seen[name] {
 			seen[name] = true
 			connectors = append(connectors, name)
 		}
@@ -924,6 +927,11 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	}
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "amp", "config.json")) {
 		add("amp")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "hermes", "config.json")) ||
+		pathExists(filepath.Join(dataRoot, "connector_backups", "hermes", "config.yaml.json")) ||
+		pathExists(filepath.Join(dataRoot, "connector_backups", "hermes", "shell-hooks-allowlist.json.json")) {
+		add("hermes")
 	}
 	return connectors, nil
 }
@@ -988,7 +996,7 @@ func readNativeConfiguredConnectors(dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
 	add := func(value string) {
 		name := normalizeConnector(strings.TrimSpace(value))
-		if name == "codex" || name == "claudecode" || name == "amp" {
+		if name == "codex" || name == "claudecode" || name == "amp" || name == "hermes" {
 			seen[name] = true
 		}
 	}
@@ -1283,6 +1291,8 @@ func connectorLifecycleConfigHome(env []string, connectorName string) (string, e
 		variable = "CODEX_HOME"
 	case "claudecode":
 		variable = "CLAUDE_CONFIG_DIR"
+	case "hermes":
+		variable = "HERMES_HOME"
 	case "amp":
 		// Amp has no config-home override. Bind its documented native Windows
 		// home beneath the current token's USERPROFILE and pass that exact
@@ -1332,7 +1342,7 @@ func samePath(a, b string) bool {
 }
 
 func validConnector(value string) bool {
-	return value == "none" || value == "codex" || value == "claudecode" || value == "amp"
+	return value == "none" || value == "codex" || value == "claudecode" || value == "amp" || value == "hermes"
 }
 
 func validMode(value string) bool {
@@ -1604,6 +1614,7 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		Mode:                   opts.Mode,
 		CodexHome:              opts.CodexHome,
 		ClaudeConfigDir:        opts.ClaudeConfigDir,
+		HermesHome:             opts.HermesHome,
 		UnsignedLocalArtifact:  payload.Manifest.Unsigned,
 		ReleaseSigningRequired: true,
 		Toolchain:              payload.Manifest.Toolchain,
@@ -2592,7 +2603,7 @@ func parseArgs(args []string) (options, error) {
 		return opts, errors.New("only per-user INSTALLSCOPE=user is supported by this installer")
 	}
 	if !validConnector(opts.Connector) {
-		return opts, fmt.Errorf("invalid CONNECTOR %q; expected codex, claudecode, amp, or none", opts.Connector)
+		return opts, fmt.Errorf("invalid CONNECTOR %q; expected codex, claudecode, amp, hermes, or none", opts.Connector)
 	}
 	if opts.Mode != "observe" && opts.Mode != "action" {
 		return opts, fmt.Errorf("invalid MODE %q; expected observe or action", opts.Mode)
@@ -2639,13 +2650,15 @@ func normalizeConnector(value string) string {
 		return "claudecode"
 	case "amp", "ampcode":
 		return "amp"
+	case "hermes", "hermesagent", "hermes-agent":
+		return "hermes"
 	default:
 		return strings.ToLower(value)
 	}
 }
 
 func printUsage() {
-	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|amp|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
+	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|amp|hermes|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
 	fmt.Println("Maintenance: DefenseClawSetup-x64.exe /repair | /upgrade | /uninstall [DELETEUSERDATA=1]")
 }
 

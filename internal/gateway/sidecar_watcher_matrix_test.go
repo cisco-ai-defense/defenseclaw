@@ -405,6 +405,48 @@ func TestResolveWatcherDirs_AMPDoesNotMaterializeOptionalClaudeRoots(t *testing.
 	}
 }
 
+func TestExpandHermesSkillWatchDirs_IncludesNestedCategoryRoots(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "skills")
+	flat := filepath.Join(root, "flat-skill")
+	category := filepath.Join(root, "productivity")
+	nested := filepath.Join(category, "nested-skill")
+	deepParent := filepath.Join(root, "mlops", "models", "vendor")
+	deepNested := filepath.Join(deepParent, "deep-skill")
+	markerless := filepath.Join(root, "not-a-category", "child")
+	for _, dir := range []string{flat, nested, deepNested, markerless} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{flat, nested, deepNested} {
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# Test skill\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := expandHermesSkillWatchDirs(connector.NewHermesConnector(), []string{root})
+	if !containsExactPath(got, root) {
+		t.Fatalf("expanded dirs = %v, missing top-level Hermes skill root", got)
+	}
+	if !containsExactPath(got, category) {
+		t.Fatalf("expanded dirs = %v, missing nested-skill category root", got)
+	}
+	if !containsExactPath(got, deepParent) {
+		t.Fatalf("expanded dirs = %v, missing deep nested-skill parent root", got)
+	}
+	if containsExactPath(got, flat) {
+		t.Fatalf("expanded dirs = %v, flat skill must not become a watch root", got)
+	}
+	if containsExactPath(got, filepath.Dir(markerless)) {
+		t.Fatalf("expanded dirs = %v, markerless grouping directory must not become a watch root", got)
+	}
+
+	nonHermes := expandHermesSkillWatchDirs(connector.NewCodexConnector(), []string{root})
+	if len(nonHermes) != 1 || !containsExactPath(nonHermes, root) {
+		t.Fatalf("non-Hermes dirs changed: %v", nonHermes)
+	}
+}
+
 func anyContains(haystack []string, needle string) bool {
 	for _, h := range haystack {
 		if strings.Contains(h, needle) {

@@ -89,8 +89,8 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Reason: "Amp and the DefenseClaw system policy plugin are supported on native Windows x64.",
 	},
 	"hermes": {
-		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
+		Status: PlatformSupported,
+		Reason: "Hermes Agent 0.20.6 and DefenseClaw native hooks are supported on native Windows x64.",
 	},
 	"openhands": {
 		Status: PlatformUnsupported,

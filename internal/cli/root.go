@@ -444,7 +444,7 @@ func loadDotEnvIntoOS(path string) {
 func dotEnvKeyIsProcessControl(key string) bool {
 	normalized := strings.ToUpper(strings.TrimSpace(key))
 	switch normalized {
-	case "ALL_PROXY", "BASH_ENV", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COMSPEC",
+	case "ALL_PROXY", "BASH_ENV", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME", "COMSPEC",
 		"CURL_CA_BUNDLE",
 		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
 		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",

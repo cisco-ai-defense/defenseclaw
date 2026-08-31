@@ -213,6 +213,7 @@ var (
 		{Label: "Codex CLI", Value: "codex"},
 		{Label: "Claude Code", Value: "claudecode"},
 		{Label: "Amp", Value: "amp"},
+		{Label: "Hermes Agent", Value: "hermes"},
 	}
 	wizardModeChoices = []wizardChoice{
 		{Label: "Observe", Value: "observe"},
@@ -735,8 +736,10 @@ func wizardCompletionDescription(connector string) string {
 		return "Claude Code is configured and its native Windows hooks are ready." + installed
 	case "amp":
 		return "Amp is configured with the DefenseClaw system policy plugin under %USERPROFILE%\\.config\\amp\\plugins. Use --plugin-ready-timeout 30 with amp -x." + installed
+	case "hermes":
+		return "Hermes Agent is configured with native DefenseClaw hooks under %LOCALAPPDATA%\\hermes. Restart Hermes so it reloads the hook registry." + installed
 	default:
-		return "Open a terminal and run defenseclaw init when you are ready to configure Codex, Claude Code, Amp, or another connector." + installed
+		return "Open a terminal and run defenseclaw init when you are ready to configure Codex, Claude Code, Amp, Hermes, or another connector." + installed
 	}
 }
 

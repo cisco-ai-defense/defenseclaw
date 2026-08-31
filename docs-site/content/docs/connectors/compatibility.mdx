@@ -14,7 +14,7 @@ DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at
 <Callout type="warning" title="Version compatibility is not platform certification">
 A connector can have a valid hook contract and still be unsupported or not
 certified on native Windows. The current packaged Windows release contract
-certifies Codex, Claude Code, and Amp; see the
+certifies Codex, Claude Code, Amp, and Hermes; see the
 [native Windows connector matrix](/docs/get-started/windows#certified-connector-scope).
 </Callout>
 
@@ -39,7 +39,7 @@ rollout holds. Existing policy defaults are unchanged.
 | <ConnectorLabel id="codex" /> | hook contract | `>=0.135.0,<0.145.0` | `codex-hooks-v3-generic` / `v6` (10 events, generic local tools) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="codex" /> | hook contract | `>=0.145.0` | `codex-hooks-v4` / `v6` (11 events) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="claudecode" /> | hook contract | `>=2.1.152` | `claudecode-hooks-v1` / `v7` | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="hermes" /> | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="hermes" /> | hook contract | `>=0.20.6` | `hermes-hooks-v1` / `v7` | 23 shell-hook events; `pre_tool_call` can block |
 | <ConnectorLabel id="cursor" /> | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v8` | prompt, tool_call, tool_result |
 | <ConnectorLabel id="windsurf" /> | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | <ConnectorLabel id="geminicli" /> | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
@@ -63,9 +63,9 @@ Codex `0.124.0` starts the six-event stable contract; `0.129.0` adds
 tools; and `0.145.0` adds the true main-thread `SessionEnd` boundary.
 The per-turn Codex `Stop` event never closes cross-turn chain state. Gemini CLI
 `0.26.0` enabled hooks by default, Cursor `1.7.0`
-introduced beta hooks, and Hermes `0.11.0` added shell hooks. The Hermes
-contract covers ten events: four LLM/tool callbacks, session
-start/end/finalize/reset, and subagent start/stop. Windsurf `1.12.41` added
+introduced beta hooks, and Hermes `0.20.6` is the validated 23-event shell-hook
+baseline covering tool, transform, LLM/API, session, subagent, gateway,
+approval, and kanban lifecycle events. Windsurf `1.12.41` added
 user-prompt hooks to the Cascade pre-hook set, while Copilot CLI `1.0.18` is
 the first release containing every event in the current DefenseClaw contract.
 

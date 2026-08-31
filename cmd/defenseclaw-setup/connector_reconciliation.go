@@ -101,13 +101,15 @@ func retryPendingConnectorReconciliation(
 		}
 		seen[identity] = true
 		connectorName := strings.ToLower(failure.Connector)
-		codexHome, claudeHome := "", ""
+		codexHome, claudeHome, hermesHome := "", "", ""
 		if connectorName == "codex" {
 			codexHome = failure.ConfigHome
 		} else if connectorName == "claudecode" {
 			claudeHome = failure.ConfigHome
+		} else if connectorName == "hermes" {
+			hermesHome = failure.ConfigHome
 		}
-		env := transactionChildEnvForHomes(transaction, codexHome, claudeHome)
+		env := transactionChildEnvForHomes(transaction, codexHome, claudeHome, hermesHome)
 		verify := func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "verify", env)
 		}
@@ -207,6 +209,8 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 			candidates = append(candidates, transaction.PreviousState.CodexHome)
 		case "claudecode":
 			candidates = append(candidates, transaction.PreviousState.ClaudeConfigDir)
+		case "hermes":
+			candidates = append(candidates, transaction.PreviousState.HermesHome)
 		}
 	}
 	candidates = append(candidates, connectorConfigHome(transaction, connectorName, false))
@@ -247,6 +251,12 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 }
 
 func connectorManagedBackupExists(dataRoot, connectorName string) bool {
+	if connectorName == "hermes" {
+		backupRoot := filepath.Join(dataRoot, "connector_backups", connectorName)
+		return pathExists(filepath.Join(backupRoot, "config.json")) ||
+			pathExists(filepath.Join(backupRoot, "config.yaml.json")) ||
+			pathExists(filepath.Join(backupRoot, "shell-hooks-allowlist.json.json"))
+	}
 	logicalName := ""
 	switch connectorName {
 	case "codex":
@@ -275,6 +285,11 @@ func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
 		directory = ".claude"
 	case "amp":
 		return filepath.Join(filepath.Dir(cleanDataRoot), ".config", "amp")
+	case "hermes":
+		// Hermes defaults to %LOCALAPPDATA%\hermes, which cannot be derived
+		// safely from the profile-bound DefenseClaw data root. Transactions
+		// always persist the Known Folder-resolved home explicitly.
+		return ""
 	default:
 		return ""
 	}
@@ -284,12 +299,15 @@ func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
 func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, configHome string) []string {
 	codexHome := transaction.PreviousCodexHome
 	claudeHome := transaction.PreviousClaudeConfigDir
+	hermesHome := transaction.PreviousHermesHome
 	if connectorName == "codex" {
 		codexHome = configHome
 	} else if connectorName == "claudecode" {
 		claudeHome = configHome
+	} else if connectorName == "hermes" {
+		hermesHome = configHome
 	}
-	return transactionChildEnvForHomes(transaction, codexHome, claudeHome)
+	return transactionChildEnvForHomes(transaction, codexHome, claudeHome, hermesHome)
 }
 
 func reconcilePreservedConnectors(
@@ -469,7 +487,7 @@ func validateConnectorReconciliationState(state *connectorReconciliationState) e
 }
 
 func validateConnectorReconciliationIdentity(connectorName, configHome string) error {
-	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "amp" {
+	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "amp" && connectorName != "hermes" {
 		return fmt.Errorf("invalid connector reconciliation target %q", connectorName)
 	}
 	if configHome == "" || !filepath.IsAbs(configHome) || filepath.Clean(configHome) != configHome {
@@ -538,6 +556,11 @@ func connectorConfigHome(transaction setupTransaction, connectorName string, pre
 		// %USERPROFILE%\.config\amp directory for both previous and target
 		// lifecycle operations.
 		return connectorDefaultHomeBesideDataRoot(transaction.DataRoot, connectorName)
+	case "hermes":
+		if previous {
+			return transaction.PreviousHermesHome
+		}
+		return transaction.HermesHome
 	default:
 		return ""
 	}

@@ -86,7 +86,7 @@ is a stop condition; do not bypass it.
 
 Double-click the EXE without **Run as administrator**. Choose one of:
 
-- **Codex**, **Claude Code**, or **Amp** to configure that native connector.
+- **Codex**, **Claude Code**, **Amp**, or **Hermes Agent** to configure that native connector.
 - **Configure later** for a CLI-only installation with no agent changes.
 
 Start in **Observe** mode. Choose **Action** only after reviewing observed
@@ -132,10 +132,11 @@ DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MOD
   </Tab>
 </Tabs>
 
-Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=amp` for Amp. To
+Use `CONNECTOR=claudecode` for Claude Code, `CONNECTOR=amp` for Amp, or
+`CONNECTOR=hermes` for Hermes Agent. To
 install without configuring an agent or starting the gateway, use
 `CONNECTOR=none STARTGATEWAY=0`. `STARTGATEWAY=0` cannot leave a Codex, Claude
-Code, or Amp installation stopped: those connectors require gateway startup
+Code, Amp, or Hermes installation stopped: those connectors require gateway startup
 and current-user logon integration.
 
 Public Setup properties are:
@@ -145,7 +146,7 @@ Public Setup properties are:
 | Action | fresh install, `/repair`, `/upgrade`, or `/uninstall` |
 | UI | interactive or `/quiet` (`/qn` alias); `/norestart` is accepted |
 | Scope | `INSTALLSCOPE=user` only |
-| Connector | `CONNECTOR=codex`, `claudecode`, `amp`, or `none` |
+| Connector | `CONNECTOR=codex`, `claudecode`, `amp`, `hermes`, or `none` |
 | Policy mode | `MODE=observe` or `action` |
 | Gateway | `STARTGATEWAY=1` or `0`, subject to the connector rule above |
 | User data on uninstall | `DELETEUSERDATA=0` (default) or `1` |
@@ -167,9 +168,10 @@ For explicit supported connectors:
 defenseclaw setup codex --mode observe
 defenseclaw setup claude-code --mode observe
 defenseclaw setup amp --mode observe
+defenseclaw setup hermes --mode observe
 ```
 
-One local gateway can host any or all three. Add connectors without removing
+One local gateway can host any or all four. Add connectors without removing
 an existing one:
 
 ```powershell
@@ -177,6 +179,7 @@ defenseclaw setup `
   --connector codex `
   --connector claudecode `
   --connector amp `
+  --connector hermes `
   --mode observe `
   --restart `
   --yes

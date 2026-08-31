@@ -44,6 +44,7 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 		"DEFENSECLAW_DISABLE_REDACTION",
 		"DEFENSECLAW_DAEMON",
 		"CLAUDE_CONFIG_DIR",
+		"HERMES_HOME",
 		"NODE_OPTIONS",
 		"SSL_CERT_DIR",
 		"SSL_CERT_FILE",
@@ -69,6 +70,7 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 			"DEFENSECLAW_DISABLE_REDACTION=1\n" +
 			"DEFENSECLAW_DAEMON=1\n" +
 			"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n" +
+			"HERMES_HOME=/tmp/attacker-hermes-home\n" +
 			"NODE_OPTIONS=--require=/tmp/attacker.js\n" +
 			"SSL_CERT_DIR=/tmp/attacker-ca-directory\n" +
 			"SSL_CERT_FILE=/tmp/attacker-ca.pem\n" +

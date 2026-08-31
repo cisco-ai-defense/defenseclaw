@@ -40,6 +40,27 @@ func TestBindConnectorLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testin
 	}
 }
 
+func TestBindHermesLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
+	root := t.TempDir()
+	ambient := filepath.Join(root, "ambient-hermes")
+	bound := filepath.Join(root, "bound-hermes")
+	t.Setenv("HERMES_HOME", ambient)
+	connectorFlagConfigHome = bound
+	t.Cleanup(func() { connectorFlagConfigHome = "" })
+
+	restore, err := bindConnectorLifecycleConfigHome("hermes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("HERMES_HOME"); got != bound {
+		t.Fatalf("bound HERMES_HOME = %q, want %q", got, bound)
+	}
+	restore()
+	if got := os.Getenv("HERMES_HOME"); got != ambient {
+		t.Fatalf("restored HERMES_HOME = %q, want %q", got, ambient)
+	}
+}
+
 func TestBindAmpLifecycleConfigHomeDoesNotMutateUserProfile(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

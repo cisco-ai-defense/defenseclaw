@@ -89,8 +89,10 @@ type setupTransaction struct {
 	TargetVersion                  string                   `json:"target_version,omitempty"`
 	PreviousCodexHome              string                   `json:"previous_codex_home,omitempty"`
 	PreviousClaudeConfigDir        string                   `json:"previous_claude_config_dir,omitempty"`
+	PreviousHermesHome             string                   `json:"previous_hermes_home,omitempty"`
 	CodexHome                      string                   `json:"codex_home,omitempty"`
 	ClaudeConfigDir                string                   `json:"claude_config_dir,omitempty"`
+	HermesHome                     string                   `json:"hermes_home,omitempty"`
 	MaintenanceSHA256              string                   `json:"maintenance_sha256,omitempty"`
 	DeleteUserData                 bool                     `json:"delete_user_data,omitempty"`
 	UninstallPathEntryOwned        bool                     `json:"uninstall_path_entry_owned,omitempty"`
@@ -274,6 +276,10 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	defaultHermesConfigHome, err := defaultHermesHome()
+	if err != nil {
+		return setupTransaction{}, err
+	}
 	codexHome, err := transactionConfigHome("CODEX_HOME", defaultCodexHome)
 	if err != nil {
 		return setupTransaction{}, err
@@ -282,10 +288,15 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	previousCodexState, previousClaudeState := "", ""
+	hermesHome, err := transactionConfigHome("HERMES_HOME", defaultHermesConfigHome)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousCodexState, previousClaudeState, previousHermesState := "", "", ""
 	if oldState != nil {
 		previousCodexState = oldState.CodexHome
 		previousClaudeState = oldState.ClaudeConfigDir
+		previousHermesState = oldState.HermesHome
 	}
 	// Pre-home-binding releases can advertise a connector only through their
 	// legacy backup. In that case the validated current override is the sole
@@ -303,12 +314,19 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	previousHermesHome, err := resolvePreviousConnectorHome(
+		previousHermesState, previousConnectors, dataRoot, "hermes", "config", hermesHome,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
 	if preserveConnectorConfiguration {
 		// A quiet repair/upgrade without a connector choice services the exact
 		// homes already owned by the installation. Environment drift must not
 		// silently move or collapse connector configuration.
 		codexHome = previousCodexHome
 		claudeConfigDir = previousClaudeConfigDir
+		hermesHome = previousHermesHome
 	}
 	maintenanceSHA256 := ""
 	maintenanceExisted, previousMaintenanceSHA256, err := snapshotMaintenanceFile(maintenancePath)
@@ -357,8 +375,10 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		TargetVersion:                  targetVersion,
 		PreviousCodexHome:              previousCodexHome,
 		PreviousClaudeConfigDir:        previousClaudeConfigDir,
+		PreviousHermesHome:             previousHermesHome,
 		CodexHome:                      codexHome,
 		ClaudeConfigDir:                claudeConfigDir,
+		HermesHome:                     hermesHome,
 		MaintenanceSHA256:              maintenanceSHA256,
 		DeleteUserData:                 opts.DeleteUserData,
 		UninstallPathEntryOwned:        uninstallPathOwned,
@@ -400,10 +420,15 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	configuredCodexHome, configuredClaudeHome := "", ""
+	defaultHermesConfigHome, err := defaultHermesHome()
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	configuredCodexHome, configuredClaudeHome, configuredHermesHome := "", "", ""
 	if oldState != nil {
 		configuredCodexHome = oldState.CodexHome
 		configuredClaudeHome = oldState.ClaudeConfigDir
+		configuredHermesHome = oldState.HermesHome
 	}
 	// The source install transaction already captured validated client homes.
 	// Preserve them across an install-to-uninstall handoff when predecessor
@@ -415,6 +440,10 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	legacyClaudeFallback := source.ClaudeConfigDir
 	if legacyClaudeFallback == "" {
 		legacyClaudeFallback = defaultClaudeConfigDir
+	}
+	legacyHermesFallback := source.HermesHome
+	if legacyHermesFallback == "" {
+		legacyHermesFallback = defaultHermesConfigHome
 	}
 	previousCodexHome, err := resolvePreviousConnectorHome(
 		configuredCodexHome,
@@ -434,6 +463,17 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		"claudecode",
 		"settings.json",
 		legacyClaudeFallback,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousHermesHome, err := resolvePreviousConnectorHome(
+		configuredHermesHome,
+		previousConnectors,
+		source.DataRoot,
+		"hermes",
+		"config",
+		legacyHermesFallback,
 	)
 	if err != nil {
 		return setupTransaction{}, err
@@ -498,8 +538,10 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		TargetMode:                   opts.Mode,
 		PreviousCodexHome:            previousCodexHome,
 		PreviousClaudeConfigDir:      previousClaudeConfigDir,
+		PreviousHermesHome:           previousHermesHome,
 		CodexHome:                    previousCodexHome,
 		ClaudeConfigDir:              previousClaudeConfigDir,
+		HermesHome:                   previousHermesHome,
 		DeleteUserData:               opts.DeleteUserData,
 		UninstallPathEntryOwned:      pathOwned,
 		UninstallPathSeparatorReused: pathSeparatorReused,
@@ -580,25 +622,35 @@ func transactionConfigHome(name, fallback string) (string, error) {
 }
 
 func inferManagedConnectorHome(dataRoot, connectorName, logicalName, fallback string) (string, error) {
-	backupName := strings.NewReplacer("/", "_", `\`, "_", ":", "_", " ", "_").Replace(logicalName)
-	path := filepath.Join(dataRoot, "connector_backups", connectorName, backupName+".json")
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return fallback, nil
+	logicalNames := []string{logicalName}
+	if connectorName == "hermes" && logicalName == "config" {
+		// PR #655 used config.yaml as the logical backup name. Current setup uses
+		// the hook connector's stable "config" name and also owns the adjacent
+		// allowlist. Accept each finite marker so upgrades retain the exact home.
+		logicalNames = append(logicalNames, "config.yaml", "shell-hooks-allowlist.json")
 	}
-	if err != nil {
-		return "", fmt.Errorf("read %s managed backup binding: %w", connectorName, err)
+	for _, candidate := range logicalNames {
+		backupName := strings.NewReplacer("/", "_", `\`, "_", ":", "_", " ", "_").Replace(candidate)
+		path := filepath.Join(dataRoot, "connector_backups", connectorName, backupName+".json")
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("read %s managed backup binding: %w", connectorName, err)
+		}
+		var binding struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(data, &binding); err != nil {
+			return "", fmt.Errorf("parse %s managed backup binding: %w", connectorName, err)
+		}
+		if strings.TrimSpace(binding.Path) == "" || !filepath.IsAbs(binding.Path) {
+			return "", fmt.Errorf("%s managed backup has an invalid target path", connectorName)
+		}
+		return filepath.Dir(filepath.Clean(binding.Path)), nil
 	}
-	var binding struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(data, &binding); err != nil {
-		return "", fmt.Errorf("parse %s managed backup binding: %w", connectorName, err)
-	}
-	if strings.TrimSpace(binding.Path) == "" || !filepath.IsAbs(binding.Path) {
-		return "", fmt.Errorf("%s managed backup has an invalid target path", connectorName)
-	}
-	return filepath.Dir(filepath.Clean(binding.Path)), nil
+	return fallback, nil
 }
 
 func resolvePreviousConnectorHome(
@@ -627,7 +679,12 @@ func resolvePreviousConnectorHome(
 }
 
 func transactionChildEnv(transaction setupTransaction) []string {
-	return transactionChildEnvForHomes(transaction, transaction.CodexHome, transaction.ClaudeConfigDir)
+	return transactionChildEnvForHomes(
+		transaction,
+		transaction.CodexHome,
+		transaction.ClaudeConfigDir,
+		transaction.HermesHome,
+	)
 }
 
 func transactionPreviousChildEnv(transaction setupTransaction) []string {
@@ -635,15 +692,26 @@ func transactionPreviousChildEnv(transaction setupTransaction) []string {
 		transaction,
 		transaction.PreviousCodexHome,
 		transaction.PreviousClaudeConfigDir,
+		transaction.PreviousHermesHome,
 	)
 }
 
-func transactionChildEnvForHomes(transaction setupTransaction, codexHome, claudeConfigDir string) []string {
+func transactionChildEnvForHomes(
+	transaction setupTransaction,
+	codexHome, claudeConfigDir string,
+	hermesHomeOverride ...string,
+) []string {
+	hermesHome := transaction.HermesHome
+	if len(hermesHomeOverride) != 0 {
+		hermesHome = hermesHomeOverride[0]
+	}
 	base := managedChildEnv(transaction.DataRoot)
-	filtered := make([]string, 0, len(base)+2)
+	filtered := make([]string, 0, len(base)+3)
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && (strings.EqualFold(name, "CODEX_HOME") || strings.EqualFold(name, "CLAUDE_CONFIG_DIR")) {
+		if ok && (strings.EqualFold(name, "CODEX_HOME") ||
+			strings.EqualFold(name, "CLAUDE_CONFIG_DIR") ||
+			strings.EqualFold(name, "HERMES_HOME")) {
 			continue
 		}
 		filtered = append(filtered, entry)
@@ -653,6 +721,9 @@ func transactionChildEnvForHomes(transaction setupTransaction, codexHome, claude
 	}
 	if claudeConfigDir != "" {
 		filtered = append(filtered, "CLAUDE_CONFIG_DIR="+claudeConfigDir)
+	}
+	if hermesHome != "" {
+		filtered = append(filtered, "HERMES_HOME="+hermesHome)
 	}
 	return filtered
 }
@@ -843,7 +914,8 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 			return errors.New("connector-preserving transaction changed the installer selection")
 		}
 		if !samePath(transaction.PreviousCodexHome, transaction.CodexHome) ||
-			!samePath(transaction.PreviousClaudeConfigDir, transaction.ClaudeConfigDir) {
+			!samePath(transaction.PreviousClaudeConfigDir, transaction.ClaudeConfigDir) ||
+			!samePath(transaction.PreviousHermesHome, transaction.HermesHome) {
 			return errors.New("connector-preserving transaction changed a connector configuration home")
 		}
 		if len(transaction.PreviousConnectors) != 0 && !transaction.TargetServices.Gateway {
@@ -863,8 +935,10 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 	for label, value := range map[string]string{
 		"previous Codex home":               transaction.PreviousCodexHome,
 		"previous Claude configuration dir": transaction.PreviousClaudeConfigDir,
+		"previous Hermes home":              transaction.PreviousHermesHome,
 		"Codex home":                        transaction.CodexHome,
 		"Claude configuration dir":          transaction.ClaudeConfigDir,
+		"Hermes home":                       transaction.HermesHome,
 	} {
 		if value == "" {
 			continue
@@ -892,7 +966,7 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 	}
 	seenConnectors := map[string]bool{}
 	for _, connectorName := range transaction.PreviousConnectors {
-		if connectorName != "codex" && connectorName != "claudecode" && connectorName != "amp" {
+		if connectorName != "codex" && connectorName != "claudecode" && connectorName != "amp" && connectorName != "hermes" {
 			return fmt.Errorf("setup transaction has an invalid previous connector %q", connectorName)
 		}
 		if seenConnectors[connectorName] {
@@ -950,6 +1024,7 @@ func validateInstallStateForRoots(state *installState, installRoot, dataRoot, ma
 	for label, value := range map[string]string{
 		"Codex home":               state.CodexHome,
 		"Claude configuration dir": state.ClaudeConfigDir,
+		"Hermes home":              state.HermesHome,
 	} {
 		if value != "" && (!filepath.IsAbs(value) || filepath.Clean(value) != value) {
 			return fmt.Errorf("installer state has an invalid %s", label)
@@ -2822,6 +2897,8 @@ func connectorHomeChanged(transaction setupTransaction, connectorName string) bo
 		return !samePath(transaction.PreviousCodexHome, transaction.CodexHome)
 	case "claudecode":
 		return !samePath(transaction.PreviousClaudeConfigDir, transaction.ClaudeConfigDir)
+	case "hermes":
+		return !samePath(transaction.PreviousHermesHome, transaction.HermesHome)
 	default:
 		return false
 	}

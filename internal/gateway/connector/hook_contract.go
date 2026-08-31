@@ -377,26 +377,39 @@ var builtinHookContracts = map[string][]HookContract{
 	"hermes": {{
 		Connector:               "hermes",
 		ContractID:              "hermes-hooks-v1",
-		MinAgentVersion:         "0.11.0",
+		MinAgentVersion:         "0.20.6",
 		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
+		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"$HERMES_HOME/config.yaml", "%LOCALAPPDATA%/hermes/config.yaml", "~/.hermes/config.yaml"},
 		ResponseFieldName:       "hook_output",
-		// Hermes' shell-hook surface (cli-config.yaml `hooks:` block).
+		// Hermes' shell-hook surface (config.yaml `hooks:` block).
 		// Only pre_tool_call can block; pre_llm_call injects context;
 		// the remaining events are observe-only telemetry decoded for
 		// inspection/audit. Order follows the agent lifecycle.
 		Events: []string{
-			"pre_llm_call",
 			"pre_tool_call",
 			"post_tool_call",
+			"transform_terminal_output",
+			"transform_tool_result",
+			"transform_llm_output",
+			"pre_llm_call",
 			"post_llm_call",
+			"pre_verify",
+			"pre_api_request",
+			"post_api_request",
+			"api_request_error",
 			"on_session_start",
 			"on_session_end",
 			"on_session_finalize",
 			"on_session_reset",
 			"subagent_start",
 			"subagent_stop",
+			"pre_gateway_dispatch",
+			"pre_approval_request",
+			"post_approval_response",
+			"kanban_task_claimed",
+			"kanban_task_completed",
+			"kanban_task_blocked",
 		},
 		// pre_llm_call → prompt; pre/post_tool_call → tool_call/tool_result;
 		// session + subagent lifecycle → event_content (audit envelope).
@@ -406,11 +419,11 @@ var builtinHookContracts = map[string][]HookContract{
 			CanAskNative: false,
 			// Only pre_tool_call honors a blocking stdout response;
 			// pre_llm_call can inject context but cannot veto, and the
-			// post/session/subagent events are read-only on Hermes' side
-			// (their stdout is ignored). Hermes never blocks on exit code
-			// or hook timeout, so SupportsFailClosed stays false.
+			// post/session/subagent events are read-only on Hermes' side.
+			// Hermes 0.20.6 supports exit-code-2 blocking and fail_closed
+			// for pre_tool_call hook failures and timeouts.
 			BlockEvents:        []string{"pre_tool_call"},
-			SupportsFailClosed: false,
+			SupportsFailClosed: true,
 			Scope:              "user",
 		},
 		SupportsTraceparent: true,
@@ -421,9 +434,9 @@ var builtinHookContracts = map[string][]HookContract{
 		ContentEnvelopeKey: "extra",
 		ToolCallLifecycle:  hermesToolCallLifecycle(),
 		Notes: []string{
-			"Covers the documented shell-hook lifecycle including session start/end/finalize/reset and subagent start/stop telemetry. Hermes nests prompt/result and delegation identity under the per-event `extra` envelope; the generic decoder lifts those fields into the canonical lifecycle.",
-			"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects via {\"context\":...}. Confirm verdicts (no native ask surface) downgrade to a {\"systemMessage\":...} alert via the shared responder epilogue. Non-zero exit codes and hook timeouts only log a warning upstream, so there is no fail-closed surface; Hermes remains live-smoke pending (https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/hermes/).",
-			"Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; otherwise Hermes prompts for per-(event,command) consent on first use and silently skips unaccepted hooks. Setup writes hooks_auto_accept so all events register, and the managed-backup heals it.",
+			"Pinned to Hermes Agent 0.20.6 and the 23-event shell-hook subset adopted from PR #655. Hermes nests prompt/result and delegation identity under the per-event `extra` envelope; the generic decoder lifts those fields into the canonical lifecycle.",
+			"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style), exit code 2 blocks, and fail_closed protects hook failures, malformed output, and timeouts. pre_llm_call injects via {\"context\":...}. Confirm verdicts (no native ask surface) downgrade to a {\"systemMessage\":...} alert via the shared responder epilogue.",
+			"Hermes requires exact per-(event,command) consent on non-TTY/gateway runs. Setup leaves the operator-wide hooks_auto_accept policy untouched and provisions only DefenseClaw-owned entries in shell-hooks-allowlist.json; teardown restores or surgically removes those entries.",
 		},
 	}},
 	"cursor": {{

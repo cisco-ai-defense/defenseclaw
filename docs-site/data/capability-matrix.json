@@ -95,11 +95,11 @@
         "canAskNative": false,
         "askEvents": [],
         "blockEvents": ["pre_tool_call"],
-        "supportsFailClosed": false,
+        "supportsFailClosed": true,
         "scope": "user"
       },
       "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "Hooks live in ~/.hermes/config.yaml (hermes-hooks-v1; generic decoder lifts content from the per-event extra envelope). Full shell-hook lifecycle: pre_tool_call blocks, pre_llm_call injects context, post_tool_call/post_llm_call/on_session_start/on_session_end/subagent_stop observe. Setup sets hooks_auto_accept so events register on non-TTY/gateway runs. Discovery surfaces for MCP, skills, plugins."
+      "notes": "Hooks live in ~/.hermes/config.yaml (hermes-hooks-v1; generic decoder lifts content from the per-event extra envelope). DefenseClaw can block only pre_tool_call and can inject context only at pre_llm_call; its other 21 registrations are telemetry-only, including pre_verify even though Hermes itself defines a bounded continue response there. Setup leaves the operator-wide hooks_auto_accept policy untouched and provisions exact DefenseClaw-owned approvals in shell-hooks-allowlist.json. Discovery surfaces for MCP, skills, plugins."
     },
     {
       "id": "opencode",

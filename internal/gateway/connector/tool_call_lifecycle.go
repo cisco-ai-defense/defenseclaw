@@ -797,11 +797,11 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 			ToolSurfaceSkills,
 		},
 		OfficialSourceURLs: []string{
-			"https://github.com/NousResearch/hermes-agent/blob/126ff7071b6b755055879648f4e859b3187d0fac/agent/shell_hooks.py",
-			"https://github.com/NousResearch/hermes-agent/blob/126ff7071b6b755055879648f4e859b3187d0fac/model_tools.py",
+			"https://github.com/NousResearch/hermes-agent/blob/5fc308a70719a83cccdbba4c0e39c23f5a8239d5/agent/shell_hooks.py",
+			"https://github.com/NousResearch/hermes-agent/blob/5fc308a70719a83cccdbba4c0e39c23f5a8239d5/model_tools.py",
 		},
 		Limitations: []string{
-			"Only pre_tool_call can block, and hook subprocess errors, timeouts, or malformed output fail open upstream.",
+			"Only pre_tool_call can block; fail_closed=true makes hook subprocess errors, timeouts, and malformed output block upstream.",
 			"A post_tool_call commits success only when extra.status is ok; error and blocked statuses must not advance state.",
 		},
 	}

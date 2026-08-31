@@ -937,6 +937,22 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", claude)
 	}
 
+	// Hermes splits the command into argv itself and executes with shell=false.
+	// The first token must therefore be the executable, not PowerShell's `&`
+	// call operator. Forward slashes also preserve the path on Hermes releases
+	// that used POSIX shlex parsing on Windows.
+	hermes := hookInvocationCommandFor("windows", "hermes", unix)
+	wantHermes := `"C:/Program Files/DefenseClaw/defenseclaw-hook.exe" hook --connector hermes`
+	if hermes != wantHermes {
+		t.Errorf("hermes command = %q, want %q", hermes, wantHermes)
+	}
+	if strings.HasPrefix(hermes, "& ") || strings.Contains(hermes, "powershell") {
+		t.Errorf("hermes direct-exec command contains a shell boundary: %q", hermes)
+	}
+	if !isNativeHookCommand(hermes) {
+		t.Errorf("isNativeHookCommand(%q) = false, want true", hermes)
+	}
+
 	// Antigravity's direct-exec parser does not dequote command paths. Keep the
 	// visible command tokenizer-safe and put the absolute managed hook path in a
 	// PowerShell encoded command so install roots containing spaces still work.
@@ -1652,7 +1668,7 @@ func TestCodexNativeNotifyOwnership(t *testing.T) {
 }
 
 // TestWindowsNativeConfigMatrix exercises the generated on-disk configs for
-// every WIN-016 native target plus the Hermes preview. OpenCode is intentionally
+// every WIN-016 native target including Hermes. OpenCode is intentionally
 // absent: its bridge remains a JavaScript plugin and has separate tests.
 func TestWindowsNativeConfigMatrix(t *testing.T) {
 	if runtime.GOOS != "windows" {
@@ -1673,7 +1689,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 		{"geminicli", NewGeminiCLIConnector(), &GeminiSettingsPathOverride, ".json"},
 		{"copilot", NewCopilotConnector(), &CopilotHooksPathOverride, ".json"},
 		{"antigravity", NewAntigravityConnector(), &AntigravityHooksPathOverride, ".json"},
-		{"hermes-preview", NewHermesConnector(), &HermesConfigPathOverride, ".yaml"},
+		{"hermes", NewHermesConnector(), &HermesConfigPathOverride, ".yaml"},
 	}
 
 	for _, tt := range tests {
@@ -1756,6 +1772,14 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				decoded := decodePowerShellEncodedCommandForTest(t, wantCommand)
 				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
+				}
+			} else if connectorName == "hermes" {
+				wantCommand := windowsHermesDirectHookCommand(defenseclawHookBinary())
+				if !strings.Contains(text, wantCommand) {
+					t.Errorf("Hermes config missing direct native command %q:\n%s", wantCommand, text)
+				}
+				if strings.Contains(text, "& ") || strings.Contains(strings.ToLower(text), "powershell") {
+					t.Errorf("Hermes config contains an incompatible shell command:\n%s", text)
 				}
 			} else if connectorName == "claudecode" {
 				var cfg map[string]interface{}

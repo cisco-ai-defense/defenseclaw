@@ -149,6 +149,14 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if connector == "antigravity" {
 		return windowsAntigravityHookCommand()
 	}
+	// Hermes parses the configured command into argv and launches it with
+	// shell=False. A PowerShell call operator is therefore an executable name,
+	// not syntax. Keep the native launcher as the first quoted argv token and
+	// use forward slashes so both the current Windows-aware splitter and older
+	// shlex-based Hermes releases preserve the path byte-for-byte.
+	if connector == "hermes" {
+		return windowsHermesDirectHookCommand(defenseclawHookBinary())
+	}
 	// Cursor 3.9.x feeds hook payloads through Windows PowerShell's object
 	// pipeline. A native executable on that boundary receives encoding
 	// preambles instead of the JSON. The generated PowerShell adapter accepts
@@ -163,6 +171,16 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// call operator is required to invoke it. Use a single-quoted literal so an
 	// install path cannot introduce PowerShell interpolation.
 	return "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + connector
+}
+
+func windowsHermesDirectHookCommand(binary string) string {
+	binary = strings.TrimSpace(binary)
+	if binary == "" || strings.ContainsAny(binary, "\"\x00\r\n") ||
+		(!filepath.IsAbs(binary) && !isWindowsDriveAbsolutePath(binary)) {
+		return ""
+	}
+	binary = strings.ReplaceAll(binary, `\`, "/")
+	return `"` + binary + `" ` + nativeHookFlag + "hermes"
 }
 
 // defenseclawHookBinary returns the stable native HookRuntime launcher on

@@ -86,6 +86,7 @@ $ConnectorChoices = @(
     "codex",
     "claudecode",
     "amp",
+    "hermes",
     "none"
 )
 $HookConnectors = @()

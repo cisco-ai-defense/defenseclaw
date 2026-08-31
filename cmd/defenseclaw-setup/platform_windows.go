@@ -480,6 +480,14 @@ func defaultProfileRoot() (string, error) {
 	return winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
 }
 
+func defaultHermesHome() (string, error) {
+	local, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(local, "hermes"), nil
+}
+
 func defaultOpenClawRoot() (string, error) {
 	profile, err := defaultProfileRoot()
 	if err != nil {

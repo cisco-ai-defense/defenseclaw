@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -2800,6 +2801,62 @@ func ampWatcherSkillDirs(cfg *config.Config) []string {
 	return filtered
 }
 
+// expandHermesSkillWatchDirs preserves Hermes' top-level skill root for flat
+// user-installed skills and also watches the direct parent of every nested
+// skill. Hermes' bundled catalog uses both shallow and deep taxonomies:
+//
+//	skills/my-skill/SKILL.md
+//	skills/category/my-skill/SKILL.md
+//	skills/category/subcategory/my-skill/SKILL.md
+//
+// InstallWatcher watches direct children of each configured root, so category
+// roots must be registered explicitly for native install events and rescans to
+// reach the nested skills. Walking marker files instead of assuming a fixed
+// category depth keeps taxonomy folders out of the scanner input.
+func expandHermesSkillWatchDirs(conn connector.Connector, skillDirs []string) []string {
+	if conn == nil || !strings.EqualFold(strings.TrimSpace(conn.Name()), "hermes") {
+		return skillDirs
+	}
+
+	expanded := make([]string, 0, len(skillDirs))
+	seen := make(map[string]struct{}, len(skillDirs))
+	appendDir := func(dir string) {
+		cleaned := filepath.Clean(dir)
+		if _, ok := seen[cleaned]; ok {
+			return
+		}
+		seen[cleaned] = struct{}{}
+		expanded = append(expanded, dir)
+	}
+
+	for _, root := range skillDirs {
+		appendDir(root)
+		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				if entry != nil && entry.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if path != root && entry.IsDir() && strings.HasPrefix(entry.Name(), ".") {
+				return fs.SkipDir
+			}
+			if entry.IsDir() || entry.Name() != "SKILL.md" {
+				return nil
+			}
+			skillDir := filepath.Dir(path)
+			watchRoot := filepath.Dir(skillDir)
+			rel, err := filepath.Rel(root, watchRoot)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				appendDir(watchRoot)
+			}
+			return nil
+		})
+	}
+
+	return expanded
+}
+
 // runWatcher starts the skill/MCP install watcher if enabled in config.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
 	wcfg := s.currentConfig().Gateway.Watcher
@@ -2827,6 +2884,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 
 	skillDirs, pluginDirs, _ := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
+	skillDirs = expandHermesSkillWatchDirs(conn, skillDirs)
 
 	if !wcfg.Skill.Enabled {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill watching disabled\n")

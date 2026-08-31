@@ -36,6 +36,7 @@ func fixtureState(t *testing.T) (State, string) {
 		Runtime:         filepath.Join(root, "runtime", "python"),
 		CodexHome:       filepath.Join(t.TempDir(), "codex-home"),
 		ClaudeConfigDir: filepath.Join(t.TempDir(), "claude-home"),
+		HermesHome:      filepath.Join(t.TempDir(), "hermes-home"),
 	}
 	body, err := json.Marshal(state)
 	if err != nil {
@@ -57,12 +58,14 @@ func TestLoadAtAndEnvironmentRehydrateConnectorHomes(t *testing.T) {
 		"PATH=fixture",
 		"CODEX_HOME=project-codex",
 		"claude_config_dir=project-claude",
+		"HERMES_HOME=project-hermes",
 		"DEFENSECLAW_HOME=project-data",
 	})
 	joined := strings.Join(env, "\n")
 	for _, expected := range []string{
 		"CODEX_HOME=" + want.CodexHome,
 		"CLAUDE_CONFIG_DIR=" + want.ClaudeConfigDir,
+		"HERMES_HOME=" + want.HermesHome,
 		"DEFENSECLAW_HOME=" + want.DataRoot,
 		"DEFENSECLAW_INSTALL_ROOT=" + want.InstallRoot,
 	} {
@@ -81,10 +84,12 @@ func TestEnvironmentRemovesAmbientConnectorHomesFromLegacyState(t *testing.T) {
 		"PATH=fixture",
 		"CODEX_HOME=project-codex",
 		"claude_config_dir=project-claude",
+		"HERMES_HOME=project-hermes",
 	})
 	joined := strings.Join(env, "\n")
 	if strings.Contains(strings.ToUpper(joined), "CODEX_HOME=") ||
-		strings.Contains(strings.ToUpper(joined), "CLAUDE_CONFIG_DIR=") {
+		strings.Contains(strings.ToUpper(joined), "CLAUDE_CONFIG_DIR=") ||
+		strings.Contains(strings.ToUpper(joined), "HERMES_HOME=") {
 		t.Fatalf("ambient connector home survived legacy state: %v", env)
 	}
 }

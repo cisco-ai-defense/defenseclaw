@@ -44,12 +44,14 @@ func TestLauncherArgsRejectsUnknownName(t *testing.T) {
 func TestLauncherEnvRehydratesManagedConnectorHomes(t *testing.T) {
 	t.Setenv("CODEX_HOME", `C:\project\codex`)
 	t.Setenv("CLAUDE_CONFIG_DIR", `C:\project\claude`)
+	t.Setenv("HERMES_HOME", `C:\project\hermes`)
 	t.Setenv("DEFENSECLAW_HOME", `C:\project\defenseclaw`)
 	state := nativeinstallstate.State{
 		InstallRoot:     `C:\Users\tester\Programs\DefenseClaw`,
 		DataRoot:        `C:\Users\tester\.defenseclaw`,
 		CodexHome:       `D:\Agent Profiles\Codex`,
 		ClaudeConfigDir: `D:\Agent Profiles\Claude`,
+		HermesHome:      `D:\Agent Profiles\Hermes`,
 	}
 	env := launcherEnv(
 		`C:\Users\tester\Programs\DefenseClaw\bin`,
@@ -62,6 +64,7 @@ func TestLauncherEnvRehydratesManagedConnectorHomes(t *testing.T) {
 	for _, expected := range []string{
 		"CODEX_HOME=" + state.CodexHome,
 		"CLAUDE_CONFIG_DIR=" + state.ClaudeConfigDir,
+		"HERMES_HOME=" + state.HermesHome,
 		"DEFENSECLAW_HOME=" + state.DataRoot,
 		"DEFENSECLAW_INSTALL_ROOT=" + state.InstallRoot,
 	} {
@@ -69,7 +72,7 @@ func TestLauncherEnvRehydratesManagedConnectorHomes(t *testing.T) {
 			t.Fatalf("launcher environment missing %q: %v", expected, env)
 		}
 	}
-	for _, inherited := range []string{`C:\project\codex`, `C:\project\claude`, `C:\project\defenseclaw`} {
+	for _, inherited := range []string{`C:\project\codex`, `C:\project\claude`, `C:\project\hermes`, `C:\project\defenseclaw`} {
 		if strings.Contains(joined, inherited) {
 			t.Fatalf("launcher retained ambient profile %q: %v", inherited, env)
 		}

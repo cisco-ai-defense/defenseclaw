@@ -642,7 +642,7 @@ func writeDeferredCleanupHookState(t *testing.T, path string, state hookruntime.
 
 func TestValidateDeferredUninstallCleanupRecordAcceptsAllManagedConnectors(t *testing.T) {
 	fixture := newDeferredCleanupFixture(t)
-	fixture.record.VerifiedConnectors = []string{"amp", "claudecode", "codex"}
+	fixture.record.VerifiedConnectors = []string{"amp", "claudecode", "codex", "hermes"}
 	paths := hookruntime.Paths{
 		Root:     fixture.record.RuntimeRoot,
 		Launcher: fixture.record.LauncherPath,

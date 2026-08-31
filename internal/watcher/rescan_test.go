@@ -424,6 +424,9 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(skillDir, "watched-skill"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(skillDir, "watched-skill", "SKILL.md"), []byte("# Watched skill\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(pluginDir, "watched-plugin"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -468,6 +471,63 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 		t.Fatalf("expected stdio MCP in targets, got %+v", targets)
 	} else if evt.Path != "stdio-mcp" {
 		t.Fatalf("stdio MCP path = %q, want server name", evt.Path)
+	}
+}
+
+func TestEnumerateTargets_SkipsSkillGroupingDirectories(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	t.Setenv("PATH", "")
+	cfg.Guardrail.Connector = "hermes"
+
+	flatSkill := filepath.Join(skillDir, "flat-skill")
+	nestedSkill := filepath.Join(skillDir, "category", "nested-skill")
+	deepSkill := filepath.Join(skillDir, "mlops", "models", "vendor", "deep-skill")
+	markerless := filepath.Join(skillDir, "markerless")
+	for _, dir := range []string{flatSkill, nestedSkill, deepSkill, markerless} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if dir == markerless {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# Test skill\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w := New(cfg, []string{
+		skillDir,
+		filepath.Join(skillDir, "category"),
+		filepath.Dir(deepSkill),
+	}, nil, store, logger, nil, nil, nil)
+	targets := w.enumerateTargets()
+
+	seen := make(map[string]InstallEvent)
+	for _, target := range targets {
+		if target.Type == InstallSkill {
+			seen[target.Name] = target
+		}
+	}
+	if _, ok := seen["category"]; ok {
+		t.Fatalf("markerless category directory was enumerated as a skill: %+v", targets)
+	}
+	if _, ok := seen["flat-skill"]; !ok {
+		t.Fatalf("flat skill missing from targets: %+v", targets)
+	}
+	if evt, ok := seen["nested-skill"]; !ok {
+		t.Fatalf("nested skill missing from targets: %+v", targets)
+	} else if evt.Path != nestedSkill {
+		t.Fatalf("nested skill path = %q, want %q", evt.Path, nestedSkill)
+	}
+	if evt, ok := seen["deep-skill"]; !ok {
+		t.Fatalf("deep skill missing from targets: %+v", targets)
+	} else if evt.Path != deepSkill {
+		t.Fatalf("deep skill path = %q, want %q", evt.Path, deepSkill)
+	}
+	for _, groupingName := range []string{"mlops", "models", "vendor", "markerless"} {
+		if _, ok := seen[groupingName]; ok {
+			t.Fatalf("grouping directory %q was enumerated as a skill: %+v", groupingName, targets)
+		}
 	}
 }
 

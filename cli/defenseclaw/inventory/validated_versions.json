@@ -56,8 +56,13 @@
     },
     "hermes": {
       "version_probe": "hermes --version",
-      "live": false,
-      "notes": "contract-only (Layer A); only pre_tool_call is mapped"
+      "live": true,
+      "os": {
+        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "0.20.6", "last_validated_at": "2026-08-30", "run_url": "" }
+      },
+      "notes": "Windows native hook registration and allow/block/fail-closed/lifecycle paths validated against official Hermes Agent 0.20.6 (release v2026.8.27)"
     },
     "windsurf": {
       "version_probe": "",

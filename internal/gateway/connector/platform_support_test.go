@@ -26,12 +26,13 @@ var windowsSupportedConnectorNames = []string{
 	"amp",
 	"claudecode",
 	"codex",
+	"hermes",
 }
 
 var windowsPreviewConnectorNames = []string{}
 
 var windowsNotCertifiedConnectorNames = []string{
-	"antigravity", "copilot", "cursor", "geminicli", "hermes", "opencode", "windsurf",
+	"antigravity", "copilot", "cursor", "geminicli", "opencode", "windsurf",
 }
 
 var windowsUnsupportedConnectorNames = []string{
@@ -149,8 +150,8 @@ func TestConnectorSupportOnOS(t *testing.T) {
 }
 
 func TestValidateConnectorSupportedOnOS(t *testing.T) {
-	if err := validateConnectorSupportedOnOS("hermes", "windows"); err == nil || !strings.Contains(err.Error(), "not certified") {
-		t.Fatalf("not-certified connector should fail: %v", err)
+	if err := validateConnectorSupportedOnOS("hermes", "windows"); err != nil {
+		t.Fatalf("supported Hermes connector should pass: %v", err)
 	}
 	err := validateConnectorSupportedOnOS("openhands", "windows")
 	if err == nil || !strings.Contains(err.Error(), "requires WSL") {
@@ -160,8 +161,8 @@ func TestValidateConnectorSupportedOnOS(t *testing.T) {
 
 func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
 	warning, err := CheckPlatformSupport("hermes", "windows")
-	if warning != "" || err == nil || !strings.Contains(err.Error(), "not certified") {
-		t.Fatalf("not-certified result warning=%q err=%v", warning, err)
+	if warning != "" || err != nil {
+		t.Fatalf("supported Hermes result warning=%q err=%v", warning, err)
 	}
 
 	warning, err = CheckPlatformSupport("openhands", "windows")

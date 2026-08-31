@@ -80,7 +80,10 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		{
 			connector:      "hermes",
 			event:          "pre_tool_call",
-			toolName:       "execute_command",
+			// Hermes exposes shell execution as the native `terminal` tool.
+			// Keep the full-chain test on that real wire alias so a generic
+			// execution-tool alias cannot hide Hermes-specific drift.
+			toolName:       "terminal",
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
 		},

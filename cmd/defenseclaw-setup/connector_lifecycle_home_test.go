@@ -14,11 +14,13 @@ func TestConnectorLifecycleConfigHomeSelectsExactNativeBinding(t *testing.T) {
 	root := t.TempDir()
 	codexHome := filepath.Join(root, "codex")
 	claudeHome := filepath.Join(root, "claude")
+	hermesHome := filepath.Join(root, "hermes")
 	profile := filepath.Join(root, "profile")
 	env := []string{
 		"UNRELATED=preserved",
 		"codex_home=" + codexHome,
 		"CLAUDE_CONFIG_DIR=" + claudeHome,
+		"HERMES_HOME=" + hermesHome,
 		"USERPROFILE=" + profile,
 	}
 	for _, test := range []struct {
@@ -27,6 +29,7 @@ func TestConnectorLifecycleConfigHomeSelectsExactNativeBinding(t *testing.T) {
 	}{
 		{connector: "codex", want: codexHome},
 		{connector: "claudecode", want: claudeHome},
+		{connector: "hermes", want: hermesHome},
 		{connector: "amp", want: filepath.Join(profile, ".config", "amp")},
 	} {
 		t.Run(test.connector, func(t *testing.T) {

@@ -201,13 +201,14 @@ residue automatically.
     registration; repair Setup if it is missing. The watchdog runs only when
     `gateway.watchdog.enabled` is configured and is not a Windows service.
   </Accordion>
-  <Accordion title="Codex or Claude Code hooks, or the Amp plugin, do not appear">
+  <Accordion title="Codex, Claude Code, or Hermes hooks, or the Amp plugin, do not appear">
     Confirm the selected product runs natively as the same Windows user. Run
     `defenseclaw guardrail status` and `defenseclaw doctor`, then re-run the
     supported connector setup in observe mode. Fully restart Codex or Claude
-    Code; fully exit and relaunch Amp. For headless Amp execution, include
+    Code; fully exit and relaunch Amp; restart Hermes. For headless Amp execution, include
     `--plugin-ready-timeout 30`. Do not copy entries between `config.toml`,
-    `managed_config.toml`, `settings.json`, and `defenseclaw.ts` by hand.
+    `managed_config.toml`, `settings.json`, `config.yaml`,
+    `shell-hooks-allowlist.json`, and `defenseclaw.ts` by hand.
   </Accordion>
   <Accordion title="A connector is disabled or status disagrees with configuration">
     Use `defenseclaw guardrail status` to compare desired and runtime posture.
@@ -233,11 +234,12 @@ residue automatically.
     rotation. Never print, compare, copy, or manually replace token files or
     OTLP headers.
 
-    Amp has no documented native-OTLP channel, so this diagnostic does not
-    apply to Amp callback telemetry. Run `defenseclaw doctor`,
+    Amp and Hermes have no documented native-OTLP channel, so this diagnostic does not
+    apply to their callback telemetry. Run `defenseclaw doctor`,
     `defenseclaw guardrail status`, and `defenseclaw-gateway status`; reconcile
     the plugin with `defenseclaw setup amp --mode observe`, then fully exit and
-    relaunch Amp.
+    relaunch Amp, or reconcile Hermes with `defenseclaw setup hermes --mode observe`
+    and restart Hermes.
   </Accordion>
   <Accordion title="Upgrade is refused or interrupted">
     A source not listed in the target release's authenticated Windows baseline matrix
@@ -272,10 +274,10 @@ Complete this without real secrets or destructive tools:
 - Run `defenseclaw version`; require the CLI and gateway generation to agree.
 - Run `defenseclaw-gateway status`, `defenseclaw status`, and
   `defenseclaw guardrail status`; require the intended Codex, Claude Code,
-  and/or Amp rows, mode, fail mode, and enabled state.
+  Amp, and/or Hermes rows, mode, fail mode, and enabled state.
 - Run `defenseclaw config validate` and `defenseclaw doctor`; resolve every
   connector registration or authentication failure.
-- Restart each configured Codex or Claude Code agent; fully exit and relaunch
+- Restart each configured Codex, Claude Code, or Hermes agent; fully exit and relaunch
   Amp. In an empty disposable directory, submit a non-sensitive prompt such as
   “Reply with the word ready.” For `amp -x`, include
   `--plugin-ready-timeout 30`. An authenticated Amp live turn additionally
@@ -297,7 +299,7 @@ Complete this without real secrets or destructive tools:
   modes, fail modes, enabled state, and optional watchdog state.
 - Confirm the command path still resolves to the installed product directory,
   not a stale checkout or copied binary.
-- Restart Codex and Claude Code, fully exit and relaunch Amp, then repeat the
+- Restart Codex, Claude Code, and Hermes, fully exit and relaunch Amp, then repeat the
   harmless per-connector event check above.
 - Verify optional destinations with `defenseclaw observability plan` and the
   destination-specific test command. A destination failure does not erase the

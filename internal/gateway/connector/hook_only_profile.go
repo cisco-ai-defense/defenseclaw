@@ -50,19 +50,20 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 	var output map[string]interface{}
 	switch in.Req.ConnectorName {
 	case "hermes":
-		// Hermes shell-hook lifecycle (cli-config.yaml `hooks:` block):
+		// Hermes shell-hook lifecycle (config.yaml `hooks:` block):
 		//
 		//	pre_llm_call     → inspect prompt; inject {"context":...}
 		//	pre_tool_call    → inspect tool args; BLOCK (only blockable event)
 		//	post_tool_call   → inspect tool output (observe)
-		//	post_llm_call    → inspect model output (observe)
-		//	on_session_*     → lifecycle telemetry (observe)
-		//	subagent_start/stop → delegate-task telemetry (observe)
+		//	pre_verify       → telemetry only in DefenseClaw (Hermes itself
+		//	                   can consume a bounded continue response)
+		//	remaining events → lifecycle telemetry (observe)
 		//
 		// Hermes reads a blocking stdout response only for
 		// pre_tool_call and a {"context":...} injection for
-		// pre_llm_call; it ignores the stdout of every other event, so
-		// those return a nil body. Hermes accepts both
+		// pre_llm_call. Hermes can also consume a pre_verify continue
+		// response, but DefenseClaw deliberately does not use that surface;
+		// the remaining events therefore return a nil body. Hermes accepts both
 		// {"action":"block","message"} (its canonical shape) and
 		// {"decision":"block","reason"} (the Claude-Code style it
 		// normalizes internally); we emit the latter for wire parity

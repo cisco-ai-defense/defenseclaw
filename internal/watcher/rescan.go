@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -146,10 +147,16 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		fmt.Sprintf("targets=%d scanned=%d skipped=%d", len(targets), scanned, skipped))
 }
 
-// enumerateTargets lists all direct child directories under watched roots plus
-// configured MCP servers from openclaw.json.
+// enumerateTargets lists installed components under watched roots plus
+// configured MCP servers. Some clients (notably Hermes) group skills under
+// category directories. A markerless directory with descendant skills is
+// therefore a grouping root, not a scanner target. Markerless flat directories
+// without any nested skill marker are preserved for backward compatibility
+// with clients whose scanners support layouts that do not require SKILL.md.
 func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	var targets []InstallEvent
+	hermesSkillsRequireMarker := w.cfg != nil &&
+		strings.EqualFold(strings.TrimSpace(w.cfg.Guardrail.Connector), "hermes")
 
 	for _, dir := range w.skillDirs {
 		entries, err := os.ReadDir(dir)
@@ -161,10 +168,17 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
+			skillPath := filepath.Join(dir, e.Name())
+			info, err := os.Stat(filepath.Join(skillPath, "SKILL.md"))
+			if err != nil || info.IsDir() {
+				if hermesSkillsRequireMarker || containsNestedSkillMarker(skillPath) {
+					continue
+				}
+			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallSkill,
 				Name:      e.Name(),
-				Path:      filepath.Join(dir, e.Name()),
+				Path:      skillPath,
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -207,6 +221,27 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	}
 
 	return targets
+}
+
+func containsNestedSkillMarker(root string) bool {
+	found := false
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if entry != nil && entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if path != root && entry.IsDir() && strings.HasPrefix(entry.Name(), ".") {
+			return fs.SkipDir
+		}
+		if !entry.IsDir() && entry.Name() == "SKILL.md" {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // rescanTarget snapshots a single target, decides whether a fresh scan is

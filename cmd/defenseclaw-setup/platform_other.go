@@ -67,6 +67,7 @@ func gatewayAutoStartValueOwned(gatewayPath, value string) (bool, error) {
 func defaultInstallRoot() (string, error)                   { return "", errors.New("windows-only operation") }
 func defaultDataRoot() (string, error)                      { return "", errors.New("windows-only operation") }
 func defaultProfileRoot() (string, error)                   { return "", errors.New("windows-only operation") }
+func defaultHermesHome() (string, error)                    { return "", errors.New("windows-only operation") }
 func defaultOpenClawRoot() (string, error)                  { return "", errors.New("windows-only operation") }
 func defaultMaintenancePath() (string, error)               { return "", errors.New("windows-only operation") }
 func defaultTransactionRoot() (string, error)               { return "", errors.New("windows-only operation") }

@@ -33,6 +33,7 @@ type State struct {
 	Runtime         string `json:"runtime"`
 	CodexHome       string `json:"codex_home,omitempty"`
 	ClaudeConfigDir string `json:"claude_config_dir,omitempty"`
+	HermesHome      string `json:"hermes_home,omitempty"`
 }
 
 // Environment removes ambient profile selectors and restores the exact
@@ -44,8 +45,9 @@ func (state State) Environment(base []string) []string {
 		"DEFENSECLAW_HOME":         true,
 		"CODEX_HOME":               true,
 		"CLAUDE_CONFIG_DIR":        true,
+		"HERMES_HOME":              true,
 	}
-	result := make([]string, 0, len(base)+4)
+	result := make([]string, 0, len(base)+5)
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
 		if !ok || owned[strings.ToUpper(name)] {
@@ -62,6 +64,9 @@ func (state State) Environment(base []string) []string {
 	}
 	if state.ClaudeConfigDir != "" {
 		result = append(result, "CLAUDE_CONFIG_DIR="+state.ClaudeConfigDir)
+	}
+	if state.HermesHome != "" {
+		result = append(result, "HERMES_HOME="+state.HermesHome)
 	}
 	return result
 }
@@ -139,7 +144,7 @@ func loadAt(executable, installRoot string) (State, error) {
 			return State{}, errors.New("native install state does not match its physical installation")
 		}
 	}
-	for _, value := range []string{state.DataRoot, state.CodexHome, state.ClaudeConfigDir} {
+	for _, value := range []string{state.DataRoot, state.CodexHome, state.ClaudeConfigDir, state.HermesHome} {
 		if value != "" && !absoluteCleanPath(value) {
 			return State{}, errors.New("native install state contains an invalid profile path")
 		}

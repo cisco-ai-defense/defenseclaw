@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_windows_release_metadata_is_exact() -> None:
-    assert WINDOWS_SUPPORTED_CONNECTORS == {"codex", "claudecode", "amp"}
+    assert WINDOWS_SUPPORTED_CONNECTORS == {"codex", "claudecode", "amp", "hermes"}
     assert WINDOWS_NOT_CERTIFIED_CONNECTORS == {
         "cursor",
         "windsurf",
@@ -27,7 +27,6 @@ def test_windows_release_metadata_is_exact() -> None:
         "copilot",
         "antigravity",
         "opencode",
-        "hermes",
     }
     assert WINDOWS_UNSUPPORTED_CONNECTORS == {"openhands", "omnigent", "openclaw", "zeptoclaw"}
     assert WINDOWS_CERTIFIED_ARCHITECTURES == {"amd64"}
@@ -53,6 +52,7 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
     assert "Windows ARM64" in text and "Not certified" in text
     assert "| Codex | `codex` | **Supported**" in text
     assert "| Claude Code | `claudecode` | **Supported**" in text
+    assert "| Hermes Agent | `hermes` | **Supported**" in text
     assert "local observability" in text
     assert "Local Splunk" in text
     assert "Hyper-V backend" in text
@@ -117,7 +117,7 @@ def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64()
 
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
     assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
-    assert '"codex",\n    "claudecode",\n    "amp",\n    "none"' in installer
+    assert '"codex",\n    "claudecode",\n    "amp",\n    "hermes",\n    "none"' in installer
 
 
 def test_connector_matrix_delegates_current_support_to_the_website() -> None:
