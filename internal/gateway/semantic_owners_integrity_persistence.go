@@ -17,12 +17,21 @@
 package gateway
 
 import (
+	"path"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-const semanticHistoryTamperExpression = `f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))`
+const (
+	semanticHistoryTamperExpression = `f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))`
+	// The owner binds this mutation shape to the exact active instruction file,
+	// using trusted case-sensitivity metadata captured when the file was loaded.
+	// Owner eligibility accepts only executing mutations (or static redirects
+	// that remain executing in the enforcement projection), so an unrelated
+	// sibling mutation cannot lend it authority.
+	semanticActiveAgentInstructionMutationExpression = `f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))`
+)
 
 var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"CMD-CRONTAB": {
@@ -34,6 +43,8 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		prerequisite:       schedulerInstallPrerequisite,
 		suppressFallback:   authoritativeSemanticSafeNegative,
 	},
+	"COG-AGENTS-MD": activeAgentInstructionMutationOwner("AGENTS.md"),
+	"COG-MEMORY":    activeAgentInstructionMutationOwner("MEMORY.md"),
 	"integrity.git_hooks_bypass": {
 		prerequisite:     gitHooksBypassPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -57,10 +68,21 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		prerequisite:     historyTamperPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
-	"PATH-HISTORY": integrityMutationOwner(
-		matchesShellHistoryCandidate, matchesActiveShellHistory, nil,
-		"PATH-WIN-PS-HISTORY",
-	),
+	"PATH-HISTORY": {
+		// The generic owner handles mutations, but a read of the Windows
+		// PowerShell history file remains independently useful advisory evidence.
+		// Claim the Windows alias only after the mutation prerequisite matches so
+		// the trusted-action disposition can classify exact reads as advisory.
+		matchedOnlyAliases: []string{"PATH-WIN-PS-HISTORY"},
+		prerequisite: integrityMutationPrerequisite(
+			matchesActiveShellHistory,
+		),
+		suppressFallback: integrityMutationSafeNegative(
+			matchesShellHistoryCandidate,
+			matchesActiveShellHistory,
+			nil,
+		),
+	},
 	"PATH-ETC-SUDOERS": integrityMutationOwner(
 		matchesSudoersCandidate, matchesActiveSudoers, nil,
 	),
@@ -125,6 +147,270 @@ func integrityMutationOwner(
 			isCandidate, isActive, isSafe,
 		),
 	}
+}
+
+func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
+	isCandidate := func(value string) bool {
+		return pathBase(canonicalSemanticPath(value)) == strings.ToLower(fileName)
+	}
+	isActive := func(
+		facts actionfacts.Facts,
+		candidate actionfacts.PathFact,
+	) bool {
+		candidatePath, ok := activeAgentInstructionPath(
+			exactSemanticPathValue(candidate),
+			candidate.Flavor,
+		)
+		if !ok || !activeAgentInstructionCandidateBaseMatches(
+			path.Base(candidatePath),
+			candidate.Flavor,
+			fileName,
+		) {
+			return false
+		}
+		for _, activePath := range facts.ActiveAgentFiles {
+			canonicalActivePath, active := activeAgentInstructionPath(
+				activePath,
+				candidate.Flavor,
+			)
+			if active && activeAgentInstructionBaseMatches(
+				canonicalActivePath,
+				candidate.Flavor,
+				fileName,
+			) && activeAgentInstructionPathsMatch(
+				canonicalActivePath,
+				candidatePath,
+				candidate.Flavor,
+				activeAgentFileCaseInsensitive(facts, activePath),
+			) {
+				return true
+			}
+		}
+		if facts.ActiveAgentFilesUncertain {
+			// Check retained exact entries above before falling back to lost
+			// context. Exact POSIX basenames always fail closed. A folded POSIX
+			// basename does so only when authenticated load-time state proved that
+			// at least one omitted active file used case-insensitive lookup.
+			if activeAgentInstructionBaseMatches(
+				candidatePath,
+				candidate.Flavor,
+				fileName,
+			) {
+				return true
+			}
+			return candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+				facts.ActiveAgentFilesCaseInsensitiveUncertain &&
+				activeAgentInstructionCandidateBaseMatches(
+					path.Base(candidatePath),
+					candidate.Flavor,
+					fileName,
+				)
+		}
+		return false
+	}
+	isSafe := func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		resolved := candidate.Resolved
+		if resolved == "" {
+			resolved = candidate.Normalized
+		}
+		flavor := candidate.Flavor
+		if flavor != actionfacts.PathFlavorPOSIX &&
+			flavor != actionfacts.PathFlavorWindows {
+			normalized := strings.ReplaceAll(resolved, `\`, "/")
+			switch {
+			case strings.HasPrefix(normalized, "//") ||
+				len(normalized) >= 3 && normalized[1] == ':' && normalized[2] == '/':
+				flavor = actionfacts.PathFlavorWindows
+			case strings.HasPrefix(normalized, "/"):
+				flavor = actionfacts.PathFlavorPOSIX
+			default:
+				return false
+			}
+		}
+		if _, ok := activeAgentInstructionPath(resolved, flavor); !ok {
+			return false
+		}
+		if !activeAgentInstructionCandidateMutatesPath(facts, candidate) {
+			return true
+		}
+		// A distinct path may still be a hard-link or symlink alias of a
+		// retained active file. The synchronous decision path deliberately does
+		// not touch the filesystem, so keep that ambiguity visible instead of
+		// declaring it safe. A known-empty rule-specific context remains quiet.
+		return !activeAgentInstructionContextPresent(facts, flavor, fileName)
+	}
+	owner := integrityMutationOwner(
+		isCandidate,
+		isActive,
+		isSafe,
+	)
+	// A fixture-looking path can alias the active file just as any other path
+	// can. Known-empty context is already handled by isSafe; do not let the
+	// generic lexical fixture exemption erase an unresolved alias finding.
+	owner.suppressFallback = integrityMutationSafeNegativeWithFixture(
+		isCandidate,
+		isActive,
+		isSafe,
+		nil,
+	)
+	return owner
+}
+
+// exactSemanticPathValue intentionally does not use semanticPathValue: that
+// helper folds case for broad pattern matching. Active instruction-file
+// authority must preserve the proven spelling and filesystem flavor until it
+// is checked against authenticated, load-time identity metadata.
+func exactSemanticPathValue(candidate actionfacts.PathFact) string {
+	if candidate.Resolved != "" {
+		return candidate.Resolved
+	}
+	if candidate.Normalized != "" {
+		return candidate.Normalized
+	}
+	return candidate.Value
+}
+
+func activeAgentInstructionPath(
+	value string,
+	flavor actionfacts.PathFlavor,
+) (string, bool) {
+	if value == "" || strings.TrimSpace(value) != value {
+		return "", false
+	}
+	switch flavor {
+	case actionfacts.PathFlavorPOSIX:
+		if !strings.HasPrefix(value, "/") {
+			return "", false
+		}
+		value = path.Clean(value)
+		return value, value != "/"
+	case actionfacts.PathFlavorWindows:
+		value = strings.ReplaceAll(value, `\`, "/")
+		unc := strings.HasPrefix(value, "//")
+		if !unc && (len(value) < 3 || !isASCIIPathLetter(value[0]) ||
+			value[1] != ':' || value[2] != '/') {
+			return "", false
+		}
+		if unc {
+			value = "//" + strings.TrimPrefix(
+				path.Clean("/"+strings.TrimLeft(value, "/")),
+				"/",
+			)
+		} else {
+			value = path.Clean(value)
+		}
+		return strings.ToLower(value), value != "" && value != "//"
+	default:
+		return "", false
+	}
+}
+
+func activeAgentInstructionBaseMatches(
+	value string,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	// POSIX matching is deliberately exact here. This is the baseline
+	// fail-closed basename gate when bounded active-file context is uncertain and
+	// when validating the canonical active path itself. The caller handles the
+	// separate proof-gated folded-candidate case.
+	base := path.Base(value)
+	if flavor == actionfacts.PathFlavorWindows {
+		return strings.EqualFold(base, fileName)
+	}
+	return flavor == actionfacts.PathFlavorPOSIX && base == fileName
+}
+
+func activeAgentInstructionCandidateBaseMatches(
+	base string,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	// Candidate discovery may recognize an ASCII case variant, but that alone
+	// never grants authority. POSIX enforcement still requires the exact parent
+	// and authenticated load-time case proof in activeAgentInstructionPathsMatch.
+	if flavor == actionfacts.PathFlavorWindows {
+		return strings.EqualFold(base, fileName)
+	}
+	return flavor == actionfacts.PathFlavorPOSIX &&
+		activeAgentASCIIEqualFold(base, fileName)
+}
+
+func activeAgentInstructionPathsMatch(
+	activePath string,
+	candidatePath string,
+	flavor actionfacts.PathFlavor,
+	caseInsensitive bool,
+) bool {
+	if activePath == candidatePath {
+		return true
+	}
+	if flavor != actionfacts.PathFlavorPOSIX || !caseInsensitive {
+		return false
+	}
+	return path.Dir(activePath) == path.Dir(candidatePath) &&
+		activeAgentASCIIEqualFold(
+			path.Base(activePath),
+			path.Base(candidatePath),
+		)
+}
+
+func activeAgentFileCaseInsensitive(
+	facts actionfacts.Facts,
+	activePath string,
+) bool {
+	for _, candidate := range facts.ActiveAgentFilesCaseInsensitive {
+		if candidate == activePath {
+			return true
+		}
+	}
+	return false
+}
+
+func activeAgentInstructionContextPresent(
+	facts actionfacts.Facts,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	if facts.ActiveAgentFilesUncertain {
+		return true
+	}
+	for _, activePath := range facts.ActiveAgentFiles {
+		canonicalActivePath, active := activeAgentInstructionPath(
+			activePath,
+			flavor,
+		)
+		if active && activeAgentInstructionBaseMatches(
+			canonicalActivePath,
+			flavor,
+			fileName,
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+func activeAgentInstructionCandidateMutatesPath(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	candidatePath := semanticPathValue(candidate)
+	for _, pathCandidate := range facts.Paths {
+		if pathCandidate.CommandID != candidate.CommandID ||
+			semanticPathValue(pathCandidate) != candidatePath {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, pathCandidate.CommandID)
+		if ok && integrityCommandMutatesPath(command, pathCandidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIPathLetter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
 
 func historyTamperPrerequisite(facts actionfacts.Facts) bool {
@@ -230,6 +516,20 @@ func integrityMutationSafeNegative(
 	isActive integrityPathMatcher,
 	isSafe integrityPathMatcher,
 ) semanticOwnerPrerequisite {
+	return integrityMutationSafeNegativeWithFixture(
+		isCandidate,
+		isActive,
+		isSafe,
+		isDefiniteFixturePath,
+	)
+}
+
+func integrityMutationSafeNegativeWithFixture(
+	isCandidate semanticPathCandidate,
+	isActive integrityPathMatcher,
+	isSafe integrityPathMatcher,
+	isFixture integrityPathMatcher,
+) semanticOwnerPrerequisite {
 	return func(facts actionfacts.Facts) bool {
 		if !facts.Authoritative() {
 			return false
@@ -258,7 +558,7 @@ func integrityMutationSafeNegative(
 			}
 			if isActive(facts, candidate) ||
 				isSafe != nil && isSafe(facts, candidate) ||
-				isDefiniteFixturePath(facts, candidate) {
+				isFixture != nil && isFixture(facts, candidate) {
 				continue
 			}
 			return false
@@ -409,7 +709,7 @@ func schedulerInstallPrerequisite(facts actionfacts.Facts) bool {
 			for _, candidate := range facts.Paths {
 				if candidate.CommandID == command.ID &&
 					candidate.Access == actionfacts.PathAccessWrite &&
-					matchesActiveRunKey(candidate) {
+					matchesActiveRegistryPersistence(command, candidate) {
 					return true
 				}
 			}
@@ -449,9 +749,19 @@ func integrityFirstPositional(argv []string) (string, bool) {
 			return lower, true
 		}
 		key, _, joined := strings.Cut(lower, "=")
-		if systemctlValueOption(key) && !joined {
-			index++
+		if systemctlValueOption(key) {
+			if !joined {
+				if index+1 >= len(argv) {
+					return "", false
+				}
+				index++
+			}
+			continue
 		}
+		if systemctlFlagOption(key) && !joined {
+			continue
+		}
+		return "", false
 	}
 	return "", false
 }
@@ -459,9 +769,51 @@ func integrityFirstPositional(argv []string) (string, bool) {
 func systemctlValueOption(option string) bool {
 	switch option {
 	case "-h", "--host", "-m", "--machine", "-n", "--lines",
-		"-o", "--output", "-p", "--property", "--root",
+		"-o", "--output", "-p", "--property", "--job-mode", "--root",
 		"--runtime-scope", "--state", "-t", "--type":
 		return true
+	default:
+		return false
+	}
+}
+
+func systemctlFlagOption(option string) bool {
+	switch option {
+	case "-a", "--all", "--failed", "--force", "--global",
+		"--no-ask-password", "--no-block", "--no-legend", "--no-pager",
+		"--no-reload", "--now", "-q", "--quiet", "--recursive",
+		"--runtime", "--system", "--user", "--dry-run", "--help",
+		"--version":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesActiveRegistryPersistence(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if matchesActiveRunKey(candidate) {
+		return true
+	}
+	if candidate.Flavor != actionfacts.PathFlavorRegistry {
+		return false
+	}
+	if len(command.Argv) == 0 {
+		return false
+	}
+	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
+	valueName := windowsRegistryValueNameForProgram(
+		command.Program,
+		command.Argv[1:],
+	)
+	switch {
+	case value == "hklm/software/microsoft/windows nt/currentversion/winlogon" ||
+		value == "hkcu/software/microsoft/windows nt/currentversion/winlogon":
+		return valueName == "shell" || valueName == "userinit"
+	case strings.HasPrefix(value, "hklm/system/currentcontrolset/services/"):
+		return valueName == "imagepath" || valueName == "servicedll"
 	default:
 		return false
 	}
@@ -471,11 +823,15 @@ func matchesActiveRunKey(candidate actionfacts.PathFact) bool {
 	if candidate.Flavor != actionfacts.PathFlavorRegistry {
 		return false
 	}
-	value := strings.Trim(semanticPathValue(candidate), "/")
+	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
 	return value == "hkcu/software/microsoft/windows/currentversion/run" ||
 		value == "hkcu/software/microsoft/windows/currentversion/runonce" ||
 		value == "hklm/software/microsoft/windows/currentversion/run" ||
-		value == "hklm/software/microsoft/windows/currentversion/runonce"
+		value == "hklm/software/microsoft/windows/currentversion/runonce" ||
+		value == "hkcu/software/wow6432node/microsoft/windows/currentversion/run" ||
+		value == "hkcu/software/wow6432node/microsoft/windows/currentversion/runonce" ||
+		value == "hklm/software/wow6432node/microsoft/windows/currentversion/run" ||
+		value == "hklm/software/wow6432node/microsoft/windows/currentversion/runonce"
 }
 
 func matchesActiveSchedulerPath(
@@ -1141,6 +1497,8 @@ func cloudMetadataPrerequisite(facts actionfacts.Facts) bool {
 		}
 		for _, network := range facts.Network {
 			if network.CommandID == command.ID &&
+				(strings.EqualFold(network.Scheme, "http") ||
+					strings.EqualFold(network.Scheme, "https")) &&
 				networkActionIn(
 					network.Action,
 					actionfacts.NetworkDownload,

@@ -130,7 +130,8 @@ func TestSidecarBootstrapObservabilityV8BindsOneValidatedOwnedRuntime(t *testing
 	owner, ok := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
 	fixture.sidecar.observabilityV8Mu.Unlock()
 	if !ok || owner == nil || owner.runtime == nil || owner.runtime.Active() == nil ||
-		owner.runtime.Active().Generation() != 1 {
+		owner.runtime.Active().Generation() != 1 ||
+		owner.runtime.Active().RetentionDays() != config.ObservabilityV8DefaultRetentionDays {
 		t.Fatalf("owned runtime=%T %#v", fixture.sidecar.observabilityV8, owner)
 	}
 	if proxy.observabilityV8TraceRuntime() != owner {

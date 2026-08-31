@@ -74,13 +74,19 @@ type enterpriseWindowsEnumerateOptions struct {
 //     exits. Used by the installer's fresh-install path (replaces
 //     the retired inline PowerShell walk at
 //     `DefenseClawEnterprise.psm1:3663-3736`).
-//   - default (no `--once`): enters the read-only interval-loop the
-//     SCM service invokes at boot. It audits the current profile set
-//     against the authenticated committed manifest but never changes
-//     authorization. New profiles require an administrator Repair or
-//     Upgrade.
+//   - default (no `--once`): enters the interval-loop the SCM
+//     service invokes at boot. On every tick it publishes an
+//     updated targets.yaml, auto-authorizing newly-discovered
+//     (SID, Connector) rows whose per-user profile contains a
+//     supported CLI (parity with macOS render-targets.sh). Rows
+//     with no discoverable CLI are silently skipped. The
+//     byte-identical short-circuit in WriteTargetsManifestAtomic
+//     keeps steady-state ticks free of file mutation.
 //
-// Spec 005 REQ-03, REQ-04, REQ-13, REQ-18, REQ-19.
+// Spec 005 REQ-03, REQ-04, REQ-13, REQ-18, REQ-19 (REQ-13's
+// audit-only sub-clause is superseded by the macOS-parity
+// auto-authorize posture; see
+// docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md residual-risk section).
 func newEnterpriseWindowsEnumerateCommand() *cobra.Command {
 	opts := &enterpriseWindowsEnumerateOptions{
 		interval:     enterpriseWindowsEnumerateDefaultInterval,
@@ -88,30 +94,34 @@ func newEnterpriseWindowsEnumerateCommand() *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   "enumerate",
-		Short: "Publish pre-commit targets or audit committed Windows enrollment",
+		Short: "Publish Windows managed-enterprise hook enrollment on every tick",
 		Long: `Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList to
 discover local user profiles, filter to interactive users (S-1-5-21-…), and
-compare them with the hook-guardian's authenticated targets.yaml.
+publish an updated hook-guardian targets.yaml.
 
 Two modes:
 
-  * default: enter a read-only audit loop suitable for an SCM ImagePath.
-    The service never rewrites targets.yaml and never authorizes a profile
-    created after deployment commit. Newly discovered or changed profiles
-    are reported for an administrator-run Repair or Upgrade.
+  * default: enter an interval loop suitable for an SCM ImagePath. On every
+    tick the service publishes an updated targets.yaml, auto-authorizing
+    newly-discovered (SID, Connector) rows whose per-user profile contains
+    a supported CLI. Profiles with no discoverable CLI are omitted from the
+    manifest without failing the cycle — the per-row reason is emitted to
+    stderr under the '[hook-enumerator] skipped ...' line so an operator
+    can see why a specific user was left out (macOS parity). The
+    byte-identical short-circuit in WriteTargetsManifestAtomic keeps
+    steady-state ticks free of file mutation.
 
   * --once: run a single cycle synchronously and exit. Used by the
-    installer to publish targets.yaml before deployment commit. This is
-    the only mode that writes the manifest.
+    installer to publish targets.yaml before deployment commit.
 
 Both modes authenticate the manifest's ancestry, exact AdminFile descriptor,
-regular-file identity, link contract, and schema. --once stages an authorized
-update under the exact AdminFile contract and publishes it atomically. Service
-audits fail closed on trust drift and leave the committed manifest untouched.
+regular-file identity, link contract, and schema, and both stage an authorized
+update under the exact AdminFile contract before atomic replace. On trust
+drift, both modes fail closed and leave the committed manifest untouched.
 
 Managed-enterprise Windows only. macOS's LaunchDaemon-based
-'hook-enumerator' + render-targets.sh already covers the darwin
-side; nothing about this subcommand is invoked on non-Windows OSes.
+'hook-enumerator' + render-targets.sh covers the darwin side;
+nothing about this subcommand is invoked on non-Windows OSes.
 `,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -162,10 +172,20 @@ func runEnterpriseWindowsEnumerate(
 	return runEnterpriseWindowsEnumerateInterval(ctx, stderr, opts, manifestPath)
 }
 
-// runEnterpriseWindowsEnumerateSingleCycle runs one bounded cycle and returns.
-// publish=true is reserved for the installer's pre-commit --once path. The
-// long-running SCM service always passes publish=false so a profile discovered
-// after commit cannot become authorized without an administrator lifecycle.
+// runEnterpriseWindowsEnumerateSingleCycle runs one bounded cycle
+// and returns. Both call sites pass publish=true today:
+//
+//   - The `--once` installer path publishes the initial pre-commit
+//     targets.yaml.
+//   - The long-running SCM interval loop publishes an updated
+//     targets.yaml on every tick (auto-authorize parity with
+//     macOS render-targets.sh). Byte-identical short-circuit in
+//     WriteTargetsManifestAtomic keeps steady-state ticks
+//     mutation-free.
+//
+// publish=false is retained on the parameter for callers that
+// legitimately want a dry-run (test rigs, admin diagnostics) but
+// is no longer wired in from either shipping call site.
 func runEnterpriseWindowsEnumerateSingleCycle(
 	ctx context.Context,
 	stderr io.Writer,
@@ -209,6 +229,16 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	changed, err := enterpriseWindowsEnumerateManifestWriter(manifestPath, manifest)
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
+	}
+	// Sibling pass: ensure the CertGateway service SID has Read+Execute on
+	// each enrolled user's inventory dotdirs (~/.claude, ~/.codex, …). The
+	// gateway runs under a virtual service account whose access to user
+	// profiles is not implicit; without this grant the AI discovery scanner
+	// walks the right paths but ReadDir returns access-denied and every
+	// skill/plugin/rule/mcp signal is suppressed. Idempotent; per-directory
+	// failures log-only so one bad DACL doesn't block the enumerator cycle.
+	if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(manifest, "", logf); grantErr != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 	}
 	elapsed := time.Since(start)
 
@@ -337,7 +367,15 @@ func runEnterpriseWindowsEnumerateInterval(
 	// First cycle: log the outcome but do NOT bail on a transient
 	// "config missing" error — the whole point of REQ-04 is to
 	// tolerate deferred-config boots.
-	if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, false); err != nil {
+	//
+	// publish=true (parity with macOS render-targets.sh): each tick
+	// auto-authorizes newly-discovered (SID, Connector) rows whose
+	// per-user profile contains a supported CLI (see
+	// internal/enterprisehooks/agent_version_windows.go). Rows
+	// without a discoverable CLI are silently skipped. The
+	// byte-identical short-circuit in WriteTargetsManifestAtomic
+	// keeps steady-state ticks free of fsnotify wakes.
+	if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
 		if !isEnterpriseWindowsEnumerateConfigMissing(err) {
 			fmt.Fprintf(stderr, "[hook-enumerator] initial cycle failed: %v\n", err)
 		}
@@ -350,7 +388,7 @@ func runEnterpriseWindowsEnumerateInterval(
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, false); err != nil {
+			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
 					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
 				}

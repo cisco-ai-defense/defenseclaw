@@ -166,7 +166,7 @@ YAML_ANNOTATIONS = {
     "    judge_bodies_path: ~/.defenseclaw/judge_bodies.db": (
         "    # Separate forensic judge-body store; must not alias any configured file.",
     ),
-    "    retention_days: 90": ("    # Applies to local event/evidence/judge history; zero means retain forever.",),
+    "    retention_days: 7": ("    # Applies to eligible local event/evidence/judge/correlation history; zero means retain forever.",),
     "  destinations:": (
         "  # Optional exports. Presence defaults enabled:true. Every example is disabled",
         "  # so this exhaustive reference is safe to inspect without exporting data.",
@@ -304,7 +304,7 @@ def _reference_document() -> dict[str, Any]:
             "local": {
                 "path": "~/.defenseclaw/audit.db",
                 "judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
-                "retention_days": 90,
+                "retention_days": 7,
             },
             "destinations": [
                 {

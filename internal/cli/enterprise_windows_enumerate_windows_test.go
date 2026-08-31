@@ -42,9 +42,20 @@ func TestNewEnterpriseWindowsEnumerateCommandRegistersFlags(t *testing.T) {
 			t.Fatalf("flag %q not registered", name)
 		}
 	}
-	if !strings.Contains(cmd.Long, "service never rewrites targets.yaml") ||
-		!strings.Contains(cmd.Long, "administrator-run Repair or Upgrade") {
-		t.Fatalf("command documentation does not describe the finite-profile audit boundary:\n%s", cmd.Long)
+	// Normalize whitespace before matching. The raw `cmd.Long` block
+	// wraps at column ~80 with two-space indent, so any assertion
+	// phrase that spans a wrap point (e.g. "omitted from the
+	// manifest" reflows as "omitted from the\n    manifest") would
+	// spuriously fail a byte-level `strings.Contains`. Collapsing
+	// every run of whitespace to a single space lets the assertions
+	// focus on semantic content rather than the reflow shape, and
+	// stays robust when the surrounding paragraph is edited.
+	long := strings.Join(strings.Fields(cmd.Long), " ")
+	if !strings.Contains(long, "publishes an updated targets.yaml") ||
+		!strings.Contains(long, "auto-authorizing") ||
+		!strings.Contains(long, "omitted from the manifest without failing the cycle") ||
+		!strings.Contains(long, "macOS parity") {
+		t.Fatalf("command documentation does not describe the macOS-parity auto-authorize posture:\n%s", cmd.Long)
 	}
 }
 

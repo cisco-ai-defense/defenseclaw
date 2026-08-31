@@ -124,10 +124,15 @@ func TestUpgradeReadinessBindsStrictStateGenerationAndCandidateVersion(t *testin
 	}
 	cfg.Guardrail.Enabled = true
 	cfg.Gateway.Watcher.Enabled = false
+	cfg.Routing.Enabled = true
 
 	generation := time.Now().Add(-time.Second)
 	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
 	snap.StartedAt = generation.Add(100 * time.Millisecond)
+	snap.Routing = gateway.SubsystemHealth{
+		State:     gateway.StateError,
+		LastError: "classifier unavailable",
+	}
 	if cfg.ConfigVersion == config.ObservabilityV8ConfigVersion {
 		snap.Telemetry.State = gateway.StateRunning
 	}

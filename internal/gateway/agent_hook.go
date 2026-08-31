@@ -17,11 +17,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -71,49 +74,50 @@ func getFallbackConnectorRegistry() *connector.Registry {
 }
 
 type agentHookRequest struct {
-	ConnectorName             string
-	AgentID                   string
-	AgentName                 string
-	AgentType                 string
-	RootAgentID               string
-	ParentAgentID             string
-	ChildAgentID              string
-	HookEventName             string
-	SemanticEventID           string
-	LogicalEventID            string
-	ConnectorInstanceID       string
-	SessionID                 string
-	ThreadID                  string
-	TurnID                    string
-	MessageID                 string
-	RootSessionID             string
-	ParentSessionID           string
-	ChildSessionID            string
-	ToolInvocationID          string
-	ModelRequestID            string
-	ModelResponseID           string
-	SourceEventID             string
-	SourceSequence            string
-	SourceTimestamp           string
-	SourceNamespace           string
-	SourceIDKind              string
-	ExecutionID               string
-	StepID                    string
-	CorrelationProfileVersion connector.CorrelationProfileVersion
-	CorrelationCompleteness   connector.CorrelationCompleteness
-	CorrelationSurface        connector.CorrelationSurface
-	CorrelationOrigins        map[connector.CorrelationTarget]connector.CorrelationOrigin
-	CorrelationValues         map[connector.CorrelationTarget]connector.CorrelationValue
-	CorrelationIdentifiers    []connector.CorrelationValue
-	SuppressCorrelationEmit   bool
-	CorrelationReceipt        *audit.CorrelationReceiptLocator
-	CWD                       string
-	ToolName                  string
-	ToolArgs                  json.RawMessage
-	Content                   string
-	Direction                 string
-	Payload                   map[string]interface{}
-	toolChain                 *toolChainHookCapture
+	ConnectorName               string
+	AgentID                     string
+	AgentName                   string
+	AgentType                   string
+	RootAgentID                 string
+	ParentAgentID               string
+	ChildAgentID                string
+	HookEventName               string
+	SemanticEventID             string
+	LogicalEventID              string
+	ConnectorInstanceID         string
+	SessionID                   string
+	ThreadID                    string
+	TurnID                      string
+	MessageID                   string
+	RootSessionID               string
+	ParentSessionID             string
+	ChildSessionID              string
+	ToolInvocationID            string
+	ModelRequestID              string
+	ModelResponseID             string
+	SourceEventID               string
+	SourceSequence              string
+	SourceTimestamp             string
+	SourceNamespace             string
+	SourceIDKind                string
+	ExecutionID                 string
+	StepID                      string
+	CorrelationProfileVersion   connector.CorrelationProfileVersion
+	CorrelationCompleteness     connector.CorrelationCompleteness
+	CorrelationSurface          connector.CorrelationSurface
+	CorrelationOrigins          map[connector.CorrelationTarget]connector.CorrelationOrigin
+	CorrelationValues           map[connector.CorrelationTarget]connector.CorrelationValue
+	CorrelationIdentifiers      []connector.CorrelationValue
+	SuppressCorrelationEmit     bool
+	CorrelationReceipt          *audit.CorrelationReceiptLocator
+	CWD                         string
+	ToolName                    string
+	ToolArgs                    json.RawMessage
+	ToolArgsProjectionUncertain bool
+	Content                     string
+	Direction                   string
+	Payload                     map[string]interface{}
+	toolChain                   *toolChainHookCapture
 }
 
 type agentHookResponse struct {
@@ -158,7 +162,28 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 
-		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
+		// Run installs the same ordinary API ceiling globally. Keep the hook
+		// handler bounded as a standalone unit too because connector tests and
+		// internal adapters invoke it directly.
+		r.Body = http.MaxBytesReader(w, r.Body, apiRequestBodyMaxBytes)
+		rawBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			var maxBytesError *http.MaxBytesError
+			if errors.As(err, &maxBytesError) {
+				a.recordConnectorHookRejection(
+					r.Context(), connectorName, "unknown", "body_too_large",
+					apiRequestBodyMaxBytes+1,
+				)
+				a.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+					"error": "request body too large",
+				})
+				return
+			}
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(bytes.NewReader(rawBody)))
 		if err != nil {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
@@ -167,7 +192,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 
 		profile := a.hookProfileForConnector(connectorName)
 		runtime := hookRuntimeForProfile(profile)
-		req := normalizeAgentHookRequestWithProfile(connectorName, payload, profile)
+		req := normalizeAgentHookRequestWithRawProfile(connectorName, payload, rawBody, profile)
 		if req.HookEventName == "" {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
@@ -1518,6 +1543,10 @@ func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[
 }
 
 func normalizeAgentHookRequestWithProfile(connectorName string, payload map[string]interface{}, profile connector.HookProfile) agentHookRequest {
+	return normalizeAgentHookRequestWithRawProfile(connectorName, payload, nil, profile)
+}
+
+func normalizeAgentHookRequestWithRawProfile(connectorName string, payload map[string]interface{}, rawPayload []byte, profile connector.HookProfile) agentHookRequest {
 	spec := profile.Correlation
 	if spec.Connector == "" || len(spec.HookBindings) == 0 {
 		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
@@ -1541,6 +1570,23 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 	}
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
+	}
+	if decoded.ToolArgsAuthoritative {
+		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
+		if len(req.ToolArgs) == 0 {
+			req.ToolArgsProjectionUncertain = true
+			req.ToolArgs = json.RawMessage(`{}`)
+		}
+	}
+	// The raw-payload decoder is the final authority for native tool arguments.
+	// An empty result stays valid JSON but records parser uncertainty downstream.
+	if profile.DecodeToolArgs != nil && len(rawPayload) != 0 {
+		toolArgs := profile.DecodeToolArgs(rawPayload)
+		req.ToolArgsProjectionUncertain = len(toolArgs) == 0
+		if len(toolArgs) == 0 {
+			toolArgs = json.RawMessage(`{}`)
+		}
+		req.ToolArgs = append(json.RawMessage(nil), toolArgs...)
 	}
 	if decoded.Content != "" {
 		req.Content = decoded.Content
@@ -1677,6 +1723,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	case structuredToolEvent:
+		if req.ToolArgsProjectionUncertain {
+			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
+		}
 		toolRequest := &ToolInspectRequest{
 			Tool:          req.ToolName,
 			Args:          req.ToolArgs,

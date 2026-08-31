@@ -199,6 +199,19 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 	if versionJSON {
 		return nil
 	}
+	// Skip the daemon bootstrap (PID registration + config load) for
+	// lifecycle utilities that operate on operator-supplied paths and
+	// do not touch DefenseClaw state. These subcommands must run on
+	// hosts where the daemon has NOT been installed yet — most
+	// importantly `enterprise hooks scrub` invoked from macOS
+	// uninstall.sh's --purge path against a host with no v8
+	// config.yaml. Mirrors the same exemption in
+	// rootPersistentPreRunE above; the two initializers must agree on
+	// the annotation contract or scrub regresses whenever it's routed
+	// through the no-audit variant.
+	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+		return nil
+	}
 	if err := daemon.RegisterCurrentProcess(); err != nil {
 		return err
 	}

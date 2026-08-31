@@ -13,7 +13,7 @@ The Antigravity connector wires DefenseClaw into Google's [Antigravity CLI](http
 
 <Video
   src="antigravity"
-  caption="Three scenarios end-to-end against the same agy session: (1) a benign command flows through with action=allow / severity=NONE; (2) a sensitive-file read lands on a HIGH finding → DefenseClaw returns decision=ask → agy surfaces its native approval prompt and the operator declines; (3) writing a synthetic secret to an environment file matches a CRITICAL finding → DefenseClaw returns decision=deny → agy refuses without prompting. Each verdict appears live in the Splunk pane on the left. This historical demo used an unredacted destination projection; current v8 deployments select an explicit redaction profile per destination or route."
+  caption="Three scenarios end-to-end against the same agy session: (1) a benign command flows through with action=allow / severity=NONE; (2) a sensitive-file read produces an approval prompt under the policy used for this historical recording; (3) writing a synthetic secret to an environment file matches a CRITICAL finding → DefenseClaw returns decision=deny → agy refuses without prompting. Current builds keep an ordinary sensitive-file read as a MEDIUM detection-only advisory unless the same action proves a mutation or external egress. Each verdict appears live in the Splunk pane on the left. This demo also used an unredacted destination projection; current v8 deployments select an explicit redaction profile per destination or route."
 />
 
 <Callout type="info">

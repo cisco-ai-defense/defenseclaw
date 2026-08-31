@@ -157,7 +157,7 @@ func validateWindowsSocketPathOverride(socketPath string) error {
 	// Shape anchor: the socket must live under an "ipc" directory. In
 	// production this is fully subsumed by the trusted-root check below,
 	// which requires an exact case-insensitive match against
-	// TrustedProgramData/…/ipc — check 3 can only fire for inputs check 4
+	// TrustedProgramFiles/…/ipc — check 3 can only fire for inputs check 4
 	// would also reject. It IS load-bearing under the test hook
 	// (allowUnsafeSocketOverrideForTest) which short-circuits check 4:
 	// leaving this shape check ensures the tests still exercise a
@@ -175,14 +175,14 @@ func validateWindowsSocketPathOverride(socketPath string) error {
 	if allowUnsafeSocketOverrideForTest {
 		return nil
 	}
-	programData, err := winpath.TrustedProgramData()
+	programFiles, err := winpath.TrustedProgramFiles()
 	if err != nil {
-		return fmt.Errorf("ipc: resolve trusted program data root: %w", err)
+		return fmt.Errorf("ipc: resolve trusted program files root: %w", err)
 	}
-	if programData == "" {
-		return fmt.Errorf("ipc: trusted program data root is empty; refusing to bind IPC surface")
+	if programFiles == "" {
+		return fmt.Errorf("ipc: trusted program files root is empty; refusing to bind IPC surface")
 	}
-	trustedParent := filepath.Clean(filepath.Join(programData, windowsManagedIPCRelativeDir))
+	trustedParent := filepath.Clean(filepath.Join(programFiles, windowsManagedIPCRelativeDir))
 	if !strings.EqualFold(parent, trustedParent) {
 		return fmt.Errorf(
 			"ipc: socket path override must live under the trusted managed root %q (got parent %q)",

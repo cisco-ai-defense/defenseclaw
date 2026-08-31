@@ -5039,8 +5039,11 @@ function Initialize-DefenseClawManagedIPCDirectory {
         [Parameter(Mandatory)][string]$GatewayServiceName
     )
     $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    # AVC release-26.8.4 integration: the UI-IPC UDS socket lives under
+    # Program Files, not ProgramData. Path parity with the Go resolver
+    # in internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02.
     $expectedIPCDirectory = [IO.Path]::Combine(
-        $script:ProgramData,
+        $script:ProgramFiles,
         'Cisco',
         'Cisco Secure Client',
         'DefenseClaw',
@@ -5064,12 +5067,12 @@ function Initialize-DefenseClawManagedIPCDirectory {
         Initialize-DefenseClawManagedRoot `
             -Path $parent `
             -Label 'managed IPC parent' `
-            -RequiredBase $script:ProgramData
+            -RequiredBase $script:ProgramFiles
     }
     else {
         Assert-DefenseClawTrustedAncestors `
             -Path $parent `
-            -RequiredBase $script:ProgramData
+            -RequiredBase $script:ProgramFiles
     }
 
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ipcDirectory) {
@@ -5293,8 +5296,11 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
             -GatewayServiceSID $GatewayServiceSID
     }
 
+    # AVC release-26.8.4 integration: the UI-IPC UDS socket lives under
+    # Program Files, not ProgramData. Path parity with the Go resolver
+    # in internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02.
     $expectedIPCDirectory = [IO.Path]::Combine(
-        $script:ProgramData,
+        $script:ProgramFiles,
         'Cisco',
         'Cisco Secure Client',
         'DefenseClaw',
@@ -5315,7 +5321,7 @@ function Revoke-DefenseClawManagedIPCServiceAccess {
     Assert-DefenseClawNoReparsePath -Path $ipcDirectory -AllowMissingLeaf
     Assert-DefenseClawTrustedAncestors `
         -Path ([IO.Path]::GetDirectoryName($ipcDirectory)) `
-        -RequiredBase $script:ProgramData
+        -RequiredBase $script:ProgramFiles
 
     $nativeSecurity = Initialize-DefenseClawNativeSecurity
     # This final-component OPEN_REPARSE_POINT call is the sole absence proof.
@@ -6324,8 +6330,13 @@ function Get-DefenseClawLayout {
     $gatewayLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'gateway'
     $brokerLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'cmid-broker'
     $guardianLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'guardian'
+    # The DefenseClaw managed-IPC UDS socket lives under Program Files
+    # (not ProgramData) as of the AVC release-26.8.4 integration —
+    # Cisco Secure Client's Windows GUI dials the socket under Program
+    # Files so DefenseClaw follows. Path parity with
+    # internal/ipc/paths_windows.go is mandatory. Spec 004 REQ-02.
     $managedIPCDirectory = [IO.Path]::Combine(
-        $script:ProgramData,
+        $script:ProgramFiles,
         'Cisco',
         'Cisco Secure Client',
         'DefenseClaw',

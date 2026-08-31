@@ -55,6 +55,7 @@ from defenseclaw.audit_actions import (
     ACTION_SETUP_MCP_SCANNER,
     ACTION_SETUP_NOTIFICATIONS_SET,
     ACTION_SETUP_NOTIFICATIONS_TOGGLE,
+    ACTION_SETUP_ROUTING,
     ACTION_SETUP_SKILL_SCANNER,
     ACTION_SETUP_SPLUNK,
 )
@@ -12563,3 +12564,192 @@ def _show_splunk_credentials(data_dir: str) -> None:
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# setup routing
+# ---------------------------------------------------------------------------
+
+
+@setup.command("routing")
+@click.option("--enable", is_flag=True, help="Enable semantic model routing.")
+@click.option("--disable", is_flag=True, help="Disable semantic model routing.")
+@click.option("--status", is_flag=True, help="Show routing status.")
+@click.option("--yes", "-y", is_flag=True, help="Accepted for compatibility; this command is non-interactive.")
+@pass_ctx
+def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, yes: bool) -> None:
+    """Configure semantic model routing.
+
+    In managed mode, the gateway owns a minimal vLLM Semantic Router Docker
+    container. Set routing.remote.endpoint to use an operator-managed router
+    instead. Model aliases and decisions live under routing: in config.yaml.
+
+    \b
+    Examples:
+      defenseclaw setup routing --enable
+      defenseclaw setup routing --disable
+      defenseclaw setup routing --status
+    """
+    _ = yes  # retained for command-line compatibility; setup has no prompt
+    if enable and disable:
+        raise click.UsageError("Cannot use --enable and --disable together.")
+
+    if status or (not enable and not disable):
+        _print_routing_status(app)
+        return
+
+    if enable:
+        app.cfg.routing.enabled = True
+        if not app.cfg.routing.version:
+            app.cfg.routing.version = "0.3.0"
+        if not app.cfg.routing.port:
+            app.cfg.routing.port = 8080
+
+        _validate_routing_setup_models(app.cfg.routing.models)
+
+        remote_endpoint = str(app.cfg.routing.remote.get("endpoint") or "").strip()
+        mode = "remote" if remote_endpoint else "managed Docker"
+
+        click.echo()
+        click.echo("  Configuring semantic model routing...")
+        click.echo()
+
+        # Remote routers are operator-owned and do not require local Docker.
+        if not remote_endpoint:
+            docker = shutil.which("docker")
+            if docker is None:
+                raise click.ClickException("Docker is required for managed routing but was not found")
+            try:
+                docker_result = subprocess.run(
+                    [docker, "info"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise click.ClickException(f"failed to check Docker: {exc}") from exc
+            if docker_result.returncode != 0:
+                detail = (docker_result.stderr or docker_result.stdout).strip()
+                suffix = f": {detail}" if detail else ""
+                raise click.ClickException(f"Docker is required for managed routing but is not running{suffix}")
+            click.echo("  ✓ Docker is running")
+        else:
+            click.echo(f"  ✓ Remote router configured: {remote_endpoint}")
+
+        # Only save after local prerequisites succeed. A failed Docker check
+        # must not leave the desired config enabled but inactive.
+        try:
+            app.cfg.save()
+        except OSError as exc:
+            raise click.ClickException(f"failed to save config: {exc}") from exc
+        click.echo()
+        click.echo("  ✓ Semantic routing configured")
+        click.echo(f"    Mode:       {mode}")
+        if not remote_endpoint:
+            click.echo(f"    Version:    {app.cfg.routing.version}")
+            click.echo(f"    Router API: http://127.0.0.1:{app.cfg.routing.port}")
+        click.echo(f"    Models:     {len(app.cfg.routing.models)}")
+        click.echo("    Scope:      proxy-mode OpenAI chat-completions traffic")
+        click.echo()
+        click.echo("  Activation: gateway restart required")
+        click.echo("  Restart with: defenseclaw-gateway restart")
+
+        # Keep setup and `keys list` aligned without forcing operators to put
+        # enterprise-managed credentials on disk during setup.
+        from defenseclaw.credentials import missing_required  # noqa: PLC0415
+
+        missing_routing_keys = [
+            item.resolution.env_name
+            for item in missing_required(app.cfg)
+            if item.spec.feature == "routing.models"
+        ]
+        if missing_routing_keys:
+            click.echo()
+            click.echo("  Missing routed-model credentials:")
+            for env_name in missing_routing_keys:
+                click.echo(f"    - {env_name}")
+            click.echo("  Add them with: defenseclaw keys set <ENV_NAME>")
+
+        _log_setup_action(
+            app,
+            ACTION_SETUP_ROUTING,
+            f"enabled=True version={app.cfg.routing.version} port={app.cfg.routing.port}",
+            allow_offline=True,
+        )
+
+    if disable:
+        app.cfg.routing.enabled = False
+        try:
+            app.cfg.save()
+        except OSError as exc:
+            raise click.ClickException(f"failed to save config: {exc}") from exc
+        click.echo()
+        click.echo("  ✓ Semantic routing disabled")
+        click.echo("    All requests will use the default provider.")
+        click.echo("    Activation: gateway restart required")
+
+        _log_setup_action(
+            app,
+            ACTION_SETUP_ROUTING,
+            "enabled=False",
+            allow_offline=True,
+        )
+
+
+def _print_routing_status(app: AppContext) -> None:
+    click.echo()
+    click.echo("  Semantic Router Status")
+    click.echo("  ══════════════════════")
+    if not app.cfg.routing.enabled:
+        click.echo("    Configured: disabled")
+        click.echo()
+        click.echo("    Enable with: defenseclaw setup routing --enable")
+        return
+    click.echo("    Configured: enabled")
+    version = app.cfg.routing.version or "0.3.0 (default)"
+    port = app.cfg.routing.port or 8080
+    remote_endpoint = str(app.cfg.routing.remote.get("endpoint") or "").strip()
+    mode = "remote" if remote_endpoint else "managed Docker"
+    endpoint = remote_endpoint or f"http://127.0.0.1:{port}"
+    click.echo(f"    Mode:       {mode}")
+    if not remote_endpoint:
+        click.echo(f"    Version:    {version}")
+    click.echo(f"    Router API: {endpoint}")
+    click.echo(f"    Models:     {len(app.cfg.routing.models)}")
+    click.echo(f"    Algorithm: {app.cfg.routing.algorithm or 'static (default)'}")
+    click.echo(f"    Runtime:    {_routing_health_status(endpoint)}")
+    click.echo("    Scope:      proxy-mode OpenAI chat-completions traffic")
+    click.echo("    Changes require a gateway restart.")
+    click.echo()
+
+
+def _validate_routing_setup_models(models: list[dict[str, Any]]) -> None:
+    if not models:
+        raise click.ClickException(
+            "routing.models must contain at least one backend before routing can be enabled",
+        )
+    aliases: set[str] = set()
+    for index, model in enumerate(models):
+        alias = str(model.get("name") or "").strip()
+        provider = str(model.get("provider") or "").strip()
+        provider_model = str(model.get("model") or "").strip()
+        if not alias or not provider or not provider_model:
+            raise click.ClickException(
+                f"routing.models[{index}] requires non-empty name, provider, and model",
+            )
+        if alias in aliases:
+            raise click.ClickException(f"routing model alias is duplicated: {alias}")
+        aliases.add(alias)
+
+
+def _routing_health_status(endpoint: str) -> str:
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    try:
+        request = urllib.request.Request(endpoint.rstrip("/") + "/health", method="GET")
+        with urllib.request.urlopen(request, timeout=2) as response:
+            return "healthy" if response.status == 200 else f"unhealthy (HTTP {response.status})"
+    except (OSError, urllib.error.URLError, ValueError):
+        return "unreachable (gateway may need restart)"

@@ -278,6 +278,36 @@ llm:
     ca_cert_pem: ""            # PEM bundle inlined from --tls-ca-cert-file
     insecure_skip_verify: false
 
+# Optional semantic model classifier for proxy-mode OpenAI Chat Completions.
+# Routing-only edits are validated by config reload but activate on gateway
+# restart. Omit `remote` to run the pinned, loopback-only Docker sidecar.
+routing:
+  enabled: false
+  version: "0.3.0"            # the only tested managed-sidecar contract
+  port: 8080
+  algorithm: static
+  # remote: {endpoint: https://router.example.com}  # sends prompt content
+  models:
+    - name: fast              # classifier alias; unique within this catalog
+      provider: openai
+      model: gpt-4o-mini
+      base_url: https://api.openai.com
+      api_key_env: OPENAI_API_KEY
+      capabilities: [general]
+  signals:
+    keywords:
+      - name: code-request
+        keywords: [debug, implement, refactor]
+        operator: OR
+  decisions:
+    - name: code
+      priority: 100
+      conditions: [{type: keyword, name: code-request}]
+      model_refs: [fast]
+    - name: default           # an unconditional decision is the fallback
+      priority: 1
+      model_refs: [fast]
+
 guardrail:
   enabled: true
   connector: claudecode        # actively enforced connector
@@ -346,6 +376,13 @@ standalone OpenShell mode: if `guardrail.host` is non-empty and is not the
 literal `localhost`, the management API inherits that host. Pin
 `gateway.api_bind: 127.0.0.1` when the API must stay loopback-only. See
 [Gateway API: bind address](/docs/reference/gateway-api#bind-address).
+
+The `routing` block affects OpenClaw and ZeptoClaw only when they use the proxy's
+OpenAI-compatible Chat Completions path. Hook connectors and other provider API
+shapes keep their existing path. `defenseclaw keys list` dynamically discovers
+each non-empty `api_key_env`; the classifier never receives the key value. See
+[Semantic model routing](/docs/setup/semantic-routing) for the exact lifecycle,
+privacy boundary, and compatibility matrix.
 
 The source file stays small because omissions compile to explicit effective
 policy. With `observability: {}`, all 14 buckets collect logs, traces, and

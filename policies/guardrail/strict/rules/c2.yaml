@@ -2,13 +2,13 @@ version: 1
 category: c2
 rules:
   - id: C2-WEBHOOK-SITE
-    pattern: '(?i)webhook\.site'
+    pattern: '(?i)(?:^|[^a-zA-Z0-9-])webhook\.site(?:[^a-zA-Z0-9.-]|$)'
     title: "webhook.site (known exfil)"
     severity: HIGH
     confidence: 0.90
     tags: [exfiltration, c2]
   - id: C2-NGROK
-    pattern: '(?i)(?:ngrok\.io|ngrok-free\.app)'
+    pattern: '(?i)(?:^|[^a-zA-Z0-9-])(?:ngrok\.io|ngrok-free\.app)(?:[^a-zA-Z0-9.-]|$)'
     title: "ngrok tunnel (exfil risk)"
     severity: HIGH
     confidence: 0.85
@@ -44,7 +44,7 @@ rules:
     confidence: 0.90
     tags: [exfiltration, c2]
   - id: C2-OAST
-    pattern: '(?i)oast\.fun'
+    pattern: '(?i)(?:^|[^a-zA-Z0-9-])oast\.fun(?:[^a-zA-Z0-9.-]|$)'
     title: "oast.fun (OOB testing)"
     severity: HIGH
     confidence: 0.85
@@ -76,7 +76,7 @@ rules:
   - id: C2-METADATA-GCP
     # Closes (parity with default pack): DNS hostnames
     # are case-insensitive so we cannot rely on the lowercase literal.
-    pattern: '(?i)metadata\.google\.internal'
+    pattern: '(?i)(?:^|[^a-zA-Z0-9-])metadata\.google\.internal(?:[^a-zA-Z0-9.-]|$)'
     title: "GCP metadata endpoint (SSRF)"
     severity: CRITICAL
     confidence: 0.95

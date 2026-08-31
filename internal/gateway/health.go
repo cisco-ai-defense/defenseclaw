@@ -141,6 +141,7 @@ type HealthSnapshot struct {
 	Config                SubsystemHealth  `json:"config"`
 	API                   SubsystemHealth  `json:"api"`
 	Guardrail             SubsystemHealth  `json:"guardrail"`
+	Routing               SubsystemHealth  `json:"routing"`
 	Telemetry             SubsystemHealth  `json:"telemetry"`
 	AIDiscovery           SubsystemHealth  `json:"ai_discovery"`
 	ApplicationProtection SubsystemHealth  `json:"application_protection"`
@@ -180,6 +181,7 @@ type SidecarHealth struct {
 	config                                SubsystemHealth
 	api                                   SubsystemHealth
 	guardrail                             SubsystemHealth
+	routing                               SubsystemHealth
 	telemetry                             SubsystemHealth
 	aiDiscovery                           SubsystemHealth
 	applicationProtection                 SubsystemHealth
@@ -323,6 +325,7 @@ func NewSidecarHealth() *SidecarHealth {
 		config:                initial,
 		api:                   initial,
 		guardrail:             disabled,
+		routing:               disabled,
 		telemetry:             disabled,
 		aiDiscovery:           disabled,
 		applicationProtection: disabled,
@@ -670,6 +673,18 @@ func (h *SidecarHealth) SetAPI(state SubsystemState, lastErr string, details map
 func (h *SidecarHealth) SetGuardrail(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
 	h.guardrail = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+func (h *SidecarHealth) SetRouting(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	h.routing = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
@@ -1309,6 +1324,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Config:                h.config,
 		API:                   h.api,
 		Guardrail:             h.guardrail,
+		Routing:               h.routing,
 		Telemetry:             h.telemetry,
 		AIDiscovery:           h.aiDiscovery,
 		ApplicationProtection: h.applicationProtection,

@@ -22,7 +22,7 @@ runtime accept and how a match becomes detection or enforcement evidence.
 
 <Flow
   direction="TB"
-  caption="Only authoritative facts enter CEL. Full facts detect the security intent; an execute-only projection determines whether that evidence can support synchronous enforcement."
+  caption="Only authoritative facts enter CEL. Full facts detect the security intent; an execute-only projection and final same-rule proof gate determine whether that evidence can support synchronous enforcement."
 >
   <Node id="boundary" kind="connector">Server-established trusted action boundary</Node>
   <Node id="analyze" kind="gateway">Parse and normalize tool arguments</Node>
@@ -30,6 +30,7 @@ runtime accept and how a match becomes detection or enforcement evidence.
   <Node id="full" kind="policy">Evaluate owner on full facts</Node>
   <Node id="execute" kind="policy">Evaluate execute-only projection</Node>
   <Node id="fallback" kind="policy">Owner-local regex fallback</Node>
+  <Node id="proof" kind="decision">Final same-rule proof gate</Node>
   <Node id="detect" kind="decision">Detection-only finding</Node>
   <Node id="enforce" kind="decision">Enforcement-eligible finding</Node>
   <Node id="none" kind="decision">No owner finding</Node>
@@ -41,10 +42,12 @@ runtime accept and how a match becomes detection or enforcement evidence.
   <Edge from="full" to="none" label="false" />
   <Edge from="full" to="fallback" label="error or budget" variant="dashed" />
   <Edge from="full" to="execute" label="true" />
-  <Edge from="execute" to="enforce" label="true + eligible surface" />
-  <Edge from="execute" to="detect" label="false or ineligible surface" />
-  <Edge from="fallback" to="detect" label="pattern matched" />
+  <Edge from="execute" to="proof" label="true" />
+  <Edge from="execute" to="detect" label="false" />
+  <Edge from="fallback" to="proof" label="pattern matched" />
   <Edge from="fallback" to="none" label="no match" />
+  <Edge from="proof" to="enforce" label="complete exact proof + eligible surface" />
+  <Edge from="proof" to="detect" label="raw, partial, unpinned, or ineligible" />
   <Edge from="detect" to="action" />
   <Edge from="enforce" to="action" />
 </Flow>
@@ -115,12 +118,63 @@ fallback without stopping unrelated rules.
 | Result | Owner behavior |
 | --- | --- |
 | Compile or admission failure | Reject the candidate generation; do not publish it. |
-| Projection is unsupported, partial, ambiguous, invalid, or uncertain | Run this owner's required regex fallback. |
+| Projection is unsupported, partial, ambiguous, invalid, or uncertain | Run this owner's required regex fallback; a raw pattern match remains detection-only. |
 | CEL evaluates `false` | Produce no owner finding and suppress only this owner's claimed fallback IDs on the structured route. |
 | CEL matches full facts but not the execute-only projection | Create detection-only evidence; preview behavior cannot synchronously block. |
-| CEL matches both projections on an enforcement-eligible, synchronous surface | Create an enforcement-eligible finding from the YAML metadata. |
+| CEL matches both projections on an enforcement-eligible, synchronous surface | Create an enforcement candidate from the YAML metadata; the final same-rule proof gate must still authorize it. |
 | CEL matches but the connector surface is not block-capable or enforcement-eligible | Create detection-only evidence. |
-| CEL errors, times out, or exceeds runtime cost | Run this owner's regex fallback; unrelated rules continue. |
+| CEL errors, times out, or exceeds runtime cost | Run this owner's regex fallback; unrelated rules continue and raw matches remain detection-only. |
+
+Every trusted-action candidate then crosses a final, code-owned proof gate. It
+can contribute to enforcement only when its proof is complete and pinned to
+the same rule ID: authoritative ActionFacts semantic evidence, an exact
+code-owned built-in CodeGuard result from a complete scan, or a bounded exact
+fallback result. Raw regex matches, custom CodeGuard matches, parser-shadow
+evidence, partial or invalid projections, and unpinned results remain visible
+as detection-only findings. The gate never removes a finding; it only prevents
+incomplete evidence from authorizing a block.
+
+### Exact-boundary examples
+
+| Family | Enforcement-eligible example | Advisory or quiet control |
+| --- | --- | --- |
+| HTTP destination hostname | Static ASCII DNS bytes from generated authority, HTTP CONNECT, remote-resolved SOCKS4a/5h destination fields, plaintext HTTP Host or canonical HTTPS SNI observed after a SOCKS handshake, or canonical HTTPS origin SNI; GNU Wget generated authority/origin SNI additionally requires `--no-config`, and every component is bound to the exact external origin or proxy | A local-only route or numeric hostname, non-ASCII IDN spelling, dynamic or config-derived value, wrapper/pipeline/shell redirection, promptable authentication, unresolved file/TLS setup, a modeled eagerly checked compression/TLS/authentication capability option or modeled final enabled capability toggle, conflicting pre-wire option, direct plaintext HTTP Host override with no remaining proxy-visible authority, target routed through an HTTPS proxy without authenticated feature facts, unsupported multi-hop proxy chain, or bare PowerShell `curl`/`wget` alias |
+| HAProxy client-IP preamble | None until [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770) supplies an authenticated fact for the exact curl executable's version and build support | Every `--haproxy-clientip` form remains LOW and detection-only, including direct HTTP(S), proxy/SOCKS/preproxy, `--noproxy`, multiple targets or `--next`, static/dynamic/oversized values, setup-preempted commands, aliases, and any executable-path spelling |
+| FTP control metadata | POSIX or structured-argv static curl FTP account or alternative bytes bound to one external FTP(S) origin or proven plaintext proxy observer | Dynamic/config-driven values, raw Windows shell input, a local-only destination, or an unproved route |
+| SOCKS authentication | Static SOCKS4 username or SOCKS5 username/password bound to the exact external proxy peer | Disabled/bypassed proxy, unsupported chain, ambiguous credentials, or pre-connect failure |
+| Telnet metadata | POSIX or structured-argv static `USER`, `TTYPE`, `XDISPLOC`, or `NEW_ENV` bytes bound to one direct external Telnet peer | Raw Windows shell input, capability-dependent, proxied, malformed, or local-only negotiation; invalid `WS`/`BINARY` settings |
+| Static stdin upload | Portable literal `echo` or format-only `printf` bytes flowing into one exact external curl stdin upload | Shell options/escapes, expansion, wrappers, intermediate transforms, or local upload |
+| Minix formatting | Exact `mkfs.minix` grammar targeting a raw device | Image target, help/version, invalid block count, near-miss executable, or untrusted path |
+
+For the modeled curl compression/TLS/authentication capability controls, an
+eagerly validated positive option, or the final enabled state of a final-toggle
+option, closes every exact transmission projector, not just the hostname lane.
+A disabled negative form can remain eligible only when no earlier eager
+validation failed, every transfer group ends with the modeled final-toggle
+capability disabled, and every other prerequisite is exact. Other optional
+features remain within the narrower authenticated-capability boundary tracked
+in the follow-up linked from this change.
+
+DefenseClaw has no current HAProxy client-IP enforcement lane. Curl 8.7.1
+primary-source and loopback-wire evidence shows that a capable direct build
+writes the PROXY preamble before the HTTP request and, for HTTPS, before TLS.
+That audit also supplies future-projector constraints: the existing
+no-ambient-defaults boundary, a maximum 1976-byte operand, exact receiver
+binding, and rejection of `--ipv4` with a literal IPv6 peer before any write.
+It does not prove the executable that will run. The option is absent before
+curl 8.2.0 and is compiled out with `CURL_DISABLE_PROXY`; native name, path,
+dialect, and operating system do not authenticate either property. [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770)
+owns the resolved executable identity, version/build capabilities, provenance,
+and invalidation rules required before any of these forms can enforce.
+
+Raw CMD/PowerShell curl gains exact ordinary HTTP(S) headers, origin
+credentials, inline/body and file-upload projection, plus supported direct
+proxy/SOCKS credentials. Exact hostname projection on PowerShell requires the
+explicit native `curl.exe` or `wget.exe`; the unqualified names belong to
+PowerShell aliases and remain detection-only. FTP account/alternative control
+fields, SMTP envelope fields, and Telnet `USER`/`TTYPE`/`XDISPLOC`/`NEW_ENV`
+remain detection-only on raw Windows shell input; their closed projectors still
+require POSIX or structured argv.
 
 Custom rules own their own rule ID. DefenseClaw may define internal alias,
 prerequisite, and safe-negative contracts for bundled owners, but those maps

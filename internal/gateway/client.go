@@ -42,9 +42,10 @@ import (
 // Client connects to the OpenClaw gateway WebSocket and provides RPC methods
 // and an event stream for the sidecar.
 type Client struct {
-	cfg    *config.GatewayConfig
-	device *DeviceIdentity
-	debug  bool
+	cfg     *config.GatewayConfig
+	device  *DeviceIdentity
+	dataDir string
+	debug   bool
 
 	conn        *websocket.Conn
 	mu          sync.Mutex
@@ -75,15 +76,26 @@ const (
 
 // NewClient creates a gateway client. The device identity is loaded or created
 // automatically from the configured key file path.
-func NewClient(cfg *config.GatewayConfig) (*Client, error) {
-	device, err := LoadOrCreateIdentity(cfg.DeviceKeyFile)
+func NewClient(cfg *config.GatewayConfig, dataDirs ...string) (*Client, error) {
+	if len(dataDirs) > 1 {
+		return nil, fmt.Errorf("gateway: device identity accepts at most one data directory")
+	}
+	target, dataDir, err := normalizeDeviceIdentityPaths(cfg.DeviceKeyFile, dataDirs)
 	if err != nil {
 		return nil, err
 	}
+	device, err := loadOrCreateIdentityAt(target, dataDir)
+	if err != nil {
+		return nil, err
+	}
+	// Keep every downstream consumer, including the telemetry resource
+	// fingerprint, on the same canonical path used for identity custody.
+	cfg.DeviceKeyFile = target
 
 	return &Client{
 		cfg:     cfg,
 		device:  device,
+		dataDir: dataDir,
 		debug:   os.Getenv("DEFENSECLAW_DEBUG") == "1",
 		pending: make(map[string]chan *ResponseFrame),
 		lastSeq: -1,
@@ -591,13 +603,12 @@ func (c *Client) tryAuthRepair(connectErr error) {
 		// hook-driven request 401s until the next full sidecar
 		// restart re-reads openclaw.json on boot.
 		//
-		// DeviceKeyFile lives at <dataDir>/device.key; derive dataDir
-		// from it so we don't need a new config field. Errors are
-		// logged but not returned — persistence is best-effort, the
-		// primary in-memory refresh already succeeded.
-		if c.cfg.DeviceKeyFile != "" {
-			dataDir := filepath.Dir(c.cfg.DeviceKeyFile)
-			if err := persistRefreshedToken(dataDir, newToken); err != nil {
+		// Keep refreshed credentials in the configured data directory even
+		// when device_key_file is nested beneath it. Errors are logged but
+		// not returned — persistence is best-effort, the primary in-memory
+		// refresh already succeeded.
+		if c.dataDir != "" {
+			if err := persistRefreshedToken(c.dataDir, newToken); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] WARNING: failed to persist refreshed token to disk: %v — hook scripts may 401 until next restart\n", err)
 			}
 		}

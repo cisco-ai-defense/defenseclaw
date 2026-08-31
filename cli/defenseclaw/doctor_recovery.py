@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ntpath
 import os
 import sqlite3
 import stat
@@ -303,9 +304,22 @@ def plan_missing_device_key(
     credentials.
     """
 
-    normalized_target = _normalize_disk_path(target)
-    normalized_data = _normalize_disk_path(data_dir)
+    normalized_target, normalized_data = _normalize_device_identity_disk_paths(
+        target,
+        data_dir,
+    )
     if normalized_target and normalized_data:
+        alias_reason = _device_identity_artifact_alias_reason(
+            normalized_target,
+            normalized_data,
+        )
+        if alias_reason is not None:
+            return _blocked_plan(
+                RecoveryKind.DEVICE_KEY,
+                normalized_target,
+                normalized_data,
+                alias_reason,
+            )
         markers = (
             normalized_target + ".provenance",
             os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET),
@@ -319,6 +333,48 @@ def plan_missing_device_key(
         normalized_data,
         markers,
         unattended_allowed=False,
+    )
+
+
+def _device_identity_artifact_alias_reason(target: str, data_dir: str) -> str | None:
+    """Reject device identity layouts whose publications can alias each other."""
+
+    if os.name == "nt" and any(
+        _windows_path_has_alternate_data_stream(path) for path in (target, data_dir)
+    ):
+        return "windows-alternate-data-stream-path"
+    secret_target = os.path.join(data_dir, _DEVICE_PROVENANCE_SECRET)
+    provenance_target = target + ".provenance"
+    normalized = tuple(
+        _normalize_device_identity_path(candidate)
+        for candidate in (target, secret_target, provenance_target)
+    )
+    if len(set(normalized)) != len(normalized):
+        return "identity-artifact-alias"
+    folded_target = _normalize_device_identity_path(target)
+    folded_secret = _normalize_device_identity_path(secret_target)
+    if folded_target.startswith(folded_secret + os.sep):
+        return "reserved-provenance-secret-path"
+    return None
+
+
+def _windows_path_has_alternate_data_stream(path: str | os.PathLike[str]) -> bool:
+    _volume, remainder = ntpath.splitdrive(os.fspath(path))
+    return ":" in remainder
+
+
+def _normalize_device_identity_path(path: str | os.PathLike[str]) -> str:
+    """Return the conservative comparison spelling for identity artifacts."""
+
+    return os.path.normpath(os.fspath(path)).casefold()
+
+
+def _device_identity_paths_equal(
+    left: str | os.PathLike[str],
+    right: str | os.PathLike[str],
+) -> bool:
+    return _normalize_device_identity_path(left) == _normalize_device_identity_path(
+        right
     )
 
 
@@ -455,6 +511,12 @@ def apply_device_key_recovery(
             (provenance_stage, provenance_target, "device-provenance"),
             (key_stage, plan.target, "device-key"),
         ):
+            # The data root is owner-private before staging, but a same-user
+            # concurrent actor can still replace a nested component. Re-bind
+            # the entire captured directory chain before every publication;
+            # Windows additionally holds the destination chain lease inside
+            # its CREATE_NEW adapter.
+            _revalidate_directory_custody(plan)
             if plan.custody.platform == "windows":
                 payload = _read_private_regular_file(source, max_bytes=4096, platform="windows")
                 try:
@@ -521,9 +583,9 @@ def _plan_missing_target(
 
     try:
         common = os.path.commonpath((target, data_dir))
-        if os.path.normcase(common) != os.path.normcase(data_dir) or os.path.normcase(target) == os.path.normcase(
-            data_dir
-        ):
+        if not _device_identity_paths_equal(
+            common, data_dir
+        ) or _device_identity_paths_equal(target, data_dir):
             return _blocked_plan(kind, target, data_dir, "target-outside-data-dir")
     except ValueError:
         return _blocked_plan(kind, target, data_dir, "target-outside-data-dir")
@@ -637,6 +699,42 @@ def _normalize_disk_path(value: str | os.PathLike[str]) -> str:
     return os.path.normpath(os.path.abspath(expanded))
 
 
+def _normalize_device_identity_disk_paths(
+    target: str | os.PathLike[str],
+    data_dir: str | os.PathLike[str],
+) -> tuple[str, str]:
+    """Resolve one portable relative key beneath an explicit absolute data root."""
+
+    try:
+        raw_target = os.fspath(target)
+        raw_data = os.fspath(data_dir)
+    except TypeError:
+        return "", ""
+    normalized_data = (
+        _normalize_disk_path(raw_data)
+        if isinstance(raw_data, str) and os.path.isabs(raw_data)
+        else ""
+    )
+    if not isinstance(raw_target, str) or not raw_target or "\x00" in raw_target:
+        return "", normalized_data
+
+    if os.path.isabs(raw_target):
+        normalized_target = _normalize_disk_path(raw_target)
+        target_volume = ntpath.splitdrive(raw_target)[0]
+        if (
+            os.name == "nt"
+            and raw_target.startswith(("/", "\\"))
+            and not target_volume
+        ):
+            return "", normalized_data
+        return normalized_target, normalized_data
+
+    from defenseclaw.config import _resolve_relative_gateway_device_key_file
+
+    resolved = _resolve_relative_gateway_device_key_file(raw_target, normalized_data)
+    return (resolved or ""), normalized_data
+
+
 def _platform_name() -> str:
     return "windows" if os.name == "nt" else "posix"
 
@@ -658,7 +756,10 @@ def _directory_identity_chain(data_dir: str, parent: str) -> tuple[DirectoryIden
         raise RecoveryRefusedError("data-dir-path-is-indirect")
     paths = _controlled_directory_paths(data_dir, parent)
 
-    from defenseclaw.file_permissions import darwin_acl_write_error
+    from defenseclaw.file_permissions import (
+        darwin_acl_confidentiality_error,
+        darwin_acl_write_error,
+    )
 
     identities: list[DirectoryIdentity] = []
     running_uid = os.geteuid()
@@ -678,6 +779,8 @@ def _directory_identity_chain(data_dir: str, parent: str) -> tuple[DirectoryIden
             raise RecoveryRefusedError("directory-chain-is-writable-by-others")
         if darwin_acl_write_error(path) is not None:
             raise RecoveryRefusedError("directory-chain-has-untrusted-writer")
+        if darwin_acl_confidentiality_error(path) is not None:
+            raise RecoveryRefusedError("directory-chain-has-untrusted-reader")
         if os.path.realpath(path) != path:
             raise RecoveryRefusedError("directory-chain-is-indirect")
         identities.append(
@@ -801,6 +904,17 @@ def _revalidate_plan(plan: RecoveryPlan) -> None:
         or fresh.data_dir != plan.data_dir
         or fresh.custody != plan.custody
     ):
+        raise RecoveryRefusedError("recovery-plan-stale")
+
+
+def _revalidate_directory_custody(plan: RecoveryPlan) -> None:
+    if plan.custody is None:
+        raise RecoveryRefusedError("recovery-plan-stale")
+    try:
+        current = _custody_snapshot(plan.data_dir, os.path.dirname(plan.target))
+    except RecoveryRefusedError as exc:
+        raise RecoveryRefusedError("recovery-plan-stale") from exc
+    if current != plan.custody:
         raise RecoveryRefusedError("recovery-plan-stale")
 
 

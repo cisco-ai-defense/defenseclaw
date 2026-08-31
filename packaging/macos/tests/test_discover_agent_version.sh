@@ -86,6 +86,72 @@ JSON
   assert_eq "${got}" "2.0.99" "claudecode version from VS Code extension"
 }
 
+t_claudecode_via_claude_desktop_embedded_bundle() {
+  # Regression for customer bundle 0827_0914 (jlunde). Claude Desktop
+  # bundles Claude Code under ~/Library/Application Support/Claude/
+  # claude-code/<X.Y.Z>/claude.app/... and drops a shim at
+  # ~/.local/bin/claude pointing to the deep binary. The shim-basename
+  # walk yields "claude" / "MacOS" (both non-semver) so the version
+  # has to come from the version-labelled bundle directory 4 hops
+  # above the terminal binary. jlunde's box had 2.1.219 embedded here;
+  # use that as a concrete regression pin.
+  #
+  # Ported from PR #785 (release-26.7.3 backport of PR #798, author
+  # @rucpande, AIFW-32990) as a surgical port. The full 26.7.3-shape
+  # discovery (versions/*/ walker, SemVer comparator, node-manager
+  # glob walker, etc.) is out of scope for this release-branch fix —
+  # see docs/PLAN-consolidate-hook-enumerator.md for the consolidated
+  # Go replacement that supersedes this bash probe.
+  local home; home="$(mktest_tmp)"
+  local bin="${home}/Library/Application Support/Claude/claude-code/2.1.219/claude.app/Contents/MacOS/claude"
+  mkdir -p "$(dirname -- "${bin}")"
+  : > "${bin}"
+  chmod 0755 "${bin}"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.219" "claudecode version from Claude Desktop embedded bundle"
+}
+
+t_claudecode_desktop_embedded_picks_highest_version() {
+  # Multiple Claude Desktop-bundled versions coexist during upgrade
+  # windows. Discovery must pick the highest semver-shaped directory
+  # so a stale bundle doesn't shadow the active install.
+  local home; home="$(mktest_tmp)"
+  local root="${home}/Library/Application Support/Claude/claude-code"
+  local ver
+  for ver in 2.1.144 2.1.219 2.1.171; do
+    local bin="${root}/${ver}/claude.app/Contents/MacOS/claude"
+    mkdir -p "$(dirname -- "${bin}")"
+    : > "${bin}"
+    chmod 0755 "${bin}"
+  done
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.219" "claudecode picks highest Claude Desktop embedded version"
+}
+
+t_claudecode_desktop_embedded_numeric_patch_ordering() {
+  # Guards against a lexicographic patch-field comparison (older BSD
+  # `sort` without `-V` would return "2.1.9" for {2.1.9, 2.1.219} —
+  # the exact symptom PR #785 fixed). The internal _semver_greater
+  # helper must order these numerically, not lexicographically.
+  local home; home="$(mktest_tmp)"
+  local root="${home}/Library/Application Support/Claude/claude-code"
+  local ver
+  for ver in 2.1.9 2.1.219; do
+    local bin="${root}/${ver}/claude.app/Contents/MacOS/claude"
+    mkdir -p "$(dirname -- "${bin}")"
+    : > "${bin}"
+    chmod 0755 "${bin}"
+  done
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.219" "claudecode numeric patch ordering (2.1.219 > 2.1.9)"
+}
+
 t_claudecode_no_install_returns_empty() {
   # Empty tmp HOME + no CLI on PATH → empty version, cleanly.
   local home; home="$(mktest_tmp)"
@@ -529,6 +595,9 @@ run_case "amp package metadata identity"      t_amp_metadata_requires_package_id
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
+run_case "claudecode via Claude Desktop embedded bundle" t_claudecode_via_claude_desktop_embedded_bundle
+run_case "claudecode Claude Desktop picks highest bundled" t_claudecode_desktop_embedded_picks_highest_version
+run_case "claudecode Claude Desktop numeric patch ordering" t_claudecode_desktop_embedded_numeric_patch_ordering
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata

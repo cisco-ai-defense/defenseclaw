@@ -185,3 +185,6 @@ outputs/
 
 # Local native-Windows manual acceptance walkthrough.
 /WINDOWS_NATIVE_MANUAL_TEST.md
+# Local AI planning artifacts
+/.superpowers/
+/docs/superpowers/

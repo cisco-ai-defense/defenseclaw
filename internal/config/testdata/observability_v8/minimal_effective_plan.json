@@ -29,7 +29,7 @@
   "local": {
     "path": "/var/lib/defenseclaw/audit.db",
     "judge_bodies_path": "/var/lib/defenseclaw/judge_bodies.db",
-    "retention_days": 90
+    "retention_days": 7
   },
   "buckets": [
     {

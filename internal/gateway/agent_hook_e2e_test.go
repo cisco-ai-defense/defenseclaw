@@ -162,7 +162,7 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			health := NewSidecarHealth()
 			api := &APIServer{scannerCfg: cfg, health: health}
 			handler := inboundTraceContextMiddleware(http.HandlerFunc(api.handleAgentHook(sh.connector)))
-			body, err := json.Marshal(map[string]interface{}{
+			requestPayload := map[string]interface{}{
 				"hook_event_name": sh.event,
 				"session_id":      "session-" + sh.connector,
 				"turn_id":         "turn-" + sh.connector,
@@ -173,7 +173,25 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				"tool_input": map[string]interface{}{
 					"command": "rm -rf /",
 				},
-			})
+			}
+			if sh.connector == "antigravity" {
+				// Real Antigravity hooks nest the tool descriptor. Keep this
+				// fixture free of top-level tool_name/tool_input authority so a
+				// block proves toolCall.args reached the trusted boundary.
+				requestPayload = map[string]interface{}{
+					"hookEventName":  sh.event,
+					"conversationId": "session-" + sh.connector,
+					"toolCall": map[string]interface{}{
+						"name": sh.toolName,
+						"args": map[string]interface{}{
+							"CommandLine": "rm -rf /",
+							"Cwd":         "/tmp/antigravity-workspace",
+						},
+					},
+					"workspacePaths": []interface{}{`/tmp/antigravity-workspace`},
+				}
+			}
+			body, err := json.Marshal(requestPayload)
 			if err != nil {
 				t.Fatalf("marshal request: %v", err)
 			}
@@ -245,6 +263,105 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		if !covered[name] {
 			t.Errorf("connector %q has a registered hook handler but no row in TestHandleAgentHook_FullChain_PerConnector; add it.", name)
 		}
+	}
+}
+
+func TestNormalizeAgentHookRequest_AntigravityNestedToolArgsAuthority(t *testing.T) {
+	profile := (&APIServer{}).hookProfileForConnector("antigravity")
+	decode := func(t *testing.T, raw string) agentHookRequest {
+		t.Helper()
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			t.Fatalf("unmarshal fixture: %v", err)
+		}
+		return normalizeAgentHookRequestWithRawProfile(
+			"antigravity", payload, []byte(raw), profile,
+		)
+	}
+
+	t.Run("exact nested args reach trusted request", func(t *testing.T) {
+		raw := `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args": { "CommandLine": "rm -rf /", "Cwd": "/tmp/work" }}}`
+		want := `{ "CommandLine": "rm -rf /", "Cwd": "/tmp/work" }`
+		req := decode(t, raw)
+		if got := string(req.ToolArgs); got != want {
+			t.Fatalf("ToolArgs=%q want exact nested object %q", got, want)
+		}
+		if req.ToolArgsProjectionUncertain {
+			t.Fatal("exact nested args were marked uncertain")
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "duplicate nested field",
+			raw:  `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"echo safe"},"args":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "conflicting aliases",
+			raw:  `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"echo safe"},"arguments":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "malformed args object",
+			raw:  `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args":"{\"CommandLine\":\"rm -rf /\"}"}}`,
+		},
+		{
+			name: "top-level and payload strings have no authority",
+			raw:  `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command"},"tool_input":"{\"CommandLine\":\"rm -rf /\"}","payload":"{\"args\":{\"CommandLine\":\"rm -rf /\"}}"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(decode(t, tc.raw).ToolArgs); got != "{}" {
+				t.Fatalf("ToolArgs=%q want valid empty-object fail-closed projection", got)
+			}
+		})
+	}
+}
+
+func TestHandleAgentHook_AntigravityUsesCompleteRawBodyForAuthority(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "antigravity"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	handler := http.HandlerFunc(api.handleAgentHook("antigravity"))
+
+	first := `{"hookEventName":"PreToolUse","conversationId":"session-antigravity","toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /","Cwd":"/tmp/work"}}}`
+	body := first + strings.Repeat(" ", 8192) + `{}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/antigravity/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 fail-open response: %s", w.Code, w.Body.String())
+	}
+	var response agentHookResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Action != "allow" || response.RawAction != "allow" ||
+		response.WouldBlock || response.Severity != "NONE" {
+		t.Fatalf("trailing JSON acquired tool authority: %+v", response)
+	}
+}
+
+func TestHandleAgentHookRejectsOversizedBody(t *testing.T) {
+	api := &APIServer{health: NewSidecarHealth()}
+	handler := http.HandlerFunc(api.handleAgentHook("antigravity"))
+	body := strings.Repeat(" ", int(apiRequestBodyMaxBytes+1)) + `{}`
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/antigravity/hook",
+		strings.NewReader(body),
+	)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want 413: %s", w.Code, w.Body.String())
 	}
 }
 

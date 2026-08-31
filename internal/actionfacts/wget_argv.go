@@ -30,6 +30,11 @@ type wgetArgvValue struct {
 	Joined      bool
 }
 
+type wgetArgvTarget struct {
+	Value     string
+	ArgvIndex int
+}
+
 type wgetRequestBodyIssue string
 
 const (
@@ -51,7 +56,10 @@ type wgetArgvParse struct {
 	Complete bool
 
 	Targets []string
-	Values  []wgetArgvValue
+	// TargetValues retains argv identity for consumers that need to prove
+	// exact target-bound request bytes without re-parsing option ownership.
+	TargetValues []wgetArgvTarget
+	Values       []wgetArgvValue
 
 	OutputSet    bool
 	Output       string
@@ -66,6 +74,10 @@ type wgetArgvParse struct {
 	Background       bool
 	ConfigIndirect   bool
 	ConfigDisabled   bool
+	ProxySet         bool
+	Proxy            bool
+	ProxyOptionIndex int
+	ProxyValueIndex  int
 	Spider           bool
 	MethodSet        bool
 	Method           string
@@ -133,6 +145,7 @@ const (
 	wgetEffectPostFile
 	wgetEffectBodyData
 	wgetEffectBodyFile
+	wgetEffectProxy
 	wgetEffectSpider
 	wgetEffectQuiet
 	wgetEffectVerbose
@@ -177,7 +190,7 @@ var wgetShortOptionSpecs = map[byte]wgetOptionSpec{
 	'U': wgetValueSpec("--user-agent", true, validWgetUserAgent),
 	'V': wgetFlagSpec("--version", wgetEffectPreview, true),
 	'X': wgetValueSpec("--exclude-directories", true, nil),
-	'Y': wgetValueSpec("--proxy", false, validWgetBoolean),
+	'Y': wgetEffectValueSpec("--proxy", false, wgetEffectProxy, validWgetBoolean),
 	'a': wgetFinalEffectValueSpec("--append-output", wgetEffectLogOutput, nil),
 	'b': wgetFlagSpec("--background", wgetEffectBackground, true),
 	'c': wgetFlagSpec("--continue", wgetEffectNone, true),
@@ -222,8 +235,12 @@ var wgetLongOptionSpecs = map[string]wgetOptionSpec{
 	"exclude-directories":  wgetValueSpec("--exclude-directories", true, nil),
 	"force-directories":    wgetBooleanSpec("--force-directories", wgetEffectNone),
 	"force-html":           wgetBooleanSpec("--force-html", wgetEffectNone),
+	"ftp-password":         wgetValueSpec("--ftp-password", true, nil),
+	"ftp-user":             wgetValueSpec("--ftp-user", true, nil),
 	"header":               wgetValueSpec("--header", true, validWgetHeader),
 	"help":                 wgetFlagSpec("--help", wgetEffectPreview, true),
+	"http-password":        wgetValueSpec("--http-password", true, nil),
+	"http-user":            wgetValueSpec("--http-user", true, nil),
 	"include-directories":  wgetValueSpec("--include-directories", true, nil),
 	"inet4-only":           wgetBooleanSpec("--inet4-only", wgetEffectIPv4),
 	"inet6-only":           wgetBooleanSpec("--inet6-only", wgetEffectIPv6),
@@ -240,7 +257,7 @@ var wgetLongOptionSpecs = map[string]wgetOptionSpec{
 	"password":             wgetValueSpec("--password", true, nil),
 	"post-data":            wgetEffectValueSpec("--post-data", true, wgetEffectPostData, nil),
 	"post-file":            wgetFinalEffectValueSpec("--post-file", wgetEffectPostFile, nil),
-	"proxy":                wgetBooleanSpec("--proxy", wgetEffectNone),
+	"proxy":                wgetBooleanSpec("--proxy", wgetEffectProxy),
 	"proxy-password":       wgetValueSpec("--proxy-password", true, nil),
 	"proxy-user":           wgetValueSpec("--proxy-user", true, nil),
 	"quiet":                wgetBooleanSpec("--quiet", wgetEffectQuiet),
@@ -324,6 +341,8 @@ func parseWgetArgv(argv []string) wgetArgvParse {
 	parsed := wgetArgvParse{
 		Complete:         true,
 		RequestBodyValid: true,
+		ProxyOptionIndex: -1,
+		ProxyValueIndex:  -1,
 	}
 	if len(argv) == 0 || argv[0] == "" {
 		parsed.Complete = false
@@ -341,6 +360,10 @@ func parseWgetArgv(argv []string) wgetArgvParse {
 		}
 		if !options || argument == "-" || !strings.HasPrefix(argument, "-") {
 			parsed.Targets = append(parsed.Targets, argument)
+			parsed.TargetValues = append(parsed.TargetValues, wgetArgvTarget{
+				Value:     argument,
+				ArgvIndex: index,
+			})
 			continue
 		}
 
@@ -435,7 +458,7 @@ func parseWgetLongOption(
 			parsed.Complete = false
 			return false
 		}
-		applyWgetFlag(parsed, spec)
+		applyWgetFlag(parsed, spec, optionIndex)
 		return !parsed.Preview
 	case wgetOptionOptionalBoolean:
 		value := spec.flagValue
@@ -455,7 +478,7 @@ func parseWgetLongOption(
 			}
 		}
 		spec.flagValue = value
-		applyWgetFlag(parsed, spec)
+		applyWgetFlag(parsed, spec, optionIndex)
 		return true
 	case wgetOptionRequiredValue:
 		value := joinedValue
@@ -478,10 +501,10 @@ func parseWgetLongOption(
 		})
 		if !spec.validateFinal && !validWgetOptionValue(spec, value) {
 			parsed.Complete = false
-			applyWgetValue(parsed, spec, value)
+			applyWgetValue(parsed, spec, value, optionIndex, valueIndex)
 			return false
 		}
-		applyWgetValue(parsed, spec, value)
+		applyWgetValue(parsed, spec, value, optionIndex, valueIndex)
 		return true
 	default:
 		parsed.Complete = false
@@ -523,7 +546,7 @@ func parseWgetShortOptions(
 			return false
 		}
 		if spec.arity == wgetOptionFlag {
-			applyWgetFlag(parsed, spec)
+			applyWgetFlag(parsed, spec, optionIndex)
 			if parsed.Preview {
 				return false
 			}
@@ -557,10 +580,10 @@ func parseWgetShortOptions(
 		})
 		if !spec.validateFinal && !validWgetOptionValue(spec, value) {
 			parsed.Complete = false
-			applyWgetValue(parsed, spec, value)
+			applyWgetValue(parsed, spec, value, optionIndex, valueIndex)
 			return false
 		}
-		applyWgetValue(parsed, spec, value)
+		applyWgetValue(parsed, spec, value, optionIndex, valueIndex)
 		return true
 	}
 	return true
@@ -573,12 +596,21 @@ func validWgetOptionValue(spec wgetOptionSpec, value string) bool {
 	return spec.validate == nil || spec.validate(value)
 }
 
-func applyWgetFlag(parsed *wgetArgvParse, spec wgetOptionSpec) {
+func applyWgetFlag(
+	parsed *wgetArgvParse,
+	spec wgetOptionSpec,
+	optionIndex int,
+) {
 	switch spec.effect {
 	case wgetEffectPreview:
 		parsed.Preview = spec.flagValue
 	case wgetEffectBackground:
 		parsed.Background = spec.flagValue
+	case wgetEffectProxy:
+		parsed.ProxySet = true
+		parsed.Proxy = spec.flagValue
+		parsed.ProxyOptionIndex = optionIndex
+		parsed.ProxyValueIndex = -1
 	case wgetEffectSpider:
 		parsed.Spider = spec.flagValue
 	case wgetEffectQuiet:
@@ -609,7 +641,13 @@ func applyWgetFlag(parsed *wgetArgvParse, spec wgetOptionSpec) {
 	}
 }
 
-func applyWgetValue(parsed *wgetArgvParse, spec wgetOptionSpec, value string) {
+func applyWgetValue(
+	parsed *wgetArgvParse,
+	spec wgetOptionSpec,
+	value string,
+	optionIndex int,
+	valueIndex int,
+) {
 	switch spec.effect {
 	case wgetEffectConfigFile:
 		parsed.ConfigIndirect = true
@@ -629,7 +667,7 @@ func applyWgetValue(parsed *wgetArgvParse, spec wgetOptionSpec, value string) {
 		}
 	case wgetEffectMethod:
 		parsed.MethodSet = true
-		parsed.Method = strings.ToUpper(value)
+		parsed.Method = wgetUpperASCII(value)
 	case wgetEffectPostData:
 		parsed.PostDataSet = true
 		parsed.PostData = value
@@ -642,6 +680,11 @@ func applyWgetValue(parsed *wgetArgvParse, spec wgetOptionSpec, value string) {
 	case wgetEffectBodyFile:
 		parsed.BodyFileSet = true
 		parsed.BodyFile = value
+	case wgetEffectProxy:
+		parsed.ProxySet = true
+		parsed.Proxy, _ = parseWgetBoolean(value)
+		parsed.ProxyOptionIndex = optionIndex
+		parsed.ProxyValueIndex = valueIndex
 	case wgetEffectNoBundle:
 		for _, option := range value {
 			switch option {
@@ -874,7 +917,7 @@ func validWgetHeader(value string) bool {
 	if value == "" {
 		return true
 	}
-	if strings.ContainsAny(value, "\r\n") {
+	if strings.ContainsAny(value, "\x00\r\n") {
 		return false
 	}
 	name, _, found := strings.Cut(value, ":")
@@ -890,19 +933,21 @@ func validWgetHeader(value string) bool {
 }
 
 func validWgetUserAgent(value string) bool {
-	return !strings.ContainsRune(value, '\n')
+	return !strings.ContainsAny(value, "\x00\n")
 }
 
 func validWgetMethod(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, char := range value {
-		if char <= 0x20 || char >= 0x7f || strings.ContainsRune("()<>@,;:\\\"/[]?={}", char) {
-			return false
+	return !strings.ContainsRune(value, '\x00')
+}
+
+func wgetUpperASCII(value string) string {
+	result := []byte(value)
+	for index, character := range result {
+		if character >= 'a' && character <= 'z' {
+			result[index] = character - ('a' - 'A')
 		}
 	}
-	return true
+	return string(result)
 }
 
 func trimWgetASCIIWhitespace(value string) string {

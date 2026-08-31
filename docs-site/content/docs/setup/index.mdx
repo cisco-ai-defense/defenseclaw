@@ -75,6 +75,11 @@ which ones are interactive and which ones are designed for scripts.
     description="Stash DEFENSECLAW_LLM_KEY (and any per-component overrides) in ~/.defenseclaw/.env. Top-level group: list, set, fill-missing, check. Not a setup subcommand."
   />
   <Card
+    title="setup routing"
+    href="/docs/setup/semantic-routing"
+    description="Route OpenAI Chat Completions traffic between configured model backends with the managed vLLM Semantic Router sidecar. Proxy connectors only."
+  />
+  <Card
     title="setup webhook"
     href="/docs/setup/webhooks"
     description="Add Slack, PagerDuty, Webex, or generic HMAC notifiers for high-severity alerts. Test deliveries, list, enable/disable, remove."
@@ -142,6 +147,7 @@ below is the canonical mapping for their interactive and scripted forms.
 | Verb | Interactive | Non-interactive | Notes |
 | --- | --- | --- | --- |
 | `setup guardrail` | yes (default) | `--non-interactive` + flags | Wizard explains each prompt; non-interactive mode requires every required flag. |
+| `setup routing` | no | `--enable`, `--disable`, or `--status` | Requires Docker. Applies only to proxy-mode OpenAI Chat Completions traffic. |
 | `setup <connector>` | yes | flags + `--yes` | Adds or reconfigures a connector; pass `--mode observe\|action` to choose enforcement mode. |
 | `keys list` / `set` / `fill-missing` / `check` | yes (default) | `--value` + `--yes` | `keys set` prompts for the value (hidden) when `--value` is omitted. |
 | `setup webhook add <type>` | yes (default) | `--non-interactive` + flags | URL and secret-env are prompt-or-flag; type is always positional. |

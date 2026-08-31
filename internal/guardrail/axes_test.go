@@ -172,6 +172,7 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"CMD-REVSHELL-BASH": CapExecShell,
 		"CMD-REVSHELL-NC":   CapExecShell,
 		"CMD-RM-RF":         CapExecShell,
+		"CMD-DEVICE-WIPE":   CapExecShell,
 		"CMD-BASH-C":        CapExecShell,
 		"CMD-SUDO":          CapExecShell,
 		"SRC-EXEC":          CapExecShell,

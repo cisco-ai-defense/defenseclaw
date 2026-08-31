@@ -598,6 +598,13 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	}
 	// The generic bearer shape has no provider-specific checksum or prefix, so
 	// require a modest entropy floor before elevating arbitrary header examples.
+	//
+	// Deliberately NOT extended to provider-prefixed keys. A padded synthetic
+	// token and a leaked credential are indistinguishable by character variety:
+	// the security corpus asserts that ghp_abc123ffff… (36 f's) MUST be
+	// detected, while an AKIA key with a zero-filler tail looks the same to any
+	// entropy or repetition measure. Where the two cannot be separated, the
+	// product's choice is to report.
 	return ruleID != "SEC-BEARER" || credentialEntropy(compactCredential(candidate)) >= 2.5
 }
 

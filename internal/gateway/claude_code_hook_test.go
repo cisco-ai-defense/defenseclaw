@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -103,6 +104,29 @@ func TestEvaluateClaudeCodeHook_NonClaudeConnectorStaysDisabled(t *testing.T) {
 	}
 }
 
+func TestEvaluateClaudeCodeHook_DisabledConnectorRetainsAuthenticatedLifecycle(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "openclaw"
+	api := &APIServer{scannerCfg: cfg}
+	agentFile := writeActiveAgentTestFile(t, t.TempDir(), "AGENTS.md")
+
+	resp := api.evaluateClaudeCodeHook(
+		withAuthenticatedHookConnector(context.Background(), "claudecode"),
+		claudeCodeHookRequest{
+			HookEventName: "InstructionsLoaded",
+			SessionID:     "disabled-session",
+			FilePath:      agentFile,
+		},
+	)
+	if resp.RawAction != "allow" {
+		t.Fatalf("RawAction = %q, want allow", resp.RawAction)
+	}
+	if got := api.activeAgentContext.snapshot("claudecode", "disabled-session"); !slices.Equal(got.files, []string{agentFile}) || got.uncertain {
+		t.Fatalf("disabled connector lost authenticated lifecycle state: %#v", got)
+	}
+}
+
 // TestEvaluateClaudeCodeHook_ExplicitEnableStillWorks ensures operators
 // who explicitly set claude_code.enabled=true (e.g. alongside a custom
 // connector for testing) still get inspection even when the connector
@@ -138,7 +162,7 @@ func TestEvaluateClaudeCodeHook_HILTPreToolUseAsks(t *testing.T) {
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
 		ToolInput: map[string]interface{}{
-			"command": "nc -l 4444",
+			"command": "chmod 777 /etc/shadow",
 		},
 	})
 

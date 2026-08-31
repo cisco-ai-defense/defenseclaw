@@ -944,6 +944,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("ai_discovery", oldCfg.AIDiscovery, newCfg.AIDiscovery)
 	add("application_protection", oldCfg.ApplicationProtection, newCfg.ApplicationProtection)
 	add("notifications", oldCfg.Notifications, newCfg.Notifications)
+	add("routing", oldCfg.Routing, newCfg.Routing)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)
 	add("workspace_id", oldCfg.WorkspaceID, newCfg.WorkspaceID)

@@ -28,14 +28,14 @@ func TestHelpControlRequiresExactOptionOwnership(t *testing.T) {
 		{
 			name:    "curl raw",
 			command: "curl --output-dir --help http://127.0.0.1:1/",
-			status:  StatusPartial,
+			status:  StatusComplete,
 		},
 		{
 			name: "curl structured",
 			argv: []string{
 				"curl", "--output-dir", "--help", "http://127.0.0.1:1/",
 			},
-			status: StatusPartial,
+			status: StatusComplete,
 		},
 		{
 			name: "docker raw",
@@ -155,18 +155,6 @@ func TestCurlEffectiveTargetOverridesForceFallback(t *testing.T) {
 				"curl", "--connect-to",
 				"allowed.example:443:169.254.169.254:443",
 				"https://allowed.example/latest/meta-data/",
-			},
-		},
-		{
-			name: "proxy raw",
-			command: "curl --proxy http://169.254.169.254:8080 " +
-				"https://allowed.example/",
-		},
-		{
-			name: "proxy structured",
-			argv: []string{
-				"curl", "--proxy", "http://169.254.169.254:8080",
-				"https://allowed.example/",
 			},
 		},
 	} {

@@ -70,6 +70,13 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 		req,
 		req.toolChain.facts,
 		preExecutionBoundary,
+		func(observation trustedActionTelemetry) {
+			a.recordParserUncertaintyMetricV8(
+				artifactCtx,
+				req.ConnectorName,
+				observation.ParserUncertaintyCount,
+			)
+		},
 	)
 	if len(findings) == 0 {
 		return resp
@@ -111,6 +118,7 @@ func promotedArtifactFindings(
 	req agentHookRequest,
 	facts actionfacts.Facts,
 	preExecutionBoundary bool,
+	recordTelemetry func(trustedActionTelemetry),
 ) []RuleFinding {
 	candidates := promotedArtifactCandidates(facts)
 	if len(candidates) == 0 {
@@ -129,11 +137,15 @@ func promotedArtifactFindings(
 		}
 		analysisBody := promotedArtifactAnalysisBody(body)
 		input := actionfacts.Input{
-			Tool:        "shell",
-			Command:     string(analysisBody),
-			CWD:         facts.CWD,
-			ActiveHome:  trustedSameHostHome(),
-			DialectHint: dialect,
+			Tool:                                     "shell",
+			Command:                                  string(analysisBody),
+			CWD:                                      facts.CWD,
+			ActiveHome:                               trustedSameHostHome(),
+			ActiveAgentFiles:                         append([]string(nil), facts.ActiveAgentFiles...),
+			ActiveAgentFilesCaseInsensitive:          append([]string(nil), facts.ActiveAgentFilesCaseInsensitive...),
+			ActiveAgentFilesCaseInsensitiveUncertain: facts.ActiveAgentFilesCaseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                facts.ActiveAgentFilesUncertain,
+			DialectHint:                              dialect,
 		}
 		artifactFacts := actionfacts.Analyze(input)
 		outerCandidateEnforceable := preExecutionBoundary &&
@@ -147,6 +159,7 @@ func promotedArtifactFindings(
 			LegacyText:         string(body),
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
+			recordTelemetry:    recordTelemetry,
 		})
 		if req.toolChain != nil {
 			req.toolChain.recordArtifactTrustedAction(

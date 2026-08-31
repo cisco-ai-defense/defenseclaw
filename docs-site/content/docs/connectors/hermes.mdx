@@ -11,7 +11,7 @@ The Hermes connector wires DefenseClaw into the Hermes agent runtime via `~/.her
 
 <Video
   src="hermes"
-  caption="Three commands against one Hermes Agent session in observe mode: (1) `echo hello` flows through as action=allow / severity=NONE; (2) `chmod 777 /tmp/dc_test` matches CMD-CHMOD-WORLD HIGH; (3) `cat /etc/shadow` raises a CRITICAL sensitive-file read. Observe mode logs without blocking, and supported tool, LLM, session, and subagent events appear in connector activity."
+  caption="Three commands against one Hermes Agent session in observe mode: (1) `echo hello` flows through as action=allow / severity=NONE; (2) `chmod 777 /tmp/dc_test` matches CMD-CHMOD-WORLD HIGH; (3) `cat /etc/shadow` appears as a CRITICAL sensitive-file read in this historical recording. Current builds cap an ordinary sensitive-file read at MEDIUM and keep it detection-only unless the same action proves a mutation or external egress. Observe mode logs without blocking, and supported tool, LLM, session, and subagent events appear in connector activity."
 />
 
 ## Setup

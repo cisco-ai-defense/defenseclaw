@@ -383,13 +383,60 @@ not an administrator authority even though it is a machine service.
 3. A target without an active, safe WTS token cannot be repaired. The guardian
    records failure and retries rather than writing the profile as LocalSystem.
    The activating install-time `-Mode` / `-Connector` shorthand therefore
-   seeds enabled rows only for eligible `WTSActive` profile SIDs. The protected
-   enumerator retains other discovered profiles as disabled rows pending an
-   explicit administrator lifecycle action; it does not treat them as
-   authenticated deferred enrollment. `Install -NoStart` keeps the complete
-   planned all-user enrollment because it makes no immediate readiness claim.
-   An explicit manifest that enables a disconnected target remains
-   authoritative and fails readiness until the exact SID has an active token.
+   seeds enabled rows only for eligible `WTSActive` profile SIDs.
+
+   Post-install, the SCM hook-enumerator runs on a 5-minute interval and
+   auto-authorizes newly-discovered `(SID, Connector)` rows whose per-user
+   profile contains a supported CLI OR whose connector has a supported
+   machine-scoped install shared across all users (parity with macOS
+   `render-targets.sh`; see
+   `internal/enterprisehooks/agent_version_windows.go` for the per-connector
+   probe). Managed-enterprise deployments are administrator-controlled at
+   the *policy* layer — which connectors are pushed, and which SID scope
+   the guardian authorization ledger accepts — not at the per-device
+   authorization layer. Three residual sub-risks follow from this posture:
+
+   a. **Local-admin user creation → auto-enrollment.** A local admin
+      who can create an interactive user (`S-1-5-21-…`) on the target
+      machine causes that user to be enrolled on the next enumerator
+      tick. macOS's `launchd`-driven `render-targets.sh` operates under
+      the same posture; this is the accepted cost of parity. The exact
+      SID membership check (row W-28 above) still fail-closes on an
+      unregistered SID between enumerator ticks, and the guardian
+      authorization ledger records every enrollment for audit.
+
+   b. **Unprivileged self-enrollment via user-writable `package.json`,
+      or admin-driven all-user enrollment via a machine-scoped install.**
+      The per-connector version probe reads a `version` field from
+      package metadata under paths inside the user's own profile
+      (`AppData\Roaming\npm\node_modules\@…\package.json`,
+      `AppData\Local\Programs\cursor\resources\app\package.json`) OR
+      — for connectors that ship a machine-scoped installer — from a
+      fixed shared path such as
+      `C:\Program Files\Cursor\resources\app\package.json` (Cursor's
+      MSI installer). Any interactive user can create the per-user
+      files with a plausible `version` string and cause the enumerator
+      to auto-authorize their `(SID, Connector)` on the next tick,
+      *without actually installing a supported CLI*. A machine-scoped
+      install of a supported connector (admin-only to write) causes
+      that `(SID, Connector)` row to auto-authorize for *every*
+      enumerated profile on the box, because the shared version is
+      by construction the same for every user. This is deliberately
+      accepted because enrollment confers no privilege to the target —
+      it only means that user's own agent invocations become subject to
+      DefenseClaw inspection. A user who self-enrolls opts themselves
+      *into* monitoring, which is a security-neutral (or
+      defense-positive) outcome; there is no path from "user drops a
+      fake `package.json`" to "attacker gains inspection authority
+      over another user's traffic." Endpoint policy remains
+      authoritative for what shell / CLI activity is actually visible
+      to DefenseClaw once the row exists.
+
+   c. **`Install -NoStart` planned-enrollment.** `Install -NoStart`
+      keeps the complete planned all-user enrollment because it makes
+      no immediate readiness claim. An explicit manifest that enables
+      a disconnected target remains authoritative and fails readiness
+      until the exact SID has an active token.
 4. Application control and vendor MDM/GPO policy are optional defense-in-depth
    controls, not features DefenseClaw can synthesize. Their absence does not
    block managed-hook readiness, but leaves the user-owned hook race described

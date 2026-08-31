@@ -26,6 +26,34 @@ import (
 	"strings"
 )
 
+var filesystemFormatterPrograms = []string{
+	"mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
+	"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
+	"mkfs.ntfs", "mkntfs", "mkfs.minix", "mkswap", "mkfs.exfat",
+	"mkexfatfs",
+}
+
+var filesystemFormatterProgramSet = func() map[string]struct{} {
+	programs := make(map[string]struct{}, len(filesystemFormatterPrograms))
+	for _, program := range filesystemFormatterPrograms {
+		programs[program] = struct{}{}
+	}
+	return programs
+}()
+
+// FilesystemFormatterPrograms returns the one ordered formatter inventory used
+// by argv classification and the semantic destructive-command owners.
+func FilesystemFormatterPrograms() []string {
+	return append([]string(nil), filesystemFormatterPrograms...)
+}
+
+// FilesystemFormatterProgram reports whether program uses the closed formatter
+// grammar owned by classifyPOSIXFilesystemFormat.
+func FilesystemFormatterProgram(program string) bool {
+	_, ok := filesystemFormatterProgramSet[strings.ToLower(program)]
+	return ok
+}
+
 func classifyOutput(out *parseOutput) {
 	if out == nil {
 		return
@@ -265,6 +293,11 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyRedirects(out, command)
 		return
 	}
+	if FilesystemFormatterProgram(program) {
+		classifyPOSIXFilesystemFormat(out, command, program)
+		classifyRedirects(out, command)
+		return
+	}
 
 	switch program {
 	case "cat":
@@ -485,10 +518,6 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyNaabu(out, command)
 	case "dd":
 		classifyDD(out, command)
-	case "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
-		"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
-		"mkfs.ntfs", "mkntfs", "mkswap", "mkfs.exfat", "mkexfatfs":
-		classifyPOSIXFilesystemFormat(out, command, program)
 	case "wipefs":
 		classifyWipeFS(out, command)
 	case "sgdisk":
@@ -733,6 +762,12 @@ func commandProgramForDialect(executable string, dialect Dialect) string {
 		return program
 	}
 	program := commandProgram(executable)
+	// The Windows system formatter is format.com. Keep its explicit native
+	// executable name aligned with the existing bare format semantic owner.
+	if program == "format.com" && (dialect == DialectCMD ||
+		dialect == DialectPowerShell || dialect == DialectArgv) {
+		return "format"
+	}
 	if dialect != DialectCMD && dialect != DialectPowerShell {
 		return program
 	}
@@ -1008,6 +1043,25 @@ func powerShellParameter(arg string) (string, string, bool) {
 	return strings.ToLower(key), value, joined
 }
 
+// canonicalPowerShellPathMutatorParameter owns the narrow set of reviewed
+// PowerShell parameter abbreviations shared by the raw and structured
+// Remove-Item parsers. Do not infer arbitrary prefixes here: PowerShell's
+// abbreviation binding is cmdlet-specific, and accepting a prefix that is
+// ambiguous with an unmodeled parameter would manufacture typed proof.
+func canonicalPowerShellPathMutatorParameter(program, key string) string {
+	if program != "remove-item" {
+		return key
+	}
+	switch key {
+	case "-rec":
+		return "-recurse"
+	case "-fo":
+		return "-force"
+	default:
+		return key
+	}
+}
+
 type structuredPowerShellControlState struct {
 	whatIfSeen  bool
 	confirmSeen bool
@@ -1080,6 +1134,7 @@ func classifyStructuredPowerShellClearDisk(
 	}
 	controls := newStructuredPowerShellControlState()
 	targetSeen := false
+	targetNumber := ""
 	removeDataSeen := false
 	removeOEMSeen := false
 	passThruSeen := false
@@ -1099,11 +1154,13 @@ func classifyStructuredPowerShellClearDisk(
 				valid = false
 				continue
 			}
-			if _, err := strconv.ParseUint(value, 10, 32); err != nil {
+			number, err := strconv.ParseUint(value, 10, 32)
+			if err != nil {
 				valid = false
 				continue
 			}
 			targetSeen = true
+			targetNumber = strconv.FormatUint(number, 10)
 		case "-inputobject":
 			_, ok := structuredPowerShellRequiredValue(command.Argv, &i)
 			// InputObject may carry a live PowerShell object or pipeline
@@ -1144,6 +1201,12 @@ func classifyStructuredPowerShellClearDisk(
 		return
 	}
 	addOperation(command, OperationDiskWrite)
+	appendCommandPath(
+		out,
+		command,
+		PathAccessWrite,
+		`\\.\PhysicalDrive`+targetNumber,
+	)
 }
 
 func classifyStructuredPowerShellStopProcess(
@@ -1538,8 +1601,19 @@ func classifyStructuredPowerShellNewItem(
 }
 
 func structuredPowerShellBooleanLiteral(value string) bool {
-	return strings.EqualFold(value, "$true") ||
-		strings.EqualFold(value, "$false")
+	_, ok := structuredPowerShellBooleanValue(value)
+	return ok
+}
+
+func structuredPowerShellBooleanValue(value string) (bool, bool) {
+	switch strings.ToLower(value) {
+	case "$true", "true", "1":
+		return true, true
+	case "$false", "false", "0":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func canonicalPowerShellNewItemParameter(key string) string {
@@ -1798,6 +1872,7 @@ func classifyStructuredPowerShellPathMutator(
 	controls := newStructuredPowerShellControlState()
 	seen := make(map[string]struct{})
 	var positional, sources, destinations []string
+	appendEnabled := false
 	valid := true
 	for index := 1; index < len(command.Argv); index++ {
 		arg := command.Argv[index]
@@ -1809,6 +1884,7 @@ func classifyStructuredPowerShellPathMutator(
 			continue
 		}
 		key, joinedValue, joined := powerShellParameter(arg)
+		key = canonicalPowerShellPathMutatorParameter(program, key)
 		consume := func() (string, bool) {
 			if _, duplicate := seen[key]; duplicate {
 				return "", false
@@ -1862,8 +1938,16 @@ func classifyStructuredPowerShellPathMutator(
 		case "-force", "-recurse", "-passthru", "-container",
 			"-nonewline", "-append", "-noclobber", "-debug", "-verbose":
 			if joined {
-				valid = false
-				continue
+				enabled, ok := structuredPowerShellBooleanValue(joinedValue)
+				if !ok {
+					valid = false
+					continue
+				}
+				if key == "-append" {
+					appendEnabled = enabled
+				}
+			} else if key == "-append" {
+				appendEnabled = true
 			}
 			if _, duplicate := seen[key]; duplicate {
 				valid = false
@@ -1899,7 +1983,7 @@ func classifyStructuredPowerShellPathMutator(
 		}
 		access := PathAccessWrite
 		operation := OperationWrite
-		if program == "add-content" {
+		if program == "add-content" || program == "out-file" && appendEnabled {
 			access = PathAccessAppend
 			operation = OperationAppend
 		}
@@ -4280,11 +4364,13 @@ func webControlOptionConsumesValue(program, option string) bool {
 			"--data-ascii", "--data-binary", "--data-raw",
 			"--data-urlencode", "--referer", "--form", "--form-string",
 			"--header", "--config", "--output", "--upload-file", "--user",
-			"--proxy-user", "--write-out", "--request", "--proxy", "--cacert",
+			"--mail-auth", "--mail-from", "--mail-rcpt",
+			"--noproxy", "--proxy-header", "--proxy-user", "--write-out",
+			"--request", "--proxy", "--cacert",
 			"--cert", "--connect-to",
 			"--connect-timeout", "--dns-servers", "--interface", "--json",
 			"--key", "--max-time", "--output-dir", "--request-target",
-			"--resolve", "--unix-socket", "--url", "--doh-url",
+			"--resolve", "--unix-socket", "--url", "--url-query", "--doh-url",
 			"--preproxy", "--proxy1.0", "--socks4", "--socks4a",
 			"--socks5", "--socks5-hostname":
 			return true
@@ -4306,6 +4392,8 @@ func webControlOptionConsumesValue(program, option string) bool {
 		switch key {
 		case "--append-output", "--bind-address", "--body-data",
 			"--body-file", "--execute", "--header", "--input-file",
+			"--ftp-password", "--ftp-user", "--http-password", "--http-user",
+			"--method",
 			"--output-file", "--output-document", "--password", "--post-data",
 			"--post-file", "--directory-prefix", "--proxy-password", "--proxy-user",
 			"--referer", "--timeout", "--tries", "--user",
@@ -4526,7 +4614,19 @@ func webNoValueOption(program, arg string) bool {
 			"-S", "--show-error", "-L", "--location", "-l", "-i",
 			"--head", "-k", "--insecure", "-N", "--no-buffer", "-g",
 			"--globoff", "-4", "--ipv4", "-6", "--ipv6", "-q", "-v",
-			"--verbose", "--compressed", "--no-progress-meter", "--remote-name":
+			"--verbose", "--compressed", "--no-progress-meter", "--progress-bar",
+			"--remote-name", "--append", "--http1.0", "--junk-session-cookies",
+			"--list-only", "--parallel", "--remote-time", "--sslv2", "--sslv3",
+			"--tlsv1", "--use-ascii",
+			"--mail-rcpt-allowfails", "--no-mail-rcpt-allowfails":
+			return true
+		}
+		switch arg {
+		case "--no-append", "--buffer", "--no-compressed", "--no-globoff",
+			"--no-include", "--no-insecure", "--no-junk-session-cookies",
+			"--no-list-only", "--no-location", "--no-parallel",
+			"--no-progress-bar", "--progress-meter", "--no-remote-time",
+			"--no-show-error", "--no-silent", "--no-use-ascii", "--no-verbose":
 			return true
 		}
 		return curlNoValueShortOptionBundle(arg)
@@ -7454,11 +7554,16 @@ func classifyPOSIXFilesystemFormat(
 	case "mkfs.ntfs", "mkntfs":
 		flags = exactOptionSet("-F")
 	}
+	previewOptions := exactOptionSet("--help", "--version")
+	if program == "mkfs.minix" {
+		previewOptions["-h"] = struct{}{}
+		previewOptions["-V"] = struct{}{}
+	}
 	parsed := parseOwnedPOSIXOptions(
 		command.Argv,
 		nil,
 		flags,
-		exactOptionSet("--help", "--version"),
+		previewOptions,
 	)
 	if parsed.preview {
 		command.Effect = EffectPreview
@@ -7470,7 +7575,18 @@ func classifyPOSIXFilesystemFormat(
 	if !parsed.complete {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
-	if len(parsed.positionals) != 1 || parsed.positionals[0] == "-" {
+	target := ""
+	switch {
+	case len(parsed.positionals) == 1:
+		target = parsed.positionals[0]
+	case program == "mkfs.minix" && len(parsed.positionals) == 2 &&
+		validMinixBlockCount(parsed.positionals[1]):
+		target = parsed.positionals[0]
+	default:
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if target == "-" {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
@@ -7480,10 +7596,15 @@ func classifyPOSIXFilesystemFormat(
 		}
 	}
 	addOperation(command, OperationWrite)
-	if isRawBlockDeviceTarget(parsed.positionals[0]) {
+	if isRawBlockDeviceTarget(target) {
 		addOperation(command, OperationDiskWrite)
 	}
-	appendCommandPath(out, command, PathAccessWrite, parsed.positionals[0])
+	appendCommandPath(out, command, PathAccessWrite, target)
+}
+
+func validMinixBlockCount(value string) bool {
+	blocks, err := strconv.ParseUint(value, 10, 64)
+	return err == nil && blocks > 10 && blocks < 65536
 }
 
 func classifyWipeFS(out *parseOutput, command *CommandFact) {
@@ -7703,7 +7824,14 @@ func classifyDestructiveDeviceTool(
 }
 
 func classifyWindowsFormat(out *parseOutput, command *CommandFact) {
-	if !requireCommandDialect(out, command, DialectCMD, DialectArgv) {
+	if command.Dialect == DialectPowerShell {
+		// PowerShell may resolve a bare `format` through its own command table;
+		// only the explicit native formatter executable owns these semantics.
+		if windowsExecutable(command.Executable) != "format.com" {
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+	} else if !requireCommandDialect(out, command, DialectCMD, DialectArgv) {
 		return
 	}
 	if len(command.Argv) == 2 &&
@@ -7723,7 +7851,21 @@ func classifyWindowsFormat(out *parseOutput, command *CommandFact) {
 	}
 	addOperation(command, OperationWrite)
 	addOperation(command, OperationDiskWrite)
-	appendCommandPath(out, command, PathAccessWrite, command.Argv[1])
+	device, ok := windowsVolumeDeviceTarget(command.Argv[1])
+	if !ok {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if command.Dialect == DialectArgv {
+		out.appendPath(PathFact{
+			CommandID: command.ID,
+			Access:    PathAccessWrite,
+			Flavor:    PathFlavorDevice,
+			Value:     device,
+		})
+		return
+	}
+	appendCommandPath(out, command, PathAccessWrite, device)
 }
 
 func classifyStructuredPowerShellFormatVolume(
@@ -7735,6 +7877,7 @@ func classifyStructuredPowerShellFormatVolume(
 	}
 	controls := newStructuredPowerShellControlState()
 	selector := ""
+	selectorKind := ""
 	complete := true
 	for index := 1; index < len(command.Argv); index++ {
 		if controls.consume(command, command.Argv[index]) {
@@ -7752,6 +7895,12 @@ func classifyStructuredPowerShellFormatVolume(
 				complete = false
 			}
 			selector = command.Argv[index]
+			selectorKind = argument
+			if argument == "-partition" || argument == "-inputobject" {
+				// These parameters carry PowerShell objects, not an exact device
+				// identity that can safely authorize a destructive action.
+				complete = false
+			}
 		case "-filesystem", "-newfilesystemlabel", "-allocationsize":
 			if index+1 >= len(command.Argv) {
 				complete = false
@@ -7771,9 +7920,31 @@ func classifyStructuredPowerShellFormatVolume(
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
+	device, ok := windowsVolumeDeviceTarget(selector)
+	if !ok || (selectorKind != "-driveletter" && selectorKind != "-path") {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
 	addOperation(command, OperationWrite)
 	addOperation(command, OperationDiskWrite)
-	appendCommandPath(out, command, PathAccessWrite, selector)
+	appendCommandPath(out, command, PathAccessWrite, device)
+}
+
+func windowsVolumeDeviceTarget(value string) (string, bool) {
+	if len(value) == 1 && isASCIILetter(value[0]) {
+		return "//./" + strings.ToUpper(value) + ":", true
+	}
+	if windowsDriveRoot(value) {
+		return "//./" + strings.ToUpper(value), true
+	}
+	if len(value) == 3 && isASCIILetter(value[0]) && value[1] == ':' &&
+		(value[2] == '\\' || value[2] == '/') {
+		return "//./" + strings.ToUpper(value[:2]), true
+	}
+	if windowsPathFlavor(value) == PathFlavorDevice {
+		return value, true
+	}
+	return "", false
 }
 
 func windowsDriveRoot(value string) bool {
@@ -10570,7 +10741,7 @@ func classifySchedule(out *parseOutput, command *CommandFact, program string) {
 	case "systemctl":
 		valueOptions := exactOptionSet(
 			"-H", "--host", "-M", "--machine", "-n", "--lines", "-o", "--output",
-			"-p", "--property", "--root", "--runtime-scope", "--state",
+			"-p", "--property", "--job-mode", "--root", "--runtime-scope", "--state",
 			"-t", "--type",
 		)
 		parsed := parseOwnedPOSIXOptions(
@@ -11435,6 +11606,150 @@ func webTargetFact(commandID int64, raw string, action NetworkAction) (NetworkFa
 		Host:      host,
 		Port:      port,
 	}, true
+}
+
+func curlSMTPTargetFact(
+	commandID int64,
+	raw string,
+	action NetworkAction,
+) (NetworkFact, bool) {
+	schemeEnd := strings.Index(raw, "://")
+	if schemeEnd <= 0 {
+		return NetworkFact{}, false
+	}
+	scheme := strings.ToLower(raw[:schemeEnd])
+	if scheme != "smtp" && scheme != "smtps" {
+		return NetworkFact{}, false
+	}
+	remainder := raw[schemeEnd+3:]
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	authority := remainder[:authorityEnd]
+	rawUserinfo, hostPort, hasUserinfo := strings.Cut(authority, "@")
+	if !hasUserinfo {
+		hostPort = authority
+	} else {
+		if strings.Contains(hostPort, "@") {
+			return NetworkFact{}, false
+		}
+		user, password, _ := strings.Cut(rawUserinfo, ":")
+		if _, valid := curlDecodePercentBytes(user, true); !valid {
+			return NetworkFact{}, false
+		}
+		if _, valid := curlDecodePercentBytes(password, true); !valid {
+			return NetworkFact{}, false
+		}
+	}
+	peerURL := scheme + "://" + hostPort + remainder[authorityEnd:]
+	parsed, err := url.Parse(peerURL)
+	if err != nil || parsed.User != nil || parsed.Hostname() == "" {
+		return NetworkFact{}, false
+	}
+	host, ok := canonicalNetworkHost(parsed.Hostname())
+	if !ok {
+		return NetworkFact{}, false
+	}
+	port := int64(0)
+	if rawPort := parsed.Port(); rawPort != "" {
+		port, ok = parseNetworkPort(rawPort)
+		if !ok {
+			return NetworkFact{}, false
+		}
+	}
+	return NetworkFact{
+		CommandID: commandID,
+		Action:    action,
+		Scheme:    scheme,
+		Host:      host,
+		Port:      port,
+	}, true
+}
+
+// curlTelnetTargetFact is intentionally curl-local. Telnet is not part of the
+// generic web target grammar, and admitting it through networkURLFact would
+// incorrectly broaden wget and generic upload projections.
+func curlTelnetTargetFact(
+	commandID int64,
+	raw string,
+	action NetworkAction,
+) (NetworkFact, bool) {
+	hostPort, _, _, _, _, valid := curlTelnetURLParts(raw)
+	if !valid {
+		return NetworkFact{}, false
+	}
+	parsed, err := url.Parse("http://" + hostPort)
+	if err != nil || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.Hostname() == "" || parsed.Path != "" || parsed.RawQuery != "" ||
+		parsed.Fragment != "" {
+		return NetworkFact{}, false
+	}
+	host, ok := canonicalNetworkHost(parsed.Hostname())
+	if !ok {
+		return NetworkFact{}, false
+	}
+	port := int64(0)
+	if rawPort := parsed.Port(); rawPort != "" {
+		port, ok = parseNetworkPort(rawPort)
+		if !ok {
+			return NetworkFact{}, false
+		}
+	}
+	return NetworkFact{
+		CommandID: commandID,
+		Action:    action,
+		Scheme:    "telnet",
+		Host:      host,
+		Port:      port,
+	}, true
+}
+
+func curlTelnetURLParts(
+	raw string,
+) (
+	hostPort string,
+	user string,
+	userPresent bool,
+	password string,
+	passwordPresent bool,
+	valid bool,
+) {
+	canonical, valid := curlCanonicalTelnetURL(raw)
+	if !valid {
+		return "", "", false, "", false, false
+	}
+	remainder := strings.TrimPrefix(canonical, "telnet://")
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	authority := remainder[:authorityEnd]
+	if authority == "" || strings.Count(authority, "@") > 1 {
+		return "", "", false, "", false, false
+	}
+	rawUserinfo, hostPort, userPresent := strings.Cut(authority, "@")
+	if !userPresent {
+		hostPort = authority
+	} else {
+		rawUser, rawPassword, hasPassword := strings.Cut(rawUserinfo, ":")
+		var decoded bool
+		user, decoded = curlDecodePercentBytes(rawUser, true)
+		if !decoded {
+			return "", "", false, "", false, false
+		}
+		if hasPassword {
+			password, decoded = curlDecodePercentBytes(rawPassword, true)
+			if !decoded {
+				return "", "", false, "", false, false
+			}
+			passwordPresent = true
+		}
+	}
+	if hostPort == "" || strings.Contains(hostPort, "@") {
+		return "", "", false, "", false, false
+	}
+	return hostPort, user, userPresent, password, passwordPresent, true
 }
 
 func splitHostPortLoose(value string) (string, int64) {

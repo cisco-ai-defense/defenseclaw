@@ -3253,7 +3253,7 @@ audit_sinks:
         "redaction_profile": "legacy-v7",
     }
     action_selector = routes[1]["selector"]["actions"]
-    assert len(action_selector) == 189
+    assert len(action_selector) == 190
     assert "setup-redaction-policy" in action_selector
     assert {"config-update", "gateway-agent-start", "guardrail-verdict", "scan"}.issubset(action_selector)
     assert "judge" not in routes[0]["selector"]["event_names"]

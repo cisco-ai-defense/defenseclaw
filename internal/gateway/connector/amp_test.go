@@ -184,6 +184,79 @@ func TestAMPTeardownRestoresPreExistingDefenseClawPluginAsClean(t *testing.T) {
 	}
 }
 
+func TestAMPVerifyCleanDetectsManagedMarkerAcrossLineEndings(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		lineEnding string
+	}{
+		{name: "LF", lineEnding: "\n"},
+		{name: "CRLF", lineEnding: "\r\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			pluginPath := filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")
+			if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			plugin := "// defenseclaw-managed-plugin v2" + test.lineEnding + "export default function managed() {}" + test.lineEnding
+			if err := os.WriteFile(pluginPath, []byte(plugin), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := AMPPluginPathOverride
+			AMPPluginPathOverride = pluginPath
+			t.Cleanup(func() { AMPPluginPathOverride = previous })
+			err := NewAMPConnector().VerifyClean(SetupOpts{DataDir: filepath.Join(root, ".defenseclaw")})
+			if err == nil || !strings.Contains(err.Error(), "managed plugin still present") {
+				t.Fatalf("VerifyClean %s residue error = %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestManagedPluginOwnershipMarkerNormalizesTemplateLineEndings(t *testing.T) {
+	want := "// defenseclaw-managed-plugin v2"
+	for _, template := range []string{want + "\nbody", want + "\r\nbody", want} {
+		marker, valid := managedPluginOwnershipMarker([]byte(template))
+		if !valid || string(marker) != want {
+			t.Fatalf("managedPluginOwnershipMarker(%q) = %q, %t", template, marker, valid)
+		}
+	}
+	for _, template := range []string{"", "// operator plugin\r\nbody"} {
+		if marker, valid := managedPluginOwnershipMarker([]byte(template)); valid {
+			t.Fatalf("managedPluginOwnershipMarker(%q) = %q, true", template, marker)
+		}
+	}
+}
+
+func TestManagedPluginOwnershipMarkerRequiresExactLine(t *testing.T) {
+	marker := []byte("// defenseclaw-managed-plugin v2")
+	for _, data := range []string{
+		string(marker) + "\nbody",
+		string(marker) + "\r\nbody",
+		"operator header\n" + string(marker) + "\nbody",
+		"operator header\r\n" + string(marker),
+		"// defenseclaw-managed-plugin v1\nold body",
+		"// defenseclaw-managed-plugin v42\r\nfuture body",
+	} {
+		if !managedPluginOwnershipMarkerPresent([]byte(data), marker) {
+			t.Errorf("exact managed marker was not found in %q", data)
+		}
+	}
+	for _, data := range []string{
+		"",
+		string(marker) + "-custom\nbody",
+		"// defenseclaw-managed-plugin v0\nbody",
+		"// defenseclaw-managed-plugin v02\nbody",
+		"// defenseclaw-managed-plugin v18446744073709551616\nbody",
+		"const note = '" + string(marker) + "'\n",
+		"prefix " + string(marker) + "\r\n",
+	} {
+		if managedPluginOwnershipMarkerPresent([]byte(data), marker) {
+			t.Errorf("non-exact managed marker was found in %q", data)
+		}
+	}
+}
+
 func TestAMPOwnedHookContractRejectsIncompletePlugin(t *testing.T) {
 	root := t.TempDir()
 	pluginPath := filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")

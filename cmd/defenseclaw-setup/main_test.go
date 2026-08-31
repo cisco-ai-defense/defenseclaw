@@ -35,6 +35,70 @@ func TestHookLauncherPayloadInterfaceIsCanonicalAndRequired(t *testing.T) {
 	}
 }
 
+func TestDeferredUninstallConnectorVerifyArgsBindExactCleanupAuthority(t *testing.T) {
+	transactionID := "0123456789abcdef0123456789abcdef"
+	root := t.TempDir()
+	setupPath := filepath.Join(root, "InstallerCache", setupArtifactName)
+	setupStartIdentity := "133713371337"
+	dataRoot := filepath.Join(root, "profile", ".defenseclaw")
+	configHome := filepath.Join(root, "profile", ".claude")
+	recordPath := filepath.Join(root, "InstallerState", "uninstall-cleanup.json")
+	transaction := setupTransaction{
+		ID:              transactionID,
+		Action:          "uninstall",
+		DataRoot:        dataRoot,
+		MaintenancePath: setupPath,
+	}
+	args, err := deferredUninstallConnectorVerifyCommandArgs(
+		transaction,
+		setupPath,
+		setupStartIdentity,
+		recordPath,
+		"claudecode",
+		[]string{"CLAUDE_CONFIG_DIR=" + configHome},
+	)
+	if err != nil {
+		t.Fatalf("deferred verify args: %v", err)
+	}
+	want := []string{
+		"connector", "verify",
+		"--connector", "claudecode",
+		"--data-dir", dataRoot,
+		"--config-home", configHome,
+		"--json",
+		"--internal-setup-parent", setupPath,
+		"--internal-setup-start-identity", setupStartIdentity,
+		"--internal-deferred-cleanup-record", recordPath,
+		"--internal-deferred-cleanup-transaction", transactionID,
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("deferred verify args = %v, want %v", args, want)
+	}
+
+	foreign := transaction
+	foreign.ID = "invalid"
+	if _, err := deferredUninstallConnectorVerifyCommandArgs(
+		foreign,
+		setupPath,
+		setupStartIdentity,
+		recordPath,
+		"claudecode",
+		[]string{"CLAUDE_CONFIG_DIR=" + configHome},
+	); err == nil {
+		t.Fatal("invalid cleanup transaction was accepted")
+	}
+	if _, err := deferredUninstallConnectorVerifyCommandArgs(
+		transaction,
+		setupPath,
+		"0001",
+		recordPath,
+		"claudecode",
+		[]string{"CLAUDE_CONFIG_DIR=" + configHome},
+	); err == nil {
+		t.Fatal("non-canonical Setup process start identity was accepted")
+	}
+}
+
 func TestStageHookLauncherCopiesCanonicalPayloadToInstalledSource(t *testing.T) {
 	payloadRoot := t.TempDir()
 	staging := t.TempDir()
