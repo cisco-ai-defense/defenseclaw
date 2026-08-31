@@ -85,48 +85,78 @@ func discoverWindowsAgentVersion(profileHome, connectorName string) string {
 	return ""
 }
 
+// windowsMachineScopedCursorPackageJSON points at Cursor's per-machine
+// install (MSI installer, admin-installed). Unlike the per-user candidates
+// this path is NOT derived from the profile home — every user on the box
+// sees the same version. Kept as a package-level variable so tests can
+// stub it to a hermetic `t.TempDir()` fixture instead of trying to write
+// to the real Program Files tree.
+var windowsMachineScopedCursorPackageJSON = `C:\Program Files\Cursor\resources\app\package.json`
+
 // windowsAgentVersionCandidatePaths returns the ordered set of
 // package.json paths to try for `connectorName` under
 // `profileHome`. The order matters: probes higher in the list are
-// preferred. Each connector's candidate set covers the install
-// flavours we've observed on real Windows QA hosts:
+// preferred (first match wins). Each connector's candidate set covers the
+// install flavours we've observed on real Windows QA hosts plus the
+// major package managers users install these CLIs through in practice —
+// a probe list too narrow becomes a silent-drop when the user installed
+// via a channel we didn't cover (real customer symptom on macOS drove
+// the presence-fallback in packaging/macos/lib/installer_lib.sh; the
+// probe broadening here is the Windows-side coverage improvement).
 //
-//   - `claudecode`: npm-global install under
-//     `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\`.
-//     `%APPDATA%` on Windows resolves to
-//     `%USERPROFILE%\AppData\Roaming` — the enumerator receives
-//     the profile's home directory so we build the Roaming path
-//     directly.
-//   - `codex`: npm-global install under
-//     `%APPDATA%\npm\node_modules\@openai\codex\`. The MSIX-store
-//     flavour (`C:\Program Files\WindowsApps\OpenAI.Codex_…\`)
-//     lives OUTSIDE the profile and is machine-scoped; probing it
-//     is a follow-up that requires a separate lookup path. For
-//     now we return empty for MSIX-only installs so the
-//     enumerator drops the row (parity with macOS's behaviour when
-//     the codex CLI is absent).
-//   - `cursor`: Cursor Desktop's per-user install at
-//     `%LOCALAPPDATA%\Programs\cursor\resources\app\package.json`.
-//     `%LOCALAPPDATA%` = `%USERPROFILE%\AppData\Local`.
+// Per-connector candidates:
 //
-// Every candidate is a fully-cleaned absolute path anchored inside
-// `profileHome`. Callers never see relative paths, symlinks, or
-// user-supplied path fragments.
+//   - `claudecode`:
+//     1. `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\package.json`
+//     — npm-global (the historical baseline).
+//     2. `%USERPROFILE%\.bun\install\global\node_modules\@anthropic-ai\claude-code\package.json`
+//     — Bun global install (`bun install -g @anthropic-ai/claude-code`).
+//     3. `%LOCALAPPDATA%\Yarn\Data\global\node_modules\@anthropic-ai\claude-code\package.json`
+//     — Yarn Classic global install (still common on legacy hosts).
+//
+//   - `codex`:
+//     1. `%APPDATA%\npm\node_modules\@openai\codex\package.json` — npm-global.
+//     2. `%USERPROFILE%\.bun\install\global\node_modules\@openai\codex\package.json`
+//     — Bun global.
+//     3. `%LOCALAPPDATA%\Yarn\Data\global\node_modules\@openai\codex\package.json`
+//     — Yarn Classic global.
+//     MSIX-store install (`C:\Program Files\WindowsApps\OpenAI.Codex_…\`) still
+//     requires a glob-resolved lookup and stays out of scope here; a follow-up
+//     probe can add it once the glob-vs-reparse-chain interaction is worked out.
+//
+//   - `cursor`:
+//     1. `%LOCALAPPDATA%\Programs\cursor\resources\app\package.json`
+//     — Cursor Desktop per-user install.
+//     2. `windowsMachineScopedCursorPackageJSON` — Cursor MSI machine-scoped
+//     install. Path is a package variable so tests can override; the
+//     production default is `C:\Program Files\Cursor\resources\app\package.json`.
+//
+// All per-user candidates are fully-cleaned absolute paths anchored inside
+// `profileHome`; the one machine-scoped candidate is anchored at a fixed
+// system root and reads the same package.json for every user (correct: it
+// documents the version of the shared install on the box).
 func windowsAgentVersionCandidatePaths(profileHome, connectorName string) []string {
 	appDataRoaming := filepath.Join(profileHome, "AppData", "Roaming")
 	appDataLocal := filepath.Join(profileHome, "AppData", "Local")
+	bunGlobal := filepath.Join(profileHome, ".bun", "install", "global", "node_modules")
+	yarnGlobal := filepath.Join(appDataLocal, "Yarn", "Data", "global", "node_modules")
 	switch connectorName {
 	case "claudecode":
 		return []string{
 			filepath.Join(appDataRoaming, "npm", "node_modules", "@anthropic-ai", "claude-code", "package.json"),
+			filepath.Join(bunGlobal, "@anthropic-ai", "claude-code", "package.json"),
+			filepath.Join(yarnGlobal, "@anthropic-ai", "claude-code", "package.json"),
 		}
 	case "codex":
 		return []string{
 			filepath.Join(appDataRoaming, "npm", "node_modules", "@openai", "codex", "package.json"),
+			filepath.Join(bunGlobal, "@openai", "codex", "package.json"),
+			filepath.Join(yarnGlobal, "@openai", "codex", "package.json"),
 		}
 	case "cursor":
 		return []string{
 			filepath.Join(appDataLocal, "Programs", "cursor", "resources", "app", "package.json"),
+			windowsMachineScopedCursorPackageJSON,
 		}
 	default:
 		return nil

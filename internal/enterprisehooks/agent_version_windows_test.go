@@ -92,6 +92,97 @@ func TestDiscoverWindowsAgentVersionCursor(t *testing.T) {
 	}
 }
 
+// TestDiscoverWindowsAgentVersionClaudeCodeBunGlobal covers the
+// `bun install -g @anthropic-ai/claude-code` install flavour — the
+// probe now walks `%USERPROFILE%\.bun\install\global\node_modules\...`
+// in addition to the npm-global path.
+func TestDiscoverWindowsAgentVersionClaudeCodeBunGlobal(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".bun", "install", "global", "node_modules", "@anthropic-ai", "claude-code")
+	writeWindowsAgentPackageJSON(t, dir, "0.5.9")
+	got := discoverWindowsAgentVersion(home, "claudecode")
+	if got != "0.5.9" {
+		t.Fatalf("bun-global claudecode: got %q, want 0.5.9", got)
+	}
+}
+
+// TestDiscoverWindowsAgentVersionClaudeCodeYarnGlobal covers the
+// Yarn Classic global install still common on legacy hosts.
+func TestDiscoverWindowsAgentVersionClaudeCodeYarnGlobal(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "AppData", "Local", "Yarn", "Data", "global", "node_modules", "@anthropic-ai", "claude-code")
+	writeWindowsAgentPackageJSON(t, dir, "0.5.10")
+	got := discoverWindowsAgentVersion(home, "claudecode")
+	if got != "0.5.10" {
+		t.Fatalf("yarn-global claudecode: got %q, want 0.5.10", got)
+	}
+}
+
+// TestDiscoverWindowsAgentVersionCodexBunGlobal + YarnGlobal cover
+// the same alternative install channels for codex.
+func TestDiscoverWindowsAgentVersionCodexBunGlobal(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".bun", "install", "global", "node_modules", "@openai", "codex")
+	writeWindowsAgentPackageJSON(t, dir, "0.42.5")
+	got := discoverWindowsAgentVersion(home, "codex")
+	if got != "0.42.5" {
+		t.Fatalf("bun-global codex: got %q, want 0.42.5", got)
+	}
+}
+
+func TestDiscoverWindowsAgentVersionCodexYarnGlobal(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "AppData", "Local", "Yarn", "Data", "global", "node_modules", "@openai", "codex")
+	writeWindowsAgentPackageJSON(t, dir, "0.42.7")
+	got := discoverWindowsAgentVersion(home, "codex")
+	if got != "0.42.7" {
+		t.Fatalf("yarn-global codex: got %q, want 0.42.7", got)
+	}
+}
+
+// TestDiscoverWindowsAgentVersionCursorMachineScoped covers the
+// Cursor MSI (machine-scoped) install. The probe path is a
+// package-level variable stubbed here to a temp fixture; production
+// default is `C:\Program Files\Cursor\resources\app\package.json`.
+func TestDiscoverWindowsAgentVersionCursorMachineScoped(t *testing.T) {
+	prev := windowsMachineScopedCursorPackageJSON
+	t.Cleanup(func() { windowsMachineScopedCursorPackageJSON = prev })
+
+	machineRoot := t.TempDir()
+	dir := filepath.Join(machineRoot, "Cursor", "resources", "app")
+	writeWindowsAgentPackageJSON(t, dir, "1.7.0")
+	windowsMachineScopedCursorPackageJSON = filepath.Join(dir, "package.json")
+
+	// Per-user profile is empty — no Programs\cursor install — so the
+	// probe must fall through to the machine-scoped candidate.
+	got := discoverWindowsAgentVersion(t.TempDir(), "cursor")
+	if got != "1.7.0" {
+		t.Fatalf("machine-scoped cursor: got %q, want 1.7.0", got)
+	}
+}
+
+// TestDiscoverWindowsAgentVersionOrderPrefersPerUserOverMachineScoped
+// pins the "first match wins" ordering: when both a per-user and a
+// machine-scoped install exist, the per-user version is reported.
+func TestDiscoverWindowsAgentVersionOrderPrefersPerUserOverMachineScoped(t *testing.T) {
+	prev := windowsMachineScopedCursorPackageJSON
+	t.Cleanup(func() { windowsMachineScopedCursorPackageJSON = prev })
+
+	home := t.TempDir()
+	perUserDir := filepath.Join(home, "AppData", "Local", "Programs", "cursor", "resources", "app")
+	writeWindowsAgentPackageJSON(t, perUserDir, "1.6.14")
+
+	machineRoot := t.TempDir()
+	machineDir := filepath.Join(machineRoot, "Cursor", "resources", "app")
+	writeWindowsAgentPackageJSON(t, machineDir, "1.7.0")
+	windowsMachineScopedCursorPackageJSON = filepath.Join(machineDir, "package.json")
+
+	got := discoverWindowsAgentVersion(home, "cursor")
+	if got != "1.6.14" {
+		t.Fatalf("per-user precedence: got %q, want 1.6.14 (per-user wins over machine 1.7.0)", got)
+	}
+}
+
 func TestDiscoverWindowsAgentVersionRejectsOversizedPackageJSON(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")
