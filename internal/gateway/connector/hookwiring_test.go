@@ -2324,11 +2324,12 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 
 			dataDir := filepath.Join(root, "Data Dir")
 			opts := SetupOpts{
-				DataDir:      dataDir,
-				APIAddr:      "127.0.0.1:18970",
-				APIToken:     "matrix-token",
-				HookFailMode: "closed",
-				WorkspaceDir: filepath.Join(root, "Workspace"),
+				DataDir:       dataDir,
+				APIAddr:       "127.0.0.1:18970",
+				APIToken:      "matrix-token",
+				HookFailMode:  "closed",
+				GuardrailMode: "action",
+				WorkspaceDir:  filepath.Join(root, "Workspace"),
 			}
 			if tt.conn.Name() == "hermes" {
 				opts = prepareHermesSetupAdmissionFixture(t, opts)

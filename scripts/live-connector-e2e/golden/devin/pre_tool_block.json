@@ -4,6 +4,6 @@
   "prompt_id": "dc-e2e-turn",
   "tool_name": "exec",
   "tool_input": {
-    "command": "cat /etc/shadow"
+    "command": "rm -rf /"
   }
 }

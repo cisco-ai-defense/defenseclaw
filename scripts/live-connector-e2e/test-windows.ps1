@@ -1423,10 +1423,14 @@ private-secret-name = "DefenseClaw must remain redacted"
 
         $Connector = 'codex'
         $codexObservePayload = [IO.File]::ReadAllText((
-            New-DangerousCommandPayload 'fixture' 'synthetic command' $dangerousPayloadRoot observe
+            New-DangerousCommandPayload `
+                -Name 'fixture' -Command 'synthetic command' -ToolName 'shell' `
+                -Root $dangerousPayloadRoot -Mode observe
         )) | ConvertFrom-Json
         $codexActionPayload = [IO.File]::ReadAllText((
-            New-DangerousCommandPayload 'fixture' 'synthetic command' $dangerousPayloadRoot action
+            New-DangerousCommandPayload `
+                -Name 'fixture' -Command 'synthetic command' -ToolName 'shell' `
+                -Root $dangerousPayloadRoot -Mode action
         )) | ConvertFrom-Json
         Assert-True ([string]$codexObservePayload.tool_call_id -ceq
             [string]$codexObservePayload.tool_use_id) `

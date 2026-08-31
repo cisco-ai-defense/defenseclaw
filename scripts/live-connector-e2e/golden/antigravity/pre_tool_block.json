@@ -8,7 +8,7 @@
     "name": "run_command",
     "args": {
       "Cwd": "C:\\dc-e2e-workspace",
-      "CommandLine": "Get-Content -LiteralPath C:\\Windows\\System32\\config\\SAM"
+      "CommandLine": "rm -rf /"
     }
   }
 }
