@@ -128,14 +128,17 @@ func platformDiscoveryHomeDirs() []string {
 // working directory, which under managed-enterprise mode would become
 // a discovery HomeDir and misdirect the AI discovery scanner at the
 // service CWD. Reject the trimmed empty value BEFORE calling Clean,
-// and defensively reject a post-Clean "." for the same reason.
+// reject a post-Clean "." for the same reason, and reject any value
+// that is not an absolute path — a relative `ProfileImagePath` like
+// `Profiles\alice` or `..\..\etc` would similarly resolve against the
+// service CWD once passed to `os.Stat` and downstream discovery.
 func normalizeProfileImagePath(raw string) (string, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", false
 	}
 	cleaned := filepath.Clean(trimmed)
-	if cleaned == "" || cleaned == "." {
+	if cleaned == "" || cleaned == "." || !filepath.IsAbs(cleaned) {
 		return "", false
 	}
 	return cleaned, true

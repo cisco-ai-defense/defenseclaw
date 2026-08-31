@@ -655,12 +655,52 @@ _claude_desktop_embedded_version_from_home() {
     version_dir="$(dirname -- "$(dirname -- "$(dirname -- "$(dirname -- "${bin}")")")")"
     version="$(basename -- "${version_dir}")"
     [[ "${version}" =~ ${semver_re} ]] || continue
-    if [[ -z "${best}" ]] || \
-       [[ "$(printf '%s\n%s\n' "${best}" "${version}" | sort -V | tail -1)" == "${version}" ]]; then
+    if [[ -z "${best}" ]] || _semver_greater "${version}" "${best}"; then
       best="${version}"
     fi
   done
   [[ -n "${best}" ]] && echo "${best}"
+}
+
+# _semver_greater A B — exit 0 iff A > B when compared as
+# MAJOR.MINOR.PATCH numeric tuples. Only the numeric core is compared;
+# any pre-release / build suffix after PATCH is ignored. Callers must
+# have already validated shape against the semver-ish regex
+# `^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$` before invoking this helper.
+# Implemented without `sort -V` so it does not depend on GNU
+# coreutils; older BSD `sort` (pre-Sequoia) may reject `-V` and
+# silently fall through to lexicographic ordering, which mis-ranks
+# e.g. `2.1.219` below `2.1.9` — the exact customer symptom PR #785
+# fixed. Bash regex + arithmetic on the fields is portable to BSD
+# userland and short enough to keep inline here rather than growing a
+# new dependency.
+_semver_greater() {
+  local -r core_re='^([0-9]+)\.([0-9]+)\.([0-9]+)'
+  local a_major=0 a_minor=0 a_patch=0
+  local b_major=0 b_minor=0 b_patch=0
+  if [[ "$1" =~ ${core_re} ]]; then
+    a_major="${BASH_REMATCH[1]}"
+    a_minor="${BASH_REMATCH[2]}"
+    a_patch="${BASH_REMATCH[3]}"
+  else
+    return 1
+  fi
+  if [[ "$2" =~ ${core_re} ]]; then
+    b_major="${BASH_REMATCH[1]}"
+    b_minor="${BASH_REMATCH[2]}"
+    b_patch="${BASH_REMATCH[3]}"
+  else
+    return 0
+  fi
+  if (( 10#${a_major} != 10#${b_major} )); then
+    (( 10#${a_major} > 10#${b_major} ))
+    return
+  fi
+  if (( 10#${a_minor} != 10#${b_minor} )); then
+    (( 10#${a_minor} > 10#${b_minor} ))
+    return
+  fi
+  (( 10#${a_patch} > 10#${b_patch} ))
 }
 
 discover_agent_version() {

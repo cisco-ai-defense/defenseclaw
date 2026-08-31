@@ -261,6 +261,16 @@ func TestNormalizeProfileImagePathRejectsBlankValues(t *testing.T) {
 		"tabs":             "\t\t",
 		"newlines":         "\n",
 		"mixed-whitespace": "  \t\r\n ",
+		// Relative-path shapes must never resolve against the enumerator
+		// process working directory. On managed-enterprise mode, a
+		// ProfileImagePath registry value crafted to escape or land
+		// inside the service CWD would otherwise become a HomeDir for
+		// AI discovery.
+		"relative-simple":      `Profiles\alice`,
+		"relative-dotdot":      `..\..\etc`,
+		"relative-current-dir": `.`,
+		"relative-current-dot": `.\Users\bob`,
+		"drive-relative":       `\Users\alice`,
 	}
 	for name, raw := range rejected {
 		t.Run(name, func(t *testing.T) {

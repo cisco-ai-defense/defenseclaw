@@ -240,6 +240,8 @@ func TestDiscoverWindowsAgentVersionRejectsControlCharsInVersion(t *testing.T) {
 		"null":          "1.2.3\x00FAKE",
 		"escape":        "1.2.3\x1b[31mFAKE",
 		"del":           "1.2.3\x7fFAKE",
+		"c1-nel":        "1.2.3\u0085FAKE", // C1 NEL (Next Line) — Unicode-aware terminals treat this as a line break
+		"c1-csi":        "1.2.3\u009bFAKE", // C1 CSI — 8-bit terminal control sequence introducer
 		"too-long":      strings.Repeat("9", windowsAgentVersionMaxRunes+1),
 		"empty-trimmed": "",
 	}
@@ -276,5 +278,32 @@ func TestWindowsAgentVersionExplainSurfacesReasons(t *testing.T) {
 	}
 	if reason != "" {
 		t.Fatalf("explain reason on success: got %q, want empty", reason)
+	}
+}
+
+// TestWindowsAgentVersionExplainRejectsControlCharsInVersion locks in
+// that the operator-facing diagnostic path applies the same version
+// validator as the primary silent-drop probe. Without this, a
+// user-controlled package.json could inject a multi-line "version"
+// string into the reason field, which the enumerator eventually
+// forwards to the auto-authorization audit line.
+func TestWindowsAgentVersionExplainRejectsControlCharsInVersion(t *testing.T) {
+	cases := []string{
+		"1.2.3\nFAKE audit line",
+		"1.2.3\u0085FAKE", // C1 NEL
+		"1.2.3\u009bFAKE", // C1 CSI
+		"1.2.3\x7fFAKE",   // DEL
+	}
+	for _, hostile := range cases {
+		home := t.TempDir()
+		dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")
+		writeWindowsAgentPackageJSON(t, dir, hostile)
+		version, reason := windowsAgentVersionExplain(home, "codex")
+		if version != "" {
+			t.Fatalf("explain hostile version %q: got %q, want empty", hostile, version)
+		}
+		if !strings.Contains(reason, "failed validation") && !strings.Contains(reason, "empty version") {
+			t.Fatalf("explain hostile version %q: reason %q did not surface a validation-failure diagnostic", hostile, reason)
+		}
 	}
 }

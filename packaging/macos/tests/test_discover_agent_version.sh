@@ -132,6 +132,26 @@ t_claudecode_desktop_embedded_picks_highest_version() {
   assert_eq "${got}" "2.1.219" "claudecode picks highest Claude Desktop embedded version"
 }
 
+t_claudecode_desktop_embedded_numeric_patch_ordering() {
+  # Guards against a lexicographic patch-field comparison (older BSD
+  # `sort` without `-V` would return "2.1.9" for {2.1.9, 2.1.219} —
+  # the exact symptom PR #785 fixed). The internal _semver_greater
+  # helper must order these numerically, not lexicographically.
+  local home; home="$(mktest_tmp)"
+  local root="${home}/Library/Application Support/Claude/claude-code"
+  local ver
+  for ver in 2.1.9 2.1.219; do
+    local bin="${root}/${ver}/claude.app/Contents/MacOS/claude"
+    mkdir -p "$(dirname -- "${bin}")"
+    : > "${bin}"
+    chmod 0755 "${bin}"
+  done
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.219" "claudecode numeric patch ordering (2.1.219 > 2.1.9)"
+}
+
 t_claudecode_no_install_returns_empty() {
   # Empty tmp HOME + no CLI on PATH → empty version, cleanly.
   local home; home="$(mktest_tmp)"
@@ -577,6 +597,7 @@ run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode via Claude Desktop embedded bundle" t_claudecode_via_claude_desktop_embedded_bundle
 run_case "claudecode Claude Desktop picks highest bundled" t_claudecode_desktop_embedded_picks_highest_version
+run_case "claudecode Claude Desktop numeric patch ordering" t_claudecode_desktop_embedded_numeric_patch_ordering
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata

@@ -261,9 +261,9 @@ func readWindowsAgentVersionCandidate(candidate string) (string, bool) {
 // enumerator's auto-authorization audit line, so a hostile user
 // profile that plants `version: "1.2.3\nFAKE audit line"` in an
 // otherwise plausible package.json could otherwise forge a
-// multi-line diagnostic. Reject any control character (including
-// embedded newlines) and enforce a small length ceiling; real
-// semvers with build metadata sit well under the cap.
+// multi-line diagnostic. Reject any control character (C0 0x00-0x1F,
+// DEL 0x7F, and C1 0x80-0x9F) and enforce a small length ceiling;
+// real semvers with build metadata sit well under the cap.
 func isValidWindowsAgentVersion(version string) bool {
 	if version == "" {
 		return false
@@ -272,13 +272,11 @@ func isValidWindowsAgentVersion(version string) bool {
 		return false
 	}
 	for _, r := range version {
-		if r == '\r' || r == '\n' || r == '\t' {
-			return false
-		}
-		// Broader control-character sweep: category Cc covers ASCII
-		// 0x00-0x1F / 0x7F and the C1 range, none of which appear in
-		// legitimate semver / build-metadata strings.
-		if r < 0x20 || r == 0x7f {
+		// C0 controls (0x00-0x1F), DEL (0x7F), and C1 controls
+		// (0x80-0x9F). None appear in legitimate semver strings and
+		// any of them can forge multi-line entries or terminal escape
+		// sequences in the auto-authorization audit line.
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return false
 		}
 	}
@@ -346,8 +344,19 @@ func windowsAgentVersionExplain(profileHome, connectorName string) (string, stri
 			continue
 		}
 		version := strings.TrimSpace(parsed.Version)
-		if version == "" {
-			lastReason = "candidate has empty version field"
+		if !isValidWindowsAgentVersion(version) {
+			// Same guard as readWindowsAgentVersionCandidate: a
+			// user-controlled package.json can plant control
+			// characters or an oversized value in the version
+			// field; both must fail the probe so nothing hostile
+			// reaches the auto-authorization audit line in
+			// enumerator_windows.go. Report the shape without
+			// echoing the candidate value.
+			if version == "" {
+				lastReason = "candidate has empty version field"
+			} else {
+				lastReason = "candidate version failed validation"
+			}
 			continue
 		}
 		return version, ""
