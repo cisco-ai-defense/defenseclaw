@@ -1,0 +1,509 @@
+//go:build windows
+
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package enterprisehooks
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+)
+
+var (
+	windowsEnterpriseMutationIdentityCheck = requireWindowsEnterpriseLocalSystem
+	windowsEnterpriseTargetTokenResolver   = resolveWindowsEnterpriseTargetToken
+	windowsEnterpriseSetThreadToken        = windows.SetThreadToken
+	windowsEnterpriseRevertThreadToken     = windows.RevertToSelf
+	windowsEnterpriseLockOSThread          = runtime.LockOSThread
+	windowsEnterpriseUnlockOSThread        = runtime.UnlockOSThread
+	windowsEnterpriseEffectiveTokenCheck   = func(target *windows.SID) error {
+		effective := windows.GetCurrentThreadEffectiveToken()
+		return validateWindowsEnterpriseTargetToken(effective, target)
+	}
+	windowsEnterpriseTokenProfileDirectory = func(token windows.Token) (string, error) {
+		return token.GetUserProfileDirectory()
+	}
+)
+
+// withWindowsEnterpriseTargetImpersonation runs a bounded per-user connector
+// mutation on one locked OS thread under an active-session token whose TokenUser
+// exactly matches the manifest-pinned SID. There is deliberately no fallback to
+// LocalSystem path-string writes: if the user has no active token, the guardian
+// fails this row and its periodic backstop retries later.
+func withWindowsEnterpriseTargetImpersonation(
+	target *windows.SID,
+	expectedHome string,
+	fn func() error,
+) error {
+	if target == nil || windowsEnterpriseSystemIdentity(target) {
+		return fmt.Errorf("enterprise hooks: refusing invalid impersonation target SID %s", windowsSIDString(target))
+	}
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return err
+	}
+	token, err := windowsEnterpriseTargetTokenResolver(target)
+	if err != nil {
+		return err
+	}
+	defer token.Close()
+	if err := validateWindowsEnterpriseTargetToken(token, target); err != nil {
+		return err
+	}
+	if err := validateWindowsEnterpriseTokenProfile(token, expectedHome); err != nil {
+		return err
+	}
+	return runWindowsEnterpriseImpersonatedCallback(token, target, fn)
+}
+
+func validateWindowsEnterpriseTokenProfile(token windows.Token, expectedHome string) error {
+	expected := strings.TrimSpace(expectedHome)
+	if expected == "" {
+		return fmt.Errorf("enterprise hooks: expected target profile directory is required")
+	}
+	expectedAbs, err := filepath.Abs(expected)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: canonicalize manifest user_home %s: %w", expected, err)
+	}
+	actual, err := windowsEnterpriseTokenProfileDirectory(token)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: resolve active target token profile directory: %w", err)
+	}
+	actual = strings.TrimSpace(actual)
+	if actual == "" {
+		return fmt.Errorf("enterprise hooks: active target token profile directory is empty")
+	}
+	actualAbs, err := filepath.Abs(actual)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: canonicalize active target token profile directory %s: %w", actual, err)
+	}
+	expectedAbs = filepath.Clean(expectedAbs)
+	actualAbs = filepath.Clean(actualAbs)
+	if !strings.EqualFold(expectedAbs, actualAbs) {
+		return fmt.Errorf(
+			"enterprise hooks: manifest user_home %s does not match active target token profile %s",
+			expectedAbs,
+			actualAbs,
+		)
+	}
+	return nil
+}
+
+func runWindowsEnterpriseImpersonatedCallback(
+	token windows.Token,
+	target *windows.SID,
+	fn func() error,
+) error {
+	result := make(chan error, 1)
+	go func() {
+		windowsEnterpriseLockOSThread()
+		if err := windowsEnterpriseSetThreadToken(nil, token); err != nil {
+			windowsEnterpriseUnlockOSThread()
+			result <- fmt.Errorf("enterprise hooks: impersonate target SID %s: %w", target, err)
+			return
+		}
+		if err := windowsEnterpriseEffectiveTokenCheck(target); err != nil {
+			revertErr := windowsEnterpriseRevertThreadToken()
+			if revertErr == nil {
+				windowsEnterpriseUnlockOSThread()
+				result <- fmt.Errorf("enterprise hooks: effective thread token mismatch after impersonation: %w", err)
+				return
+			}
+			// Never unlock a thread whose identity could not be reverted. A
+			// goroutine that exits while locked causes the Go runtime to
+			// terminate that OS thread instead of returning it to the pool.
+			result <- fmt.Errorf(
+				"enterprise hooks: effective thread token mismatch after impersonation: %v (revert failed: %v)",
+				err,
+				revertErr,
+			)
+			return
+		}
+
+		callbackErr := fn()
+		if revertErr := windowsEnterpriseRevertThreadToken(); revertErr != nil {
+			// Intentionally omit UnlockOSThread: this dedicated goroutine now
+			// exits and the runtime destroys the still-impersonated OS thread.
+			if callbackErr == nil {
+				result <- fmt.Errorf("enterprise hooks: revert target SID impersonation: %w", revertErr)
+			} else {
+				result <- fmt.Errorf("%v (revert target SID impersonation failed: %v)", callbackErr, revertErr)
+			}
+			return
+		}
+		windowsEnterpriseUnlockOSThread()
+		result <- callbackErr
+	}()
+	return <-result
+}
+
+// errWindowsEnterpriseNotLocalSystem is returned by
+// requireWindowsEnterpriseLocalSystem when the current process token was
+// resolved successfully but does not belong to LocalSystem. Callers that
+// permit a non-guardian fallback should check for this sentinel with
+// errors.Is; any other error indicates that the identity could not be
+// resolved at all and must be surfaced rather than treated as fallback.
+var errWindowsEnterpriseNotLocalSystem = errors.New(
+	"enterprise hooks: per-user Windows hook mutation requires the LocalSystem guardian service",
+)
+
+func requireWindowsEnterpriseLocalSystem() error {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: resolve guardian process SID: %w", err)
+	}
+	if user == nil || user.User.Sid == nil || !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		return errWindowsEnterpriseNotLocalSystem
+	}
+	return nil
+}
+
+func validateWindowsEnterpriseTokenSID(token windows.Token, target *windows.SID) error {
+	if token == 0 || target == nil {
+		return fmt.Errorf("target token or SID is unavailable")
+	}
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("read target token user: %w", err)
+	}
+	if user == nil || user.User.Sid == nil {
+		return fmt.Errorf("target token has no user SID")
+	}
+	if !user.User.Sid.Equals(target) {
+		return fmt.Errorf("target token SID %s does not match manifest SID %s", user.User.Sid, target)
+	}
+	if windowsEnterpriseSystemIdentity(user.User.Sid) {
+		return fmt.Errorf("target token SID %s is not an interactive user", user.User.Sid)
+	}
+	return nil
+}
+
+func validateWindowsEnterpriseTargetToken(token windows.Token, target *windows.SID) error {
+	if err := validateWindowsEnterpriseTokenSID(token, target); err != nil {
+		return err
+	}
+	advisory, err := assessWindowsEnterpriseTokenElevation(token)
+	if err != nil {
+		return fmt.Errorf("target token for SID %s failed elevation assessment: %w", target, err)
+	}
+	if advisory != "" {
+		logWindowsEnterpriseTokenElevationAdvisory(target, advisory)
+	}
+	return nil
+}
+
+// logWindowsEnterpriseTokenElevationAdvisory emits a rate-limited stderr
+// line whenever an interactive target's active-session token is elevated.
+// Guardian reconcile proceeds regardless (the fsnotify + interval loop
+// restores DefenseClaw-owned artifacts on drift, so admin tampering with
+// their own hooks reverts within one reconcile cycle) — the advisory is
+// how operators tailing gateway.err.log see which sessions run at full
+// integrity so they can decide whether to require a non-admin login for
+// those users. See docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md § "Elevated
+// target relaxation" for the softened posture rationale.
+var windowsEnterpriseTokenAdvisoryLoggerMu sync.Mutex
+var windowsEnterpriseTokenAdvisoryLastEmit = map[string]time.Time{}
+
+// windowsEnterpriseTokenAdvisoryLastEmit is a rate-limit ledger keyed by
+// SID+advisory. On single-user boxes it stays under a handful of entries
+// forever, but on multi-user hosts (RDS/Citrix session hosts, VDI, kiosk
+// pools with rotating profiles) each distinct elevated principal that
+// ever showed up adds one entry, permanently. Cap the map so a host that
+// churns through 10K profiles doesn't grow the guardian process's map
+// unbounded. When the cap trips, evict the entry whose last emit is
+// oldest — it will simply re-emit next time it's seen, which is the
+// intended posture anyway.
+const windowsEnterpriseTokenAdvisoryLastEmitCap = 4096
+
+func logWindowsEnterpriseTokenElevationAdvisory(target *windows.SID, advisory string) {
+	if target == nil {
+		return
+	}
+	key := target.String() + "|" + advisory
+	now := time.Now()
+	windowsEnterpriseTokenAdvisoryLoggerMu.Lock()
+	last, seen := windowsEnterpriseTokenAdvisoryLastEmit[key]
+	if seen && now.Sub(last) < 60*time.Second {
+		windowsEnterpriseTokenAdvisoryLoggerMu.Unlock()
+		return
+	}
+	if len(windowsEnterpriseTokenAdvisoryLastEmit) >= windowsEnterpriseTokenAdvisoryLastEmitCap {
+		// Evict the single oldest entry. O(n) scan is acceptable at
+		// this cadence — the cap only trips on hosts with >4K distinct
+		// elevated principals over the process lifetime, and even then
+		// each admission does at most one eviction.
+		var oldestKey string
+		var oldestTime time.Time
+		for k, t := range windowsEnterpriseTokenAdvisoryLastEmit {
+			if oldestKey == "" || t.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = t
+			}
+		}
+		if oldestKey != "" {
+			delete(windowsEnterpriseTokenAdvisoryLastEmit, oldestKey)
+		}
+	}
+	windowsEnterpriseTokenAdvisoryLastEmit[key] = now
+	windowsEnterpriseTokenAdvisoryLoggerMu.Unlock()
+	fmt.Fprintf(
+		os.Stderr,
+		"[hook-guardian] WARN: target SID %s active-session token is %s; "+
+			"per-user hook enrollment proceeds best-effort — reconciler "+
+			"restores DefenseClaw-owned artifacts on drift, but an elevated "+
+			"target can trivially disable inspection between reconcile ticks. "+
+			"See WINDOWS-ENTERPRISE-THREAT-MODEL.md § Elevated target relaxation.\n",
+		target,
+		advisory,
+	)
+}
+
+type windowsEnterpriseTokenSecurityFacts struct {
+	elevated      uint32
+	elevationType uint32
+	integrityRID  uint32
+	uiAccess      uint32
+}
+
+// assessWindowsEnterpriseTokenElevation reads the target token's
+// integrity facts and returns:
+//
+//   - advisory != ""  — the token is elevated / full-admin /
+//     high-integrity / UIAccess. Callers should log
+//     the advisory and proceed with enrollment; the
+//     guardian's reconcile loop will restore any
+//     admin-driven drift on the per-user artifacts.
+//   - advisory == "", err == nil — token is a normal non-admin session,
+//     enrollment safe.
+//   - err != nil      — could not read the token or the token reports
+//     an unknown elevation type. This is a real
+//     integrity failure (WTS or the token itself is
+//     misbehaving), not an "admin user" case; the
+//     caller should propagate.
+//
+// This replaces the prior validateWindowsEnterpriseNonElevatedToken
+// which returned a hard error for admin sessions. The softening is
+// deliberate: rejecting admin sessions denied per-user inspection to
+// every user who happens to be a member of the local Administrators
+// group (common in QA endpoints, real-world lab deployments, and
+// small-team production boxes). The reconcile loop already provides
+// tamper-recovery for accidental or malicious drift; refusing enrollment
+// altogether was strictly worse than best-effort inspection. Trust
+// boundary against a determined elevated attacker is unchanged — an
+// elevated user could uninstall DefenseClaw entirely, so hook-level
+// hardening never defended against them (see threat model § "Trusted
+// or outside scope").
+func assessWindowsEnterpriseTokenElevation(token windows.Token) (string, error) {
+	elevated, err := windowsEnterpriseTokenUint32(token, windows.TokenElevation)
+	if err != nil {
+		return "", fmt.Errorf("read token elevation: %w", err)
+	}
+	elevationType, err := windowsEnterpriseTokenUint32(token, windows.TokenElevationType)
+	if err != nil {
+		return "", fmt.Errorf("read token elevation type: %w", err)
+	}
+	integrityRID, err := windowsEnterpriseTokenIntegrityRID(token)
+	if err != nil {
+		return "", fmt.Errorf("read token integrity: %w", err)
+	}
+	uiAccess, err := windowsEnterpriseTokenUint32(token, windows.TokenUIAccess)
+	if err != nil {
+		return "", fmt.Errorf("read token UIAccess: %w", err)
+	}
+	return assessWindowsEnterpriseTokenSecurityFacts(windowsEnterpriseTokenSecurityFacts{
+		elevated:      elevated,
+		elevationType: elevationType,
+		integrityRID:  integrityRID,
+		uiAccess:      uiAccess,
+	})
+}
+
+func assessWindowsEnterpriseTokenSecurityFacts(facts windowsEnterpriseTokenSecurityFacts) (string, error) {
+	const (
+		tokenElevationTypeDefault = 1
+		tokenElevationTypeFull    = 2
+		tokenElevationTypeLimited = 3
+		mandatoryHighRID          = 0x3000
+	)
+	// An unknown elevation type is a real integrity failure — the token
+	// is reporting a value that isn't in the Windows-documented set. Keep
+	// this as a hard error so a genuinely broken WTS query doesn't get
+	// silently downgraded to "just elevated, proceed."
+	switch facts.elevationType {
+	case tokenElevationTypeDefault, tokenElevationTypeLimited, tokenElevationTypeFull:
+		// valid values — fall through to advisory synthesis below
+	default:
+		return "", fmt.Errorf("unknown token elevation type %d", facts.elevationType)
+	}
+	var reasons []string
+	if facts.elevated != 0 {
+		reasons = append(reasons, "elevated")
+	}
+	if facts.elevationType == tokenElevationTypeFull {
+		reasons = append(reasons, "full-administrator")
+	}
+	if facts.integrityRID >= mandatoryHighRID {
+		reasons = append(reasons, fmt.Sprintf("high-integrity(RID=0x%x)", facts.integrityRID))
+	}
+	if facts.uiAccess != 0 {
+		reasons = append(reasons, "UIAccess")
+	}
+	if len(reasons) == 0 {
+		return "", nil
+	}
+	return strings.Join(reasons, "+"), nil
+}
+
+func windowsEnterpriseTokenUint32(token windows.Token, informationClass uint32) (uint32, error) {
+	if token == 0 {
+		return 0, fmt.Errorf("token is unavailable")
+	}
+	var value uint32
+	var returned uint32
+	if err := windows.GetTokenInformation(
+		token,
+		informationClass,
+		(*byte)(unsafe.Pointer(&value)),
+		uint32(unsafe.Sizeof(value)),
+		&returned,
+	); err != nil {
+		return 0, err
+	}
+	if returned != uint32(unsafe.Sizeof(value)) {
+		return 0, fmt.Errorf("unexpected token information size %d", returned)
+	}
+	return value, nil
+}
+
+func windowsEnterpriseTokenIntegrityRID(token windows.Token) (uint32, error) {
+	if token == 0 {
+		return 0, fmt.Errorf("token is unavailable")
+	}
+	var size uint32
+	err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, nil, 0, &size)
+	if err != windows.ERROR_INSUFFICIENT_BUFFER {
+		return 0, fmt.Errorf("query token integrity size: %w", err)
+	}
+	if size < uint32(unsafe.Sizeof(windows.Tokenmandatorylabel{})) {
+		return 0, fmt.Errorf("query token integrity size: returned %d bytes", size)
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(
+		token,
+		windows.TokenIntegrityLevel,
+		&buffer[0],
+		size,
+		&size,
+	); err != nil {
+		return 0, err
+	}
+	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buffer[0]))
+	sid := label.Label.Sid
+	if sid == nil || !sid.IsValid() || sid.SubAuthorityCount() == 0 {
+		return 0, fmt.Errorf("token integrity label has no valid SID")
+	}
+	return sid.SubAuthority(uint32(sid.SubAuthorityCount() - 1)), nil
+}
+
+func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, error) {
+	var sessions *windows.WTS_SESSION_INFO
+	var count uint32
+	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
+		return 0, fmt.Errorf("enterprise hooks: enumerate active Windows sessions for target SID %s: %w", target, err)
+	}
+	if sessions != nil {
+		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
+	}
+	sessionIDs := make([]uint32, 0, count)
+	if count > 0 && sessions != nil {
+		for _, session := range unsafe.Slice(sessions, count) {
+			if session.State == windows.WTSActive {
+				sessionIDs = append(sessionIDs, session.SessionID)
+			}
+		}
+	}
+	sort.Slice(sessionIDs, func(i, j int) bool { return sessionIDs[i] < sessionIDs[j] })
+	var queryFailures []string
+	for _, sessionID := range sessionIDs {
+		var primary windows.Token
+		if err := windows.WTSQueryUserToken(sessionID, &primary); err != nil {
+			queryFailures = append(queryFailures, fmt.Sprintf("session %d: %v", sessionID, err))
+			continue
+		}
+		if err := validateWindowsEnterpriseTokenSID(primary, target); err != nil {
+			primary.Close()
+			continue
+		}
+		advisory, err := assessWindowsEnterpriseTokenElevation(primary)
+		if err != nil {
+			primary.Close()
+			return 0, fmt.Errorf(
+				"enterprise hooks: active-session token for explicit target SID %s failed elevation assessment: %w",
+				target,
+				err,
+			)
+		}
+		if advisory != "" {
+			logWindowsEnterpriseTokenElevationAdvisory(target, advisory)
+		}
+		var impersonation windows.Token
+		err = windows.DuplicateTokenEx(
+			primary,
+			windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE|windows.TOKEN_DUPLICATE,
+			nil,
+			windows.SecurityImpersonation,
+			windows.TokenImpersonation,
+			&impersonation,
+		)
+		primary.Close()
+		if err != nil {
+			return 0, fmt.Errorf("enterprise hooks: duplicate active-session token for target SID %s: %w", target, err)
+		}
+		if err := validateWindowsEnterpriseTargetToken(impersonation, target); err != nil {
+			impersonation.Close()
+			return 0, fmt.Errorf("enterprise hooks: duplicated target token validation failed: %w", err)
+		}
+		return impersonation, nil
+	}
+	if len(queryFailures) > 0 {
+		return 0, fmt.Errorf(
+			"enterprise hooks: active Windows session token queries failed while resolving target SID %s: %s",
+			target,
+			strings.Join(queryFailures, "; "),
+		)
+	}
+	return 0, &WindowsTargetSessionUnavailableError{SID: target.String()}
+}
+
+// RequireWindowsEnterpriseTargetSession authenticates that an exact active
+// token currently exists for the manifest SID and profile. It performs no
+// profile mutation; callers must still re-resolve the token inside the actual
+// impersonated operation so logout/session-reuse races fail closed.
+func RequireWindowsEnterpriseTargetSession(ownerSID, expectedHome string) error {
+	target, err := validateWindowsEnterpriseTargetSID(ownerSID)
+	if err != nil {
+		return err
+	}
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return err
+	}
+	token, err := windowsEnterpriseTargetTokenResolver(target)
+	if err != nil {
+		return err
+	}
+	defer token.Close()
+	if err := validateWindowsEnterpriseTargetToken(token, target); err != nil {
+		return err
+	}
+	return validateWindowsEnterpriseTokenProfile(token, expectedHome)
+}

@@ -75,6 +75,7 @@ var (
 	connectorFlagConfigHome           string
 	connectorFlagHookExe              string
 	connectorVerifySetupParent        string
+	connectorVerifySetupStartIdentity string
 	connectorVerifyCleanupRecord      string
 	connectorVerifyCleanupTransaction string
 )
@@ -200,6 +201,13 @@ func init() {
 	)
 	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-parent")
 	connectorVerifyCmd.Flags().StringVar(
+		&connectorVerifySetupStartIdentity,
+		"internal-setup-start-identity",
+		"",
+		"internal authenticated Setup process-instance binding",
+	)
+	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-start-identity")
+	connectorVerifyCmd.Flags().StringVar(
 		&connectorVerifyCleanupRecord,
 		"internal-deferred-cleanup-record",
 		"",
@@ -225,6 +233,7 @@ func init() {
 
 func runConnectorVerifyPersistentPreRunE(cmd *cobra.Command, args []string) error {
 	if connectorVerifySetupParent == "" &&
+		connectorVerifySetupStartIdentity == "" &&
 		connectorVerifyCleanupRecord == "" &&
 		connectorVerifyCleanupTransaction == "" {
 		return connectorVerifyRootPersistentPreRun(cmd, args)

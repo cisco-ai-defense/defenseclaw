@@ -7,6 +7,7 @@ package testenv
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 	"unsafe"
@@ -35,6 +36,12 @@ func PrivateTempDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("canonicalize private temp dir %s: %v", dir, err)
+	}
+	dir = canonical
 	t.Cleanup(func() {
 		// Windows can retain a short-lived image-section handle after a test
 		// process exits. Retry the cleanup briefly so a just-executed fixture

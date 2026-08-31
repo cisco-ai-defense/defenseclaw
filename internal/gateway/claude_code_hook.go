@@ -116,6 +116,9 @@ type claudeCodeHookResponse struct {
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	// Keep authenticated lifecycle state current even while inspection is
+	// disabled so a live same-session re-enable cannot lose active-file authority.
+	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
 	mode := a.claudeCodeMode()
 	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
@@ -156,10 +159,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:       toolName,
-				Args:       toolArgs,
-				CWD:        req.CWD,
-				ActiveHome: trustedSameHostHome(),
+				Tool:                                     toolName,
+				Args:                                     toolArgs,
+				CWD:                                      req.CWD,
+				ActiveHome:                               trustedSameHostHome(),
+				ActiveAgentFiles:                         activeAgentContext.files,
+				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
+				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
+				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 			},
 			LegacyText:         string(toolArgs),
 			Connector:          "claudecode",
@@ -523,14 +530,17 @@ func claudeCodeAdditionalContext(rawAction, severity, reason string, wouldBlock 
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
+	lead := "DefenseClaw observed"
+	finding := fmt.Sprintf("a %s Claude Code hook finding", severity)
 	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
+		// A full clause cannot take the article that follows "observed".
+		lead = "DefenseClaw would block this in action mode:"
+		finding = fmt.Sprintf("%s Claude Code hook finding", severity)
 	}
 	if reason == "" {
-		return fmt.Sprintf("%s a %s Claude Code hook finding.", prefix, severity)
+		return fmt.Sprintf("%s %s.", lead, finding)
 	}
-	return fmt.Sprintf("%s a %s Claude Code hook finding: %s", prefix, severity, reason)
+	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 func reasonOrDefaultClaudeCode(reason string) string {

@@ -37,8 +37,24 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// currentStderrWriter resolves os.Stderr for every write. The Windows service
+// host redirects os.Stderr only after package initialization, so retaining the
+// *os.File value observed here would strand later diagnostics on the original
+// process handle instead of the protected service log. Keeping this proxy
+// stateless also preserves the existing test seam: focused tests may still
+// replace defaultLogWriter or ciscoInspectStructuredLogWriter with a buffer.
+type currentStderrWriter struct{}
+
+func (currentStderrWriter) Write(data []byte) (int, error) {
+	stderr := os.Stderr
+	if stderr == nil {
+		return 0, os.ErrInvalid
+	}
+	return stderr.Write(data)
+}
+
 // defaultLogWriter is the destination for guardrail diagnostic messages.
-var defaultLogWriter io.Writer = os.Stderr
+var defaultLogWriter io.Writer = currentStderrWriter{}
 
 // ScanVerdict is the result of a guardrail inspection.
 type ScanVerdict struct {
@@ -343,6 +359,15 @@ func (g *GuardrailInspector) mergeVerdict(local, cisco *ScanVerdict) *ScanVerdic
 		// enforcement (guardrail.mode = action) driven by AID
 		// classification, while local regex behaves as an "observe"
 		// signal in the same install.
+		if cisco == nil {
+			// Every merge on the proxy lane that lands here without
+			// a cloud verdict is a fail-open. The structured event
+			// stream already records these as managed-AID fail-opens;
+			// the stderr line makes the condition visible to anyone
+			// tailing gateway.err.log live. Rate-limited so a
+			// persistently broken cloud lane cannot flood the log.
+			logManagedAIDSkip("proxy-cisco-nil", "AID inspector returned no verdict")
+		}
 		local = demoteLocalBlockForManaged(local)
 		return mergeVerdictsManaged(local, cisco)
 	}

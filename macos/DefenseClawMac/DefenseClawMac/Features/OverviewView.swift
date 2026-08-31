@@ -270,10 +270,10 @@ struct OverviewView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     HStack {
-                        Text("defenseclaw gateway start")
+                        Text("defenseclaw-gateway start")
                             .font(.system(.caption, design: .monospaced))
                         Button {
-                            copyToPasteboard("defenseclaw gateway start")
+                            copyToPasteboard("defenseclaw-gateway start")
                         } label: { Image(systemName: "doc.on.doc") }
                         .buttonStyle(.borderless)
                         .accessibilityLabel("Copy gateway start command")

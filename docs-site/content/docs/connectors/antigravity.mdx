@@ -24,6 +24,11 @@ x64 and ARM64 clients; DefenseClaw supports the native Windows x64 setup path.
 Validation metadata remains empty and `live=false`. Windows 10
 64-bit is the documented minimum.
 
+<Video
+  src="antigravity"
+  caption="Three scenarios end-to-end against the same agy session: (1) a benign command flows through with action=allow / severity=NONE; (2) a sensitive-file read produces an approval prompt under the policy used for this historical recording; (3) writing a synthetic secret to an environment file matches a CRITICAL finding → DefenseClaw returns decision=deny → agy refuses without prompting. Current builds keep an ordinary sensitive-file read as a MEDIUM detection-only advisory unless the same action proves a mutation or external egress. Each verdict appears live in the Splunk pane on the left. This demo also used an unredacted destination projection; current v8 deployments select an explicit redaction profile per destination or route."
+/>
+
 ## Native Windows setup
 
 Install the official client from PowerShell:

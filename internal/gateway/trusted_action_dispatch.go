@@ -55,6 +55,29 @@ type trustedActionRequest struct {
 	// leave this false even when the argv shape is a static reader.
 	DowngradeReadOnlyDataArgs bool
 	record                    func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry           func(trustedActionTelemetry)
+}
+
+// trustedActionTelemetry is value-free dispatch telemetry. It deliberately
+// carries counts only: raw shell text, argv, matched rule IDs, paths, and
+// network destinations must never leave the trusted action boundary through
+// this channel.
+type trustedActionTelemetry struct {
+	ParserUncertaintyCount              int64
+	ParserUncertaintyCatalogMatchCount  int64
+	ParserUncertaintyShadowFindingCount int64
+}
+
+func (t *trustedActionTelemetry) merge(other trustedActionTelemetry) {
+	t.ParserUncertaintyCount += other.ParserUncertaintyCount
+	t.ParserUncertaintyCatalogMatchCount += other.ParserUncertaintyCatalogMatchCount
+	t.ParserUncertaintyShadowFindingCount += other.ParserUncertaintyShadowFindingCount
+}
+
+func (t trustedActionTelemetry) empty() bool {
+	return t.ParserUncertaintyCount == 0 &&
+		t.ParserUncertaintyCatalogMatchCount == 0 &&
+		t.ParserUncertaintyShadowFindingCount == 0
 }
 
 func dispatchTrustedAction(
@@ -65,9 +88,17 @@ func dispatchTrustedAction(
 		return nil
 	}
 	var (
-		facts    actionfacts.Facts
-		analyzed bool
+		facts     actionfacts.Facts
+		analyzed  bool
+		telemetry trustedActionTelemetry
 	)
+	if request.recordTelemetry != nil {
+		defer func() {
+			if !telemetry.empty() {
+				request.recordTelemetry(telemetry)
+			}
+		}()
+	}
 	if request.record != nil {
 		defer func() {
 			if !analyzed {
@@ -79,6 +110,9 @@ func dispatchTrustedAction(
 	if parent == nil {
 		parent = context.Background()
 	}
+
+	facts = actionfacts.Analyze(request.Input)
+	analyzed = true
 	ctx, cancel := context.WithTimeout(parent, trustedActionDispatchTimeout)
 	defer cancel()
 
@@ -88,34 +122,39 @@ func dispatchTrustedAction(
 		excludeTrustExploit: true,
 	}
 	if generation == nil || len(generation.semanticRules) == 0 {
-		facts = actionfacts.Analyze(request.Input)
-		analyzed = true
-		return dispatchTrustedFallback(
+		var fallbackTelemetry trustedActionTelemetry
+		findings, fallbackTelemetry = dispatchTrustedFallback(
 			generation,
 			request,
 			facts,
 			options,
 		)
+		telemetry.merge(fallbackTelemetry)
+		return findings
 	}
 
-	facts = actionfacts.Analyze(request.Input)
-	analyzed = true
 	if !facts.Authoritative() {
-		return dispatchTrustedFallback(
+		var fallbackTelemetry trustedActionTelemetry
+		findings, fallbackTelemetry = dispatchTrustedFallback(
 			generation,
 			request,
 			facts,
 			options,
 		)
+		telemetry.merge(fallbackTelemetry)
+		return findings
 	}
 	fullProjection, projectionCode := semantic.Project(facts)
 	if projectionCode != semantic.ProjectionOK {
-		return dispatchTrustedFallback(
+		var fallbackTelemetry trustedActionTelemetry
+		findings, fallbackTelemetry = dispatchTrustedFallback(
 			generation,
 			request,
 			facts,
 			options,
 		)
+		telemetry.merge(fallbackTelemetry)
+		return findings
 	}
 
 	excluded := make(map[string]struct{})
@@ -192,6 +231,18 @@ func dispatchTrustedAction(
 			!enforcementResult.Matched {
 			finding.enforcement = findingEnforcementDetectionOnly
 		}
+		finding = finding.withTrustedActionProof(
+			newActionFactsSemanticFindingProof(
+				candidate.rule.ID,
+				actionFactsSemanticProofInput{
+					FactsAuthoritative:  facts.Authoritative(),
+					EnforcementEligible: enforcementFacts.EnforcementEligible(),
+					ProjectionComplete:  projectionCode == semantic.ProjectionOK,
+					EvaluationComplete:  enforcementCode == semantic.EvalOK,
+					Matched:             enforcementResult.Matched,
+				},
+			),
+		)
 		semanticFindings = append(
 			semanticFindings,
 			adjustConfidence(request.Input.Tool, finding),
@@ -226,6 +277,12 @@ func dispatchTrustedAction(
 		request.Input.Tool,
 		options,
 	)
+	legacyFindings = appendTrustedWindowsPathFactFindings(
+		legacyFindings,
+		facts,
+		request.Input.Tool,
+		options,
+	)
 	legacyFindings = appendTrustedEmbeddedCommandFindings(
 		legacyFindings,
 		generation,
@@ -233,7 +290,8 @@ func dispatchTrustedAction(
 		facts,
 		options,
 	)
-	legacyFindings = appendTrustedBashFallbackFindings(
+	var fallbackTelemetry trustedActionTelemetry
+	legacyFindings, fallbackTelemetry = appendTrustedBashFallbackFindings(
 		legacyFindings,
 		generation,
 		request.Input,
@@ -243,6 +301,7 @@ func dispatchTrustedAction(
 		request.EnforcementCapable,
 		request.DowngradeReadOnlyDataArgs,
 	)
+	telemetry.merge(fallbackTelemetry)
 	legacyFindings = filterTrustedLegacyActionContext(
 		generation,
 		legacyFindings,
@@ -258,7 +317,7 @@ func dispatchTrustedAction(
 		request.EnforcementCapable,
 	)
 	findings = append(semanticFindings, legacyFindings...)
-	return applyBoundaryEnforcement(findings, request.EnforcementCapable)
+	return finalizeTrustedActionFindings(generation, request, facts, findings)
 }
 
 func excludeSemanticOwner(
@@ -310,7 +369,13 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 	"CMD-PIPE-CURL": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return curlDownloadExecPrerequisite(facts)
+			return curlDownloadExecPrerequisite(facts) ||
+				powerShellDownloadExecPrerequisite(facts)
+		},
+	},
+	"CMD-WIN-REG-PERSIST": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return schedulerInstallPrerequisite(facts)
 		},
 	},
 	"CMD-WIN-IWR-IEX": {
@@ -479,7 +544,7 @@ var trustedLegacyProvenCommandDetectionOnly = map[string]trustedLegacyProvenComm
 		severity:     "LOW",
 		confidence:   0.55,
 		tags:         []string{"execution"},
-		prerequisite: trustedPerlInlineEffectFreeOwnerProven,
+		prerequisite: trustedPerlInlineCommandOwnerProven,
 	},
 	"CMD-RUBY-E": {
 		category:     "command",
@@ -488,7 +553,7 @@ var trustedLegacyProvenCommandDetectionOnly = map[string]trustedLegacyProvenComm
 		severity:     "LOW",
 		confidence:   0.55,
 		tags:         []string{"execution"},
-		prerequisite: trustedRubyInlineEffectFreeOwnerProven,
+		prerequisite: trustedRubyInlineCommandOwnerProven,
 	},
 }
 
@@ -796,19 +861,29 @@ func filterExactFallbackFindings(
 	facts actionfacts.Facts,
 	enforcementCapable bool,
 ) []RuleFinding {
+	enforcementFacts := facts.EnforcementProjection()
+	var nestedActions []trustedNestedAction
+	nestedActionsReady := false
+	getNestedActions := func() []trustedNestedAction {
+		if !nestedActionsReady {
+			nestedActions = trustedNestedExecutionActions(input, facts)
+			nestedActionsReady = true
+		}
+		return nestedActions
+	}
 	suppressAuthorizedKeysPathFallback := false
 	suppressPowerShellDownloadAlias := false
 	for _, finding := range findings {
 		switch finding.RuleID {
 		case "persistence.ssh_authorized_keys_command":
 			contract := exactFallbackContracts[finding.RuleID]
-			if contract.proves != nil && contract.proves(input, facts) {
+			if contract.proves != nil && contract.proves(input, enforcementFacts) {
 				suppressAuthorizedKeysPathFallback = true
 			}
 		case "CMD-PIPE-CURL":
 			contract := exactFallbackContracts[finding.RuleID]
-			if contract.proves != nil && contract.proves(input, facts) &&
-				powerShellDownloadExecPrerequisite(facts) {
+			if contract.proves != nil && contract.proves(input, enforcementFacts) &&
+				powerShellDownloadExecPrerequisite(enforcementFacts) {
 				suppressPowerShellDownloadAlias = true
 			}
 		}
@@ -834,40 +909,87 @@ func filterExactFallbackFindings(
 			filtered = append(filtered, finding)
 			continue
 		}
-		proven := contract.proves != nil && contract.proves(input, facts)
-		if !proven {
-			proven = trustedNestedExactFallbackProof(
+		matched := contract.proves != nil && contract.proves(input, facts)
+		if !matched {
+			matched = trustedNestedExactFallbackMatch(
 				contract,
-				input,
-				facts,
+				getNestedActions(),
 			)
 		}
-		if !preserveUnstructured && !proven {
+		if !preserveUnstructured && !matched {
 			continue
 		}
-		if contract.detectionOnly || !enforcementCapable {
+		proofBoundary := facts.Authoritative() &&
+			enforcementFacts.EnforcementEligible() &&
+			enforcementFacts.Parse.Status == actionfacts.StatusComplete
+		proven := proofBoundary && contract.proves != nil &&
+			contract.proves(input, enforcementFacts)
+		if proofBoundary && !proven {
+			proven = trustedNestedExactFallbackProof(
+				contract,
+				getNestedActions(),
+			)
+		}
+		if contract.detectionOnly || !enforcementCapable || !proven {
 			finding.enforcement = findingEnforcementDetectionOnly
 		} else {
 			finding.enforcement = findingEnforcementAllowed
 		}
+		finding = finding.withTrustedActionProof(
+			newExactFallbackFindingProof(
+				finding.RuleID,
+				facts.Authoritative(),
+				enforcementFacts.EnforcementEligible(),
+				enforcementFacts.Parse.Status == actionfacts.StatusComplete,
+				proven,
+			),
+		)
 		filtered = append(filtered, finding)
 	}
 	return filtered
 }
 
-func trustedNestedExactFallbackProof(
+func trustedNestedExactFallbackMatch(
 	contract exactFallbackContract,
-	input actionfacts.Input,
-	facts actionfacts.Facts,
+	nestedActions []trustedNestedAction,
 ) bool {
 	if contract.proves == nil {
 		return false
 	}
-	for _, nested := range trustedNestedExecutionActions(input, facts) {
-		if nested.rawFallback {
+	for _, nested := range nestedActions {
+		if !nested.rawFallback && contract.proves(nested.input, nested.facts) {
+			return true
+		}
+	}
+	return false
+}
+
+func trustedNestedExactFallbackProof(
+	contract exactFallbackContract,
+	nestedActions []trustedNestedAction,
+) bool {
+	return trustedNestedExactFallbackProofFromActions(
+		contract,
+		nestedActions,
+	)
+}
+
+func trustedNestedExactFallbackProofFromActions(
+	contract exactFallbackContract,
+	nestedActions []trustedNestedAction,
+) bool {
+	if contract.proves == nil {
+		return false
+	}
+	for _, nested := range nestedActions {
+		if nested.rawFallback || !nested.facts.Authoritative() {
 			continue
 		}
-		if contract.proves(nested.input, nested.facts) {
+		nestedEnforcementFacts := nested.facts.EnforcementProjection()
+		if !nestedEnforcementFacts.EnforcementEligible() {
+			continue
+		}
+		if contract.proves(nested.input, nestedEnforcementFacts) {
 			return true
 		}
 	}
@@ -893,7 +1015,7 @@ func dispatchTrustedFallback(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 	options ruleScanOptions,
-) []RuleFinding {
+) ([]RuleFinding, trustedActionTelemetry) {
 	legacyText := request.LegacyText
 	if trustedFixtureSourceInspectionAction(request.Input, facts) {
 		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
@@ -904,6 +1026,12 @@ func dispatchTrustedFallback(
 		request.Input.Tool,
 		options,
 	)
+	findings = appendTrustedWindowsPathFactFindings(
+		findings,
+		facts,
+		request.Input.Tool,
+		options,
+	)
 	findings = appendTrustedEmbeddedCommandFindings(
 		findings,
 		generation,
@@ -911,7 +1039,8 @@ func dispatchTrustedFallback(
 		facts,
 		options,
 	)
-	findings = appendTrustedBashFallbackFindings(
+	var fallbackTelemetry trustedActionTelemetry
+	findings, fallbackTelemetry = appendTrustedBashFallbackFindings(
 		findings,
 		generation,
 		request.Input,
@@ -935,7 +1064,26 @@ func dispatchTrustedFallback(
 		facts,
 		request.EnforcementCapable,
 	)
-	return applyBoundaryEnforcement(findings, request.EnforcementCapable)
+	return finalizeTrustedActionFindings(
+		generation,
+		request,
+		facts,
+		findings,
+	), fallbackTelemetry
+}
+
+func finalizeTrustedActionFindings(
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+	findings []RuleFinding,
+) []RuleFinding {
+	findings = applyTrustedActionContextDisposition(
+		generation,
+		facts,
+		findings,
+	)
+	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
 // trustedFixtureSourceInspectionAction identifies the one tool-call shape in
@@ -1163,7 +1311,16 @@ func filterTrustedLegacyActionContext(
 	var (
 		readOnlyInspectionKnown bool
 		readOnlyInspection      bool
+		nestedActionsKnown      bool
+		nestedActions           []trustedNestedAction
 	)
+	loadNestedActions := func() []trustedNestedAction {
+		if !nestedActionsKnown {
+			nestedActions = trustedNestedExecutionActions(input, facts)
+			nestedActionsKnown = true
+		}
+		return nestedActions
+	}
 	filtered := findings[:0]
 	for _, finding := range findings {
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {
@@ -1197,17 +1354,38 @@ func filterTrustedLegacyActionContext(
 			}
 		case "cognitive-file":
 			if _, ok := mutationMatches[finding.RuleID]; ok {
+				if proof, proven := trustedSemanticOwnerFindingProofFromActions(
+					finding.RuleID,
+					facts,
+					loadNestedActions(),
+				); proven {
+					finding = finding.withTrustedActionProof(proof)
+				}
 				filtered = append(filtered, finding)
 			}
 		case "command":
 			if _, ok := commandMatches[finding.RuleID]; ok {
 				filtered = append(
 					filtered,
-					trustedLegacyProvenCommandFinding(generation, finding, facts),
+					trustedLegacyProvenCommandFinding(
+						generation,
+						finding,
+						facts,
+						loadNestedActions(),
+					),
 				)
 			}
 		case "c2":
 			if _, ok := networkMatches[finding.RuleID]; ok {
+				if proof, proven := trustedNetworkFindingProofFromActions(
+					generation,
+					finding.RuleID,
+					toolName,
+					facts,
+					loadNestedActions(),
+				); proven {
+					finding = finding.withTrustedActionProof(proof)
+				}
 				filtered = append(filtered, finding)
 			}
 		default:
@@ -1218,17 +1396,38 @@ func filterTrustedLegacyActionContext(
 				}
 			case strings.HasPrefix(finding.RuleID, "COG-"):
 				if _, ok := mutationMatches[finding.RuleID]; ok {
+					if proof, proven := trustedSemanticOwnerFindingProofFromActions(
+						finding.RuleID,
+						facts,
+						loadNestedActions(),
+					); proven {
+						finding = finding.withTrustedActionProof(proof)
+					}
 					filtered = append(filtered, finding)
 				}
 			case strings.HasPrefix(finding.RuleID, "CMD-"):
 				if _, ok := commandMatches[finding.RuleID]; ok {
 					filtered = append(
 						filtered,
-						trustedLegacyProvenCommandFinding(generation, finding, facts),
+						trustedLegacyProvenCommandFinding(
+							generation,
+							finding,
+							facts,
+							loadNestedActions(),
+						),
 					)
 				}
 			case strings.HasPrefix(finding.RuleID, "C2-"):
 				if _, ok := networkMatches[finding.RuleID]; ok {
+					if proof, proven := trustedNetworkFindingProofFromActions(
+						generation,
+						finding.RuleID,
+						toolName,
+						facts,
+						loadNestedActions(),
+					); proven {
+						finding = finding.withTrustedActionProof(proof)
+					}
 					filtered = append(filtered, finding)
 				}
 			default:
@@ -1243,6 +1442,7 @@ func trustedLegacyProvenCommandFinding(
 	generation *compiledRulePackCategories,
 	finding RuleFinding,
 	facts actionfacts.Facts,
+	nestedActions []trustedNestedAction,
 ) RuleFinding {
 	// CMD-PYTHON-C and CMD-BASH-C are generic interpreter-shape owners. Once
 	// ActionFacts proves the command being executed, retain the LOW match as
@@ -1251,18 +1451,21 @@ func trustedLegacyProvenCommandFinding(
 	// commands) remain independently enforcement-capable. Unstructured and
 	// malformed literal fallback never reaches this proven-owner branch and
 	// keeps its existing conservative contract.
-	contract, ok := trustedLegacyProvenCommandDetectionOnly[finding.RuleID]
-	if !ok || !trustedLegacyDetectionOnlyCommandRule(
+	contract, detectionOnly := trustedLegacyProvenCommandDetectionOnly[finding.RuleID]
+	if detectionOnly && trustedLegacyDetectionOnlyCommandRule(
 		generation,
 		finding.RuleID,
 		contract,
-	) {
-		return finding
+	) && (contract.prerequisite == nil || contract.prerequisite(facts)) {
+		finding.enforcement = findingEnforcementDetectionOnly
 	}
-	if contract.prerequisite != nil && !contract.prerequisite(facts) {
-		return finding
+	if proof, proven := trustedSemanticOwnerFindingProofFromActions(
+		finding.RuleID,
+		facts,
+		nestedActions,
+	); proven {
+		finding = finding.withTrustedActionProof(proof)
 	}
-	finding.enforcement = findingEnforcementDetectionOnly
 	return finding
 }
 
@@ -1309,6 +1512,35 @@ func trustedBashInlineCommandOwnerProven(facts actionfacts.Facts) bool {
 			command.ArgvComplete &&
 			oneOfFold(command.Program, "bash", "sh") &&
 			len(command.Argv) >= 3 && command.Argv[1] == "-c" &&
+			strings.TrimSpace(command.Argv[2]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func trustedPerlInlineCommandOwnerProven(facts actionfacts.Facts) bool {
+	return trustedInlineCommandOwnerProven(facts, "perl", "-e")
+}
+
+func trustedRubyInlineCommandOwnerProven(facts actionfacts.Facts) bool {
+	return trustedInlineCommandOwnerProven(facts, "ruby", "-e")
+}
+
+func trustedInlineCommandOwnerProven(
+	facts actionfacts.Facts,
+	program string,
+	inlineFlag string,
+) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, command := range facts.Commands {
+		if command.Effect == actionfacts.EffectExecute &&
+			command.ArgvComplete &&
+			oneOfFold(command.Program, program) &&
+			len(command.Argv) >= 3 &&
+			command.Argv[1] == inlineFlag &&
 			strings.TrimSpace(command.Argv[2]) != "" {
 			return true
 		}
@@ -1840,10 +2072,14 @@ func trustedBashFallbackActions(
 				return false
 			}
 			nestedInput := actionfacts.Input{
-				Tool:       "bash",
-				Command:    body,
-				CWD:        input.CWD,
-				ActiveHome: input.ActiveHome,
+				Tool:                                     "bash",
+				Command:                                  body,
+				CWD:                                      input.CWD,
+				ActiveHome:                               input.ActiveHome,
+				ActiveAgentFiles:                         append([]string(nil), input.ActiveAgentFiles...),
+				ActiveAgentFilesCaseInsensitive:          append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+				ActiveAgentFilesCaseInsensitiveUncertain: input.ActiveAgentFilesCaseInsensitiveUncertain,
+				ActiveAgentFilesUncertain:                input.ActiveAgentFilesUncertain,
 			}
 			nestedFacts := actionfacts.Analyze(nestedInput)
 			if len(nestedFacts.Commands) == 0 {
@@ -1919,10 +2155,14 @@ func trustedStaticShellWrapperFallbackActions(
 			}
 			seen[script.Value] = struct{}{}
 			nestedInput := actionfacts.Input{
-				Tool:       program,
-				Command:    script.Value,
-				CWD:        input.CWD,
-				ActiveHome: input.ActiveHome,
+				Tool:                                     program,
+				Command:                                  script.Value,
+				CWD:                                      input.CWD,
+				ActiveHome:                               input.ActiveHome,
+				ActiveAgentFiles:                         append([]string(nil), input.ActiveAgentFiles...),
+				ActiveAgentFilesCaseInsensitive:          append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+				ActiveAgentFilesCaseInsensitiveUncertain: input.ActiveAgentFilesCaseInsensitiveUncertain,
+				ActiveAgentFilesUncertain:                input.ActiveAgentFilesUncertain,
 			}
 			nestedFacts := actionfacts.Analyze(nestedInput)
 			actions = append(
@@ -2404,10 +2644,14 @@ func trustedEmbeddedExecutionActions(
 			return
 		}
 		nestedInput := actionfacts.Input{
-			Tool:       "bash",
-			Command:    text,
-			CWD:        input.CWD,
-			ActiveHome: input.ActiveHome,
+			Tool:                                     "bash",
+			Command:                                  text,
+			CWD:                                      input.CWD,
+			ActiveHome:                               input.ActiveHome,
+			ActiveAgentFiles:                         append([]string(nil), input.ActiveAgentFiles...),
+			ActiveAgentFilesCaseInsensitive:          append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+			ActiveAgentFilesCaseInsensitiveUncertain: input.ActiveAgentFilesCaseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                input.ActiveAgentFilesUncertain,
 		}
 		nestedFacts := actionfacts.Analyze(nestedInput)
 		if len(nestedFacts.Commands) == 0 {
@@ -2435,10 +2679,14 @@ func trustedEmbeddedExecutionActions(
 			return
 		}
 		nestedInput := actionfacts.Input{
-			Tool:       "shell",
-			Argv:       append([]string(nil), argv...),
-			CWD:        input.CWD,
-			ActiveHome: input.ActiveHome,
+			Tool:                                     "shell",
+			Argv:                                     append([]string(nil), argv...),
+			CWD:                                      input.CWD,
+			ActiveHome:                               input.ActiveHome,
+			ActiveAgentFiles:                         append([]string(nil), input.ActiveAgentFiles...),
+			ActiveAgentFilesCaseInsensitive:          append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+			ActiveAgentFilesCaseInsensitiveUncertain: input.ActiveAgentFilesCaseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                input.ActiveAgentFilesUncertain,
 		}
 		actions = append(actions, trustedNestedAction{
 			input: trustedTerminalNestedInput(nestedInput),
@@ -2711,6 +2959,14 @@ func trustedNestedExecutionActions(
 			break
 		}
 		exploreInput := queued.action.input
+		exploreInput.ActiveAgentFiles = append(
+			[]string(nil),
+			queued.action.input.ActiveAgentFiles...,
+		)
+		exploreInput.ActiveAgentFilesCaseInsensitive = append(
+			[]string(nil),
+			queued.action.input.ActiveAgentFilesCaseInsensitive...,
+		)
 		exploreInput.Tool = queued.action.facts.Tool
 		if strings.TrimSpace(exploreInput.Tool) == "" {
 			exploreInput.Tool = "bash"
@@ -2813,10 +3069,14 @@ func trustedRawShellFallbackAction(
 ) []trustedNestedAction {
 	return []trustedNestedAction{{
 		input: trustedTerminalNestedInput(actionfacts.Input{
-			Tool:       "bash",
-			Command:    trustedExecutableShellProjection(command),
-			CWD:        input.CWD,
-			ActiveHome: input.ActiveHome,
+			Tool:                                     "bash",
+			Command:                                  trustedExecutableShellProjection(command),
+			CWD:                                      input.CWD,
+			ActiveHome:                               input.ActiveHome,
+			ActiveAgentFiles:                         append([]string(nil), input.ActiveAgentFiles...),
+			ActiveAgentFilesCaseInsensitive:          append([]string(nil), input.ActiveAgentFilesCaseInsensitive...),
+			ActiveAgentFilesCaseInsensitiveUncertain: input.ActiveAgentFilesCaseInsensitiveUncertain,
+			ActiveAgentFilesUncertain:                input.ActiveAgentFilesUncertain,
 		}),
 		rawFallback: true,
 	}}
@@ -3068,7 +3328,8 @@ func appendTrustedBashFallbackFindings(
 	options ruleScanOptions,
 	enforcementCapable bool,
 	downgradeReadOnlyDataArgs bool,
-) []RuleFinding {
+) ([]RuleFinding, trustedActionTelemetry) {
+	var telemetry trustedActionTelemetry
 	seen := make(map[string]int, len(findings))
 	for index, finding := range findings {
 		seen[finding.RuleID] = index
@@ -3088,6 +3349,7 @@ func appendTrustedBashFallbackFindings(
 	for _, nested := range trustedNestedExecutionActions(input, facts) {
 		if nested.rawFallback {
 			matched := false
+			shadowFindings := int64(0)
 			for _, finding := range scanRuleGeneration(
 				generation,
 				nested.input.Command,
@@ -3095,6 +3357,7 @@ func appendTrustedBashFallbackFindings(
 				options,
 			) {
 				matched = true
+				shadowFindings++
 				finding = markTrustedParserUncertainty(finding)
 				if index, exists := seen[finding.RuleID]; exists {
 					if _, proven := loadTypedProof()[finding.RuleID]; !proven {
@@ -3105,10 +3368,10 @@ func appendTrustedBashFallbackFindings(
 				seen[finding.RuleID] = len(findings)
 				findings = append(findings, finding)
 			}
-			if _, exists := seen[trustedParserUncertaintyRuleID]; !exists {
-				finding := trustedParserUncertaintyFinding(matched)
-				seen[finding.RuleID] = len(findings)
-				findings = append(findings, finding)
+			telemetry.ParserUncertaintyCount++
+			telemetry.ParserUncertaintyShadowFindingCount += shadowFindings
+			if matched {
+				telemetry.ParserUncertaintyCatalogMatchCount++
 			}
 			continue
 		}
@@ -3143,6 +3406,16 @@ func appendTrustedBashFallbackFindings(
 			enforcementCapable,
 		)
 		for _, finding := range nestedFindings {
+			if !facts.Authoritative() || !facts.EnforcementEligible() {
+				// A bounded nested parser may prove its own command, but that
+				// proof cannot upgrade an outer PARTIAL or INVALID shell
+				// expression. Preserve the finding for shadow analysis while
+				// replacing any nested authority with an explicit shadow proof.
+				finding.enforcement = findingEnforcementDetectionOnly
+				finding = finding.withTrustedActionProof(
+					newParserShadowFindingProof(finding.RuleID),
+				)
+			}
 			if _, exists := seen[finding.RuleID]; exists {
 				continue
 			}
@@ -3150,11 +3423,12 @@ func appendTrustedBashFallbackFindings(
 			findings = append(findings, finding)
 		}
 	}
-	return findings
+	return findings, telemetry
 }
 
 func markTrustedParserUncertainty(finding RuleFinding) RuleFinding {
 	finding.enforcement = findingEnforcementDetectionOnly
+	finding.disposition = findingDispositionAudit
 	finding.Severity = "LOW"
 	if finding.Confidence > 0.25 {
 		finding.Confidence = 0.25
@@ -3162,25 +3436,12 @@ func markTrustedParserUncertainty(finding RuleFinding) RuleFinding {
 	if !hasTag(finding.Tags, trustedParserUncertaintyTag) {
 		finding.Tags = append(finding.Tags, trustedParserUncertaintyTag)
 	}
-	return finding
+	return finding.withTrustedActionProof(newParserShadowFindingProof(finding.RuleID))
 }
 
+// Keep the former rule identifier as the stable metrics identity. It must not
+// be materialized as RuleFinding: parser uncertainty is not a security alert.
 const trustedParserUncertaintyRuleID = "ACTION-PARSER-UNCERTAINTY"
-
-func trustedParserUncertaintyFinding(catalogMatch bool) RuleFinding {
-	title := "Shell action could not be fully projected"
-	if catalogMatch {
-		title = "Shell action matched only under parser uncertainty"
-	}
-	return RuleFinding{
-		RuleID:      trustedParserUncertaintyRuleID,
-		Title:       title,
-		Severity:    "LOW",
-		Confidence:  0.2,
-		Tags:        []string{trustedParserUncertaintyTag},
-		enforcement: findingEnforcementDetectionOnly,
-	}
-}
 
 func trustedTypedLegacyActionRuleMatches(
 	generation *compiledRulePackCategories,
@@ -3302,6 +3563,219 @@ func trustedRuleHasActionProof(
 	}
 	owner, ok := semanticOwners[ruleID]
 	return ok && owner.prerequisite != nil && owner.prerequisite(facts)
+}
+
+// trustedSemanticOwnerFindingProof binds a compatibility finding to the same
+// code-owned semantic prerequisite used by the ActionFacts owner. A nested
+// projection may supply the matching command, but it can authorize only when
+// both the outer action and the nested projection are complete and eligible.
+// This preserves useful nested-command coverage without allowing a PARTIAL or
+// INVALID outer shell expression to become authoritative.
+func trustedSemanticOwnerFindingProof(
+	ruleID string,
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) (findingProof, bool) {
+	return trustedSemanticOwnerFindingProofFromActions(
+		ruleID,
+		facts,
+		trustedNestedExecutionActions(input, facts),
+	)
+}
+
+func trustedSemanticOwnerFindingProofFromActions(
+	ruleID string,
+	facts actionfacts.Facts,
+	nestedActions []trustedNestedAction,
+) (findingProof, bool) {
+	if !facts.Authoritative() {
+		return findingProof{}, false
+	}
+	enforcementFacts := facts.EnforcementProjection()
+	if !enforcementFacts.EnforcementEligible() {
+		return findingProof{}, false
+	}
+	owner, ok := trustedSemanticOwnerClaimingRule(ruleID)
+	if !ok || owner.prerequisite == nil {
+		return findingProof{}, false
+	}
+	matched := owner.prerequisite(enforcementFacts)
+	if !matched {
+		for _, nested := range nestedActions {
+			if nested.rawFallback || !nested.facts.Authoritative() {
+				continue
+			}
+			nestedEnforcementFacts := nested.facts.EnforcementProjection()
+			if !nestedEnforcementFacts.EnforcementEligible() {
+				continue
+			}
+			if owner.prerequisite(nestedEnforcementFacts) {
+				matched = true
+				break
+			}
+		}
+	}
+	if !matched {
+		return findingProof{}, false
+	}
+	return newActionFactsSemanticFindingProof(
+		ruleID,
+		actionFactsSemanticProofInput{
+			FactsAuthoritative:  facts.Authoritative(),
+			EnforcementEligible: enforcementFacts.EnforcementEligible(),
+			ProjectionComplete:  true,
+			EvaluationComplete:  true,
+			Matched:             true,
+		},
+	), true
+}
+
+var trustedSemanticOwnerRuleIndex = buildTrustedSemanticOwnerRuleIndex(semanticOwners)
+
+func buildTrustedSemanticOwnerRuleIndex(
+	owners map[string]semanticOwner,
+) map[string]semanticOwner {
+	index := make(map[string]semanticOwner, len(owners))
+	for ownerID, owner := range owners {
+		owner.id = ownerID
+		for _, ruleID := range owner.claimedIDs(true) {
+			canonicalRuleID := canonicalTrustedRuleID(ruleID)
+			if canonicalRuleID == "" {
+				continue
+			}
+			if existing, duplicate := index[canonicalRuleID]; duplicate &&
+				existing.id != ownerID {
+				panic("duplicate trusted semantic owner claim for " + canonicalRuleID)
+			}
+			index[canonicalRuleID] = owner
+		}
+	}
+	return index
+}
+
+func trustedSemanticOwnerClaimingRule(ruleID string) (semanticOwner, bool) {
+	owner, ok := trustedSemanticOwnerRuleIndex[canonicalTrustedRuleID(ruleID)]
+	return owner, ok
+}
+
+// trustedNetworkFindingProof requires a command-owned network fact from a
+// complete executing command. The rule pattern classifies the typed endpoint;
+// it is never allowed to turn a URL-shaped literal in source or test data into
+// an action. Nested endpoints remain bounded by the complete outer action.
+func trustedNetworkFindingProof(
+	generation *compiledRulePackCategories,
+	ruleID string,
+	input actionfacts.Input,
+	toolName string,
+	facts actionfacts.Facts,
+) (findingProof, bool) {
+	return trustedNetworkFindingProofFromActions(
+		generation,
+		ruleID,
+		toolName,
+		facts,
+		trustedNestedExecutionActions(input, facts),
+	)
+}
+
+func trustedNetworkFindingProofFromActions(
+	generation *compiledRulePackCategories,
+	ruleID string,
+	toolName string,
+	facts actionfacts.Facts,
+	nestedActions []trustedNestedAction,
+) (findingProof, bool) {
+	if !facts.Authoritative() {
+		return findingProof{}, false
+	}
+	enforcementFacts := facts.EnforcementProjection()
+	if !enforcementFacts.EnforcementEligible() {
+		return findingProof{}, false
+	}
+	matched := trustedNetworkRuleMatchesExecutingFact(
+		generation,
+		ruleID,
+		toolName,
+		enforcementFacts,
+	)
+	if !matched {
+		for _, nested := range nestedActions {
+			if nested.rawFallback || !nested.facts.Authoritative() {
+				continue
+			}
+			nestedEnforcementFacts := nested.facts.EnforcementProjection()
+			if !nestedEnforcementFacts.EnforcementEligible() {
+				continue
+			}
+			if trustedNetworkRuleMatchesExecutingFact(
+				generation,
+				ruleID,
+				toolName,
+				nestedEnforcementFacts,
+			) {
+				matched = true
+				break
+			}
+		}
+	}
+	if !matched {
+		return findingProof{}, false
+	}
+	return newActionFactsSemanticFindingProof(
+		ruleID,
+		actionFactsSemanticProofInput{
+			FactsAuthoritative:  facts.Authoritative(),
+			EnforcementEligible: enforcementFacts.EnforcementEligible(),
+			ProjectionComplete:  true,
+			EvaluationComplete:  true,
+			Matched:             true,
+		},
+	), true
+}
+
+func trustedNetworkRuleMatchesExecutingFact(
+	generation *compiledRulePackCategories,
+	ruleID string,
+	toolName string,
+	facts actionfacts.Facts,
+) bool {
+	commands := make(map[int64]actionfacts.CommandFact, len(facts.Commands))
+	for _, command := range facts.Commands {
+		commands[command.ID] = command
+	}
+	for _, network := range facts.Network {
+		command, ok := commands[network.CommandID]
+		if !ok || command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete {
+			continue
+		}
+		values := []string{network.Host, network.NormalizedHost}
+		if network.Scheme != "" && network.Host != "" {
+			values = append(values, network.Scheme+"://"+network.Host)
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			for _, match := range scanRuleGeneration(
+				generation,
+				value,
+				toolName,
+				ruleScanOptions{
+					includeToolCallOnly: true,
+					excludeTrustExploit: true,
+				},
+			) {
+				if canonicalTrustedRuleID(match.RuleID) ==
+					canonicalTrustedRuleID(ruleID) &&
+					(trustedLegacyRuleCategory(generation, match.RuleID) == "c2" ||
+						strings.HasPrefix(match.RuleID, "C2-")) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func collectTrustedLegacyCommandMatches(
@@ -3593,6 +4067,60 @@ func appendTrustedEmbeddedCommandFindings(
 					continue
 				}
 				if _, exists := seen[finding.RuleID]; exists {
+					continue
+				}
+				seen[finding.RuleID] = struct{}{}
+				findings = append(findings, finding)
+			}
+		}
+	}
+	return findings
+}
+
+// appendTrustedWindowsPathFactFindings materializes Windows-only sensitive
+// path rules from typed filesystem facts. Keeping this bridge fact-driven lets
+// curl uploads and other exact readers reach the legacy rule catalog without
+// treating a path-shaped header, cookie, URL, or documentation operand as a
+// filesystem action.
+func appendTrustedWindowsPathFactFindings(
+	findings []RuleFinding,
+	facts actionfacts.Facts,
+	toolName string,
+	options ruleScanOptions,
+) []RuleFinding {
+	seen := make(map[string]struct{}, len(findings))
+	for _, finding := range findings {
+		seen[finding.RuleID] = struct{}{}
+	}
+	for _, candidate := range facts.Paths {
+		if candidate.Flavor != actionfacts.PathFlavorWindows {
+			continue
+		}
+		switch candidate.Access {
+		case actionfacts.PathAccessRead,
+			actionfacts.PathAccessWrite,
+			actionfacts.PathAccessAppend,
+			actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		values := []string{candidate.Value, candidate.Normalized, candidate.Resolved}
+		seenValues := make(map[string]struct{}, len(values))
+		for _, value := range values {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			if _, duplicate := seenValues[value]; duplicate {
+				continue
+			}
+			seenValues[value] = struct{}{}
+			for _, finding := range windowsSensitivePathFindingsWithOptions(
+				value,
+				toolName,
+				true,
+				options,
+			) {
+				if _, duplicate := seen[finding.RuleID]; duplicate {
 					continue
 				}
 				seen[finding.RuleID] = struct{}{}

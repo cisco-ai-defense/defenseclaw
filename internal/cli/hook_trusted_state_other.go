@@ -8,5 +8,14 @@ package cli
 func trustedNativeHookHome() (string, bool)         { return "", false }
 func NativeHookRuntimeNoop() bool                   { return false }
 func NativeConnectorHookNoop([]string) bool         { return false }
-func enterpriseManagedHookRuntimeNoop() bool        { return false }
+func enterpriseManagedHookRuntimeNoop(string) bool  { return false }
 func enterpriseManagedHookRuntimeForceClosed() bool { return false }
+func enterpriseManagedHookRuntimeFailureReason() string {
+	return ""
+}
+func enterpriseManagedHookRuntimeEndpoint(string) (string, string, bool) {
+	return "", "", false
+}
+func enterpriseManagedHookRuntimeConnection(string) (string, string, *string, bool) {
+	return "", "", nil, false
+}

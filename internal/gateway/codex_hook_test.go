@@ -1282,7 +1282,7 @@ func TestEvaluateCodexHook_HILTPreToolUseDoesNotAsk(t *testing.T) {
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
 		ToolInput: map[string]interface{}{
-			"command": "nc -l 4444",
+			"command": "chmod 777 /etc/shadow",
 		},
 	})
 
@@ -1311,7 +1311,7 @@ func TestEvaluateCodexHook_HILTPermissionRequestAbstains(t *testing.T) {
 		HookEventName: "PermissionRequest",
 		ToolName:      "Bash",
 		ToolInput: map[string]interface{}{
-			"command": "nc -l 4444",
+			"command": "chmod 777 /etc/shadow",
 		},
 	})
 

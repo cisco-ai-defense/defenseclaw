@@ -35,6 +35,7 @@ type llmEventMeta struct {
 	Source             string
 	Provider           string
 	Model              string
+	ResponseModel      string
 	SessionID          string
 	RequestID          string
 	RunID              string
@@ -184,6 +185,10 @@ func (a *APIServer) emitLLMResponseEventV8(
 	if a == nil {
 		return ""
 	}
+	// Hook completion payloads report the model that produced the response in
+	// their model field. Preserve that source-backed fact without teaching the
+	// shared log builder to fall back for proxy failures that saw no response.
+	meta.ResponseModel = firstNonEmpty(meta.ResponseModel, meta.Model)
 	return emitLLMResponseEventV8WithEmitter(
 		ctx, a.observabilityV8RuntimeEmitter(), meta, response, rawResponseBody, finishReasons,
 	)
@@ -210,7 +215,14 @@ func emitLLMResponseEventV8WithEmitterStatus(
 	finishReasons []string,
 ) (string, bool, error) {
 	if strings.TrimSpace(response) == "" && rawResponseBody == "" && len(finishReasons) == 0 {
-		return "", false, nil
+		switch strings.TrimSpace(meta.LifecycleOutcome) {
+		case "failed", "timed_out", "cancelled", "rejected":
+			// A terminal call failure can truthfully have no provider response,
+			// body, or finish reason. LifecycleOutcome selects the registered
+			// model.call.failed family without fabricating model output facts.
+		default:
+			return "", false, nil
+		}
 	}
 	if meta.ResponseID == "" {
 		meta.ResponseID = stableLLMEventID("response", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID, meta.PromptID)
@@ -354,6 +366,8 @@ func (r *EventRouter) emitLLMResponseEventV8Correlated(
 	finishReasons []string,
 ) (string, context.Context, llmEventMeta, bool) {
 	emitter := r.observabilityV8RuntimeEmitter()
+	// Session-message assistant frames report their producing model directly.
+	meta.ResponseModel = firstNonEmpty(meta.ResponseModel, meta.Model)
 	if meta.ResponseID == "" {
 		meta.ResponseID = stableLLMEventID("response", meta.Source, meta.SessionID, meta.TurnID, meta.RequestID, meta.PromptID)
 	}
@@ -824,6 +838,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		}
 		meta.PromptID = a.lastHookPromptID("claudecode", req.SessionID)
 		meta.ResponseID = firstNonEmpty(req.MessageID, stableLLMEventID("response", "claudecode", req.SessionID, req.TurnID))
+		meta.ResponseIDReported = strings.TrimSpace(req.MessageID) != ""
 		finish := "streaming"
 		if req.DisplayFinal {
 			finish = "stop"
@@ -2749,4 +2764,18 @@ func responseIDFromRawJSON(raw []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(body.ID)
+}
+
+func responseModelFromRawJSON(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var body struct {
+		Model        string `json:"model"`
+		ModelVersion string `json:"modelVersion"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	return firstNonEmpty(strings.TrimSpace(body.Model), strings.TrimSpace(body.ModelVersion))
 }

@@ -166,6 +166,12 @@ class FirstRunOptions:
     # falling back to a stricter posture is safer than silently
     # promoting a typo into a permissive setting.
     hilt_min_severity: str = ""
+    # A pre-init trusted-path bootstrap may have already created config.yaml
+    # solely to admit a staged agent runtime. ``init`` snapshots those exact,
+    # validated prefixes and passes them here so every first-run save carries
+    # the trust decision into the final v8 transaction instead of treating it
+    # as transient discovery input. None keeps non-init callers unchanged.
+    trusted_binary_prefixes: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -706,6 +712,49 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     transaction_app.cfg = cfg
     from defenseclaw.commands.cmd_setup import _capture_setup_config_snapshot
 
+    preserved_trusted_prefixes: tuple[str, ...] | None = None
+    if options.trusted_binary_prefixes is not None:
+        preserved: list[str] = []
+        seen: set[str] = set()
+        # See _validated_preinit_trusted_binary_prefixes in cmd_init.py:
+        # quarantine entries that fail post-`--force` re-validation with a
+        # warning instead of aborting first-run bootstrap. The pruned list
+        # is written back to cfg.ai_discovery.trusted_binary_prefixes below
+        # and gets persisted by finalize_first_run_config — the offending
+        # entries are dropped from the config on this run, not merely
+        # skipped. The warning tells the operator WHICH entries were
+        # dropped and why, so the same `--force` add doesn't get re-issued
+        # blindly; there is no remove-step required after the fact because
+        # the entry is already gone by the time the warning renders.
+        quarantined_bootstrap: list[tuple[str, str]] = []
+        for raw in options.trusted_binary_prefixes:
+            resolved, error = agent_discovery.validate_trusted_prefix(raw)
+            if not resolved or error:
+                quarantined_bootstrap.append((raw, error or "invalid path"))
+                continue
+            key = agent_discovery._path_key(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            preserved.append(resolved)
+        # Emit via the standard warnings module so long-form test suites
+        # can assert with pytest's recwarn / pytest.warns. (caplog only
+        # captures logging records — not warnings.warn output — so the
+        # earlier justification comment overstated its scope.) The
+        # bootstrap runs before click's output stream is bound; stderr
+        # would work but warnings.warn threads through pytest cleanly.
+        import warnings as _warnings
+        for entry, reason in quarantined_bootstrap:
+            _warnings.warn(
+                f"dropped pre-init trusted binary prefix {entry} "
+                f"({reason}) from managed config; the persisted list "
+                f"has been pruned on this run so no follow-up remove is "
+                f"required",
+                stacklevel=2,
+            )
+        preserved_trusted_prefixes = tuple(preserved)
+        cfg.ai_discovery.trusted_binary_prefixes = list(preserved_trusted_prefixes)
+
     try:
         setup_snapshot = _capture_setup_config_snapshot(cfg)
     except OSError as exc:
@@ -934,7 +983,24 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             )
 
         try:
+            if preserved_trusted_prefixes is not None:
+                cfg.ai_discovery.trusted_binary_prefixes = list(
+                    preserved_trusted_prefixes
+                )
             finalize_first_run_config(cfg, was_config_absent=was_config_absent)
+            if preserved_trusted_prefixes is not None:
+                persisted = cfg_mod.load(data_dir=cfg.data_dir)
+                observed = tuple(
+                    str(value)
+                    for value in (
+                        persisted.ai_discovery.trusted_binary_prefixes or []
+                    )
+                )
+                if observed != preserved_trusted_prefixes:
+                    raise OSError(
+                        "init did not retain the pre-init trusted binary "
+                        "prefix transaction"
+                    )
         except FreshMigrationStateError as exc:
             setup.append(StepResult("Migration State", "fail", str(exc), "defenseclaw init"))
             retain_pending_migration_transaction = os.path.isfile(
@@ -2067,6 +2133,6 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
 
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
-    _ensure_device_key(cfg.gateway.device_key_file)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
 
     return token_configured

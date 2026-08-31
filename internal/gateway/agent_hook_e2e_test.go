@@ -155,7 +155,7 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			health := NewSidecarHealth()
 			api := &APIServer{scannerCfg: cfg, health: health}
 			handler := inboundTraceContextMiddleware(http.HandlerFunc(api.handleAgentHook(sh.connector)))
-			payload := map[string]interface{}{
+			requestPayload := map[string]interface{}{
 				"hook_event_name": sh.event,
 				"session_id":      "session-" + sh.connector,
 				"turn_id":         "turn-" + sh.connector,
@@ -167,8 +167,9 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 					"command": "rm -rf /",
 				},
 			}
+			scannerCommand := requestPayload["tool_input"].(map[string]interface{})["command"]
 			if sh.connector == "antigravity" {
-				payload = map[string]interface{}{
+				requestPayload = map[string]interface{}{
 					"conversationId": "session-antigravity",
 					"stepIdx":        1,
 					"workspacePaths": []string{"/workspace"},
@@ -180,19 +181,22 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 						},
 					},
 				}
+				requestPayload["toolCall"].(map[string]interface{})["args"].(map[string]interface{})["CommandLine"] = scannerCommand
 			}
 			if sh.connector == "copilot" {
 				// Exact native camelCase body: event identity is intentionally
 				// absent and comes only from the trusted registration header.
-				payload = map[string]interface{}{
+				requestPayload = map[string]interface{}{
 					"sessionId": "session-copilot",
 					"timestamp": float64(1),
 					"cwd":       `C:\workspace`,
 					"toolName":  sh.toolName,
-					"toolArgs":  map[string]interface{}{"command": "rm -rf /"},
+					"toolArgs": map[string]interface{}{
+						"command": `Remove-Item C:\ -Recurse:$true -Force:$true`,
+					},
 				}
 			}
-			body, err := json.Marshal(payload)
+			body, err := json.Marshal(requestPayload)
 			if err != nil {
 				t.Fatalf("marshal request: %v", err)
 			}
@@ -331,6 +335,60 @@ func TestHandleAgentHook_OpenCodeLoadHeartbeat(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentHookRequest_AntigravityNestedToolArgsAuthority(t *testing.T) {
+	profile := (&APIServer{}).hookProfileForConnector("antigravity")
+	decode := func(t *testing.T, raw string) agentHookRequest {
+		t.Helper()
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			t.Fatalf("unmarshal fixture: %v", err)
+		}
+		return normalizeAgentHookRequestWithRawProfile(
+			"antigravity", payload, []byte(raw), profile,
+		)
+	}
+
+	t.Run("exact nested args reach trusted request", func(t *testing.T) {
+		raw := `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args": { "CommandLine": "rm -rf /", "Cwd": "/tmp/work" }}}`
+		want := `{ "CommandLine": "rm -rf /", "Cwd": "/tmp/work" }`
+		req := decode(t, raw)
+		if got := string(req.ToolArgs); got != want {
+			t.Fatalf("ToolArgs=%q want exact nested object %q", got, want)
+		}
+		if req.ToolArgsProjectionUncertain {
+			t.Fatal("exact nested args were marked uncertain")
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "duplicate nested field",
+			raw:  `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"echo safe"},"args":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "conflicting aliases",
+			raw:  `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"echo safe"},"arguments":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "malformed args object",
+			raw:  `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args":"{\"CommandLine\":\"rm -rf /\"}"}}`,
+		},
+		{
+			name: "top-level and payload strings have no authority",
+			raw:  `{"hookEventName":"PreToolUse","toolCall":{"name":"run_command"},"tool_input":"{\"CommandLine\":\"rm -rf /\"}","payload":"{\"args\":{\"CommandLine\":\"rm -rf /\"}}"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(decode(t, tc.raw).ToolArgs); got != "{}" {
+				t.Fatalf("ToolArgs=%q want valid empty-object fail-closed projection", got)
+			}
+		})
+	}
+}
+
 func TestHandleAgentHook_OpenCodeAmbiguousMCPIdentityUsesConnectorMode(t *testing.T) {
 	for _, tc := range []struct {
 		mode           string
@@ -421,7 +479,7 @@ func TestHandleAgentHook_AntigravityRequiresRegisteredEvent(t *testing.T) {
 	}
 }
 
-func TestHandleAgentHook_AntigravityBlocksForcedSingleFileDeletion(t *testing.T) {
+func TestHandleAgentHook_AntigravityReportsForcedSingleFileDeletionAsAdvisory(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "antigravity"
@@ -453,8 +511,9 @@ func TestHandleAgentHook_AntigravityBlocksForcedSingleFileDeletion(t *testing.T)
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 	var parsed struct {
-		Action     string `json:"action"`
-		RawAction  string `json:"raw_action"`
+		Action     string   `json:"action"`
+		RawAction  string   `json:"raw_action"`
+		Findings   []string `json:"findings"`
 		HookOutput struct {
 			Decision string `json:"decision"`
 		} `json:"hook_output"`
@@ -462,8 +521,11 @@ func TestHandleAgentHook_AntigravityBlocksForcedSingleFileDeletion(t *testing.T)
 	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
 		t.Fatalf("response not valid JSON: %v body=%s", err, w.Body.String())
 	}
-	if parsed.Action != "block" || parsed.RawAction != "block" || parsed.HookOutput.Decision != "deny" {
-		t.Fatalf("forced file deletion was not denied: %+v body=%s", parsed, w.Body.String())
+	if parsed.Action != "allow" || parsed.RawAction != "allow" || parsed.HookOutput.Decision != "allow" {
+		t.Fatalf("forced single-file deletion was not advisory-only: %+v body=%s", parsed, w.Body.String())
+	}
+	if !containsString(parsed.Findings, "CMD-WIN-RM-FORCE:PowerShell forced deletion") {
+		t.Fatalf("forced single-file deletion finding missing: %+v body=%s", parsed, w.Body.String())
 	}
 }
 
@@ -671,5 +733,17 @@ func TestConnectorRegistry_ScopeAndHookHandlerInSync(t *testing.T) {
 		if _, ok := connectorHookHandlerByName[string(scope)]; !ok {
 			t.Errorf("OTLP scope %q has no registered hook handler; misconfigured connector estate", scope)
 		}
+	}
+}
+
+func TestHandleAgentHookRejectsOversizedBody(t *testing.T) {
+	api := &APIServer{health: NewSidecarHealth()}
+	handler := http.HandlerFunc(api.handleAgentHook("antigravity"))
+	body := strings.Repeat(" ", int(apiRequestBodyMaxBytes+1)) + `{}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/antigravity/hook", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want 413: %s", w.Code, w.Body.String())
 	}
 }

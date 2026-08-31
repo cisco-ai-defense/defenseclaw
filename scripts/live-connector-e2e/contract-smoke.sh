@@ -25,9 +25,9 @@
 #
 # This proves the decode -> map -> respond contract through the real installed
 # entrypoint on every OS, complementing the Go contract matrix (which proves
-# the same chain at the handler level). The block payload reads /etc/shadow
-# (rule PATH-ETC-SHADOW, CRITICAL) so it is denied deterministically without
-# an LLM and is harmless if a regression ever lets it through.
+# the same chain at the handler level). The block payload describes a recursive
+# delete of the filesystem root, which has complete typed proof and is denied
+# deterministically without an LLM. The harness never executes the command.
 #
 # Usage: contract-smoke.sh <connector>
 
@@ -105,8 +105,8 @@ drive_event() {
     # Antigravity's official stdin schema omits the event name; setup binds
     # each installed hook command to its trusted event out-of-band.
     native_event="PreToolUse"
-  elif ! native_event="$(jq -er '.hook_event_name | select(type == "string" and length > 0)' "${payload}")"; then
-    dc_record_result "${label}:fixture" fail "missing non-empty hook_event_name in ${payload}"
+  elif ! native_event="$(jq -er '[.hook_event_name, .hookEventName] | map(select(type == "string" and length > 0)) | .[0] // empty' "${payload}")"; then
+    dc_record_result "${label}:fixture" fail "missing non-empty hook event name in ${payload}"
     overall_rc=1
     return
   fi

@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -602,6 +603,14 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		// a header and the unified HTTP handler injects it before this decoder.
 		// See antigravity_hook_profile.go for the exact official field mapping.
 		profile.Decode = antigravityProfileDecode
+		profile.DecodeToolArgs = antigravityToolArgsFromRawPayload
+	}
+	if c.name == "copilot" {
+		// Copilot's documented hook body is camelCase and carries the complete
+		// tool request in toolName/toolArgs. Event identity remains bound to the
+		// event-specific Setup registration and is supplied out-of-band by the
+		// authenticated bridge.
+		profile.Decode = copilotProfileDecode
 	}
 	if c.name == "cursor" {
 		profile.Decode = cursorProfileDecode
@@ -617,6 +626,28 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	// (declared on the hermes hook contract), and its wire replies are
 	// shaped by the hermes case in hookOnlyProfileRespond.
 	return ApplyHookContract(profile, opts)
+}
+
+func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
+	req := HookProfileRequest{
+		ConnectorName: "copilot",
+		CWD:           hookFirstString(payload, "cwd"),
+		ToolName:      hookFirstString(payload, "toolName"),
+	}
+	args, present := payload["toolArgs"]
+	if !present {
+		return req
+	}
+	req.ToolArgsAuthoritative = true
+	object, ok := args.(map[string]interface{})
+	if !ok {
+		return req
+	}
+	raw, err := json.Marshal(object)
+	if err == nil {
+		req.ToolArgs = raw
+	}
+	return req
 }
 
 // Cursor documents generation_id as the identifier for one user-message
@@ -1595,9 +1626,8 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
 	}
-	marker, _, _ := bytes.Cut(tmpl, []byte("\n"))
-	marker = bytes.TrimSuffix(marker, []byte("\r"))
-	if len(marker) == 0 || !bytes.HasPrefix(marker, []byte("// defenseclaw-managed-plugin v")) {
+	marker, valid := managedPluginOwnershipMarker(tmpl)
+	if !valid {
 		return false, fmt.Errorf("%s managed plugin identity is invalid", c.name)
 	}
 	installedMarker, _, _ := bytes.Cut(data, []byte("\n"))
@@ -2052,11 +2082,11 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		if templateErr != nil {
 			return fmt.Errorf("%s read managed plugin identity: %w", c.name, templateErr)
 		}
-		marker, _, _ := bytes.Cut(tmpl, []byte("\n"))
-		if len(marker) == 0 || !bytes.HasPrefix(marker, []byte("// defenseclaw-managed-plugin v")) {
+		marker, valid := managedPluginOwnershipMarker(tmpl)
+		if !valid {
 			return fmt.Errorf("%s managed plugin identity is invalid", c.name)
 		}
-		if bytes.Contains(data, marker) {
+		if managedPluginOwnershipMarkerPresent(data, marker) {
 			return fmt.Errorf("%s teardown incomplete: managed plugin still present at %s", c.name, path)
 		}
 		return nil
@@ -2235,6 +2265,51 @@ func (c *hookOnlyConnector) verifyCursorHookArtifactsClean(opts SetupOpts) error
 		}
 	}
 	return nil
+}
+
+func managedPluginOwnershipMarker(template []byte) ([]byte, bool) {
+	marker, _, _ := bytes.Cut(template, []byte("\n"))
+	marker = bytes.TrimSuffix(marker, []byte("\r"))
+	return marker, validManagedPluginOwnershipMarker(marker)
+}
+
+func managedPluginOwnershipMarkerPresent(data, marker []byte) bool {
+	if !validManagedPluginOwnershipMarker(marker) {
+		return false
+	}
+	for {
+		line, rest, found := bytes.Cut(data, []byte("\n"))
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		// VerifyClean is intentionally stricter than the live ownership check:
+		// any exact canonical historical marker is residue, even if an edit moved
+		// it away from the first line. Generic product prose and marker-like
+		// suffixes remain operator content rather than ownership evidence.
+		if validManagedPluginOwnershipMarker(line) {
+			return true
+		}
+		if !found {
+			return false
+		}
+		data = rest
+	}
+}
+
+func validManagedPluginOwnershipMarker(marker []byte) bool {
+	const prefix = "// defenseclaw-managed-plugin v"
+	if !bytes.HasPrefix(marker, []byte(prefix)) {
+		return false
+	}
+	version := marker[len(prefix):]
+	if len(version) == 0 || version[0] < '1' || version[0] > '9' {
+		return false
+	}
+	for _, digit := range version[1:] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseUint(string(version), 10, 64)
+	return err == nil
 }
 
 func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {
@@ -5248,30 +5323,6 @@ func validateHermesManagedBackupPristine(backup *managedFileBackup) error {
 	return nil
 }
 
-var cursorHookEvents = []string{
-	"sessionStart",
-	"sessionEnd",
-	"preToolUse",
-	"postToolUse",
-	"postToolUseFailure",
-	"subagentStart",
-	"subagentStop",
-	"beforeShellExecution",
-	"beforeMCPExecution",
-	"afterShellExecution",
-	"afterMCPExecution",
-	"beforeReadFile",
-	"beforeTabFileRead",
-	"afterFileEdit",
-	"afterTabFileEdit",
-	"beforeSubmitPrompt",
-	"afterAgentResponse",
-	"afterAgentThought",
-	"stop",
-	"preCompact",
-	"workspaceOpen",
-}
-
 func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -5284,8 +5335,11 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 		entry := map[string]interface{}{
 			"type":    "command",
 			"command": shellWord(hookScript),
-			// Cursor's hook schema defines timeout in seconds.
-			"timeout":    30,
+			// Cursor's hooks.json timeout is in seconds; use the same
+			// shared constant the enterprise writer emits so a bug in
+			// one place cannot deviate. A raw 30000 was 30000 seconds
+			// (>8 hours), long enough for a hung hook to freeze Cursor.
+			"timeout":    windowsCursorEnterpriseHookTimeoutSeconds,
 			"failClosed": failClosed,
 		}
 		// Replace instead of merely appending. This both migrates the previous
@@ -5324,18 +5378,19 @@ func (c *hookOnlyConnector) ownedCursorHookContractPresent(opts SetupOpts) (bool
 	}
 	runtimeMarkers := []string{"defenseclaw-managed-hook v8"}
 	if runtime.GOOS == "windows" {
-		failClosedMarker := "$failClosed = $false"
-		if c.effectiveFailClosed(opts) {
-			failClosedMarker = "$failClosed = $true"
-		}
-		runtimeMarkers = append(runtimeMarkers,
-			"--input-file",
+		runtimeMarkers = []string{
+			"defenseclaw-managed-hook v9",
 			"defenseclaw-hook.exe",
 			"ProcessStartInfo",
+			"RedirectStandardInput",
 			"RedirectStandardOutput",
 			"WaitForExit",
-			failClosedMarker,
-		)
+		}
+		failureResponseMarker := `{"continue":true}`
+		if c.effectiveFailClosed(opts) {
+			failureResponseMarker = `"permission":"deny"`
+		}
+		runtimeMarkers = append(runtimeMarkers, failureResponseMarker)
 	}
 	for _, marker := range runtimeMarkers {
 		if !bytes.Contains(runtimeBody, []byte(marker)) {

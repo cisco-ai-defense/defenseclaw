@@ -52,6 +52,113 @@ func platformDiscoveryHomeDir() (string, error) {
 	return filepath.Clean(path), nil
 }
 
+// profileListRegistryKey is HKLM's inventory of resolved user profile
+// directories, keyed by SID. It's the same authority the enterprise-hook
+// enumerator uses to discover interactive users; reusing it keeps discovery
+// scanning aligned with the hook-lifecycle enrollment surface without pulling
+// in the enterprisehooks package.
+const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`
+
+// platformDiscoveryHomeDirs enumerates interactive-user profile roots by
+// walking HKLM\...\ProfileList. The gateway sidecar runs as a service (its
+// current-user Known Folder resolves to a per-service virtual profile under
+// C:\Windows\ServiceProfiles\), so a bare ~/... expansion never sees any real
+// user's .claude/.codex/.cursor directories. Feeding this list into
+// AIDiscoveryOptions.HomeDirs makes homesToScan() enumerate real profiles.
+//
+// Filter: only S-1-5-21-... SIDs (local-account or domain-account interactive
+// users, 5+ sub-authorities), matching the same coarse gate the hook
+// enumerator applies at internal/enterprisehooks/enumerator_windows.go. Stale
+// ProfileList entries whose ProfileImagePath no longer exists are skipped so
+// the scan does not waste ticks on ghost profiles.
+func platformDiscoveryHomeDirs() []string {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, profileListRegistryKey, registry.READ)
+	if err != nil {
+		return nil
+	}
+	defer key.Close()
+	names, err := key.ReadSubKeyNames(-1)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, sid := range names {
+		if !isInteractiveUserSID(sid) {
+			continue
+		}
+		subKey, err := registry.OpenKey(
+			registry.LOCAL_MACHINE,
+			profileListRegistryKey+`\`+sid,
+			registry.QUERY_VALUE,
+		)
+		if err != nil {
+			continue
+		}
+		raw, _, err := subKey.GetStringValue("ProfileImagePath")
+		_ = subKey.Close()
+		if err != nil {
+			continue
+		}
+		expanded, expandErr := registry.ExpandString(raw)
+		if expandErr != nil {
+			expanded = raw
+		}
+		expanded, ok := normalizeProfileImagePath(expanded)
+		if !ok {
+			continue
+		}
+		if fi, err := os.Stat(expanded); err != nil || !fi.IsDir() {
+			continue
+		}
+		lower := strings.ToLower(expanded)
+		if _, ok := seen[lower]; ok {
+			continue
+		}
+		seen[lower] = struct{}{}
+		out = append(out, expanded)
+	}
+	return out
+}
+
+// normalizeProfileImagePath trims and cleans a raw ProfileImagePath
+// registry value and reports whether it is safe to use as a discovery
+// home root. `filepath.Clean("")` returns "." — a whitespace-only or
+// otherwise blank registry value must NOT collapse into the process
+// working directory, which under managed-enterprise mode would become
+// a discovery HomeDir and misdirect the AI discovery scanner at the
+// service CWD. Reject the trimmed empty value BEFORE calling Clean,
+// reject a post-Clean "." for the same reason, and reject any value
+// that is not an absolute path — a relative `ProfileImagePath` like
+// `Profiles\alice` or `..\..\etc` would similarly resolve against the
+// service CWD once passed to `os.Stat` and downstream discovery.
+func normalizeProfileImagePath(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+	cleaned := filepath.Clean(trimmed)
+	if cleaned == "" || cleaned == "." || !filepath.IsAbs(cleaned) {
+		return "", false
+	}
+	return cleaned, true
+}
+
+// isInteractiveUserSID reports whether sid names a local or domain user
+// account whose profile hosts real per-user configuration. Matches the
+// coarse gate the enterprise-hook enumerator uses (S-1-5-21-... with 5+
+// sub-authorities); virtual service accounts (S-1-5-80-...), well-known
+// principals (S-1-5-18 LocalSystem, S-1-5-19/20), and machine SIDs never
+// carry AI-agent config directories worth scanning.
+func isInteractiveUserSID(sid string) bool {
+	if !strings.HasPrefix(sid, "S-1-5-21-") {
+		return false
+	}
+	// S-1-5-21-<domain-3-tuple>-<RID> → at least 5 sub-authorities after
+	// the S-1-5- prefix. Splitting on '-' produces >=8 pieces.
+	return len(strings.Split(sid, "-")) >= 8
+}
+
 func platformDiscoveryVariable(name, home string) (string, bool) {
 	var folderID *windows.KNOWNFOLDERID
 	switch strings.ToUpper(strings.TrimSpace(name)) {

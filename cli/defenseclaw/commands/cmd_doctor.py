@@ -5553,6 +5553,67 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
 
 
+def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
+    routing = getattr(cfg, "routing", None)
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        _emit("skip", "Semantic routing", "disabled", r=r)
+        return
+
+    remote = getattr(routing, "remote", {}) or {}
+    remote_endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
+    port = int(getattr(routing, "port", 0) or 8080)
+    endpoint = remote_endpoint or f"http://127.0.0.1:{port}"
+    mode = "remote" if remote_endpoint else "managed Docker"
+    models = getattr(routing, "models", []) or []
+
+    live = live_health.get("routing") if isinstance(live_health, dict) else None
+    if isinstance(live, dict):
+        state = str(live.get("state") or "").strip().lower()
+        last_error = str(live.get("last_error") or "").strip()
+        if state == "running":
+            _emit("pass", "Semantic routing", f"{mode}; healthy; {len(models)} model(s)", r=r)
+            return
+        if state == "error":
+            detail = f"{mode}; gateway reports router error"
+            if last_error:
+                detail += f": {last_error[:256]}"
+            _emit(
+                "fail",
+                "Semantic routing",
+                detail,
+                remediation=(
+                    "run 'defenseclaw setup routing --status', inspect the labeled Docker container, "
+                    "then restart the gateway"
+                ),
+                r=r,
+            )
+            return
+        if state in {"starting", "reconnecting"}:
+            _emit("warn", "Semantic routing", f"{mode}; runtime state is {state}", r=r)
+            return
+        if state == "disabled":
+            _emit(
+                "fail",
+                "Semantic routing",
+                "configured enabled but the gateway runtime reports disabled",
+                remediation="restart the gateway and inspect routing startup diagnostics",
+                r=r,
+            )
+            return
+
+    code, _ = _http_probe(endpoint.rstrip("/") + "/health", timeout=2.0)
+    if code == 200:
+        _emit("pass", "Semantic routing", f"{mode}; classifier healthy; {len(models)} model(s)", r=r)
+    else:
+        _emit(
+            "fail",
+            "Semantic routing",
+            f"{mode}; classifier is not responding at its configured health endpoint",
+            remediation="run 'defenseclaw setup routing --status' and restart the gateway",
+            r=r,
+        )
+
+
 # Connectors that enforce in-process via an agent-native lifecycle surface
 # (hook bus or OmniGent's custom policy API) and talk directly to their
 # upstream provider. They do NOT bind the guardrail proxy listener on port
@@ -7177,6 +7238,7 @@ def doctor(
         _doctor_subsection("Services")
     r.set_section("services")
     sidecar_health = _check_sidecar(cfg, r)
+    _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):
         # Preserve the established Linux/macOS evidence collectors. Windows

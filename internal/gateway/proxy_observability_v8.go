@@ -18,6 +18,21 @@ import (
 
 const proxyV8Producer = "gateway.proxy.chat"
 
+const proxyV8TerminalTelemetryTimeout = 5 * time.Second
+
+const proxyV8MaxStructuredItems = 256
+
+// proxyV8TerminalTelemetryContext preserves request correlation and active
+// span values after the caller goes away, while bounding the small amount of
+// terminal persistence work. WithoutCancel deliberately removes only caller
+// cancellation/deadline; the timeout below prevents detached work lingering.
+func proxyV8TerminalTelemetryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), proxyV8TerminalTelemetryTimeout)
+}
+
 // lifecycleV8Runtime is the single process-owned generated trace seam shared by
 // the proxy, hook API, and EventRouter. It exposes only request-bounded root
 // operations; producers must never retain returned handles across deliveries.
@@ -134,7 +149,8 @@ func (p *GuardrailProxy) startProxyV8RequestTrace(
 	reportedAgentType := p.agentNameForRequest(requestHeaderAgent)
 	agentType := strings.TrimSpace(reportedAgentType)
 	trace := &proxyV8RequestTrace{runtime: runtime}
-	if agentType == "" || agentType != reportedAgentType {
+	_, agentTypeValid := hookModelV8OptionalText(agentType).Get()
+	if agentType == "" || agentType != reportedAgentType || !agentTypeValid {
 		return ctx, trace
 	}
 	input := p.proxyV8AgentInput(ctx, req, agentType, time.Now().UTC())
@@ -150,7 +166,7 @@ func (trace *proxyV8RequestTrace) StartModel(
 	ctx context.Context,
 	input observability.SpanModelChatInput,
 ) (context.Context, *proxyV8ModelTrace) {
-	if trace == nil || trace.runtime == nil {
+	if trace == nil || trace.runtime == nil || !hookModelV8Identifier(input.GenAIRequestModel) {
 		return ctx, nil
 	}
 	if trace.agent != nil {
@@ -226,10 +242,17 @@ func (trace *proxyV8ModelTrace) AddGuardrailOverlay(overlay proxyGuardrailV8Over
 }
 
 func (trace *proxyV8ModelTrace) recordMetrics(result proxyV8TraceResult) {
-	runtime, ok := trace.runtime.(hookLifecycleMetricV8Runtime)
-	if !ok || runtime == nil {
+	var runtime hookLifecycleMetricV8Runtime
+	if trace.model != nil {
+		runtime = trace.model
+	} else {
+		runtime, _ = trace.runtime.(hookLifecycleMetricV8Runtime)
+	}
+	if runtime == nil {
 		return
 	}
+	metricCtx, metricCancel := proxyV8TerminalTelemetryContext(trace.ctx)
+	defer metricCancel()
 	input := trace.input
 	provider, _ := input.GenAIProviderName.Get()
 	agentName, _ := input.GenAIAgentName.Get()
@@ -244,7 +267,7 @@ func (trace *proxyV8ModelTrace) recordMetrics(result proxyV8TraceResult) {
 	items := make([]observabilityruntime.GeneratedMetricBatchItem, 0, 3)
 	appendToken := func(tokenType string, count int64) {
 		items = append(items, newHookV8MetricBatchItemForProducer(
-			trace.ctx, observedAt, meta, proxyV8Producer,
+			metricCtx, observedAt, meta, proxyV8Producer,
 			observability.EventName(observability.TelemetryInstrumentGenAIClientTokenUsage),
 			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 				return builder.BuildMetricGenAIClientTokenUsage(observability.MetricGenAIClientTokenUsageInput{
@@ -257,13 +280,17 @@ func (trace *proxyV8ModelTrace) recordMetrics(result proxyV8TraceResult) {
 		))
 	}
 	if result.Usage != nil {
-		appendToken("input", result.Usage.PromptTokens)
-		appendToken("output", result.Usage.CompletionTokens)
+		if result.Usage.PromptTokens >= 0 {
+			appendToken("input", result.Usage.PromptTokens)
+		}
+		if result.Usage.CompletionTokens >= 0 {
+			appendToken("output", result.Usage.CompletionTokens)
+		}
 	}
 	durationSeconds := result.UpstreamDuration.Seconds()
 	if durationSeconds > 0 && !math.IsNaN(durationSeconds) && !math.IsInf(durationSeconds, 0) {
 		items = append(items, newHookV8MetricBatchItemForProducer(
-			trace.ctx, observedAt, meta, proxyV8Producer,
+			metricCtx, observedAt, meta, proxyV8Producer,
 			observability.EventName(observability.TelemetryInstrumentGenAIClientOperationDuration),
 			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 				return builder.BuildMetricGenAIClientOperationDuration(observability.MetricGenAIClientOperationDurationInput{
@@ -275,7 +302,7 @@ func (trace *proxyV8ModelTrace) recordMetrics(result proxyV8TraceResult) {
 		))
 	}
 	if len(items) > 0 {
-		_, _ = runtime.RecordGeneratedMetricBatch(trace.ctx, items)
+		_, _ = runtime.RecordGeneratedMetricBatch(metricCtx, items)
 	}
 }
 
@@ -294,21 +321,23 @@ func (p *GuardrailProxy) proxyV8AgentInput(
 		facts.agentID = proxyV8StableID(p.agentIDForRequest())
 		envelope.Correlation.AgentID = facts.agentID
 	}
-	messages, inputBytes, inputReported := proxyV8InputMessages(req.Messages)
+	messages, inputBytes, inputReported, inputState, inputStructured := proxyV8InputMessages(req.Messages)
 	input := observability.SpanAgentInvokeInput{
 		Envelope: envelope, Outcome: observability.OutcomeCompleted, Kind: "INTERNAL",
 		StartTimeUnixNano: uint64(start.UnixNano()), Status: observability.NewTraceStatusOK(),
 		DefenseClawAgentType: agentType, DefenseClawAgentReportedCostPresent: false,
 		DefenseClawTelemetryInputReported:  inputReported,
-		DefenseClawContentInputState:       proxyV8ContentState(inputReported),
+		DefenseClawContentInputState:       inputState,
 		DefenseClawTelemetryOutputReported: false,
 		DefenseClawContentOutputState:      "not_reported",
 		GenAIOperationName:                 observability.Present("invoke_agent"),
 		ConditionConnectorKnown:            facts.connectorKnown,
 		ConditionOperationTerminal:         true,
 	}
-	if inputReported {
+	if inputStructured {
 		input.GenAIInputMessages = observability.Present(messages)
+	}
+	if inputReported {
 		input.DefenseClawContentInputOriginalBytes = observability.Present(inputBytes)
 	}
 	applyProxyV8FactsToAgent(&input, facts, agentType)
@@ -322,13 +351,13 @@ func (p *GuardrailProxy) proxyV8ModelInput(
 	start time.Time,
 ) observability.SpanModelChatInput {
 	envelope, facts := p.proxyV8Envelope(ctx, "chat")
-	messages, inputBytes, inputReported := proxyV8InputMessages(req.Messages)
+	messages, inputBytes, inputReported, inputState, inputStructured := proxyV8InputMessages(req.Messages)
 	input := observability.SpanModelChatInput{
 		Envelope: envelope, Outcome: observability.OutcomeCompleted, Kind: "CLIENT",
 		StartTimeUnixNano: uint64(start.UnixNano()), Status: observability.NewTraceStatusOK(),
 		DefenseClawAgentReportedCostPresent: false,
 		DefenseClawTelemetryInputReported:   inputReported,
-		DefenseClawContentInputState:        proxyV8ContentState(inputReported),
+		DefenseClawContentInputState:        inputState,
 		DefenseClawTelemetryOutputReported:  false,
 		DefenseClawContentOutputState:       "not_reported",
 		GenAIOperationName:                  observability.Present("chat"),
@@ -339,20 +368,25 @@ func (p *GuardrailProxy) proxyV8ModelInput(
 		ConditionConnectorKnown:             facts.connectorKnown,
 		ConditionOperationTerminal:          true,
 	}
-	if providerName = strings.TrimSpace(providerName); providerName != "" {
+	if providerName = strings.TrimSpace(providerName); providerName != "" &&
+		len(providerName) <= hookModelV8MaxMetadataBytes {
 		input.GenAIProviderName = observability.Present(providerName)
 	}
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		input.GenAIRequestMaxTokens = observability.Present(int64(*req.MaxTokens))
 	}
-	if req.Temperature != nil {
+	if req.Temperature != nil && !math.IsNaN(*req.Temperature) && !math.IsInf(*req.Temperature, 0) &&
+		*req.Temperature >= -1e308 && *req.Temperature <= 1e308 {
 		input.GenAIRequestTemperature = observability.Present(*req.Temperature)
 	}
-	if req.TopP != nil {
+	if req.TopP != nil && !math.IsNaN(*req.TopP) && !math.IsInf(*req.TopP, 0) &&
+		*req.TopP >= 0 && *req.TopP <= 1 {
 		input.GenAIRequestTopP = observability.Present(*req.TopP)
 	}
-	if inputReported {
+	if inputStructured {
 		input.GenAIInputMessages = observability.Present(messages)
+	}
+	if inputReported {
 		input.DefenseClawContentInputOriginalBytes = observability.Present(inputBytes)
 	}
 	applyProxyV8FactsToModel(&input, facts)
@@ -476,17 +510,22 @@ func applyProxyV8ResultToAgent(input *observability.SpanAgentInvokeInput, result
 	input.Status = proxyV8Status(result)
 	input.ConditionTechnicalFailure = result.TechnicalFailure
 	input.ErrorType = proxyV8OptionalID(result.ErrorType)
-	output, outputBytes, reported := proxyV8OutputMessages(result.OutputText, result.ToolCalls, result.FinishReasons)
+	finishReasons := hookModelV8FinishReasons(result.FinishReasons)
+	output, outputBytes, reported, outputState, structured := proxyV8OutputMessages(
+		result.OutputText, result.ToolCalls, finishReasons,
+	)
 	input.DefenseClawTelemetryOutputReported = reported
-	input.DefenseClawContentOutputState = proxyV8ContentState(reported)
-	if reported {
+	input.DefenseClawContentOutputState = outputState
+	if structured {
 		input.GenAIOutputMessages = observability.Present(output)
+	}
+	if reported {
 		input.DefenseClawContentOutputOriginalBytes = observability.Present(outputBytes)
 	}
 	if result.ResponseModel != "" {
-		input.GenAIResponseModel = proxyV8OptionalID(result.ResponseModel)
+		input.GenAIResponseModel = hookModelV8OptionalID(result.ResponseModel)
 	}
-	input.GenAIResponseID = proxyV8OptionalID(result.ResponseID)
+	input.GenAIResponseID = hookModelV8OptionalID(result.ResponseID)
 }
 
 func applyProxyV8ResultToModel(input *observability.SpanModelChatInput, result proxyV8TraceResult) {
@@ -495,92 +534,194 @@ func applyProxyV8ResultToModel(input *observability.SpanModelChatInput, result p
 	input.Status = proxyV8Status(result)
 	input.ConditionTechnicalFailure = result.TechnicalFailure
 	input.ErrorType = proxyV8OptionalID(result.ErrorType)
-	output, outputBytes, reported := proxyV8OutputMessages(result.OutputText, result.ToolCalls, result.FinishReasons)
+	finishReasons := hookModelV8FinishReasons(result.FinishReasons)
+	output, outputBytes, reported, outputState, structured := proxyV8OutputMessages(
+		result.OutputText, result.ToolCalls, finishReasons,
+	)
 	input.DefenseClawTelemetryOutputReported = reported
-	input.DefenseClawContentOutputState = proxyV8ContentState(reported)
-	if reported {
+	input.DefenseClawContentOutputState = outputState
+	if structured {
 		input.GenAIOutputMessages = observability.Present(output)
+	}
+	if reported {
 		input.DefenseClawContentOutputOriginalBytes = observability.Present(outputBytes)
 	}
-	input.GenAIResponseModel = proxyV8OptionalID(result.ResponseModel)
-	input.GenAIResponseID = proxyV8OptionalID(result.ResponseID)
-	if len(result.FinishReasons) > 0 {
-		input.GenAIResponseFinishReasons = observability.Present(append([]string(nil), result.FinishReasons...))
+	input.GenAIResponseModel = hookModelV8OptionalID(result.ResponseModel)
+	input.GenAIResponseID = hookModelV8OptionalID(result.ResponseID)
+	if len(finishReasons) > 0 {
+		input.GenAIResponseFinishReasons = observability.Present(finishReasons)
 	}
+	tokensReported := false
 	if result.Usage != nil {
-		input.GenAIUsageInputTokens = observability.Present(result.Usage.PromptTokens)
-		input.GenAIUsageOutputTokens = observability.Present(result.Usage.CompletionTokens)
-		input.DefenseClawTelemetryTokensReported = observability.Present(true)
-	} else {
-		input.DefenseClawTelemetryTokensReported = observability.Present(false)
+		if result.Usage.PromptTokens >= 0 {
+			input.GenAIUsageInputTokens = observability.Present(result.Usage.PromptTokens)
+			tokensReported = true
+		}
+		if result.Usage.CompletionTokens >= 0 {
+			input.GenAIUsageOutputTokens = observability.Present(result.Usage.CompletionTokens)
+			tokensReported = true
+		}
 	}
+	input.DefenseClawTelemetryTokensReported = observability.Present(tokensReported)
 	input.DefenseClawModelUpstreamMs = observability.Present(float64(result.UpstreamDuration.Microseconds()) / 1000)
 	input.DefenseClawModelStreaming = observability.Present(result.Streaming)
 	input.DefenseClawModelCancelled = observability.Present(result.Cancelled)
 	input.DefenseClawModelToolCallCount = observability.Present(int64(result.ToolCallCount))
 }
 
-func proxyV8InputMessages(messages []ChatMessage) (observability.TelemetryStructuredGenAIInputMessages, int64, bool) {
-	items := make([]observability.TelemetryStructuredGenAIChatMessage, 0, len(messages))
+func proxyV8InputMessages(
+	messages []ChatMessage,
+) (observability.TelemetryStructuredGenAIInputMessages, int64, bool, string, bool) {
+	capacity := len(messages)
+	if capacity > proxyV8MaxStructuredItems {
+		capacity = proxyV8MaxStructuredItems
+	}
+	items := make([]observability.TelemetryStructuredGenAIChatMessage, 0, capacity)
 	var originalBytes int64
+	reported := false
+	representationComplete := true
 	for _, message := range messages {
+		rawContentReported := proxyV8JSONValueReported(message.RawContent)
+		if message.Content != "" {
+			originalBytes += int64(len(message.Content))
+			reported = true
+		} else if rawContentReported {
+			originalBytes += int64(len(message.RawContent))
+			reported = true
+			representationComplete = false
+		}
+		if proxyV8JSONValueReported(message.ToolCalls) {
+			originalBytes += int64(len(message.ToolCalls))
+			reported = true
+			representationComplete = false
+		}
+		if message.ToolCallID != "" {
+			originalBytes += int64(len(message.ToolCallID))
+			reported = true
+			representationComplete = false
+		}
+		if proxyV8JSONValueReported(message.ExtraContent) {
+			originalBytes += int64(len(message.ExtraContent))
+			reported = true
+			representationComplete = false
+		}
 		role := strings.TrimSpace(message.Role)
 		if !proxyV8MessageRole(role) || message.Content == "" {
+			if message.Content != "" {
+				representationComplete = false
+			}
 			continue
 		}
-		originalBytes += int64(len(message.Content))
+		if rawContentReported && strings.TrimSpace(string(message.RawContent))[0] != '"' {
+			// ChatMessage flattens content-block arrays for inspection. The
+			// canonical mapper cannot claim byte-preserved structured input for
+			// a multimodal/provider-extension shape it did not fully represent.
+			representationComplete = false
+		}
+		if len(items) == proxyV8MaxStructuredItems {
+			representationComplete = false
+			continue
+		}
 		item := observability.TelemetryStructuredGenAIChatMessage{
 			Role: role,
 			Parts: observability.TelemetryStructuredGenAIMessageParts{Items: []observability.TelemetryStructuredGenAIMessagePart{
 				observability.TelemetryStructuredArmGenAIMessagePartText{Value: observability.TelemetryStructuredGenAITextPart{Content: message.Content}},
 			}},
 		}
-		if observability.IsStableToken(message.Name) {
+		if message.Name != "" {
 			item.Name = observability.Present(message.Name)
 		}
 		items = append(items, item)
 	}
-	return observability.TelemetryStructuredGenAIInputMessages{Items: items}, originalBytes, len(items) > 0
+	if len(items) == 0 {
+		if reported {
+			return observability.TelemetryStructuredGenAIInputMessages{}, originalBytes, true, "failed_closed", false
+		}
+		return observability.TelemetryStructuredGenAIInputMessages{}, 0, false, "not_reported", false
+	}
+	if !representationComplete {
+		return observability.TelemetryStructuredGenAIInputMessages{}, originalBytes, reported, "failed_closed", false
+	}
+	input := observability.TelemetryStructuredGenAIInputMessages{Items: items}
+	if err := observability.ValidateTelemetryStructuredGenAIInputMessages(input); err != nil {
+		return observability.TelemetryStructuredGenAIInputMessages{}, originalBytes, reported, "failed_closed", false
+	}
+	return input, originalBytes, reported, "preserved", true
 }
 
-func proxyV8OutputMessages(text string, toolCalls json.RawMessage, finishReasons []string) (observability.TelemetryStructuredGenAIOutputMessages, int64, bool) {
-	finishReason := observability.Absent[string]()
-	if len(finishReasons) > 0 && strings.TrimSpace(finishReasons[0]) != "" {
-		finishReason = observability.Present(finishReasons[0])
+func proxyV8JSONValueReported(value json.RawMessage) bool {
+	switch strings.TrimSpace(string(value)) {
+	case "", "null", "[]", "{}", `""`:
+		return false
+	default:
+		return true
 	}
-	parts := make([]observability.TelemetryStructuredGenAIMessagePart, 0, 1+countToolCalls(toolCalls))
-	var originalBytes int64
-	if strings.TrimSpace(text) != "" {
+}
+
+func proxyV8OutputMessages(
+	text string,
+	toolCalls json.RawMessage,
+	finishReasons []string,
+) (observability.TelemetryStructuredGenAIOutputMessages, int64, bool, string, bool) {
+	finishReason := hookModelV8OutputFinishReason(finishReasons)
+	parts := make([]observability.TelemetryStructuredGenAIMessagePart, 0, 1)
+	originalBytes := int64(len(text))
+	trimmedToolCalls := strings.TrimSpace(string(toolCalls))
+	toolCallsReported := trimmedToolCalls != "" && trimmedToolCalls != "null" && trimmedToolCalls != "[]"
+	if toolCallsReported {
+		originalBytes += int64(len(toolCalls))
+	}
+	reported := text != "" || toolCallsReported
+	representationComplete := true
+	if text != "" {
 		parts = append(parts, observability.TelemetryStructuredArmGenAIMessagePartText{
 			Value: observability.TelemetryStructuredGenAITextPart{Content: text},
 		})
-		originalBytes += int64(len(text))
 	}
 	var calls []toolCallEntry
-	if len(toolCalls) > 0 && json.Unmarshal(toolCalls, &calls) == nil {
+	if toolCallsReported {
+		if json.Unmarshal(toolCalls, &calls) != nil || len(calls) == 0 {
+			representationComplete = false
+		}
 		for _, call := range calls {
-			name := strings.TrimSpace(call.Function.Name)
-			if name == "" || name != call.Function.Name {
+			if len(parts) == proxyV8MaxStructuredItems {
+				representationComplete = false
+				break
+			}
+			name := call.Function.Name
+			if name == "" {
+				representationComplete = false
 				continue
 			}
 			part := observability.TelemetryStructuredGenAIToolCallRequestPart{Name: name}
-			if id := proxyV8StableID(call.ID); id != "" {
-				part.ID = observability.Present(id)
+			if call.ID != "" {
+				part.ID = observability.Present(call.ID)
 			}
 			if arguments, ok := proxyV8CanonicalJSON([]byte(call.Function.Arguments)); ok {
 				part.Arguments = observability.Present[observability.TelemetryStructuredGenAICanonicalJSON](arguments)
-				originalBytes += int64(len(call.Function.Arguments))
+			} else if call.Function.Arguments != "" {
+				representationComplete = false
 			}
 			parts = append(parts, observability.TelemetryStructuredArmGenAIMessagePartToolCall{Value: part})
 		}
 	}
 	if len(parts) == 0 {
-		return observability.TelemetryStructuredGenAIOutputMessages{}, 0, false
+		if reported {
+			return observability.TelemetryStructuredGenAIOutputMessages{}, originalBytes, true, "failed_closed", false
+		}
+		return observability.TelemetryStructuredGenAIOutputMessages{}, 0, false, "not_reported", false
 	}
-	return observability.TelemetryStructuredGenAIOutputMessages{Items: []observability.TelemetryStructuredGenAIOutputMessage{{
+	if !representationComplete {
+		return observability.TelemetryStructuredGenAIOutputMessages{}, originalBytes, reported, "failed_closed", false
+	}
+	output := observability.TelemetryStructuredGenAIOutputMessages{Items: []observability.TelemetryStructuredGenAIOutputMessage{{
 		Role: "assistant", FinishReason: finishReason,
 		Parts: observability.TelemetryStructuredGenAIMessageParts{Items: parts},
-	}}}, originalBytes, true
+	}}}
+	if err := observability.ValidateTelemetryStructuredGenAIOutputMessages(output); err != nil {
+		return observability.TelemetryStructuredGenAIOutputMessages{}, originalBytes, reported, "failed_closed", false
+	}
+	return output, originalBytes, reported, "preserved", true
 }
 
 func proxyV8CanonicalJSON(encoded []byte) (observability.TelemetryStructuredGenAICanonicalJSON, bool) {
@@ -655,13 +796,6 @@ func proxyV8Status(result proxyV8TraceResult) observability.TraceStatusInput {
 	return observability.NewTraceStatusOK()
 }
 
-func proxyV8ContentState(reported bool) string {
-	if reported {
-		return "preserved"
-	}
-	return "not_reported"
-}
-
 func proxyV8MessageRole(role string) bool {
 	switch role {
 	case "system", "developer", "user", "assistant", "tool":
@@ -686,11 +820,7 @@ func proxyV8OptionalID(value string) observability.Optional[string] {
 }
 
 func proxyV8OptionalText(value string) observability.Optional[string] {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 4096 {
-		return observability.Absent[string]()
-	}
-	return observability.Present(value)
+	return hookModelV8OptionalText(value)
 }
 
 func proxyV8Optional(present bool, value string) observability.Optional[string] {

@@ -33,6 +33,7 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,7 @@ import yaml
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
 from defenseclaw.file_permissions import open_regular_file_no_follow
+from defenseclaw.file_lock import locked_file_update
 
 try:
     import tomllib
@@ -4965,3 +4967,151 @@ def _enumerate_mcp_filesystem(
                 row["activation_state"] = "unverified-same-name-scope-conflict"
         rows.append(row)
     return rows
+
+
+# Categories mirrored by :func:`claw_aibom_to_scan_result`. Kept as a module
+# constant so the digest and the finding emitter can never drift apart.
+_AIBOM_CATEGORY_KEYS = (
+    "skills",
+    "plugins",
+    "mcp",
+    "agents",
+    "tools",
+    "model_providers",
+    "memory",
+)
+
+
+def _strip_volatile(node: Any) -> Any:
+    """Drop provenance stamps so an unchanged environment hashes identically."""
+    if isinstance(node, dict):
+        return {k: _strip_volatile(v) for k, v in sorted(node.items()) if k != "provenance"}
+    if isinstance(node, list):
+        return [_strip_volatile(v) for v in node]
+    return node
+
+
+def claw_aibom_digest(inv: dict[str, Any]) -> str:
+    """Stable SHA-256 over the inventory categories only.
+
+    Provenance carries a per-run binary/config stamp, so it is stripped before
+    hashing: two sweeps of an unchanged environment must yield one digest.
+    """
+    payload = {key: _strip_volatile(inv.get(key, [])) for key in _AIBOM_CATEGORY_KEYS}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _aibom_digest_state_path(cfg: Config) -> str:
+    return os.path.join(getattr(cfg, "data_dir", "") or ".", "aibom_last_digest.json")
+
+
+def _load_aibom_digest_state(
+    path: str, *, recover_corrupt: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    """Load the digest map, distinguishing an empty file from an unreadable one."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except FileNotFoundError:
+        return {}, True
+    except OSError:
+        return {}, False
+    except ValueError:
+        return {}, recover_corrupt
+    if not isinstance(loaded, dict):
+        return {}, recover_corrupt
+    return loaded, True
+
+
+def pending_claw_aibom_digest(
+    inv: dict[str, Any], cfg: Config, connector: str | None = None,
+) -> str | None:
+    """Return the digest that needs logging, without advancing the checkpoint.
+
+    An unreadable state file deliberately returns the current digest. Callers
+    then log again rather than risk dropping an inventory transition.
+    """
+    key = connector or "default"
+    digest = claw_aibom_digest(inv)
+    previous, readable = _load_aibom_digest_state(_aibom_digest_state_path(cfg))
+    if readable and previous.get(key) == digest:
+        return None
+    return digest
+
+
+def commit_claw_aibom_digest(
+    digest: str, cfg: Config, connector: str | None = None,
+) -> bool:
+    """Checkpoint an AIBOM digest after its scan was acknowledged.
+
+    The state is re-read immediately before the atomic replace so another
+    connector's checkpoint is preserved. Any state-file failure returns
+    ``False``; the next sweep will emit a duplicate rather than lose a record.
+    """
+    path = _aibom_digest_state_path(cfg)
+    tmp = ""
+    fd = -1
+    try:
+        with locked_file_update(path):
+            # A successfully admitted scan is the safe point to repair a
+            # malformed checkpoint. Genuine I/O failures still leave state
+            # untouched so the next sweep retries rather than risking loss.
+            previous, readable = _load_aibom_digest_state(
+                path, recover_corrupt=True,
+            )
+            if not readable:
+                return False
+            previous[connector or "default"] = digest
+
+            directory = os.path.dirname(path) or "."
+            fd, tmp = tempfile.mkstemp(
+                prefix=".aibom_last_digest.", suffix=".tmp", dir=directory,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = -1
+                json.dump(previous, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            tmp = ""
+    except (OSError, ValueError):
+        return False
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return True
+
+
+def claw_aibom_changed(inv: dict[str, Any], cfg: Config, connector: str | None = None) -> bool:
+    """Report whether this inventory differs and persist its digest.
+
+    The sweep runs on ``ai_discovery.process_interval_s`` (60s by default)
+    across every active connector, and :func:`claw_aibom_to_scan_result`
+    emits one INFO finding per category unconditionally. That wrote ~42
+    identical rows per minute into ``scan_findings`` — 45k rows collapsing to
+    13 distinct fingerprints in one observed deployment — which buried real
+    findings and inflated the audit database.
+
+    Keying persistence on content means an unchanged environment costs
+    nothing while a genuine change is still recorded exactly once. Command
+    paths that emit a scan must instead use :func:`pending_claw_aibom_digest`
+    and call :func:`commit_claw_aibom_digest` only after logging succeeds.
+
+    On any state-file error this returns ``True``: losing an inventory record
+    is worse than writing a duplicate, so the failure mode is the old
+    behaviour, not silence.
+    """
+    digest = pending_claw_aibom_digest(inv, cfg, connector=connector)
+    if digest is None:
+        return False
+    commit_claw_aibom_digest(digest, cfg, connector=connector)
+    return True

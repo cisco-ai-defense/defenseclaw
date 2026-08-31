@@ -49,7 +49,7 @@ expose a separate policy endpoint.
 
 <Flow
   direction="TB"
-  caption="The connector contract establishes trust. CEL never trusts a payload to declare itself structured, and an uncertain projection stays on that rule owner's regex fallback."
+  caption="The connector contract establishes trust. CEL never trusts a payload to declare itself structured, and every candidate crosses a final same-rule proof gate before it can affect an action."
 >
   <Node id="hook" kind="connector">Authenticated tool-action route</Node>
   <Node id="contract" kind="gateway">Server-resolved action contract</Node>
@@ -58,6 +58,8 @@ expose a separate policy endpoint.
   <Node id="cel" kind="policy">CEL Boolean owner</Node>
   <Node id="fallback" kind="policy">Owner-local regex fallback</Node>
   <Node id="finding" kind="decision">Finding metadata</Node>
+  <Node id="proof" kind="decision">Complete same-rule proof?</Node>
+  <Node id="visible" kind="decision">Visible detection-only finding</Node>
   <Node id="action" kind="decision">allow / alert / confirm / block</Node>
   <Node id="reply" kind="connector">Caller or connector response</Node>
   <Edge from="hook" to="contract" />
@@ -68,7 +70,10 @@ expose a separate policy endpoint.
   <Edge from="cel" to="fallback" label="evaluation error" variant="dashed" />
   <Edge from="cel" to="finding" label="true" />
   <Edge from="fallback" to="finding" label="pattern matched" />
-  <Edge from="finding" to="action" />
+  <Edge from="finding" to="proof" />
+  <Edge from="proof" to="action" label="complete exact proof" />
+  <Edge from="proof" to="visible" label="raw, partial, or unpinned" />
+  <Edge from="visible" to="action" label="no block authority" />
   <Edge from="action" to="reply" />
 </Flow>
 
@@ -78,6 +83,9 @@ native pre-tool hooks; only the latter can participate in durable ordered
 state. DefenseClaw normalizes the action into private `ActionFacts` and exposes
 one typed variable, `f`, to CEL. A semantic rule owner takes exactly one route:
 authoritative facts plus CEL, or that same owner's compatible regex fallback.
+A fallback pattern preserves visibility but does not itself mint trusted-action
+authority. Enforcement requires a complete code-owned proof pinned to the same
+rule ID at the final gate.
 
 ## Start with a complete rule
 
@@ -108,7 +116,8 @@ rules:
 The expression only decides whether the action matches. A `true` result creates
 the YAML-defined finding; connector mode, severity thresholds, HITL, and
 enforcement evidence determine the runtime action. The required `pattern`
-preserves compatible detection when structured facts are not authoritative.
+preserves compatible detection when structured facts are not authoritative,
+but a raw pattern match remains detection-only at the trusted-action boundary.
 
 Continue with [Authoring CEL rules](/docs/policies/cel/authoring) to adapt this
 rule to command, path, network, and data-flow cases.

@@ -12,15 +12,18 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
 
 type deferredVerifyFixture struct {
 	command       *cobra.Command
+	connectorName string
 	parentPath    string
 	recordPath    string
 	journalPath   string
@@ -28,11 +31,16 @@ type deferredVerifyFixture struct {
 	dataRoot      string
 	configHome    string
 	transactionID string
+	startIdentity string
 	record        deferredVerifyCleanupRecord
 	journal       deferredVerifyJournal
 }
 
 func newDeferredVerifyFixture(t *testing.T) deferredVerifyFixture {
+	return newDeferredVerifyFixtureForConnector(t, "claudecode")
+}
+
+func newDeferredVerifyFixtureForConnector(t *testing.T, connectorName string) deferredVerifyFixture {
 	t.Helper()
 	root := t.TempDir()
 	localRoot := filepath.Join(root, "DefenseClaw")
@@ -45,13 +53,24 @@ func newDeferredVerifyFixture(t *testing.T) deferredVerifyFixture {
 		}
 	}
 	fixture := deferredVerifyFixture{
+		connectorName: connectorName,
 		parentPath:    filepath.Join(cacheRoot, deferredVerifySetupName),
 		recordPath:    filepath.Join(stateRoot, "uninstall-cleanup.json"),
 		journalPath:   filepath.Join(stateRoot, "setup-transaction.json"),
 		childPath:     filepath.Join(childRoot, deferredVerifyGatewayName),
 		dataRoot:      filepath.Join(root, "profile", ".defenseclaw"),
-		configHome:    filepath.Join(root, "profile", ".claude"),
 		transactionID: "0123456789abcdef0123456789abcdef",
+		startIdentity: "133713371337",
+	}
+	switch connectorName {
+	case "codex":
+		fixture.configHome = filepath.Join(root, "profile", ".codex")
+	case "claudecode":
+		fixture.configHome = filepath.Join(root, "profile", ".claude")
+	case "amp":
+		fixture.configHome = filepath.Join(root, "profile", ".config", "amp")
+	default:
+		t.Fatalf("unsupported fixture connector %q", connectorName)
 	}
 	for _, path := range []string{fixture.parentPath, fixture.childPath} {
 		if err := os.WriteFile(path, []byte("private executable fixture"), 0o600); err != nil {
@@ -69,20 +88,26 @@ func newDeferredVerifyFixture(t *testing.T) deferredVerifyFixture {
 		JournalPath:        fixture.journalPath,
 		RecordPath:         fixture.recordPath,
 		CacheAckPath:       filepath.Join(cacheRoot, "uninstall-cleanup-ack.json"),
-		VerifiedConnectors: []string{"claudecode"},
+		VerifiedConnectors: []string{connectorName},
+	}
+	transaction := deferredVerifyTransaction{
+		ID:                        fixture.transactionID,
+		Action:                    "uninstall",
+		DataRoot:                  fixture.dataRoot,
+		MaintenancePath:           fixture.parentPath,
+		PreviousMaintenanceSHA256: fixture.record.MaintenanceSHA256,
+		PreviousConnectors:        []string{connectorName},
+	}
+	if connectorName == "codex" {
+		transaction.PreviousCodexHome = fixture.configHome
+	}
+	if connectorName == "claudecode" {
+		transaction.PreviousClaudeConfigDir = fixture.configHome
 	}
 	fixture.journal = deferredVerifyJournal{
 		SchemaVersion: 2,
 		Phase:         "converged",
-		Transaction: deferredVerifyTransaction{
-			ID:                        fixture.transactionID,
-			Action:                    "uninstall",
-			DataRoot:                  fixture.dataRoot,
-			MaintenancePath:           fixture.parentPath,
-			PreviousMaintenanceSHA256: fixture.record.MaintenanceSHA256,
-			PreviousConnectors:        []string{"claudecode"},
-			PreviousClaudeConfigDir:   fixture.configHome,
-		},
+		Transaction:   transaction,
 	}
 	fixture.write(t)
 
@@ -94,14 +119,16 @@ func newDeferredVerifyFixture(t *testing.T) deferredVerifyFixture {
 	fixture.command.Flags().String("config-home", "", "")
 	fixture.command.Flags().Bool("json", false, "")
 	fixture.command.Flags().String("internal-setup-parent", "", "")
+	fixture.command.Flags().String("internal-setup-start-identity", "", "")
 	fixture.command.Flags().String("internal-deferred-cleanup-record", "", "")
 	fixture.command.Flags().String("internal-deferred-cleanup-transaction", "", "")
 	for name, value := range map[string]string{
-		"connector":                             "claudecode",
+		"connector":                             connectorName,
 		"data-dir":                              fixture.dataRoot,
 		"config-home":                           fixture.configHome,
 		"json":                                  "true",
 		"internal-setup-parent":                 fixture.parentPath,
+		"internal-setup-start-identity":         fixture.startIdentity,
 		"internal-deferred-cleanup-record":      fixture.recordPath,
 		"internal-deferred-cleanup-transaction": fixture.transactionID,
 	} {
@@ -131,6 +158,7 @@ func (fixture deferredVerifyFixture) write(t *testing.T) {
 func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixture) {
 	t.Helper()
 	oldParent := connectorVerifySetupParent
+	oldStartIdentity := connectorVerifySetupStartIdentity
 	oldRecord := connectorVerifyCleanupRecord
 	oldTransaction := connectorVerifyCleanupTransaction
 	oldName := connectorFlagName
@@ -144,6 +172,7 @@ func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixtur
 	oldPrivate := deferredVerifyPrivateFile
 	t.Cleanup(func() {
 		connectorVerifySetupParent = oldParent
+		connectorVerifySetupStartIdentity = oldStartIdentity
 		connectorVerifyCleanupRecord = oldRecord
 		connectorVerifyCleanupTransaction = oldTransaction
 		connectorFlagName = oldName
@@ -157,16 +186,24 @@ func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixtur
 		deferredVerifyPrivateFile = oldPrivate
 	})
 	connectorVerifySetupParent = fixture.parentPath
+	connectorVerifySetupStartIdentity = fixture.startIdentity
 	connectorVerifyCleanupRecord = fixture.recordPath
 	connectorVerifyCleanupTransaction = fixture.transactionID
-	connectorFlagName = "claudecode"
+	connectorFlagName = fixture.connectorName
 	connectorFlagJSON = true
 	connectorFlagDataDir = fixture.dataRoot
 	connectorFlagConfigHome = fixture.configHome
 	connectorFlagHookExe = ""
 	connectorExit = func(code int) { t.Fatalf("unexpected connector exit %d", code) }
 	deferredVerifyExecutable = func() (string, error) { return fixture.childPath, nil }
-	deferredVerifyParent = func(int) (string, error) { return fixture.parentPath, nil }
+	deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
+		return deferredVerifyProcessIdentity{
+			ImagePath:     fixture.parentPath,
+			StartIdentity: fixture.startIdentity,
+			requireLive:   func() error { return nil },
+			close:         func() error { return nil },
+		}, nil
+	}
 	deferredVerifyPrivateFile = func(string) error { return nil }
 }
 
@@ -186,6 +223,9 @@ func TestDeferredUninstallVerifyAuthenticatesWithoutV8Config(t *testing.T) {
 	}
 	if err := runConnectorVerify(fixture.command, nil); err != nil {
 		t.Fatalf("Claude Code VerifyClean without v8 config: %v", err)
+	}
+	if _, err := os.Lstat(fixture.dataRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("configless verification recreated deleted data root: %v", err)
 	}
 }
 
@@ -207,6 +247,197 @@ func TestDeferredUninstallVerifyAuthenticatesGeminiPreviousHomeCandidate(t *test
 	}
 }
 
+func TestDeferredVerifyProcessStartIdentityIsCanonical(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{value: "133713371337", want: true},
+		{value: ""},
+		{value: "0"},
+		{value: "-1"},
+		{value: "01"},
+		{value: " 1"},
+		{value: "9223372036854775808"},
+	}
+	for _, test := range tests {
+		if got := validDeferredVerifyProcessStartIdentity(test.value); got != test.want {
+			t.Errorf("validDeferredVerifyProcessStartIdentity(%q) = %t, want %t", test.value, got, test.want)
+		}
+	}
+}
+
+func TestDeferredVerifyParentProcessIdentityUsesStableHandle(t *testing.T) {
+	if os.Getenv("DEFENSECLAW_DEFERRED_VERIFY_PARENT_HELPER") == "1" {
+		time.Sleep(30 * time.Second)
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, "-test.run=^TestDeferredVerifyParentProcessIdentityUsesStableHandle$")
+	command.Env = append(os.Environ(), "DEFENSECLAW_DEFERRED_VERIFY_PARENT_HELPER=1")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited && command.Process != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	identity, err := deferredVerifyParentImage(command.Process.Pid)
+	if err != nil {
+		t.Fatalf("open live process identity: %v", err)
+	}
+	t.Cleanup(func() { _ = identity.closeParent() })
+	if identity.ImagePath == "" || !validDeferredVerifyProcessStartIdentity(identity.StartIdentity) {
+		t.Fatalf("live process identity = path:%q start:%q", identity.ImagePath, identity.StartIdentity)
+	}
+	if err := identity.requireLiveParent(); err != nil {
+		t.Fatalf("live process was not live: %v", err)
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("killed helper exited successfully")
+	}
+	waited = true
+	if err := identity.requireLiveParent(); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("exited process liveness = %v, want os.ErrProcessDone", err)
+	}
+}
+
+func TestDeferredUninstallVerifyAuthenticatesAmpWithoutV8Config(t *testing.T) {
+	fixture := newDeferredVerifyFixtureForConnector(t, "amp")
+	withDeferredVerifyFixtureGlobals(t, fixture)
+	if err := os.MkdirAll(fixture.configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.command.SetOut(io.Discard)
+	fixture.command.SetErr(io.Discard)
+	if err := runConnectorVerifyPersistentPreRunE(fixture.command, nil); err != nil {
+		t.Fatalf("authenticated configless Amp pre-run: %v", err)
+	}
+	exitCode := 0
+	connectorExit = func(code int) { exitCode = code }
+	if err := runConnectorVerify(fixture.command, nil); err != nil {
+		t.Fatalf("Amp VerifyClean without v8 config: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("clean Amp verification exit = %d, want 0", exitCode)
+	}
+	if _, err := os.Lstat(fixture.dataRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("configless Amp verification recreated deleted data root: %v", err)
+	}
+}
+
+func TestDeferredVerifyConfigHomeBindingCoversNativeRoster(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "profile")
+	transaction := deferredVerifyTransaction{
+		DataRoot:                filepath.Join(profile, ".defenseclaw"),
+		PreviousCodexHome:       filepath.Join(profile, "codex-before"),
+		CodexHome:               filepath.Join(profile, "codex-after"),
+		PreviousClaudeConfigDir: filepath.Join(profile, "claude-before"),
+		ClaudeConfigDir:         filepath.Join(profile, "claude-after"),
+		PreviousState:           &deferredVerifyInstallState{CodexHome: filepath.Join(profile, "codex-state"), ClaudeConfigDir: filepath.Join(profile, "claude-state")},
+	}
+	tests := []struct {
+		connector string
+		home      string
+		want      bool
+	}{
+		{connector: "codex", home: transaction.PreviousCodexHome, want: true},
+		{connector: "codex", home: transaction.CodexHome, want: true},
+		{connector: "codex", home: transaction.PreviousState.CodexHome, want: true},
+		{connector: "codex", home: filepath.Join(profile, ".codex"), want: true},
+		{connector: "claudecode", home: transaction.PreviousClaudeConfigDir, want: true},
+		{connector: "claudecode", home: transaction.ClaudeConfigDir, want: true},
+		{connector: "claudecode", home: transaction.PreviousState.ClaudeConfigDir, want: true},
+		{connector: "claudecode", home: filepath.Join(profile, ".claude"), want: true},
+		{connector: "amp", home: filepath.Join(profile, ".config", "amp"), want: true},
+		{connector: "amp", home: filepath.Join(profile, ".config", "foreign"), want: false},
+		{connector: "foreign", home: filepath.Join(profile, ".codex"), want: false},
+	}
+	for _, test := range tests {
+		name := test.connector + "_" + filepath.Base(test.home)
+		t.Run(name, func(t *testing.T) {
+			if got := deferredVerifyConfigHomeBound(transaction, test.connector, test.home); got != test.want {
+				t.Fatalf("config home binding = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDeferredUninstallVerifyBlocksExternalConnectorResidueWithoutV8Config(t *testing.T) {
+	tests := []struct {
+		connector string
+		write     func(*testing.T, deferredVerifyFixture)
+	}{
+		{
+			connector: "codex",
+			write: func(t *testing.T, fixture deferredVerifyFixture) {
+				if err := os.MkdirAll(fixture.configHome, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fixture.configHome, "config.toml"), []byte("[hooks\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			connector: "claudecode",
+			write: func(t *testing.T, fixture deferredVerifyFixture) {
+				if err := os.MkdirAll(fixture.configHome, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				settings := []byte(`{"env":{"OTEL_RESOURCE_ATTRIBUTES":"defenseclaw.connector=claudecode,service.name=claudecode"}}`)
+				if err := os.WriteFile(filepath.Join(fixture.configHome, "settings.json"), settings, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			connector: "amp",
+			write: func(t *testing.T, fixture deferredVerifyFixture) {
+				plugin := filepath.Join(fixture.configHome, "plugins", "defenseclaw.ts")
+				if err := os.MkdirAll(filepath.Dir(plugin), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(plugin, []byte("// defenseclaw-managed-plugin v2\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.connector, func(t *testing.T) {
+			fixture := newDeferredVerifyFixtureForConnector(t, test.connector)
+			withDeferredVerifyFixtureGlobals(t, fixture)
+			test.write(t, fixture)
+			fixture.command.SetOut(io.Discard)
+			fixture.command.SetErr(io.Discard)
+			if err := runConnectorVerifyPersistentPreRunE(fixture.command, nil); err != nil {
+				t.Fatalf("authenticated configless pre-run: %v", err)
+			}
+			exitCode := 0
+			connectorExit = func(code int) { exitCode = code }
+			if err := runConnectorVerify(fixture.command, nil); err != nil {
+				t.Fatalf("configless VerifyClean: %v", err)
+			}
+			if exitCode != 1 {
+				t.Fatalf("connector residue exit = %d, want 1", exitCode)
+			}
+			if _, err := os.Lstat(fixture.dataRoot); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("residue verification recreated deleted data root: %v", err)
+			}
+		})
+	}
+}
+
 func TestDeferredUninstallVerifyRejectsBindingDrift(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -223,9 +454,51 @@ func TestDeferredUninstallVerifyRejectsBindingDrift(t *testing.T) {
 		{
 			name: "parent",
 			mutate: func(_ *testing.T, fixture *deferredVerifyFixture) {
-				deferredVerifyParent = func(int) (string, error) { return filepath.Join(filepath.Dir(fixture.parentPath), "foreign.exe"), nil }
+				deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
+					return deferredVerifyProcessIdentity{
+						ImagePath:     filepath.Join(filepath.Dir(fixture.parentPath), "foreign.exe"),
+						StartIdentity: fixture.startIdentity,
+						requireLive:   func() error { return nil },
+						close:         func() error { return nil },
+					}, nil
+				}
 			},
 			want: "live parent",
+		},
+		{
+			name: "parent process instance",
+			mutate: func(_ *testing.T, fixture *deferredVerifyFixture) {
+				deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
+					return deferredVerifyProcessIdentity{
+						ImagePath:     fixture.parentPath,
+						StartIdentity: "133713371338",
+						requireLive:   func() error { return nil },
+						close:         func() error { return nil },
+					}, nil
+				}
+			},
+			want: "live parent",
+		},
+		{
+			name: "parent exits during validation",
+			mutate: func(_ *testing.T, fixture *deferredVerifyFixture) {
+				liveChecks := 0
+				deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
+					return deferredVerifyProcessIdentity{
+						ImagePath:     fixture.parentPath,
+						StartIdentity: fixture.startIdentity,
+						requireLive: func() error {
+							liveChecks++
+							if liveChecks > 1 {
+								return os.ErrProcessDone
+							}
+							return nil
+						},
+						close: func() error { return nil },
+					}, nil
+				}
+			},
+			want: "revalidate live Setup parent",
 		},
 		{
 			name: "manifest digest",
@@ -261,6 +534,34 @@ func TestDeferredUninstallVerifyRejectsBindingDrift(t *testing.T) {
 			},
 			want: "private file",
 		},
+		{
+			name: "journal path",
+			mutate: func(t *testing.T, fixture *deferredVerifyFixture) {
+				fixture.record.JournalPath = filepath.Join(filepath.Dir(fixture.journalPath), "foreign.json")
+				fixture.write(t)
+			},
+			want: "cleanup record",
+		},
+		{
+			name: "connector roster",
+			mutate: func(t *testing.T, fixture *deferredVerifyFixture) {
+				fixture.record.VerifiedConnectors = []string{"codex"}
+				fixture.write(t)
+			},
+			want: "roster",
+		},
+		{
+			name: "reparse binding",
+			mutate: func(_ *testing.T, fixture *deferredVerifyFixture) {
+				deferredVerifyPrivateFile = func(path string) error {
+					if sameDeferredVerifyPath(path, fixture.recordPath) {
+						return errors.New("reparse point")
+					}
+					return nil
+				}
+			},
+			want: "private file",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -277,16 +578,19 @@ func TestDeferredUninstallVerifyRejectsBindingDrift(t *testing.T) {
 
 func TestOrdinaryConnectorVerifyRetainsStrictRootPreRun(t *testing.T) {
 	oldParent := connectorVerifySetupParent
+	oldStartIdentity := connectorVerifySetupStartIdentity
 	oldRecord := connectorVerifyCleanupRecord
 	oldTransaction := connectorVerifyCleanupTransaction
 	oldRoot := connectorVerifyRootPersistentPreRun
 	t.Cleanup(func() {
 		connectorVerifySetupParent = oldParent
+		connectorVerifySetupStartIdentity = oldStartIdentity
 		connectorVerifyCleanupRecord = oldRecord
 		connectorVerifyCleanupTransaction = oldTransaction
 		connectorVerifyRootPersistentPreRun = oldRoot
 	})
 	connectorVerifySetupParent = ""
+	connectorVerifySetupStartIdentity = ""
 	connectorVerifyCleanupRecord = ""
 	connectorVerifyCleanupTransaction = ""
 	called := false
@@ -297,5 +601,25 @@ func TestOrdinaryConnectorVerifyRetainsStrictRootPreRun(t *testing.T) {
 	err := runConnectorVerifyPersistentPreRunE(&cobra.Command{Use: "verify"}, nil)
 	if !called || err == nil || !strings.Contains(err.Error(), "strict v8 config required") {
 		t.Fatalf("ordinary connector verify pre-run = called:%t err:%v", called, err)
+	}
+}
+
+func TestDeferredConnectorVerifyRejectsPartialPrivateAuthorization(t *testing.T) {
+	fixture := newDeferredVerifyFixture(t)
+	withDeferredVerifyFixtureGlobals(t, fixture)
+	connectorVerifyCleanupRecord = ""
+	err := runConnectorVerifyPersistentPreRunE(fixture.command, nil)
+	if err == nil || !strings.Contains(err.Error(), "cleanup record path") {
+		t.Fatalf("partial private authorization error = %v", err)
+	}
+}
+
+func TestDeferredConnectorVerifyRequiresExplicitProcessInstanceBinding(t *testing.T) {
+	fixture := newDeferredVerifyFixture(t)
+	withDeferredVerifyFixtureGlobals(t, fixture)
+	fixture.command.Flags().Lookup("internal-setup-start-identity").Changed = false
+	err := runConnectorVerifyPersistentPreRunE(fixture.command, nil)
+	if err == nil || !strings.Contains(err.Error(), "every explicit authenticated binding") {
+		t.Fatalf("missing process-instance authorization error = %v", err)
 	}
 }

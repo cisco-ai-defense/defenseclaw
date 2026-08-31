@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import ntpath
 import os
 import platform
 import stat
@@ -83,6 +84,33 @@ _untrusted_managed_config_warned_paths: set[str] = set()
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
 CONFIG_FILE_NAME = "config.yaml"
+
+
+def _resolve_relative_gateway_device_key_file(key_file: str, data_dir: str) -> str | None:
+    """Resolve one portable relative device-key path beneath an absolute data root."""
+
+    if (
+        not isinstance(key_file, str)
+        or not key_file
+        or "\x00" in key_file
+        or not os.path.isabs(data_dir)
+        or os.path.isabs(key_file)
+        or key_file.startswith(("/", "\\"))
+        or ntpath.splitdrive(key_file)[0]
+        or ":" in key_file
+    ):
+        return None
+    root = os.path.normpath(os.path.abspath(data_dir))
+    target = os.path.normpath(os.path.abspath(os.path.join(root, key_file)))
+    try:
+        common = os.path.commonpath((target, root))
+    except ValueError:
+        return None
+    if common.casefold() != root.casefold() or target.casefold() == root.casefold():
+        return None
+    return target
+
+
 CONFIG_PATH_ENV = "DEFENSECLAW_CONFIG"
 DEPLOYMENT_MODE_ENV = "DEFENSECLAW_DEPLOYMENT_MODE"
 VALID_DEPLOYMENT_MODES = {
@@ -2068,6 +2096,62 @@ class NotificationsConfig:
 
 
 @dataclass
+class RoutingConfig:
+    """Semantic model routing configuration."""
+
+    enabled: bool = False
+    version: str = ""
+    port: int = 0
+    algorithm: str = ""
+    # Keep the nested routing graph as mappings/lists rather than duplicating
+    # the rapidly evolving Go DTO hierarchy here.  Python setup commands only
+    # toggle the lifecycle fields above, but these values must still be part of
+    # the modeled v8 snapshot: otherwise changing ``enabled`` on a disabled
+    # config replaces the entire routing block and silently drops the model
+    # catalog, signals, and decisions.
+    remote: dict[str, Any] = field(default_factory=dict)
+    models: list[dict[str, Any]] = field(default_factory=list)
+    signals: dict[str, Any] = field(default_factory=dict)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"enabled": self.enabled}
+        if self.version:
+            d["version"] = self.version
+        if self.port:
+            d["port"] = self.port
+        if self.algorithm:
+            d["algorithm"] = self.algorithm
+        if self.remote:
+            d["remote"] = copy.deepcopy(self.remote)
+        if self.models:
+            d["models"] = copy.deepcopy(self.models)
+        if self.signals:
+            d["signals"] = copy.deepcopy(self.signals)
+        if self.decisions:
+            d["decisions"] = copy.deepcopy(self.decisions)
+        return d
+
+
+@dataclass
+class PrivacyConfig:
+    """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
+
+    ``disable_redaction`` is the persistent kill-switch documented in
+    the Go redaction package: when True the sidecar bypasses every
+    ForSink* helper at startup, including persistent sinks (audit DB,
+    OTel logs, Splunk HEC, webhooks). It violates the
+    unconditional-redaction contract documented in OBSERVABILITY.md
+    by design — only enable on single-tenant installs where every
+    downstream sink lives inside the same trust boundary.
+    The CLI emits a warning on flip, and config loaders emit a
+    once-per-process warning when they observe it.
+    """
+
+    disable_redaction: bool = False
+
+
+@dataclass
 class AIDiscoveryConfig:
     enabled: bool = False
     mode: str = "enhanced"
@@ -2290,6 +2374,7 @@ class Config:
     # legacy global-only behavior; resolution goes through
     # :class:`ObservabilityConfig` resolvers, never by reading the map directly.
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
     # the file at load). Lets the merge distinguish "this process loaded
@@ -2306,6 +2391,7 @@ class Config:
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -2973,7 +3059,46 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         sources = registries.get("sources") or []
         if not sources:
             d.pop("registries", None)
+    _serialize_routing(d)
     return d
+
+
+def _serialize_routing(d: dict[str, Any]) -> None:
+    """Compact the ``routing:`` block, omitting fields at their zero value.
+
+    Mirrors Go's ``yaml:",omitempty"`` so configs that never opt in stay
+    byte-identical after a load/save round-trip.
+    """
+    routing = d.get("routing")
+    if not isinstance(routing, dict):
+        return
+    nested_fields = (
+        "remote",
+        "models",
+        "signals",
+        "decisions",
+    )
+    has_value = any(
+        (
+            routing.get("enabled"),
+            routing.get("version"),
+            routing.get("port"),
+            routing.get("algorithm"),
+            *(routing.get(name) for name in nested_fields),
+        )
+    )
+    if not has_value:
+        d.pop("routing", None)
+        return
+    if not routing.get("version"):
+        routing.pop("version", None)
+    if not routing.get("port"):
+        routing.pop("port", None)
+    if not routing.get("algorithm"):
+        routing.pop("algorithm", None)
+    for name in nested_fields:
+        if not routing.get(name):
+            routing.pop(name, None)
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
@@ -4655,7 +4780,15 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
+        routing=_merge_routing(raw.get("routing")),
     )
+    if not os.path.isabs(cfg.gateway.device_key_file):
+        resolved_device_key = _resolve_relative_gateway_device_key_file(
+            cfg.gateway.device_key_file,
+            cfg.data_dir,
+        )
+        if resolved_device_key is not None:
+            cfg.gateway.device_key_file = resolved_device_key
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
     cfg._source_config_version = source_config_version
@@ -4862,6 +4995,33 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
         sources=sources,
         dedup_window=dedup_window,
         max_per_minute=max_per_minute,
+    )
+
+
+def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
+    """Build a :class:`RoutingConfig` from the YAML ``routing:`` block."""
+    if not isinstance(raw, dict):
+        return RoutingConfig()
+
+    def mapping(name: str) -> dict[str, Any]:
+        value = raw.get(name)
+        return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+    def mapping_list(name: str) -> list[dict[str, Any]]:
+        value = raw.get(name)
+        if not isinstance(value, list):
+            return []
+        return [copy.deepcopy(entry) for entry in value if isinstance(entry, dict)]
+
+    return RoutingConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        version=str(raw.get("version", "") or ""),
+        port=_as_int(raw.get("port", 0), 0),
+        algorithm=str(raw.get("algorithm", "") or ""),
+        remote=mapping("remote"),
+        models=mapping_list("models"),
+        signals=mapping("signals"),
+        decisions=mapping_list("decisions"),
     )
 
 

@@ -212,6 +212,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printSubsystem("Watcher", snap.Watcher)
 	printSubsystem("API", snap.API)
 	printSubsystem("Guardrail", snap.Guardrail)
+	printSubsystem("Routing", snap.Routing)
 	printSubsystem("Telemetry", snap.Telemetry)
 	if snap.Sandbox != nil {
 		printSubsystem("Sandbox", *snap.Sandbox)

@@ -453,7 +453,7 @@ func TestShippedProfilesKeepSharedDriftCorrections(t *testing.T) {
 		},
 		{
 			id:      "CMD-ENV-DUMP",
-			pattern: `(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)`,
+			pattern: `(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw|-urlencode)?\s+@-|-d\s+@-|(?:--form|-F)\s+[^;\n]*=@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)`,
 		},
 	}
 

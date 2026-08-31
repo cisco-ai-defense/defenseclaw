@@ -94,10 +94,10 @@ endef
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
@@ -795,6 +795,85 @@ packaging-macos-bundle:
 	    "$(CMID_OVERLAY)" \
 	    "$(CMID_VERSION)"
 
+# The managed-enterprise Windows build is split so a macOS release box (which
+# has SSH access to cisco-aispg/ai-common) prepares the -tags cmid gateway
+# zip, and a Windows tester (which typically does not) only runs the OSS
+# installer flow against that zip.
+#
+# packaging-windows-managed-gateway-zip (macOS / Linux / Windows-with-bash):
+#   Clones ai-common at $(WINDOWS_MANAGED_REF), applies the cloudreg overlay,
+#   pins the ai-common/cmid pseudo-version, cross-builds defenseclaw.exe +
+#   defenseclaw-hook.exe with -tags cmid, stamps VERSIONINFO / icon on both,
+#   and packages them into $(DIST_DIR)/defenseclaw_$(VERSION)_windows_amd64.zip
+#   alongside a gateway-source-commit.txt sidecar. Restores the OSS working
+#   tree on exit.
+#
+# The prior name was `packaging-managed-windows-bundle`, which differed from
+# `packaging-windows-managed-bundle` (the Windows-only enterprise-installer
+# build) only by word order — an operator transposing the words ran the
+# wrong step, and the mistake only surfaced after the script started.
+# The prior name is retained below as a deprecated alias.
+WINDOWS_MANAGED_REF ?= develop
+packaging-windows-managed-gateway-zip:
+	@packaging/scripts/build-managed-windows-bundle.sh \
+	    --ref "$(WINDOWS_MANAGED_REF)" \
+	    --version "$(VERSION)" \
+	    --dist-dir "$(DIST_DIR)"
+
+# Deprecated alias — remove in a future cleanup pass once release runbooks
+# are updated. Use `packaging-windows-managed-gateway-zip` instead.
+packaging-managed-windows-bundle: packaging-windows-managed-gateway-zip
+	@echo 'note: `packaging-managed-windows-bundle` is deprecated; use `packaging-windows-managed-gateway-zip`.'
+
+# packaging-windows-enterprise-installer:
+#   Local self-serve unsigned developer build. Under the AVC-approved
+#   Windows managed_enterprise handoff (spec 002:
+#   docs/specs/002-windows-avc-packaging), a signed Setup EXE is
+#   produced only by AVC's pipeline consuming a build kit; DefenseClaw-
+#   side runs are always unsigned. This target invokes the extended
+#   bundler with --allow-unsigned, which emits the kit AND runs
+#   assemble.sh inline to produce a runnable
+#   DefenseClawSetup-Enterprise-x64.exe under
+#   dist/windows-enterprise-buildkit-<version>-unsigned/out/.
+#
+# Prereqs (macOS/Linux — the retired on-Windows-box flow no longer
+# runs; AVC does the signing round trips):
+#   - bash, git, go, zip on PATH.
+#   - Access to cisco-aispg/ai-common at $WINDOWS_MANAGED_REF for the
+#     private CMID overlay (or --ai-common-dir pointing at an existing
+#     checkout).
+#   - Local git HEAD == the DefenseClaw commit whose bytes you want
+#     stamped into the artefact (the bundler embeds HEAD as
+#     main.commit and refuses drift).
+#
+# For a signed release artefact, use `packaging-windows-avc-buildkit`
+# below to emit the kit and hand it to AVC.
+packaging-windows-enterprise-installer:
+	@packaging/scripts/build-managed-windows-bundle.sh \
+	    --ref "$(WINDOWS_MANAGED_REF)" \
+	    --version "$(VERSION)" \
+	    --dist-dir "$(DIST_DIR)" \
+	    --allow-unsigned
+
+# packaging-windows-avc-buildkit:
+#   Alias for `packaging-windows-managed-gateway-zip` — both invoke the
+#   same bundler, which emits BOTH the legacy gateway zip AND the
+#   AVC-facing build kit at
+#   $(DIST_DIR)/windows-enterprise-buildkit-<version>/ on the same run.
+#   The alias exists so release runbooks that grep for the intent
+#   ("build the AVC kit") find a matching target. Hand the kit to AVC
+#   per docs/WINDOWS-AVC-PACKAGING-HANDOFF.md; AVC signs the inner
+#   payload, runs the shipped assemble.sh, and signs the outer Setup
+#   EXE. See CR spec-002:PRRT_kwDORuAK-s6af8ii.
+packaging-windows-avc-buildkit: packaging-windows-managed-gateway-zip
+
+# Deprecated alias — remove once release runbooks are updated to use
+# `packaging-windows-avc-buildkit` (the AVC-facing kit target) or
+# `packaging-windows-enterprise-installer` (the local unsigned dev
+# build). See CR spec-002:PRRT_kwDORuAK-s6af8ie.
+packaging-windows-managed-bundle: packaging-windows-avc-buildkit
+	@echo 'note: `packaging-windows-managed-bundle` is deprecated; use `packaging-windows-avc-buildkit` (for the AVC kit) or `packaging-windows-enterprise-installer` (for a local unsigned dev build).'
+
 # Native SwiftUI companion-app checks and release packaging. The release target
 # builds a runtime-bearing drag-to-Applications DMG plus an app-only self-update
 # zip. Both are ad-hoc signed by default; scripts/build-macos-app-release.sh
@@ -996,8 +1075,30 @@ upgrade-signed-protocol-matrix:
 # Lint targets
 # ---------------------------------------------------------------------------
 
-lint: py-lint go-lint
+lint: py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity
 	$(VENV_BIN)/python$(EXE) -m py_compile cli/defenseclaw/main.py
+
+# go-mod-no-toolchain refuses a `toolchain` directive in go.mod so the
+# managed-enterprise / AVC reproducibility pin (GOTOOLCHAIN in
+# packaging/scripts/lib/repro-flags.{sh,ps1}) cannot silently leak into
+# OSS builds. See docs/specs/001-windows-deterministic-build/design.md.
+go-mod-no-toolchain:
+	@scripts/check-go-mod-no-toolchain.sh
+
+# repro-flags-parity refuses drift between the bash and pwsh copies of
+# repro-flags.* — both files must ship the same fixed env exports and
+# the same required-env list, or the byte-identical outer Setup EXE
+# contract that Workstream A depends on quietly breaks.
+repro-flags-parity:
+	@scripts/check-repro-flags-parity.sh
+
+# assemble-parity refuses drift between the bash and pwsh copies of
+# assemble.* — both files must ship the same stage sequence, expected
+# payload filenames, and emitter subcommand set, or a kit built with
+# --script-host pwsh could silently diverge from --script-host bash.
+# See docs/specs/002-windows-avc-packaging/design.md § Risks.
+assemble-parity:
+	@scripts/check-assemble-parity.sh
 
 py-lint: pycli
 	$(RUFF) check cli/defenseclaw/

@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -225,6 +226,7 @@ type Config struct {
 	// and compiled independently; connector audit_sinks survive here only as
 	// release-upgrader input and never own target-runtime routing.
 	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
+	Privacy               PrivacyConfig               `mapstructure:"privacy"          yaml:"privacy,omitempty"`
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
@@ -232,6 +234,87 @@ type Config struct {
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
 	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
+	Routing RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
+}
+
+// RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
+// Kept in config package to avoid circular imports; the gateway adapter
+// converts to routing.RoutingConfig at boot.
+type RoutingConfig struct {
+	Enabled   bool                  `mapstructure:"enabled"       yaml:"enabled"`
+	Version   string                `mapstructure:"version"       yaml:"version,omitempty"`
+	Port      int                   `mapstructure:"port"          yaml:"port,omitempty"`
+	Algorithm string                `mapstructure:"algorithm"     yaml:"algorithm,omitempty"`
+	Remote    RoutingRemoteConfig   `mapstructure:"remote"        yaml:"remote,omitempty"`
+	Models    []RoutingModelBackend `mapstructure:"models"        yaml:"models,omitempty"`
+	Signals   RoutingSignalConfig   `mapstructure:"signals"       yaml:"signals,omitempty"`
+	Decisions []RoutingDecisionRule `mapstructure:"decisions"     yaml:"decisions,omitempty"`
+}
+
+type RoutingModelBackend struct {
+	Name         string   `mapstructure:"name"              yaml:"name"`
+	Provider     string   `mapstructure:"provider"          yaml:"provider"`
+	Model        string   `mapstructure:"model"             yaml:"model"`
+	BaseURL      string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
+	APIKeyEnv    string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
+	Capabilities []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
+}
+
+type RoutingSignalConfig struct {
+	Keywords []RoutingKeywordSignal `mapstructure:"keywords" yaml:"keywords,omitempty"`
+}
+
+type RoutingKeywordSignal struct {
+	Name     string   `mapstructure:"name"     yaml:"name"`
+	Keywords []string `mapstructure:"keywords" yaml:"keywords"`
+	Operator string   `mapstructure:"operator" yaml:"operator,omitempty"`
+}
+
+type RoutingDecisionRule struct {
+	Name       string             `mapstructure:"name"       yaml:"name"`
+	Priority   int                `mapstructure:"priority"   yaml:"priority"`
+	Conditions []RoutingCondition `mapstructure:"conditions" yaml:"conditions,omitempty"`
+	Operator   string             `mapstructure:"operator"   yaml:"operator,omitempty"`
+	ModelRefs  []string           `mapstructure:"model_refs" yaml:"model_refs"`
+	Algorithm  string             `mapstructure:"algorithm"  yaml:"algorithm,omitempty"`
+}
+
+type RoutingCondition struct {
+	Type string `mapstructure:"type" yaml:"type"`
+	Name string `mapstructure:"name" yaml:"name"`
+}
+
+type RoutingRemoteConfig struct {
+	Endpoint  string `mapstructure:"endpoint"   yaml:"endpoint,omitempty"`
+	TimeoutMs int    `mapstructure:"timeout_ms" yaml:"timeout_ms,omitempty"`
+}
+
+// PrivacyConfig groups privacy/redaction toggles. Today it carries
+// only the redaction kill-switch; future fields (per-sink redaction
+// scope, custom redactor profiles) land here so operators have a
+// single section to audit.
+//
+// Scope: this is a deliberate, persistent operator decision.
+// Defaults match the existing redacting-by-default behavior so a
+// fresh install or a config without a `privacy:` block keeps the
+// historical contract documented in OBSERVABILITY.md.
+type PrivacyConfig struct {
+	// DisableRedaction, when true, instructs the sidecar to bypass
+	// every ForSink* redaction helper at startup — including
+	// persistent sinks (SQLite audit, OTel log exporters, Splunk
+	// HEC, webhooks). Equivalent to setting
+	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
+	// the choice survives restarts and TUI invocations without
+	// per-shell env-var ceremony.
+	//
+	// WARNING: this violates the unconditional-redaction contract
+	// documented in OBSERVABILITY.md. Only enable on single-tenant
+	// installs where every downstream sink already lives inside
+	// the same trust boundary (e.g. lab / prompt-engineering use).
+	// The CLI emits a loud warning on flip-on, and config loaders emit
+	// a once-per-process warning when they observe the setting so the
+	// runtime state stays auditable without spamming reload loops.
+	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
 }
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
@@ -2270,10 +2353,11 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 	}, nil
 }
 
-// ApplyRuntimeV8DataDirDefaultsFromBytes re-bases only omitted path fields on
-// the canonical compiler-selected data directory. It is used after compilation
-// when data_dir was defaulted externally (for example by a reload transaction).
-// Explicit operator paths are preserved.
+// ApplyRuntimeV8DataDirDefaultsFromBytes re-bases omitted path fields and an
+// explicit relative device-key spelling on the canonical compiler-selected
+// data directory. It is used after compilation when data_dir was defaulted
+// externally (for example by a reload transaction). Explicit absolute paths
+// are preserved.
 func ApplyRuntimeV8DataDirDefaultsFromBytes(candidate *Config, source string, raw []byte, dataDir string) error {
 	document, err := ParseV8YAML(source, raw)
 	if err != nil {
@@ -2324,6 +2408,12 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("gateway", "device_key_file") {
 		candidate.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
+	} else if gateway := v8YAMLMapValue(root, "gateway"); gateway != nil {
+		if keyFile := v8YAMLMapValue(gateway, "device_key_file"); keyFile != nil {
+			if resolved, ok := ResolveRelativeGatewayDeviceKeyFile(keyFile.Value, dataDir); ok {
+				candidate.Gateway.DeviceKeyFile = resolved
+			}
+		}
 	}
 }
 
@@ -2472,6 +2562,9 @@ func loadConfigSource(
 	}
 
 	migrateConfig(&cfg)
+	if !runtimeV8 {
+		normalizeRelativeGatewayDeviceKeyFile(&cfg)
+	}
 	if runtimeV8 {
 		if cfg.ConfigVersion != ObservabilityV8ConfigVersion {
 			return nil, fmt.Errorf("config: schema v8 is required; run defenseclaw upgrade first")
@@ -2503,11 +2596,27 @@ func loadConfigSource(
 				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
 		}
-		if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "managed data_dir"); err != nil {
+		if err := managed.ValidateTrustedServiceRuntimeDir(
+			cfg.DataDir,
+			"managed data_dir",
+			os.Getenv(managed.WindowsServiceAccountEnv),
+		); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
 			}
 			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
+		}
+		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
+			}
+			return nil, err
+		}
+		if err := validateManagedEnterpriseWindowsPeerAuthKnobs(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_ipc_peer_auth_unsupported_on_windows")
+			}
+			return nil, err
 		}
 	}
 
@@ -2591,6 +2700,12 @@ func loadConfigSource(
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.Routing.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "routing_invalid")
+		}
+		return nil, fmt.Errorf("config: routing: %w", err)
 	}
 	if err := cfg.ApplicationProtection.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -2694,6 +2809,107 @@ func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
 	return nil
 }
 
+// validateManagedEnterpriseListenerBindings keeps every inbound enterprise
+// surface on loopback. The managed hook transport is intentionally pinned to
+// canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
+// than another loopback spelling or address. This is enterprise-only:
+// unmanaged/BYOD deployments retain their existing remote-bind behavior.
+func validateManagedEnterpriseListenerBindings(cfg *Config) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+
+	apiBind := cfg.Gateway.APIBind
+	if apiBind == "" {
+		// Persist the effective managed bind into the in-memory config so
+		// standalone topology cannot later derive the API listener from an
+		// independent IPv6 guardrail host.
+		cfg.Gateway.APIBind = "127.0.0.1"
+		apiBind = cfg.Gateway.APIBind
+	}
+	if apiBind != "127.0.0.1" {
+		return fmt.Errorf(
+			"config: managed_enterprise gateway API must bind to exact canonical 127.0.0.1, got %q",
+			apiBind,
+		)
+	}
+
+	if cfg.Guardrail.Enabled {
+		proxyBind := strings.TrimSpace(cfg.Guardrail.EffectiveHost())
+		if !isLoopbackListenerHost(proxyBind) {
+			return fmt.Errorf(
+				"config: managed_enterprise guardrail proxy must bind to loopback, got %q",
+				proxyBind,
+			)
+		}
+	}
+	return nil
+}
+
+// validateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
+// managed_enterprise config on Windows that carries non-empty
+// AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs. Those allowlists
+// only take effect on macOS / linux, where LOCAL_PEERCRED-style peer
+// credentials give the AF_UNIX IPC surface a real accept-time codesign
+// check. On Windows the AF_UNIX kernel implementation exposes no peer
+// credential API, so the values are silently discarded by
+// newCodesignValidatingListener (peerauth_windows.go, deferred_windows
+// posture). Accepting them from config and dropping them at start-time
+// is a config-honesty gap: an operator setting an allowlist expecting
+// hardening ends up with an AF_UNIX socket whose only access boundary
+// is the file DACL. Refusing to load makes that gap loud instead of
+// silent; the deferred Windows peer-auth mechanism belongs to parity
+// plan §4.4 and is not something operators can enable from config.
+//
+// Non-managed builds keep operator config verbatim per the existing
+// unmanaged/BYOD contract (unmanaged doesn't ship the IPC surface at
+// all outside dev rigs), so this validator is scoped to
+// managed_enterprise on Windows.
+func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	var offending []string
+	if len(cfg.Managed.AllowedTeamIDs) != 0 {
+		offending = append(offending, "managed.allowed_team_ids")
+	}
+	if len(cfg.Managed.AllowedSigningIDs) != 0 {
+		offending = append(offending, "managed.allowed_signing_ids")
+	}
+	if len(cfg.Managed.AllowedBundleIDs) != 0 {
+		offending = append(offending, "managed.allowed_bundle_ids")
+	}
+	if len(offending) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"config: %s cannot be set on Windows in the initial-cut managed IPC "+
+			"peer-auth posture (spec 004): the AF_UNIX socket has no peer-"+
+			"credential API on Windows, so any allowlist here would be silently "+
+			"discarded. Remove these keys from config.yaml; the socket DACL is "+
+			"the enforcement boundary until parity plan §4.4 lands the Windows "+
+			"peer-auth mechanism.",
+		strings.Join(offending, ", "),
+	)
+}
+
+func isLoopbackListenerHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
+	return requested && !managed.IsManagedEnterprise(deploymentMode)
+}
+
 // clearLegacyObservabilityRuntimeConfig makes the general application Config
 // a one-way consumer of the v8 compiler. These fields remain on Config solely
 // so the upgrade/preview loaders can decode historical v7 sources; no target
@@ -2709,10 +2925,6 @@ func clearLegacyObservabilityRuntimeConfig(cfg *Config) {
 		connector.AuditSinks = nil
 		cfg.Observability.Connectors[name] = connector
 	}
-}
-
-func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
-	return requested && !managed.IsManagedEnterprise(deploymentMode)
 }
 
 // seedProvenanceOnLoad stamps the process-wide content hash from the

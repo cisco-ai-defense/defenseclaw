@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,50 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestHookModelV8FinishReasonsStayWithinCanonicalBounds(t *testing.T) {
+	t.Run("count", func(t *testing.T) {
+		values := make([]string, 300)
+		for index := range values {
+			values[index] = fmt.Sprintf("r%03d", index)
+		}
+		got := hookModelV8FinishReasons(values)
+		if len(got) != hookModelV8MaxFinishReasonItems {
+			t.Fatalf("finish reason count=%d, want %d", len(got), hookModelV8MaxFinishReasonItems)
+		}
+		if got[0] != "r000" || got[len(got)-1] != "r255" {
+			t.Fatalf("finish reason order=[%q ... %q]", got[0], got[len(got)-1])
+		}
+	})
+
+	t.Run("encoded bytes", func(t *testing.T) {
+		values := make([]string, 100)
+		for index := range values {
+			values[index] = fmt.Sprintf("%03d-%s", index, strings.Repeat("\\\"", 80))
+		}
+		got := hookModelV8FinishReasons(values)
+		encoded, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) == 0 || len(got) >= len(values) {
+			t.Fatalf("encoded bound retained %d of %d reasons", len(got), len(values))
+		}
+		if len(encoded) > hookModelV8MaxFinishReasonsEncodedBytes {
+			t.Fatalf("encoded finish reasons=%d bytes, max %d", len(encoded), hookModelV8MaxFinishReasonsEncodedBytes)
+		}
+	})
+
+	t.Run("invalid and oversized values", func(t *testing.T) {
+		got := hookModelV8FinishReasons([]string{
+			" stop ", "stop", "", string([]byte{0xff}),
+			strings.Repeat("x", hookModelV8MaxFinishReasonUTF8Bytes+1), "late",
+		})
+		if fmt.Sprint(got) != "[stop late]" {
+			t.Fatalf("normalized finish reasons=%q", got)
+		}
+	})
+}
 
 type hookModelV8OTLPCapture struct {
 	mu        sync.Mutex
@@ -617,6 +662,41 @@ func TestHookModelV8SchemaIdentifiersAndMissingModelRemainTruthful(t *testing.T)
 	}, meta, "response")
 	if observation.model != "" || observation.responseModel != "" {
 		t.Fatalf("absent model was fabricated as request=%q response=%q", observation.model, observation.responseModel)
+	}
+}
+
+func TestHookModelV8ResponseIDSeparatesProviderAndInternalIdentity(t *testing.T) {
+	meta := richHookModelV8Meta()
+	observation := (&APIServer{}).hookModelV8Observation(hookLLMSpanPrompt{
+		meta: meta, content: "prompt", originalBytes: 6, startedAt: time.Now().Add(-time.Second),
+	}, meta, "response")
+	model := hookModelV8ModelInput(observation)
+	agent, ok := hookModelV8AgentInput(observation)
+	if !ok {
+		t.Fatal("valid hook observation did not build agent span")
+	}
+	for name, ids := range map[string]struct {
+		response observability.Optional[string]
+		internal observability.Optional[string]
+	}{
+		"model": {model.GenAIResponseID, model.DefenseClawModelResponseID},
+		"agent": {agent.GenAIResponseID, agent.DefenseClawModelResponseID},
+	} {
+		if value, reported := ids.response.Get(); reported {
+			t.Errorf("%s span fabricated provider response ID %q", name, value)
+		}
+		if value, present := ids.internal.Get(); !present || value != meta.ResponseID {
+			t.Errorf("%s span internal response ID=%q present=%t want %q", name, value, present, meta.ResponseID)
+		}
+	}
+
+	meta.ResponseIDReported = true
+	observation = (&APIServer{}).hookModelV8Observation(hookLLMSpanPrompt{
+		meta: meta, content: "prompt", originalBytes: 6, startedAt: time.Now().Add(-time.Second),
+	}, meta, "response")
+	model = hookModelV8ModelInput(observation)
+	if value, reported := model.GenAIResponseID.Get(); !reported || value != meta.ResponseID {
+		t.Fatalf("reported provider response ID=%q present=%t want %q", value, reported, meta.ResponseID)
 	}
 }
 

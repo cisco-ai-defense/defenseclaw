@@ -10,8 +10,10 @@ fails, is cancelled, or is skipped.
 
 The merge gate covers:
 
-- native Go tests, including current-user Windows DACL regressions, followed by
-  `go vet` and gateway/hook builds;
+- native Go tests, including current-user Windows DACL regressions, exact
+  CMD/PowerShell quote and executable identity, destination-bound curl
+  metadata/body/file projection, and typed Windows sensitive-path
+  block/advisory/quiet outcomes, followed by `go vet` and gateway/hook builds;
 - the ordinary Python suite plus focused native Windows telemetry-registry
   updater and headless TUI checks on pull requests; main and
   manual/release-candidate runs retain both exhaustive telemetry-registry
@@ -22,6 +24,9 @@ The merge gate covers:
 - the public `install.ps1` authentication and native handoff path under a
   token-bound disposable Windows profile;
 - installed CLI, gateway lifecycle, doctor, scanner, and dependency checks;
+- live-gateway Doctor custody checks for the audit database and HMAC-bound
+  device identity, proving the detached gateway and watchdog do not pin the
+  protected data directory;
 - Setup build and native install/repair/uninstall acceptance, including the
   staged connector selection, repair, custody, and exact-restoration paths;
 - deterministic packaged connector contract tests for Codex, Claude Code,

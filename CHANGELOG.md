@@ -20,6 +20,19 @@ deleted.
 
 ### Observability v8
 
+- Defaults an omitted `observability.local.retention_days` to a rolling seven-day
+  local SQLite window. The startup-and-six-hour reaper applies that UTC cutoff
+  in dependency order; it drains expired or bounded guardrail-chain dependencies
+  before eligible unreferenced `correlation_events`, while preserving active
+  cursors, pending operations, unexpired receipts, and their graph anchors.
+  Explicit values still win,
+  including `0` for unbounded retention. Deleted pages remain reusable by
+  SQLite, but the database file does not shrink automatically;
+  the separate OPA `audit.retention_days` policy is unchanged. This changes the
+  prior omitted default from 90 days: an existing v8 configuration without an
+  explicit value adopts seven days on its first upgraded gateway startup and
+  deletes eligible days 8–90. Set an explicit longer value before upgrading if
+  that history must be preserved.
 - Replaces separate `otel`, `audit_sinks`, and global redaction policy with one
   strict `config_version: 8` `observability` graph for bucket collection,
   mandatory local SQLite history, redaction profiles, routing, retention,
@@ -75,6 +88,58 @@ boundary.
   longer evaluated as an executable command or sensitive-path request; typed
   command/path enforcement remains on `PreToolUse`, and physically verified
   standalone source reads reuse the Codex low-noise source boundary.
+- **Trusted-action enforcement now requires exact, same-rule proof**: raw,
+  partial, parser-shadow, and unpinned evidence remains detection-only;
+  ordinary sensitive reads are advisory unless paired with mutation or
+  external egress, and Claude Code instruction-file mutation protection
+  requires authenticated same-session load context; exact identities are
+  retained, while recognized instruction paths with unprovable native identity
+  fail closed only for proven canonical mutations. Parser uncertainty is
+  counted separately by `defenseclaw.guardrail.parser_uncertainty`, so it does
+  not inflate guardrail evaluation or block-rate metrics. Newly exact egress
+  coverage includes curl FTP account/alternative operands and Telnet
+  negotiation metadata on POSIX or structured argv, cross-platform SOCKS proxy
+  credentials, and portable static `echo` or format-only `printf` output
+  flowing into one exact external curl stdin upload. Exact static ASCII DNS
+  hostname bytes are now covered only where curl or GNU Wget is proved to emit
+  them: generated authority, HTTP CONNECT, remote-resolved SOCKS4a/5h
+  destination fields, plaintext HTTP Host or canonical HTTPS SNI observed
+  after a SOCKS handshake, and canonical HTTPS origin SNI. GNU Wget's
+  canonical generated authority and origin SNI additionally require ambient
+  configuration to be disabled. Every component is bound to the exact external
+  origin or proxy network fact. Raw CMD/PowerShell curl now gains exact ordinary
+  HTTP(S) headers, origin credentials, inline/body and file-upload projection,
+  plus supported direct proxy/SOCKS credentials. Exact plaintext HTTP metadata
+  and inline bodies are also bound to the external SOCKS observer when that
+  exact target uses the proxy.
+  PowerShell hostname projection additionally requires explicit `curl.exe` or
+  `wget.exe`; its bare aliases and raw-Windows FTP control, SMTP envelope, and
+  Telnet metadata remain detection-only.
+  Curl `--haproxy-clientip` remains LOW and detection-only on every surface,
+  including direct HTTP(S), explicit proxy/SOCKS or preproxy routes,
+  `--noproxy`, multiple targets or `--next`, static or dynamic values,
+  setup-preempted commands, aliases, and trusted or untrusted executable-path
+  spellings. A curl 8.7.1 source and loopback-wire audit confirms that a capable
+  direct build writes the PROXY preamble before the HTTP request or, for HTTPS,
+  before TLS. It also establishes a 1976-byte future-projector ceiling and the
+  pre-wire `--ipv4`/literal-IPv6 exclusion. Those facts are rationale, not
+  current authority: the option is absent before curl 8.2.0 and is compiled out
+  with `CURL_DISABLE_PROXY`, while executable spelling authenticates neither
+  version nor build. [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770)
+  owns the required executable-capability boundary.
+  `mkfs.minix` now shares the formatter owner for raw-device targets;
+  image files, help/version calls, invalid grammar, near-miss executables, and
+  local-only routes or numeric destinations, non-ASCII IDN spellings,
+  dynamic/config-driven
+  targets, wrappers, pipelines, shell redirections, promptable authentication, unresolved
+  file/TLS setup, a modeled eagerly checked compression/TLS/authentication
+  capability option, a modeled final enabled capability toggle, conflicting pre-wire options, direct plaintext
+  HTTP Host overrides with no remaining proxy-visible authority, an HTTPS
+  proxy route without authenticated HTTPS-proxy feature facts, unsupported
+  multi-hop proxy chains, and other
+  ambiguous egress forms cannot mint action
+  authority; they remain advisory where a compatible detector still matches and
+  otherwise stay quiet.
 - **Amp is now a first-class connector on macOS, Linux, and native Windows**:
   setup installs an owner-only authenticated system policy plugin for Amp's five
   documented callbacks; action mode gates `tool.call` before execution and can
@@ -85,6 +150,32 @@ boundary.
   `traceparent`, `session.end`, or dedicated subagent lifecycle callback, so
   DefenseClaw correlates only source-backed thread events and governs delegation
   tools at their `tool.call` boundary.
+- **Windows runtime custody remains verifiable while services are live**:
+  detached gateway, watchdog, startup, and hook-recovery processes no longer
+  use the protected data directory as their current working directory, so
+  Doctor can hold its exact anti-replacement lease without weakening Windows
+  sharing or ACL checks. Fresh device identities now publish an owner-private
+  random provenance secret, an HMAC bound to the exact Ed25519 key bytes, and
+  finally the key itself with create-new semantics. A portable relative
+  `gateway.device_key_file` remains compatible by resolving strictly beneath
+  the canonical absolute `data_dir`; rooted, drive-relative, ADS, traversal,
+  and outside-root spellings still fail closed before read or mutation. On
+  POSIX, every validated nested-directory entry is synced before deeper work
+  and re-synced on retry after an interrupted attempt. Existing unprovenanced
+  keys are never blessed after the fact; they remain usable but Doctor reports
+  them for continuity review. After `DELETEUSERDATA=1`, post-reboot Windows
+  cleanup now re-verifies the exact recorded Codex, Claude Code, and Amp homes
+  through a configless child bound to the exact transaction, journal, digest,
+  and Setup process instance; the child retains one stable parent handle and
+  checks its creation identity and liveness before and after authorization. It
+  neither recreates the deleted data root nor weakens ordinary
+  `connector verify`, which still requires a valid v8 runtime configuration.
+  Managed-plugin residue verification normalizes only line terminators and
+  recognizes exact canonical historical marker lines, so LF- and CRLF-built
+  gateways find managed residue across upgrades without matching marker-like
+  suffixes or operator prose.
+  Native Windows CI now requires both live
+  audit-database custody and HMAC-bound device identity checks to pass.
 - **`make all` is again the explicit same-checkout developer reinstall**:
   markerless or older source-owned state may advance with the checkout for
   local development. Foreign, newer, release-managed, and different-checkout

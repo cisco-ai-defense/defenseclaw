@@ -28,14 +28,27 @@ const (
 	semanticRecursiveDeleteExpression        = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE))`
 	semanticSudoDiscoveryElevationExpression = `f.commands.exists(c, c.argv_complete && ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) || (c.program == 'find' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations) || (c.program == 'getcap' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))`
 	semanticAccessControlExpression          = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))`
-	semanticDDDiskWriteExpression            = `f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
-	semanticFilesystemWipeExpression         = `f.commands.exists(c, c.argv_complete && c.program != 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)`
+	semanticDDDiskWriteExpression            = `f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
 	semanticNetworkSweepExpression           = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))`
 	semanticContainerHostEscapeExpression    = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))`
 	semanticCryptominingExpression           = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)`
 	semanticMassProcessTerminationExpression = `f.commands.exists(c, c.argv_complete && c.program in ['kill', 'stop-process', 'taskkill'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PROCESS_KILL in c.operations)`
 	semanticPrivilegedAccountExpression      = `f.commands.exists(c, c.argv_complete && c.program in ['useradd', 'usermod', 'gpasswd', 'groupmems', 'adduser', 'dseditgroup', 'dscl', 'net', 'net1', 'add-localgroupmember', 'add-adgroupmember'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations)`
 )
+
+var (
+	semanticFilesystemFormatterPrograms = celProgramList(actionfacts.FilesystemFormatterPrograms())
+	semanticFilesystemWipeExpression    = `f.commands.exists(c, c.argv_complete && c.program in ` + semanticFilesystemFormatterPrograms + ` && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+	semanticDeviceWipeExpression        = `f.commands.exists(c, c.argv_complete && c.program != 'dd' && !(c.program in ` + semanticFilesystemFormatterPrograms + `) && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+)
+
+func celProgramList(programs []string) string {
+	quoted := make([]string, 0, len(programs))
+	for _, program := range programs {
+		quoted = append(quoted, "'"+program+"'")
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
 
 var semanticReconImpactOwners = map[string]semanticOwner{
 	"CMD-RM-RF": {
@@ -61,6 +74,10 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	},
 	"CMD-MKFS": {
 		prerequisite:     filesystemWipePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"CMD-DEVICE-WIPE": {
+		prerequisite:     destructiveDeviceWritePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"recon.network_sweep": {
@@ -175,7 +192,7 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 			command.ID,
 			actionfacts.PathAccessDelete,
 			func(candidate actionfacts.PathFact) bool {
-				return deleteTargetIsRootOrHome(facts, candidate)
+				return deleteTargetIsCriticalScope(facts, candidate)
 			},
 		) {
 			return true
@@ -255,13 +272,25 @@ func powerShellRecursiveForceFlags(argv []string) bool {
 			continue
 		}
 		switch key {
-		case "-recurse":
-			recurse = !joined
-		case "-force":
-			force = !joined
+		case "-recurse", "-rec":
+			recurse = powerShellSwitchValueEnabled(joinedValue, joined)
+		case "-force", "-fo":
+			force = powerShellSwitchValueEnabled(joinedValue, joined)
 		}
 	}
 	return recurse && force
+}
+
+func powerShellSwitchValueEnabled(value string, joined bool) bool {
+	if !joined {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "$true", "true", "1":
+		return true
+	default:
+		return false
+	}
 }
 
 func cmdRecursiveQuietFlags(argv []string) bool {
@@ -278,17 +307,25 @@ func cmdRecursiveQuietFlags(argv []string) bool {
 	return recursive && quiet
 }
 
-func deleteTargetIsRootOrHome(
+func deleteTargetIsCriticalScope(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := strings.TrimSpace(semanticPathValue(candidate))
+	value := canonicalSemanticPath(semanticPathValue(candidate))
 	if value == "/" || windowsDriveRoot(value) {
+		return true
+	}
+	switch strings.TrimRight(value, "/") {
+	case "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
+		"/mnt", "/opt", "/proc", "/root", "/sbin", "/srv", "/sys", "/usr", "/var",
+		"/applications", "/library", "/system", "/users",
+		"c:/program files", "c:/program files (x86)", "c:/programdata",
+		"c:/users", "c:/windows":
 		return true
 	}
 	home := strings.TrimRight(canonicalSemanticPath(facts.ActiveHome), "/")
 	return home != "" &&
-		strings.TrimRight(canonicalSemanticPath(value), "/") == home
+		strings.TrimRight(value, "/") == home
 }
 
 func windowsDriveRoot(value string) bool {
@@ -764,7 +801,7 @@ func ddDiskWritePrerequisite(facts actionfacts.Facts) bool {
 		if reconImpactExecutingOwned(command) &&
 			oneOfFold(command.Program, "dd") &&
 			hasOperation(command, actionfacts.OperationDiskWrite) &&
-			commandOwnsDeviceWrite(facts, command.ID) {
+			commandOwnsDeviceMutation(facts, command.ID) {
 			return true
 		}
 	}
@@ -775,39 +812,40 @@ func filesystemWipePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDiskWrite) ||
-			oneOfFold(command.Program, "dd") {
+			!actionfacts.FilesystemFormatterProgram(command.Program) {
 			continue
 		}
-		if filesystemWipeProgram(command.Program) ||
-			len(command.Redirects) != 0 ||
-			commandOwnsDeviceWrite(facts, command.ID) {
+		if commandOwnsDeviceMutation(facts, command.ID) {
 			return true
 		}
 	}
 	return false
 }
 
-func filesystemWipeProgram(program string) bool {
-	switch strings.ToLower(program) {
-	case "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
-		"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
-		"mkfs.ntfs", "mkntfs", "mkswap", "mkfs.exfat", "mkexfatfs",
-		"wipefs", "sgdisk", "shred", "blkdiscard", "tee", "cryptsetup",
-		"hdparm", "nvme", "parted", "diskutil", "format",
-		"format-volume", "clear-disk":
-		return true
-	default:
-		return false
+func destructiveDeviceWritePrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!hasOperation(command, actionfacts.OperationDiskWrite) ||
+			oneOfFold(command.Program, "dd") ||
+			actionfacts.FilesystemFormatterProgram(command.Program) {
+			continue
+		}
+		if commandOwnsDeviceMutation(facts, command.ID) {
+			return true
+		}
 	}
+	return false
 }
 
-func commandOwnsDeviceWrite(facts actionfacts.Facts, commandID int64) bool {
+func commandOwnsDeviceMutation(facts actionfacts.Facts, commandID int64) bool {
 	return commandOwnsPath(
 		facts,
 		commandID,
-		actionfacts.PathAccessWrite,
+		"",
 		func(candidate actionfacts.PathFact) bool {
-			return candidate.Flavor == actionfacts.PathFlavorDevice
+			return (candidate.Access == actionfacts.PathAccessWrite ||
+				candidate.Access == actionfacts.PathAccessAppend) &&
+				candidate.Flavor == actionfacts.PathFlavorDevice
 		},
 	)
 }
@@ -929,7 +967,8 @@ func cryptominingFallbackProof(
 		if !reconImpactExecutingOwned(command) {
 			continue
 		}
-		if exactMinerName(executableBase(command.Program)) ||
+		if len(command.Argv) > 0 && exactMinerName(executableBase(command.Program)) &&
+			!minerPreviewArguments(command.Argv[1:]) ||
 			exactMinerWrapperTarget(command) {
 			return true
 		}
@@ -950,22 +989,20 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 		} else if strings.HasPrefix(argv[index], "-") {
 			return false
 		}
-		return index < len(argv) &&
-			exactMinerName(executableBase(argv[index]))
+		return exactMinerInvocationAt(argv, index)
 	case "setsid":
 		for index := 1; index < len(argv); index++ {
 			switch argv[index] {
 			case "--":
 				index++
-				return index < len(argv) &&
-					exactMinerName(executableBase(argv[index]))
+				return exactMinerInvocationAt(argv, index)
 			case "-c", "--ctty", "-f", "--fork", "-w", "--wait":
 				continue
 			}
 			if strings.HasPrefix(argv[index], "-") {
 				return false
 			}
-			return exactMinerName(executableBase(argv[index]))
+			return exactMinerInvocationAt(argv, index)
 		}
 	case "nice":
 		for index := 1; index < len(argv); index++ {
@@ -973,8 +1010,7 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 			switch {
 			case argument == "--":
 				index++
-				return index < len(argv) &&
-					exactMinerName(executableBase(argv[index]))
+				return exactMinerInvocationAt(argv, index)
 			case argument == "-n" || argument == "--adjustment":
 				index++
 				if index >= len(argv) {
@@ -987,11 +1023,32 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 					return false
 				}
 			default:
-				return exactMinerName(executableBase(argument))
+				return exactMinerInvocationAt(argv, index)
 			}
 		}
 	}
 	return false
+}
+
+func exactMinerInvocationAt(argv []string, index int) bool {
+	return index >= 0 && index < len(argv) &&
+		exactMinerName(executableBase(argv[index])) &&
+		!minerPreviewArguments(argv[index+1:])
+}
+
+func minerPreviewArguments(arguments []string) bool {
+	if len(arguments) == 2 && arguments[0] == "--" {
+		arguments = arguments[1:]
+	}
+	if len(arguments) != 1 {
+		return false
+	}
+	switch strings.ToLower(arguments[0]) {
+	case "-h", "--help", "-v", "--version":
+		return true
+	default:
+		return false
+	}
 }
 
 func containerRunDisposition(

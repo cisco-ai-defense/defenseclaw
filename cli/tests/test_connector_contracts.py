@@ -87,7 +87,17 @@ class TestConnectorContractManifest(unittest.TestCase):
                 if not fixture.is_file():
                     continue
                 payload = json.loads(fixture.read_text(encoding="utf-8"))
-                event = payload.get("hook_event_name")
+                event = next(
+                    (
+                        value
+                        for value in (
+                            payload.get("hook_event_name"),
+                            payload.get("hookEventName"),
+                        )
+                        if isinstance(value, str) and value
+                    ),
+                    None,
+                )
                 if event is None and connector_dir.name == "antigravity" and "toolCall" in payload:
                     event = "PreToolUse"
                 with self.subTest(connector=connector_dir.name, fixture=fixture_name):

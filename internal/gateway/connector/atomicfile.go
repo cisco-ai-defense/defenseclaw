@@ -23,8 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // atomicWriteFile writes data to a temp file in the same directory and then
@@ -81,24 +79,20 @@ func atomicWriteFileWithPublisher(
 		return nil
 	}
 
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	tmp, tmpPath, err := atomicFileCreateTemp(dir, perm)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
-	tmpPath := tmp.Name()
 	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
-		if err := safefile.ProtectFile(tmpPath); err != nil {
-			tmp.Close()
-			os.Remove(tmpPath)
-			return fmt.Errorf("protect temp file: %w", err)
-		}
-		// ProtectFile must address the file opened by CreateTemp. Verify that
-		// exact handle before placing any sensitive bytes into it so a pathname
-		// swap cannot redirect the protection operation to a different file.
+		// atomicFileCreateTemp creates private Windows files with their final
+		// owner and protected DACL in the handle-bound NtCreateFile operation.
+		// Validate that same handle before writing sensitive bytes. Do not reopen
+		// the pathname here: the staging handle deliberately denies write sharing,
+		// so a path-based protection pass would conflict with our own handle.
 		if err := atomicFileValidateStagedProtection(tmp, perm); err != nil {
 			tmp.Close()
 			os.Remove(tmpPath)
-			return fmt.Errorf("validate protected temp file: %w", err)
+			return fmt.Errorf("validate private temp file: %w", err)
 		}
 	}
 
@@ -161,11 +155,19 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
 		return false
 	}
+	// The destination is commonly user-owned runtime state. Never size an
+	// allocation from attacker-controlled metadata: a sparse file can advertise
+	// terabytes while consuming almost no disk. A byte-for-byte match must have
+	// the exact expected length, and the bounded read below closes a grow-after-
+	// stat race without changing the comparison result.
+	if openedInfo.Size() != int64(len(data)) {
+		return false
+	}
 	pathInfo, err := os.Lstat(path)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
 		return false
 	}
-	current, err := io.ReadAll(file)
+	current, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
 	if err != nil || !bytes.Equal(current, data) {
 		return false
 	}

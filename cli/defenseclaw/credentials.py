@@ -659,9 +659,30 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
 _BY_NAME: dict[str, CredentialSpec] = {spec.env_name: spec for spec in CREDENTIALS}
 
 
-def lookup(env_name: str) -> CredentialSpec | None:
-    """Return the registered spec for *env_name*, or None if unknown."""
-    return _BY_NAME.get(env_name)
+def lookup(env_name: str, cfg: Config | None = None) -> CredentialSpec | None:
+    """Return the static or config-discovered spec for *env_name*.
+
+    The optional config keeps the long-standing static lookup behavior intact
+    for callers that do not have runtime state, while allowing ``keys set`` to
+    recognize observability, custom-provider, and routing credentials surfaced
+    by ``keys list``.
+    """
+
+    stable = _BY_NAME.get(env_name)
+    if stable is not None or cfg is None:
+        return stable
+
+    # A stable entry whose effective name was overridden by config still takes
+    # precedence over runtime-discovered specs for that same environment key.
+    for spec in CREDENTIALS:
+        if spec.resolve_env_name(cfg) == env_name:
+            return spec
+    discovered = (
+        *discover_observability_credentials(cfg),
+        *discover_custom_provider_credentials(cfg),
+        *discover_routing_credentials(cfg),
+    )
+    return next((spec for spec in discovered if spec.env_name == env_name), None)
 
 
 # ---------------------------------------------------------------------------
@@ -870,6 +891,100 @@ def discover_custom_provider_credentials(cfg: Config) -> list[CredentialSpec]:
 
 
 # ---------------------------------------------------------------------------
+# Semantic-routing model credential discovery
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _RoutingCredentialRef:
+    env_name: str
+    model_names: tuple[str, ...]
+    endpoint: str
+
+
+def _routing_credential_refs(cfg: Config) -> dict[str, _RoutingCredentialRef]:
+    """Return one reference per non-empty ``routing.models[].api_key_env``.
+
+    Model order is preserved for stable ``keys list`` output.  Multiple model
+    aliases may intentionally share one provider credential, so their names
+    are coalesced under a single environment variable.
+    """
+
+    routing = getattr(cfg, "routing", None)
+    models = getattr(routing, "models", ()) if routing is not None else ()
+    if not isinstance(models, (list, tuple)):
+        return {}
+
+    names_by_env: dict[str, list[str]] = {}
+    endpoints: dict[str, str] = {}
+    for index, model in enumerate(models):
+        if isinstance(model, Mapping):
+            env_name = str(model.get("api_key_env") or "").strip()
+            model_name = str(model.get("name") or "").strip()
+            endpoint = str(model.get("base_url") or "").strip()
+        else:
+            env_name = str(getattr(model, "api_key_env", "") or "").strip()
+            model_name = str(getattr(model, "name", "") or "").strip()
+            endpoint = str(getattr(model, "base_url", "") or "").strip()
+        if not env_name:
+            # Keyless/local backends are valid and must not create a phantom
+            # required credential.
+            continue
+        names_by_env.setdefault(env_name, []).append(model_name or f"model-{index + 1}")
+        if endpoint and env_name not in endpoints:
+            endpoints[env_name] = endpoint
+
+    return {
+        env_name: _RoutingCredentialRef(
+            env_name=env_name,
+            model_names=tuple(model_names),
+            endpoint=endpoints.get(env_name, ""),
+        )
+        for env_name, model_names in names_by_env.items()
+    }
+
+
+def _routing_credential_predicate(env_name: str) -> Callable[[Config], Requirement]:
+    def _check(cfg: Config) -> Requirement:
+        if env_name not in _routing_credential_refs(cfg):
+            return Requirement.NOT_USED
+        routing = getattr(cfg, "routing", None)
+        return (
+            Requirement.REQUIRED
+            if routing is not None and bool(getattr(routing, "enabled", False))
+            else Requirement.NOT_USED
+        )
+
+    return _check
+
+
+def _routing_credential_endpoint(env_name: str) -> Callable[[Config], str]:
+    def _resolve(cfg: Config) -> str:
+        ref = _routing_credential_refs(cfg).get(env_name)
+        return ref.endpoint if ref is not None else ""
+
+    return _resolve
+
+
+def discover_routing_credentials(cfg: Config) -> list[CredentialSpec]:
+    """Return runtime specs for semantic-routing model API-key references."""
+
+    specs: list[CredentialSpec] = []
+    for ref in _routing_credential_refs(cfg).values():
+        aliases = ", ".join(ref.model_names)
+        specs.append(
+            CredentialSpec(
+                env_name=ref.env_name,
+                feature="routing.models",
+                description=f"API key referenced by semantic-routing model(s): {aliases}.",
+                required=_routing_credential_predicate(ref.env_name),
+                bound_endpoint=_routing_credential_endpoint(ref.env_name),
+            )
+        )
+    return specs
+
+
+# ---------------------------------------------------------------------------
 # Resolution helpers
 # ---------------------------------------------------------------------------
 #
@@ -968,11 +1083,11 @@ def classify(cfg: Config) -> list[CredentialStatus]:
     """Classify every registered credential against the current config.
 
     The order follows ``CREDENTIALS`` so the UX is stable across runs.
-    Additional canonical-v8 observability references and custom-provider env
-    keys discovered in
-    ``~/.defenseclaw/custom-providers.json`` are appended after the
-    static registry so they show up in ``defenseclaw keys list`` /
-    ``doctor`` without polluting the canonical ordering.
+    Additional canonical-v8 observability references, custom-provider env keys
+    discovered in ``~/.defenseclaw/custom-providers.json``, and semantic-routing
+    model key references are appended after the static registry so they show up
+    in ``defenseclaw keys list`` / ``doctor`` without polluting the canonical
+    ordering.
 
     We resolve ``effective_env_name`` so when the operator has
     configured a custom env var (e.g. ``judge.api_key_env``), we show
@@ -990,32 +1105,58 @@ def _classify_once(cfg: Config) -> list[CredentialStatus]:
 
     data_dir = getattr(cfg, "data_dir", "") or ""
     statuses: list[CredentialStatus] = []
-    seen: set[str] = set()
-    for spec in CREDENTIALS:
-        env_name = spec.resolve_env_name(cfg)
-        seen.add(env_name)
+    seen: dict[str, int] = {}
+    routing_refs = _routing_credential_refs(cfg)
+    routing = getattr(cfg, "routing", None)
+    routing_requirement = (
+        Requirement.REQUIRED
+        if routing is not None and bool(getattr(routing, "enabled", False))
+        else Requirement.NOT_USED
+    )
+
+    rank = {
+        Requirement.NOT_USED: 0,
+        Requirement.OPTIONAL: 1,
+        Requirement.REQUIRED: 2,
+    }
+
+    def append_status(spec: CredentialSpec, env_name: str) -> None:
+        requirement = spec.required(cfg)
+        if env_name in routing_refs and rank[routing_requirement] > rank[requirement]:
+            requirement = routing_requirement
+
+        prior_index = seen.get(env_name)
+        if prior_index is not None:
+            prior = statuses[prior_index]
+            if rank[requirement] > rank[prior.requirement]:
+                # Preserve the earlier (normally static) CredentialSpec while
+                # upgrading its aggregate requirement for a shared key.
+                statuses[prior_index] = CredentialStatus(
+                    spec=prior.spec,
+                    requirement=requirement,
+                    resolution=prior.resolution,
+                )
+            return
+
+        seen[env_name] = len(statuses)
         statuses.append(
             CredentialStatus(
                 spec=spec,
-                requirement=spec.required(cfg),
+                requirement=requirement,
                 resolution=resolve(env_name, data_dir),
             )
         )
+
+    for spec in CREDENTIALS:
+        env_name = spec.resolve_env_name(cfg)
+        append_status(spec, env_name)
     discovered = (
         *discover_observability_credentials(cfg),
         *discover_custom_provider_credentials(cfg),
+        *discover_routing_credentials(cfg),
     )
     for spec in discovered:
-        if spec.env_name in seen:
-            continue
-        seen.add(spec.env_name)
-        statuses.append(
-            CredentialStatus(
-                spec=spec,
-                requirement=spec.required(cfg),
-                resolution=resolve(spec.env_name, data_dir),
-            )
-        )
+        append_status(spec, spec.env_name)
     return statuses
 
 

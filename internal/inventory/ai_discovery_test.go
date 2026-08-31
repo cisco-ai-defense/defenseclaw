@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1958,87 +1960,84 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	}
 }
 
-// TestRunScan_SingleFlight (H-1) verifies that two concurrent scans
-// serialize on the per-service mutex instead of racing on the state
-// store / detector fanout. Without the lock the JSON ai_discovery_state
-// snapshot can be clobbered when the API-trigger path falls through to
-// runScan() at the same moment a scheduled tick fires.
+// TestRunScan_SingleFlight (H-1) verifies that concurrent scans serialize on
+// the per-service mutex instead of racing on the state store / detector
+// fanout. It uses the single-flight boundary directly so the assertion does
+// not depend on the duration of a host-specific full inventory scan.
 func TestRunScan_SingleFlight(t *testing.T) {
-	tmp := t.TempDir()
-	dataDir := filepath.Join(tmp, "data")
-	home := filepath.Join(tmp, "home")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		t.Fatalf("mkdir dataDir: %v", err)
-	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatalf("mkdir home: %v", err)
-	}
+	svc := &ContinuousDiscoveryService{}
 
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled:         true,
-		Mode:            "enhanced",
-		DataDir:         dataDir,
-		HomeDir:         home,
-		MaxFilesPerScan: 5,
-		MaxFileBytes:    32 * 1024,
-	}, []AISignature{testAISignature()})
-	if svc == nil {
-		t.Fatal("expected non-nil service")
-	}
-	cleanupPreparedDiscoveryService(t, svc)
-	entered := make(chan struct{}, 8)
+	const scanCount = 8
+	start := make(chan struct{})
 	release := make(chan struct{})
-	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
-		entered <- struct{}{}
-		<-release
-		return nil, nil
-	})
+	entered := make(chan struct{}, scanCount)
+	results := make(chan error, scanCount)
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	var wg sync.WaitGroup
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
 
-	// Spawn N concurrent process-only scans. The deterministic process seam
-	// holds the first scan inside the detector so the test can prove that no
-	// second scan crosses the per-service mutex. Avoiding a full scan keeps this
-	// synchronization test independent of host filesystem and AppsFolder state.
-	const N = 8
-	done := make(chan struct{}, N)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	for i := 0; i < N; i++ {
+	wg.Add(scanCount)
+	for i := 0; i < scanCount; i++ {
 		go func() {
-			defer func() { done <- struct{}{} }()
-			_, _ = svc.runScan(ctx, false, "test-concurrent")
+			defer wg.Done()
+			<-start
+			_, err := svc.runScanSingleFlight(context.Background(), func() (AIDiscoveryReport, error) {
+				current := active.Add(1)
+				defer active.Add(-1)
+				for previous := maxActive.Load(); current > previous; previous = maxActive.Load() {
+					if maxActive.CompareAndSwap(previous, current) {
+						break
+					}
+				}
+
+				var lockErr error
+				if svc.scanMu.TryLock() {
+					svc.scanMu.Unlock()
+					lockErr = errors.New("scan work entered without holding scanMu")
+				}
+				entered <- struct{}{}
+				<-release
+				return AIDiscoveryReport{}, lockErr
+			})
+			results <- err
 		}()
 	}
-	failure := ""
+	defer func() {
+		releaseAll()
+		wg.Wait()
+	}()
+
+	close(start)
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
-		failure = "first runScan goroutine did not reach the deterministic process detector"
+		t.Fatal("first scan did not enter the controlled critical section")
 	}
-	if failure == "" {
-		select {
-		case <-entered:
-			failure = "concurrent runScan goroutines entered the process detector"
-		case <-time.After(100 * time.Millisecond):
+
+	// The first controlled scan is still blocked inside the critical section.
+	// A successful TryLock here would prove that runScanSingleFlight failed to
+	// retain the per-service mutex around its scan work.
+	if svc.scanMu.TryLock() {
+		svc.scanMu.Unlock()
+		t.Error("scanMu was not held while controlled scan work was active")
+	}
+
+	releaseAll()
+	wg.Wait()
+	close(results)
+
+	for err := range results {
+		if err != nil {
+			t.Errorf("controlled scan: %v", err)
 		}
 	}
-	if failure != "" {
-		cancel()
+	if got := len(entered) + 1; got != scanCount {
+		t.Errorf("controlled scans entered = %d, want %d", got, scanCount)
 	}
-	close(release)
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
-	completed := 0
-	for completed < N {
-		select {
-		case <-done:
-			completed++
-		case <-timer.C:
-			cancel()
-			t.Fatalf("runScan goroutines did not finish — possible deadlock or unbounded wait")
-		}
-	}
-	if failure != "" {
-		t.Fatal(failure)
+	if got := maxActive.Load(); got != 1 {
+		t.Errorf("concurrent controlled scans = %d, want 1", got)
 	}
 }
 

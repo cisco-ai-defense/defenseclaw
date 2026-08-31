@@ -1901,7 +1901,7 @@ func TestRawFrameTypeParsing(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoadOrCreateIdentityCreatesNew(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "device.key")
+	keyFile := filepath.Join(testenv.PrivateTempDir(t), "device.key")
 
 	identity, err := LoadOrCreateIdentity(keyFile)
 	if err != nil {
@@ -1924,7 +1924,7 @@ func TestLoadOrCreateIdentityCreatesNew(t *testing.T) {
 }
 
 func TestLoadOrCreateIdentityLoadsExisting(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "device.key")
+	keyFile := filepath.Join(testenv.PrivateTempDir(t), "device.key")
 
 	id1, err := LoadOrCreateIdentity(keyFile)
 	if err != nil {
@@ -1945,9 +1945,10 @@ func TestLoadOrCreateIdentityLoadsExisting(t *testing.T) {
 }
 
 func TestLoadOrCreateIdentityCreatesParentDir(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "sub", "dir", "device.key")
+	dataDir := testenv.PrivateTempDir(t)
+	keyFile := filepath.Join(dataDir, "sub", "dir", "device.key")
 
-	_, err := LoadOrCreateIdentity(keyFile)
+	_, err := LoadOrCreateIdentity(keyFile, dataDir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateIdentity with nested dir: %v", err)
 	}
@@ -2619,10 +2620,11 @@ func TestClientCloseWithoutConnection(t *testing.T) {
 }
 
 func TestNewClientCreatesIdentity(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
 	cfg := &config.GatewayConfig{
 		Host:          "127.0.0.1",
 		Port:          18789,
-		DeviceKeyFile: filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
 	}
 
 	client, err := NewClient(cfg)
@@ -2644,7 +2646,7 @@ func TestNewClientCreatesIdentity(t *testing.T) {
 }
 
 func TestNewClientReusesExistingKey(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "device.key")
+	keyFile := filepath.Join(testenv.PrivateTempDir(t), "device.key")
 	cfg := &config.GatewayConfig{
 		Host:          "127.0.0.1",
 		Port:          18789,
@@ -2660,10 +2662,11 @@ func TestNewClientReusesExistingKey(t *testing.T) {
 }
 
 func TestClientConnectWithRetryCancelledContext(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
 	cfg := &config.GatewayConfig{
 		Host:           "127.0.0.1",
 		Port:           19999,
-		DeviceKeyFile:  filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile:  filepath.Join(dataDir, "device.key"),
 		ReconnectMs:    100,
 		MaxReconnectMs: 200,
 	}
@@ -3978,10 +3981,11 @@ func TestConfigPatchAuditDoesNotLeakRawValue(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewClientDebugFlagOffByDefault(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
 	cfg := &config.GatewayConfig{
 		Host:          "127.0.0.1",
 		Port:          18789,
-		DeviceKeyFile: filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
 	}
 
 	t.Setenv("DEFENSECLAW_DEBUG", "")
@@ -3995,10 +3999,11 @@ func TestNewClientDebugFlagOffByDefault(t *testing.T) {
 }
 
 func TestNewClientDebugFlagEnabled(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
 	cfg := &config.GatewayConfig{
 		Host:          "127.0.0.1",
 		Port:          18789,
-		DeviceKeyFile: filepath.Join(t.TempDir(), "device.key"),
+		DeviceKeyFile: filepath.Join(dataDir, "device.key"),
 	}
 
 	t.Setenv("DEFENSECLAW_DEBUG", "1")
@@ -4140,21 +4145,22 @@ func TestInspectToolSecretInArgs(t *testing.T) {
 	_, verdict := postInspect(t, api,
 		`{"tool":"web_search","args":{"query":"api_key=sk-ant-api03-`+"A7b9C2d4E6f8G1h3J5k7L9m2"+`"}}`)
 
-	// Observe mode: .action MUST be "allow" so the inspect-*.sh hook
-	// scripts (which exit 2 on .action == "block") do not kill the
-	// agent. Forensics still flow via .raw_action / .would_block,
-	// matching the codex / claude-code hook handlers.
+	// A search query is content, not proof of secret egress. Preserve the
+	// finding for telemetry while keeping every action surface advisory.
 	if verdict.Action != "allow" {
-		t.Errorf("action = %q, want allow (observe mode never blocks)", verdict.Action)
+		t.Errorf("action = %q, want allow for an unproved search literal", verdict.Action)
 	}
-	if verdict.RawAction == "" || verdict.RawAction == "allow" {
-		t.Errorf("raw_action = %q, want a non-allow latent decision", verdict.RawAction)
+	if verdict.RawAction != "allow" {
+		t.Errorf("raw_action = %q, want allow without typed egress", verdict.RawAction)
 	}
-	if !verdict.WouldBlock {
-		t.Errorf("would_block = false, want true for high-severity finding in observe mode")
+	if verdict.WouldBlock {
+		t.Error("would_block = true for a search literal without typed egress")
 	}
-	if verdict.Severity == "NONE" {
-		t.Errorf("severity = %q, want non-NONE", verdict.Severity)
+	if verdict.Severity != "LOW" {
+		t.Errorf("severity = %q, want LOW audit telemetry", verdict.Severity)
+	}
+	if !containsString(verdict.Findings, "SEC-ANTHROPIC:Anthropic API key") {
+		t.Errorf("secret finding was dropped from advisory telemetry: %v", verdict.Findings)
 	}
 	if verdict.Mode != "observe" {
 		t.Errorf("mode = %q, want observe", verdict.Mode)
@@ -4226,7 +4232,7 @@ func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 
 	_, verdict := postInspect(t, api,
-		`{"tool":"shell","args":{"command":"nc -l 4444"},"session_id":"sess-1"}`)
+		`{"tool":"shell","args":{"command":"chmod 777 /etc/shadow"},"session_id":"sess-1"}`)
 
 	if verdict.Action != "block" || verdict.RawAction != "confirm" {
 		t.Fatalf("action=%q raw=%q, want block/confirm when approval cannot be delivered",
@@ -4248,7 +4254,7 @@ func TestInspectToolHILTNativeSurfaceReturnsConfirm(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 
 	_, verdict := postInspect(t, api,
-		`{"tool":"shell","args":{"command":"nc -l 4444"},"session_id":"sess-1","approval_surface":"native"}`)
+		`{"tool":"shell","args":{"command":"chmod 777 /etc/shadow"},"session_id":"sess-1","approval_surface":"native"}`)
 
 	if verdict.Action != "confirm" || verdict.RawAction != "confirm" {
 		t.Fatalf("action=%q raw=%q, want confirm/confirm for native approval surface", verdict.Action, verdict.RawAction)

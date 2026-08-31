@@ -197,14 +197,14 @@ func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
 }
 
 func otlpWindowsOwnerOnlySecurityAttributes() (*windows.SecurityAttributes, error) {
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	currentSID, err := windowsEffectiveUserSID()
 	if err != nil {
 		return nil, fmt.Errorf("resolve current Windows token owner: %w", err)
 	}
-	if currentUser == nil || currentUser.User.Sid == nil {
+	if currentSID == nil {
 		return nil, fmt.Errorf("resolve current Windows token owner: missing user SID")
 	}
-	sid := currentUser.User.Sid.String()
+	sid := currentSID.String()
 	// Protected DACL: the creating user owns the credential, while LocalSystem
 	// and Administrators retain the access required by managed service installs.
 	sd, err := windows.SecurityDescriptorFromString(

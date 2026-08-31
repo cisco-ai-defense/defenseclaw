@@ -48,7 +48,7 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"cursor", func() Connector { return NewCursorConnector() }, true, true, true},
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, true, true, true},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
-		{"copilot", func() Connector { return NewCopilotConnector() }, false, true, true},
+		{"copilot", func() Connector { return NewCopilotConnector() }, true, true, true},
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, false, true, true},
 		// Antigravity uses Decode because agy v1 ships a nested
 		// `toolCall` wire shape that the generic normalizer cannot read.
@@ -80,6 +80,28 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 				t.Errorf("%s Respond set=%v want=%v", tc.name, got, tc.wantRespond)
 			}
 		})
+	}
+}
+
+func TestCopilotProfileDecodeUsesDocumentedToolArgsAuthority(t *testing.T) {
+	got := copilotProfileDecode(map[string]interface{}{
+		"cwd":      `C:\workspace`,
+		"toolName": "powershell",
+		"toolArgs": map[string]interface{}{"command": "Write-Output connector-test"},
+	})
+	if got.CWD != `C:\workspace` || got.ToolName != "powershell" {
+		t.Fatalf("Copilot identity projection = %+v", got)
+	}
+	if !got.ToolArgsAuthoritative || string(got.ToolArgs) != `{"command":"Write-Output connector-test"}` {
+		t.Fatalf("Copilot tool args = %s authoritative=%v", got.ToolArgs, got.ToolArgsAuthoritative)
+	}
+
+	malformed := copilotProfileDecode(map[string]interface{}{
+		"toolName": "powershell",
+		"toolArgs": "opaque",
+	})
+	if !malformed.ToolArgsAuthoritative || len(malformed.ToolArgs) != 0 {
+		t.Fatalf("non-object Copilot toolArgs became trusted: %+v", malformed)
 	}
 }
 
@@ -703,7 +725,7 @@ func TestAntigravityProfileRespond_Parity(t *testing.T) {
 			event:      "PreToolUse",
 			action:     "allow",
 			raw:        "block",
-			additional: "DefenseClaw would block this in action mode a HIGH antigravity hook finding: matched policy",
+			additional: "DefenseClaw would block this in action mode: HIGH antigravity hook finding: matched policy",
 			expected:   map[string]interface{}{"decision": "allow"},
 		},
 		{
@@ -1297,7 +1319,9 @@ func TestCodexAdditionalContextForProfile(t *testing.T) {
 		{"observe_block_with_reason", "block", "HIGH", "matched policy", false,
 			"DefenseClaw observed a HIGH Codex hook finding: matched policy"},
 		{"action_would_block", "block", "HIGH", "matched policy", true,
-			"DefenseClaw would block this in action mode a HIGH Codex hook finding: matched policy"},
+			"DefenseClaw would block this in action mode: HIGH Codex hook finding: matched policy"},
+		{"action_would_block_no_reason", "block", "HIGH", "", true,
+			"DefenseClaw would block this in action mode: HIGH Codex hook finding."},
 		{"alert_no_reason", "alert", "MEDIUM", "", false,
 			"DefenseClaw observed a MEDIUM Codex hook finding."},
 	}

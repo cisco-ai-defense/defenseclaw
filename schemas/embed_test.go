@@ -300,6 +300,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"application_protection",
 		"notifications",
 		"managed",
+		"routing",
 	}
 	if len(properties) != len(allowedTopLevel) {
 		t.Errorf("top-level property count = %d, want %d", len(properties), len(allowedTopLevel))
@@ -481,7 +482,7 @@ func TestDefenseClawConfigV8SchemaCompilesAndValidates(t *testing.T) {
 			"local": map[string]any{
 				"path":              "~/.defenseclaw/audit.db",
 				"judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
-				"retention_days":    90,
+				"retention_days":    7,
 			},
 			"destinations": []any{
 				map[string]any{
@@ -560,6 +561,136 @@ func TestDefenseClawConfigV8SchemaCompilesAndValidates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefenseClawConfigV8RoutingSchemaValidation(t *testing.T) {
+	t.Parallel()
+
+	schema := compileConfigV8Schema(t)
+
+	t.Run("valid routing block", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled":   true,
+				"version":   "0.3.0",
+				"port":      8888,
+				"algorithm": "hybrid",
+				"models": []any{
+					map[string]any{
+						"name":         "reasoning",
+						"provider":     "anthropic",
+						"model":        "claude-sonnet-4-6",
+						"api_key_env":  "ANTHROPIC_API_KEY",
+						"capabilities": []any{"reasoning", "analysis"},
+					},
+				},
+				"signals": map[string]any{
+					"keywords": []any{
+						map[string]any{
+							"name":     "complex_task",
+							"keywords": []any{"analyze", "compare"},
+							"operator": "OR",
+						},
+					},
+				},
+				"decisions": []any{
+					map[string]any{
+						"name":       "reasoning_route",
+						"priority":   100,
+						"operator":   "AND",
+						"conditions": []any{map[string]any{"type": "keyword", "name": "complex_task"}},
+						"model_refs": []any{"reasoning"},
+					},
+				},
+			},
+		}
+		if err := schema.Validate(doc); err != nil {
+			t.Fatalf("valid routing config rejected: %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "valid Ollama colon model identifier", model: "library/qwen2.5:0.5b"},
+		{name: "valid 256 byte model identifier", model: strings.Repeat("a", 256)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := map[string]any{
+				"config_version": 8,
+				"routing": map[string]any{
+					"enabled": true,
+					"models": []any{map[string]any{
+						"name":     "local",
+						"provider": "ollama",
+						"model":    tc.model,
+					}},
+				},
+			}
+			if err := schema.Validate(doc); err != nil {
+				t.Fatalf("valid routing model rejected: %v", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "empty model identifier", model: ""},
+		{name: "model identifier with spaces", model: "qwen 2.5:0.5b"},
+		{name: "oversized model identifier", model: strings.Repeat("a", 257)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doc := map[string]any{
+				"config_version": 8,
+				"routing": map[string]any{
+					"enabled": true,
+					"models": []any{map[string]any{
+						"name":     "invalid",
+						"provider": "ollama",
+						"model":    tc.model,
+					}},
+				},
+			}
+			if err := schema.Validate(doc); err == nil {
+				t.Fatalf("routing config with model %q should be rejected", tc.model)
+			}
+		})
+	}
+
+	t.Run("invalid port zero", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled": true,
+				"port":    0,
+			},
+		}
+		if err := schema.Validate(doc); err == nil {
+			t.Fatal("routing config with port 0 should be rejected")
+		}
+	})
+
+	t.Run("unknown property in routing", func(t *testing.T) {
+		t.Parallel()
+		doc := map[string]any{
+			"config_version": 8,
+			"routing": map[string]any{
+				"enabled":          true,
+				"unknown_property": "bad",
+			},
+		}
+		if err := schema.Validate(doc); err == nil {
+			t.Fatal("routing config with unknown property should be rejected")
+		}
+	})
 }
 
 func TestDefenseClawConfigV8CurrentNonObservabilitySectionsValidate(t *testing.T) {

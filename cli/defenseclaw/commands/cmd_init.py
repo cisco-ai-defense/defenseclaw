@@ -652,6 +652,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     from defenseclaw.ux import CLIRenderer
 
     data_dir = default_data_path()
+    trusted_binary_prefixes = _validated_preinit_trusted_binary_prefixes(data_dir)
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
     interactive_wizard = False
@@ -773,6 +774,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         # invalid values.
         human_approval=primary["human_approval"],
         hilt_min_severity=primary["hilt_min_severity"] or "",
+        trusted_binary_prefixes=trusted_binary_prefixes,
     )
     report = run_first_run(opts)
 
@@ -853,6 +855,56 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         click.echo("  Configured connectors: " + ", ".join(activated))
     if report.status == "needs_attention":
         raise SystemExit(1)
+
+
+def _validated_preinit_trusted_binary_prefixes(
+    data_dir: str | os.PathLike[str],
+) -> tuple[str, ...] | None:
+    """Snapshot exact config-backed trust before the init transaction."""
+
+    from defenseclaw import config as cfg_mod
+
+    if not os.path.lexists(cfg_mod.config_path_for_data_dir(data_dir)):
+        return None
+    cfg_path = cfg_mod.config_path_for_data_dir(data_dir)
+    cfg = cfg_mod.load(data_dir=os.fspath(data_dir))
+    values = tuple(cfg.ai_discovery.trusted_binary_prefixes or ())
+    resolved_values: list[str] = []
+    quarantined: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in values:
+        resolved, error = agent_discovery.validate_trusted_prefix(str(raw))
+        if not resolved or error:
+            # `setup trusted-paths add --force` can persist an entry that
+            # later fails validation (writable parent, missing directory,
+            # etc.). Aborting init leaves no CLI-visible recovery path:
+            # the operator has to hand-edit the config file to unblock
+            # subsequent runs. Quarantine the offending entry, warn
+            # visibly with the fix hint, and let init proceed on the
+            # remaining valid prefixes. The persisted list itself is
+            # untouched here — the operator can inspect / correct via
+            # the setup subcommands. See Vineeth review of PR #767, #3.
+            quarantined.append((str(raw), error or "invalid path"))
+            continue
+        key = agent_discovery._path_key(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved_values.append(resolved)
+    if quarantined:
+        import shlex
+        for entry, reason in quarantined:
+            # {entry!r} would render a Python repr ('D:\\staging\\bin'),
+            # which isn't a valid shell argument. Use shlex.quote for the
+            # command portion so cut-and-paste works verbatim.
+            click.echo(
+                f"warning: skipping pre-init trusted binary prefix "
+                f"{entry} ({reason}); config file: {cfg_path}; "
+                f"fix with `defenseclaw setup trusted-paths remove "
+                f"{shlex.quote(entry)}`",
+                err=True,
+            )
+    return tuple(resolved_values)
 
 
 def _parse_connector_list(raw: str | None) -> list[str]:
@@ -2244,46 +2296,250 @@ def _show_scanner_defaults(cfg) -> None:
     click.echo("  Run 'defenseclaw setup' to customize scanner settings.")
 
 
-def _ensure_device_key(path: str) -> None:
-    """Create the Ed25519 device key file if it doesn't exist.
-
-    The Go gateway creates this on first start, but the guardrail setup
-    needs it earlier to derive the proxy master key. Uses the same PEM
-    format as internal/gateway/device.go.
-    """
-    if os.path.exists(path):
-        return
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    private_key = Ed25519PrivateKey.generate()
-    seed = private_key.private_bytes(
-        serialization.Encoding.Raw,
-        serialization.PrivateFormat.Raw,
-        serialization.NoEncryption(),
+def _validate_device_identity_windows_path_syntax(*paths: str) -> None:
+    from defenseclaw.doctor_recovery import (
+        _windows_path_has_alternate_data_stream,
     )
-    import base64
 
-    b64_seed = base64.b64encode(seed).decode()
-    pem_data = f"-----BEGIN ED25519 PRIVATE KEY-----\n{b64_seed}\n-----END ED25519 PRIVATE KEY-----\n"
-    # Create the file with 0o600 atomically so the key is never
-    # world-readable, even for the brief window between open() and
-    # the previous chmod(). ``O_EXCL`` ensures we don't overwrite a
-    # concurrently-created key (idempotent early-exit already covered
-    # the is-it-there case above).
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    try:
-        fd = os.open(path, flags, 0o600)
-    except FileExistsError:
-        # Another process won the race — trust its key and exit.
+    if os.name != "nt":
         return
-    with os.fdopen(fd, "w") as f:
-        f.write(pem_data)
+    if any(_windows_path_has_alternate_data_stream(path) for path in paths):
+        raise click.ClickException(
+            "cannot safely create device identity "
+            "(windows-alternate-data-stream-path)"
+        )
+
+
+def _validate_device_identity_artifact_layout(target: str, identity_root: str) -> None:
+    from defenseclaw.doctor_recovery import (
+        _device_identity_artifact_alias_reason,
+    )
+
+    if os.path.dirname(identity_root) == identity_root:
+        raise click.ClickException(
+            "cannot safely create device identity (data-dir-too-broad)"
+        )
+    reason = _device_identity_artifact_alias_reason(target, identity_root)
+    if reason is not None:
+        raise click.ClickException(
+            f"cannot safely create device identity ({reason})"
+        )
+
+
+def _validate_private_identity_directory(path: str) -> None:
+    import stat
+
+    from defenseclaw.file_permissions import (
+        darwin_acl_confidentiality_error,
+        darwin_acl_write_error,
+        reject_reparse_path,
+        windows_acl_confidentiality_error,
+        windows_acl_custody_write_error,
+    )
+
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        reject_reparse_path(path)
+        info = os.lstat(path)
+    except OSError as exc:
+        raise click.ClickException(
+            "cannot safely create device identity (directory-custody-unavailable)"
+        ) from exc
+    attributes = int(getattr(info, "st_file_attributes", 0))
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    ):
+        raise click.ClickException(
+            "cannot safely create device identity (directory-chain-is-not-regular)"
+        )
+    if os.name != "nt" and os.path.realpath(path) != os.path.normpath(path):
+        raise click.ClickException(
+            "cannot safely create device identity (directory-chain-is-indirect)"
+        )
+    if os.name == "nt":
+        problem = windows_acl_custody_write_error(
+            path,
+            allow_current_user=True,
+            require_current_user_owner=True,
+        ) or windows_acl_confidentiality_error(path)
+    else:
+        problem = None
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            problem = "directory is not owner-private"
+        else:
+            problem = darwin_acl_write_error(path) or darwin_acl_confidentiality_error(path)
+    if problem is not None:
+        raise click.ClickException(
+            "cannot safely create device identity (directory-chain-is-not-private)"
+        )
+
+
+def _sync_new_device_identity_directory_parent(path: str) -> None:
+    if os.name == "nt":
+        # Windows has no supported directory-handle fsync. Each identity file
+        # handle is still flushed before publication completes.
+        return
+    from defenseclaw.doctor_recovery import _fsync_directory
+
+    _fsync_directory(path)
+
+
+def _prepare_device_identity_directories(
+    identity_root: str,
+    target_parent: str,
+    *,
+    protect_directory=None,
+    sync_directory=None,
+) -> None:
+    import stat
+
+    from defenseclaw.file_permissions import make_private_directory
+
+    protect_directory = protect_directory or make_private_directory
+    sync_directory = sync_directory or _sync_new_device_identity_directory_parent
+
+    _validate_private_identity_directory(identity_root)
+    try:
+        relative = os.path.relpath(target_parent, identity_root)
+    except ValueError as exc:
+        raise click.ClickException(
+            "cannot safely create device identity (target-outside-data-dir)"
+        ) from exc
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
+        raise click.ClickException(
+            "cannot safely create device identity (target-outside-data-dir)"
+        )
+    if relative == os.curdir:
+        return
+
+    current = identity_root
+    for component in relative.split(os.sep):
+        if component in ("", os.curdir, os.pardir):
+            raise click.ClickException(
+                "cannot safely create device identity (invalid-directory-component)"
+            )
+        _validate_private_identity_directory(current)
+        child = os.path.join(current, component)
+        try:
+            info = os.lstat(child)
+        except FileNotFoundError:
+            try:
+                # The validated current directory is owner-private. Create
+                # exactly one child so a nested link can never redirect a
+                # recursive mkdir into an outside tree.
+                protect_directory(child)
+            except OSError as exc:
+                raise click.ClickException(
+                    "cannot safely create device identity (directory-create-failed)"
+                ) from exc
+        except OSError as exc:
+            raise click.ClickException(
+                "cannot safely create device identity (directory-custody-unavailable)"
+            ) from exc
+        else:
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise click.ClickException(
+                    "cannot safely create device identity (directory-chain-is-not-regular)"
+                )
+        _validate_private_identity_directory(child)
+        # Re-sync existing entries too: a prior interrupted attempt may have
+        # created the child but failed before its containing directory became
+        # durable.
+        try:
+            sync_directory(current)
+        except OSError as exc:
+            raise click.ClickException(
+                "cannot safely create device identity (directory-sync-failed)"
+            ) from exc
+        current = child
+
+
+def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
+    """Create one new device identity with HMAC-bound provenance.
+
+    Existing identities are deliberately left untouched. In particular, an
+    older unprovenanced key must remain visible to Doctor as legacy rather than
+    being blessed after the fact.
+    """
+    raw_path = os.fspath(path)
+    raw_data_dir = os.fspath(data_dir) if data_dir is not None else None
+    if raw_data_dir is not None and not os.path.isabs(raw_data_dir):
+        raise click.ClickException(
+            "cannot safely create device identity (data-dir-path-not-absolute)"
+        )
+    _validate_device_identity_windows_path_syntax(
+        raw_path,
+        *((raw_data_dir,) if raw_data_dir is not None else ()),
+    )
+
+    if raw_data_dir is None:
+        if not os.path.isabs(raw_path):
+            raise click.ClickException(
+                "cannot safely create device identity (device-key-path-not-absolute)"
+            )
+        target = os.path.normpath(os.path.abspath(raw_path))
+        identity_root = os.path.dirname(target)
+    else:
+        from defenseclaw.doctor_recovery import _normalize_device_identity_disk_paths
+
+        target, identity_root = _normalize_device_identity_disk_paths(
+            raw_path,
+            raw_data_dir,
+        )
+        if not target:
+            raise click.ClickException(
+                "cannot safely create device identity "
+                "(device-key-path-not-local-to-data-dir)"
+            )
+    target_parent = os.path.dirname(target)
+    _validate_device_identity_windows_path_syntax(target, identity_root)
+    _validate_device_identity_artifact_layout(target, identity_root)
+    if os.path.lexists(target):
+        return
+
+    from defenseclaw.doctor_recovery import (
+        RecoveryApplyStatus,
+        RecoveryDisposition,
+        RecoveryRefusedError,
+        _device_identity_paths_equal,
+        apply_device_key_recovery,
+        plan_missing_device_key,
+    )
+    try:
+        common = os.path.commonpath((target, identity_root))
+    except ValueError as exc:
+        raise click.ClickException(
+            "cannot safely create device identity (target-outside-data-dir)"
+        ) from exc
+    if (
+        not _device_identity_paths_equal(common, identity_root)
+        or _device_identity_paths_equal(target, identity_root)
+    ):
+        raise click.ClickException(
+            "cannot safely create device identity (target-outside-data-dir)"
+        )
+    if os.name != "nt" and os.path.realpath(identity_root) != identity_root:
+        raise click.ClickException(
+            "cannot safely create device identity (data-dir-path-is-indirect)"
+        )
+    _prepare_device_identity_directories(identity_root, target_parent)
+
+    plan = plan_missing_device_key(target, data_dir=identity_root)
+    if plan.disposition is not RecoveryDisposition.READY:
+        raise click.ClickException(
+            f"cannot safely create device identity ({plan.reason_code})"
+        )
+    try:
+        result = apply_device_key_recovery(plan, approved=True)
+    except RecoveryRefusedError as exc:
+        raise click.ClickException(
+            f"cannot safely create device identity ({exc.code})"
+        ) from exc
+    if result.status is not RecoveryApplyStatus.CREATED:
+        raise click.ClickException(
+            f"could not create device identity ({result.reason_code})"
+        )
 
 
 def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
@@ -2419,7 +2675,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
 
-    _ensure_device_key(cfg.gateway.device_key_file)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
 
     click.echo(f"  Gateway:       {cfg.gateway.host}:{cfg.gateway.port} (connector: {connector})")
     # Plan B2 / S0.2: the sidecar synthesizes a CSPRNG token on first

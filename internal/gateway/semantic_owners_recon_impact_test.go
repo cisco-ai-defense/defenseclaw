@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -30,6 +31,7 @@ var reconImpactExpressionsForTest = map[string]string{
 	"CMD-CHMOD-WORLD":                       semanticAccessControlExpression,
 	"CMD-DD-IF":                             semanticDDDiskWriteExpression,
 	"CMD-MKFS":                              semanticFilesystemWipeExpression,
+	"CMD-DEVICE-WIPE":                       semanticDeviceWipeExpression,
 	"recon.network_sweep":                   semanticNetworkSweepExpression,
 	"privilege.container_host_escape":       semanticContainerHostEscapeExpression,
 	"impact.cryptomining_launch":            semanticCryptominingExpression,
@@ -64,6 +66,20 @@ func TestGeneratedDefaultSemanticRulesUseRegisteredOwners(t *testing.T) {
 	compiled := make(map[string]compiledSemanticRule, len(generation.semanticRules))
 	for _, candidate := range generation.semanticRules {
 		compiled[candidate.rule.ID] = candidate
+	}
+	for _, ruleID := range []string{"CMD-MKFS", "CMD-DEVICE-WIPE"} {
+		candidate, ok := compiled[ruleID]
+		if !ok {
+			t.Fatalf("default semantic rule %q is missing", ruleID)
+		}
+		if want := reconImpactExpressionsForTest[ruleID]; candidate.rule.Expression != want {
+			t.Fatalf(
+				"default semantic rule %q expression drifted\n got: %s\nwant: %s",
+				ruleID,
+				candidate.rule.Expression,
+				want,
+			)
+		}
 	}
 	for _, owners := range []map[string]semanticOwner{
 		semanticReconImpactOwners,
@@ -102,6 +118,35 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			ruleID: "CMD-RM-RF",
 			input:  reconImpactCommand("rm --recursive --force /home/alice"),
 			want:   true,
+		},
+		{
+			name:   "recursive delete exact system scope",
+			ruleID: "CMD-RM-RF",
+			input:  reconImpactCommand("rm -rf /etc"),
+			want:   true,
+		},
+		{
+			name:   "recursive delete mounted scope",
+			ruleID: "CMD-RM-RF",
+			input:  reconImpactCommand("rm -rf /mnt"),
+			want:   true,
+		},
+		{
+			name:   "recursive delete optional software scope",
+			ruleID: "CMD-RM-RF",
+			input:  reconImpactCommand("rm -rf /opt"),
+			want:   true,
+		},
+		{
+			name:   "recursive delete service data scope",
+			ruleID: "CMD-RM-RF",
+			input:  reconImpactCommand("rm -rf /srv"),
+			want:   true,
+		},
+		{
+			name:   "recursive delete system child is bounded",
+			ruleID: "CMD-RM-RF",
+			input:  reconImpactCommand("rm -rf /etc/example-app"),
 		},
 		{
 			name:   "recursive delete scoped tree",
@@ -261,6 +306,12 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "dd redirected device append keeps its dedicated owner",
+			ruleID: "CMD-DD-IF",
+			input:  reconImpactCommand("dd if=/tmp/inert.bin >> /dev/sda"),
+			want:   true,
+		},
+		{
 			name:   "dd device read",
 			ruleID: "CMD-DD-IF",
 			input:  reconImpactCommand("dd if=/dev/sda of=/tmp/backup.img"),
@@ -272,43 +323,93 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "filesystem formatter redirected device append keeps its dedicated owner",
+			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("mkfs.ext4 /tmp/disk.img >> /dev/sda"),
+			want:   true,
+		},
+		{
+			name:   "filesystem format keeps its dedicated owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("mkfs.ext4 /dev/sda"),
+		},
+		{
 			name:   "filesystem format preview",
 			ruleID: "CMD-MKFS",
 			input:  reconImpactCommand("mkfs.ext4 -n /dev/sda"),
 		},
 		{
-			name:   "device shred",
+			name:   "filesystem image format is not a device write",
 			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("mkfs.ext4 /tmp/disk.img"),
+		},
+		{
+			name:   "device shred is not a formatter",
+			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("shred -n 1 /dev/sda"),
+		},
+		{
+			name:   "device shred has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
 			input:  reconImpactCommand("shred -n 1 /dev/sda"),
 			want:   true,
 		},
 		{
-			name:   "device cryptsetup erase",
+			name:   "device cryptsetup erase is not a formatter",
 			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("cryptsetup luksErase /dev/sda1"),
+		},
+		{
+			name:   "device cryptsetup erase has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
 			input:  reconImpactCommand("cryptsetup luksErase /dev/sda1"),
 			want:   true,
 		},
 		{
-			name:   "device nvme sanitize",
+			name:   "device nvme sanitize is not a formatter",
 			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("nvme sanitize /dev/nvme0n1"),
+		},
+		{
+			name:   "device nvme sanitize has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
 			input:  reconImpactCommand("nvme sanitize /dev/nvme0n1"),
 			want:   true,
 		},
 		{
-			name:   "device parted label",
+			name:   "device parted label is not a formatter",
 			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("parted /dev/sda mklabel gpt"),
+		},
+		{
+			name:   "device parted label has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
 			input:  reconImpactCommand("parted /dev/sda mklabel gpt"),
 			want:   true,
 		},
 		{
-			name:   "macos bare disk erase",
+			name:   "macos bare disk erase is not a formatter executable",
 			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("diskutil eraseDisk APFS Empty disk2"),
+		},
+		{
+			name:   "macos bare disk erase has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
 			input:  reconImpactCommand("diskutil eraseDisk APFS Empty disk2"),
 			want:   true,
 		},
 		{
-			name:   "windows oem disk clear",
+			name:   "windows oem disk clear is not a formatter executable",
 			ruleID: "CMD-MKFS",
+			input: actionfacts.Input{
+				Tool:        "powershell",
+				Command:     "Clear-Disk -Number 1 -RemoveOEM",
+				DialectHint: actionfacts.DialectPowerShell,
+			},
+		},
+		{
+			name:   "windows oem disk clear has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
 			input: actionfacts.Input{
 				Tool:        "powershell",
 				Command:     "Clear-Disk -Number 1 -RemoveOEM",
@@ -317,14 +418,60 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			want: true,
 		},
 		{
-			name:   "device tee",
+			name:   "windows disk number is canonicalized",
+			ruleID: "CMD-DEVICE-WIPE",
+			input: actionfacts.Input{
+				Tool:        "powershell",
+				Command:     "Clear-Disk -Number 00 -RemoveData",
+				DialectHint: actionfacts.DialectPowerShell,
+			},
+			want: true,
+		},
+		{
+			name:   "cmd drive format has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input: actionfacts.Input{
+				Tool:        "cmd",
+				Command:     "format C:",
+				DialectHint: actionfacts.DialectCMD,
+			},
+			want: true,
+		},
+		{
+			name:   "PowerShell drive format has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input: actionfacts.Input{
+				Tool:        "powershell",
+				Command:     "Format-Volume -DriveLetter C",
+				DialectHint: actionfacts.DialectPowerShell,
+			},
+			want: true,
+		},
+		{
+			name:   "device tee is not a formatter",
 			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("tee /dev/sda"),
+		},
+		{
+			name:   "device tee has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
 			input:  reconImpactCommand("tee /dev/sda"),
 			want:   true,
 		},
 		{
-			name:   "device redirect",
+			name:   "device append has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
+			input:  reconImpactCommand("tee -a /dev/sda"),
+			want:   true,
+		},
+		{
+			name:   "device redirect is not a formatter",
 			ruleID: "CMD-MKFS",
+			input:  reconImpactCommand("printf x > /dev/sda"),
+		},
+		{
+			name:   "device redirect has its own typed owner",
+			ruleID: "CMD-DEVICE-WIPE",
 			input:  reconImpactCommand("printf x > /dev/sda"),
 			want:   true,
 		},
@@ -537,6 +684,49 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 	}
 }
 
+func TestExplicitFormatCOMDispatchesDeviceWipeFinding(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		tool    string
+		dialect actionfacts.Dialect
+		argv    []string
+	}{
+		{name: "cmd", tool: "cmd", dialect: actionfacts.DialectCMD},
+		{name: "PowerShell", tool: "PowerShell", dialect: actionfacts.DialectPowerShell},
+		{name: "structured argv", tool: "exec", argv: []string{"format.com", "C:"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			connector := "format-com-device-wipe-" + strings.ToLower(test.name)
+			installDefaultProfileConnector(t, connector)
+
+			const command = `format.com C:`
+			input := actionfacts.Input{
+				Tool:        test.tool,
+				DialectHint: test.dialect,
+			}
+			if len(test.argv) > 0 {
+				input.Argv = test.argv
+			} else {
+				input.Command = command
+			}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:              input,
+				LegacyText:         command,
+				Connector:          connector,
+				EnforcementCapable: true,
+			})
+			matched := findingWithID(findings, "CMD-DEVICE-WIPE")
+			if matched == nil || !matched.contributesToEnforcement() ||
+				matched.Evidence != "" {
+				t.Fatalf(
+					"format.com lost semantic device-wipe enforcement: findings=%v facts=%+v",
+					FindingStrings(findings), actionfacts.Analyze(input),
+				)
+			}
+		})
+	}
+}
+
 func TestSudoFallbackDispositionRouting(t *testing.T) {
 	const connector = "sudo-fallback-disposition-test"
 	installDefaultProfileConnector(t, connector)
@@ -716,6 +906,38 @@ func TestSemanticReconImpactOwnerAliasBoundary(t *testing.T) {
 		[]string{"CMD-CHMOD-WORLD", "CMD-CHOWN-ROOT"},
 	) {
 		t.Fatalf("access-control aliases = %v", got)
+	}
+}
+
+func TestExactMinerWrapperTargetRejectsMinerPreviewArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{name: "nohup launch", argv: []string{"nohup", "xmrig", "--url", "pool.example"}, want: true},
+		{name: "nohup help", argv: []string{"nohup", "xmrig", "--help"}},
+		{name: "nohup mixed help token launches", argv: []string{"nohup", "xmrig", "--url", "pool.example", "--help"}, want: true},
+		{name: "setsid launch", argv: []string{"setsid", "--fork", "xmrig", "--url", "pool.example"}, want: true},
+		{name: "setsid help", argv: []string{"setsid", "xmrig", "--help"}},
+		{name: "setsid help-looking value launches", argv: []string{"setsid", "xmrig", "--user", "--help"}, want: true},
+		{name: "setsid delimited version", argv: []string{"setsid", "--", "xmrig", "--version"}},
+		{name: "nice launch", argv: []string{"nice", "-n", "5", "xmrig", "--url", "pool.example"}, want: true},
+		{name: "nice help", argv: []string{"nice", "xmrig", "-h"}},
+		{name: "nice mixed version token launches", argv: []string{"nice", "xmrig", "--url", "pool.example", "--version"}, want: true},
+		{name: "nice adjusted version", argv: []string{"nice", "--adjustment=5", "xmrig", "-v"}},
+		{name: "nice delimited version", argv: []string{"nice", "--", "xmrig", "--version"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := actionfacts.CommandFact{
+				Program: test.argv[0],
+				Argv:    test.argv,
+			}
+			if got := exactMinerWrapperTarget(command); got != test.want {
+				t.Fatalf("exactMinerWrapperTarget(%v) = %t, want %t", test.argv, got, test.want)
+			}
+		})
 	}
 }
 

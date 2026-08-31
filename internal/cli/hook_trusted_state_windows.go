@@ -7,7 +7,7 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,7 +35,7 @@ var (
 	hookExecutableOverride           string
 	nativeHookRuntimeReader          = hookruntime.ReadTrustedForExecutable
 	nativeDelegatedHookRuntimeReader = hookruntime.ReadTrustedDelegatedForExecutable
-	enterpriseManagedRuntimeResolver = enterprisehooks.ResolveWindowsClaudeManagedHookRuntime
+	enterpriseManagedRuntimeResolver = enterprisehooks.ResolveWindowsManagedHookRuntime
 )
 
 var nativeHookRuntimeSnapshot struct {
@@ -49,11 +49,17 @@ var nativeHookRuntimeSnapshot struct {
 
 var nativeEnterpriseHookRuntimeSnapshot struct {
 	sync.Mutex
-	prepared   bool
-	executable string
-	home       string
-	registered bool
-	err        error
+	prepared           bool
+	executable         string
+	connector          string
+	home               string
+	policyActive       bool
+	registered         bool
+	gatewayAddr        string
+	gatewayServiceName string
+	scopedToken        string
+	generationID       string
+	err                error
 }
 
 // preparedNativeHookRuntime returns the exact process-local admission result
@@ -82,18 +88,14 @@ func nativeHookExecutable() string {
 }
 
 // NativeHookRuntimeNoop reports whether this process is the canonical stable
-// Windows launcher while its installer-owned state is disabled or unsafe. The
-// launcher must exit before Cobra or hook fail-mode environment is evaluated,
-// so a long-running agent can never turn an uninstalled cached command into a
-// strict-availability block.
+// per-user Windows launcher while its installer-owned state is disabled or
+// unsafe. That launcher must exit before Cobra or hook fail-mode environment
+// is evaluated, so a long-running normal-mode agent cannot turn an uninstalled
+// cached command into a strict-availability block. Managed-enterprise policy
+// invokes an administrator-owned Program Files binary instead; enterprise
+// uninstall removes that policy before retiring the binary and requires
+// already-running clients to reload.
 func NativeHookRuntimeNoop() bool {
-	enterpriseManaged := hookArgsContainEnterpriseManaged(os.Args[1:])
-	if enterpriseManaged {
-		// The machine-managed policy is authoritative for this invocation. It
-		// must be resolved before stale, inactive, or corrupt per-user launcher
-		// state can turn an administrator-managed hook into a permissive no-op.
-		return enterpriseManagedHookRuntimeNoop()
-	}
 	executable := nativeHookExecutable()
 	state, recognized, err := nativeDelegatedHookRuntimeReader(executable)
 	if !recognized {
@@ -106,6 +108,19 @@ func NativeHookRuntimeNoop() bool {
 	nativeHookRuntimeSnapshot.recognized = recognized
 	nativeHookRuntimeSnapshot.err = err
 	nativeHookRuntimeSnapshot.Unlock()
+	if hookArgsContainEnterpriseManaged(os.Args[1:]) {
+		connectorName, connectorErr := hookConnectorFromArgs(os.Args[1:])
+		if connectorErr != nil {
+			nativeEnterpriseHookRuntimeSnapshot.Lock()
+			nativeEnterpriseHookRuntimeSnapshot.prepared = true
+			nativeEnterpriseHookRuntimeSnapshot.executable = executable
+			nativeEnterpriseHookRuntimeSnapshot.connector = connectorName
+			nativeEnterpriseHookRuntimeSnapshot.err = connectorErr
+			nativeEnterpriseHookRuntimeSnapshot.Unlock()
+			return false
+		}
+		return enterpriseManagedHookRuntimeNoop(connectorName)
+	}
 	if !recognized {
 		return false
 	}
@@ -173,29 +188,160 @@ func hookArgsContainEnterpriseManaged(args []string) bool {
 	return false
 }
 
-func enterpriseManagedHookRuntimeNoop() bool {
+func hookConnectorFromArgs(args []string) (string, error) {
+	var connectorName string
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--connector":
+			if index+1 >= len(args) {
+				return "", fmt.Errorf("enterprise managed hook connector flag has no value")
+			}
+			index++
+			connectorName = args[index]
+		case strings.HasPrefix(arg, "--connector="):
+			connectorName = strings.TrimPrefix(arg, "--connector=")
+		}
+	}
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "cursor" {
+		return connectorName, fmt.Errorf(
+			"enterprise managed hook connector %q is not supported",
+			connectorName,
+		)
+	}
+	return connectorName, nil
+}
+
+func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
+	// Cobra passes the raw flag value ("ClaudeCode" for --connector
+	// ClaudeCode), but hookConnectorFromArgs caches the lowercase form
+	// ("claudecode"). Without normalization here the snapshot cache would
+	// key on a case that enterpriseManagedHookRuntimeEndpoint's lowercase
+	// comparison never matches, so events would silently fail closed to
+	// 127.0.0.1:1 with no recorded reason.
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	executable := nativeHookExecutable()
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
-	if nativeEnterpriseHookRuntimeSnapshot.prepared && sameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable) {
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		sameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable) &&
+		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName {
+		policyActive := nativeEnterpriseHookRuntimeSnapshot.policyActive
 		registered := nativeEnterpriseHookRuntimeSnapshot.registered
 		err := nativeEnterpriseHookRuntimeSnapshot.err
 		nativeEnterpriseHookRuntimeSnapshot.Unlock()
-		return err == nil && !registered
+		return enterpriseManagedRuntimeAbsenceNoop(
+			executable,
+			connectorName,
+			policyActive,
+			registered,
+			err,
+		)
 	}
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 
-	home, registered, err := enterpriseManagedRuntimeResolver(executable)
-	if err == nil && registered && !filepath.IsAbs(strings.TrimSpace(home)) {
-		err = errors.New("enterprise managed hook runtime home is not absolute")
+	runtime, err := enterpriseManagedRuntimeResolver(executable, connectorName)
+	if err == nil && runtime.Registered {
+		if !validEnterpriseManagedRuntimeGenerationID(runtime.GenerationID) {
+			err = fmt.Errorf(
+				"enterprise hooks: connector %s authenticated runtime generation is invalid",
+				connectorName,
+			)
+		} else if strings.TrimSpace(runtime.ScopedToken) == "" {
+			err = fmt.Errorf(
+				"enterprise hooks: connector %s authenticated runtime token is empty",
+				connectorName,
+			)
+		}
 	}
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	nativeEnterpriseHookRuntimeSnapshot.prepared = true
 	nativeEnterpriseHookRuntimeSnapshot.executable = executable
-	nativeEnterpriseHookRuntimeSnapshot.home = home
-	nativeEnterpriseHookRuntimeSnapshot.registered = registered
+	nativeEnterpriseHookRuntimeSnapshot.connector = connectorName
+	nativeEnterpriseHookRuntimeSnapshot.home = runtime.DataDir
+	nativeEnterpriseHookRuntimeSnapshot.policyActive = runtime.PolicyActive
+	nativeEnterpriseHookRuntimeSnapshot.registered = runtime.Registered
+	nativeEnterpriseHookRuntimeSnapshot.gatewayAddr = runtime.GatewayAddr
+	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = runtime.GatewayServiceName
+	nativeEnterpriseHookRuntimeSnapshot.scopedToken = runtime.ScopedToken
+	nativeEnterpriseHookRuntimeSnapshot.generationID = runtime.GenerationID
 	nativeEnterpriseHookRuntimeSnapshot.err = err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
-	return err == nil && !registered
+	return enterpriseManagedRuntimeAbsenceNoop(
+		executable,
+		connectorName,
+		runtime.PolicyActive,
+		runtime.Registered,
+		err,
+	)
+}
+
+func validEnterpriseManagedRuntimeGenerationID(generationID string) bool {
+	if len(generationID) != 32 {
+		return false
+	}
+	for _, char := range generationID {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func enterpriseManagedRuntimeAbsenceNoop(
+	executable string,
+	connectorName string,
+	policyActive bool,
+	registered bool,
+	resolveErr error,
+) bool {
+	if managedRuntimeAbsentWithTrustedTombstone(
+		policyActive,
+		registered,
+		resolveErr,
+	) {
+		return true
+	}
+	if resolveErr != nil || policyActive || registered {
+		return false
+	}
+	// An absent machine target is a trusted no-op only for the stable per-user
+	// launcher after its installer-owned state has become an inactive
+	// tombstone. Any other cached/retained enterprise runtime is de-enrolled;
+	// classify it before buildHookOptions can consult target-owned sidecars or
+	// attempt a gateway peer connection.
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		sameWindowsHookPath(
+			nativeEnterpriseHookRuntimeSnapshot.executable,
+			executable,
+		) &&
+		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil {
+		nativeEnterpriseHookRuntimeSnapshot.err = fmt.Errorf(
+			"%s: connector %s is absent from the protected target set",
+			enterprisehooks.WindowsManagedSIDUnregisteredReason,
+			connectorName,
+		)
+	}
+	return false
+}
+
+func managedRuntimeAbsentWithTrustedTombstone(
+	policyActive bool,
+	registered bool,
+	resolveErr error,
+) bool {
+	if resolveErr != nil || policyActive || registered {
+		return false
+	}
+	nativeHookRuntimeSnapshot.Lock()
+	defer nativeHookRuntimeSnapshot.Unlock()
+	return nativeHookRuntimeSnapshot.prepared &&
+		nativeHookRuntimeSnapshot.recognized &&
+		nativeHookRuntimeSnapshot.err == nil &&
+		!nativeHookRuntimeSnapshot.state.Active()
 }
 
 func enterpriseManagedHookRuntimeForceClosed() bool {
@@ -204,6 +350,63 @@ func enterpriseManagedHookRuntimeForceClosed() bool {
 	err := nativeEnterpriseHookRuntimeSnapshot.err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	return prepared && err != nil
+}
+
+func enterpriseManagedHookRuntimeFailureReason() string {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if !nativeEnterpriseHookRuntimeSnapshot.prepared ||
+		nativeEnterpriseHookRuntimeSnapshot.err == nil {
+		return ""
+	}
+	if strings.Contains(
+		nativeEnterpriseHookRuntimeSnapshot.err.Error(),
+		enterprisehooks.WindowsManagedSIDUnregisteredReason,
+	) {
+		return enterprisehooks.WindowsManagedSIDUnregisteredReason
+	}
+	return "enterprise_managed_runtime_state_invalid"
+}
+
+func enterpriseManagedHookRuntimeEndpoint(
+	connectorName string,
+) (gatewayAddr, gatewayServiceName string, ok bool) {
+	gatewayAddr, gatewayServiceName, _, ok =
+		enterpriseManagedHookRuntimeConnection(connectorName)
+	return gatewayAddr, gatewayServiceName, ok
+}
+
+// enterpriseManagedHookRuntimeConnection returns endpoint identity and the
+// connector-scoped token from one already-authenticated immutable generation.
+// The returned token pointer is the explicit hookexec snapshot-mode marker;
+// callers must never reconstruct it from the mutable legacy token path.
+func enterpriseManagedHookRuntimeConnection(
+	connectorName string,
+) (gatewayAddr, gatewayServiceName string, scopedToken *string, ok bool) {
+	// Normalize identically to enterpriseManagedHookRuntimeNoop so the
+	// snapshot cache lookup matches regardless of the caller's casing.
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	valid := nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil &&
+		nativeEnterpriseHookRuntimeSnapshot.registered &&
+		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
+		validEnterpriseManagedRuntimeGenerationID(
+			nativeEnterpriseHookRuntimeSnapshot.generationID,
+		) &&
+		strings.TrimSpace(nativeEnterpriseHookRuntimeSnapshot.scopedToken) != ""
+	if !valid {
+		return nativeEnterpriseHookRuntimeSnapshot.gatewayAddr,
+			nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName,
+			nil,
+			false
+	}
+	token := nativeEnterpriseHookRuntimeSnapshot.scopedToken
+	return nativeEnterpriseHookRuntimeSnapshot.gatewayAddr,
+		nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName,
+		&token,
+		true
 }
 
 type nativeHookInstallState struct {
@@ -225,7 +428,8 @@ func trustedNativeHookHome() (string, bool) {
 		return "", false
 	}
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
-	enterprisePrepared := nativeEnterpriseHookRuntimeSnapshot.prepared && sameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable)
+	enterprisePrepared := nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		sameWindowsHookPath(nativeEnterpriseHookRuntimeSnapshot.executable, executable)
 	enterpriseHome := nativeEnterpriseHookRuntimeSnapshot.home
 	enterpriseErr := nativeEnterpriseHookRuntimeSnapshot.err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()

@@ -92,8 +92,9 @@ The static baseline is registered in
 rendered by `keys list`. Classification then appends independently named
 Splunk/Galileo environment references from enabled observability-v8
 destinations and `env_keys` declared by
-`~/.defenseclaw/custom-providers.json`. Duplicate environment names are
-collapsed.
+`~/.defenseclaw/custom-providers.json`, plus every non-empty
+`routing.models[].api_key_env`. Duplicate environment names are collapsed;
+multiple routed aliases may deliberately share one key.
 
 | Env name | Feature | Required when… | Notes |
 | --- | --- | --- | --- |
@@ -105,12 +106,19 @@ collapsed.
 | `SPLUNK_ACCESS_TOKEN` | `observability.splunk` | A Splunk HEC destination is enabled. | The HEC token. |
 | `GALILEO_API_KEY` | `observability.galileo` | An enabled OTLP destination named `galileo` is configured. | Required for Galileo Cloud and authenticated self-hosted trace export. Use `setup observability list` for the destination inventory. |
 | `DEFENSECLAW_SKILL_SCANNER_LLM_KEY` | `skill-scanner.llm` | The skill scanner uses LLM and has a custom `llm.api_key_env` override. | Only tracked when there's a custom override; otherwise falls through to `DEFENSECLAW_LLM_KEY`. |
+| Configured `routing.models[].api_key_env` | `routing.models` | Semantic routing is enabled and at least one routed backend references that environment name. | Discovered dynamically. Keyless local backends such as Ollama add no row; shared names are shown once. |
 
 The names you see in `keys list` are the **effective** ones. If you set
 `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY`, the table shows
 `MY_JUDGE_KEY` rather than `JUDGE_API_KEY`. Additional enabled Splunk/Galileo
-destinations and custom-provider overlay entries can add more rows after the
-eight baseline entries.
+destinations, custom-provider overlay entries, and routed model backends can
+add more rows after the eight baseline entries.
+
+For routed traffic, the classifier chooses only a configured alias. The gateway
+then resolves that alias's credential from the process environment or dotenv
+and sends it only to the configured provider. The semantic-router container
+does not read `~/.defenseclaw/.env`. See
+[Semantic model routing](/docs/setup/semantic-routing).
 
 ## Provider-specific SaaS variables are not baseline entries
 

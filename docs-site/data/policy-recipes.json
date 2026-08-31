@@ -6,7 +6,7 @@
       "kind": "rule:c2",
       "body": {
         "id": "C2-WEBHOOK-SITE",
-        "pattern": "(?i)webhook\\.site",
+        "pattern": "(?i)(?:^|[^a-zA-Z0-9-])webhook\\.site(?:[^a-zA-Z0-9.-]|$)",
         "title": "webhook.site (known exfil)",
         "severity": "HIGH",
         "confidence": 0.9,
@@ -33,7 +33,7 @@
       "kind": "rule:c2",
       "body": {
         "id": "C2-NGROK",
-        "pattern": "(?i)(?:ngrok\\.io|ngrok-free\\.app)",
+        "pattern": "(?i)(?:^|[^a-zA-Z0-9-])(?:ngrok\\.io|ngrok-free\\.app)(?:[^a-zA-Z0-9.-]|$)",
         "title": "ngrok tunnel (exfil risk)",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -195,7 +195,7 @@
       "kind": "rule:c2",
       "body": {
         "id": "C2-OAST",
-        "pattern": "(?i)oast\\.fun",
+        "pattern": "(?i)(?:^|[^a-zA-Z0-9-])oast\\.fun(?:[^a-zA-Z0-9.-]|$)",
         "title": "oast.fun (OOB testing)",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -305,7 +305,7 @@
       "kind": "rule:c2",
       "body": {
         "id": "C2-METADATA-GCP",
-        "pattern": "(?i)metadata\\.google\\.internal",
+        "pattern": "(?i)(?:^|[^a-zA-Z0-9-])metadata\\.google\\.internal(?:[^a-zA-Z0-9.-]|$)",
         "title": "GCP metadata endpoint (SSRF)",
         "severity": "CRITICAL",
         "confidence": 0.95,
@@ -545,12 +545,13 @@
     },
     {
       "id": "RECIPE-COG-MEMORY",
-      "title": "MEMORY.md access",
+      "title": "MEMORY.md mutation or reference",
       "kind": "rule:cognitive-file",
       "body": {
         "id": "COG-MEMORY",
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
         "pattern": "(?i)MEMORY\\.md",
-        "title": "MEMORY.md access",
+        "title": "MEMORY.md mutation or reference",
         "severity": "HIGH",
         "confidence": 0.85,
         "tags": [
@@ -620,12 +621,13 @@
     },
     {
       "id": "RECIPE-COG-AGENTS-MD",
-      "title": "AGENTS.md access",
+      "title": "AGENTS.md mutation or reference",
       "kind": "rule:cognitive-file",
       "body": {
         "id": "COG-AGENTS-MD",
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
         "pattern": "(?i)AGENTS\\.md",
-        "title": "AGENTS.md access",
+        "title": "AGENTS.md mutation or reference",
         "severity": "HIGH",
         "confidence": 0.8,
         "tags": [
@@ -802,7 +804,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-REVSHELL-PYTHON",
-        "pattern": "(?i)python[23]?\\s+-c\\s+.*socket.*connect",
+        "pattern": "(?is)python[23]?\\s+-c\\s+.{0,400}?socket\\s*\\.\\s*socket\\s*\\(.{0,200}?\\.\\s*connect\\s*\\(",
         "title": "Python reverse shell",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -1043,9 +1045,32 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-MKFS",
-        "expression": "f.commands.exists(c, c.argv_complete && c.program != 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
-        "pattern": "(?i)\\bmkfs\\b",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+        "pattern": "(?i)\\b(?:mkfs(?:\\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat|minix))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)\\b",
         "title": "Filesystem format command",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "destructive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "destructive"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-DEVICE-WIPE",
+      "title": "Destructive write to a disk device",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-DEVICE-WIPE",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program != 'dd' && !(c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs']) && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+        "pattern": "a^",
+        "title": "Destructive write to a disk device",
         "severity": "CRITICAL",
         "confidence": 0.9,
         "tags": [
@@ -1066,7 +1091,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-DD-IF",
-        "expression": "f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
         "pattern": "(?i)\\bdd\\s+if=",
         "title": "dd disk write",
         "severity": "HIGH",
@@ -1277,7 +1302,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-WGET-POST",
-        "pattern": "(?i)\\bwget\\b\\s+.*--post-(?:data|file)",
+        "pattern": "(?i)\\bwget\\b[^;\\n]*--post-(?:data|file)",
         "title": "wget POST data exfil",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -1304,7 +1329,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-SOCAT-EXEC",
-        "pattern": "(?i)\\bsocat\\b\\s+.*\\bEXEC\\b",
+        "pattern": "(?i)\\bsocat\\b[^;\\n]*\\bEXEC\\b",
         "title": "socat with EXEC (reverse shell)",
         "severity": "CRITICAL",
         "confidence": 0.95,
@@ -1329,7 +1354,7 @@
       "body": {
         "id": "CMD-ENV-DUMP",
         "expression": "f.commands.exists(src, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ENVIRONMENT_READ in src.operations && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ENVIRONMENT_READ in src.operations && f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) && f.network.exists(n, n.command_id == dst.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && f.data_flows.exists(d, d.from_command_id == dst.id && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))",
-        "pattern": "(?i)\\b(?:printenv|export\\s+-p|env)\\b[^|;\\n]*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw)?\\s+@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
+        "pattern": "(?i)\\b(?:printenv|export\\s+-p|env)\\b[^|;\\n]*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw|-urlencode)?\\s+@-|-d\\s+@-|(?:--form|-F)\\s+[^;\\n]*=@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
         "title": "Environment variable dump",
         "severity": "HIGH",
         "confidence": 0.8,
@@ -1388,7 +1413,7 @@
         "id": "exfil.secret_read_and_egress_oneliner",
         "tool_call_only": true,
         "expression": "f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.paths.exists(p, p.command_id == src.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ)) && f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) && f.network.exists(n, n.command_id == dst.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && f.data_flows.exists(d, d.from_command_id == dst.id && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))",
-        "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;\\n]*(?:\\.env|credentials|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|/token)\\s*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw)?\\s+@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
+        "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;\\n]*(?:\\.env|credentials|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|/token)\\s*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw|-urlencode)?\\s+@-|-d\\s+@-|(?:--form|-F)\\s+[^;\\n]*=@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
         "title": "Sensitive read piped to external upload",
         "severity": "CRITICAL",
         "confidence": 0.96,
@@ -2831,7 +2856,7 @@
       "kind": "rule:secret",
       "body": {
         "id": "SEC-HEX-SECRET",
-        "pattern": "(?i)(?:secret(?:_key)?|api[_-]?key|access[_-]?token|auth[_-]?token)\\s*[=:]\\s*[\"'][a-f0-9]{32,}[\"']",
+        "pattern": "(?i)(?:secret(?:_key)?|api[_-]?key|[a-z0-9]{0,24}[_-]?token)\\s*[=:]\\s*[\"']?[a-f0-9]{32,}\\b",
         "title": "Hex-encoded secret in assignment",
         "severity": "HIGH",
         "confidence": 0.72,

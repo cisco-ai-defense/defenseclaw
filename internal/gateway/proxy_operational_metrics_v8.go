@@ -15,6 +15,28 @@ import (
 
 const proxyOperationalV8Producer = "gateway.proxy.operational"
 
+const proxyParserUncertaintyV8Producer = "gateway.proxy.parser_uncertainty"
+
+func (p *GuardrailProxy) recordParserUncertaintyMetricV8(
+	ctx context.Context,
+	count int64,
+) {
+	if p == nil || ctx == nil || count <= 0 {
+		return
+	}
+	runtime := p.proxyOperationalV8Runtime()
+	if runtime == nil {
+		return
+	}
+	recordParserUncertaintyMetricV8ForRuntime(
+		ctx,
+		runtime,
+		p.connectorName(),
+		proxyParserUncertaintyV8Producer,
+		count,
+	)
+}
+
 func (p *GuardrailProxy) proxyOperationalV8Runtime() hookLifecycleMetricV8Runtime {
 	if p == nil {
 		return nil

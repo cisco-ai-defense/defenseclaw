@@ -648,6 +648,100 @@ func TestHandleChatCompletionGeneratedModelMetricsSurviveTraceSamplingDrop(t *te
 	}
 }
 
+func TestProxyV8ModelTraceMetricsStayPinnedAcrossRuntimeReload(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil, ""), "action")
+	request := &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: "user", Content: "hello"}},
+	}
+	input := proxy.proxyV8ModelInput(t.Context(), request, "openai", time.Now().UTC())
+	_, trace := (&proxyV8RequestTrace{runtime: runtime}).StartModel(t.Context(), input)
+	if trace == nil || trace.model == nil {
+		t.Fatal("model trace did not start")
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			trace.Abort()
+		}
+	}()
+
+	generation := trace.model.Generation()
+	if active := runtime.Active(); active == nil || generation == 0 || active.Generation() != generation {
+		t.Fatalf("model/active generation=%d/%v", generation, active)
+	}
+	candidate := runtimegraph.ConfigFromPlan(runtime.Active().Plan(), false)
+	type reloadOutcome struct {
+		result runtimegraph.ReloadResult
+		err    *runtimegraph.Error
+	}
+	reloadDone := make(chan reloadOutcome, 1)
+	go func() {
+		result, err := runtime.Reload(t.Context(), candidate)
+		reloadDone <- reloadOutcome{result: result, err: err}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.Active() == nil || runtime.Active().Generation() != generation+1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("reload did not publish generation %d while model generation %d remained live", generation+1, generation)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case outcome := <-reloadDone:
+		t.Fatalf("reload returned before model Finish released generation %d: status=%s err=%v", generation, outcome.result.Status(), outcome.err)
+	default:
+	}
+
+	trace.Finish(proxyV8TraceResult{
+		Outcome:          observability.OutcomeCompleted,
+		ResponseID:       "chatcmpl-reload",
+		ResponseModel:    "gpt-4-actual",
+		Usage:            &ChatUsage{PromptTokens: 11, CompletionTokens: 7, TotalTokens: 18},
+		UpstreamDuration: 25 * time.Millisecond,
+	})
+	finished = true
+	select {
+	case outcome := <-reloadDone:
+		if outcome.err != nil || outcome.result.Status() != runtimegraph.ReloadApplied {
+			t.Fatalf("reload status=%s err=%v", outcome.result.Status(), outcome.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reload did not finish after model Finish released its generation")
+	}
+
+	models := proxyGeneratedSpansForFamily(capture.snapshot(), observability.TelemetryFamilyModelChat)
+	if len(models) != 1 {
+		t.Fatalf("generated model spans=%d", len(models))
+	}
+	model := models[0]
+	if got := model.Record().Provenance().ConfigGeneration; got != int64(generation) {
+		t.Fatalf("model span generation=%d want=%d", got, generation)
+	}
+	counts := make(map[string]int)
+	for _, metric := range capture.metricSnapshot() {
+		name := metric.Descriptor().Name
+		if name != observability.TelemetryInstrumentGenAIClientOperationDuration &&
+			name != observability.TelemetryInstrumentGenAIClientTokenUsage {
+			continue
+		}
+		counts[name]++
+		if metric.Generation() != generation || metric.CanonicalRecord().Provenance().ConfigGeneration != int64(generation) {
+			t.Fatalf("metric %s generation=%d/%d want=%d", name, metric.Generation(), metric.CanonicalRecord().Provenance().ConfigGeneration, generation)
+		}
+		correlation := metric.CanonicalRecord().Correlation()
+		if correlation.TraceID != model.TraceID().String() || correlation.SpanID != model.SpanID().String() {
+			t.Fatalf("metric %s correlation=%s/%s want model=%s/%s", name, correlation.TraceID, correlation.SpanID, model.TraceID(), model.SpanID())
+		}
+	}
+	if counts[observability.TelemetryInstrumentGenAIClientTokenUsage] != 2 ||
+		counts[observability.TelemetryInstrumentGenAIClientOperationDuration] != 1 || len(counts) != 2 {
+		t.Fatalf("generated model metric counts=%v", counts)
+	}
+}
+
 func TestHandleChatCompletionGeneratedGuardrailEnforcementCompanion(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	inspector := newMockInspector()

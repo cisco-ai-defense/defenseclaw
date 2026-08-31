@@ -353,6 +353,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _status_row("Sidecar", ux._style("running", fg="green"))
         _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
+        _print_semantic_routing(cfg, health=health)
         _print_hook_guardian(cfg)
         hint(
             "Dashboard:     defenseclaw alerts",
@@ -365,6 +366,7 @@ def status(app: AppContext, as_json: bool) -> None:
         # so operators know what `start` will spin up.
         _print_agents(cfg)
         _print_application_protection(cfg)
+        _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
         hint(
             "Start sidecar:  defenseclaw-gateway start",
@@ -848,6 +850,38 @@ def _application_protection_status(cfg, health: dict | None = None) -> dict:
     return state
 
 
+def _semantic_routing_status(cfg, health: dict | None = None) -> dict:
+    routing = getattr(cfg, "routing", None)
+    enabled = bool(getattr(routing, "enabled", False)) if routing is not None else False
+    remote = getattr(routing, "remote", {}) or {} if routing is not None else {}
+    endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
+    state = {
+        "configured": enabled,
+        "mode": "remote" if endpoint else "managed",
+        "version": str(getattr(routing, "version", "") or "0.3.0") if routing is not None else "0.3.0",
+        "port": int(getattr(routing, "port", 0) or 8080) if routing is not None else 8080,
+        "model_count": len(getattr(routing, "models", []) or []) if routing is not None else 0,
+        "runtime_state": "unknown" if enabled else "disabled",
+    }
+    live = health.get("routing") if isinstance(health, dict) else None
+    if isinstance(live, dict):
+        state["runtime_state"] = str(live.get("state") or state["runtime_state"])
+        if live.get("last_error"):
+            state["last_error"] = str(live["last_error"])
+    return state
+
+
+def _print_semantic_routing(cfg, health: dict | None = None) -> None:
+    state = _semantic_routing_status(cfg, health=health)
+    if not state["configured"]:
+        _status_row("Model routing", ux._style("disabled", fg="bright_black"))
+        return
+    runtime = str(state["runtime_state"])
+    color = "green" if runtime == "running" else "yellow"
+    value = f"{state['mode']} — {runtime}; {state['model_count']} model(s)"
+    _status_row("Model routing", ux._style(value, fg=color))
+
+
 def _load_application_protection_state(cfg) -> dict:
     data_dir = getattr(cfg, "data_dir", "") or ""
     if not data_dir:
@@ -1210,6 +1244,7 @@ def _status_payload(app) -> dict:
     payload["sidecar"] = {"running": running}
     payload["connectors"] = _connector_roster(cfg, health=health)
     payload["application_protection"] = _application_protection_status(cfg, health=health)
+    payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 

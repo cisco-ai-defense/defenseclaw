@@ -559,14 +559,7 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 	if mode != "action" && guardrailSeverityRank(severity) < severityHigh {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
-	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
-	}
-	if reason == "" {
-		return fmt.Sprintf("%s a %s Codex hook finding.", prefix, severity)
-	}
-	return fmt.Sprintf("%s a %s Codex hook finding: %s", prefix, severity, reason)
+	return connector.BuildCodexAdditionalContext(rawAction, severity, reason, wouldBlock)
 }
 
 // codexObserveContextEnforcementEligible keeps the in-chat Observe warning

