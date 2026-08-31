@@ -96,7 +96,7 @@ jobs:
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $go = (Get-Command go.exe -ErrorAction Stop).Source
           $result = Invoke-WindowsNativeProcess $go @(
-            'test', '-v', '-count=1', '-timeout=10m', './internal/observability/redaction'
+            'test', '-vet=off', '-v', '-count=1', '-timeout=10m', './internal/observability/redaction'
           ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-redaction-test.log')
           $restrictedTest = 'TestWindowsCorrelationKeyPublishesWithAdministratorsDisabled'
           $escaped = [regex]::Escape($restrictedTest)

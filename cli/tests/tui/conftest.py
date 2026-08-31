@@ -44,7 +44,10 @@ def current_windows_gateway(tmp_path_factory: pytest.TempPathFactory) -> Path:
             stdout=output,
             stderr=subprocess.STDOUT,
             check=False,
-            timeout=300,
+            # Hosted Windows can exceed five minutes when the current gateway
+            # is rebuilt while the native Go matrix is also compiling. Keep
+            # the fixture bounded, but leave enough room for that cold path.
+            timeout=600,
         )
     assert completed.returncode == 0, build_log.read_text(encoding="utf-8", errors="replace")
     return binary
