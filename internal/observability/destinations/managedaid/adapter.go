@@ -359,28 +359,43 @@ func (adapter *Adapter) post(ctx context.Context, body []byte, token string) (in
 		// gateway.err.log / gateway.log can see when the AI Defense POST
 		// couldn't complete at all (DNS, TCP, TLS, cancel, deadline).
 		// One line per attempt; low-frequency at the 5 min publish cadence.
-		fmt.Fprintf(os.Stderr, "[managedaid] POST %s bytes=%d elapsed=%s err=%v\n",
-			adapter.endpoint, len(body), time.Since(postStart), err)
+		// The endpoint URL is deliberately redacted to "AI DEFENSE" — the
+		// configured host is release-owned and static across a deployment
+		// so operators don't need it in every log line, and omitting it
+		// keeps regionalized endpoint labels out of log-forwarder pipelines
+		// that may not be scoped to the DefenseClaw tenant.
+		fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s err=%v\n",
+			len(body), time.Since(postStart), err)
 		return 0, classifyTransportError(err, wrote.Load())
 	}
 	if response == nil {
-		fmt.Fprintf(os.Stderr, "[managedaid] POST %s bytes=%d elapsed=%s status=nil\n",
-			adapter.endpoint, len(body), time.Since(postStart))
+		fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s status=nil\n",
+			len(body), time.Since(postStart))
 		return 0, delivery.OutcomeAmbiguous
 	}
 	defer response.Body.Close()
 	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
-	if readErr != nil || len(responseBody) > maxResponseBytes {
-		fmt.Fprintf(os.Stderr, "[managedaid] POST %s bytes=%d elapsed=%s status=%d body-read-err=%v\n",
-			adapter.endpoint, len(body), time.Since(postStart), response.StatusCode, readErr)
+	if readErr != nil {
+		// Genuine read/network failure while draining the response body.
+		fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s status=%d body-read-err=%v\n",
+			len(body), time.Since(postStart), response.StatusCode, readErr)
+		return 0, delivery.OutcomeAmbiguous
+	}
+	if len(responseBody) > maxResponseBytes {
+		// io.LimitReader was set to maxResponseBytes+1 exactly to detect
+		// this — a response body larger than the cap. Distinct from a
+		// read error so operators can tell "AI Defense returned a huge
+		// payload" from "the connection was cut mid-body".
+		fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s status=%d body-too-large=%d\n",
+			len(body), time.Since(postStart), response.StatusCode, len(responseBody))
 		return 0, delivery.OutcomeAmbiguous
 	}
 	// Success (or well-formed error response) info line — status + latency
 	// only. Full response body is deliberately NOT logged here; operators
 	// can enable the delivery-diagnostics destination or inspect
 	// gateway.jsonl for per-event `inserted`/`rejectCode` details.
-	fmt.Fprintf(os.Stderr, "[managedaid] POST %s bytes=%d elapsed=%s status=%d resp_bytes=%d\n",
-		adapter.endpoint, len(body), time.Since(postStart), response.StatusCode, len(responseBody))
+	fmt.Fprintf(os.Stderr, "[managedaid] POST AI DEFENSE bytes=%d elapsed=%s status=%d resp_bytes=%d\n",
+		len(body), time.Since(postStart), response.StatusCode, len(responseBody))
 	return response.StatusCode, ""
 }
 

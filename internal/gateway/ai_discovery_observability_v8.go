@@ -229,28 +229,6 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 	if signal.SignalID == "" || signal.Category == "" {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	// Human-readable info line for operators tailing gateway.err.log (macOS) /
-	// gateway.log (Windows). Format matches the historical macOS convention:
-	//   [ai_discovery:<category>] <state> <name> confidence=<0.NN>
-	// One line per emitted signal (delta on all modes; also `seen` on
-	// managed_enterprise where the caller ships snapshots every cadence).
-	// Kept cheap and single-line so a long-running daemon can leave this on
-	// as an info-level default instead of gating on a debug flag.
-	displayName := strings.TrimSpace(signal.Product)
-	if displayName == "" {
-		displayName = strings.TrimSpace(signal.Name)
-	}
-	if displayName == "" {
-		displayName = signal.SignalID
-	}
-	fmt.Fprintf(
-		os.Stderr,
-		"[ai_discovery:%s] %s %s confidence=%.2f\n",
-		signal.Category,
-		signal.State,
-		displayName,
-		aiDiscoveryV8Clamp(signal.Confidence),
-	)
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
 		observability.ProducerKey("ai_discovery"),
@@ -343,7 +321,75 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// Human-readable info line for operators tailing gateway.err.log (macOS) /
+	// gateway.log (Windows). Format matches the historical macOS convention:
+	//   [ai_discovery:<category>] <state> <name> confidence=<0.NN>
+	// One line per successfully-emitted signal (delta on all modes; also
+	// `seen` on managed_enterprise where the caller ships snapshots every
+	// cadence). Runs AFTER Emit so a runtime failure never claims an
+	// emission that didn't reach the observability pipeline.
+	//
+	// displayName runs through aiDiscoverySanitizeLogValue at the log
+	// boundary: signal.Product / .Name / .SignalID can be operator-authored
+	// or catalog-driven; embedded CR/LF would inject synthetic log records,
+	// and an unbounded length could produce multi-KB lines. Trim +
+	// strip-controls + length cap defuse both.
+	displayName := aiDiscoverySanitizeLogValue(signal.Product)
+	if displayName == "" {
+		displayName = aiDiscoverySanitizeLogValue(signal.Name)
+	}
+	if displayName == "" {
+		displayName = aiDiscoverySanitizeLogValue(signal.SignalID)
+	}
+	if displayName == "" {
+		displayName = "(unnamed)"
+	}
+	category := aiDiscoverySanitizeLogValue(signal.Category)
+	state := aiDiscoverySanitizeLogValue(string(signal.State))
+	fmt.Fprintf(
+		os.Stderr,
+		"[ai_discovery:%s] %s %s confidence=%.2f\n",
+		category,
+		state,
+		displayName,
+		aiDiscoveryV8Clamp(signal.Confidence),
+	)
+	return nil
+}
+
+// aiDiscoverySanitizeLogValue prepares a signal field for single-line stderr
+// output: it trims surrounding whitespace, drops embedded control characters
+// (defends against log-record injection via CR/LF/NUL in an operator-authored
+// Product or Name), and caps the length so a hostile or misconfigured signal
+// cannot inflate the info-log line to multi-KB. Returns "" for values that are
+// empty after normalization so the caller can fall through its priority chain
+// (Product -> Name -> SignalID -> "(unnamed)").
+func aiDiscoverySanitizeLogValue(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(trimmed))
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			// Collapse any C0 control (incl. CR/LF/TAB/NUL) plus DEL to a
+			// single ASCII space so the token stays readable but cannot
+			// terminate the log line early.
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := strings.TrimSpace(b.String())
+	const aiDiscoveryLogValueMaxLen = 128
+	if len(out) > aiDiscoveryLogValueMaxLen {
+		out = out[:aiDiscoveryLogValueMaxLen] + "…"
+	}
+	return out
 }
 
 func (adapter *aiDiscoveryV8Adapter) emitComponentConfidenceLog(
