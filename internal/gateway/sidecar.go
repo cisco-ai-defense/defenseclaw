@@ -2317,6 +2317,18 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 // operators see the new signal without waiting out the cooldown).
 const cmidBuildLogCooldown = 30 * time.Second
 
+// cmidProviderTokenCacheTTL is the in-memory cache window applied to
+// the singleton cloudreg.Provider returned from ensureCMIDProvider.
+// The underlying provider makes a fresh IPC round-trip on every
+// Token() call (Windows named-pipe RPC, macOS private CMID daemon);
+// bearer tokens themselves live minutes to hours. Caching for 60s
+// cuts the IPC rate an order of magnitude on hot hook-decision paths
+// without holding a token past any realistic expiry. On a 401 the
+// consumer calls Invalidate(), which drops the cache immediately —
+// the TTL is a "reduce redundant refetches" bound, not a "risk
+// expiring tokens" bound.
+const cmidProviderTokenCacheTTL = 60 * time.Second
+
 // logCMIDBuildError emits a rate-limited operator-visible stderr line
 // describing why a CMID provider build or Refresh failed. Called from
 // every error branch in buildCMIDProvider and from the cached-Refresh-
@@ -2361,38 +2373,44 @@ func (s *Sidecar) logCMIDBuildLane(lane string) {
 // ensureCMIDProvider lazily constructs the managed cloud auth provider
 // on first use and caches it for the sidecar's lifetime.
 // Managed_enterprise only. Returns an error when the underlying
-// provider cannot Refresh (unsupported OS, no provider registered,
-// agent unavailable after the retry ladder). The error is surfaced so
-// the caller can take the fail-closed path.
+// provider cannot be constructed (unsupported OS, no provider
+// registered, agent unavailable after the retry ladder). The error is
+// surfaced so the caller can take the fail-closed path.
 //
-// T5.2 note (construction-time signal): every call to this helper —
-// cached or fresh — updates setInspectionAvailability with the latest
-// Refresh outcome. But this helper is ONLY reached from inspector
-// construction (newManagedInspector) and the boot guardrail; it does
-// NOT run on every inspection. Per-inspection availability is fed by
-// the CiscoDefenseClawInspectClient's availability observer (wired at
-// construction in newManagedInspector via bindAvailabilityObserver),
-// which fires on every Token() outcome. Together the two paths mean
-// /health reflects reality within one inspection latency of a lane
-// state change — construction-time signal picks up config reloads,
-// per-request signal picks up in-flight auth drops on a live cached
-// provider.
+// Callers today are (a) newManagedInspector at inspector construction
+// and (b) the managedaid ProviderResolver bound in
+// sidecar_observability_v8_bootstrap.go, which invokes this helper on
+// every managedaid.Adapter.Deliver batch. Because (b) is per-batch —
+// and, indirectly through the inspect lane's own re-entries, close to
+// per-hook-decision — this helper must be cheap on the cached path.
+// Historically it called Refresh() on every cached invocation to
+// probe availability; that turned into a fresh CMID-broker IPC
+// round-trip per Deliver on both macOS and Windows, defeating the
+// whole point of the process-wide bearer-token cache.
+//
+// New behavior: the cached path is a plain pointer return. Availability
+// is signaled through two orthogonal, already-wired channels:
+//   - the CiscoDefenseClawInspectClient availability observer fires on
+//     every Token() outcome (wired in newManagedInspector via
+//     bindAvailabilityObserver), so a broker outage flips the health
+//     signal within one hook decision;
+//   - managedaid delivery outcomes bubble transport / auth failures
+//     back through the dispatcher's classifyStatus / classifyTransport
+//     path, which the destination health surface already inspects.
+//
+// Config reload / boot still Refresh via buildCMIDProvider on the
+// first-construction branch below, so the boot-time availability
+// signal is unchanged.
+//
+// The returned provider is wrapped with cloudreg.WithTokenCache so
+// consumers that call Token() at a high cadence (inspect lane per
+// hook, managedaid per batch) reuse the last-issued bearer token
+// until either the TTL expires or a 401 → Invalidate() clears it.
 func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
 	s.cmidProviderMu.Lock()
 	defer s.cmidProviderMu.Unlock()
 	if s.cmidProviderInst != nil {
-		// Refresh to check current availability. Keep the cached
-		// provider even on error — the provider's own Token()/
-		// Refresh() cycle handles per-call dlopen retries, so
-		// discarding the cache would just force a fresh cloudreg.New
-		// on the next hook without changing the outcome. Callers
-		// gate on the returned error, not the provider value.
-		err := s.cmidProviderInst.Refresh(ctx)
-		s.setInspectionAvailability(err)
-		if err != nil {
-			s.logCMIDBuildError("refresh-cached", err)
-		}
-		return s.cmidProviderInst, err
+		return s.cmidProviderInst, nil
 	}
 	prov, buildErr := s.buildCMIDProvider(ctx)
 	s.setInspectionAvailability(buildErr)
@@ -2405,8 +2423,15 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 	if prov == nil {
 		return nil, buildErr
 	}
-	s.cmidProviderInst = prov
-	return prov, buildErr
+	// Wrap once with the token cache before storing on the sidecar so
+	// every consumer that reaches for this provider observes the same
+	// cached bearer-token state. See cloudreg.WithTokenCache for the
+	// caching contract — notably that Invalidate() (called from the
+	// 401-retry path in doInspectHTTP and from managedaid.remint)
+	// drops the cache immediately, so a stale-token retry loop cannot
+	// form.
+	s.cmidProviderInst = cloudreg.WithTokenCache(prov, cmidProviderTokenCacheTTL)
+	return s.cmidProviderInst, buildErr
 }
 
 func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
