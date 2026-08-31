@@ -156,8 +156,11 @@ type AIDiscoveryOptions struct {
 	// anchor "~" expansion in candidate paths.
 	HomeDirs []string
 	// ManagedEnterprise mirrors deployment_mode == managed_enterprise. It
-	// controls only the managed endpoint-inventory callback; canonical v8
-	// telemetry remains owned by the bound observability runtime.
+	// gates the managed endpoint-inventory callback and the v8 observer
+	// EmitReport publish to the full-scan cadence (ScanIntervalMin) — the
+	// intra-cycle process tick is treated as a local refresh only. Canonical
+	// v8 scan-trace telemetry (StartScan / detector traces / End) remains
+	// owned by the bound observability runtime and fires on every tick.
 	ManagedEnterprise bool
 }
 
@@ -1086,7 +1089,7 @@ func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool,
 	s.lastErr = nil
 	s.mu.Unlock()
 
-	s.fanoutReport(ctx, report)
+	s.fanoutReport(ctx, report, full)
 	s.notifyReportObservers(ctx, report)
 	scanObservation.end(report)
 	return report, nil
@@ -1123,8 +1126,22 @@ func (s *ContinuousDiscoveryService) notifyReportObservers(ctx context.Context, 
 // path called ComputeComponentConfidence with its own
 // time.Now()). The snapshot is built lazily so default-config
 // installs (no OTel, redaction enabled) don't pay for a rollup
-// they'd discard.
-func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport) {
+// they'd discard. `full` mirrors the runScan tick kind so
+// managed_enterprise ships to AI Defense on the full-scan cadence
+// only, not on every process tick.
+func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport, full bool) {
+	// managed_enterprise ships the endpoint inventory to AI Defense
+	// on the FULL-scan cadence (ScanIntervalMin) only. The intra-cycle
+	// process-only tick (ProcessIntervalSec) is a local refresh — the
+	// non-process detectors do not re-run on it, so replaying the
+	// carried-forward inventory + firing the connector/MCP hook every
+	// process tick would flood the AID event-ingest endpoint without
+	// adding new information. Non-managed mode is unaffected: it has
+	// no managedInventoryEmit hook installed and the observer emission
+	// is per-report by design for local telemetry sinks.
+	if !full && s.opts.ManagedEnterprise {
+		return
+	}
 	observer := s.observabilityV8Snapshot()
 	v8On := observer != nil
 	// The generated v8 observer is the sole telemetry owner. Skip the rollup
@@ -3658,7 +3675,10 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 			enrichLocalModelProvenance(report.Signals[i].Model, modelProvenanceHints{})
 		}
 	}
-	s.fanoutReport(ctx, *report)
+	// External reports carry a complete inventory snapshot by contract
+	// (validated above), so treat the fanout as a full-scan cycle —
+	// managed_enterprise ships to AI Defense on this path as well.
+	s.fanoutReport(ctx, *report, true)
 	return nil
 }
 

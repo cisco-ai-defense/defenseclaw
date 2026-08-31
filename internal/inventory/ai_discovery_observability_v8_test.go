@@ -152,7 +152,7 @@ func TestAIDiscoveryV8FanoutUsesOneRollupAndDoesNotResurrectLegacyAfterDetach(t 
 			"signal-1", "pypi", "openai", "1.0.0", "workspace-1", AIStateNew, "OpenAI SDK",
 		)},
 	}
-	service.fanoutReport(t.Context(), report)
+	service.fanoutReport(t.Context(), report, true)
 	if len(capture.reports) != 1 || len(capture.components) != 1 || len(capture.components[0]) != 1 {
 		t.Fatalf("reports=%d components=%v", len(capture.reports), capture.components)
 	}
@@ -163,7 +163,7 @@ func TestAIDiscoveryV8FanoutUsesOneRollupAndDoesNotResurrectLegacyAfterDetach(t 
 	}
 
 	service.BindObservabilityV8(nil)
-	service.fanoutReport(t.Context(), report)
+	service.fanoutReport(t.Context(), report, true)
 	if len(capture.reports) != 1 {
 		t.Fatalf("detached v8 fanout resurrected an emitter: reports=%d", len(capture.reports))
 	}
@@ -199,8 +199,8 @@ func TestAIDiscoveryV8ModelLifecycleUsesInstallationKeyedPseudonym(t *testing.T)
 	service.BindObservabilityV8(capture)
 
 	SetPathHashKey([]byte("installation-a"))
-	service.fanoutReport(t.Context(), report)
-	service.fanoutReport(t.Context(), report)
+	service.fanoutReport(t.Context(), report, true)
+	service.fanoutReport(t.Context(), report, true)
 	if len(capture.reports) != 2 || len(capture.reports[0].Signals) != 1 {
 		t.Fatalf("reports=%d first=%+v", len(capture.reports), capture.reports)
 	}
@@ -216,13 +216,13 @@ func TestAIDiscoveryV8ModelLifecycleUsesInstallationKeyedPseudonym(t *testing.T)
 	}
 
 	SetPathHashKey([]byte("installation-b"))
-	service.fanoutReport(t.Context(), report)
+	service.fanoutReport(t.Context(), report, true)
 	thirdID := capture.reports[2].Signals[0].SignalID
 	if thirdID == firstID {
 		t.Fatalf("different installation keys produced the same lifecycle id %q", thirdID)
 	}
 	SetPathHashKey(nil)
-	service.fanoutReport(t.Context(), report)
+	service.fanoutReport(t.Context(), report, true)
 	if unkeyedID := capture.reports[3].Signals[0].SignalID; unkeyedID != "" {
 		t.Fatalf("unkeyed model lifecycle correlation was not omitted: %q", unkeyedID)
 	}
@@ -266,7 +266,7 @@ func TestAIDiscoveryV8DroppedTraceAndReportStayOnCanonicalAdapter(t *testing.T) 
 	report := AIDiscoveryReport{Summary: AIDiscoverySummary{
 		ScanID: "scan-drop", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok",
 	}}
-	service.fanoutReport(ctx, report)
+	service.fanoutReport(ctx, report, true)
 	observation.end(report)
 	observation.abort()
 
