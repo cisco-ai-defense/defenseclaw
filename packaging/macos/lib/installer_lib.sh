@@ -470,6 +470,45 @@ _native_claudecode_version_from_dir() {
   fi
 }
 
+# _claude_desktop_embedded_version_from_home HOME -> echoes the highest
+# embedded Claude Code version or "".
+#
+# Claude Desktop bundles Claude Code per user under:
+#
+#   ~/Library/Application Support/Claude/claude-code/<X.Y.Z>/claude.app/
+#     Contents/MacOS/claude
+#
+# and drops a convenience shim at ~/.local/bin/claude pointing into that
+# tree. The shim's basename-walk in _native_claudecode_version_from_bin
+# stops at "claude" / "MacOS" (neither is semver-shaped) so the version
+# has to be extracted from the parent-dir chain of the concrete binary.
+#
+# The desktop application version is not the Claude Code version, so the
+# version-labelled embedded bundle directory is the authoritative metadata
+# source. Metadata-only: readdir + basename, no exec of a desktop- or
+# user-bundled binary during installer discovery.
+#
+# Ported from PR #798 (author @rucpande, AIFW-32990) into this release-
+# branch fix — see docs/PLAN-consolidate-hook-enumerator.md for the
+# larger main-branch consolidation this probe eventually lives inside.
+_claude_desktop_embedded_version_from_home() {
+  local home="$1"
+  local root="${home}/Library/Application Support/Claude/claude-code"
+  [[ -d "${root}" ]] || return 0
+  local -r semver_re='^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$'
+  local bin version_dir version best=""
+  for bin in "${root}"/*/claude.app/Contents/MacOS/claude; do
+    [[ -x "${bin}" ]] || continue
+    version_dir="$(dirname -- "$(dirname -- "$(dirname -- "$(dirname -- "${bin}")")")")"
+    version="$(basename -- "${version_dir}")"
+    [[ "${version}" =~ ${semver_re} ]] || continue
+    if [[ -z "${best}" ]] || _semver_gt "${version}" "${best}"; then
+      best="${version}"
+    fi
+  done
+  [[ -n "${best}" ]] && echo "${best}"
+}
+
 # _semver_gt A B -> exit 0 iff A > B under SemVer 2.0.0 precedence.
 #
 # Ordering is: MAJOR.MINOR.PATCH first (numeric), then prerelease tail.
@@ -895,6 +934,17 @@ discover_agent_version() {
       # meets MIN_CLAUDECODE_VERSION; if nothing clears the minimum,
       # the highest overall is still emitted so the Go hook gate
       # reports drift rather than the noisier "unversioned".
+      #
+      # Claude Desktop-bundled probe first: newer Claude Desktop builds
+      # ship the CLI under ~/Library/Application Support/Claude/
+      # claude-code/<X.Y.Z>/ and drop a shim at ~/.local/bin/claude
+      # whose readlink target is the deep binary — the shim's
+      # basename-walk yields "claude"/"MacOS" (both non-semver) so we
+      # have to consult the bundle directory directly. Ported from
+      # PR #798 (author @rucpande, AIFW-32990).
+      v="$(_claude_desktop_embedded_version_from_home "${home}")"
+      [[ -n "${v}" ]] && versions+=("${v}")
+
       for base in \
         "${home}/.local/share/claude" \
         /opt/claude \
@@ -1132,12 +1182,93 @@ enumerate_local_users() {
 #
 # One `- ` block per (user × supported-and-installed connector).
 # Unsupported connectors (not in is_supported_connector) are skipped: they
-# have no per-user setup path in the CLI. Connectors the caller asked for
-# but which discover_agent_version could not locate on THIS user's home
-# ARE ALSO skipped — no CLI/app/extension present means there is nothing
-# to hook, and emitting the row would just churn the guardian with a
-# permanent "agent_version empty" failure per tick. Users who install the
-# connector later are picked up by the hook-enumerator's next re-render.
+# have no per-user setup path in the CLI.
+#
+# Connectors the caller asked for but which discover_agent_version could
+# not locate on THIS user's home used to be skipped unconditionally. That
+# rule made an unrecoverable "silent drop" whenever the CLI was installed
+# via a channel discover_agent_version does not probe (Bun, pnpm, custom
+# PATH shim, Homebrew tap, etc.) — the row never appeared in
+# targets.yaml, the guardian never installed hooks, and the operator got
+# no diagnostic pointing at the discovery gap.
+#
+# Now: when the version probe returns empty, fall back to a cheap per-user
+# PRESENCE signal (connector_present_for_user). If the connector's user
+# config surface exists on this user, emit the row with an empty
+# agent_version and let the Go guardian handle it — the sidecar's
+# ResolveHookContract has an Unversioned branch that returns the
+# connector's DefaultForUnversioned contract. In `action` mode the Go
+# guardian's validateHookContract still fail-shuts per-target (unless
+# DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1), which surfaces the failure in
+# protected_targets.json — infinitely better than a silent drop. In
+# observability / audit modes the target wires end-to-end. If the presence
+# signal is also absent, the row is still skipped as before.
+
+# connector_present_for_user CONNECTOR HOME -> exit 0 iff there is a
+# per-user artifact on disk indicating the user has actually used this
+# connector's CLI, even when discover_agent_version could not resolve the
+# install path. Used as a fallback presence check in render_targets_manifest
+# so a CLI installed via a channel we don't probe still gets a manifest row.
+#
+# CRITICAL: none of the signals below may match a directory or file that
+# prepare_userspace_for (this same library, above) creates as part of
+# installer bootstrap. Otherwise every DefenseClaw pkg install would
+# create the presence marker itself, the fallback would fire for every
+# eligible user × connector, and the guardian would churn on connectors
+# the user has never touched.
+#
+# Blocked signals (DefenseClaw-authored — must NOT be checked here):
+#   claudecode: ~/.claude, ~/.claude/settings.json
+#   codex:      ~/.codex, ~/.codex/config.toml
+#   cursor:     ~/.cursor, ~/.cursor/hooks.json
+#
+# Allowed signals below are artifacts the connector's CLI itself
+# creates on first launch — never anything prepare_userspace_for nor
+# an unrelated app could scatter.
+connector_present_for_user() {
+  local connector="$1"
+  local home="$2"
+  [[ -n "${home}" ]] || return 1
+  case "${connector}" in
+    claudecode)
+      # ~/.claude.json is Claude Code CLI's project-trust file at the
+      # home root; DefenseClaw never touches it. The subdirs under
+      # ~/.claude below are CLI runtime state (sessions, per-project
+      # data, env snapshots per session) — the DART bundle from the
+      # customer that motivated this fix showed all three populated on
+      # a box where DefenseClaw's discover_agent_version came up empty.
+      # Claude Desktop uses ~/Library/Application Support/Claude/ and
+      # does NOT populate ~/.claude, so each of these is CLI-specific.
+      [[ -f "${home}/.claude.json" ]] && return 0
+      [[ -d "${home}/.claude/sessions" ]] && return 0
+      [[ -d "${home}/.claude/projects" ]] && return 0
+      [[ -d "${home}/.claude/session-env" ]] && return 0
+      ;;
+    codex)
+      # Codex CLI runtime artifacts. history.jsonl is written on every
+      # chat exchange; auth.json holds the OAuth cache after first
+      # login; log/ is created the first time codex boots. Any of them
+      # implies actual CLI use. DefenseClaw only writes config.toml.
+      [[ -d "${home}/.codex/log" ]] && return 0
+      [[ -f "${home}/.codex/history.jsonl" ]] && return 0
+      [[ -f "${home}/.codex/auth.json" ]] && return 0
+      ;;
+    cursor)
+      # Cursor IDE runtime artifacts. extensions/ is populated the
+      # first time the IDE launches (even with zero third-party
+      # extensions, a manifest file is written); argv.json is the
+      # editor's saved-startup-args file. DefenseClaw only writes
+      # hooks.json. The version probe already covers Cursor via the
+      # extension package.json path — this branch is a symmetry /
+      # robustness fallback for hosts whose extension dir metadata is
+      # transiently unreadable at enumeration time.
+      [[ -d "${home}/.cursor/extensions" ]] && return 0
+      [[ -f "${home}/.cursor/argv.json" ]] && return 0
+      ;;
+  esac
+  return 1
+}
+
 yaml_double_quoted_scalar() {
   local value="$1"
   case "${value}" in
@@ -1188,7 +1319,15 @@ render_targets_manifest() {
       is_supported_connector "${c}" || continue
       q_connector="$(yaml_double_quoted_scalar "${c}")" || continue
       ver="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_version "${c}" "${home}" 2>/dev/null || true)"
-      [[ -n "${ver}" ]] || continue
+      if [[ -z "${ver}" ]]; then
+        # Version probe came up empty. Only emit a row when a cheap
+        # user-scoped presence signal proves the connector CLI has been
+        # used on this account — otherwise the guardian churns forever
+        # trying to install hooks for a CLI that doesn't exist here. See
+        # connector_present_for_user above and render_targets_manifest's
+        # header comment for the full rationale.
+        connector_present_for_user "${c}" "${home}" || continue
+      fi
       q_ver="$(yaml_double_quoted_scalar "${ver}")" || q_ver='""'
       # data_dir is intentionally omitted from each target block: the
       # guardian's validateUserDataDir requires the data_dir to be inside
