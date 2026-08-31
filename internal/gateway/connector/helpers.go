@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -695,11 +696,29 @@ func isDefenseClawManagedHookExecutable(exe string) bool {
 		canonicalNativeWindowsHookBinary(),
 		canonicalNativeWindowsInstalledHookBinary(),
 	}) {
-		if pathidentity.Same(exe, owned) {
+		if sameManagedHookExecutablePath(exe, owned) {
 			return true
 		}
 	}
 	return false
+}
+
+func sameManagedHookExecutablePath(left, right string) bool {
+	if pathidentity.Same(left, right) {
+		return true
+	}
+	// Hermes normalizes the exact managed Windows executable to forward
+	// slashes before passing it to its shell-free argv parser. Keep ownership
+	// recognition host-independent for contract tests without accepting a
+	// foreign Windows path: both sides must be drive-absolute, cleaned, and
+	// equal case-insensitively after separator normalization.
+	if !isWindowsDriveAbsolutePath(left) || !isWindowsDriveAbsolutePath(right) {
+		return false
+	}
+	cleanWindows := func(value string) string {
+		return path.Clean(strings.ReplaceAll(value, `\`, "/"))
+	}
+	return strings.EqualFold(cleanWindows(left), cleanWindows(right))
 }
 
 // isWindowsDriveAbsolutePath keeps host-independent connector tests faithful

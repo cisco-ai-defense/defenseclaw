@@ -1595,6 +1595,18 @@ func TestWindowsDriveAbsoluteHookPath(t *testing.T) {
 	if !isWindowsDriveAbsolutePath(`C:\Program Files\DefenseClaw\defenseclaw-hook.exe`) {
 		t.Fatal("drive-rooted Windows hook path was not recognized as absolute")
 	}
+	if !sameManagedHookExecutablePath(
+		`C:/Program Files/DefenseClaw/defenseclaw-hook.exe`,
+		`c:\Program Files\DefenseClaw\defenseclaw-hook.exe`,
+	) {
+		t.Fatal("Hermes-normalized Windows hook path did not match the managed executable")
+	}
+	if sameManagedHookExecutablePath(
+		`C:/Tools/defenseclaw-hook.exe`,
+		`C:\Program Files\DefenseClaw\defenseclaw-hook.exe`,
+	) {
+		t.Fatal("foreign Windows hook path was recognized as the managed executable")
+	}
 	setHookBinaryOverride(t, `C:defenseclaw-hook.exe`)
 	if isDefenseClawManagedHookExecutable(defenseclawHookBinaryOverride) {
 		t.Fatal("drive-relative Windows hook path was recognized as managed")
