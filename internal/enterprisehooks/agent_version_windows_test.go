@@ -296,8 +296,12 @@ func TestWindowsAgentVersionExplainRejectsControlCharsInVersion(t *testing.T) {
 	}
 	for _, hostile := range cases {
 		home := t.TempDir()
-		dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")
-		writeWindowsAgentPackageJSON(t, dir, hostile)
+		// Write the hostile package.json to ALL candidate paths for
+		// codex so that later candidates don't overwrite lastReason
+		// with "no codex package.json under this profile".
+		for _, dir := range windowsAgentVersionCandidatePaths(home, "codex") {
+			writeWindowsAgentPackageJSON(t, filepath.Dir(dir), hostile)
+		}
 		version, reason := windowsAgentVersionExplain(home, "codex")
 		if version != "" {
 			t.Fatalf("explain hostile version %q: got %q, want empty", hostile, version)
