@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -969,5 +970,48 @@ func TestAdapterRejectsOversizedAcknowledgement(t *testing.T) {
 	}
 	if err := dispatcher.Close(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSanitizeTransportErrorDoesNotLeakEndpoint locks in that the
+// sanitized error string used on `[managedaid] POST AI DEFENSE`
+// stderr lines never carries the redacted URL nor the resolved
+// remote address, even when the underlying transport failure is a
+// *net.OpError wrapped inside a *url.Error (the shape
+// net/http.Client.Do produces for dial/read failures).
+func TestSanitizeTransportErrorDoesNotLeakEndpoint(t *testing.T) {
+	endpoint := "https://redacted.example.internal:8443/v1/logs"
+	remoteAddr := &net.TCPAddr{IP: net.ParseIP("10.99.88.77"), Port: 4433}
+	opErr := &net.OpError{
+		Op:     "dial",
+		Net:    "tcp",
+		Addr:   remoteAddr,
+		Source: nil,
+		Err:    errors.New("connection refused"),
+	}
+	urlErr := &url.Error{Op: "Post", URL: endpoint, Err: opErr}
+
+	sanitized := sanitizeTransportError(urlErr)
+	if sanitized == nil {
+		t.Fatalf("sanitizeTransportError returned nil for a non-nil error")
+	}
+	text := sanitized.Error()
+	for _, forbidden := range []string{
+		endpoint,
+		"redacted.example.internal",
+		remoteAddr.String(),
+		remoteAddr.IP.String(),
+		"connection refused",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("sanitized error %q leaks %q", text, forbidden)
+		}
+	}
+	if text == "" {
+		t.Fatalf("sanitized error is empty; expected a category label")
+	}
+
+	if sanitizeTransportError(nil) != nil {
+		t.Fatalf("sanitizeTransportError(nil) must return nil")
 	}
 }

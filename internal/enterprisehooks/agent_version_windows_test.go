@@ -226,6 +226,35 @@ func TestDiscoverWindowsAgentVersionRejectsEmptyVersionField(t *testing.T) {
 	}
 }
 
+// TestDiscoverWindowsAgentVersionRejectsControlCharsInVersion guards
+// the auto-authorization audit line against a user-controlled
+// package.json planting a multi-line "version" string that could
+// forge additional log entries. Embedded LF / CR / other control
+// characters must trip the version validator and cause a silent
+// drop.
+func TestDiscoverWindowsAgentVersionRejectsControlCharsInVersion(t *testing.T) {
+	cases := map[string]string{
+		"newline":       "1.2.3\nFAKE audit line",
+		"carriage":      "1.2.3\rFAKE",
+		"tab":           "1.2.3\tFAKE",
+		"null":          "1.2.3\x00FAKE",
+		"escape":        "1.2.3\x1b[31mFAKE",
+		"del":           "1.2.3\x7fFAKE",
+		"too-long":      strings.Repeat("9", windowsAgentVersionMaxRunes+1),
+		"empty-trimmed": "",
+	}
+	for name, version := range cases {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code")
+			writeWindowsAgentPackageJSON(t, dir, version)
+			if got := discoverWindowsAgentVersion(home, "claudecode"); got != "" {
+				t.Fatalf("hostile version %q: got %q, want empty (drop)", version, got)
+			}
+		})
+	}
+}
+
 func TestWindowsAgentVersionExplainSurfacesReasons(t *testing.T) {
 	home := t.TempDir()
 	// Not installed → explain should report "no <connector>

@@ -33,6 +33,13 @@ import (
 // a legitimate agent update never trips it.
 const windowsAgentVersionMaxBytes = 64 * 1024
 
+// windowsAgentVersionMaxRunes caps the length of the accepted
+// `version` string. Real semvers even with build metadata sit well
+// under 64 chars; the ceiling exists so a user-controlled
+// package.json cannot feed a multi-KB blob into the audit log the
+// enumerator emits when it auto-authorizes a `(SID, Connector)` row.
+const windowsAgentVersionMaxRunes = 128
+
 // windowsAgentPackageJSON is the shape we care about — just the
 // `version` field. json.Decoder.DisallowUnknownFields is NOT used
 // because npm CLIs ship dozens of other fields; we ignore them.
@@ -243,10 +250,39 @@ func readWindowsAgentVersionCandidate(candidate string) (string, bool) {
 		return "", false
 	}
 	version := strings.TrimSpace(parsed.Version)
-	if version == "" {
+	if !isValidWindowsAgentVersion(version) {
 		return "", false
 	}
 	return version, true
+}
+
+// isValidWindowsAgentVersion reports whether `version` is safe to
+// return from a `package.json` probe. The value flows into the
+// enumerator's auto-authorization audit line, so a hostile user
+// profile that plants `version: "1.2.3\nFAKE audit line"` in an
+// otherwise plausible package.json could otherwise forge a
+// multi-line diagnostic. Reject any control character (including
+// embedded newlines) and enforce a small length ceiling; real
+// semvers with build metadata sit well under the cap.
+func isValidWindowsAgentVersion(version string) bool {
+	if version == "" {
+		return false
+	}
+	if len(version) > windowsAgentVersionMaxRunes {
+		return false
+	}
+	for _, r := range version {
+		if r == '\r' || r == '\n' || r == '\t' {
+			return false
+		}
+		// Broader control-character sweep: category Cc covers ASCII
+		// 0x00-0x1F / 0x7F and the C1 range, none of which appear in
+		// legitimate semver / build-metadata strings.
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // windowsAgentVersionExplain is a diagnostic wrapper used by the

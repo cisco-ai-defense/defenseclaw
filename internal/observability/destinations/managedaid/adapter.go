@@ -460,25 +460,67 @@ func classifyStatus(status int) delivery.DeliveryOutcome {
 }
 
 // sanitizeTransportError returns an error safe to include in stderr
-// log lines that deliberately redact the AI Defense endpoint URL.
-// net/http.Client.Do wraps transport failures in *url.Error whose
-// Error() method prints the request URL verbatim (documented in
-// net/url; format is `<Op> "<URL>": <inner>`). Formatting that raw
-// error with %v defeats the URL redaction on the `[managedaid] POST
-// AI DEFENSE ...` info lines. Unwrap the URL layer once and return
-// the inner cause, preserving the diagnostic text (e.g. "dial tcp:
-// connection refused", "context deadline exceeded") without leaking
-// the endpoint. A nil error or an error not wrapping *url.Error
-// passes through unchanged.
+// log lines that deliberately redact the AI Defense endpoint URL and
+// resolved socket address. net/http.Client.Do wraps transport
+// failures in *url.Error whose Error() method prints the request URL
+// verbatim (documented in net/url; format is
+// `<Op> "<URL>": <inner>`). Formatting that raw error with %v
+// defeats the URL redaction on the `[managedaid] POST AI DEFENSE
+// ...` info lines. But the wrapped inner cause is often itself a
+// *net.OpError whose Error() includes the resolved remote Addr
+// (source [-> ]addr) — logging that verbatim would leak the same
+// endpoint we deliberately redacted at the URL layer. Map the error
+// to a short, address-free category label so the operator still
+// gets diagnostic signal (dial vs. read vs. TLS vs. context) without
+// disclosing endpoint or address details. A nil error passes
+// through unchanged.
 func sanitizeTransportError(err error) error {
 	if err == nil {
 		return nil
 	}
+	inner := err
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Err != nil {
-		return urlErr.Err
+		inner = urlErr.Err
 	}
-	return err
+	return errors.New(transportErrorCategory(inner))
+}
+
+// transportErrorCategory maps a transport error to a short label
+// safe to log. The label is chosen from a fixed set — none of them
+// contain the endpoint URL, resolved address, or SNI hostname.
+func transportErrorCategory(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context deadline exceeded"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "connection closed"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		// opErr.Op describes the operation (dial/read/write/tls) and is
+		// a fixed set of Go-emitted strings; it never contains the
+		// remote address. Combine it with the closest safe classifier
+		// we can extract without falling back to opErr.Error() (which
+		// would re-inject the address).
+		op := opErr.Op
+		switch {
+		case opErr.Timeout():
+			return op + " timeout"
+		case op != "":
+			return op + " error"
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return "network timeout"
+		}
+		return "network error"
+	}
+	return "transport error"
 }
 
 func classifyTransportError(err error, wrote bool) delivery.DeliveryOutcome {

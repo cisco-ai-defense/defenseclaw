@@ -104,8 +104,8 @@ func platformDiscoveryHomeDirs() []string {
 		if expandErr != nil {
 			expanded = raw
 		}
-		expanded = filepath.Clean(strings.TrimSpace(expanded))
-		if expanded == "" {
+		expanded, ok := normalizeProfileImagePath(expanded)
+		if !ok {
 			continue
 		}
 		if fi, err := os.Stat(expanded); err != nil || !fi.IsDir() {
@@ -119,6 +119,26 @@ func platformDiscoveryHomeDirs() []string {
 		out = append(out, expanded)
 	}
 	return out
+}
+
+// normalizeProfileImagePath trims and cleans a raw ProfileImagePath
+// registry value and reports whether it is safe to use as a discovery
+// home root. `filepath.Clean("")` returns "." — a whitespace-only or
+// otherwise blank registry value must NOT collapse into the process
+// working directory, which under managed-enterprise mode would become
+// a discovery HomeDir and misdirect the AI discovery scanner at the
+// service CWD. Reject the trimmed empty value BEFORE calling Clean,
+// and defensively reject a post-Clean "." for the same reason.
+func normalizeProfileImagePath(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+	cleaned := filepath.Clean(trimmed)
+	if cleaned == "" || cleaned == "." {
+		return "", false
+	}
+	return cleaned, true
 }
 
 // isInteractiveUserSID reports whether sid names a local or domain user

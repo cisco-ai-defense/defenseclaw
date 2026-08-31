@@ -107,7 +107,12 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 			switch {
 			case err != nil:
 				failed++
-				logfSafely(logf, target.SID, fmt.Sprintf("inventory-DACL grant %s: %v", path, err))
+				// Log only the dotdir identifier and a sanitized error
+				// category, never the absolute path (`C:\Users\<name>\.claude`)
+				// or the wrapped Windows error text — the CLI enumeration
+				// logger writes this verbatim to stderr and the target's SID
+				// is already captured as the log-line prefix.
+				logfSafely(logf, target.SID, fmt.Sprintf("inventory-DACL grant dotdir=%s: %s", dotdir, sanitizeInventoryDACLError(err)))
 			case result == inventoryDACLGranted:
 				granted++
 			case result == inventoryDACLAlreadyPresent:
@@ -245,6 +250,34 @@ func daclContainsInventoryReadACE(acl *windows.ACL, sid *windows.SID) bool {
 		return true
 	}
 	return false
+}
+
+// sanitizeInventoryDACLError maps `err` to a short category label
+// safe to write into the enumeration log line. The Windows syscall
+// errors wrapped inside `ensureInventoryReadACE` failures often
+// stringify with the offending path (e.g. `stat` -> `os.PathError`,
+// whose Error() includes the absolute `C:\Users\<name>\.claude` path
+// verbatim). Emitting a category instead of the wrapped message
+// preserves the diagnostic signal — "permission-denied" vs
+// "not-found" vs other — without leaking the user's profile
+// location to the stderr audit stream.
+func sanitizeInventoryDACLError(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "not-found"
+	case errors.Is(err, os.ErrPermission):
+		return "permission-denied"
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
+		return "permission-denied"
+	case errors.Is(err, windows.ERROR_FILE_NOT_FOUND),
+		errors.Is(err, windows.ERROR_PATH_NOT_FOUND):
+		return "not-found"
+	default:
+		return "other"
+	}
 }
 
 // discoverGatewayServiceName looks up the DefenseClaw gateway service via the
