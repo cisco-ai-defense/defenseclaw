@@ -184,12 +184,12 @@ func NewCursorConnector() *hookOnlyConnector {
 				},
 				BlockEvents: []string{
 					"preToolUse",
+					"subagentStart",
 					"beforeShellExecution",
 					"beforeMCPExecution",
 					"beforeReadFile",
 					"beforeTabFileRead",
 					"beforeSubmitPrompt",
-					"stop",
 				},
 				SupportsFailClosed: true,
 				Scope:              "user",
@@ -414,26 +414,6 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	// (declared on the hermes hook contract), and its wire replies are
 	// shaped by the hermes case in hookOnlyProfileRespond.
 	return ApplyHookContract(profile, opts)
-}
-
-// Cursor documents generation_id as the identifier for one user-message
-// generation. Keep that connector-native turn mapping out of the generic
-// decoder so another connector's generation identifier cannot become a turn.
-func cursorProfileDecode(payload map[string]interface{}) HookProfileRequest {
-	return HookProfileRequest{
-		ConnectorName: "cursor",
-		HookEventName: hookFirstString(payload,
-			"hook_event_name", "hookEventName",
-			"event_type", "eventType",
-			"event_name", "eventName",
-			"agent_action_name",
-		),
-		TurnID: hookFirstString(payload,
-			"generation_id", "generationId",
-			"turn_id", "turnId", "turnID",
-		),
-		Payload: payload,
-	}
 }
 
 // Windsurf documents execution_id as one Cascade agent turn. This is a
@@ -1366,16 +1346,30 @@ func hermesConfigPath(SetupOpts) string {
 // plugin in opencode's global auto-load directory. opencode loads any
 // JS/TS file under ~/.config/opencode/plugins/ at startup, so writing
 // the file is the entire install — no opencode.json edit is required.
-func opencodePluginPath(SetupOpts) string {
+func opencodePluginPath(opts SetupOpts) string {
 	if OpenCodePluginPathOverride != "" {
 		return OpenCodePluginPathOverride
+	}
+	if configDir := strings.TrimSpace(opts.ConfigHome); configDir != "" {
+		return filepath.Join(configDir, "plugins", "defenseclaw.js")
+	}
+	if configDir := strings.TrimSpace(os.Getenv("OPENCODE_CONFIG_DIR")); configDir != "" {
+		if absolute, err := filepath.Abs(configDir); err == nil {
+			return filepath.Join(absolute, "plugins", "defenseclaw.js")
+		}
 	}
 	return homePath(".config", "opencode", "plugins", "defenseclaw.js")
 }
 
-func cursorHooksPath(SetupOpts) string {
+func cursorHooksPath(opts SetupOpts) string {
 	if CursorHooksPathOverride != "" {
 		return CursorHooksPathOverride
+	}
+	if configHome := strings.TrimSpace(opts.ConfigHome); configHome != "" {
+		return filepath.Join(configHome, "hooks.json")
+	}
+	if configHome := strings.TrimSpace(os.Getenv("CURSOR_CONFIG_DIR")); configHome != "" {
+		return filepath.Join(configHome, "hooks.json")
 	}
 	return homePath(".cursor", "hooks.json")
 }

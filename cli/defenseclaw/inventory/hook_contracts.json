@@ -970,19 +970,21 @@
             ],
             "block_events": [
               "preToolUse",
+              "subagentStart",
               "beforeShellExecution",
               "beforeMCPExecution",
               "beforeReadFile",
               "beforeTabFileRead",
-              "beforeSubmitPrompt",
-              "stop"
+              "beforeSubmitPrompt"
             ],
             "supports_fail_closed": true,
             "scope": "user"
           },
           "notes": [
-            "Cursor 1.7 introduced beta hooks for the agent loop.",
-            "Cursor native ask is limited to beforeShellExecution and beforeMCPExecution."
+            "Cursor command hooks use documented per-event payloads; specialized shell, MCP, file, prompt, and result fields are projected into the shared scanner contract.",
+            "Cursor native ask is limited to beforeShellExecution and beforeMCPExecution.",
+            "preToolUse, subagentStart, shell/MCP gates, file-read gates, and beforeSubmitPrompt can deny. stop is follow-up-only and cannot block termination.",
+            "Every command-hook invocation returns a non-empty JSON object; beforeSubmitPrompt uses continue while permission gates use permission."
           ]
         }
       ]

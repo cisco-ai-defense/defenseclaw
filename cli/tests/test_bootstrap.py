@@ -186,6 +186,33 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
 
+    def test_cursor_readiness_honors_cursor_config_dir(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        config_home = os.path.join(self._tmp.name, "cursor-config")
+        os.makedirs(config_home)
+        with open(os.path.join(config_home, "hooks.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"version": 1, "hooks": {}}\n')
+
+        with patch.dict(os.environ, {"CURSOR_CONFIG_DIR": config_home}):
+            result = _connector_readiness(cfg, "cursor")
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("Cursor hooks found", result.detail)
+
+    def test_opencode_readiness_honors_opencode_config_dir(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        config_home = os.path.join(self._tmp.name, "opencode-config")
+        plugin_dir = os.path.join(config_home, "plugins")
+        os.makedirs(plugin_dir)
+        with open(os.path.join(plugin_dir, "defenseclaw.js"), "w", encoding="utf-8") as fh:
+            fh.write("// DefenseClaw test bridge\n")
+
+        with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": config_home}):
+            result = _connector_readiness(cfg, "opencode")
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("OpenCode bridge plugin found", result.detail)
+
     def test_omnigent_readiness_honors_config_home(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "omnigent-config")

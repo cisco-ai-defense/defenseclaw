@@ -1,11 +1,13 @@
 ---
 title: Connectors and enforcement
-description: Exact native Windows Codex, Claude Code, Amp, and Hermes event coverage, action boundaries, fail modes, and runtime controls.
+description: Exact native Windows Codex, Claude Code, Amp, Hermes, OpenCode, and Cursor event coverage, action boundaries, fail modes, and runtime controls.
 keywords:
   - DefenseClaw Windows Codex
   - DefenseClaw Windows Claude Code
   - DefenseClaw Windows Amp
   - DefenseClaw Windows Hermes
+  - DefenseClaw Windows OpenCode
+  - DefenseClaw Windows Cursor
   - DefenseClaw Windows action mode
   - DefenseClaw Windows fail closed
   - DefenseClaw Windows hooks
@@ -13,7 +15,10 @@ keywords:
 
 Native Windows enforcement is connector-native and hook/plugin-only. Codex,
 Claude Code, and Hermes invoke `defenseclaw-hook.exe`; Amp loads an owner-only TypeScript
-system-policy plugin. The hook or plugin authenticates to the same-user
+system-policy plugin, OpenCode loads an owner-only JavaScript bridge plugin,
+and Cursor invokes a same-user PowerShell adapter that streams into the native
+hook launcher.
+The hook or plugin authenticates to the same-user
 loopback gateway, and the gateway maps a policy verdict back into that event's
 documented response shape.
 
@@ -38,6 +43,8 @@ defenseclaw setup codex --mode observe
 defenseclaw setup claude-code --mode observe
 defenseclaw setup amp --mode observe
 defenseclaw setup hermes --mode observe
+defenseclaw setup opencode --mode observe
+defenseclaw setup cursor --mode observe
 ```
 
 After reviewing the event inventory and policy, promote one connector at a
@@ -48,6 +55,8 @@ defenseclaw setup codex --mode action
 defenseclaw setup claude-code --mode action
 defenseclaw setup amp --mode action
 defenseclaw setup hermes --mode action
+defenseclaw setup opencode --mode action
+defenseclaw setup cursor --mode action
 defenseclaw guardrail status
 ```
 
@@ -198,6 +207,53 @@ and restores or surgically removes its entries during teardown. Restart Hermes
 after setup, removal, or repair because a running process retains its loaded
 callbacks.
 
+## OpenCode (preview)
+
+DefenseClaw installs the native Windows bridge at:
+
+```text
+%USERPROFILE%\.config\opencode\plugins\defenseclaw.js
+```
+
+`OPENCODE_CONFIG_DIR` overrides the configuration directory. OpenCode loads
+global JavaScript/TypeScript plugins directly, so this path needs no shell,
+Git Bash, `jq`, WSL, or `defenseclaw-hook.exe`. The plugin reads its
+connector-scoped token sidecar for each request and talks only to the
+same-user loopback gateway.
+
+`tool.execute.before` awaits the local verdict and throws an error when action
+mode returns a block, preventing the tool from executing. `tool.execute.after`
+is awaited for reliable outcome attribution but remains telemetry-only because
+the tool has already run. OpenCode exposes no native ask or context-injection
+response through this plugin contract. The preview validation point is the
+official signed OpenCode `1.18.14` Windows x64 client.
+
+## Cursor (preview)
+
+DefenseClaw appends its managed entries to Cursor's user-scoped hook file:
+
+```text
+%USERPROFILE%\.cursor\hooks.json
+```
+
+The official `CURSOR_CONFIG_DIR` override selects a different Cursor
+configuration directory. On native Windows the hook command launches
+`%USERPROFILE%\.defenseclaw\hooks\cursor-hook.ps1` by default; that adapter streams Cursor's
+stdin JSON directly to `defenseclaw-hook.exe hook --connector cursor` through
+an absolute same-user process boundary. It does not require Git Bash, `jq`, or
+WSL.
+
+`beforeShellExecution` and `beforeMCPExecution` can return Cursor's native
+allow, deny, or ask verdict before execution. `preToolUse`, `subagentStart`,
+`beforeReadFile`, `beforeTabFileRead`, and `beforeSubmitPrompt` can deny but do
+not provide a resumable native ask. `stop` is follow-up-only and is observed,
+not treated as a termination block. Post-execution events remain
+telemetry-only. Cursor's specialized top-level shell command, string-encoded
+MCP parameters, file content/edits, prompt text, and result fields are decoded
+into the same typed local scanner contract used by the other connectors.
+The Windows preview does not imply managed-enterprise installation or
+hardening.
+
 ## Fail behavior
 
 A fresh installation defaults to `closed`; a migrated older configuration may
@@ -220,6 +276,8 @@ defenseclaw guardrail fail-mode closed --connector codex --yes
 defenseclaw guardrail fail-mode closed --connector claudecode --yes
 defenseclaw guardrail fail-mode closed --connector amp --yes
 defenseclaw guardrail fail-mode closed --connector hermes --yes
+defenseclaw guardrail fail-mode closed --connector opencode --yes
+defenseclaw guardrail fail-mode closed --connector cursor --yes
 defenseclaw guardrail status
 ```
 

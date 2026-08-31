@@ -75,6 +75,76 @@ func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentHookRequestCursorSpecializedEventsStayTyped(t *testing.T) {
+	profile := connector.NewCursorConnector().HookProfile(connector.SetupOpts{})
+
+	shellRaw := []byte(`{"hook_event_name":"beforeShellExecution","conversation_id":"cursor-session","generation_id":"cursor-turn","command":"az account show","cwd":"C:\\work"}`)
+	var shellPayload map[string]interface{}
+	if err := json.Unmarshal(shellRaw, &shellPayload); err != nil {
+		t.Fatal(err)
+	}
+	shell := normalizeAgentHookRequestWithRawProfile("cursor", shellPayload, shellRaw, profile)
+	if shell.ToolName != "Shell" || shell.CWD != `C:\work` || shell.ToolArgsProjectionUncertain {
+		t.Fatalf("specialized shell projection=%+v", shell)
+	}
+	var shellArgs map[string]interface{}
+	if err := json.Unmarshal(shell.ToolArgs, &shellArgs); err != nil {
+		t.Fatal(err)
+	}
+	if shellArgs["command"] != "az account show" {
+		t.Fatalf("shell args=%#v", shellArgs)
+	}
+
+	// The official Windows Cursor Agent emits cwd:"" today. Blank optional
+	// context must not poison an otherwise authoritative command projection.
+	emptyCWDRaw := []byte(`{"hook_event_name":"beforeShellExecution","conversation_id":"cursor-session","generation_id":"cursor-turn","command":"az keyvault secret show --vault-name missing --name test","cwd":"","sandbox":false}`)
+	var emptyCWDPayload map[string]interface{}
+	if err := json.Unmarshal(emptyCWDRaw, &emptyCWDPayload); err != nil {
+		t.Fatal(err)
+	}
+	emptyCWD := normalizeAgentHookRequestWithRawProfile("cursor", emptyCWDPayload, emptyCWDRaw, profile)
+	if emptyCWD.CWD != "" || emptyCWD.ToolArgsProjectionUncertain {
+		t.Fatalf("blank optional cwd projection=%+v", emptyCWD)
+	}
+	var emptyCWDArgs map[string]interface{}
+	if err := json.Unmarshal(emptyCWD.ToolArgs, &emptyCWDArgs); err != nil {
+		t.Fatal(err)
+	}
+	if emptyCWDArgs["command"] != "az keyvault secret show --vault-name missing --name test" {
+		t.Fatalf("blank cwd shell args=%#v", emptyCWDArgs)
+	}
+	if _, exists := emptyCWDArgs["cwd"]; exists {
+		t.Fatalf("blank optional cwd was forwarded: %#v", emptyCWDArgs)
+	}
+	if _, exists := emptyCWDArgs["sandbox"]; exists {
+		t.Fatalf("Cursor control metadata was forwarded as command input: %#v", emptyCWDArgs)
+	}
+
+	mcpRaw := []byte(`{"hook_event_name":"beforeMCPExecution","conversation_id":"cursor-session","generation_id":"cursor-turn","tool_name":"search","tool_input":"{\"query\":\"status\"}","mcp_server_name":"local-docs"}`)
+	var mcpPayload map[string]interface{}
+	if err := json.Unmarshal(mcpRaw, &mcpPayload); err != nil {
+		t.Fatal(err)
+	}
+	mcp := normalizeAgentHookRequestWithRawProfile("cursor", mcpPayload, mcpRaw, profile)
+	var mcpArgs map[string]interface{}
+	if err := json.Unmarshal(mcp.ToolArgs, &mcpArgs); err != nil {
+		t.Fatal(err)
+	}
+	if mcp.ToolName != "search" || mcpArgs["query"] != "status" {
+		t.Fatalf("specialized MCP projection tool=%q args=%#v", mcp.ToolName, mcpArgs)
+	}
+
+	resultRaw := []byte(`{"hook_event_name":"afterShellExecution","conversation_id":"cursor-session","generation_id":"cursor-turn","command":"Write-Output ok","output":"ok"}`)
+	var resultPayload map[string]interface{}
+	if err := json.Unmarshal(resultRaw, &resultPayload); err != nil {
+		t.Fatal(err)
+	}
+	result := normalizeAgentHookRequestWithRawProfile("cursor", resultPayload, resultRaw, profile)
+	if result.Content != "ok" || result.Direction != "tool_result" {
+		t.Fatalf("shell result projection content=%q direction=%q", result.Content, result.Direction)
+	}
+}
+
 func TestNormalizeAgentHookRequest_AntigravityNilToolArgsProjectionUsesEmptyObject(t *testing.T) {
 	raw := []byte(`{"hookEventName":"PreToolUse","toolCall":{"name":"run_command"}}`)
 	var payload map[string]interface{}

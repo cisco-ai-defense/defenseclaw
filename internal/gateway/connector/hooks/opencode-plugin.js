@@ -89,7 +89,8 @@ async function defenseclawPost(event, toolName, toolInput, toolResponse, cwd, co
     const data = await res.json();
     const out = data && data.hook_output;
     if (out && (out.decision === "deny" || out.decision === "block")) {
-      return { reason: out.reason || "DefenseClaw blocked this tool call." };
+      const detail = out.reason || "policy denied this tool call";
+      return { reason: "DefenseClaw blocked this tool before execution: " + detail };
     }
     return null;
   } catch (err) {

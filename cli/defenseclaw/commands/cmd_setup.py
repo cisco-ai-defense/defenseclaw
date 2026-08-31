@@ -3978,10 +3978,10 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.defenseclaw/hooks/hermes-hook.sh",
     ),
     "cursor": (
-        "~/.cursor/hooks.json hooks",
+        "CURSOR_CONFIG_DIR/hooks.json hooks (defaults to ~/.cursor/hooks.json)",
         "<workspace>/.cursor/mcp.json MCP entries when configured explicitly",
         "<workspace>/.cursor/skills and <workspace>/.cursor/rules install surfaces",
-        "~/.defenseclaw/hooks/cursor-hook.sh",
+        "~/.defenseclaw/hooks/cursor-hook.sh (macOS/Linux) or cursor-hook.ps1 (Windows)",
     ),
     "windsurf": (
         "~/.codeium/windsurf/hooks.json hooks",

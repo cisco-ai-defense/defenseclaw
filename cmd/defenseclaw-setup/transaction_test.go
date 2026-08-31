@@ -1296,7 +1296,7 @@ func TestTeardownSupersededConnectorsSwitchesConnector(t *testing.T) {
 func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *testing.T) {
 	transaction := setupTransaction{
 		DataRoot:           `C:\Users\tester\.defenseclaw`,
-		PreviousConnectors: []string{"codex", "claudecode", "amp", "hermes"},
+		PreviousConnectors: []string{"codex", "claudecode", "amp", "hermes", "opencode", "cursor"},
 		TargetConnector:    "none",
 	}
 	var calls []string
@@ -1312,6 +1312,8 @@ func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *test
 		"claudecode:teardown", "claudecode:verify",
 		"amp:teardown", "amp:verify",
 		"hermes:teardown", "hermes:verify",
+		"opencode:teardown", "opencode:verify",
+		"cursor:teardown", "cursor:verify",
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("connector opt-out calls = %v, want %v", calls, want)
@@ -1450,6 +1452,79 @@ func TestInferManagedHermesHomeAcceptsPR655LegacyBackupName(t *testing.T) {
 	}
 	if !samePath(got, want) {
 		t.Fatalf("inferred legacy Hermes home = %q, want %q", got, want)
+	}
+}
+
+func TestInferManagedOpenCodeHomeUsesPluginDirectoryParent(t *testing.T) {
+	dataRoot := t.TempDir()
+	backupPath := filepath.Join(dataRoot, "connector_backups", "opencode", "config.json")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(t.TempDir(), "opencode-custom-home")
+	pluginPath := filepath.Join(want, "plugins", "defenseclaw.js")
+	if err := os.WriteFile(
+		backupPath,
+		[]byte(fmt.Sprintf(`{"path":%q}`, pluginPath)),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := inferManagedConnectorHome(dataRoot, "opencode", "config", `C:\fallback`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, want) {
+		t.Fatalf("inferred OpenCode home = %q, want %q", got, want)
+	}
+}
+
+func TestInferManagedCursorHomeUsesHooksFileParent(t *testing.T) {
+	dataRoot := t.TempDir()
+	backupPath := filepath.Join(dataRoot, "connector_backups", "cursor", "hooks.json.json")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(t.TempDir(), "cursor-custom-home")
+	if err := os.WriteFile(
+		backupPath,
+		[]byte(fmt.Sprintf(`{"path":%q}`, filepath.Join(want, "hooks.json"))),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := inferManagedConnectorHome(dataRoot, "cursor", "hooks.json", `C:\fallback`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !samePath(got, want) {
+		t.Fatalf("inferred Cursor home = %q, want %q", got, want)
+	}
+}
+
+func TestTransactionChildEnvironmentBindsOpenCodeHome(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "opencode")
+	transaction := setupTransaction{
+		DataRoot:          filepath.Join(root, "data"),
+		OpenCodeConfigDir: home,
+	}
+	joined := strings.Join(transactionChildEnv(transaction), "\n")
+	if !strings.Contains(joined, "OPENCODE_CONFIG_DIR="+home) {
+		t.Fatalf("transaction child environment omitted OpenCode home: %s", joined)
+	}
+}
+
+func TestTransactionChildEnvironmentBindsCursorHome(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "cursor")
+	transaction := setupTransaction{
+		DataRoot:        filepath.Join(root, "data"),
+		CursorConfigDir: home,
+	}
+	joined := strings.Join(transactionChildEnv(transaction), "\n")
+	if !strings.Contains(joined, "CURSOR_CONFIG_DIR="+home) {
+		t.Fatalf("transaction child environment omitted Cursor home: %s", joined)
 	}
 }
 

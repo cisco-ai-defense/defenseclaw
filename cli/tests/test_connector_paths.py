@@ -1141,6 +1141,27 @@ class TestConnectorHome:
 
         assert connector_paths.connector_home(connector) == str(tmp_path / directory)
 
+    @pytest.mark.parametrize(
+        ("connector", "variable", "config_parts"),
+        [
+            ("cursor", "CURSOR_CONFIG_DIR", ("hooks.json",)),
+            ("opencode", "OPENCODE_CONFIG_DIR", ("plugins", "defenseclaw.js")),
+        ],
+    )
+    def test_windows_preview_connector_homes_follow_official_overrides(
+        self,
+        connector,
+        variable,
+        config_parts,
+        monkeypatch,
+        tmp_path,
+    ):
+        configured = tmp_path / f"custom-{connector}"
+        monkeypatch.setenv(variable, str(configured))
+
+        assert connector_paths.connector_home(connector) == str(configured)
+        assert connector_paths.connector_config_files(connector)[0] == str(configured.joinpath(*config_parts))
+
     def test_opencode_home_is_xdg_config(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
         assert connector_paths.connector_home("opencode") == os.path.join(str(tmp_path), ".config", "opencode")

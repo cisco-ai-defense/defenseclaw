@@ -1,6 +1,6 @@
 ---
 title: Cursor
-description: Cursor connector wires hooks.json with native ask on beforeShellExecution and beforeMCPExecution. Block on preToolUse, beforeReadFile, beforeTabFileRead, beforeSubmitPrompt, stop.
+description: Cursor connector wires hooks.json with native ask on beforeShellExecution and beforeMCPExecution. Block on preToolUse, subagentStart, shell/MCP gates, file-read gates, and beforeSubmitPrompt.
 keywords:
   - DefenseClaw Cursor connector
   - Cursor hooks
@@ -17,16 +17,19 @@ defenseclaw setup cursor
 ```
 
 <Callout type="warning">
-Cursor setup is supported on macOS and Linux. The DefenseClaw connector is not
-certified on native Windows x64, so setup rejects it there.
+Cursor setup is supported on macOS and Linux and is available as a native
+Windows x64 preview. On Windows it remains a per-user OSS integration; it does
+not enable the separate managed-enterprise hardening lifecycle.
 </Callout>
 
 This runs the observe-mode template. Cursor talks directly to its native
 upstream; DefenseClaw inspects via hooks. **There is no proxy-enforcement
 path** for Cursor — blocking happens hook-side via `preToolUse`,
-`beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`,
-`beforeTabFileRead`, `beforeSubmitPrompt`, and `stop`. Native ask is supported
-only on the two `before*Execution` events.
+`subagentStart`, `beforeShellExecution`, `beforeMCPExecution`,
+`beforeReadFile`, `beforeTabFileRead`, and `beforeSubmitPrompt`. Native ask is
+supported only on the two `before*Execution` events. Cursor's `stop` response
+is follow-up-only, so DefenseClaw observes it but does not claim it can block
+termination.
 
 #### What `setup cursor` actually does
 
@@ -58,6 +61,12 @@ defenseclaw setup cursor
 ```
 
 Confirms once, wires the hooks against `~/.cursor/hooks.json`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+
+On native Windows, the default is `%USERPROFILE%\.cursor\hooks.json`.
+`CURSOR_CONFIG_DIR` selects a different Cursor configuration directory when it
+is set explicitly. DefenseClaw writes a same-user PowerShell adapter under its
+own hook directory; the adapter streams Cursor's stdin payload to the native
+`defenseclaw-hook.exe` launcher, so Git Bash, `jq`, and WSL are not required.
 
 </Tab>
 
@@ -102,8 +111,9 @@ defenseclaw setup cursor --mode action --human-approval --fail-mode closed
 
 With `mode=action`, `beforeShellExecution` and `beforeMCPExecution` surface a
 native ask when policy returns an eligible confirmation verdict. The other
-block events use an alert/context fallback with `raw_action` preserved; the
-TUI can review but not resume them.
+block events return deny when policy blocks. They cannot pause for approval, so
+an eligible confirmation verdict uses an alert/context fallback with
+`raw_action` preserved; the TUI can review but not resume it.
 
 </Tab>
 
@@ -131,6 +141,7 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name="hooks">
       <File name="cursor-hook.sh" />
+      <File name="cursor-hook.ps1 (native Windows only)" />
     </Folder>
   </Folder>
 </Files>
@@ -143,9 +154,10 @@ Cursor's MCP / skills / rules surfaces are discovered from user-global Cursor lo
 
 <Callout type="info">
 Cursor supports native ask only on `beforeShellExecution` and
-`beforeMCPExecution`. The other block events (`preToolUse`, `beforeReadFile`,
-`beforeTabFileRead`, `beforeSubmitPrompt`, `stop`) return an alert/context
-fallback and retain the original confirm intent in audit.
+`beforeMCPExecution`. The other block events (`preToolUse`, `subagentStart`,
+`beforeReadFile`, `beforeTabFileRead`, and `beforeSubmitPrompt`) return an
+alert/context fallback for confirm verdicts and retain the original confirm
+intent in audit. The `stop` hook is telemetry/follow-up-only.
 </Callout>
 
 ## Disable

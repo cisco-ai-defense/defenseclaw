@@ -214,6 +214,8 @@ var (
 		{Label: "Claude Code", Value: "claudecode"},
 		{Label: "Amp", Value: "amp"},
 		{Label: "Hermes Agent", Value: "hermes"},
+		{Label: "OpenCode (preview)", Value: "opencode"},
+		{Label: "Cursor (preview)", Value: "cursor"},
 	}
 	wizardModeChoices = []wizardChoice{
 		{Label: "Observe", Value: "observe"},
@@ -738,8 +740,12 @@ func wizardCompletionDescription(connector string) string {
 		return "Amp is configured with the DefenseClaw system policy plugin under %USERPROFILE%\\.config\\amp\\plugins. Use --plugin-ready-timeout 30 with amp -x." + installed
 	case "hermes":
 		return "Hermes Agent is configured with native DefenseClaw hooks under %LOCALAPPDATA%\\hermes. Restart Hermes so it reloads the hook registry." + installed
+	case "opencode":
+		return "OpenCode preview is configured with the native Windows bridge plugin under %USERPROFILE%\\.config\\opencode\\plugins. Restart OpenCode so it loads the plugin." + installed
+	case "cursor":
+		return "Cursor preview is configured with native Windows hooks under %USERPROFILE%\\.cursor. Restart Cursor Agent so it reloads hooks.json." + installed
 	default:
-		return "Open a terminal and run defenseclaw init when you are ready to configure Codex, Claude Code, Amp, Hermes, or another connector." + installed
+		return "Open a terminal and run defenseclaw init when you are ready to configure Codex, Claude Code, Amp, Hermes, OpenCode, Cursor, or another connector." + installed
 	}
 }
 

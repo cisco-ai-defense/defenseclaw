@@ -53,6 +53,7 @@ from defenseclaw.connector_paths import (
     _expand,
     amp_managed_settings_path,
     connector_config_files,
+    connector_home,
     hermes_config_path,
     omnigent_config_path,
 )
@@ -1026,6 +1027,20 @@ def _scan_agent(
         )
     elif name == "hermes":
         config_candidates = (hermes_config_path(),)
+    elif name == "cursor":
+        config_candidates = tuple(connector_config_files("cursor"))
+    elif name == "opencode":
+        config_home = connector_home("opencode")
+        config_candidates = (
+            os.path.join(config_home, "plugins", "defenseclaw.js"),
+            os.path.join(config_home, "opencode.json"),
+            os.path.join(config_home, "opencode.jsonc"),
+            os.path.join(config_home, "tui.json"),
+            os.path.join(config_home, "tui.jsonc"),
+            "opencode.json",
+            "opencode.jsonc",
+            ".opencode/plugins/defenseclaw.js",
+        )
     elif name == "amp":
         # Enterprise managed settings are valid configuration evidence but
         # are platform-specific and administrator-owned. Keep them read-only

@@ -369,6 +369,8 @@ func TestWizardChoiceMappings(t *testing.T) {
 		{Label: "Claude Code", Value: "claudecode"},
 		{Label: "Amp", Value: "amp"},
 		{Label: "Hermes Agent", Value: "hermes"},
+		{Label: "OpenCode (preview)", Value: "opencode"},
+		{Label: "Cursor (preview)", Value: "cursor"},
 	}
 	modes := []wizardChoice{
 		{Label: "Observe", Value: "observe"},

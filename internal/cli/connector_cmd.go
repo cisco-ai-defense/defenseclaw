@@ -274,6 +274,10 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		variable = "CLAUDE_CONFIG_DIR"
 	case "hermes":
 		variable = "HERMES_HOME"
+	case "opencode":
+		variable = "OPENCODE_CONFIG_DIR"
+	case "cursor":
+		variable = "CURSOR_CONFIG_DIR"
 	case "amp":
 		// Amp does not expose a config-home environment override. The
 		// validated path is carried in SetupOpts.ConfigHome instead, so this
@@ -345,7 +349,7 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 		Interactive: false,
 	}
 	name := resolveActiveConnectorName(dataDir)
-	if name == "amp" {
+	if name == "amp" || name == "cursor" {
 		opts.ConfigHome = strings.TrimSpace(connectorFlagConfigHome)
 	}
 	if cfg == nil {
@@ -381,8 +385,8 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if !ok {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
 	}
-	if name != "claudecode" && name != "codex" && name != "amp" {
-		return fmt.Errorf("connector reconcile: selected refresh is supported only for claudecode, codex, and amp")
+	if name != "claudecode" && name != "codex" && name != "amp" && name != "hermes" && name != "opencode" && name != "cursor" {
+		return fmt.Errorf("connector reconcile: selected refresh is unsupported for %s", name)
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
 		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)

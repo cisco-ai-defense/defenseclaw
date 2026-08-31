@@ -70,12 +70,12 @@
         "askEvents": ["beforeShellExecution", "beforeMCPExecution"],
         "blockEvents": [
           "preToolUse",
+          "subagentStart",
           "beforeShellExecution",
           "beforeMCPExecution",
           "beforeReadFile",
           "beforeTabFileRead",
-          "beforeSubmitPrompt",
-          "stop"
+          "beforeSubmitPrompt"
         ],
         "supportsFailClosed": true,
         "scope": "user"

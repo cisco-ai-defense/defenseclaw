@@ -61,8 +61,8 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Reason: "Claude Code with Git for Windows and native hooks is certified on native Windows x64.",
 	},
 	"cursor": {
-		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw Cursor integration has not completed native Windows x64 certification.",
+		Status: PlatformPreview,
+		Reason: "Cursor native Windows support is preview pending integrated packaged Setup and official-client validation.",
 	},
 	"windsurf": {
 		Status: PlatformNotCertified,
@@ -81,8 +81,8 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Reason: "The DefenseClaw Antigravity integration has not completed native Windows x64 certification.",
 	},
 	"opencode": {
-		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw OpenCode integration has not completed native Windows x64 certification.",
+		Status: PlatformPreview,
+		Reason: "OpenCode native Windows support is preview pending integrated packaged Setup and official-client validation; OpenCode recommends WSL but also supports direct Windows use.",
 	},
 	"amp": {
 		Status: PlatformSupported,

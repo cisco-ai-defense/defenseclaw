@@ -46,6 +46,30 @@ func TestHookConfigPathsForConnector_ResolvesOverride(t *testing.T) {
 	}
 }
 
+func TestCursorHooksPathPrecedence(t *testing.T) {
+	previous := CursorHooksPathOverride
+	t.Cleanup(func() { CursorHooksPathOverride = previous })
+
+	root := t.TempDir()
+	environmentHome := filepath.Join(root, "environment")
+	explicitHome := filepath.Join(root, "explicit")
+	overridePath := filepath.Join(root, "override", "hooks.json")
+	t.Setenv("CURSOR_CONFIG_DIR", environmentHome)
+
+	CursorHooksPathOverride = ""
+	if got, want := cursorHooksPath(SetupOpts{}), filepath.Join(environmentHome, "hooks.json"); got != want {
+		t.Fatalf("environment path = %q, want %q", got, want)
+	}
+	if got, want := cursorHooksPath(SetupOpts{ConfigHome: explicitHome}), filepath.Join(explicitHome, "hooks.json"); got != want {
+		t.Fatalf("explicit path = %q, want %q", got, want)
+	}
+
+	CursorHooksPathOverride = overridePath
+	if got := cursorHooksPath(SetupOpts{ConfigHome: explicitHome}); got != overridePath {
+		t.Fatalf("override path = %q, want %q", got, overridePath)
+	}
+}
+
 func TestHookConfigPathsForConnector_ProxyConnectorsAreInert(t *testing.T) {
 	opts := SetupOpts{DataDir: t.TempDir(), ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 	for _, conn := range []Connector{NewOpenClawConnector(), NewZeptoClawConnector()} {

@@ -480,12 +480,12 @@ var builtinHookContracts = map[string][]HookContract{
 			},
 			BlockEvents: []string{
 				"preToolUse",
+				"subagentStart",
 				"beforeShellExecution",
 				"beforeMCPExecution",
 				"beforeReadFile",
 				"beforeTabFileRead",
 				"beforeSubmitPrompt",
-				"stop",
 			},
 			SupportsFailClosed: true,
 			Scope:              "user",
@@ -493,8 +493,9 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		ToolCallLifecycle:   cursorToolCallLifecycle(),
 		Notes: []string{
-			"Cursor 1.7 introduced beta hooks for the agent loop.",
+			"Cursor command hooks use documented per-event payloads; specialized shell, MCP, file, prompt, and result fields are projected into the shared scanner contract.",
 			"Cursor native ask is limited to beforeShellExecution and beforeMCPExecution.",
+			"preToolUse, subagentStart, shell/MCP gates, file-read gates, and beforeSubmitPrompt can deny. stop is follow-up-only and cannot block termination.",
 			"Every command-hook invocation returns a non-empty JSON object; beforeSubmitPrompt uses continue while permission gates use permission.",
 		},
 	}},
@@ -741,6 +742,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ToolCallLifecycle:   openCodeToolCallLifecycle(),
 		Notes: []string{
 			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
+			"The bridge prefixes a blocked-tool error with 'DefenseClaw blocked this tool before execution'. OpenCode may continue the conversational turn after the failed tool; the absence of tool.execute.after is the authoritative proof that execution was prevented.",
 			"Block is the only active verdict: opencode has no hook-driven ask or context-injection surface. tool.execute.after is observe-only. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
 			"Contract is unbounded (min 0.0.0): the plugin hook API is documented as a stable contract rather than a versioned floor, matching the OpenHands precedent.",
 		},

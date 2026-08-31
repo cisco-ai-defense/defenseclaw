@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -48,6 +49,25 @@ func TestManagedPluginTokenPathJavaScriptEscapingIsCrossPlatform(t *testing.T) {
 		if decoded != path {
 			t.Fatalf("escaped path round trip = %q, want %q", decoded, path)
 		}
+	}
+}
+
+func TestOpenCodePluginPathHonorsExplicitAndEnvironmentHomes(t *testing.T) {
+	previous := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = ""
+	t.Cleanup(func() { OpenCodePluginPathOverride = previous })
+
+	environmentHome := filepath.Join(t.TempDir(), "environment-opencode")
+	explicitHome := filepath.Join(t.TempDir(), "explicit-opencode")
+	t.Setenv("OPENCODE_CONFIG_DIR", environmentHome)
+
+	wantEnvironment := filepath.Join(environmentHome, "plugins", "defenseclaw.js")
+	if got := opencodePluginPath(SetupOpts{}); got != wantEnvironment {
+		t.Fatalf("environment plugin path = %q, want %q", got, wantEnvironment)
+	}
+	wantExplicit := filepath.Join(explicitHome, "plugins", "defenseclaw.js")
+	if got := opencodePluginPath(SetupOpts{ConfigHome: explicitHome}); got != wantExplicit {
+		t.Fatalf("explicit plugin path = %q, want %q", got, wantExplicit)
 	}
 }
 
@@ -104,6 +124,7 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 		`if (offset > DC_MAX_TOKEN_FILE_BYTES)`,
 		`/^[0-9a-f]{64}$/`,
 		`if (actionable) return { reason: "DefenseClaw hook credential is unavailable." }`,
+		`DefenseClaw blocked this tool before execution: `,
 		"tool.execute.before",         // block hook wired
 		"input && input.args",         // after-hook preserves exact executed args
 		"tool_response: toolResponse", // after-hook forwards the result
@@ -290,6 +311,159 @@ for await (const _ of lines) {
 	}
 	if string(pluginAfter) != string(pluginBytes) {
 		t.Fatal("sidecar rotation rewrote the stable OpenCode plugin")
+	}
+}
+
+func TestOpenCodePluginAllOwnedHooksUseReviewedWireShapes(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required for the OpenCode owned-hook contract test")
+	}
+
+	const sessionID = "session-owned-hooks"
+	token := strings.Repeat("c", 64)
+	var (
+		mu       sync.Mutex
+		requests []map[string]interface{}
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Header.Get("Authorization"), "Bearer "+token; got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
+		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode OpenCode hook request: %v", err)
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, payload)
+		mu.Unlock()
+
+		decision := "allow"
+		reason := ""
+		if input, ok := payload["tool_input"].(map[string]interface{}); ok &&
+			input["command"] == "strict-block-probe" {
+			decision = "deny"
+			reason = "matched: strict-owned-hook-probe"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"hook_output": map[string]interface{}{"decision": decision, "reason": reason},
+		})
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	pluginPath := filepath.Join(root, "plugins", "defenseclaw.mjs")
+	previous := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = previous })
+	opts := SetupOpts{
+		DataDir:      filepath.Join(root, "dc"),
+		APIAddr:      strings.TrimPrefix(server.URL, "http://"),
+		APIToken:     token,
+		HookFailMode: "closed",
+	}
+	tokenPath, err := HookAPITokenFilePath(opts.DataDir, "opencode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := NewOpenCodeConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Teardown(context.Background(), opts) })
+
+	harness := `
+import { pathToFileURL } from "node:url";
+const loaded = await import(pathToFileURL(process.argv[1]).href);
+const plugin = await loaded.DefenseClaw({ directory: "C:/owned-hooks", worktree: "C:/owned-hooks" });
+const lifecycle = [
+  "session.created", "session.updated", "session.status", "session.idle",
+  "session.compacted", "session.error", "session.deleted",
+];
+for (const type of lifecycle) {
+  await plugin.event({ event: { type, properties: { info: { id: "session-owned-hooks" } } } });
+}
+await plugin["tool.execute.before"](
+  { tool: "bash", sessionID: "session-owned-hooks", messageID: "turn-owned-hooks", callID: "call-owned-hooks" },
+  { args: { command: "Write-Output safe-owned-hook-probe" } },
+);
+await plugin["tool.execute.after"](
+  { tool: "bash", sessionID: "session-owned-hooks", messageID: "turn-owned-hooks", callID: "call-owned-hooks", args: { command: "Write-Output safe-owned-hook-probe" } },
+  { title: "safe", output: "safe-owned-hook-probe", metadata: { exit: 0 } },
+);
+let blocked = "";
+try {
+  await plugin["tool.execute.before"](
+    { tool: "bash", sessionID: "session-owned-hooks", messageID: "turn-block", callID: "call-block" },
+    { args: { command: "strict-block-probe" } },
+  );
+} catch (error) {
+  blocked = String(error && error.message || error);
+}
+console.log(JSON.stringify({ blocked }));
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, "--input-type=module", "-e", harness, pluginPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run OpenCode owned-hook harness: %v\n%s", err, output)
+	}
+	var result struct {
+		Blocked string `json:"blocked"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(output), &result); err != nil {
+		t.Fatalf("decode OpenCode owned-hook harness output: %v\n%s", err, output)
+	}
+	wantBlock := "DefenseClaw blocked this tool before execution: matched: strict-owned-hook-probe"
+	if result.Blocked != wantBlock {
+		t.Fatalf("blocking callback error = %q, want %q", result.Blocked, wantBlock)
+	}
+
+	mu.Lock()
+	got := append([]map[string]interface{}(nil), requests...)
+	mu.Unlock()
+	if len(got) != 10 {
+		t.Fatalf("OpenCode hook request count = %d, want 10", len(got))
+	}
+	lifecycle := []string{
+		"session.created", "session.updated", "session.status", "session.idle",
+		"session.compacted", "session.error", "session.deleted",
+	}
+	for index, event := range lifecycle {
+		if got[index]["hook_event_name"] != event || got[index]["event_type"] != event {
+			t.Errorf("lifecycle request %d = %#v, want event %q", index, got[index], event)
+		}
+		if got[index]["session_id"] != sessionID {
+			t.Errorf("lifecycle request %d session_id = %#v, want %q", index, got[index]["session_id"], sessionID)
+		}
+	}
+	before := got[7]
+	if before["hook_event_name"] != "tool.execute.before" || before["tool_name"] != "bash" ||
+		before["session_id"] != sessionID || before["turn_id"] != "turn-owned-hooks" ||
+		before["tool_call_id"] != "call-owned-hooks" {
+		t.Errorf("pre-tool wire shape = %#v", before)
+	}
+	if input, ok := before["tool_input"].(map[string]interface{}); !ok ||
+		input["command"] != "Write-Output safe-owned-hook-probe" {
+		t.Errorf("pre-tool input = %#v", before["tool_input"])
+	}
+	after := got[8]
+	if after["hook_event_name"] != "tool.execute.after" || after["tool_name"] != "bash" {
+		t.Errorf("post-tool wire shape = %#v", after)
+	}
+	if response, ok := after["tool_response"].(map[string]interface{}); !ok ||
+		response["output"] != "safe-owned-hook-probe" {
+		t.Errorf("post-tool response = %#v", after["tool_response"])
 	}
 }
 

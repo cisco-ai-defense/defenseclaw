@@ -1511,7 +1511,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "Hermes config found")
         return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup hermes")
     if connector == "cursor":
-        path = os.path.expanduser("~/.cursor/hooks.json")
+        path = connector_config_files("cursor")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Cursor hooks found")
         return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup cursor")
@@ -1568,7 +1568,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "opencode":
         # opencode is governed by a bridge plugin DefenseClaw writes into
         # opencode's auto-load plugin directory (no hooks.json to patch).
-        path = os.path.expanduser("~/.config/opencode/plugins/defenseclaw.js")
+        path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
         return StepResult(

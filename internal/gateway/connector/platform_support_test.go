@@ -29,10 +29,10 @@ var windowsSupportedConnectorNames = []string{
 	"hermes",
 }
 
-var windowsPreviewConnectorNames = []string{}
+var windowsPreviewConnectorNames = []string{"cursor", "opencode"}
 
 var windowsNotCertifiedConnectorNames = []string{
-	"antigravity", "copilot", "cursor", "geminicli", "opencode", "windsurf",
+	"antigravity", "copilot", "geminicli", "windsurf",
 }
 
 var windowsUnsupportedConnectorNames = []string{
@@ -175,7 +175,7 @@ func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
 	}
 }
 
-func TestRegistryWindowsFilterKeepsSupportedOnly(t *testing.T) {
+func TestRegistryWindowsFilterKeepsSupportedAndPreview(t *testing.T) {
 	reg := NewDefaultRegistry()
 	var got []string
 	for _, name := range reg.Names() {
@@ -185,6 +185,7 @@ func TestRegistryWindowsFilterKeepsSupportedOnly(t *testing.T) {
 	}
 	sort.Strings(got)
 	want := append([]string(nil), windowsSupportedConnectorNames...)
+	want = append(want, windowsPreviewConnectorNames...)
 	sort.Strings(want)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("windows-filtered connectors=%v, want %v", got, want)

@@ -101,15 +101,17 @@ func retryPendingConnectorReconciliation(
 		}
 		seen[identity] = true
 		connectorName := strings.ToLower(failure.Connector)
-		codexHome, claudeHome, hermesHome := "", "", ""
+		codexHome, claudeHome, hermesHome, openCodeHome := "", "", "", ""
 		if connectorName == "codex" {
 			codexHome = failure.ConfigHome
 		} else if connectorName == "claudecode" {
 			claudeHome = failure.ConfigHome
 		} else if connectorName == "hermes" {
 			hermesHome = failure.ConfigHome
+		} else if connectorName == "opencode" {
+			openCodeHome = failure.ConfigHome
 		}
-		env := transactionChildEnvForHomes(transaction, codexHome, claudeHome, hermesHome)
+		env := transactionChildEnvForHomes(transaction, codexHome, claudeHome, hermesHome, openCodeHome)
 		verify := func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "verify", env)
 		}
@@ -211,6 +213,8 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 			candidates = append(candidates, transaction.PreviousState.ClaudeConfigDir)
 		case "hermes":
 			candidates = append(candidates, transaction.PreviousState.HermesHome)
+		case "opencode":
+			candidates = append(candidates, transaction.PreviousState.OpenCodeConfigDir)
 		}
 	}
 	candidates = append(candidates, connectorConfigHome(transaction, connectorName, false))
@@ -265,6 +269,10 @@ func connectorManagedBackupExists(dataRoot, connectorName string) bool {
 		logicalName = "settings.json"
 	case "amp":
 		logicalName = "config"
+	case "opencode":
+		logicalName = "config"
+	case "cursor":
+		logicalName = "hooks.json"
 	default:
 		return false
 	}
@@ -290,6 +298,10 @@ func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
 		// safely from the profile-bound DefenseClaw data root. Transactions
 		// always persist the Known Folder-resolved home explicitly.
 		return ""
+	case "opencode":
+		directory = filepath.Join(".config", "opencode")
+	case "cursor":
+		directory = ".cursor"
 	default:
 		return ""
 	}
@@ -300,14 +312,20 @@ func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, c
 	codexHome := transaction.PreviousCodexHome
 	claudeHome := transaction.PreviousClaudeConfigDir
 	hermesHome := transaction.PreviousHermesHome
+	openCodeHome := transaction.PreviousOpenCodeConfigDir
+	cursorHome := transaction.PreviousCursorConfigDir
 	if connectorName == "codex" {
 		codexHome = configHome
 	} else if connectorName == "claudecode" {
 		claudeHome = configHome
 	} else if connectorName == "hermes" {
 		hermesHome = configHome
+	} else if connectorName == "opencode" {
+		openCodeHome = configHome
+	} else if connectorName == "cursor" {
+		cursorHome = configHome
 	}
-	return transactionChildEnvForHomes(transaction, codexHome, claudeHome, hermesHome)
+	return transactionChildEnvForHomes(transaction, codexHome, claudeHome, hermesHome, openCodeHome, cursorHome)
 }
 
 func reconcilePreservedConnectors(
@@ -487,7 +505,7 @@ func validateConnectorReconciliationState(state *connectorReconciliationState) e
 }
 
 func validateConnectorReconciliationIdentity(connectorName, configHome string) error {
-	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "amp" && connectorName != "hermes" {
+	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "amp" && connectorName != "hermes" && connectorName != "opencode" && connectorName != "cursor" {
 		return fmt.Errorf("invalid connector reconciliation target %q", connectorName)
 	}
 	if configHome == "" || !filepath.IsAbs(configHome) || filepath.Clean(configHome) != configHome {
@@ -561,6 +579,16 @@ func connectorConfigHome(transaction setupTransaction, connectorName string, pre
 			return transaction.PreviousHermesHome
 		}
 		return transaction.HermesHome
+	case "opencode":
+		if previous {
+			return transaction.PreviousOpenCodeConfigDir
+		}
+		return transaction.OpenCodeConfigDir
+	case "cursor":
+		if previous {
+			return transaction.PreviousCursorConfigDir
+		}
+		return transaction.CursorConfigDir
 	default:
 		return ""
 	}

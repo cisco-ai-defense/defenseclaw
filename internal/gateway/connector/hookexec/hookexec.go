@@ -411,10 +411,42 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	case resp.StatusCode >= 500 && resp.StatusCode < 600:
 		return failUnreachable(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
-		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+		return failResponse(opts, sp, failMode, hookHTTPResponseError(resp.StatusCode, body))
 	}
 
 	return sp.decide(opts, body)
+}
+
+// hookHTTPResponseError retains the gateway's bounded machine error on 4xx
+// responses without echoing arbitrary response bodies into an agent console.
+// The local hook API emits {"error":"..."}; anything else falls back to the
+// status-only diagnostic. This distinguishes malformed native stdin from a
+// missing event or an authentication/configuration rejection while keeping
+// payload content and credentials out of logs.
+func hookHTTPResponseError(status int, body []byte) string {
+	base := fmt.Sprintf("gateway returned HTTP %d", status)
+	var envelope struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return base
+	}
+	detail := strings.TrimSpace(envelope.Error)
+	if detail == "" {
+		return base
+	}
+	detail = strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == '\t' || r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, detail)
+	const maxRunes = 160
+	runes := []rune(detail)
+	if len(runes) > maxRunes {
+		detail = string(runes[:maxRunes])
+	}
+	return base + ": " + detail
 }
 
 func sendHookRequest(

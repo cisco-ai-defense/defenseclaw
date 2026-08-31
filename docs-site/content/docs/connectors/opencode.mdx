@@ -16,11 +16,13 @@ The OpenCode connector wires DefenseClaw into [opencode](https://opencode.ai). U
 />
 
 <Callout type="info">
-**No `opencode.json` edit, no shell shim.** Local plugins under `~/.config/opencode/plugins/` are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies (and never triggers a `bun install`). The JavaScript plugin is supported on macOS and Linux. The DefenseClaw OpenCode integration is not certified on Windows.
+**No `opencode.json` edit, no shell shim.** Local plugins under `~/.config/opencode/plugins/` are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies (and never triggers a `bun install`). The JavaScript plugin is supported on macOS and Linux. Native Windows x64 is available as preview and uses the same documented plugin callbacks.
 </Callout>
 
-Native Windows x64 setup rejects this connector; use a supported macOS or
-Linux host.
+On Windows, the plugin lives under `%OPENCODE_CONFIG_DIR%\plugins`; the default
+configuration directory is `%USERPROFILE%\.config\opencode`. OpenCode supports
+direct Windows execution even though its documentation recommends WSL for the
+best experience. DefenseClaw does not mix native and WSL connector homes.
 
 ## Setup
 
@@ -29,7 +31,7 @@ defenseclaw setup opencode                # observe (default) - record only
 defenseclaw setup opencode --mode action  # block on policy hits by throwing
 ```
 
-This connector is **global/user-scoped only**. DefenseClaw writes the bridge plugin to `~/.config/opencode/plugins/defenseclaw.js` (owner-only, `0o600`, because it carries the gateway token) with the gateway address, token, and fail mode substituted in at setup time. There is **no proxy-enforcement path** for OpenCode — blocking happens plugin-side by throwing inside `tool.execute.before`.
+This connector is **global/user-scoped only**. DefenseClaw writes the bridge plugin to `~/.config/opencode/plugins/defenseclaw.js` (owner-only `0o600` on macOS/Linux, or a protected current-user/SYSTEM DACL on Windows). The stable plugin contains the gateway address, scoped-token sidecar path, and fail mode; it reads the token sidecar for each request so token rotation does not rewrite the plugin. There is **no proxy-enforcement path** for OpenCode — blocking happens plugin-side by throwing inside `tool.execute.before`. The thrown error begins `DefenseClaw blocked this tool before execution:` and aborts the tool, but OpenCode may continue the conversational turn after receiving that failed-tool result. Continued model narration is not evidence that the command ran; a blocked call has no matching `tool.execute.after` event.
 
 `setup opencode` is the dedicated OpenCode alias. See the
 [quick-alias reference](/docs/setup/guardrail/aliases) for its common setup
@@ -38,14 +40,14 @@ and judge configuration.
 
 #### Version contract
 
-The current contract is `opencode-hooks-v1` (the plugin API is documented as a stable contract rather than a versioned floor, so the contract is unbounded — `min 0.0.0`). `tool.execute.before` is the only blockable event; `tool.execute.after` is observe-only telemetry.
+The current contract is `opencode-hooks-v1` (the plugin API is documented as a stable contract rather than a versioned floor, so the contract is unbounded — `min 0.0.0`). `tool.execute.before` is the only blockable event; `tool.execute.after` is observe-only telemetry. Native Windows preview validation uses the official signed OpenCode `1.18.14` x64 client.
 
 ## Lifecycle events
 
 | Event | When it fires | DefenseClaw role | Action verdict → behavior |
 | --- | --- | --- | --- |
 | `tool.execute.before` | Right before a tool (`bash`, `read`, `edit`, …) executes | Inspect tool args; intercept risky commands | `block` → gateway returns `{decision: "deny", reason}`; the bridge `throw`s `new Error(reason)`, aborting the tool |
-| `tool.execute.after` | Immediately after a tool returns | Capture diagnostics / flag secrets in output. **Cannot block** — tool already ran. | Observe-only (fire-and-forget; never adds latency) |
+| `tool.execute.after` | Immediately after a tool returns | Capture diagnostics / flag secrets in output. **Cannot block** — tool already ran. | Observe-only; awaited so outcome attribution is recorded before the callback returns |
 
 opencode has no hook-driven ask or context-injection surface, so `confirm` verdicts fall back to allow and findings on `tool.execute.after` are telemetry only.
 
@@ -71,6 +73,10 @@ thrown `Error` is authoritative for `tool.execute.before`.
     <File name="defenseclaw.js" />
   </Folder>
 </Files>
+
+On native Windows the equivalent path is
+`%OPENCODE_CONFIG_DIR%\plugins\defenseclaw.js`, defaulting to
+`%USERPROFILE%\.config\opencode\plugins\defenseclaw.js`.
 
 DefenseClaw v1 governs opencode tool execution via the bridge plugin. opencode's MCP servers live in `opencode.json`; `defenseclaw mcp list --connector opencode`, `defenseclaw mcp set <name> --connector opencode`, and `defenseclaw mcp unset <name> --connector opencode` read or update the top-level `mcp` map. For local MCP servers, `mcp set` refuses commands outside trusted install prefixes unless you add the directory to `DEFENSECLAW_TRUSTED_BIN_PREFIXES` or pass `--force-untrusted-command` for that one write, because OpenCode will execute the stored command. Skills / rules / plugins / agents surfaces remain unsupported and their panels are hidden while `claw.mode=opencode`.
 

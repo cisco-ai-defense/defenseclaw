@@ -143,7 +143,7 @@ func cursorHookOutputForProfile(event, action, reason, additional string) map[st
 		}
 	}
 	switch event {
-	case "pretooluse", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread", "stop":
+	case "pretooluse", "subagentstart", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread":
 		return map[string]interface{}{"continue": true, "permission": "allow"}
 	default:
 		return map[string]interface{}{"continue": true}

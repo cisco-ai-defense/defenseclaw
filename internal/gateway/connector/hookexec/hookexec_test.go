@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -70,6 +71,20 @@ type runResult struct {
 	stderr string
 	code   int
 	rt     *stubRT
+}
+
+func TestHookHTTPResponseErrorUsesOnlyBoundedMachineError(t *testing.T) {
+	if got := hookHTTPResponseError(400, []byte(`{"error":"hook event name is required"}`)); got != "gateway returned HTTP 400: hook event name is required" {
+		t.Fatalf("machine error=%q", got)
+	}
+	if got := hookHTTPResponseError(400, []byte(`{"private":"must not surface"}`)); got != "gateway returned HTTP 400" {
+		t.Fatalf("unrecognized body surfaced: %q", got)
+	}
+	long := strings.Repeat("x", 200) + "\nsecret"
+	got := hookHTTPResponseError(403, []byte(`{"error":`+strconv.Quote(long)+`}`))
+	if strings.Contains(got, "secret") || strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("machine error was not bounded/single-line: %q", got)
+	}
 }
 
 // run executes a hook against a stub gateway with a temp Home + .token file.

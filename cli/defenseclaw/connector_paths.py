@@ -308,6 +308,18 @@ def codex_home() -> str:
     return _connector_env_home("CODEX_HOME", ".codex")
 
 
+def cursor_config_home() -> str:
+    """Return Cursor's effective user configuration directory."""
+
+    return _connector_env_home("CURSOR_CONFIG_DIR", ".cursor")
+
+
+def opencode_config_home() -> str:
+    """Return OpenCode's effective global configuration directory."""
+
+    return _connector_env_home("OPENCODE_CONFIG_DIR", os.path.join(".config", "opencode"))
+
+
 def amp_config_home() -> str:
     """Return Amp's documented system configuration directory.
 
@@ -497,16 +509,13 @@ def connector_home(
         # path agy actually evaluates.
         return os.path.join(home, ".gemini", "antigravity-cli")
     if name == "cursor":
-        return os.path.join(home, ".cursor")
+        return cursor_config_home()
     if name == "windsurf":
         return os.path.join(home, ".codeium", "windsurf")
     if name == "hermes":
         return hermes_home()
     if name == "opencode":
-        # opencode keeps its config under ~/.config/opencode/ (XDG-style).
-        # Surfaced so inventory/doctor render a truthful home label rather
-        # than an empty string or — worse — OpenClaw's path.
-        return os.path.join(home, ".config", "opencode")
+        return opencode_config_home()
     if name == "omnigent":
         return _omnigent_config_home()
     if name == "openclaw":
@@ -595,13 +604,14 @@ def connector_config_files(
         # DefenseClaw installs a single bridge plugin there. There is no
         # command-hook config file to patch.
         paths = [
-            os.path.join(home, ".config", "opencode", "plugins", "defenseclaw.js"),
+            os.path.join(opencode_config_home(), "plugins", "defenseclaw.js"),
         ]
     elif name == "omnigent":
         paths = [omnigent_config_path()]
     elif name == "cursor":
         paths = [
-            os.path.join(home, ".cursor", "mcp.json"),
+            os.path.join(cursor_config_home(), "hooks.json"),
+            os.path.join(cursor_config_home(), "mcp.json"),
             _workspace_path(workspace_dir, ".cursor", "mcp.json"),
         ]
     elif name == "windsurf":
@@ -1238,7 +1248,7 @@ def _cursor_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
     return _dedup(
         [
-            os.path.join(home, ".cursor", "skills"),
+            os.path.join(cursor_config_home(), "skills"),
             os.path.join(home, ".agents", "skills"),
             _workspace_path(workspace_dir, ".cursor", "skills"),
             _workspace_path(workspace_dir, ".agents", "skills"),
@@ -1620,9 +1630,8 @@ def _hermes_mcp_servers() -> list[MCPServerEntry]:
 
 
 def _cursor_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
-    home = str(Path.home())
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_dotmcp_json(os.path.join(home, ".cursor", "mcp.json")))
+    entries.extend(_read_dotmcp_json(os.path.join(cursor_config_home(), "mcp.json")))
     project_mcp = _workspace_path(workspace_dir, ".cursor", "mcp.json")
     if project_mcp:
         entries.extend(_read_dotmcp_json(project_mcp))
@@ -1698,10 +1707,10 @@ def _opencode_config_paths(workspace_dir: str | None) -> list[str]:
     ``.jsonc``) is added only when an explicit workspace is pinned, so
     the daemon never infers a project file from its own cwd.
     """
-    home = str(Path.home())
+    config_home = opencode_config_home()
     paths = [
-        os.path.join(home, ".config", "opencode", "opencode.json"),
-        os.path.join(home, ".config", "opencode", "opencode.jsonc"),
+        os.path.join(config_home, "opencode.json"),
+        os.path.join(config_home, "opencode.jsonc"),
     ]
     root = _workspace_dir(workspace_dir)
     if root:
@@ -2666,7 +2675,7 @@ def _opencode_write_path(workspace_dir: str | None) -> str:
     root = _workspace_dir(workspace_dir)
     if root:
         return os.path.join(root, "opencode.json")
-    return os.path.join(str(Path.home()), ".config", "opencode", "opencode.json")
+    return os.path.join(opencode_config_home(), "opencode.json")
 
 
 def _opencode_mcp_entry_from_generic(entry: dict[str, Any]) -> dict[str, Any]:

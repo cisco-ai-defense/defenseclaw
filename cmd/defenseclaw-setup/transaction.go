@@ -90,9 +90,13 @@ type setupTransaction struct {
 	PreviousCodexHome              string                   `json:"previous_codex_home,omitempty"`
 	PreviousClaudeConfigDir        string                   `json:"previous_claude_config_dir,omitempty"`
 	PreviousHermesHome             string                   `json:"previous_hermes_home,omitempty"`
+	PreviousOpenCodeConfigDir      string                   `json:"previous_opencode_config_dir,omitempty"`
+	PreviousCursorConfigDir        string                   `json:"previous_cursor_config_dir,omitempty"`
 	CodexHome                      string                   `json:"codex_home,omitempty"`
 	ClaudeConfigDir                string                   `json:"claude_config_dir,omitempty"`
 	HermesHome                     string                   `json:"hermes_home,omitempty"`
+	OpenCodeConfigDir              string                   `json:"opencode_config_dir,omitempty"`
+	CursorConfigDir                string                   `json:"cursor_config_dir,omitempty"`
 	MaintenanceSHA256              string                   `json:"maintenance_sha256,omitempty"`
 	DeleteUserData                 bool                     `json:"delete_user_data,omitempty"`
 	UninstallPathEntryOwned        bool                     `json:"uninstall_path_entry_owned,omitempty"`
@@ -280,6 +284,14 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	defaultOpenCodeConfigDir, err := defaultConnectorConfigHome(filepath.Join(".config", "opencode"))
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	defaultCursorConfigDir, err := defaultConnectorConfigHome(".cursor")
+	if err != nil {
+		return setupTransaction{}, err
+	}
 	codexHome, err := transactionConfigHome("CODEX_HOME", defaultCodexHome)
 	if err != nil {
 		return setupTransaction{}, err
@@ -292,11 +304,21 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	previousCodexState, previousClaudeState, previousHermesState := "", "", ""
+	openCodeConfigDir, err := transactionConfigHome("OPENCODE_CONFIG_DIR", defaultOpenCodeConfigDir)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	cursorConfigDir, err := transactionConfigHome("CURSOR_CONFIG_DIR", defaultCursorConfigDir)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousCodexState, previousClaudeState, previousHermesState, previousOpenCodeState, previousCursorState := "", "", "", "", ""
 	if oldState != nil {
 		previousCodexState = oldState.CodexHome
 		previousClaudeState = oldState.ClaudeConfigDir
 		previousHermesState = oldState.HermesHome
+		previousOpenCodeState = oldState.OpenCodeConfigDir
+		previousCursorState = oldState.CursorConfigDir
 	}
 	// Pre-home-binding releases can advertise a connector only through their
 	// legacy backup. In that case the validated current override is the sole
@@ -320,6 +342,18 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	if err != nil {
 		return setupTransaction{}, err
 	}
+	previousOpenCodeConfigDir, err := resolvePreviousConnectorHome(
+		previousOpenCodeState, previousConnectors, dataRoot, "opencode", "config", openCodeConfigDir,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousCursorConfigDir, err := resolvePreviousConnectorHome(
+		previousCursorState, previousConnectors, dataRoot, "cursor", "hooks.json", cursorConfigDir,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
 	if preserveConnectorConfiguration {
 		// A quiet repair/upgrade without a connector choice services the exact
 		// homes already owned by the installation. Environment drift must not
@@ -327,6 +361,8 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		codexHome = previousCodexHome
 		claudeConfigDir = previousClaudeConfigDir
 		hermesHome = previousHermesHome
+		openCodeConfigDir = previousOpenCodeConfigDir
+		cursorConfigDir = previousCursorConfigDir
 	}
 	maintenanceSHA256 := ""
 	maintenanceExisted, previousMaintenanceSHA256, err := snapshotMaintenanceFile(maintenancePath)
@@ -376,9 +412,13 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		PreviousCodexHome:              previousCodexHome,
 		PreviousClaudeConfigDir:        previousClaudeConfigDir,
 		PreviousHermesHome:             previousHermesHome,
+		PreviousOpenCodeConfigDir:      previousOpenCodeConfigDir,
+		PreviousCursorConfigDir:        previousCursorConfigDir,
 		CodexHome:                      codexHome,
 		ClaudeConfigDir:                claudeConfigDir,
 		HermesHome:                     hermesHome,
+		OpenCodeConfigDir:              openCodeConfigDir,
+		CursorConfigDir:                cursorConfigDir,
 		MaintenanceSHA256:              maintenanceSHA256,
 		DeleteUserData:                 opts.DeleteUserData,
 		UninstallPathEntryOwned:        uninstallPathOwned,
@@ -424,11 +464,21 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	if err != nil {
 		return setupTransaction{}, err
 	}
-	configuredCodexHome, configuredClaudeHome, configuredHermesHome := "", "", ""
+	defaultOpenCodeConfigDir, err := defaultConnectorConfigHome(filepath.Join(".config", "opencode"))
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	defaultCursorConfigDir, err := defaultConnectorConfigHome(".cursor")
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	configuredCodexHome, configuredClaudeHome, configuredHermesHome, configuredOpenCodeHome, configuredCursorHome := "", "", "", "", ""
 	if oldState != nil {
 		configuredCodexHome = oldState.CodexHome
 		configuredClaudeHome = oldState.ClaudeConfigDir
 		configuredHermesHome = oldState.HermesHome
+		configuredOpenCodeHome = oldState.OpenCodeConfigDir
+		configuredCursorHome = oldState.CursorConfigDir
 	}
 	// The source install transaction already captured validated client homes.
 	// Preserve them across an install-to-uninstall handoff when predecessor
@@ -444,6 +494,14 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 	legacyHermesFallback := source.HermesHome
 	if legacyHermesFallback == "" {
 		legacyHermesFallback = defaultHermesConfigHome
+	}
+	legacyOpenCodeFallback := source.OpenCodeConfigDir
+	if legacyOpenCodeFallback == "" {
+		legacyOpenCodeFallback = defaultOpenCodeConfigDir
+	}
+	legacyCursorFallback := source.CursorConfigDir
+	if legacyCursorFallback == "" {
+		legacyCursorFallback = defaultCursorConfigDir
 	}
 	previousCodexHome, err := resolvePreviousConnectorHome(
 		configuredCodexHome,
@@ -474,6 +532,28 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		"hermes",
 		"config",
 		legacyHermesFallback,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousOpenCodeConfigDir, err := resolvePreviousConnectorHome(
+		configuredOpenCodeHome,
+		previousConnectors,
+		source.DataRoot,
+		"opencode",
+		"config",
+		legacyOpenCodeFallback,
+	)
+	if err != nil {
+		return setupTransaction{}, err
+	}
+	previousCursorConfigDir, err := resolvePreviousConnectorHome(
+		configuredCursorHome,
+		previousConnectors,
+		source.DataRoot,
+		"cursor",
+		"hooks.json",
+		legacyCursorFallback,
 	)
 	if err != nil {
 		return setupTransaction{}, err
@@ -539,9 +619,13 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		PreviousCodexHome:            previousCodexHome,
 		PreviousClaudeConfigDir:      previousClaudeConfigDir,
 		PreviousHermesHome:           previousHermesHome,
+		PreviousOpenCodeConfigDir:    previousOpenCodeConfigDir,
+		PreviousCursorConfigDir:      previousCursorConfigDir,
 		CodexHome:                    previousCodexHome,
 		ClaudeConfigDir:              previousClaudeConfigDir,
 		HermesHome:                   previousHermesHome,
+		OpenCodeConfigDir:            previousOpenCodeConfigDir,
+		CursorConfigDir:              previousCursorConfigDir,
 		DeleteUserData:               opts.DeleteUserData,
 		UninstallPathEntryOwned:      pathOwned,
 		UninstallPathSeparatorReused: pathSeparatorReused,
@@ -648,7 +732,11 @@ func inferManagedConnectorHome(dataRoot, connectorName, logicalName, fallback st
 		if strings.TrimSpace(binding.Path) == "" || !filepath.IsAbs(binding.Path) {
 			return "", fmt.Errorf("%s managed backup has an invalid target path", connectorName)
 		}
-		return filepath.Dir(filepath.Clean(binding.Path)), nil
+		home := filepath.Dir(filepath.Clean(binding.Path))
+		if connectorName == "opencode" && strings.EqualFold(filepath.Base(home), "plugins") {
+			home = filepath.Dir(home)
+		}
+		return home, nil
 	}
 	return fallback, nil
 }
@@ -684,6 +772,8 @@ func transactionChildEnv(transaction setupTransaction) []string {
 		transaction.CodexHome,
 		transaction.ClaudeConfigDir,
 		transaction.HermesHome,
+		transaction.OpenCodeConfigDir,
+		transaction.CursorConfigDir,
 	)
 }
 
@@ -693,25 +783,37 @@ func transactionPreviousChildEnv(transaction setupTransaction) []string {
 		transaction.PreviousCodexHome,
 		transaction.PreviousClaudeConfigDir,
 		transaction.PreviousHermesHome,
+		transaction.PreviousOpenCodeConfigDir,
+		transaction.PreviousCursorConfigDir,
 	)
 }
 
 func transactionChildEnvForHomes(
 	transaction setupTransaction,
 	codexHome, claudeConfigDir string,
-	hermesHomeOverride ...string,
+	connectorHomeOverrides ...string,
 ) []string {
 	hermesHome := transaction.HermesHome
-	if len(hermesHomeOverride) != 0 {
-		hermesHome = hermesHomeOverride[0]
+	openCodeConfigDir := transaction.OpenCodeConfigDir
+	cursorConfigDir := transaction.CursorConfigDir
+	if len(connectorHomeOverrides) > 0 {
+		hermesHome = connectorHomeOverrides[0]
+	}
+	if len(connectorHomeOverrides) > 1 {
+		openCodeConfigDir = connectorHomeOverrides[1]
+	}
+	if len(connectorHomeOverrides) > 2 {
+		cursorConfigDir = connectorHomeOverrides[2]
 	}
 	base := managedChildEnv(transaction.DataRoot)
-	filtered := make([]string, 0, len(base)+3)
+	filtered := make([]string, 0, len(base)+5)
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && (strings.EqualFold(name, "CODEX_HOME") ||
 			strings.EqualFold(name, "CLAUDE_CONFIG_DIR") ||
-			strings.EqualFold(name, "HERMES_HOME")) {
+			strings.EqualFold(name, "HERMES_HOME") ||
+			strings.EqualFold(name, "OPENCODE_CONFIG_DIR") ||
+			strings.EqualFold(name, "CURSOR_CONFIG_DIR")) {
 			continue
 		}
 		filtered = append(filtered, entry)
@@ -724,6 +826,12 @@ func transactionChildEnvForHomes(
 	}
 	if hermesHome != "" {
 		filtered = append(filtered, "HERMES_HOME="+hermesHome)
+	}
+	if openCodeConfigDir != "" {
+		filtered = append(filtered, "OPENCODE_CONFIG_DIR="+openCodeConfigDir)
+	}
+	if cursorConfigDir != "" {
+		filtered = append(filtered, "CURSOR_CONFIG_DIR="+cursorConfigDir)
 	}
 	return filtered
 }
@@ -915,7 +1023,9 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 		}
 		if !samePath(transaction.PreviousCodexHome, transaction.CodexHome) ||
 			!samePath(transaction.PreviousClaudeConfigDir, transaction.ClaudeConfigDir) ||
-			!samePath(transaction.PreviousHermesHome, transaction.HermesHome) {
+			!samePath(transaction.PreviousHermesHome, transaction.HermesHome) ||
+			!samePath(transaction.PreviousOpenCodeConfigDir, transaction.OpenCodeConfigDir) ||
+			!samePath(transaction.PreviousCursorConfigDir, transaction.CursorConfigDir) {
 			return errors.New("connector-preserving transaction changed a connector configuration home")
 		}
 		if len(transaction.PreviousConnectors) != 0 && !transaction.TargetServices.Gateway {
@@ -933,12 +1043,16 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 		return errors.New("setup transaction records a digest for an absent previous maintenance executable")
 	}
 	for label, value := range map[string]string{
-		"previous Codex home":               transaction.PreviousCodexHome,
-		"previous Claude configuration dir": transaction.PreviousClaudeConfigDir,
-		"previous Hermes home":              transaction.PreviousHermesHome,
-		"Codex home":                        transaction.CodexHome,
-		"Claude configuration dir":          transaction.ClaudeConfigDir,
-		"Hermes home":                       transaction.HermesHome,
+		"previous Codex home":                 transaction.PreviousCodexHome,
+		"previous Claude configuration dir":   transaction.PreviousClaudeConfigDir,
+		"previous Hermes home":                transaction.PreviousHermesHome,
+		"previous OpenCode configuration dir": transaction.PreviousOpenCodeConfigDir,
+		"previous Cursor configuration dir":   transaction.PreviousCursorConfigDir,
+		"Codex home":                          transaction.CodexHome,
+		"Claude configuration dir":            transaction.ClaudeConfigDir,
+		"Hermes home":                         transaction.HermesHome,
+		"OpenCode configuration dir":          transaction.OpenCodeConfigDir,
+		"Cursor configuration dir":            transaction.CursorConfigDir,
 	} {
 		if value == "" {
 			continue
@@ -1022,9 +1136,11 @@ func validateInstallStateForRoots(state *installState, installRoot, dataRoot, ma
 		}
 	}
 	for label, value := range map[string]string{
-		"Codex home":               state.CodexHome,
-		"Claude configuration dir": state.ClaudeConfigDir,
-		"Hermes home":              state.HermesHome,
+		"Codex home":                 state.CodexHome,
+		"Claude configuration dir":   state.ClaudeConfigDir,
+		"Hermes home":                state.HermesHome,
+		"OpenCode configuration dir": state.OpenCodeConfigDir,
+		"Cursor configuration dir":   state.CursorConfigDir,
 	} {
 		if value != "" && (!filepath.IsAbs(value) || filepath.Clean(value) != value) {
 			return fmt.Errorf("installer state has an invalid %s", label)
@@ -2899,6 +3015,10 @@ func connectorHomeChanged(transaction setupTransaction, connectorName string) bo
 		return !samePath(transaction.PreviousClaudeConfigDir, transaction.ClaudeConfigDir)
 	case "hermes":
 		return !samePath(transaction.PreviousHermesHome, transaction.HermesHome)
+	case "opencode":
+		return !samePath(transaction.PreviousOpenCodeConfigDir, transaction.OpenCodeConfigDir)
+	case "cursor":
+		return !samePath(transaction.PreviousCursorConfigDir, transaction.CursorConfigDir)
 	default:
 		return false
 	}

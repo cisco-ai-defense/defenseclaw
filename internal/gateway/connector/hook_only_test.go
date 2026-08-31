@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1775,6 +1776,36 @@ func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"failClosed": true`) {
 		t.Fatalf("cursor hooks did not enable failClosed when explicitly requested:\n%s", string(data))
+	}
+	configured, err := readJSONObject(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuredHooks, _ := configured["hooks"].(map[string]interface{})
+	if len(configuredHooks) != len(cursorHookEvents) {
+		t.Fatalf("Cursor configured %d hook events, want the complete %d-event contract: %#v", len(configuredHooks), len(cursorHookEvents), configuredHooks)
+	}
+	wantScript := "cursor-hook.sh"
+	if runtime.GOOS == "windows" {
+		wantScript = "cursor-hook.ps1"
+	}
+	for _, event := range cursorHookEvents {
+		entries, ok := configuredHooks[event].([]interface{})
+		if !ok || len(entries) != 1 {
+			t.Fatalf("Cursor %s entries = %#v, want exactly one managed hook", event, configuredHooks[event])
+		}
+		entry, _ := entries[0].(map[string]interface{})
+		command, _ := entry["command"].(string)
+		if !strings.Contains(command, wantScript) {
+			t.Fatalf("Cursor %s command = %q, want %s adapter", event, command, wantScript)
+		}
+		if entry["failClosed"] != true {
+			t.Fatalf("Cursor %s failClosed = %#v, want true", event, entry["failClosed"])
+		}
+		timeout, ok := entry["timeout"].(json.Number)
+		if !ok || timeout.String() != strconv.Itoa(windowsCursorEnterpriseHookTimeoutSeconds) {
+			t.Fatalf("Cursor %s timeout = %#v, want %d seconds", event, entry["timeout"], windowsCursorEnterpriseHookTimeoutSeconds)
+		}
 	}
 
 	// Refreshing the same connector in observe/fail-open mode must replace the

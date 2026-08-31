@@ -75,8 +75,9 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         "Claude Code with Git for Windows and native hooks is certified on native Windows x64.",
     ),
     "cursor": ConnectorPlatformSupport(
-        NOT_CERTIFIED,
-        "The DefenseClaw Cursor integration has not completed native Windows x64 certification.",
+        PREVIEW,
+        "Cursor native Windows support is preview pending integrated packaged Setup "
+        "and official-client validation.",
     ),
     "windsurf": ConnectorPlatformSupport(
         NOT_CERTIFIED,
@@ -95,8 +96,10 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         "The DefenseClaw Antigravity integration has not completed native Windows x64 certification.",
     ),
     "opencode": ConnectorPlatformSupport(
-        NOT_CERTIFIED,
-        "The DefenseClaw OpenCode integration has not completed native Windows x64 certification.",
+        PREVIEW,
+        "OpenCode native Windows support is preview pending integrated packaged Setup "
+        "and official-client validation; OpenCode recommends WSL but also supports "
+        "direct Windows use.",
     ),
     "amp": ConnectorPlatformSupport(
         SUPPORTED,
