@@ -2144,6 +2144,7 @@ func (s *Sidecar) logCMIDBuildLane(lane string) {
 //   - managedaid delivery outcomes bubble transport / auth failures
 //     back through the dispatcher's classifyStatus / classifyTransport
 //     path, which the destination health surface already inspects.
+//
 // Config reload / boot still Refresh via buildCMIDProvider on the
 // first-construction branch below, so the boot-time availability
 // signal is unchanged.
