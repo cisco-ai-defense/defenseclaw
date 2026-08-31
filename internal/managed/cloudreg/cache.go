@@ -80,9 +80,18 @@ type cachingProvider struct {
 	inner Provider
 	ttl   time.Duration
 
-	mu    sync.Mutex
-	token string
-	at    time.Time
+	mu sync.Mutex
+	// generation is bumped on every Invalidate() call. A Token() miss
+	// captures the current generation before releasing the lock to
+	// fetch through inner.Token; the resulting token is stored back
+	// into the cache only if the generation is unchanged at store
+	// time. This closes the "restore invalidated token" race: an
+	// in-flight fetch that started under generation N cannot repopulate
+	// the cache after a concurrent Invalidate() bumped it to N+1.
+	// Reported by CodeRabbit on PR #802.
+	generation uint64
+	token      string
+	at         time.Time
 }
 
 func (c *cachingProvider) Token(ctx context.Context) (string, error) {
@@ -92,14 +101,24 @@ func (c *cachingProvider) Token(ctx context.Context) (string, error) {
 		c.mu.Unlock()
 		return cached, nil
 	}
+	// Capture the generation so a concurrent Invalidate can invalidate
+	// the value we're about to fetch — see cachingProvider.generation.
+	generation := c.generation
 	c.mu.Unlock()
 	token, err := c.inner.Token(ctx)
 	if err != nil || token == "" {
 		return token, err
 	}
 	c.mu.Lock()
-	c.token = token
-	c.at = time.Now()
+	if generation == c.generation {
+		c.token = token
+		c.at = time.Now()
+	}
+	// If generation drifted, the token we fetched is already
+	// considered stale by the caller who invalidated. Return it to
+	// this caller (they may still succeed with it — some brokers keep
+	// old tokens live briefly) but do not pollute the cache. The 401
+	// path will invalidate again if the token is truly rejected.
 	c.mu.Unlock()
 	return token, nil
 }
@@ -117,9 +136,17 @@ func (c *cachingProvider) Refresh(ctx context.Context) error {
 }
 
 func (c *cachingProvider) Invalidate() {
-	c.inner.Invalidate()
+	// Hold the cache lock through inner.Invalidate so a concurrent
+	// Token() miss cannot start fetching a stale token during the
+	// broker-side invalidation window. Combined with the generation
+	// counter above, this makes cache pollution impossible: any
+	// in-flight fetch will observe the bumped generation on its
+	// return-and-store path and skip the store; any new fetch is
+	// blocked from starting until the invalidation completes.
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generation++
 	c.token = ""
 	c.at = time.Time{}
-	c.mu.Unlock()
+	c.inner.Invalidate()
 }
