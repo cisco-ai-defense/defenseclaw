@@ -189,8 +189,11 @@ type AIDiscoveryOptions struct {
 	// In managed mode the gateway ships the FULL endpoint inventory to
 	// AI Defense as discovery events (every active signal, including
 	// steady-state `seen`), not just lifecycle deltas — see
-	// emitGatewayEvents. Non-managed keeps the delta-only behavior so
-	// user-owned SIEMs are not flooded on every full scan.
+	// emitGatewayEvents. This full-inventory ship happens on the
+	// full-scan cadence (ScanInterval) only; the intra-cycle process
+	// tick is a local-only refresh and does not re-ship. Non-managed
+	// keeps the delta-only behavior so user-owned SIEMs are not
+	// flooded on every full scan.
 	ManagedEnterprise bool
 }
 
@@ -886,7 +889,7 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 	s.lastErr = nil
 	s.mu.Unlock()
 
-	s.fanoutReport(ctx, report)
+	s.fanoutReport(ctx, report, full)
 	s.notifyReportObservers(ctx, report)
 	return report, nil
 }
@@ -922,8 +925,11 @@ func (s *ContinuousDiscoveryService) notifyReportObservers(ctx context.Context, 
 // path called ComputeComponentConfidence with its own
 // time.Now()). The snapshot is built lazily so default-config
 // installs (no OTel, redaction enabled) don't pay for a rollup
-// they'd discard.
-func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport) {
+// they'd discard. `full` mirrors the runScan tick kind and is
+// forwarded to emitGatewayEvents so managed_enterprise ships to
+// AI Defense on full-scan cadence only, not on every process
+// tick.
+func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport, full bool) {
 	otelOn := s.opts.EmitOTel && s.otel != nil && s.otel.Enabled()
 	eventsOn := s.events != nil
 	// The snapshot is only consulted when (a) OTel is on, or
@@ -938,7 +944,7 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 		s.emitTelemetry(ctx, report, snap)
 	}
 	if eventsOn {
-		s.emitGatewayEvents(ctx, report, snap)
+		s.emitGatewayEvents(ctx, report, snap, full)
 	}
 }
 
@@ -1199,10 +1205,14 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		// carried-forward inventory so consumers see the same
 		// count the summary advertises. The carried-forward rows
 		// ship as state=seen regardless of what they were last
-		// classified as, so the OTel + gateway-events emitters
-		// (which fire only on new/changed/gone) don't replay
-		// lifecycle events on every 5-second process tick. The
-		// persistence map (`current`) is left untouched so the
+		// classified as, so the OTel emitter (delta-focused) does
+		// not replay lifecycle events on every process tick.
+		// managed_enterprise skips the gateway-events fanout
+		// entirely on non-full ticks (see emitGatewayEvents), so
+		// AI Defense is not re-shipped the full inventory every
+		// minute; non-managed still relies on the state filter in
+		// emitGatewayEvents to keep the process tick delta-only.
+		// The persistence map (`current`) is left untouched so the
 		// next FULL scan still sees the prior state for proper
 		// reclassification.
 		for fp, stored := range current {
@@ -2898,8 +2908,22 @@ func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context
 	s.managedInventoryEmitMu.Unlock()
 }
 
-func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, report AIDiscoveryReport, snap componentRollupSnapshot) {
+func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, report AIDiscoveryReport, snap componentRollupSnapshot, full bool) {
 	if s.events == nil {
+		return
+	}
+	// managed_enterprise ships the full endpoint inventory to AI
+	// Defense on the FULL-scan cadence only (ScanIntervalMin). The
+	// intra-cycle process-only tick (ProcessIntervalSec) is a
+	// local-only refresh — re-emitting the entire carried-forward
+	// inventory + connector/MCP hooks every minute would flood the
+	// AID event-ingest endpoint without adding new information (the
+	// non-process detectors do not re-run on process ticks). Bail
+	// out here so both the per-signal fanout and the
+	// managedInventoryEmit hook stay pinned to the full-scan
+	// interval. Non-managed mode is unaffected — its state filter
+	// below already keeps the process tick delta-only.
+	if !full && s.opts.ManagedEnterprise {
 		return
 	}
 	// managed_enterprise: after the per-signal ai_discovery snapshot,
@@ -3607,7 +3631,11 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 	for i := range report.Signals {
 		report.Signals[i].Source = AISourceExternal
 	}
-	s.fanoutReport(ctx, *report)
+	// External reports carry a complete inventory snapshot by
+	// contract (ValidateSanitizedAIDiscoveryReport above), so treat
+	// the fanout as a full-scan cycle — managed_enterprise ships to
+	// AI Defense on this path as well.
+	s.fanoutReport(ctx, *report, true)
 	return nil
 }
 
