@@ -934,10 +934,13 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 	eventsOn := s.events != nil
 	// The snapshot is only consulted when (a) OTel is on, or
 	// (b) gateway events are on AND redaction is OFF (otherwise
-	// BuildAIDiscoveryPayload strips Confidence anyway). Skip
-	// the rollup entirely when neither path needs it.
+	// BuildAIDiscoveryPayload strips Confidence anyway) AND the
+	// gateway-events emission is actually going to happen (i.e.
+	// not the managed_enterprise non-full-tick early-return in
+	// emitGatewayEvents). Skip the rollup entirely when no path
+	// will read it.
 	var snap componentRollupSnapshot
-	if otelOn || (eventsOn && s.opts.DisableRedaction) {
+	if otelOn || (eventsOn && s.opts.DisableRedaction && (!s.opts.ManagedEnterprise || full)) {
 		snap = buildComponentRollupSnapshot(report.Signals, s.confidenceParams)
 	}
 	if otelOn {
@@ -3631,10 +3634,18 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 	for i := range report.Signals {
 		report.Signals[i].Source = AISourceExternal
 	}
-	// External reports carry a complete inventory snapshot by
-	// contract (ValidateSanitizedAIDiscoveryReport above), so treat
-	// the fanout as a full-scan cycle — managed_enterprise ships to
-	// AI Defense on this path as well.
+	// full=true here bypasses the managed_enterprise cadence gate in
+	// emitGatewayEvents so external ingest continues to publish under
+	// the pre-fix pathway; it is NOT a claim that the external report
+	// is a complete inventory snapshot.
+	// ValidateSanitizedAIDiscoveryReport enforces only sanitization
+	// (ScanID + signal cap), not completeness, so a partial report
+	// still emits partial ai_discovery events without gone-signal
+	// reconciliation for the missing endpoints (IngestExternalReport
+	// never runs classifyAndPersist). Callers are responsible for
+	// shipping full snapshots; the next scheduled full scan reconciles
+	// any staleness. This pre-existing behavior is unchanged by the
+	// cadence fix — see PR #801 discussion for context.
 	s.fanoutReport(ctx, *report, true)
 	return nil
 }
