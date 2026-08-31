@@ -5,7 +5,9 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"os"
 	"strings"
 	"time"
 
@@ -227,6 +229,28 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 	if signal.SignalID == "" || signal.Category == "" {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
+	// Human-readable info line for operators tailing gateway.err.log (macOS) /
+	// gateway.log (Windows). Format matches the historical macOS convention:
+	//   [ai_discovery:<category>] <state> <name> confidence=<0.NN>
+	// One line per emitted signal (delta on all modes; also `seen` on
+	// managed_enterprise where the caller ships snapshots every cadence).
+	// Kept cheap and single-line so a long-running daemon can leave this on
+	// as an info-level default instead of gating on a debug flag.
+	displayName := strings.TrimSpace(signal.Product)
+	if displayName == "" {
+		displayName = strings.TrimSpace(signal.Name)
+	}
+	if displayName == "" {
+		displayName = signal.SignalID
+	}
+	fmt.Fprintf(
+		os.Stderr,
+		"[ai_discovery:%s] %s %s confidence=%.2f\n",
+		signal.Category,
+		signal.State,
+		displayName,
+		aiDiscoveryV8Clamp(signal.Confidence),
+	)
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
 		observability.ProducerKey("ai_discovery"),

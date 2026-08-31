@@ -16,11 +16,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -347,21 +349,38 @@ func (adapter *Adapter) post(ctx context.Context, body []byte, token string) (in
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
 		WroteRequest: func(httptrace.WroteRequestInfo) { wrote.Store(true) },
 	}))
+	postStart := time.Now()
 	response, err := adapter.client.Do(request)
 	if err != nil {
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
+		// Transport-level failure info line so an operator tailing
+		// gateway.err.log / gateway.log can see when the AI Defense POST
+		// couldn't complete at all (DNS, TCP, TLS, cancel, deadline).
+		// One line per attempt; low-frequency at the 5 min publish cadence.
+		fmt.Fprintf(os.Stderr, "[managedaid] POST %s bytes=%d elapsed=%s err=%v\n",
+			adapter.endpoint, len(body), time.Since(postStart), err)
 		return 0, classifyTransportError(err, wrote.Load())
 	}
 	if response == nil {
+		fmt.Fprintf(os.Stderr, "[managedaid] POST %s bytes=%d elapsed=%s status=nil\n",
+			adapter.endpoint, len(body), time.Since(postStart))
 		return 0, delivery.OutcomeAmbiguous
 	}
 	defer response.Body.Close()
 	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if readErr != nil || len(responseBody) > maxResponseBytes {
+		fmt.Fprintf(os.Stderr, "[managedaid] POST %s bytes=%d elapsed=%s status=%d body-read-err=%v\n",
+			adapter.endpoint, len(body), time.Since(postStart), response.StatusCode, readErr)
 		return 0, delivery.OutcomeAmbiguous
 	}
+	// Success (or well-formed error response) info line — status + latency
+	// only. Full response body is deliberately NOT logged here; operators
+	// can enable the delivery-diagnostics destination or inspect
+	// gateway.jsonl for per-event `inserted`/`rejectCode` details.
+	fmt.Fprintf(os.Stderr, "[managedaid] POST %s bytes=%d elapsed=%s status=%d resp_bytes=%d\n",
+		adapter.endpoint, len(body), time.Since(postStart), response.StatusCode, len(responseBody))
 	return response.StatusCode, ""
 }
 
