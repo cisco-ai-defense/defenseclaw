@@ -79,6 +79,19 @@ func invokeNativeSkillHook(
 		http.MethodPost, hookPath,
 		strings.NewReader(rawPayload),
 	)
+	if connector == "codex" {
+		var envelope struct {
+			HookEventName string `json:"hook_event_name"`
+		}
+		if err := json.Unmarshal([]byte(rawPayload), &envelope); err != nil {
+			t.Fatalf("decode Codex hook event: %v", err)
+		}
+		setTestCodexHookBinding(
+			req,
+			envelope.HookEventName,
+			defaultTestCodexHookContract,
+		)
+	}
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook(connector)(recorder, req)
 	if recorder.Code != http.StatusOK {

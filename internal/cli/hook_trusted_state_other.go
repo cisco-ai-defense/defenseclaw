@@ -7,6 +7,7 @@ package cli
 
 func trustedNativeHookHome() (string, bool)         { return "", false }
 func NativeHookRuntimeNoop() bool                   { return false }
+func NativeConnectorHookNoop([]string) bool         { return false }
 func enterpriseManagedHookRuntimeNoop(string) bool  { return false }
 func enterpriseManagedHookRuntimeForceClosed() bool { return false }
 func enterpriseManagedHookRuntimeFailureReason() string {

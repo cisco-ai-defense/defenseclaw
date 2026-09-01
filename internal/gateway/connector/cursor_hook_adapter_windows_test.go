@@ -38,6 +38,8 @@ import (
 
 const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
 const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
+const windsurfAdapterHelperMode = "TEST_WINDSURF_ADAPTER_MODE"
+const windsurfAdapterExitCodeEnv = "TEST_WINDSURF_ADAPTER_EXIT_CODE"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(cursorAdapterHelperMode) {
@@ -64,6 +66,27 @@ func TestMain(m *testing.M) {
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	default:
+		if os.Getenv(windsurfAdapterHelperMode) == "result" {
+			payload, err := io.ReadAll(os.Stdin)
+			if err != nil || string(payload) != `{"source":"windsurf-adapter-probe"}` {
+				fmt.Fprintln(os.Stderr, "Windsurf adapter helper received wrong stdin")
+				os.Exit(9)
+			}
+			if len(os.Args) != 4 || os.Args[1] != "hook" ||
+				os.Args[2] != "--connector" || os.Args[3] != "windsurf" {
+				fmt.Fprintln(os.Stderr, "Windsurf adapter helper received wrong arguments")
+				os.Exit(8)
+			}
+			exitCode, err := strconv.Atoi(os.Getenv(windsurfAdapterExitCodeEnv))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Windsurf adapter helper received invalid exit code")
+				os.Exit(7)
+			}
+			_, _ = os.Stdout.Write([]byte(`{"continue":true,"source":"windsurf"}`))
+			_, _ = os.Stderr.Write([]byte("windsurf helper stderr"))
+			time.Sleep(350 * time.Millisecond)
+			os.Exit(exitCode)
+		}
 		// Pre-existing connector fixtures exercise config, trust, CAS, and
 		// teardown behavior without provisioning a real Codex installation.
 		// Dedicated production-path tests explicitly restore the native policy

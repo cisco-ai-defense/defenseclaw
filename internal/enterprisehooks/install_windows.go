@@ -221,6 +221,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		ManagedEnterprise:  true,
 		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
 		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
+		GuardrailMode:      strings.TrimSpace(opts.GuardrailMode),
 		HILTEnabled:        opts.HILTEnabled,
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),

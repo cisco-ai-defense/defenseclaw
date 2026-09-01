@@ -241,7 +241,7 @@ type APIServer struct {
 	// regex + CodeGuard verdict in that case. Wired by the sidecar
 	// at boot via SetCiscoInspector. Only the proxy lane held an
 	// AID client historically; this field extends coverage to the
-	// hook surface (Codex / Claude Code / Cursor / Windsurf /
+	// hook surface (Codex / Claude Code / Cursor / Devin /
 	// Hermes / Gemini / Copilot) so MCP tool calls and tool results
 	// reach AID without per-script changes.
 	// Widened from *CiscoInspectClient to the Inspector interface so
@@ -706,7 +706,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent"} {
+		for _, name := range []string{"hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -715,6 +715,9 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 	}
 
 	for _, name := range a.connectorRegistry.Names() {
+		if connector.ConnectorSupportOnHostOS(name).Status == connector.PlatformUnsupported {
+			continue
+		}
 		conn, ok := a.connectorRegistry.Get(name)
 		if !ok {
 			continue
@@ -1165,6 +1168,10 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snap := a.health.Snapshot()
+	runtimeEnvironment := ""
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		runtimeEnvironment = cfg.Environment
+	}
 
 	status := map[string]interface{}{
 		"health":     snap,
@@ -1175,8 +1182,9 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// process's memory or environment. Never add authentication material to
 		// this object.
 		"runtime": map[string]interface{}{
-			"pid":      os.Getpid(),
-			"data_dir": a.configDataDir(),
+			"pid":         os.Getpid(),
+			"data_dir":    a.configDataDir(),
+			"environment": runtimeEnvironment,
 		},
 		// connector_mode reports which guardrail surface the active
 		// connector is running. The TUI uses this to render the
@@ -1366,12 +1374,12 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
+	case "hermes", "cursor", "devin", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
 		mode = "observability"
 		intercept = false
 		surface = "agent_lifecycle_hooks"
 		telemetry = []string{"hooks"}
-		if name == "geminicli" || name == "copilot" {
+		if name == "geminicli" {
 			telemetry = append(telemetry, "otel")
 		}
 	case "omnigent":
@@ -2150,6 +2158,12 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if isBundledSkillScanPath(req.Target) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "vendor-bundled skills are discovery-only and are not scanned or blocked",
+		})
+		return
+	}
 
 	// Verify target exists on this host.
 	// If the path doesn't exist locally, the scanner will fail with a clear
@@ -2164,7 +2178,6 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
 		return
 	}
-
 	// Route through the unified resolver so top-level ``llm:`` defaults
 	// flow into the skill scanner with ``scanners.skill.llm:`` overrides
 	// applied on top. ``NewSkillScannerFromLLM`` is the post-v5
@@ -2194,6 +2207,68 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
 }
 
+func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
+	if a == nil || a.scannerCfg == nil {
+		return false
+	}
+	servers, err := a.scannerCfg.ReadMCPServersForConnector("codex")
+	if err != nil {
+		return false
+	}
+	for _, server := range servers {
+		if !server.Bundled {
+			continue
+		}
+		if req.Target == server.Name {
+			return true
+		}
+		if req.Name == server.Name && (req.Target == server.Name || req.Target == server.URL) {
+			return true
+		}
+	}
+	return false
+}
+
+func isBundledSkillScanPath(path string) bool {
+	if enforce.IsBundledSkillPath(path) {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	return err == nil && enforce.IsBundledSkillPath(resolved)
+}
+
+func (a *APIServer) isManagedPluginScanTarget(target string) bool {
+	if a == nil || a.scannerCfg == nil || strings.TrimSpace(target) == "" {
+		return false
+	}
+	reg := connector.NewDefaultRegistry()
+	opts := connector.SetupOpts{WorkspaceDir: a.scannerCfg.ConnectorWorkspaceDir()}
+	for _, name := range a.scannerCfg.ActiveConnectors() {
+		conn, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		for _, managedPath := range connector.ManagedPluginArtifacts(conn, opts) {
+			if sameAPIScanPath(target, managedPath) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sameAPIScanPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
+}
+
 func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2207,6 +2282,12 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Target == "" {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
+		return
+	}
+	if a.isManagedPluginScanTarget(req.Target) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "connector-managed plugins are lifecycle-owned and are not scanned",
+		})
 		return
 	}
 
@@ -2266,6 +2347,12 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.scannerCfg == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
+		return
+	}
+	if a.isBundledMCPScanRequest(req) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "vendor-bundled MCP servers are discovery-only and are not scanned",
+		})
 		return
 	}
 

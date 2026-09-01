@@ -53,7 +53,7 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 	newOpts := func(dataDir string) connector.SetupOpts {
 		return connector.SetupOpts{
 			DataDir:           dataDir,
-			AgentVersion:      "2.1.152",
+			AgentVersion:      "2.1.154",
 			ManagedEnterprise: true,
 		}
 	}
@@ -213,7 +213,7 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 		APIToken:      scopedToken,
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
-		AgentVersion:  "omnigent 0.1.0",
+		AgentVersion:  "omnigent 0.7.0",
 		Registry:      connector.NewDefaultRegistry(),
 	})
 	if err != nil {

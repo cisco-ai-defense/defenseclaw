@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from defenseclaw import connector_paths
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory.plugin_directories import (
@@ -258,6 +259,16 @@ def scan(
             if scan_dir:
                 matches = [_PluginMatch(connector, scan_dir)]
 
+    _refuse_managed_opencode_bridge_action(
+        app,
+        name_or_path,
+        connector_flag,
+        action="scan",
+    )
+    for _connector, scan_dir in matches:
+        if _is_exact_managed_opencode_bridge(scan_dir):
+            _raise_managed_opencode_bridge_refusal("scan")
+
     if not matches:
         scope = f" for connector {connector_flag!r}" if connector_flag else " across configured connectors"
         click.echo(f"error: plugin not found: {name_or_path}{scope}", err=True)
@@ -366,8 +377,12 @@ def _scan_one_plugin_dir(
         return
 
     try:
-        if connector == "amp" and os.path.isfile(scan_dir) and scan_dir.casefold().endswith(".ts"):
-            target_name = validate_plugin_id(os.path.basename(scan_dir)[:-3])
+        if (
+            connector_paths.normalize(connector) in {"amp", "opencode"}
+            and os.path.isfile(scan_dir)
+            and scan_dir.casefold().endswith((".js", ".ts"))
+        ):
+            target_name = validate_plugin_id(os.path.splitext(os.path.basename(scan_dir))[0])
         else:
             target_name, _manifest = canonical_plugin_id(scan_dir)
     except PluginIdentityError as exc:
@@ -419,7 +434,16 @@ def _scan_one_plugin_dir(
 def _host_plugin_dirs(app: AppContext, connector: str) -> list[str]:
     """The target connector's own plugin dirs (P-B), empty on any failure."""
     try:
-        return list(app.cfg.plugin_dirs(connector))
+        if connector_paths.normalize(connector) != "opencode":
+            return list(app.cfg.plugin_dirs(connector))
+        workspace_resolver = getattr(app.cfg, "connector_workspace_dir", None)
+        workspace = workspace_resolver() if callable(workspace_resolver) else ""
+        claw = getattr(app.cfg, "claw", None)
+        return connector_paths.plugin_inventory_dirs(
+            connector,
+            openclaw_home=getattr(claw, "home_dir", None),
+            workspace_dir=workspace,
+        )
     except Exception:  # noqa: BLE001 — managed-dir-only fallback.
         return []
 
@@ -428,7 +452,11 @@ def _active_plugin_connectors(app: AppContext) -> list[str]:
     cfg = app.cfg
     if hasattr(cfg, "active_connectors"):
         try:
-            names = [n for n in cfg.active_connectors() if n]
+            names = [
+                n
+                for n in cfg.active_connectors()
+                if n and not connector_paths.is_cleanup_only(n)
+            ]
             if names:
                 return names
         except Exception:  # noqa: BLE001 — fall back to the singular connector.
@@ -436,7 +464,7 @@ def _active_plugin_connectors(app: AppContext) -> list[str]:
     if hasattr(cfg, "active_connector"):
         active = cfg.active_connector()
         if active:
-            return [active]
+            return [] if connector_paths.is_cleanup_only(active) else [active]
     return ["openclaw"]
 
 
@@ -455,7 +483,7 @@ def _plugin_roots_for_connector(
     """
     roots: list[str] = []
     try:
-        roots.extend(d for d in app.cfg.plugin_dirs(connector) if d)
+        roots.extend(d for d in _host_plugin_dirs(app, connector) if d)
     except Exception:  # noqa: BLE001 — legacy root below may still work.
         pass
 
@@ -696,6 +724,7 @@ def _plugin_match_dir_scopes(
                         root,
                         connector=resolved,
                         registry_cache=registry_cache,
+                        workspace_dir=app.cfg.connector_workspace_dir(),
                     )
                     if filesystem_identity_key(entry.id, root) == key
                 ]
@@ -736,6 +765,63 @@ def _plugin_match_dir_scopes(
     return matches
 
 
+def _managed_opencode_bridge_path() -> str:
+    """Return the exact connector-owned OpenCode bridge path."""
+
+    try:
+        return os.path.abspath(connector_paths.connector_config_files("opencode")[0])
+    except (IndexError, OSError, ValueError):
+        return ""
+
+
+def _is_exact_managed_opencode_bridge(path: str) -> bool:
+    """Match only the connector-owned bridge, never a same-named sibling."""
+
+    managed = _managed_opencode_bridge_path()
+    if not managed or not path:
+        return False
+    try:
+        return os.path.normcase(os.path.abspath(path)) == os.path.normcase(managed)
+    except (OSError, ValueError):
+        return False
+
+
+def _raise_managed_opencode_bridge_refusal(action: str) -> None:
+    raise click.ClickException(
+        f"refusing to {action} the managed OpenCode defenseclaw.js bridge; "
+        "it is connector lifecycle configuration, not an operator plugin"
+    )
+
+
+def _refuse_managed_opencode_bridge_action(
+    app: AppContext,
+    target: str,
+    connector: str,
+    *,
+    action: str,
+) -> None:
+    """Refuse lifecycle actions only when they resolve to our exact bridge."""
+
+    if _looks_like_explicit_path(target):
+        if _is_exact_managed_opencode_bridge(target):
+            _raise_managed_opencode_bridge_refusal(action)
+        return
+    requested = os.path.splitext(os.path.basename(target))[0].casefold()
+    if requested != "defenseclaw":
+        return
+    scoped = _normalize_runtime_connector(connector) if connector else ""
+    connectors = [scoped] if scoped else _active_plugin_connectors(app)
+    if "opencode" not in connectors:
+        return
+    # A project/user plugin with the same basename is an ordinary eligible
+    # asset. Discovery excludes only the exact managed global bridge.
+    if _plugin_match_dir_scopes(app, "defenseclaw", "opencode"):
+        return
+    managed = _managed_opencode_bridge_path()
+    if managed and os.path.isfile(managed):
+        _raise_managed_opencode_bridge_refusal(action)
+
+
 def _scan_all_plugins(
     app: AppContext,
     as_json: bool,
@@ -759,16 +845,11 @@ def _scan_all_plugins(
     one configured connector.
     """
     from defenseclaw import ux
-    from defenseclaw.commands import _scan_ui, resolve_list_connector
+    from defenseclaw.commands import _scan_ui, resolve_list_connectors
     from defenseclaw.scanner.plugin import PluginScannerWrapper
     from defenseclaw.scanner.rulepack import maybe_wrap
 
-    if connector_flag:
-        connectors: list[str] = [resolve_list_connector(app, connector_flag)]
-    elif hasattr(app.cfg, "active_connectors") and len(app.cfg.active_connectors()) > 1:
-        connectors = list(app.cfg.active_connectors())
-    else:
-        connectors = [resolve_list_connector(app, "")]
+    connectors: list[str] = resolve_list_connectors(app, connector_flag)
 
     registry_cache: PluginRegistryCache = {}
     discovery = _plugin_registry_probes(
@@ -1922,6 +2003,7 @@ def _assert_connector_plugin_identities_unambiguous(
             root,
             connector=connector,
             registry_cache=registry_cache,
+            workspace_dir=app.cfg.connector_workspace_dir(),
         ):
             claimed.add_directory(entry, root)
 
@@ -2219,7 +2301,8 @@ def _resolve_plugin_dir(
     """Resolve a plugin name or path to a scannable artifact on disk.
 
     Resolution order:
-      1. Literal path (a directory or direct Amp ``.ts`` plugin) — only
+      1. Literal path (a directory, direct Amp ``.ts`` plugin, or direct
+         OpenCode ``.js``/``.ts`` plugin) — only
          when the input clearly looks like a path (absolute, or contains a path
          separator). A bare token like ``my-plugin`` is intentionally
          NOT treated as a relative path here, even if a directory of
@@ -2240,9 +2323,13 @@ def _resolve_plugin_dir(
     if _looks_like_explicit_path(name_or_path) and (
         os.path.isdir(name_or_path)
         or (
-            connector == "amp"
+            connector_paths.normalize(connector) in {"amp", "opencode"}
             and os.path.isfile(name_or_path)
-            and name_or_path.casefold().endswith(".ts")
+            and name_or_path.casefold().endswith(
+                (".ts",)
+                if connector_paths.normalize(connector) == "amp"
+                else (".js", ".ts")
+            )
             and not is_link_or_reparse(name_or_path)
         )
     ):
@@ -2443,19 +2530,21 @@ def _scan_plugin_dir(
     connector: str,
     *,
     registry_cache: PluginRegistryCache | None = None,
+    workspace_dir: str = "",
 ) -> list[dict[str, Any]]:
     """Discover *host_dir* and emit one dict per installed plugin.
 
     Ordinary host-agent roots remain one-level and non-recursive so nested
-    dependencies cannot become phantom plugins. Connector registries may map
-    an installed plugin to an exact nested cache root; the shared discovery
-    helper expands only those authoritative paths.
+    dependencies cannot become phantom plugins. Connector-specific discovery
+    owns exact registry/cache layouts, including Claude marketplace versions
+    and manifest-bearing skills-directory plugins.
     """
     out: list[dict[str, Any]] = []
     for discovered in discover_plugin_directories(
         host_dir,
         connector=connector,
         registry_cache=registry_cache,
+        workspace_dir=workspace_dir,
     ):
         entry = discovered.id
         plugin_path = discovered.path
@@ -2482,12 +2571,15 @@ def _scan_plugin_dir(
             row["registry"] = discovered.registry
         if discovered.cached:
             row["cached"] = True
+            row["activation_verified"] = discovered.activation_verified
         if discovered.scope:
             row["scope"] = discovered.scope
         if discovered.project_path:
             row["project_path"] = discovered.project_path
         if discovered.registry_source:
             row["registry_source"] = discovered.registry_source
+        if discovered.logical_id and discovered.logical_id != discovered.id:
+            row["logical_id"] = discovered.logical_id
         out.append(row)
     return out
 
@@ -2515,9 +2607,24 @@ def _list_host_plugins(
         # binary (see _list_openclaw_plugins). Don't double-count.
         return []
     if name == "copilot":
-        return _list_copilot_plugins()
+        workspace_resolver = getattr(cfg, "connector_workspace_dir", None)
+        workspace_dir = workspace_resolver() if callable(workspace_resolver) else ""
+        return _list_copilot_plugins(
+            data_dir=getattr(cfg, "data_dir", None),
+            workspace_dir=workspace_dir,
+        )
+    workspace_resolver = getattr(cfg, "connector_workspace_dir", None)
+    workspace_dir = workspace_resolver() if callable(workspace_resolver) else ""
     try:
-        dirs = cfg.plugin_dirs(connector)
+        if name == "opencode":
+            claw = getattr(cfg, "claw", None)
+            dirs = connector_paths.plugin_inventory_dirs(
+                connector,
+                openclaw_home=getattr(claw, "home_dir", None),
+                workspace_dir=workspace_dir,
+            )
+        else:
+            dirs = cfg.plugin_dirs(connector)
     except Exception:
         return []
     out: list[dict[str, Any]] = []
@@ -2527,6 +2634,7 @@ def _list_host_plugins(
             d,
             name,
             registry_cache=registry_cache,
+            workspace_dir=workspace_dir,
         ):
             if not claimed.add(
                 str(entry["id"]),
@@ -2538,26 +2646,117 @@ def _list_host_plugins(
             ):
                 continue
             out.append(entry)
+    if name == "opencode":
+        from defenseclaw.inventory.claw_inventory import _opencode_config_plugin_rows
+
+        seen_ids = {str(entry["id"]).casefold() for entry in out}
+        for configured in _opencode_config_plugin_rows(workspace_dir):
+            pid = str(configured["id"])
+            identity = pid.casefold()
+            if identity in seen_ids:
+                continue
+            seen_ids.add(identity)
+            out.append(
+                {
+                    "id": pid,
+                    "name": str(configured["name"]),
+                    "description": "",
+                    "version": "",
+                    "origin": str(configured["origin"]),
+                    "enabled": True,
+                    "source": "host:opencode:config",
+                    "configuration_only": True,
+                }
+            )
     return out
 
 
-def _list_copilot_plugins() -> list[dict[str, Any]]:
-    """Best-effort Copilot CLI plugin listing via documented CLI flow."""
-    copilot = shutil.which("copilot")
+def _trusted_copilot_binary(
+    data_dir: str | os.PathLike[str] | None = None,
+) -> str:
+    """Resolve Copilot through the passive inventory's executable trust gate."""
+    from defenseclaw.inventory.agent_discovery import (
+        _SPECS,
+        _binary_candidates_for_agent,
+        _is_trusted_binary_path,
+    )
+
+    spec = _SPECS["copilot"]
+    for candidate in _binary_candidates_for_agent("copilot", spec):
+        if _is_trusted_binary_path(candidate, data_dir=data_dir):
+            return candidate
+    return ""
+
+
+def _list_copilot_plugins(
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    workspace_dir: str | os.PathLike[str] | None = None,
+) -> list[dict[str, Any]]:
+    """List declared plugins in the exact trusted lifecycle context."""
+
+    workspace = str(workspace_dir or "")
+    if (
+        not workspace
+        or workspace.strip() != workspace
+        or not os.path.isabs(workspace)
+        or os.path.normpath(workspace) != workspace
+    ):
+        return []
+    try:
+        connector_paths.reject_reparse_path(workspace)
+        before = os.stat(workspace, follow_symlinks=False)
+        if not os.path.isdir(workspace):
+            return []
+        if data_dir:
+            data_real = os.path.realpath(os.path.abspath(str(data_dir)))
+            workspace_real = os.path.realpath(workspace)
+            if os.path.normcase(os.path.commonpath((workspace_real, data_real))) == os.path.normcase(
+                data_real
+            ):
+                return []
+    except (OSError, ValueError):
+        return []
+
+    copilot = _trusted_copilot_binary(data_dir)
     if not copilot:
         return []
     try:
+        bound_home = connector_paths.copilot_home()
+    except ValueError:
+        return []
+    env = os.environ.copy()
+    env["COPILOT_HOME"] = bound_home
+    try:
         proc = subprocess.run(
-            [copilot, "plugin", "list", "--json"],
+            [copilot, "plugins", "list", "--kind", "plugin", "--json"],
             capture_output=True,
             text=True,
             timeout=15,
+            cwd=workspace,
+            env=env,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    try:
+        after = os.stat(workspace, follow_symlinks=False)
+    except OSError:
+        return []
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
         return []
     if proc.returncode != 0:
         return []
-    plugins = _parse_plugin_list_json(proc.stdout) or _parse_plugin_list_text(proc.stdout)
+    plugins = _parse_plugin_list_json(proc.stdout)
     out: list[dict[str, Any]] = []
     for p in plugins:
         pid = str(p.get("id") or p.get("name") or "").strip()
@@ -2569,6 +2768,8 @@ def _list_copilot_plugins() -> list[dict[str, Any]]:
                 "name": str(p.get("name") or pid),
                 "version": str(p.get("version") or ""),
                 "enabled": p.get("enabled", True),
+                "activation_verified": False,
+                "activation_state": "semantic-activation-unverified",
                 "source": "host:copilot",
                 "path": "",
             }
@@ -2870,13 +3071,19 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
+    connector = _resolve_connector_scope(app, connector_flag)
+    _refuse_managed_opencode_bridge_action(
+        app,
+        name,
+        connector,
+        action="block",
+    )
     plugin_name = _validated_plugin_argument(name)
     pe = PolicyEngine(app.store)
 
     if not reason:
         reason = "manual block via CLI"
 
-    connector = _resolve_connector_scope(app, connector_flag)
     if connector:
         if pe.is_blocked_for_connector("plugin", plugin_name, connector):
             if app.store and app.store.has_action(
@@ -3182,6 +3389,12 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
     from defenseclaw.enforce import PolicyEngine
 
     connector = _normalize_runtime_connector(resolve_list_connector(app, connector_flag))
+    _refuse_managed_opencode_bridge_action(
+        app,
+        name,
+        connector,
+        action="disable",
+    )
     plugin_name = (
         _resolve_openclaw_plugin_id(name, connector) if connector == "openclaw" else _validated_plugin_argument(name)
     )
@@ -3374,6 +3587,13 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 
+    resolved_connector = _resolve_connector_scope(app, connector_flag)
+    _refuse_managed_opencode_bridge_action(
+        app,
+        name,
+        resolved_connector,
+        action="quarantine",
+    )
     try:
         plugin_name = (
             canonical_plugin_id(name)[0]
@@ -3385,7 +3605,6 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
         raise SystemExit(1)
 
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
-    resolved_connector = _resolve_connector_scope(app, connector_flag)
     scope_roots = (
         _plugin_roots_for_connector(app, resolved_connector) if resolved_connector else _all_active_plugin_dirs(app)
     )

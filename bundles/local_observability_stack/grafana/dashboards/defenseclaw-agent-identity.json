@@ -50,7 +50,7 @@
         "name": "connector",
         "label": "Connector",
         "type": "custom",
-        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot,openhands,antigravity,opencode,amp,omnigent",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,devin,copilot,openhands,antigravity,opencode,amp,omnigent",
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
@@ -94,12 +94,8 @@
             "value": "cursor"
           },
           {
-            "text": "windsurf",
-            "value": "windsurf"
-          },
-          {
-            "text": "geminicli",
-            "value": "geminicli"
+            "text": "devin",
+            "value": "devin"
           },
           {
             "text": "copilot",
@@ -349,7 +345,7 @@
     {
       "type": "timeseries",
       "title": "Hook invocations by connector",
-      "description": "Connector hook fires (`defenseclaw_connector_hook_invocations_total`) — `connector` label is the canonical name. Populates as soon as a hook script (Codex, Claude Code, Hermes, Cursor, Windsurf, GeminiCLI, Copilot) fires.",
+      "description": "Connector hook fires (`defenseclaw_connector_hook_invocations_total`) — `connector` label is the canonical name. Populates as soon as a hook script (Codex, Claude Code, Hermes, Cursor, Devin, Copilot) fires.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"

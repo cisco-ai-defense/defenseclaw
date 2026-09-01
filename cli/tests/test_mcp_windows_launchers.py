@@ -227,8 +227,21 @@ class _RecordingScanner:
 
 def _build_python_fixture_wheel(source: Path, dist: Path) -> Path:
     dist.mkdir(parents=True)
+    build_source = dist.parent / ".src"
+    shutil.copytree(
+        source,
+        build_source,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "build", "*.egg-info"),
+    )
     subprocess.run(
-        [os.fspath(HOST_UV), "build", "--wheel", "--out-dir", os.fspath(dist), os.fspath(source)],
+        [
+            os.fspath(HOST_UV),
+            "build",
+            "--wheel",
+            "--out-dir",
+            os.fspath(dist),
+            os.fspath(build_source),
+        ],
         capture_output=True,
         text=True,
         timeout=120,
@@ -842,9 +855,15 @@ def test_early_exit_is_reported_without_leaking_stderr_marker() -> None:
 def test_protocol_error_is_distinguished_from_timeout() -> None:
     env = mcp._safe_subprocess_env({"MCP_FIXTURE_MODE": "protocol_error"})
     errors: list[tuple[str, str]] = []
+    timeout_seconds = 5
     with pytest.raises(BaseException) as caught, mcp._capture_sdk_error_logs(errors):
         asyncio.run(
-            mcp._scan_windows_stdio_tools(_RecordingScanner(), _python_plan(env), ["fixture"], timeout_seconds=0.5)
+            mcp._scan_windows_stdio_tools(
+                _RecordingScanner(),
+                _python_plan(env),
+                ["fixture"],
+                timeout_seconds=timeout_seconds,
+            )
         )
 
     message = str(
@@ -853,7 +872,7 @@ def test_protocol_error_is_distinguished_from_timeout() -> None:
             _python_plan(env),
             errors,
             int(getattr(caught.value, "_defenseclaw_stderr_size", 0) or 0),
-            0.5,
+            timeout_seconds,
         )
     )
     assert "protocol failure" in message

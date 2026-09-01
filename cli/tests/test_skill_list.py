@@ -105,7 +105,9 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
         os.makedirs(os.path.join(system_root, "not-a-skill"), exist_ok=True)
         _seed_skill(skill_root, "operator-skill", body="# Operator skill")
 
-        with self._patch_skill_dirs([skill_root]):
+        with self._patch_skill_dirs([skill_root]), patch.dict(
+            os.environ, {"CODEX_HOME": os.path.join(self.tmp, ".codex")}
+        ):
             rows = skill_list.list_skills(cfg)
 
         by_name = {row["name"]: row for row in rows}
@@ -123,7 +125,9 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
         _seed_skill(skill_root, "shared", body="# Operator copy")
         _seed_skill(os.path.join(skill_root, ".system"), "shared", body="# System copy")
 
-        with self._patch_skill_dirs([skill_root]):
+        with self._patch_skill_dirs([skill_root]), patch.dict(
+            os.environ, {"CODEX_HOME": os.path.join(self.tmp, ".codex")}
+        ):
             rows = skill_list.list_skills(cfg)
 
         self.assertEqual(len(rows), 1)
@@ -203,7 +207,8 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
 
     def test_missing_skill_dir_is_skipped(self):
         cfg = _make_cfg(self.tmp, "codex")
-        with self._patch_skill_dirs(["/nonexistent/path"]):
+        missing = os.path.join(self.tmp, "missing-skills")
+        with self._patch_skill_dirs([missing]):
             rows = skill_list.list_skills(cfg)
         self.assertEqual(rows, [])
 

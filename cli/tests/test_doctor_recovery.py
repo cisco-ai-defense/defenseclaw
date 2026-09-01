@@ -26,6 +26,7 @@ import os
 import posixpath
 import sqlite3
 import stat
+import threading
 import subprocess
 import sys
 from contextlib import closing, nullcontext
@@ -79,6 +80,37 @@ def test_audit_db_plan_is_read_only_and_requires_explicit_approval(tmp_path: Pat
     assert exc.value.code == "recovery-approval-required"
     assert not target.exists()
 
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows share modes")
+def test_existing_target_inspection_coexists_with_gateway_directory_lease(tmp_path: Path) -> None:
+    from defenseclaw.windows_acl import hold_directory_chain
+
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / "audit.db"
+    target.write_bytes(b"existing")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_gateway_lease() -> None:
+        with hold_directory_chain(str(data_dir)):
+            entered.set()
+            assert release.wait(timeout=10.0)
+
+    holder = threading.Thread(target=hold_gateway_lease, daemon=True)
+    holder.start()
+    assert entered.wait(timeout=10.0)
+    try:
+        existing = plan_missing_audit_db(target, data_dir=data_dir)
+        missing = plan_missing_audit_db(data_dir / "missing.db", data_dir=data_dir)
+    finally:
+        release.set()
+        holder.join(timeout=10.0)
+
+    assert not holder.is_alive()
+    assert existing.disposition is RecoveryDisposition.NOT_NEEDED
+    assert existing.reason_code == "target-already-exists"
+    assert missing.disposition is RecoveryDisposition.BLOCKED
+    assert missing.reason_code == "directory-custody-unavailable"
 
 def test_recovery_refuses_a_filesystem_root_as_data_dir(tmp_path: Path) -> None:
     root = Path(tmp_path.anchor)
@@ -612,7 +644,8 @@ def test_device_key_plan_rejects_read_acl_before_staging_or_publication(
 def _inject_windows_backend(monkeypatch: pytest.MonkeyPatch):
     writes: list[tuple[str, bytes, bool]] = []
 
-    def fake_custody(data_dir: str, parent: str):
+    def fake_custody(data_dir: str, parent: str, *, protect_name: bool = True):
+        del protect_name
         identities = []
         for path in recovery._controlled_directory_paths(data_dir, parent):
             info = os.lstat(path)

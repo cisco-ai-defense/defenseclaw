@@ -70,7 +70,7 @@ EXPECTED_CLAW_MODE_ENUM = {
     "codex",
     "hermes",
     "cursor",
-    "windsurf",
+    "devin",
     "geminicli",
     "copilot",
     "openhands",

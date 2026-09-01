@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 MANIFEST_FILES = (
+    ".cursor-plugin/plugin.json",
     ".codex-plugin/plugin.json",
     ".claude-plugin/plugin.json",
     "plugin.json",

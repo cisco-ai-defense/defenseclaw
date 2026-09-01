@@ -116,16 +116,10 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			Apply:          hookOnlyFixtureApply("cursor"),
 		},
 		{
-			Name:           "windsurf",
-			DestinationApp: "windsurf",
-			ClawMode:       "windsurf",
-			Apply:          hookOnlyFixtureApply("windsurf"),
-		},
-		{
-			Name:           "geminicli",
-			DestinationApp: "geminicli",
-			ClawMode:       "geminicli",
-			Apply:          hookOnlyFixtureApply("geminicli"),
+			Name:           "devin",
+			DestinationApp: "devin",
+			ClawMode:       "devin",
+			Apply:          hookOnlyFixtureApply("devin"),
 		},
 		{
 			Name:           "copilot",
@@ -179,14 +173,10 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.CursorHooksPathOverride
 			connector.CursorHooksPathOverride = filepath.Join(home, ".cursor", "hooks.json")
 			t.Cleanup(func() { connector.CursorHooksPathOverride = prev })
-		case "windsurf":
-			prev := connector.WindsurfHooksPathOverride
-			connector.WindsurfHooksPathOverride = filepath.Join(home, ".codeium", "windsurf", "hooks.json")
-			t.Cleanup(func() { connector.WindsurfHooksPathOverride = prev })
-		case "geminicli":
-			prev := connector.GeminiSettingsPathOverride
-			connector.GeminiSettingsPathOverride = filepath.Join(home, ".gemini", "settings.json")
-			t.Cleanup(func() { connector.GeminiSettingsPathOverride = prev })
+		case "devin":
+			prev := connector.DevinHooksPathOverride
+			connector.DevinHooksPathOverride = filepath.Join(home, ".config", "devin", "config.json")
+			t.Cleanup(func() { connector.DevinHooksPathOverride = prev })
 		case "copilot":
 			prev := connector.CopilotHooksPathOverride
 			connector.CopilotHooksPathOverride = filepath.Join(home, "workspace", ".github", "hooks", "defenseclaw.json")

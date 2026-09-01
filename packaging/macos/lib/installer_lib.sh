@@ -57,7 +57,7 @@ parse_connectors() {
 # is_supported_connector NAME -> exit 0 if name is auto-wireable.
 is_supported_connector() {
   case "$1" in
-    amp|codex|claudecode|cursor) return 0;;
+    amp|codex|claudecode|cursor|opencode) return 0;;
     *) return 1;;
   esac
 }
@@ -70,7 +70,7 @@ is_supported_connector() {
 # install.log can act on the right cause:
 #
 #   all-unsupported  Every requested connector is outside the auto-wire
-#                    allow-list (amp|codex|claudecode|cursor). The
+#                    allow-list (amp|codex|claudecode|cursor|opencode). The
 #                    hook-enumerator's tick will NOT fix this by itself
 #                    — the operator has to rerun with --connector picking
 #                    a supported entry.
@@ -133,7 +133,8 @@ home_perms_ok() {
 # Record layout: USER\tCONNECTOR\tREASON\tPATH\n
 #   USER      — DC_INSTALLER_TARGET_USER at the time of the failure
 #               (empty when the caller didn't scope to a user).
-#   CONNECTOR — connector token (amp / codex / claudecode / cursor).
+#   CONNECTOR — connector token (amp / codex / claudecode / cursor /
+#               opencode).
 #   REASON    — short machine-readable reason (e.g. "malformed-json").
 #   PATH      — absolute path of the metadata file that failed to
 #               parse; the operator can act on this directly.
@@ -183,14 +184,15 @@ _probe_json_version() {
 
 # discover_agent_version CONNECTOR HOME -> echoes the agent version or "".
 #
-# Metadata-only: reads files under HOME or under signed system app bundles
-# and never executes user-installed agent binaries. install.sh runs as root,
-# so invoking $PATH-resolved `codex` / `claude` / etc. would be a
-# privilege-escalation surface — the caller must pass --agent-version
-# explicitly for connectors that don't ship a stable metadata file.
-# _read_codex_version_as_user USER -> echoes codex --version output (first line, ≤512 bytes) or "".
+# Prefer identified package/app metadata. The two binary fallbacks (Codex and
+# OpenCode's official standalone path) run with bounded output/time as the
+# enumerated target user, never as root; no PATH-resolved user binary runs
+# with installer privileges.
+# _read_agent_version_as_user USER BINARY [SUDO_BIN] -> echoes BINARY --version
+# output (first line, ≤512 bytes) or "". The installer omits SUDO_BIN and
+# uses Apple's fixed /usr/bin/sudo; the optional argument is a unit-test seam.
 #
-# Runs `sudo -n -u USER codex --version` with a bounded wall-clock
+# Runs `sudo -n -u USER -- BINARY --version` with a bounded wall-clock
 # limit (5 s) so a hung codex cannot stall the installer. Pure-bash
 # implementation: previously this shelled out to python3 for the
 # timeout + bounded-read logic, but that violated the "no python3
@@ -199,9 +201,11 @@ _probe_json_version() {
 # not ship `timeout(1)` so the timeout is implemented by
 # background-launching the child and killing it after the deadline;
 # the child's stdout is captured to a private temp file bounded at
-# 512 bytes via `head -c` so a chatty codex cannot fill the pipe.
-_read_codex_version_as_user() {
+# 512 bytes via `head -c` so a chatty agent cannot fill the pipe.
+_read_agent_version_as_user() {
   local user="$1"
+  local binary="$2"
+  local sudo_bin="${3:-/usr/bin/sudo}"
   local out_file rc=0
   # Fail closed on mktemp failure. The prior fallback
   # `/tmp/defenseclaw-codex-version.$$` was predictable — a
@@ -212,7 +216,7 @@ _read_codex_version_as_user() {
   # privesc surface. If mktemp fails, print nothing and return
   # non-zero so the caller falls through to alternative version
   # discovery paths.
-  out_file="$(mktemp -t defenseclaw-codex-version.XXXXXX 2>/dev/null)" || return 1
+  out_file="$(mktemp -t defenseclaw-agent-version.XXXXXX 2>/dev/null)" || return 1
   # Best-effort cleanup on any exit path.
   # shellcheck disable=SC2064
   trap "rm -f -- '${out_file}'" RETURN
@@ -222,7 +226,7 @@ _read_codex_version_as_user() {
   # macOS the child inherits the shell's session and $$ but exec's
   # `-a` and `sudo`'s `-b` do not give us a clean PGID, so we settle
   # for killing the immediate PID plus a wait.
-  ( sudo -n -u "${user}" codex --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
+  ( "${sudo_bin}" -n -u "${user}" -- "${binary}" --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
   local pid=$!
   # Poll for completion with a 5-second wall-clock budget. `wait -n`
   # would block indefinitely; a tight sleep+kill loop hits the
@@ -249,6 +253,10 @@ _read_codex_version_as_user() {
   # line (or empty on any failure).
   printf '%s' "${line}"
   return 0
+}
+
+_read_codex_version_as_user() {
+  _read_agent_version_as_user "$1" codex
 }
 
 
@@ -619,6 +627,75 @@ _read_json_version() {
   _read_json_field "${path}" "version"
 }
 
+# _is_valid_opencode_version VERSION -> exit 0 for a SemVer-shaped
+# metadata value. Compatibility remains the guardian hook-contract's job
+# (currently >=1.18.10,<1.18.20); discovery only rejects values that cannot be
+# a real agent version at all. Keeping that boundary here avoids silently
+# treating a future, well-formed OpenCode release as an absent installation.
+_is_valid_opencode_version() {
+  local version="$1"
+  local semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+  [[ "${version}" =~ ${semver_re} ]]
+}
+
+# _probe_opencode_json_version PATH -> echoes a validated opencode-ai package
+# version. The package-name check prevents a similarly placed, unrelated npm
+# package from becoming version authority. Malformed JSON and invalid version
+# strings feed the installer's existing discovery-error report.
+_probe_opencode_json_version() {
+  local path="$1"
+  local version
+  version="$(_probe_json_version "${path}" opencode "opencode-ai")"
+  [[ -n "${version}" ]] || return 0
+  if ! _is_valid_opencode_version "${version}"; then
+    _record_discovery_error opencode "${path}" "invalid-version"
+    return 0
+  fi
+  printf '%s' "${version}"
+}
+
+# _probe_opencode_app_version INFO_PLIST -> echoes the version only for the
+# official production desktop bundle. PlistBuddy is an Apple system metadata
+# reader; the OpenCode executable is never launched by this probe.
+_probe_opencode_app_version() {
+  local plist="$1"
+  [[ -f "${plist}" ]] || return 0
+  local bundle_id version
+  bundle_id="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "${plist}" 2>/dev/null || true)"
+  if [[ "${bundle_id}" != "ai.opencode.desktop" ]]; then
+    _record_discovery_error opencode "${plist}" "bundle-identity-mismatch"
+    return 0
+  fi
+  version="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${plist}" 2>/dev/null || true)"
+  if ! _is_valid_opencode_version "${version}"; then
+    _record_discovery_error opencode "${plist}" "invalid-version"
+    return 0
+  fi
+  printf '%s' "${version}"
+}
+
+# _probe_opencode_homebrew_version PREFIX -> echoes the version carried by
+# Homebrew's active opt symlink (PREFIX/opt/opencode ->
+# ../Cellar/opencode/VERSION). Validate that exact formula layout and the
+# linked executable, but never execute brew or opencode.
+_probe_opencode_homebrew_version() {
+  local prefix="$1"
+  local opt_path="${prefix}/opt/opencode"
+  [[ -L "${opt_path}" ]] || return 0
+  local target version
+  target="$(readlink "${opt_path}" 2>/dev/null || true)"
+  case "${target}" in
+    ../Cellar/opencode/*) version="${target#../Cellar/opencode/}";;
+    "${prefix}"/Cellar/opencode/*) version="${target#"${prefix}"/Cellar/opencode/}";;
+    *) return 0;;
+  esac
+  version="${version%/}"
+  [[ "${version}" != */* ]] || return 0
+  _is_valid_opencode_version "${version}" || return 0
+  [[ -x "${opt_path}/bin/opencode" ]] || return 0
+  printf '%s' "${version}"
+}
+
 # _claude_desktop_embedded_version_from_home HOME -> echoes the highest
 # Claude Code version bundled inside Claude Desktop, or "".
 #
@@ -849,6 +926,47 @@ discover_agent_version() {
           /Applications/Cursor.app/Contents/Info.plist 2>/dev/null || true
       fi
       ;;
+    opencode)
+      # OpenCode is distributed as an official desktop app, Homebrew formula,
+      # npm package, and standalone ~/.opencode/bin install. Prefer identified
+      # metadata; because the official standalone installer leaves no version
+      # metadata, its exact binary path is the sole executable fallback and is
+      # run through the bounded target-user helper above, never as root.
+      local plist version
+      plist=/Applications/OpenCode.app/Contents/Info.plist
+      if [[ -f "${plist}" ]]; then
+        version="$(_probe_opencode_app_version "${plist}")"
+        if [[ -n "${version}" ]]; then echo "${version}"; return; fi
+      fi
+
+      local prefix
+      for prefix in /opt/homebrew /usr/local; do
+        version="$(_probe_opencode_homebrew_version "${prefix}")"
+        if [[ -n "${version}" ]]; then echo "${version}"; return; fi
+      done
+
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/opencode-ai/package.json \
+        "${home}"/.local/lib/node_modules/opencode-ai/package.json \
+        /usr/local/lib/node_modules/opencode-ai/package.json \
+        /opt/homebrew/lib/node_modules/opencode-ai/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        version="$(_probe_opencode_json_version "${pkg}")"
+        if [[ -n "${version}" ]]; then echo "${version}"; return; fi
+      done
+
+      local standalone="${home}/.opencode/bin/opencode"
+      if [[ -n "${DC_INSTALLER_TARGET_USER:-}" && -f "${standalone}" && -x "${standalone}" ]]; then
+        version="$(_read_agent_version_as_user "${DC_INSTALLER_TARGET_USER}" "${standalone}" || true)"
+        if _is_valid_opencode_version "${version}"; then
+          echo "${version}"
+          return
+        fi
+        _record_discovery_error opencode "${standalone}" "version-probe-failed"
+      fi
+
+      ;;
   esac
 }
 
@@ -1040,6 +1158,10 @@ prepare_userspace_for() {
     codex)      prepare_codex_userspace      "${home}" "${uid}" "${gid}";;
     claudecode) prepare_claudecode_userspace "${home}" "${uid}" "${gid}";;
     cursor)     prepare_cursor_userspace     "${home}" "${uid}" "${gid}";;
+    # OpenCode Setup owns the complete defenseclaw.js bridge plugin and
+    # creates its parent directory as the target user. Packaging must not
+    # precreate a placeholder that could be mistaken for user state.
+    opencode)   : ;;
   esac
 }
 
@@ -1136,7 +1258,8 @@ enumerate_local_users() {
 #
 # Args:
 #   SUPPORT_DIR    e.g. /opt/cisco/secureclient/defenseclaw
-#   CONNECTORS_CSV comma-separated list of connectors (e.g. amp,codex,claudecode,cursor)
+#   CONNECTORS_CSV comma-separated list of connectors
+#                  (e.g. amp,codex,claudecode,cursor,opencode)
 #   USER_LINES     newline-separated user:uid:gid:home lines (as produced by
 #                  enumerate_local_users)
 #

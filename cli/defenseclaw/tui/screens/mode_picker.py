@@ -44,10 +44,27 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("zeptoclaw", "ZeptoClaw", "z", True, "api_base redirect + proxy response-scan (full guardrail)"),
     ModeChoice("claudecode", "Claude Code", "k", False, "PreToolUse hooks + native OTel + CodeGuard plugin"),
     ModeChoice("codex", "Codex", "c", False, "hook scripts + native OTel + notify + CodeGuard skill"),
-    ModeChoice("hermes", "Hermes", "h", False, "shell hooks + vendor-native block events"),
-    ModeChoice("cursor", "Cursor", "u", False, "command hooks + event-scoped ask/block"),
-    ModeChoice("windsurf", "Windsurf", "w", False, "Cascade hooks + fail-open block decisions"),
-    ModeChoice("geminicli", "Gemini CLI", "g", False, "settings.json hooks + structured deny responses"),
+    ModeChoice(
+        "hermes",
+        "Hermes",
+        "h",
+        False,
+        "shell hooks; synchronous JSON pre-tool block; no ask or fail-closed",
+    ),
+    ModeChoice(
+        "cursor",
+        "Cursor",
+        "u",
+        False,
+        "command hooks + event-scoped deny; no native human approval",
+    ),
+    ModeChoice(
+        "devin",
+        "Devin CLI",
+        "d",
+        False,
+        "native lifecycle hooks; MCP, skills, and rules discovery; no native OTLP",
+    ),
     ModeChoice("copilot", "Copilot", "p", False, "workspace hooks + native pre-tool approval"),
     ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
@@ -60,8 +77,8 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
 def visible_mode_picker_choices(os_name: str | None = None) -> tuple[ModeChoice, ...]:
     """Mode-picker rows supported on *os_name*.
 
-    Unsupported Windows connectors are dropped. Preview connectors remain
-    selectable with an explicit label/reason; macOS/Linux are unchanged.
+    Unsupported or retired connectors are dropped. Preview connectors remain
+    selectable with an explicit label/reason.
     """
     supported = set(supported_connectors([c.wire for c in MODE_PICKER_CHOICES], os_name))
     visible: list[ModeChoice] = []

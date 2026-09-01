@@ -73,10 +73,20 @@ class PluginEnforcer:
         if not os.path.exists(real_path):
             return None
         try:
-            source_id, _manifest = canonical_plugin_id(source_path)
-            if filesystem_identity_key(source_id, os.path.dirname(source_path)) != filesystem_identity_key(
-                validate_plugin_id(plugin_name), os.path.dirname(source_path)
-            ):
+            identity_root = os.path.dirname(source_path)
+            direct_script = os.path.isfile(source_path) and source_path.casefold().endswith(
+                (".js", ".ts")
+            )
+            source_id = (
+                validate_plugin_id(os.path.splitext(os.path.basename(source_path))[0])
+                if direct_script
+                else canonical_plugin_id(source_path)[0]
+            )
+            expected_key = filesystem_identity_key(
+                validate_plugin_id(plugin_name),
+                identity_root,
+            )
+            if expected_key != filesystem_identity_key(source_id, identity_root):
                 return None
         except PluginIdentityError:
             return None

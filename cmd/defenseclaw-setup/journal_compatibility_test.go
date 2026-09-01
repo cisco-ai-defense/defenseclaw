@@ -68,6 +68,11 @@ type published087SetupJournal struct {
 func TestPublishedSetupJournalSchemaFixturesReproduceStrictCompatibilityBoundary(t *testing.T) {
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	// The shared transaction fixture follows current Setup behavior and
+	// captures Antigravity's config home for every install. That field did not
+	// exist in the published 0.8.7 schema whose strict boundary this fixture
+	// reproduces, so remove it from the frozen legacy document.
+	transaction.AntigravityConfigDir = ""
 
 	published087 := setupJournal{
 		SchemaVersion: setupJournalSchemaVersion,

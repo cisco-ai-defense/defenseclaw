@@ -16,9 +16,10 @@ import (
 // Token(0) convenience API can consult process-level USERPROFILE and
 // LOCALAPPDATA overrides. Agent runtimes legitimately override those variables
 // for connector isolation, but they must never redirect Setup ownership or the
-// native hook trust boundary.
+// native hook trust boundary. Packaged desktop agent hosts must not redirect
+// the lookup into their private package cache either.
 func CurrentUserKnownFolderPath(folderID *windows.KNOWNFOLDERID) (string, error) {
-	return CurrentUserKnownFolderPathWithFlags(folderID, windows.KF_FLAG_DEFAULT)
+	return CurrentUserKnownFolderPathWithFlags(folderID, windows.KF_FLAG_NO_PACKAGE_REDIRECTION)
 }
 
 // CurrentUserKnownFolderPathWithFlags resolves a Known Folder with the

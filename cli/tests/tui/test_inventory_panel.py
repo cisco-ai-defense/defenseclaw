@@ -83,6 +83,15 @@ def _inventory_payload() -> dict[str, object]:
         ],
         "mcp": [{"id": "context7", "source": "codex", "transport": "stdio", "command": "uvx context7"}],
         "agents": [{"id": "default", "model": "gpt-5", "source": "codex", "is_default": True}],
+        "tools": [
+            {
+                "id": "shell",
+                "name": "Shell",
+                "kind": "config-tool",
+                "source": "~/.codex/config.toml",
+                "description": "Execute a shell command",
+            }
+        ],
         "model_providers": [{"id": "openai", "source": "config", "default_model": "gpt-5", "status": "ready"}],
         "memory": [
             {
@@ -112,6 +121,7 @@ def _inventory_payload() -> dict[str, object]:
             "plugins": {"count": 2, "loaded": 1, "disabled": 1},
             "mcp": {"count": 1},
             "agents": {"count": 1},
+            "tools": {"count": 1},
             "model_providers": {"count": 1},
             "memory": {"count": 1},
             "errors": 0,
@@ -201,6 +211,7 @@ def test_inventory_apply_json_summary_source_and_load_errors() -> None:
     assert summary.home_path == "~/.codex"
     assert summary.config_path == "~/.codex/config.toml"
     assert summary.counts["skills"] == "3"
+    assert summary.counts["tools"] == "1"
     assert summary.policy_skill_verdicts["blocked"] == "1"
     assert summary.version == "1"
     assert summary.generated_at == "2026-05-20T12:00:00Z"
@@ -210,6 +221,7 @@ def test_inventory_apply_json_summary_source_and_load_errors() -> None:
     rows = dict(panel.summary_table_rows())
     assert "Errors" not in rows
     assert rows["Unsupported capabilities"] == "1 (informational)"
+    assert rows["Tools"] == "1"
     assert panel.inventory is not None
     assert panel.inventory.limitations[0].status == "unsupported"
 
@@ -274,6 +286,7 @@ def test_inventory_detail_info_for_all_non_summary_tabs_and_command_intent() -> 
     for tab, want_title in (
         ("mcp", "MCP: context7"),
         ("agents", "AGENT: default"),
+        ("tools", "TOOL: Shell"),
         ("models", "MODEL: openai"),
         ("memory", "MEMORY: mem"),
     ):
@@ -301,6 +314,7 @@ def test_inventory_subtab_scope_and_summary_metadata_match_go_labels() -> None:
         "Plugins (2)",
         "MCPs (1)",
         "Agents (1)",
+        "Tools (1)",
         "Models (1)",
         "Memory (1)",
     ]
@@ -312,7 +326,7 @@ def test_inventory_subtab_scope_and_summary_metadata_match_go_labels() -> None:
     assert panel.active_sub == "plugins"
     assert panel.handle_key("h").handled is True
     assert panel.active_sub == "skills"
-    for _ in range(5):
+    for _ in range(6):
         assert panel.handle_key("l").handled is True
     assert panel.active_sub == "memory"
 
@@ -332,8 +346,24 @@ def test_inventory_subtab_scope_and_summary_metadata_match_go_labels() -> None:
     rows = dict(panel.summary_table_rows())
     assert rows["Skills"] == "3 (2 eligible)"
     assert rows["Plugins"] == "2 (1 loaded, 1 disabled)"
+    assert rows["Tools"] == "1"
     assert rows["Skill policy verdicts"] == "1 blocked  1 allowed  1 warning"
     assert rows["Skill scan coverage"] == "2 scanned  1 unscanned  3 findings"
+
+
+def test_inventory_tools_subtab_renders_aibom_tool_rows_and_detail() -> None:
+    panel = InventoryPanelModel()
+    panel.apply_loaded(_inventory())
+    panel.set_active_subtab("tools")
+
+    assert panel.data_table_columns() == ("ID", "Name", "Kind", "Source")
+    assert panel.data_table_rows() == (
+        ("shell", "Shell", "config-tool", "~/.codex/config.toml"),
+    )
+    detail = panel.detail_info()
+    assert detail is not None
+    assert detail.title == "TOOL: Shell"
+    assert ("Description", "Execute a shell command") in detail.fields
 
 
 def test_inventory_merged_tags_connector_and_adds_column() -> None:
@@ -347,6 +377,7 @@ def test_inventory_merged_tags_connector_and_adds_column() -> None:
             "connector": "codex",
             "skills": [{"id": "alpha", "enabled": True}],
             "mcp": [{"id": "context7", "transport": "stdio"}],
+            "tools": [{"id": "shell", "source": "config.toml"}],
         }
     )
     cursor = json.dumps(
@@ -354,6 +385,7 @@ def test_inventory_merged_tags_connector_and_adds_column() -> None:
             "connector": "cursor",
             "skills": [{"id": "beta"}],
             "agents": [{"id": "main", "model": "gpt"}],
+            "tools": [{"id": "browser", "source": "plugin:browser"}],
         }
     )
     panel.apply_merged([("codex", codex), ("cursor", cursor)])
@@ -364,6 +396,11 @@ def test_inventory_merged_tags_connector_and_adds_column() -> None:
     skill_rows = panel.data_table_rows()
     assert [row[0] for row in skill_rows] == ["codex", "cursor"]
     assert [row[1] for row in skill_rows] == ["alpha", "beta"]
+
+    panel.set_active_subtab("tools")
+    tool_rows = panel.data_table_rows()
+    assert [row[0] for row in tool_rows] == ["codex", "cursor"]
+    assert [row[1] for row in tool_rows] == ["shell", "browser"]
 
     # Per-connector snapshots are retained for the Summary breakdown.
     assert [name for name, _snap in panel.connector_snapshots] == ["codex", "cursor"]

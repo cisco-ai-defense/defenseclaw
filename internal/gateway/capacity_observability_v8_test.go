@@ -28,12 +28,20 @@ func (runtime *capacityHealthRuntime) DestinationHealthSnapshot(
 }
 
 func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
-	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	runtime, capture := newProxyGeneratedMetricRuntime(t)
 	sidecar := &Sidecar{startedAt: time.Now().Add(-time.Minute), store: capture.store}
 	items := sidecar.capacityMetricBatch(t.Context(), time.Now().UTC())
 	results, err := runtime.RecordGeneratedMetricBatch(t.Context(), items)
 	if err != nil {
-		t.Fatal(err)
+		recorded := capture.metricSnapshot()
+		failedFamily := observability.EventName("")
+		if len(recorded) < len(items) {
+			failedFamily = items[len(recorded)].Family
+		}
+		t.Fatalf(
+			"capacity batch failed after %d/%d metrics at family %q (capture_closed=%t): %v",
+			len(recorded), len(items), failedFamily, capture.closed.Load(), err,
+		)
 	}
 	if len(items) != 11 || len(results) != len(items) {
 		t.Fatalf("capacity batch items/results=%d/%d", len(items), len(results))

@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -79,6 +81,36 @@ func TestCorrelationContractSourcesAndFixturesAreImmutable(t *testing.T) {
 	}
 }
 
+func TestOpenHandsCorrelationEvidenceIncludesReviewedSDKExporter(t *testing.T) {
+	sources := correlationContractSources("openhands")
+	wants := map[string]struct {
+		uri      string
+		revision string
+	}{
+		"openhands-source-a55f1ded": {
+			uri:      "https://github.com/All-Hands-AI/OpenHands",
+			revision: "a55f1ded61cac85d6e42aee9e460320ead93ae6a",
+		},
+		"openhands-sdk-source-bf57d16f": {
+			uri:      "https://github.com/OpenHands/software-agent-sdk",
+			revision: "bf57d16f3dde05b0b03fa0af3f7e0ae924043b80",
+		},
+	}
+	for _, source := range sources {
+		want, ok := wants[source.ID]
+		if !ok {
+			continue
+		}
+		if source.URI != want.uri || source.Revision != want.revision || source.CheckedDate == "" {
+			t.Fatalf("OpenHands source %+v does not match reviewed evidence %+v", source, want)
+		}
+		delete(wants, source.ID)
+	}
+	if len(wants) != 0 {
+		t.Fatalf("OpenHands correlation evidence is missing sources: %v", wants)
+	}
+}
+
 func TestCorrelationAuthorityRequiresExactFieldEvidence(t *testing.T) {
 	spec := DefaultCorrelationSpec("codex")
 	generic, ok := spec.NativeOTLPValue(map[string]interface{}{
@@ -108,7 +140,7 @@ func TestCorrelationAuthorityRequiresExactFieldEvidence(t *testing.T) {
 
 func TestHookProfilesCarryResolvedCorrelationVersion(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		conn, _ := reg.Get(name)
 		profile := conn.(HookProfileProvider).HookProfile(SetupOpts{})
 		if profile.Correlation.ProfileVersion == "" || profile.Correlation.ProfileVersion == CorrelationProfileExplicitV1 {
@@ -175,6 +207,25 @@ func TestCodexCorrelationProfileSupportsExactReviewedHookContracts(t *testing.T)
 	}
 }
 
+func TestClaudeCorrelationProfileSupportsExactReviewedHookContracts(t *testing.T) {
+	for _, contractID := range []string{"claudecode-hooks-v1", "claudecode-hooks-v2"} {
+		spec, ok := CorrelationSpecForConnector("claudecode", contractID)
+		if !ok {
+			t.Fatalf("reviewed Claude Code contract %q rejected", contractID)
+		}
+		if spec.HookContractID != contractID {
+			t.Fatalf("correlation contract=%q want %q", spec.HookContractID, contractID)
+		}
+		if err := spec.Validate(); err != nil {
+			t.Fatalf("Validate %q: %v", contractID, err)
+		}
+	}
+
+	if _, ok := CorrelationSpecForConnector("claudecode", "claudecode-hooks-v999"); ok {
+		t.Fatal("unreviewed future Claude Code contract accepted")
+	}
+}
+
 func TestUnknownCorrelationProfileDoesNotGuessVendorAliases(t *testing.T) {
 	spec := ExplicitCanonicalCorrelationSpec("plugin-example")
 	if !spec.AllowsReceiptTarget(CorrelationTargetSourceEvent) {
@@ -216,7 +267,7 @@ func TestConnectorScopedTurnMappingsDoNotCrossKinds(t *testing.T) {
 		want    string
 	}{
 		{name: "cursor", payload: map[string]interface{}{"generation_id": "generation-7"}, want: "generation-7"},
-		{name: "windsurf", payload: map[string]interface{}{"execution_id": "execution-9"}, want: "execution-9"},
+		{name: "devin", payload: map[string]interface{}{"prompt_id": "prompt-9"}, want: "prompt-9"},
 		{name: "zeptoclaw", payload: map[string]interface{}{"provider_request_id": "provider-1"}, want: ""},
 		{name: "antigravity", payload: map[string]interface{}{"stepIdx": 9}, want: ""},
 	}
@@ -273,12 +324,16 @@ func TestSemanticEventIDAcceptsOnlyExactCanonicalKey(t *testing.T) {
 }
 
 func TestNativeTelemetryRegistryIsExplicit(t *testing.T) {
+	openhandsStability := NativeTelemetryNone
+	if runtime.GOOS == "darwin" {
+		openhandsStability = NativeTelemetryStable
+	}
 	wants := map[string]NativeTelemetryStability{
 		"openclaw": NativeTelemetryNone, "zeptoclaw": NativeTelemetryNone,
 		"codex": NativeTelemetryStable, "claudecode": NativeTelemetryBeta,
-		"hermes": NativeTelemetryNone, "cursor": NativeTelemetryNone, "windsurf": NativeTelemetryNone,
-		"geminicli": NativeTelemetryStable, "copilot": NativeTelemetryStable,
-		"openhands": NativeTelemetryNone, "antigravity": NativeTelemetryNone,
+		"hermes": NativeTelemetryNone, "cursor": NativeTelemetryNone, "devin": NativeTelemetryNone,
+		"copilot":   NativeTelemetryNone,
+		"openhands": openhandsStability, "antigravity": NativeTelemetryNone,
 		"opencode": NativeTelemetryNone, "omnigent": NativeTelemetryExperimental,
 		"amp": NativeTelemetryNone,
 	}
@@ -304,6 +359,9 @@ func TestNativeTelemetryRegistryIsExplicit(t *testing.T) {
 
 func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 	for _, name := range NewDefaultRegistry().Names() {
+		if name == "geminicli" {
+			continue // retained in the internal registry for legacy cleanup only
+		}
 		spec := DefaultCorrelationSpec(name)
 		if err := spec.Validate(); err != nil {
 			t.Fatalf("%s profile invalid: %v", name, err)
@@ -320,7 +378,7 @@ func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 			case CorrelationSurfaceNativeOTLP:
 				count = len(spec.NativeOTLPBindings)
 			}
-			if count == 0 {
+			if count == 0 && !(surface == CorrelationSurfaceNativeOTLP && spec.NativeTelemetry.BindingMode == NativeTelemetryBindingsExporterOnly) {
 				t.Errorf("%s declares %s without bindings", name, surface)
 			}
 		}
@@ -331,6 +389,49 @@ func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 				t.Errorf("%s advertises an event stream without a production adapter", name)
 			}
 		}
+	}
+}
+
+func TestNativeTelemetryBindingModesAreExplicit(t *testing.T) {
+	for _, name := range NewDefaultRegistry().Names() {
+		spec := DefaultCorrelationSpec(name)
+		if spec.NativeTelemetry.Stability == NativeTelemetryNone {
+			if spec.NativeTelemetry.BindingMode != NativeTelemetryBindingsNone {
+				t.Errorf("%s none stability has binding mode %q", name, spec.NativeTelemetry.BindingMode)
+			}
+			continue
+		}
+		switch spec.NativeTelemetry.BindingMode {
+		case NativeTelemetryBindingsReviewed:
+			if len(spec.NativeOTLPBindings) == 0 {
+				t.Errorf("%s reviewed native telemetry has no bindings", name)
+			}
+		case NativeTelemetryBindingsExporterOnly:
+			if len(spec.NativeOTLPBindings) != 0 {
+				t.Errorf("%s exporter-only native telemetry has bindings", name)
+			}
+		default:
+			t.Errorf("%s native telemetry has invalid binding mode %q", name, spec.NativeTelemetry.BindingMode)
+		}
+	}
+
+	exporterOnly := ExplicitCanonicalCorrelationSpec("exporter-only-test")
+	exporterOnly.NativeTelemetry = NativeTelemetrySpec{
+		InputSurface: CorrelationSurfaceNativeOTLP,
+		Signals:      []NativeTelemetrySignal{NativeTelemetryTraces},
+		Stability:    NativeTelemetryExperimental,
+		BindingMode:  NativeTelemetryBindingsExporterOnly,
+	}
+	exporterOnly.Surfaces = []CorrelationSurface{CorrelationSurfaceNativeOTLP}
+	if err := exporterOnly.Validate(); err != nil {
+		t.Fatalf("valid exporter-only native telemetry rejected: %v", err)
+	}
+
+	exporterOnly.NativeOTLPBindings = []CorrelationFieldBinding{
+		reported(CorrelationTargetSession, "exporter-only-test", "session", "undocumented.session.id"),
+	}
+	if err := exporterOnly.Validate(); err == nil || !strings.Contains(err.Error(), "exporter-only") {
+		t.Fatalf("exporter-only mode accepted invented correlation binding: %v", err)
 	}
 }
 
@@ -415,7 +516,7 @@ func TestCorrelationRegistryRetainsAllTypedNativeIdentifiers(t *testing.T) {
 
 func TestHookLifecycleBindingsUseOnlyReviewedContractEvents(t *testing.T) {
 	for _, name := range []string{
-		"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli",
+		"codex", "claudecode", "hermes", "cursor", "devin",
 		"copilot", "openhands", "antigravity", "opencode", "omnigent", "amp",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -446,8 +547,7 @@ func TestConnectorLifecycleSemantics(t *testing.T) {
 		{"claudecode", "PostToolUseFailure", CorrelationLifecycleToolEnd},
 		{"hermes", "pre_llm_call", CorrelationLifecycleTurnStart},
 		{"cursor", "beforeSubmitPrompt", CorrelationLifecycleTurnStart},
-		{"windsurf", "post_cascade_response", CorrelationLifecycleTurnEnd},
-		{"geminicli", "BeforeTool", CorrelationLifecycleToolStart},
+		{"devin", "Stop", CorrelationLifecycleTurnEnd},
 		{"copilot", "userPromptSubmitted", CorrelationLifecycleTurnStart},
 		{"openhands", "user_prompt_submit", CorrelationLifecycleTurnStart},
 		{"antigravity", "PostInvocation", CorrelationLifecycleTurnEnd},
@@ -467,6 +567,9 @@ func TestConnectorLifecycleSemantics(t *testing.T) {
 
 func TestNativeRegistryNeverRecognizesNonStandardGenAIRequestID(t *testing.T) {
 	for _, name := range NewDefaultRegistry().Names() {
+		if name == "geminicli" {
+			continue // retained in the internal registry for legacy cleanup only
+		}
 		spec := DefaultCorrelationSpec(name)
 		if got, ok := spec.NativeOTLPValue(map[string]interface{}{"gen_ai.request.id": "not-standard"}, CorrelationTargetModelRequest); ok {
 			t.Errorf("%s accepted non-standard gen_ai.request.id as %+v", name, got)
@@ -486,14 +589,11 @@ func TestAllBuiltinCorrelationProfilesUseConnectorExactIDs(t *testing.T) {
 		{"claudecode", map[string]interface{}{"session_id": "s", "prompt_id": "p", "tool_use_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "p", CorrelationTargetTool: "tc"}},
 		{"hermes", map[string]interface{}{"extra": map[string]interface{}{"session_id": "s", "turn_id": "t", "event_id": "e", "tool_call_id": "tc"}}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
 		{"cursor", map[string]interface{}{"conversation_id": "s", "generation_id": "t", "messageId": "m", "tool_use_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "m", CorrelationTargetTool: "tc"}},
-		{"windsurf", map[string]interface{}{"trajectory_id": "s", "execution_id": "t", "stepIndex": 3, "tool_call_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetExecution: "t", CorrelationTargetSourceSeq: "3", CorrelationTargetTool: "tc"}},
-		{"geminicli", map[string]interface{}{"session_id": "s", "prompt_id": "p", "response_id": "rs"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "p", CorrelationTargetModelResponse: "rs"}},
+		{"devin", map[string]interface{}{"session_id": "s", "prompt_id": "p"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "p"}},
 		{"copilot", map[string]interface{}{"sessionId": "s"}, map[CorrelationTarget]string{CorrelationTargetSession: "s"}},
-		{"openhands", map[string]interface{}{"conversation_id": "s", "message_id": "t", "event_id": "e", "tool_call_id": "tc", "llm_response_id": "rs"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc", CorrelationTargetModelResponse: "rs"}},
+		{"openhands", map[string]interface{}{"session_id": "s"}, map[CorrelationTarget]string{CorrelationTargetSession: "s"}},
 		{"antigravity", map[string]interface{}{"conversationId": "s", "stepIdx": 4, "invocationNum": 8, "toolCall": map[string]interface{}{"id": "tc"}}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetStep: "4", CorrelationTargetExecution: "8", CorrelationTargetTool: "tc"}},
 		{"opencode", map[string]interface{}{"session_id": "s", "parentID": "ps", "messageId": "t", "part_id": "e", "callID": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetParentSession: "ps", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
-		{"omnigent", map[string]interface{}{"conversation_id": "s", "root_conversation_id": "rs", "response_id": "t", "item_id": "e", "call_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetRootSession: "rs", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
-		{"amp", map[string]interface{}{"thread_id": "th", "session_id": "s", "turn_id": "t", "message_id": "m", "source_event_id": "e", "tool_call_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetThread: "th", CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetMessage: "m", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -505,6 +605,56 @@ func TestAllBuiltinCorrelationProfilesUseConnectorExactIDs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOmniGentOfficialPolicyEventDoesNotInventCorrelationIDs(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "omnigent-policy-event.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	spec := DefaultCorrelationSpec("omnigent")
+	if got := spec.HookValues(payload); len(got) != 0 {
+		t.Fatalf("official OmniGent PolicyEvent produced unsupported correlation IDs: %+v", got)
+	}
+	if spec.Completeness.Session != CorrelationCompletenessPartial ||
+		spec.Completeness.Turn != CorrelationCompletenessAbsent ||
+		spec.Completeness.AgentLifecycle != CorrelationCompletenessAbsent ||
+		spec.Completeness.Tool != CorrelationCompletenessAbsent ||
+		spec.Completeness.Model != CorrelationCompletenessAbsent {
+		t.Fatalf("OmniGent correlation completeness is overstated: %+v", spec.Completeness)
+	}
+	if len(spec.AllowedInferenceRules) != 0 || len(spec.ReceiptTargets) != 0 ||
+		len(spec.MirrorIdentityTargets) != 0 {
+		t.Fatalf("OmniGent v0.7.0 invented correlation authority: %+v", spec)
+	}
+
+	nativeRaw, err := os.ReadFile(filepath.Join("testdata", "omnigent-otel-span.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nativeFixture struct {
+		Attributes map[string]interface{} `json:"attributes"`
+	}
+	if err := json.Unmarshal(nativeRaw, &nativeFixture); err != nil {
+		t.Fatal(err)
+	}
+	session, ok := spec.NativeOTLPValue(nativeFixture.Attributes, CorrelationTargetSession)
+	if !ok || session.Path != "session.id" || session.Value != "conv_0123456789abcdef" {
+		t.Fatalf("OmniGent native session correlation = %+v, present=%v", session, ok)
+	}
+	for _, unsupported := range []string{
+		"gen_ai.conversation.id", "gen_ai.agent.id", "gen_ai.response.id",
+		"gen_ai.tool.call.id", "defenseclaw.turn.id",
+	} {
+		attributes := map[string]interface{}{unsupported: "invented"}
+		if got := spec.NativeOTLPValues(attributes); len(got) != 0 {
+			t.Fatalf("unsupported OmniGent native ID %q was accepted: %+v", unsupported, got)
+		}
 	}
 }
 
@@ -579,7 +729,7 @@ func TestOpenClawNativeTelemetryFailsClosedWithoutReviewedExporter(t *testing.T)
 	}
 }
 
-func TestCopilotDocumentedHookAndNativeIDsStayOnTheirRails(t *testing.T) {
+func TestCopilotDocumentedHookIDsStayOnTheirRail(t *testing.T) {
 	spec := DefaultCorrelationSpec("copilot")
 	hook := map[string]interface{}{
 		"sessionId":      "session-1",
@@ -594,16 +744,8 @@ func TestCopilotDocumentedHookAndNativeIDsStayOnTheirRails(t *testing.T) {
 			t.Errorf("undocumented Copilot hook identity populated %s: %+v", target, value)
 		}
 	}
-
-	native, ok := spec.NativeOTLPValue(map[string]interface{}{"github.copilot.interaction_id": "interaction-1"}, CorrelationTargetModelRequest)
-	if !ok || native.Value != "interaction-1" || native.IDKind != "interaction" {
-		t.Fatalf("Copilot native interaction=(%+v,%v)", native, ok)
-	}
-	if message, found := spec.NativeOTLPValue(map[string]interface{}{"github.copilot.interaction_id": "interaction-1"}, CorrelationTargetMessage); found {
-		t.Fatalf("Copilot interaction was mislabeled as a message: %+v", message)
-	}
-	if spec.NativeTelemetry.IsAuthoritative(CorrelationTargetModelRequest) {
-		t.Fatal("Copilot native interaction gained cross-rail authority without paired field proof")
+	if len(spec.NativeOTLPBindings) != 0 {
+		t.Fatalf("Copilot gained unintegrated native OTLP bindings: %v", spec.NativeOTLPBindings)
 	}
 	if len(spec.MirrorIdentityTargets) != 0 {
 		t.Fatalf("Copilot undocumented hook/native mirrors remain enabled: %v", spec.MirrorIdentityTargets)
@@ -646,20 +788,6 @@ func TestClaudeDocumentedHookIDsAndCorrelationVersionFloor(t *testing.T) {
 	}
 	if !spec.AllowsMirrorTarget(CorrelationTargetTool) || spec.AllowsMirrorTarget(CorrelationTargetModelResponse) {
 		t.Fatalf("Claude mirror targets=%v want tool only", spec.MirrorIdentityTargets)
-	}
-}
-
-func TestGeminiNativeToolCallUsesDocumentedUnderscoreSpelling(t *testing.T) {
-	spec := DefaultCorrelationSpec("geminicli")
-	tool, ok := spec.NativeOTLPValue(map[string]interface{}{"gen_ai.tool.call_id": "gemini-call-1"}, CorrelationTargetTool)
-	if !ok || tool.Value != "gemini-call-1" || tool.Path != "gen_ai.tool.call_id" || tool.IDKind != "tool_invocation" {
-		t.Fatalf("Gemini native tool=(%+v,%v)", tool, ok)
-	}
-	if value, found := spec.HookValue(map[string]interface{}{"toolCallId": "not-documented"}, CorrelationTargetTool); found {
-		t.Fatalf("undocumented Gemini hook toolCallId was accepted: %+v", value)
-	}
-	if spec.AllowsMirrorTarget(CorrelationTargetTool) {
-		t.Fatal("Gemini hook/native tool mirror is enabled without a shared documented hook ID")
 	}
 }
 
@@ -726,24 +854,37 @@ func TestClaudeNativeRequestAndResponseIDsStayDistinct(t *testing.T) {
 	}
 }
 
-func TestOpenHandsActionIDNeverAliasesProviderToolInvocation(t *testing.T) {
+func TestOpenHandsCommandHookDoesNotClaimInProcessOnlyIDs(t *testing.T) {
 	spec := DefaultCorrelationSpec("openhands")
-	action, ok := spec.HookValue(map[string]interface{}{"action_id": "shared"}, CorrelationTargetAction)
-	if !ok || action.IDKind != "action" {
-		t.Fatalf("action binding=(%+v,%v)", action, ok)
+	payload := map[string]interface{}{
+		"session_id":      "session-1",
+		"action_id":       "action-1",
+		"message_id":      "message-1",
+		"event_id":        "event-1",
+		"tool_call_id":    "tool-1",
+		"llm_response_id": "response-1",
 	}
-	if tool, found := spec.HookValue(map[string]interface{}{"action_id": "shared"}, CorrelationTargetTool); found {
-		t.Fatalf("action ID populated tool invocation: %+v", tool)
+	values := spec.HookValues(payload)
+	if len(values) != 1 || values[0].Target != CorrelationTargetSession || values[0].Value != "session-1" {
+		t.Fatalf("OpenHands command-hook values=%+v, want only reported session_id", values)
 	}
-	tool, ok := spec.HookValue(map[string]interface{}{"tool_call_id": "shared"}, CorrelationTargetTool)
-	if !ok || tool.IDKind != "tool_invocation" {
-		t.Fatalf("hook tool binding=(%+v,%v)", tool, ok)
+	if spec.Completeness.Turn != CorrelationCompletenessAbsent ||
+		spec.Completeness.AgentLifecycle != CorrelationCompletenessAbsent ||
+		spec.Completeness.Model != CorrelationCompletenessAbsent ||
+		spec.Completeness.NativeOTLP != CorrelationCompletenessAbsent {
+		t.Fatalf("OpenHands correlation completeness overclaims exporter-only evidence: %+v", spec.Completeness)
 	}
-	if action.Target == tool.Target || action.IDKind == tool.IDKind {
-		t.Fatal("OpenHands action_id was made equivalent to tool invocation")
+	wantStability := NativeTelemetryNone
+	if runtime.GOOS == "darwin" {
+		wantStability = NativeTelemetryStable
 	}
-	if spec.NativeTelemetry.Stability != NativeTelemetryNone {
-		t.Fatal("OpenHands advertises a native exporter that is not installed")
+	if spec.NativeTelemetry.Stability != wantStability {
+		t.Fatalf("OpenHands native telemetry stability=%q want %q", spec.NativeTelemetry.Stability, wantStability)
+	}
+	if runtime.GOOS == "darwin" {
+		if spec.NativeTelemetry.BindingMode != NativeTelemetryBindingsExporterOnly || len(spec.NativeOTLPBindings) != 0 {
+			t.Fatalf("OpenHands Darwin native telemetry must remain exporter-only without identity bindings: %+v bindings=%+v", spec.NativeTelemetry, spec.NativeOTLPBindings)
+		}
 	}
 }
 
@@ -758,12 +899,12 @@ func TestCorrelationAliasConflictsAreTypedAndFailClosed(t *testing.T) {
 	}
 
 	openhands := DefaultCorrelationSpec("openhands")
-	independent := openhands.HookValues(map[string]interface{}{
+	unsupported := openhands.HookValues(map[string]interface{}{
 		"action_id":    "shared-provider-value",
 		"tool_call_id": "shared-provider-value",
 	})
-	if err := ValidateCorrelationValues(independent); err != nil {
-		t.Fatalf("independent action and tool identities were treated as aliases: %v", err)
+	if len(unsupported) != 0 {
+		t.Fatalf("OpenHands command hook accepted in-process-only identities: %+v", unsupported)
 	}
 }
 

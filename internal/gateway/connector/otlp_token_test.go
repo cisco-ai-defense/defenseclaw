@@ -43,6 +43,7 @@ func TestIsValidOTLPScope_NegativeCases(t *testing.T) {
 		{"validGemini", OTLPScopeGeminiCLI, true},
 		{"validCodex", OTLPScopeCodex, true},
 		{"validClaude", OTLPScopeClaude, true},
+		{"validOpenHands", OTLPScopeOpenHands, true},
 		{"upper", "GEMINICLI", false},
 		{"trailingSpace", "geminicli ", false},
 		{"leadingSpace", " geminicli", false},
@@ -586,6 +587,8 @@ func TestOTLPPathTokenScopeForConnector(t *testing.T) {
 		{name: "codex", scope: OTLPScopeCodex, ok: true},
 		{name: " ClaudeCode ", scope: OTLPScopeClaude, ok: true},
 		{name: "geminicli", scope: OTLPScopeGeminiCLI, ok: true},
+		{name: "omnigent", scope: OTLPScopeOmnigent, ok: true},
+		{name: "openhands", scope: OTLPScopeOpenHands, ok: true},
 		{name: "cursor", ok: false},
 	} {
 		tc := tc

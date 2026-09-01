@@ -11,8 +11,8 @@
 """Plan E2 / item 2 — Claude Code config parity tests.
 
 Mirrors test_guardrail.py's OpenClaw flow but for Claude Code's
-``~/.claude/settings.json``: shape parsing, ``hooks`` block round-trip,
-``mcpServers`` enumeration, and connector_paths dispatcher coverage.
+``~/.claude/settings.json`` hook parsing, ``~/.claude.json`` MCP
+enumeration, and connector_paths dispatcher coverage.
 We do NOT shell out to a real ``claude-code`` binary; every test is
 filesystem-shape-only.
 """
@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw import connector_paths
 
-from tests.connector_fixtures import make_claudecode_settings
+from tests.connector_fixtures import make_claudecode_mcp_state, make_claudecode_settings
 from tests.environment import isolated_home_env
 
 
@@ -56,41 +56,37 @@ class _IsolatedHome:
 
 
 class MakeClaudeCodeSettingsShapeTests(unittest.TestCase):
-    def test_default_seeds_empty_hooks_and_mcp(self):
+    def test_default_seeds_empty_hooks(self):
         with _IsolatedHome() as home:
             path = make_claudecode_settings(home)
             self.assertEqual(Path(path).parts[-2:], (".claude", "settings.json"))
             with open(path) as fh:
                 doc = json.load(fh)
             self.assertEqual(doc["hooks"], [])
-            self.assertEqual(doc["mcpServers"], {})
 
     def test_custom_hooks_round_trip(self):
         with _IsolatedHome() as home:
             hooks = [
                 {"event": "PreToolUse", "matcher": "Bash", "command": "/bin/inspect.sh"},
             ]
-            mcps = {
-                "playwright": {"command": "npx", "args": ["@playwright/mcp"]},
-            }
-            path = make_claudecode_settings(home, hooks=hooks, mcp_servers=mcps)
+            path = make_claudecode_settings(home, hooks=hooks)
             with open(path) as fh:
                 doc = json.load(fh)
             self.assertEqual(doc["hooks"], hooks)
-            self.assertIn("playwright", doc["mcpServers"])
-            self.assertEqual(doc["mcpServers"]["playwright"]["command"], "npx")
 
 
 class ClaudeCodeMCPReaderTests(unittest.TestCase):
     """``connector_paths.mcp_servers('claudecode')`` reads
-    ``~/.claude/settings.json`` ``mcpServers`` and merges in an
+    user ``~/.claude.json`` ``mcpServers`` and merges in an
     explicit workspace ``.mcp.json`` when configured.
     """
 
-    def test_reads_mcp_from_settings_json(self):
+    def test_reads_mcp_from_user_state(self):
         with _IsolatedHome() as home:
-            make_claudecode_settings(
-                home,
+            state_path = connector_paths.claude_mcp_state_path()
+            self.assertEqual(Path(state_path), Path(home) / ".claude" / ".claude.json")
+            make_claudecode_mcp_state(
+                os.path.dirname(state_path),
                 mcp_servers={
                     "playwright": {"command": "npx", "args": ["@playwright/mcp"]},
                     "filesystem": {"command": "uvx", "args": ["mcp-server-filesystem"]},
@@ -104,7 +100,7 @@ class ClaudeCodeMCPReaderTests(unittest.TestCase):
             self.assertEqual(playwright.command, "npx")
             self.assertEqual(playwright.args, ["@playwright/mcp"])
 
-    def test_missing_settings_returns_empty(self):
+    def test_missing_state_returns_empty(self):
         with _IsolatedHome():
             self.assertEqual(connector_paths.mcp_servers("claudecode"), [])
 
@@ -125,14 +121,17 @@ class ClaudeCodeSkillAndPluginDirsTests(unittest.TestCase):
     def test_plugin_dirs_default_to_home(self):
         with _IsolatedHome() as home:
             dirs = connector_paths.plugin_dirs("claudecode")
-            self.assertIn(os.path.join(home, ".claude", "plugins"), dirs)
+            self.assertIn(os.path.join(home, ".claude", "plugins", "cache"), dirs)
+            self.assertIn(os.path.join(home, ".claude", "skills"), dirs)
             self.assertNotIn(os.path.join(os.getcwd(), ".claude", "plugins"), dirs)
 
     def test_plugin_dirs_include_workspace_when_explicit(self):
         with _IsolatedHome() as home:
             dirs = connector_paths.plugin_dirs("claudecode", workspace_dir=os.getcwd())
-            self.assertIn(os.path.join(home, ".claude", "plugins"), dirs)
-            self.assertIn(os.path.join(os.getcwd(), ".claude", "plugins"), dirs)
+            self.assertIn(os.path.join(home, ".claude", "plugins", "cache"), dirs)
+            self.assertIn(os.path.join(home, ".claude", "skills"), dirs)
+            self.assertIn(os.path.join(os.getcwd(), ".claude", "skills"), dirs)
+            self.assertNotIn(os.path.join(os.getcwd(), ".claude", "plugins"), dirs)
 
 
 class ClaudeCodeHooksRoundTripTests(unittest.TestCase):

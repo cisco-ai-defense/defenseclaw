@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -113,6 +114,191 @@ func withCodexLifecycleTransaction(opts SetupOpts, fn func() error) error {
 	return withOwnedFileLock(filepath.Join(lockDir, ".codex-lifecycle.lock"), fn)
 }
 
+type codexSetupRuntimeSnapshot struct {
+	hookDir        string
+	hookDirExisted bool
+	files          []codexSetupRuntimeFileSnapshot
+}
+
+type codexSetupRuntimeFileSnapshot struct {
+	path    string
+	existed bool
+	data    []byte
+	perm    os.FileMode
+}
+
+var codexWriteHookScriptsForSetup = WriteHookScriptsForConnectorObjectWithOpts
+
+func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codexSetupRuntimeSnapshot, error) {
+	var snapshot codexSetupRuntimeSnapshot
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	snapshot.hookDir = hookDir
+	if info, err := os.Lstat(hookDir); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return snapshot, fmt.Errorf("Codex hook runtime path is not an ordinary directory: %s", hookDir)
+		}
+		snapshot.hookDirExisted = true
+	} else if !os.IsNotExist(err) {
+		return snapshot, fmt.Errorf("inspect Codex hook runtime directory: %w", err)
+	}
+
+	paths := make(map[string]os.FileMode)
+	for _, path := range hookScriptPathsForConnector(opts, connector) {
+		paths[path] = 0o700
+	}
+	for _, name := range hookHelperScripts {
+		paths[filepath.Join(hookDir, name)] = 0o600
+	}
+	for _, path := range []string{
+		filepath.Join(hookDir, ".token"),
+		filepath.Join(hookDir, hookConfigSidecarName),
+		filepath.Join(hookDir, hookConfigSidecarName+".lock"),
+		filepath.Join(hookDir, hookConfigSidecarName+".codex"),
+	} {
+		paths[path] = 0o600
+	}
+	hookTokenPath, err := HookTokenFilePath(hookDir, connector.Name())
+	if err != nil {
+		return snapshot, fmt.Errorf("resolve Codex hook token path for setup snapshot: %w", err)
+	}
+	paths[hookTokenPath] = 0o600
+	otlpTokenPath, err := OTLPPathTokenFilePath(opts.DataDir, OTLPScopeCodex)
+	if err != nil {
+		return snapshot, fmt.Errorf("resolve Codex OTLP token path for setup snapshot: %w", err)
+	}
+	paths[otlpTokenPath] = 0o600
+	paths[otlpTokenPath+".lock"] = 0o600
+	for _, path := range []string{
+		filepath.Join(opts.DataDir, "codex_config_backup.json"),
+		managedFileBackupPath(opts.DataDir, connector.Name(), "config.toml"),
+		managedFileBackupPath(
+			opts.DataDir,
+			connector.Name(),
+			codexManagedConfigLogicalName,
+		),
+	} {
+		paths[path] = 0o600
+	}
+
+	for path, perm := range paths {
+		fileSnapshot := codexSetupRuntimeFileSnapshot{path: path, perm: perm}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			snapshot.files = append(snapshot.files, fileSnapshot)
+			continue
+		}
+		if err != nil {
+			return snapshot, fmt.Errorf("inspect Codex setup runtime artifact %s: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return snapshot, fmt.Errorf("Codex setup runtime artifact is not a regular file: %s", path)
+		}
+		data, ok := readStableNativeWindowsFile(path, nativeCodeGuardFileMaxBytes)
+		if !ok {
+			return snapshot, fmt.Errorf("Codex setup runtime artifact is unsafe or changing: %s", path)
+		}
+		fileSnapshot.existed = true
+		fileSnapshot.data = data
+		snapshot.files = append(snapshot.files, fileSnapshot)
+	}
+	return snapshot, nil
+}
+
+func restoreCodexSetupRuntime(snapshot codexSetupRuntimeSnapshot) error {
+	var restoreErrors []error
+	for _, file := range snapshot.files {
+		if err := atomicTransformValidateNoReparsePathPlatform(file.path); err != nil {
+			restoreErrors = append(
+				restoreErrors,
+				fmt.Errorf("validate Codex setup runtime rollback path %s: %w", file.path, err),
+			)
+			continue
+		}
+		if file.existed {
+			if err := atomicWriteFile(file.path, file.data, file.perm); err != nil {
+				restoreErrors = append(
+					restoreErrors,
+					fmt.Errorf("restore Codex setup runtime artifact %s: %w", file.path, err),
+				)
+			}
+			continue
+		}
+		if info, err := os.Lstat(file.path); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				restoreErrors = append(
+					restoreErrors,
+					fmt.Errorf("refuse to remove replaced Codex setup runtime artifact %s", file.path),
+				)
+				continue
+			}
+			if err := os.Remove(file.path); err != nil {
+				restoreErrors = append(
+					restoreErrors,
+					fmt.Errorf("remove new Codex setup runtime artifact %s: %w", file.path, err),
+				)
+			}
+		} else if !os.IsNotExist(err) {
+			restoreErrors = append(
+				restoreErrors,
+				fmt.Errorf("inspect new Codex setup runtime artifact %s: %w", file.path, err),
+			)
+		}
+	}
+	if !snapshot.hookDirExisted {
+		hookDir := snapshot.hookDir
+		if hookDir != "" {
+			entries, err := os.ReadDir(hookDir)
+			if err == nil && len(entries) == 0 {
+				if err := os.Remove(hookDir); err != nil && !os.IsNotExist(err) {
+					restoreErrors = append(
+						restoreErrors,
+						fmt.Errorf("remove new empty Codex hook runtime directory: %w", err),
+					)
+				}
+			} else if err != nil && !os.IsNotExist(err) {
+				restoreErrors = append(
+					restoreErrors,
+					fmt.Errorf("inspect new Codex hook runtime directory: %w", err),
+				)
+			}
+		}
+	}
+	return errors.Join(restoreErrors...)
+}
+
+func (c *CodexConnector) rollbackSetupAfterSnapshot(
+	opts SetupOpts,
+	snapshot codexSetupRuntimeSnapshot,
+	primary error,
+	restoreConfig bool,
+	restoreManagedHooks bool,
+) error {
+	rollbackErrors := []error{primary}
+	if restoreConfig {
+		if err := c.restoreCodexConfig(opts); err != nil {
+			rollbackErrors = append(
+				rollbackErrors,
+				fmt.Errorf("codex config rollback after setup failure: %w", err),
+			)
+		}
+	}
+	if restoreManagedHooks {
+		if err := c.restoreCodexManagedHooks(opts); err != nil {
+			rollbackErrors = append(
+				rollbackErrors,
+				fmt.Errorf("codex managed hook rollback after setup failure: %w", err),
+			)
+		}
+	}
+	if err := restoreCodexSetupRuntime(snapshot); err != nil {
+		rollbackErrors = append(
+			rollbackErrors,
+			fmt.Errorf("codex runtime rollback after setup failure: %w", err),
+		)
+	}
+	return errors.Join(rollbackErrors...)
+}
+
 func (c *CodexConnector) Name() string        { return "codex" }
 func (c *CodexConnector) HookAPIPath() string { return "/api/v1/codex/hook" }
 
@@ -127,7 +313,7 @@ func (c *CodexConnector) HookScriptNames(SetupOpts) []string {
 	return []string{"codex-hook.sh"}
 }
 func (c *CodexConnector) Description() string {
-	return "config.toml model_providers patch + hook script (versioned event matrix, component scanning)"
+	return "config.toml model_providers patch + versioned hook matrix (6-11 events, component scanning)"
 }
 func (c *CodexConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
@@ -146,6 +332,10 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 	if err := enforceCodexUserHookPolicy(ctx, opts); err != nil {
 		return err
 	}
+	runtimeSnapshot, err := snapshotCodexSetupRuntime(opts, c)
+	if err != nil {
+		return fmt.Errorf("snapshot Codex setup runtime: %w", err)
+	}
 
 	// Hook-only connector: patchCodexConfig wires hooks, OTel, and the
 	// notify bridge without rewriting provider URLs or exporting a
@@ -155,7 +345,13 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 
 	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeCodex, opts.OTLPPathToken)
 	if err != nil {
-		return fmt.Errorf("codex scoped OTLP token: %w", err)
+		return c.rollbackSetupAfterSnapshot(
+			opts,
+			runtimeSnapshot,
+			fmt.Errorf("codex scoped OTLP token: %w", err),
+			false,
+			false,
+		)
 	}
 	opts.OTLPPathToken = otlpToken
 
@@ -163,8 +359,14 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 	// Plan C2: HookScriptOwner-driven. codex_hook.sh ships from the
 	// connector method; generic inspect-* scripts come from the
 	// shared list inside writeHookScriptsCommon.
-	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
-		return fmt.Errorf("codex hook script: %w", err)
+	if err := codexWriteHookScriptsForSetup(hookDir, opts, c); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts,
+			runtimeSnapshot,
+			fmt.Errorf("codex hook script: %w", err),
+			false,
+			false,
+		)
 	}
 
 	hookScript := filepath.Join(hookDir, "codex-hook.sh")
@@ -174,21 +376,34 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 		// administrator-managed, so setup never needs to synthesize private
 		// hooks.state trust records or ask the operator to approve /hooks.
 		if err := c.patchCodexManagedHooks(opts, hookScript); err != nil {
-			return fmt.Errorf("codex managed_config.toml hook patch: %w", err)
+			return c.rollbackSetupAfterSnapshot(
+				opts,
+				runtimeSnapshot,
+				fmt.Errorf("codex managed_config.toml hook patch: %w", err),
+				false,
+				false,
+			)
 		}
 	}
 	if err := c.patchCodexConfig(opts, hookScript); err != nil {
-		if runtime.GOOS == "windows" {
-			if rollbackErr := c.restoreCodexManagedHooks(opts); rollbackErr != nil {
-				return fmt.Errorf("codex config.toml patch: %w (managed hook rollback failed: %v)", err, rollbackErr)
-			}
-		}
-		return fmt.Errorf("codex config.toml patch: %w", err)
+		return c.rollbackSetupAfterSnapshot(
+			opts,
+			runtimeSnapshot,
+			fmt.Errorf("codex config.toml patch: %w", err),
+			false,
+			runtime.GOOS == "windows",
+		)
 	}
 
 	if opts.InstallCodeGuard {
 		if err := ensureCodexCodeGuardSkill(ctx, opts); err != nil {
-			return fmt.Errorf("codex CodeGuard skill install: %w", err)
+			return c.rollbackSetupAfterSnapshot(
+				opts,
+				runtimeSnapshot,
+				fmt.Errorf("codex CodeGuard skill install: %w", err),
+				true,
+				runtime.GOOS == "windows",
+			)
 		}
 	}
 
@@ -212,6 +427,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 		if err := c.restoreCodexManagedHooks(opts); err != nil {
 			return fmt.Errorf("codex teardown: managed hook restore: %w", err)
 		}
+	}
+	if err := teardownCodexCodeGuardSkill(opts); err != nil {
+		return fmt.Errorf("codex teardown: CodeGuard skill restore: %w", err)
 	}
 
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
@@ -296,6 +514,14 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("read Codex managed config while verifying cleanup: %w", err)
 		}
+	}
+	if _, exists, err := loadCodexCodeGuardReceipt(
+		opts,
+		filepath.Join(codexPersonalSkillsDir(), nativeCodeGuardCodexSkillName),
+	); err != nil {
+		return fmt.Errorf("verify Codex CodeGuard cleanup: %w", err)
+	} else if exists {
+		residual = append(residual, "owned Codex CodeGuard skill receipt still exists")
 	}
 	if err := inspectCodexHooksJSON(opts, func(eventType string) {
 		residual = append(residual, fmt.Sprintf("hooks.json hooks[%s] still contains defenseclaw hook", eventType))
@@ -480,13 +706,16 @@ func (c *CodexConnector) RequiredEnv() []EnvRequirement {
 // HookCapabilities declares the Codex hook surface for the unified
 // hook collector and the agent_hook verdict mapper. The shape is
 // derived from the events `evaluateCodexHook` and `codexOutput`
-// handle today (SessionStart, UserPromptSubmit, PreToolUse,
-// PermissionRequest, PostToolUse, Stop) and the deny-shaped JSON
-// envelope codex's hook protocol accepts.
+// handle today and the event-specific JSON envelopes Codex accepts.
 //
-// CanBlock=true: codex's PreToolUse / PermissionRequest hookSpecific
-// outputs honour permissionDecision=deny; UserPromptSubmit/PostToolUse/
-// Stop honour decision=block.
+// CanBlock=true: Codex's PreToolUse / PermissionRequest hookSpecific outputs
+// honour deny decisions. UserPromptSubmit can block submission. PostToolUse
+// cannot undo an executed tool: block replaces the result flow with feedback
+// (and rejects the tool promise in code mode). Stop decision=block continues
+// Codex with a new continuation prompt; SubagentStop similarly continues the
+// subagent flow. SessionStart, PreCompact, and PostCompact honour continue=false
+// with event-specific turn/compaction effects. SessionEnd remains advisory and
+// is intentionally absent.
 //
 // CanAskNative=false: Codex does not surface a native HITL ask channel
 // from a hook decision today. confirm verdicts fall back to alert in
@@ -501,15 +730,126 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 		CanBlock:     true,
 		CanAskNative: false,
 		BlockEvents: []string{
+			"SessionStart",
 			"UserPromptSubmit",
 			"PreToolUse",
 			"PermissionRequest",
 			"PostToolUse",
+			"SubagentStop",
+			"PreCompact",
+			"PostCompact",
 			"Stop",
 		},
 		SupportsFailClosed: true,
 		Scope:              "user",
 		ConfigPath:         codexHookConfigPath(),
+	}
+}
+
+// Capabilities implements ConnectorCapabilityProvider. Inventory paths come
+// from ComponentTargets so API metadata, connector-state locks, and the
+// continuous component scanner describe the same Codex project layers.
+// Writable paths are intentionally narrower than discovery: DefenseClaw can
+// manage MCP registrations and opt-in skills, but it only inventories Codex
+// rules, custom agents, and marketplace/plugin caches.
+func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
+	targets := c.ComponentTargets(opts.WorkspaceDir)
+	profile := c.HookProfile(opts)
+
+	mcpWritePaths := uniqueNonEmptyStrings([]string{
+		workspacePath(opts, ".codex", "config.toml"),
+		codexConfigPath(),
+	})
+	skillWritePaths := uniqueNonEmptyStrings([]string{
+		workspacePath(opts, ".agents", "skills"),
+		CodexPersonalSkillsPath(),
+	})
+	skillScope := "workspace,user"
+	if runtime.GOOS != "windows" {
+		skillScope += ",system"
+	}
+	telemetryEndpoint := ""
+	if profile.NativeOTLP != nil {
+		telemetryEndpoint = profile.NativeOTLP.Endpoint
+	}
+
+	return ConnectorCapabilities{
+		LLMTrafficMode: LLMTrafficModeForConnector(c.Name()),
+		Hooks:          c.HookCapabilities(opts),
+		MCP: SurfaceCapability{
+			Supported:       true,
+			Scope:           "workspace,user",
+			ConfigPaths:     uniqueNonEmptyStrings(targets["mcp"]),
+			ReadPaths:       uniqueNonEmptyStrings(targets["mcp"]),
+			WritePaths:      mcpWritePaths,
+			SupportsBackup:  true,
+			SupportsRestore: true,
+			Notes: []string{
+				"Codex MCP servers are read from trusted project .codex/config.toml layers followed by the user config; DefenseClaw writes only the explicitly selected workspace layer or user config.",
+				"Filesystem discovery does not infer Codex's private project-trust decision.",
+			},
+		},
+		Skills: SurfaceCapability{
+			Supported:      true,
+			Scope:          skillScope,
+			ReadPaths:      uniqueNonEmptyStrings(targets["skill"]),
+			WritePaths:     skillWritePaths,
+			InstallTargets: []string{"skill"},
+			RequiresOptIn:  true,
+			Notes: []string{
+				"Codex Agent Skills are discovered from project and personal .agents/skills roots; /etc/codex/skills is additionally read-only on Unix.",
+			},
+		},
+		Rules: SurfaceCapability{
+			Supported:     true,
+			Scope:         "workspace,user",
+			ReadPaths:     uniqueNonEmptyStrings(targets["rule"]),
+			DiscoveryOnly: true,
+			Notes: []string{
+				"Codex *.rules files are inventoried beside candidate active config layers; DefenseClaw does not create or modify general Codex rules.",
+			},
+		},
+		Plugins: SurfaceCapability{
+			Supported:     true,
+			Scope:         "workspace,user,cache",
+			ReadPaths:     uniqueNonEmptyStrings(targets["plugin"]),
+			DiscoveryOnly: true,
+			Notes: []string{
+				"Codex plugin inventory follows declared local marketplace sources and observed installed cache entries; DefenseClaw does not claim activation or custody of those plugin roots.",
+			},
+		},
+		Agents: SurfaceCapability{
+			Supported:     true,
+			Scope:         "workspace,user",
+			ReadPaths:     uniqueNonEmptyStrings(targets["agent"]),
+			DiscoveryOnly: true,
+			Notes: []string{
+				"Codex custom-agent TOML files are inventory-only and project entries still require Codex project trust.",
+			},
+		},
+		CodeGuard: CodeGuardCapability{
+			Supported:      true,
+			InstallTargets: []string{"skill"},
+			OptInOnly:      true,
+			AutoInstall:    false,
+			Idempotent:     true,
+			ConflictSafe:   true,
+			Notes: []string{
+				"Explicit CodeGuard setup installs the managed software-security skill under the personal .agents/skills root and records an ownership receipt for safe teardown.",
+			},
+		},
+		Telemetry: TelemetryCapability{
+			NativeOTLP:       profile.NativeOTLP != nil,
+			NativeSignals:    []string{"logs", "metrics", "traces"},
+			HookSignals:      []string{"logs", "metrics", "traces"},
+			ConfigPaths:      []string{codexConfigPath()},
+			AuthMode:         "header-token",
+			EndpointTemplate: telemetryEndpoint,
+			SourceModes:      []string{"native", "hook"},
+			Notes: []string{
+				"Codex emits native OTLP directly to the loopback gateway with a connector-scoped Authorization header; hook and agent-turn-complete notify records are independent channels.",
+			},
+		},
 	}
 }
 
@@ -607,13 +947,247 @@ func (c *CodexConnector) SupportsComponentScanning() bool { return true }
 
 func (c *CodexConnector) ComponentTargets(cwd string) map[string][]string {
 	codexDir := codexHomeDir()
-
 	targets := map[string][]string{
-		"skill":  {filepath.Join(codexDir, "skills"), filepath.Join(cwd, ".codex", "skills")},
-		"plugin": {filepath.Join(codexDir, "plugins"), filepath.Join(codexDir, "plugins", "cache")},
-		"mcp":    {filepath.Join(codexDir, "config.toml"), filepath.Join(cwd, ".mcp.json")},
+		"skill": {},
+		"plugin": {
+			filepath.Join(codexDir, "plugins", "cache"),
+		},
+		"mcp":   {filepath.Join(codexDir, "config.toml")},
+		"agent": {filepath.Join(codexDir, "agents")},
+		"rule":  {filepath.Join(codexDir, "rules")},
+		"memory": {
+			filepath.Join(codexDir, "memories"),
+		},
+	}
+	if personalSkills := CodexPersonalSkillsPath(); strings.TrimSpace(personalSkills) != "" {
+		targets["skill"] = append(targets["skill"], personalSkills)
+	}
+	targets["plugin"] = append(targets["plugin"], CodexPluginSourceDirs(cwd)...)
+	if runtime.GOOS != "windows" {
+		targets["skill"] = append(targets["skill"], filepath.FromSlash("/etc/codex/skills"))
+	}
+	for _, root := range CodexProjectLayerDirs(cwd) {
+		targets["skill"] = append(targets["skill"], filepath.Join(root, ".agents", "skills"))
+		targets["mcp"] = append(targets["mcp"], filepath.Join(root, ".codex", "config.toml"))
+		targets["agent"] = append(targets["agent"], filepath.Join(root, ".codex", "agents"))
+		targets["rule"] = append(targets["rule"], filepath.Join(root, ".codex", "rules"))
 	}
 	return targets
+}
+
+// CodexPersonalSkillsPath returns the personal skill root. CODEX_HOME does not
+// redirect this documented cross-agent location.
+func CodexPersonalSkillsPath() string {
+	return homePath(".agents", "skills")
+}
+
+// CodexHomeDir returns the effective Codex state root, including CODEX_HOME.
+func CodexHomeDir() string {
+	return codexHomeDir()
+}
+
+func codexProjectRootMarkers() []string {
+	raw, ok := readStableNativeWindowsFile(codexConfigPath(), codexMarketplaceMaxBytes)
+	if !ok {
+		return []string{".git"}
+	}
+	var config map[string]interface{}
+	if err := toml.Unmarshal(raw, &config); err != nil {
+		return []string{".git"}
+	}
+	value, ok := config["project_root_markers"]
+	if !ok {
+		return []string{".git"}
+	}
+	var markers []string
+	switch items := value.(type) {
+	case []interface{}:
+		markers = make([]string, 0, len(items))
+		for _, item := range items {
+			marker, ok := item.(string)
+			if !ok {
+				return []string{".git"}
+			}
+			if marker = strings.TrimSpace(marker); marker != "" {
+				markers = append(markers, marker)
+			}
+		}
+	case []string:
+		markers = make([]string, 0, len(items))
+		for _, marker := range items {
+			if marker = strings.TrimSpace(marker); marker != "" {
+				markers = append(markers, marker)
+			}
+		}
+	default:
+		return []string{".git"}
+	}
+	return markers
+}
+
+// CodexProjectLayerDirs returns discovered project layers from the active
+// directory through the root selected by project_root_markers. Discovery does
+// not assert that a project layer is trusted or enabled by the client.
+func CodexProjectLayerDirs(cwd string) []string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return []string{filepath.Clean(cwd)}
+	}
+	abs = filepath.Clean(abs)
+	markers := codexProjectRootMarkers()
+	if len(markers) == 0 {
+		return []string{abs}
+	}
+	roots := make([]string, 0, 4)
+	for dir := abs; ; dir = filepath.Dir(dir) {
+		roots = append(roots, dir)
+		for _, marker := range markers {
+			if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+				return roots
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// No configured marker means the active directory is the project
+			// root. Do not invent filesystem-ancestor project layers.
+			return []string{abs}
+		}
+	}
+}
+
+const codexMarketplaceMaxBytes = 1 << 20
+
+// CodexPluginSourceDirs returns local plugin source directories declared by
+// personal and repo marketplaces. These are discovered sources, not proof that
+// the user installed, enabled, or trusted the plugin.
+func CodexPluginSourceDirs(cwd string) []string {
+	type marketplaceRoot struct {
+		path string
+		root string
+	}
+	var marketplaces []marketplaceRoot
+	layers := CodexProjectLayerDirs(cwd)
+	if len(layers) > 0 {
+		repoRoot := layers[len(layers)-1]
+		marketplaces = append(marketplaces,
+			marketplaceRoot{
+				path: filepath.Join(repoRoot, ".agents", "plugins", "marketplace.json"),
+				root: repoRoot,
+			},
+			marketplaceRoot{
+				path: filepath.Join(repoRoot, ".claude-plugin", "marketplace.json"),
+				root: repoRoot,
+			},
+		)
+	}
+	if home := strings.TrimSpace(homePath()); home != "" {
+		marketplaces = append(marketplaces, marketplaceRoot{
+			path: filepath.Join(home, ".agents", "plugins", "marketplace.json"),
+			root: home,
+		})
+	}
+
+	var out []string
+	seen := map[string]bool{}
+	for _, marketplace := range marketplaces {
+		for _, source := range codexMarketplaceLocalSources(marketplace.path, marketplace.root) {
+			key := filepath.Clean(source)
+			if runtime.GOOS == "windows" {
+				key = strings.ToLower(key)
+			}
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, source)
+			}
+		}
+	}
+	return out
+}
+
+func codexMarketplaceLocalSources(path, root string) []string {
+	raw, ok := readStableNativeWindowsFile(path, codexMarketplaceMaxBytes)
+	if !ok {
+		return nil
+	}
+	var catalog struct {
+		Plugins []struct {
+			Source json.RawMessage `json:"source"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		return nil
+	}
+	var out []string
+	for _, plugin := range catalog.Plugins {
+		var sourcePath string
+		if err := json.Unmarshal(plugin.Source, &sourcePath); err != nil {
+			var source struct {
+				Kind string `json:"source"`
+				Path string `json:"path"`
+			}
+			if err := json.Unmarshal(plugin.Source, &source); err != nil ||
+				strings.TrimSpace(source.Kind) != "local" {
+				continue
+			}
+			sourcePath = source.Path
+		}
+		if resolved, ok := codexResolveMarketplaceSource(root, sourcePath); ok {
+			out = append(out, resolved)
+		}
+	}
+	return out
+}
+
+func codexResolveMarketplaceSource(root, source string) (string, bool) {
+	source = strings.TrimSpace(source)
+	if !strings.HasPrefix(source, "./") {
+		return "", false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	targetAbs, err := filepath.Abs(filepath.Join(rootAbs, filepath.FromSlash(strings.TrimPrefix(source, "./"))))
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	if atomicTransformValidateNoReparsePathPlatform(targetAbs) != nil {
+		return "", false
+	}
+	for current := targetAbs; ; current = filepath.Dir(current) {
+		info, statErr := os.Lstat(current)
+		if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", false
+		}
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return "", false
+		}
+		if sameCodexInventoryPath(current, rootAbs) {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false
+		}
+	}
+	return filepath.Clean(targetAbs), true
+}
+
+func sameCodexInventoryPath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 // --- StopScanner interface ---
@@ -659,7 +1233,6 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 	if resolution.Contract.ContractID == "" {
 		return false, nil
 	}
-	expectedGroups := codexHookGroupsForContract(resolution.Contract.ContractID)
 	userConfigPath := codexConfigPath()
 	data, err := os.ReadFile(userConfigPath)
 	if err != nil {
@@ -719,13 +1292,9 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 	}
 	var verifyErr error
 	if runtime.GOOS == "windows" {
-		verifyErr = verifyManagedCodexHookMatrixForGroups(
-			hooks, configPath, filepath.Join(opts.DataDir, "hooks"), expectedGroups,
-		)
+		verifyErr = verifyManagedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
 	} else {
-		verifyErr = verifyTrustedCodexHookMatrixForGroups(
-			hooks, configPath, filepath.Join(opts.DataDir, "hooks"), expectedGroups,
-		)
+		verifyErr = verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
 	}
 	if verifyErr != nil {
 		return false, nil
@@ -784,9 +1353,10 @@ func (c *CodexConnector) loadConfigBackup(dataDir string) (codexConfigBackup, er
 	return backup, json.Unmarshal(data, &backup)
 }
 
-// codexHookGroups mirrors claudecode.go's grouping, but timeout is in
-// seconds (not ms) per codex's TOML schema. Stop-time scans get a
-// larger budget.
+// codexHookGroups is the registry of every event shape DefenseClaw knows how
+// to render. Setup and guardian verification select a version-specific subset
+// through codexHookGroupsForSetup; this union is also used to remove stale
+// owned handlers after an agent downgrade.
 type codexHookGroup struct {
 	eventType string
 	matcher   string
@@ -806,22 +1376,67 @@ var codexHookGroups = []codexHookGroup{
 	{"Stop", "", 90},
 }
 
-var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", 60}
+// SessionEnd first appears in the official 0.145.0 v4 schema and remains
+// advisory. The client caps this teardown hook at three seconds, so emitting a
+// larger value is misleading even though the client would clamp it at load.
+var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", 3}
 
-func codexHookGroupsForContract(contractID string) []codexHookGroup {
-	groups := append([]codexHookGroup(nil), codexHookGroups...)
-	if contractID == "codex-hooks-v4" {
-		groups = append(groups, codexSessionEndHookGroup)
+func codexHookContractForSetup(opts SetupOpts) (HookContract, error) {
+	var contract HookContract
+	if pinnedID := strings.TrimSpace(opts.HookContractID); pinnedID != "" {
+		var ok bool
+		contract, ok = hookContractByID("codex", pinnedID)
+		if !ok {
+			return HookContract{}, fmt.Errorf("pinned Codex hook contract %q is not registered", pinnedID)
+		}
+	} else {
+		resolution := ResolveHookContract("codex", opts.AgentVersion)
+		contract = resolution.Contract
+		if contract.ContractID == "" {
+			return HookContract{}, fmt.Errorf(
+				"Codex version %q does not resolve to a supported hook contract",
+				strings.TrimSpace(opts.AgentVersion),
+			)
+		}
 	}
-	return groups
+	return contract, nil
+}
+
+func codexHookGroupsForSetup(opts SetupOpts) ([]codexHookGroup, error) {
+	contract, err := codexHookContractForSetup(opts)
+	if err != nil {
+		return nil, err
+	}
+	registry := make(map[string]codexHookGroup, len(codexHookGroups)+1)
+	for _, group := range codexHookGroups {
+		registry[group.eventType] = group
+	}
+	registry[codexSessionEndHookGroup.eventType] = codexSessionEndHookGroup
+	groups := make([]codexHookGroup, 0, len(contract.Events))
+	for _, eventType := range contract.Events {
+		group, ok := registry[eventType]
+		if !ok {
+			return nil, fmt.Errorf(
+				"Codex hook contract %s contains unregistered event %s",
+				contract.ContractID,
+				eventType,
+			)
+		}
+		if eventType == "SessionStart" &&
+			(contract.ContractID == "codex-hooks-v3" ||
+				contract.ContractID == "codex-hooks-v3-generic" ||
+				contract.ContractID == "codex-hooks-v4") {
+			// The compact SessionStart matcher is certified only for the
+			// 0.133+ v3/v4 contracts. Do not backfill it into legacy tiers.
+			group.matcher = "startup|resume|clear|compact"
+		}
+		groups = append(groups, group)
+	}
+	return groups, nil
 }
 
 func codexHookGroupsForOptions(opts SetupOpts) ([]codexHookGroup, error) {
-	resolution := resolveHookContractForOptions("codex", opts)
-	if resolution.Contract.ContractID == "" {
-		return nil, fmt.Errorf("resolve Codex hook contract: %s", resolution.Reason)
-	}
-	return codexHookGroupsForContract(resolution.Contract.ContractID), nil
+	return codexHookGroupsForSetup(opts)
 }
 
 // isDefenseClawCodexProxyRedirect reports whether v is the loopback
@@ -958,7 +1573,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				hooks = map[string]interface{}{}
 			}
 			if err := mergeOwnedCodexHooks(
-				hooks, configPath, hookScript, hooksDir, true,
+				hooks, configPath, hookScript, hooksDir, opts, true,
 				hookGroups,
 			); err != nil {
 				return err
@@ -1028,9 +1643,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			if !ok {
 				return fmt.Errorf("verify rendered codex config: hooks has unsupported type %T", rendered["hooks"])
 			}
-			if err := verifyTrustedCodexHookMatrixForGroups(
-				renderedHooks, configPath, hooksDir, hookGroups,
-			); err != nil {
+			if err := verifyTrustedCodexHookMatrix(renderedHooks, configPath, hooksDir, opts); err != nil {
 				return fmt.Errorf("verify trusted DefenseClaw Codex hooks: %w", err)
 			}
 		} else if err := verifyNoOwnedCodexHooks(rendered, hooksDir); err != nil {
@@ -1110,9 +1723,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			if !ok {
 				return fmt.Errorf("verify persisted codex config: hooks has unsupported type %T", persistedConfig["hooks"])
 			}
-			if err := verifyTrustedCodexHookMatrixForGroups(
-				persistedHooks, configPath, hooksDir, hookGroups,
-			); err != nil {
+			if err := verifyTrustedCodexHookMatrix(persistedHooks, configPath, hooksDir, opts); err != nil {
 				return fmt.Errorf("verify persisted trusted DefenseClaw Codex hooks: %w", err)
 			}
 		} else if err := verifyNoOwnedCodexHooks(persistedConfig, hooksDir); err != nil {
@@ -1159,10 +1770,59 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 // The generated hook script decides fail-open vs fail-closed from
 // SetupOpts: observability-only installs allow the tool when the
 // gateway is unavailable, while enforcement installs can block.
-func buildCodexHooksTable(configPath, hookCommand string) map[string]interface{} {
-	return buildCodexHooksTableForGroups(configPath, hookCommand, codexHookGroups)
+func buildCodexHooksTable(opts SetupOpts, configPath, hookCommand string) (map[string]interface{}, error) {
+	out := map[string]interface{}{}
+	_ = configPath // retained for source-compatible migration tests
+	groups, err := codexHookGroupsForSetup(opts)
+	if err != nil {
+		return nil, err
+	}
+	contract, err := codexHookContractForSetup(opts)
+	if err != nil {
+		return nil, err
+	}
+	if runtime.GOOS == "windows" {
+		// Codex prefers command_windows on native Windows, but command remains
+		// part of the persisted registration and is inspected by lifecycle and
+		// compatibility tooling. Keep both fields native so a fallback can never
+		// select the Unix hook script on a Windows installation.
+		hookCommand = hookInvocationCommandFor("windows", "codex", hookCommand)
+	}
+	for _, group := range groups {
+		// Bind every platform's command to the exact finite event and contract.
+		// The native launcher and Unix bridge independently compare this
+		// registration identity with official stdin before contacting the
+		// authenticated gateway. On Windows, command and command_windows remain
+		// byte-identical because Codex includes both in its trusted hook identity.
+		effectiveCommand := codexHookCommandForPlatform(
+			runtime.GOOS,
+			group.eventType,
+			contract.ContractID,
+			hookCommand,
+		)
+		handler := map[string]interface{}{
+			"type":    "command",
+			"command": effectiveCommand,
+			"timeout": group.timeout,
+		}
+		if runtime.GOOS == "windows" {
+			handler["command_windows"] = effectiveCommand
+		}
+		matcherGroup := map[string]interface{}{
+			"hooks": []interface{}{handler},
+		}
+		if group.matcher != "" {
+			matcherGroup["matcher"] = group.matcher
+		}
+		out[group.eventType] = []interface{}{matcherGroup}
+	}
+	return out, nil
 }
 
+// buildCodexHooksTableForGroups renders an explicit historical event matrix.
+// Production setup uses buildCodexHooksTable so every command is bound to the
+// resolved contract and event. Migration code uses this helper only to
+// recognize and safely replace matrices emitted by older releases.
 func buildCodexHooksTableForGroups(
 	configPath, hookCommand string,
 	groups []codexHookGroup,
@@ -1170,10 +1830,6 @@ func buildCodexHooksTableForGroups(
 	out := map[string]interface{}{}
 	_ = configPath // retained for source-compatible migration tests
 	if runtime.GOOS == "windows" {
-		// Codex prefers command_windows on native Windows, but command remains
-		// part of the persisted registration and is inspected by lifecycle and
-		// compatibility tooling. Keep both fields native so a fallback can never
-		// select the Unix hook script on a Windows installation.
 		hookCommand = hookInvocationCommandFor("windows", "codex", hookCommand)
 	}
 	for _, group := range groups {
@@ -1200,6 +1856,24 @@ func windowsCodexHookCommand() string {
 	return windowsNativeHookCommand("codex")
 }
 
+func windowsCodexHookCommandForEvent(event, contractID string) string {
+	return windowsNativePowerShellHookCommandForCodexEvent(event, contractID, defenseclawHookBinary())
+}
+
+func codexHookCommandForPlatform(
+	goos string,
+	event string,
+	contractID string,
+	hookCommand string,
+) string {
+	if goos == "windows" {
+		return windowsCodexHookCommandForEvent(event, contractID)
+	}
+	return hookCommand +
+		" --event " + event +
+		" --hook-contract " + contractID
+}
+
 func codexHookEventKeyLabel(eventType string) string {
 	switch eventType {
 	case "PreToolUse":
@@ -1218,12 +1892,12 @@ func codexHookEventKeyLabel(eventType string) string {
 		return "post_compact"
 	case "SessionStart":
 		return "session_start"
+	case "SessionEnd":
+		return "session_end"
 	case "UserPromptSubmit":
 		return "user_prompt_submit"
 	case "Stop":
 		return "stop"
-	case "SessionEnd":
-		return "session_end"
 	default:
 		return eventType
 	}
@@ -1546,7 +2220,18 @@ func buildCodexOtelBlockWithPathToken(opts SetupOpts, pathToken string) (map[str
 	if err != nil {
 		return nil, err
 	}
+	// Codex officially supports otel.environment and otherwise defaults it to
+	// "dev". Pin the same environment used by DefenseClaw's live telemetry
+	// runtime so Setup, Doctor, and emitted Codex telemetry cannot disagree.
+	block["environment"] = codexOtelEnvironment(opts)
 	return block, nil
+}
+
+func codexOtelEnvironment(opts SetupOpts) string {
+	if environment := strings.TrimSpace(opts.CodexOtelEnvironment); environment != "" {
+		return environment
+	}
+	return "dev"
 }
 
 func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
@@ -2098,17 +2783,46 @@ func removeOwnedCodexHooksFromTOML(raw []byte, configPath, hooksDir string) ([]b
 func mergeOwnedCodexHooks(
 	hooks map[string]interface{},
 	configPath, hookScript, hooksDir string,
-	writeTrustState bool,
-	groups []codexHookGroup,
+	modeOrOpts interface{},
+	args ...interface{},
 ) error {
+	var (
+		opts            SetupOpts
+		groups          []codexHookGroup
+		writeTrustState bool
+		versioned       bool
+	)
+	switch value := modeOrOpts.(type) {
+	case SetupOpts:
+		opts = value
+		versioned = true
+		if len(args) < 1 {
+			return errors.New("merge Codex hooks: missing trust-state mode")
+		}
+		var ok bool
+		writeTrustState, ok = args[0].(bool)
+		if !ok {
+			return fmt.Errorf("merge Codex hooks: trust-state mode has type %T", args[0])
+		}
+	case bool:
+		writeTrustState = value
+		if len(args) < 1 {
+			return errors.New("merge Codex hooks: missing explicit hook groups")
+		}
+		var ok bool
+		groups, ok = args[0].([]codexHookGroup)
+		if !ok {
+			return fmt.Errorf("merge Codex hooks: explicit hook groups have type %T", args[0])
+		}
+	default:
+		return fmt.Errorf("merge Codex hooks: unsupported mode type %T", modeOrOpts)
+	}
+
 	managedCommands, err := inferTrustedCodexManagedHookCommands(hooks, configPath)
 	if err != nil {
 		return fmt.Errorf("inspect predecessor DefenseClaw Codex hooks: %w", err)
 	}
-	isManaged := func(rawHook interface{}) bool {
-		if isOwnedCodexHookHandler(rawHook, hooksDir) {
-			return true
-		}
+	isInferredManaged := func(rawHook interface{}) bool {
 		handler, ok := rawHook.(map[string]interface{})
 		if !ok {
 			return false
@@ -2117,10 +2831,24 @@ func mergeOwnedCodexHooks(
 		_, ok = managedCommands[command]
 		return ok
 	}
+	isManaged := func(rawHook interface{}) bool {
+		if isOwnedCodexHookHandler(rawHook, hooksDir) {
+			return true
+		}
+		return isInferredManaged(rawHook)
+	}
 	if _, err := removeCodexHookStateMatching(hooks, configPath, isManaged); err != nil {
 		return fmt.Errorf("inspect existing DefenseClaw Codex hook trust: %w", err)
 	}
-	generatedHooks := buildCodexHooksTableForGroups(configPath, hookScript, groups)
+	var generatedHooks map[string]interface{}
+	if versioned {
+		generatedHooks, err = buildCodexHooksTable(opts, configPath, hookScript)
+		if err != nil {
+			return err
+		}
+	} else {
+		generatedHooks = buildCodexHooksTableForGroups(configPath, hookScript, groups)
+	}
 	for eventType, value := range hooks {
 		if eventType == "state" {
 			continue
@@ -2141,22 +2869,44 @@ func mergeOwnedCodexHooks(
 	for eventType, value := range generatedHooks {
 		newEntries, _ := value.([]interface{})
 		existing, _ := hooks[eventType].([]interface{})
-		merged, err := replaceCodexHookInPlace(existing, newEntries, isManaged)
+		merged, err := replaceCodexHookInPlace(
+			existing,
+			newEntries,
+			isManaged,
+			func(_ map[string]interface{}, handlers []interface{}) bool {
+				// inferTrustedCodexManagedHookCommands already proved this exact
+				// singleton belongs to a complete shipped profile with matching
+				// positional trust. It is therefore safe to discard an accumulated
+				// predecessor even when a later reviewed contract changed only the
+				// generated matcher (for example SessionStart adding compact).
+				return len(handlers) == 1 && isInferredManaged(handlers[0])
+			},
+		)
 		if err != nil {
 			return fmt.Errorf("repair Codex hooks.%s: %w", eventType, err)
 		}
 		hooks[eventType] = merged
 	}
 	if writeTrustState {
-		if err := trustOwnedCodexHooks(hooks, configPath, hooksDir, groups); err != nil {
-			return fmt.Errorf("trust DefenseClaw Codex hooks: %w", err)
+		var trustErr error
+		if versioned {
+			trustErr = trustOwnedCodexHooks(hooks, configPath, hooksDir, opts)
+		} else {
+			trustErr = trustOwnedCodexHooks(hooks, configPath, hooksDir, groups)
+		}
+		if trustErr != nil {
+			return fmt.Errorf("trust DefenseClaw Codex hooks: %w", trustErr)
 		}
 		return nil
 	}
-	if err := verifyManagedCodexHookMatrixForGroups(
-		hooks, configPath, hooksDir, groups,
-	); err != nil {
-		return fmt.Errorf("verify managed DefenseClaw Codex hooks: %w", err)
+	var verifyErr error
+	if versioned {
+		verifyErr = verifyManagedCodexHookMatrix(hooks, configPath, hooksDir, opts)
+	} else {
+		verifyErr = verifyManagedCodexHookMatrixForGroups(hooks, configPath, hooksDir, groups)
+	}
+	if verifyErr != nil {
+		return fmt.Errorf("verify managed DefenseClaw Codex hooks: %w", verifyErr)
 	}
 	return nil
 }
@@ -2191,7 +2941,7 @@ func inferTrustedCodexManagedHookCommands(
 
 	keySource := codexHookStateKeySource(configPath)
 	for _, profile := range codexShippedManagedHookProfiles() {
-		var candidates map[string]struct{}
+		var candidates map[codexManagedCommandIdentity]struct{}
 		complete := true
 		for eventIndex, expected := range profile {
 			rawGroups, present := hooks[expected.eventType]
@@ -2209,12 +2959,15 @@ func inferTrustedCodexManagedHookCommands(
 				return nil, fmt.Errorf("hooks.%s: %w", expected.eventType, err)
 			}
 			if eventIndex == 0 {
-				candidates = forEvent
+				candidates = make(map[codexManagedCommandIdentity]struct{}, len(forEvent))
+				for identity := range forEvent {
+					candidates[identity] = struct{}{}
+				}
 				continue
 			}
-			for command := range candidates {
-				if _, present := forEvent[command]; !present {
-					delete(candidates, command)
+			for identity := range candidates {
+				if _, present := forEvent[identity]; !present {
+					delete(candidates, identity)
 				}
 			}
 			if len(candidates) == 0 {
@@ -2224,8 +2977,15 @@ func inferTrustedCodexManagedHookCommands(
 		if !complete {
 			continue
 		}
-		for command := range candidates {
-			if codexCommandMatchesExactGeneratedProfile(hooks, command, profile) {
+		for identity := range candidates {
+			if !codexManagedCommandIdentityMatchesProfile(identity, profile) {
+				continue
+			}
+			commands, exact := codexCommandsMatchExactGeneratedProfile(hooks, identity, profile)
+			if !exact {
+				continue
+			}
+			for command := range commands {
 				managed[command] = struct{}{}
 			}
 		}
@@ -2237,10 +2997,11 @@ func inferTrustedCodexManagedHookCommands(
 // actually emitted. The five-event profile predates PermissionRequest; the
 // six-event profile added it; the eight-event profile added compact lifecycle
 // coverage; the ten-event profile added subagent lifecycle coverage. SessionEnd
-// is the sole extension to that current matrix; its first shipped timeout was
-// three seconds before the current sixty-second budget. Keeping these profiles
-// explicit prevents a trusted-looking subset or edited superset from being
-// absorbed as product-owned state.
+// is the sole extension to that current matrix. DefenseClaw briefly emitted a
+// sixty-second value that Codex clamps to its official three-second maximum;
+// retain that predecessor shape only for safe migration and teardown. Keeping
+// these profiles explicit prevents a trusted-looking subset or edited superset
+// from being absorbed as product-owned state.
 func codexShippedManagedHookProfiles() [][]codexHookGroup {
 	fiveEvents := []codexHookGroup{
 		{"SessionStart", "startup|resume|clear", 30},
@@ -2258,31 +3019,125 @@ func codexShippedManagedHookProfiles() [][]codexHookGroup {
 		codexHookGroup{"PostCompact", "", 30},
 		sixEvents[len(sixEvents)-1],
 	)
-	tenEvents := append([]codexHookGroup(nil), codexHookGroups...)
+	legacyTenEvents := append([]codexHookGroup(nil), codexHookGroups...)
+	tenEvents := append([]codexHookGroup(nil), legacyTenEvents...)
+	// The v3 and v4 contracts have always emitted compact as a reviewed
+	// SessionStart matcher. The shared registry keeps the narrower legacy
+	// matcher so v1/v2 rendering is not broadened.
+	tenEvents[0].matcher = "startup|resume|clear|compact"
 	elevenEvents := append([]codexHookGroup(nil), tenEvents...)
 	elevenEvents = append(elevenEvents, codexSessionEndHookGroup)
-	legacyElevenEvents := append([]codexHookGroup(nil), tenEvents...)
-	legacyElevenEvents = append(legacyElevenEvents, codexHookGroup{"SessionEnd", "", 3})
+	preClampElevenEvents := append([]codexHookGroup(nil), tenEvents...)
+	preClampElevenEvents = append(preClampElevenEvents, codexHookGroup{"SessionEnd", "", 60})
 	return [][]codexHookGroup{
 		elevenEvents,
-		legacyElevenEvents,
+		preClampElevenEvents,
 		tenEvents,
+		legacyTenEvents,
 		eightEvents,
 		sixEvents,
 		fiveEvents,
 	}
 }
 
-func codexCommandMatchesExactGeneratedProfile(
-	hooks map[string]interface{},
-	command string,
+type codexManagedCommandIdentity struct {
+	script     string
+	contractID string
+}
+
+// parseCodexManagedCommandIdentity accepts the two command families that
+// DefenseClaw has emitted. Older releases registered the script path directly;
+// current releases bind each command to one finite event and hook contract.
+// The latter necessarily differs across events, so migration must correlate the
+// underlying script+contract identity rather than intersecting full commands.
+func parseCodexManagedCommandIdentity(command string) (
+	codexManagedCommandIdentity,
+	string,
+	bool,
+) {
+	return parseCodexManagedCommandIdentityForPlatform(runtime.GOOS, command)
+}
+
+func parseCodexManagedCommandIdentityForPlatform(goos, command string) (
+	codexManagedCommandIdentity,
+	string,
+	bool,
+) {
+	if isCodexManagedScriptCandidate(command) {
+		return codexManagedCommandIdentity{script: command}, "", true
+	}
+
+	const contractSeparator = " --hook-contract "
+	contractIndex := strings.LastIndex(command, contractSeparator)
+	if contractIndex <= 0 {
+		return codexManagedCommandIdentity{}, "", false
+	}
+	contractID := command[contractIndex+len(contractSeparator):]
+	if contractID == "" || strings.TrimSpace(contractID) != contractID {
+		return codexManagedCommandIdentity{}, "", false
+	}
+	prefix := command[:contractIndex]
+	const eventSeparator = " --event "
+	eventIndex := strings.LastIndex(prefix, eventSeparator)
+	if eventIndex <= 0 {
+		return codexManagedCommandIdentity{}, "", false
+	}
+	script := prefix[:eventIndex]
+	event := prefix[eventIndex+len(eventSeparator):]
+	if event == "" || !isCodexManagedScriptCandidate(script) {
+		return codexManagedCommandIdentity{}, "", false
+	}
+	contract, registered := hookContractByID("codex", contractID)
+	if !registered || !codexContractContainsEvent(contract, event) {
+		return codexManagedCommandIdentity{}, "", false
+	}
+	if command != codexHookCommandForPlatform(goos, event, contractID, script) {
+		return codexManagedCommandIdentity{}, "", false
+	}
+	return codexManagedCommandIdentity{script: script, contractID: contractID}, event, true
+}
+
+func codexContractContainsEvent(contract HookContract, event string) bool {
+	for _, candidate := range contract.Events {
+		if candidate == event {
+			return true
+		}
+	}
+	return false
+}
+
+func codexManagedCommandIdentityMatchesProfile(
+	identity codexManagedCommandIdentity,
 	profile []codexHookGroup,
 ) bool {
+	// Unbound commands predate contract IDs; their exact shipped event shape and
+	// positional trust fingerprints remain the bounded ownership evidence.
+	if identity.contractID == "" {
+		return true
+	}
+	contract, registered := hookContractByID("codex", identity.contractID)
+	if !registered || len(contract.Events) != len(profile) {
+		return false
+	}
+	for index, expected := range profile {
+		if contract.Events[index] != expected.eventType {
+			return false
+		}
+	}
+	return true
+}
+
+func codexCommandsMatchExactGeneratedProfile(
+	hooks map[string]interface{},
+	identity codexManagedCommandIdentity,
+	profile []codexHookGroup,
+) (map[string]struct{}, bool) {
 	expectedByEvent := make(map[string]codexHookGroup, len(profile))
 	for _, expected := range profile {
 		expectedByEvent[expected.eventType] = expected
 	}
 	seen := make(map[string]int, len(profile))
+	commands := make(map[string]struct{}, len(profile))
 	for eventType, rawGroups := range hooks {
 		if eventType == "state" {
 			continue
@@ -2303,29 +3158,37 @@ func codexCommandMatchesExactGeneratedProfile(
 			for _, rawHandler := range handlers {
 				handler, ok := rawHandler.(map[string]interface{})
 				candidateCommand, _ := handler["command"].(string)
-				if !ok || candidateCommand != command {
+				if !ok {
 					continue
+				}
+				candidateIdentity, boundEvent, parsed := parseCodexManagedCommandIdentity(candidateCommand)
+				if !parsed || candidateIdentity != identity {
+					continue
+				}
+				if boundEvent != "" && boundEvent != eventType {
+					return nil, false
 				}
 				expected, recognized := expectedByEvent[eventType]
 				if !recognized || !codexGeneratedGroupShapeMatches(group, expected) {
-					return false
+					return nil, false
 				}
 				seen[eventType]++
 				if seen[eventType] != 1 {
-					return false
+					return nil, false
 				}
+				commands[candidateCommand] = struct{}{}
 			}
 		}
 	}
 	if len(seen) != len(profile) {
-		return false
+		return nil, false
 	}
 	for _, expected := range profile {
 		if seen[expected.eventType] != 1 {
-			return false
+			return nil, false
 		}
 	}
-	return true
+	return commands, true
 }
 
 func trustedCodexManagedCommandsForEvent(
@@ -2333,13 +3196,14 @@ func trustedCodexManagedCommandsForEvent(
 	state map[string]interface{},
 	keySource string,
 	expected codexHookGroup,
-) (map[string]struct{}, error) {
+) (map[codexManagedCommandIdentity]string, error) {
 	groups, ok := rawGroups.([]interface{})
 	if !ok {
 		return nil, fmt.Errorf("event groups have unsupported type %T", rawGroups)
 	}
 	eventKey := codexHookEventKeyLabel(expected.eventType)
-	counts := map[string]int{}
+	counts := map[codexManagedCommandIdentity]int{}
+	commandsByIdentity := map[codexManagedCommandIdentity]string{}
 	for groupIndex, rawGroup := range groups {
 		group, ok := rawGroup.(map[string]interface{})
 		if !ok || !codexGeneratedGroupShapeMatches(group, expected) {
@@ -2348,7 +3212,8 @@ func trustedCodexManagedCommandsForEvent(
 		handlers := group["hooks"].([]interface{})
 		handler := handlers[0].(map[string]interface{})
 		command, _ := handler["command"].(string)
-		if !isCodexManagedScriptCandidate(command) {
+		identity, boundEvent, parsed := parseCodexManagedCommandIdentity(command)
+		if !parsed || (boundEvent != "" && boundEvent != expected.eventType) {
 			continue
 		}
 		currentHash, err := codexCommandHookHashForPlatform(
@@ -2375,16 +3240,17 @@ func trustedCodexManagedCommandsForEvent(
 		if trustedHash != currentHash && trustedHash != legacyHash {
 			continue
 		}
-		counts[command]++
+		counts[identity]++
+		commandsByIdentity[identity] = command
 	}
 
-	commands := map[string]struct{}{}
-	for command, count := range counts {
+	commands := map[codexManagedCommandIdentity]string{}
+	for identity, count := range counts {
 		// Multiple identical handlers in one event are ambiguous and cannot be
 		// repaired without changing positional identities. Distinct predecessor
 		// paths remain independently recognizable.
 		if count == 1 {
-			commands[command] = struct{}{}
+			commands[identity] = commandsByIdentity[identity]
 		}
 	}
 	return commands, nil
@@ -2563,6 +3429,7 @@ func replaceOwnedCodexHookInPlace(existing, generated []interface{}, hooksDir st
 func replaceCodexHookInPlace(
 	existing, generated []interface{},
 	isManaged func(interface{}) bool,
+	canRemoveReviewedDuplicate ...func(map[string]interface{}, []interface{}) bool,
 ) ([]interface{}, error) {
 	if len(generated) != 1 {
 		return nil, fmt.Errorf("generated group count = %d, want 1", len(generated))
@@ -2603,7 +3470,12 @@ func replaceCodexHookInPlace(
 				// group is safe to remove automatically. Shared or edited groups
 				// remain an explicit manual-repair case because deleting one handler
 				// could re-index unrelated positional trust state.
-				if !codexDuplicateGroupCanBeRemoved(group, generatedGroup, handlers) {
+				removable := codexDuplicateGroupCanBeRemoved(group, generatedGroup, handlers)
+				if !removable && len(canRemoveReviewedDuplicate) > 0 &&
+					canRemoveReviewedDuplicate[0] != nil {
+					removable = canRemoveReviewedDuplicate[0](group, handlers)
+				}
+				if !removable {
 					return nil, fmt.Errorf("multiple DefenseClaw handlers require manual repair")
 				}
 				duplicateRemoved = true
@@ -2795,11 +3667,7 @@ func codexHookLocationsMatching(
 // keys are derived from the final table. A colliding state record is overwritten
 // only when its hash already proves that it belongs to the exact handler at that
 // position; otherwise setup fails without touching the file.
-func trustOwnedCodexHooks(
-	hooks map[string]interface{},
-	configPath, hooksDir string,
-	groups []codexHookGroup,
-) error {
+func trustOwnedCodexHooks(hooks map[string]interface{}, configPath, hooksDir string, selector interface{}) error {
 	state, exists := hooks["state"].(map[string]interface{})
 	if rawState, present := hooks["state"]; present && !exists {
 		return fmt.Errorf("hooks.state has unsupported type %T", rawState)
@@ -2808,6 +3676,25 @@ func trustOwnedCodexHooks(
 		state = map[string]interface{}{}
 	}
 	keySource := codexHookStateKeySource(configPath)
+	var (
+		groups    []codexHookGroup
+		versioned bool
+		opts      SetupOpts
+	)
+	switch value := selector.(type) {
+	case SetupOpts:
+		opts = value
+		versioned = true
+		var err error
+		groups, err = codexHookGroupsForSetup(opts)
+		if err != nil {
+			return err
+		}
+	case []codexHookGroup:
+		groups = value
+	default:
+		return fmt.Errorf("trust Codex hooks: unsupported selector type %T", selector)
+	}
 	for _, expected := range groups {
 		eventKey := codexHookEventKeyLabel(expected.eventType)
 		locations, err := ownedCodexHookLocations(runtime.GOOS, eventKey, hooks[expected.eventType], hooksDir)
@@ -2829,6 +3716,9 @@ func trustOwnedCodexHooks(
 		state[key] = map[string]interface{}{"trusted_hash": location.currentHash}
 	}
 	hooks["state"] = state
+	if versioned {
+		return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir, opts)
+	}
 	return verifyTrustedCodexHookMatrixForGroups(hooks, configPath, hooksDir, groups)
 }
 
@@ -2836,8 +3726,8 @@ func trustOwnedCodexHooks(
 // complete required event matrix. It verifies exact commands (including the
 // native Windows override and generic fallback), synchronous execution,
 // matcher, timeout, positional key, enabled state, and trusted hash.
-func verifyTrustedCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string) error {
-	return verifyCodexHookMatrix(hooks, configPath, hooksDir, true, nil)
+func verifyTrustedCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string, opts SetupOpts) error {
+	return verifyCodexHookMatrix(hooks, configPath, hooksDir, opts, true)
 }
 
 func verifyTrustedCodexHookMatrixForGroups(
@@ -2845,15 +3735,15 @@ func verifyTrustedCodexHookMatrixForGroups(
 	configPath, hooksDir string,
 	groups []codexHookGroup,
 ) error {
-	return verifyCodexHookMatrix(hooks, configPath, hooksDir, true, groups)
+	return verifyCodexHookMatrixForGroups(hooks, configPath, hooksDir, true, groups)
 }
 
 // verifyManagedCodexHookMatrix verifies the same complete synchronous matrix
 // without private hooks.state data. Codex trusts handlers from
 // managed_config.toml by source, including when allow_managed_hooks_only is
 // enabled, so no per-user approval record is either needed or supported.
-func verifyManagedCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string) error {
-	return verifyCodexHookMatrix(hooks, configPath, hooksDir, false, nil)
+func verifyManagedCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string, opts SetupOpts) error {
+	return verifyCodexHookMatrix(hooks, configPath, hooksDir, opts, false)
 }
 
 func verifyManagedCodexHookMatrixForGroups(
@@ -2861,10 +3751,10 @@ func verifyManagedCodexHookMatrixForGroups(
 	configPath, hooksDir string,
 	groups []codexHookGroup,
 ) error {
-	return verifyCodexHookMatrix(hooks, configPath, hooksDir, false, groups)
+	return verifyCodexHookMatrixForGroups(hooks, configPath, hooksDir, false, groups)
 }
 
-func verifyCodexHookMatrix(
+func verifyCodexHookMatrixForGroups(
 	hooks map[string]interface{},
 	configPath, hooksDir string,
 	requireTrustState bool,
@@ -2878,31 +3768,81 @@ func verifyCodexHookMatrix(
 			return fmt.Errorf("hooks.state has unsupported type %T", hooks["state"])
 		}
 	}
-	if len(groups) == 0 {
-		groups = append([]codexHookGroup(nil), codexHookGroups...)
-		if raw, present := hooks[codexSessionEndHookGroup.eventType]; present {
-			locations, err := ownedCodexHookLocations(
-				runtime.GOOS,
-				codexHookEventKeyLabel(codexSessionEndHookGroup.eventType),
-				raw,
-				hooksDir,
-			)
-			if err != nil {
-				return fmt.Errorf("SessionEnd: %w", err)
-			}
-			if len(locations) != 0 {
-				groups = append(groups, codexSessionEndHookGroup)
-			}
-		}
-	} else {
-		groups = append([]codexHookGroup(nil), groups...)
-	}
 	keySource := codexHookStateKeySource(configPath)
 	expectedTable := buildCodexHooksTableForGroups(
 		configPath,
 		filepath.ToSlash(filepath.Join(hooksDir, "codex-hook.sh")),
 		groups,
 	)
+	expectedEvents := make(map[string]struct{}, len(groups))
+	for _, expected := range groups {
+		expectedEvents[expected.eventType] = struct{}{}
+		eventKey := codexHookEventKeyLabel(expected.eventType)
+		locations, err := ownedCodexHookLocations(runtime.GOOS, eventKey, hooks[expected.eventType], hooksDir)
+		if err != nil {
+			return fmt.Errorf("%s: %w", expected.eventType, err)
+		}
+		if len(locations) != 1 {
+			return fmt.Errorf("%s has %d DefenseClaw handlers, want 1", expected.eventType, len(locations))
+		}
+		location := locations[0]
+		expectedGroups := expectedTable[expected.eventType].([]interface{})
+		expectedGroup := expectedGroups[0].(map[string]interface{})
+		expectedHandlers := expectedGroup["hooks"].([]interface{})
+		expectedHandler := expectedHandlers[0].(map[string]interface{})
+		if err := verifyCodexOwnedHandlerShape(location, expectedGroup, expectedHandler); err != nil {
+			return fmt.Errorf("%s: %w", expected.eventType, err)
+		}
+		if requireTrustState {
+			key := codexHookStateKey(keySource, eventKey, location.groupIndex, location.handlerIndex)
+			entry, ok := state[key].(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("%s trust state %q is missing or malformed", expected.eventType, key)
+			}
+			if enabled, _ := entry["enabled"].(bool); entry["enabled"] != nil && !enabled {
+				return fmt.Errorf("%s trust state %q is disabled", expected.eventType, key)
+			}
+			if trustedHash, _ := entry["trusted_hash"].(string); trustedHash != location.currentHash {
+				return fmt.Errorf("%s trust state %q is not trusted", expected.eventType, key)
+			}
+		}
+	}
+	for eventType, rawGroups := range hooks {
+		if eventType == "state" {
+			continue
+		}
+		if _, expected := expectedEvents[eventType]; expected {
+			continue
+		}
+		locations, err := ownedCodexHookLocations(runtime.GOOS, codexHookEventKeyLabel(eventType), rawGroups, hooksDir)
+		if err != nil {
+			return fmt.Errorf("%s: %w", eventType, err)
+		}
+		if len(locations) > 0 {
+			return fmt.Errorf("unexpected event %s has %d DefenseClaw handlers", eventType, len(locations))
+		}
+	}
+	return nil
+}
+
+func verifyCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string, opts SetupOpts, requireTrustState bool) error {
+	var state map[string]interface{}
+	if requireTrustState {
+		var ok bool
+		state, ok = hooks["state"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("hooks.state has unsupported type %T", hooks["state"])
+		}
+	}
+	keySource := codexHookStateKeySource(configPath)
+	expectedTable, err := buildCodexHooksTable(opts, configPath, filepath.ToSlash(filepath.Join(hooksDir, "codex-hook.sh")))
+	if err != nil {
+		return err
+	}
+	groups, err := codexHookGroupsForSetup(opts)
+	if err != nil {
+		return err
+	}
 	expectedEvents := make(map[string]struct{}, len(groups))
 	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}
@@ -3006,6 +3946,7 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		return
 	}
 
+	currentLooksManaged := codexOtelBlockLooksManaged(current, opts)
 	var originalValue interface{}
 	originalDecoded := false
 	original := map[string]interface{}(nil)
@@ -3065,6 +4006,34 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		delete(current, key)
 	}
 
+	// Setup owns otel.environment only while it retains the exact value Setup
+	// wrote and either the current table still carries a managed exporter or a
+	// pristine [otel] pre-image proves which value preceded Setup. This avoids
+	// claiming an unrelated operator's coincidentally identical environment.
+	managedEnvironment := codexOtelEnvironment(opts)
+	if value, exists := current["environment"]; exists && value == managedEnvironment &&
+		(currentLooksManaged || originalDecoded) {
+		if original != nil {
+			if saved, hadSaved := original["environment"]; hadSaved {
+				if originalLooksManaged && saved == managedEnvironment {
+					delete(current, "environment")
+				} else {
+					current["environment"] = saved
+				}
+			} else {
+				delete(current, "environment")
+			}
+		} else {
+			delete(current, "environment")
+		}
+	}
+	if _, exists := current["environment"]; !exists && original != nil {
+		if saved, hadSaved := original["environment"]; hadSaved &&
+			!(originalLooksManaged && saved == managedEnvironment) {
+			current["environment"] = saved
+		}
+	}
+
 	// Setup owns log_user_prompt only while it retains the value Setup wrote.
 	// A current false/non-boolean value is an operator edit and must survive.
 	if value, exists := current["log_user_prompt"]; exists && value == true {
@@ -3088,7 +4057,7 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	// Setup replaced the original [otel] table wholesale. Re-add displaced
 	// unrelated original keys, but never overwrite a current operator edit.
 	for key, saved := range original {
-		if key == "log_user_prompt" || codexOtelExporterKey(key) {
+		if key == "environment" || key == "log_user_prompt" || codexOtelExporterKey(key) {
 			continue
 		}
 		if _, exists := current[key]; !exists {
@@ -3119,6 +4088,10 @@ func codexOtelTableIsEntirelyManaged(current map[string]interface{}, opts SetupO
 	sawManagedExporter := false
 	for key, value := range current {
 		switch key {
+		case "environment":
+			if value != codexOtelEnvironment(opts) {
+				return false
+			}
 		case "log_user_prompt":
 			if value != true {
 				return false

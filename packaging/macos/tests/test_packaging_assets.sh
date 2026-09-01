@@ -104,7 +104,7 @@ t_install_bootstraps_guardian_and_enumerator() {
 t_install_survives_zero_target_manifest() {
   # AIFW-31486 regression guard: on a fresh customer box the AVC-shipped
   # .pkg lands before the user has installed any supported connector CLI
-  # (Codex / ClaudeCode / Cursor). The zero-target render used to `die`
+  # (Amp / Codex / ClaudeCode / Cursor / OpenCode). The zero-target render used to `die`
   # here, which surfaced as the AVC postinstall logging
   # "DefenseClaw install failed with exit code 1; continuing AVC install"
   # and left the box with no hook-guardian daemon running at all.
@@ -130,6 +130,8 @@ t_install_survives_zero_target_manifest() {
   # different guidance. Without this the warn is a single generic line.
   assert_contains "${body}" 'classify_zero_target_reason "${CONNECTOR}"' \
     "install.sh consults classify_zero_target_reason to distinguish all-unsupported vs none-installed"
+  assert_contains "${body}" 'supported today: amp|codex|claudecode|cursor|opencode' \
+    "zero-target operator report lists every auto-wireable connector"
 
   # Branch-to-bootstrap control-flow guard (CodeRabbit finding 2):
   # a source scan alone can't prove the zero-target branch actually

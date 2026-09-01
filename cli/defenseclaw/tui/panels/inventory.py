@@ -36,6 +36,7 @@ from defenseclaw.tui.services.inventory_state import (
     InventorySubTabInfo,
     InventorySummary,
     InventorySummaryState,
+    InventoryTool,
 )
 
 __all__ = [
@@ -62,4 +63,5 @@ __all__ = [
     "InventorySubTabInfo",
     "InventorySummary",
     "InventorySummaryState",
+    "InventoryTool",
 ]

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -119,18 +120,19 @@ type ConfigurationHealth struct {
 
 // ConnectorHealth reports a connector's identity, mode, and live counters.
 type ConnectorHealth struct {
-	Name               string                       `json:"name"`
-	State              SubsystemState               `json:"state"`
-	Source             string                       `json:"source,omitempty"`
-	Since              time.Time                    `json:"since"`
-	LastActivityAt     *time.Time                   `json:"last_activity_at,omitempty"`
-	ToolInspectionMode connector.ToolInspectionMode `json:"tool_inspection_mode"`
-	SubprocessPolicy   connector.SubprocessPolicy   `json:"subprocess_policy"`
-	Requests           int64                        `json:"requests"`
-	Errors             int64                        `json:"errors"`
-	ToolInspections    int64                        `json:"tool_inspections"`
-	ToolBlocks         int64                        `json:"tool_blocks"`
-	SubprocessBlocks   int64                        `json:"subprocess_blocks"`
+	Name                string                       `json:"name"`
+	State               SubsystemState               `json:"state"`
+	Source              string                       `json:"source,omitempty"`
+	Since               time.Time                    `json:"since"`
+	LastActivityAt      *time.Time                   `json:"last_activity_at,omitempty"`
+	LastLoadHeartbeatAt *time.Time                   `json:"load_heartbeat_at,omitempty"`
+	ToolInspectionMode  connector.ToolInspectionMode `json:"tool_inspection_mode"`
+	SubprocessPolicy    connector.SubprocessPolicy   `json:"subprocess_policy"`
+	Requests            int64                        `json:"requests"`
+	Errors              int64                        `json:"errors"`
+	ToolInspections     int64                        `json:"tool_inspections"`
+	ToolBlocks          int64                        `json:"tool_blocks"`
+	SubprocessBlocks    int64                        `json:"subprocess_blocks"`
 }
 
 type HealthSnapshot struct {
@@ -263,12 +265,13 @@ type connectorStats struct {
 	toolInspectionMode connector.ToolInspectionMode
 	subprocessPolicy   connector.SubprocessPolicy
 
-	requests         atomic.Int64
-	lastActivityAt   atomic.Int64
-	errors           atomic.Int64
-	toolInspections  atomic.Int64
-	toolBlocks       atomic.Int64
-	subprocessBlocks atomic.Int64
+	requests            atomic.Int64
+	lastActivityAt      atomic.Int64
+	lastLoadHeartbeatAt atomic.Int64
+	errors              atomic.Int64
+	toolInspections     atomic.Int64
+	toolBlocks          atomic.Int64
+	subprocessBlocks    atomic.Int64
 }
 
 func (s *connectorStats) snapshot() ConnectorHealth {
@@ -281,19 +284,25 @@ func (s *connectorStats) snapshot() ConnectorHealth {
 		activityAt := time.Unix(0, unixNanos).UTC()
 		lastActivityAt = &activityAt
 	}
+	var lastLoadHeartbeatAt *time.Time
+	if unixNanos := s.lastLoadHeartbeatAt.Load(); unixNanos > 0 {
+		heartbeatAt := time.Unix(0, unixNanos).UTC()
+		lastLoadHeartbeatAt = &heartbeatAt
+	}
 	return ConnectorHealth{
-		Name:               s.name,
-		State:              s.state,
-		Source:             s.source,
-		Since:              s.since,
-		LastActivityAt:     lastActivityAt,
-		ToolInspectionMode: s.toolInspectionMode,
-		SubprocessPolicy:   s.subprocessPolicy,
-		Requests:           requests,
-		Errors:             s.errors.Load(),
-		ToolInspections:    s.toolInspections.Load(),
-		ToolBlocks:         s.toolBlocks.Load(),
-		SubprocessBlocks:   s.subprocessBlocks.Load(),
+		Name:                s.name,
+		State:               s.state,
+		Source:              s.source,
+		Since:               s.since,
+		LastActivityAt:      lastActivityAt,
+		LastLoadHeartbeatAt: lastLoadHeartbeatAt,
+		ToolInspectionMode:  s.toolInspectionMode,
+		SubprocessPolicy:    s.subprocessPolicy,
+		Requests:            requests,
+		Errors:              s.errors.Load(),
+		ToolInspections:     s.toolInspections.Load(),
+		ToolBlocks:          s.toolBlocks.Load(),
+		SubprocessBlocks:    s.subprocessBlocks.Load(),
 	}
 }
 
@@ -305,6 +314,19 @@ func (s *connectorStats) recordActivity(at time.Time) {
 			return
 		}
 		if s.lastActivityAt.CompareAndSwap(current, candidate) {
+			return
+		}
+	}
+}
+
+func recordLatestTimestamp(target *atomic.Int64, at time.Time) {
+	candidate := at.UnixNano()
+	for {
+		current := target.Load()
+		if candidate <= current {
+			return
+		}
+		if target.CompareAndSwap(current, candidate) {
 			return
 		}
 	}
@@ -779,6 +801,9 @@ func (h *SidecarHealth) observeObservabilityV8Failure(
 }
 
 func validObservabilityV8FailureCode(code string) bool {
+	if delivery.IsFailureCode(delivery.FailureCode(code)) {
+		return true
+	}
 	switch code {
 	case string(delivery.HealthReasonQueueFull), string(delivery.HealthReasonRetryable),
 		string(delivery.HealthReasonPartial), string(delivery.HealthReasonDeliveryFailed),
@@ -1292,6 +1317,13 @@ func (h *SidecarHealth) RecordConnectorRequestFor(name string) {
 	stats.requests.Add(1)
 }
 
+// RecordConnectorLoadHeartbeatFor records proof that a connector's managed
+// bridge actually loaded. File presence alone cannot distinguish a live
+// OpenCode plugin from --pure/external-plugin-disabled operation.
+func (h *SidecarHealth) RecordConnectorLoadHeartbeatFor(name string) {
+	recordLatestTimestamp(&h.statsFor(name).lastLoadHeartbeatAt, time.Now())
+}
+
 // RecordConnectorErrorFor increments the error counter for a connector.
 func (h *SidecarHealth) RecordConnectorErrorFor(name string) { h.statsFor(name).errors.Add(1) }
 
@@ -1502,6 +1534,7 @@ func renderObservabilityV8Health(
 	details["generation"] = snapshot.Generation
 	destinations := make([]map[string]interface{}, 0, len(snapshot.Destinations))
 	aggregate := StateRunning
+	optionalFailures := make([]string, 0, len(snapshot.Destinations))
 	for _, destination := range snapshot.Destinations {
 		row := map[string]interface{}{
 			"name": destination.Name, "kind": string(destination.Kind),
@@ -1525,6 +1558,9 @@ func renderObservabilityV8Health(
 		}
 		if destination.LastFailureClass != "" {
 			row["last_failure_class"] = string(destination.LastFailureClass)
+		}
+		if destination.LastFailureCode != "" {
+			row["last_failure_code"] = string(destination.LastFailureCode)
 		}
 		if destination.Queue != nil {
 			row["queue"] = renderObservabilityV8Queue(*destination.Queue, destination.Counters)
@@ -1554,6 +1590,9 @@ func renderObservabilityV8Health(
 			if source.LastFailureClass != "" {
 				signalRow["last_failure_class"] = string(source.LastFailureClass)
 			}
+			if source.LastFailureCode != "" {
+				signalRow["last_failure_code"] = string(source.LastFailureCode)
+			}
 			if source.Queue != nil {
 				queue := renderObservabilityV8Queue(*source.Queue, source.Counters)
 				signalRow["queue"] = queue
@@ -1577,6 +1616,9 @@ func renderObservabilityV8Health(
 				if source.LastFailureClass != "" {
 					queueRow["last_failure_class"] = string(source.LastFailureClass)
 				}
+				if source.LastFailureCode != "" {
+					queueRow["last_failure_code"] = string(source.LastFailureCode)
+				}
 				queueRows = append(queueRows, queueRow)
 			}
 			signalRows = append(signalRows, signalRow)
@@ -1588,14 +1630,18 @@ func renderObservabilityV8Health(
 			row["queues"] = queueRows
 		}
 		lastFailure := destination.LastFailure
+		activeFailureCode := string(destination.LastFailureCode)
+		destinationDegraded := destination.Enabled && (destination.State == delivery.HealthDegraded ||
+			destination.State == delivery.HealthFailing || destination.State == delivery.HealthStopped)
 		if observed, ok := failures[destination.Name]; ok &&
 			observed.generation == snapshot.Generation &&
 			!destination.LastSuccess.After(observed.occurredAt) {
 			row["failure"] = observed.code
+			activeFailureCode = observed.code
+			destinationDegraded = true
 			if observed.occurredAt.After(lastFailure) {
 				lastFailure = observed.occurredAt
 			}
-			aggregate = StateError
 		}
 		if !destination.LastSuccess.IsZero() {
 			row["last_success_at"] = destination.LastSuccess.UTC().Format(time.RFC3339Nano)
@@ -1603,14 +1649,26 @@ func renderObservabilityV8Health(
 		if !lastFailure.IsZero() {
 			row["last_failure_at"] = lastFailure.UTC().Format(time.RFC3339Nano)
 		}
-		if destination.Enabled && (destination.State == delivery.HealthDegraded ||
-			destination.State == delivery.HealthFailing || destination.State == delivery.HealthStopped) {
-			aggregate = StateError
+		if destinationDegraded {
+			if destination.Kind == config.ObservabilityV8DestinationLocalSQLite {
+				aggregate = StateError
+			} else {
+				optionalFailures = append(optionalFailures, observabilityV8OptionalFailureSummary(
+					destination.Name, destination.State, destination.Reason, activeFailureCode,
+				))
+			}
 		}
 		destinations = append(destinations, row)
 	}
 	details["destination_count"] = len(destinations)
 	details["destinations"] = destinations
+	sort.Strings(optionalFailures)
+	details["optional_destination_state"] = "healthy"
+	details["optional_destination_failure_count"] = len(optionalFailures)
+	if len(optionalFailures) > 0 {
+		details["optional_destination_state"] = "degraded"
+		details["optional_destination_failure_summary"] = boundedObservabilityV8FailureSummary(optionalFailures)
+	}
 	if validObservabilityV8RetentionState(retentionState) {
 		details["retention_state"] = retentionState
 		details["retention_days"] = retentionDays
@@ -1626,6 +1684,57 @@ func renderObservabilityV8Health(
 	}
 	appendObservabilityV8EventHistoryDetails(details, eventHistory)
 	return SubsystemHealth{State: aggregate, Since: since, Details: details}
+}
+
+const (
+	observabilityV8MaxFailureSummaryItems = 8
+	observabilityV8MaxFailureSummaryBytes = 512
+)
+
+func observabilityV8OptionalFailureSummary(
+	destination string,
+	state delivery.HealthState,
+	reason string,
+	code string,
+) string {
+	if code == "" {
+		code = reason
+	}
+	if code == "" {
+		code = string(delivery.FailureCodeUnspecified)
+	}
+	return destination + ":" + string(state) + ":" + code
+}
+
+func boundedObservabilityV8FailureSummary(failures []string) string {
+	if len(failures) == 0 {
+		return ""
+	}
+	limit := len(failures)
+	if limit > observabilityV8MaxFailureSummaryItems {
+		limit = observabilityV8MaxFailureSummaryItems
+	}
+	var summary strings.Builder
+	for index := 0; index < limit; index++ {
+		separator := ""
+		if summary.Len() > 0 {
+			separator = ","
+		}
+		remaining := observabilityV8MaxFailureSummaryBytes - summary.Len() - len(separator)
+		if remaining <= 0 {
+			break
+		}
+		value := failures[index]
+		if len(value) > remaining {
+			value = value[:remaining]
+		}
+		summary.WriteString(separator)
+		summary.WriteString(value)
+		if len(value) == remaining {
+			break
+		}
+	}
+	return summary.String()
 }
 
 func appendObservabilityV8EventHistoryDetails(

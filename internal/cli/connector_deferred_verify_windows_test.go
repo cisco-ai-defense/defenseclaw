@@ -165,6 +165,7 @@ func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixtur
 	oldJSON := connectorFlagJSON
 	oldDataDir := connectorFlagDataDir
 	oldConfigHome := connectorFlagConfigHome
+	oldHookExe := connectorFlagHookExe
 	oldExit := connectorExit
 	oldExecutable := deferredVerifyExecutable
 	oldParentImage := deferredVerifyParent
@@ -178,6 +179,7 @@ func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixtur
 		connectorFlagJSON = oldJSON
 		connectorFlagDataDir = oldDataDir
 		connectorFlagConfigHome = oldConfigHome
+		connectorFlagHookExe = oldHookExe
 		connectorExit = oldExit
 		deferredVerifyExecutable = oldExecutable
 		deferredVerifyParent = oldParentImage
@@ -191,6 +193,7 @@ func withDeferredVerifyFixtureGlobals(t *testing.T, fixture deferredVerifyFixtur
 	connectorFlagJSON = true
 	connectorFlagDataDir = fixture.dataRoot
 	connectorFlagConfigHome = fixture.configHome
+	connectorFlagHookExe = ""
 	connectorExit = func(code int) { t.Fatalf("unexpected connector exit %d", code) }
 	deferredVerifyExecutable = func() (string, error) { return fixture.childPath, nil }
 	deferredVerifyParent = func(int) (deferredVerifyProcessIdentity, error) {
@@ -223,6 +226,24 @@ func TestDeferredUninstallVerifyAuthenticatesWithoutV8Config(t *testing.T) {
 	}
 	if _, err := os.Lstat(fixture.dataRoot); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("configless verification recreated deleted data root: %v", err)
+	}
+}
+
+func TestDeferredUninstallVerifyAuthenticatesGeminiPreviousHomeCandidate(t *testing.T) {
+	fixture := newDeferredVerifyFixture(t)
+	fixture.record.VerifiedConnectors = []string{"geminicli"}
+	fixture.journal.Transaction.PreviousConnectors = []string{"geminicli"}
+	fixture.journal.Transaction.PreviousClaudeConfigDir = ""
+	fixture.journal.Transaction.PreviousGeminiConfigDir = fixture.configHome
+	fixture.write(t)
+	withDeferredVerifyFixtureGlobals(t, fixture)
+	connectorFlagName = "geminicli"
+	if err := fixture.command.Flags().Set("connector", "geminicli"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validateDeferredUninstallConnectorVerify(fixture.command); err != nil {
+		t.Fatalf("authenticated Gemini previous-home candidate rejected: %v", err)
 	}
 }
 

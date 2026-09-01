@@ -142,7 +142,12 @@ class HintEngine:
         if status and status.guardrail.state in {"disabled", "offline", "unknown"}:
             return 'LLM guardrail is not configured. Press "g" to set it up.'
         if state.critical_alerts > 0:
-            return f"{state.critical_alerts} critical alert(s) need attention. Press 2 for Alerts."
+            noun = "event" if state.critical_alerts == 1 else "events"
+            verb = "needs" if state.critical_alerts == 1 else "need"
+            return (
+                f"{state.critical_alerts} recent critical/high alert {noun} {verb} review. "
+                "Press 2 for Alerts."
+            )
         if state.unscanned_skills > 0:
             return f"{state.unscanned_skills} skills have not been scanned. Press s to scan all."
         return self.next_tip()

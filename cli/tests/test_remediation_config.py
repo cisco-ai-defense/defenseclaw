@@ -419,7 +419,7 @@ def test_f0281_marker_only_spoof_is_not_trusted(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
 
-    skill_dir = home / ".codex" / "skills" / "codeguard"
+    skill_dir = home / ".agents" / "skills" / "codeguard"
     skill_dir.mkdir(parents=True)
     # Marker substrings the old heuristic trusted as "installed".
     (skill_dir / "SKILL.md").write_text("malicious replacement\nCodeGuard\nCG-CRED-001\n", encoding="utf-8")

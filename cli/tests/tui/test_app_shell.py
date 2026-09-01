@@ -2997,10 +2997,29 @@ async def test_setup_global_shortcuts_save_restart_clear_and_revert() -> None:
     cfg: dict = {"notifications": {"enabled": True}}
     setup = SetupPanelModel(cfg)
     app = DefenseClawTUI(config=cfg, setup_model=setup)
+    status_updates: list[str] = []
+    config_saved = asyncio.Event()
+    set_status = app._set_status  # noqa: SLF001 - observe the exact callback outcome.
+
+    def capture_status(message: str) -> None:
+        status_updates.append(message)
+        if "Config changes saved" in message:
+            config_saved.set()
+        set_status(message)
+
+    app._set_status = capture_status  # type: ignore[method-assign]  # noqa: SLF001
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("0")
         await pilot.pause()
+
+        # The mount-time v8 status worker rebuilds Setup sections. Wait for
+        # that one unrelated refresh before installing this test's synthetic
+        # edit so a loaded runner cannot race it with the save review.
+        await _wait_for_background(
+            lambda: not app._observability_status_load_running  # noqa: SLF001
+            and not app._observability_status_reload_pending  # noqa: SLF001
+        )
 
         # Install the edit after startup status loading has settled; the
         # canonical Observability status refresh rebuilds Setup sections.
@@ -3020,14 +3039,19 @@ async def test_setup_global_shortcuts_save_restart_clear_and_revert() -> None:
         await pilot.press("S")
         await pilot.pause()
 
-        assert app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen"
-        await pilot.press("enter")
+        diff_screen = app.screen_stack[-1]
+        assert diff_screen.__class__.__name__ == "ConfigDiffScreen"
+        assert diff_screen.model.has_changes  # type: ignore[attr-defined]
+        # Pointer and keyboard activation have dedicated screen tests. This
+        # integration awaits Textual's exact screen-pop boundary so the worker
+        # consuming push_screen_wait cannot lag behind a loaded Windows runner.
+        await diff_screen.dismiss(diff_screen.model.result())  # type: ignore[attr-defined]
         await pilot.pause()
-        await pilot.pause()
+        await asyncio.wait_for(config_saved.wait(), timeout=8.0)
 
         assert cfg["notifications"]["enabled"] is False
         assert setup.restart_queue.pending is True
-        assert "Config changes saved" in app.status_text
+        assert any("Config changes saved" in update for update in status_updates)
 
         await pilot.press("C")
         await pilot.pause()
@@ -6061,6 +6085,8 @@ async def test_overview_prefers_persisted_hook_totals_over_gateway_request_count
             self.stats_calls = 0
 
         def audit_data_version(self) -> int:
+            # Production stores expose a stable source version. Keep this
+            # cache contract independent of wall-clock TTL and suite load.
             return 1
 
         def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
@@ -6111,9 +6137,12 @@ async def test_overview_prefers_persisted_hook_totals_over_gateway_request_count
     )
     app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
     # This contract covers reuse of the grouped persisted totals within one
-    # render generation.  Do not let Textual's independent two-second refresh
-    # timer create another generation while the full suite is instrumented.
+    # render generation. Do not let Textual's independent mount polls create
+    # another generation while the full suite is instrumented.
     app._periodic_refresh = lambda: None  # type: ignore[method-assign]
+    app._schedule_health_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_ai_usage_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_config_poll = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(190, 50)) as pilot:
         await pilot.pause()
@@ -6745,6 +6774,48 @@ async def test_overview_disabled_connector_marked_but_still_filterable() -> None
         assert app._connector_filter() == "codex"
 
 
+def test_cursor_disclosure_renders_for_enabled_and_disabled_rows_only() -> None:
+    from rich.console import Console
+
+    disclosure = "priority-conflict-detection=unavailable (none inferred)"
+    for disabled in (False, True):
+        cfg = OverviewConfig(
+            claw_mode="codex",
+            guardrail_connector="codex",
+            connector_modes=(("codex", "action"), ("cursor", "observe")),
+            connector_disabled=("cursor",) if disabled else (),
+        )
+        overview = OverviewPanelModel(cfg, version="test")
+        overview.set_health(
+            HealthSnapshot(
+                gateway=SubsystemHealth(state="running"),
+                connectors=(
+                    (ConnectorHealth(name="codex", state="running"),)
+                    if disabled
+                    else (
+                        ConnectorHealth(name="codex", state="running"),
+                        ConnectorHealth(name="cursor", state="running"),
+                    )
+                ),
+            )
+        )
+        app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel())
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        panel = app._overview_connectors_panel(list(rows.values()))
+        console = Console(file=io.StringIO(), width=170, record=True)
+        console.print(panel)
+        rich_text = console.export_text()
+        fallback_text = app._overview_connectors_text(list(rows.values()))
+
+        assert rows["cursor"].status == ("disabled" if disabled else "running")
+        assert rich_text.count(disclosure) == 1
+        assert fallback_text.count(disclosure) == 1
+        assert f"Cursor (cursor): {disclosure}" in rich_text
+        assert f"Cursor (cursor): {disclosure}" in fallback_text
+        assert f"Codex (codex): {disclosure}" not in rich_text
+        assert f"Codex (codex): {disclosure}" not in fallback_text
+
+
 @pytest.mark.asyncio
 async def test_overview_enforcement_narrows_to_selected_connector() -> None:
     """8.13: ENFORCEMENT shows global stats under "All", and narrows to the
@@ -6871,6 +6942,34 @@ async def test_overview_connector_rows_status_falls_back_to_gateway() -> None:
         assert all(row.status == "active" for row in rows)
 
 
+def test_overview_connector_rows_degrade_only_unverified_opencode_runtime() -> None:
+    now = datetime.now(timezone.utc)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="opencode",
+        guardrail_connector="opencode",
+        connector_modes=(("opencode", "action"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            started_at=(now - timedelta(hours=1)).isoformat(),
+            gateway=SubsystemHealth(state="running"),
+            api=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(name="opencode", state="running"),
+                ConnectorHealth(name="cursor", state="running"),
+            ),
+        )
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel())
+
+    rows = {row.connector: row for row in app._overview_connector_rows()}
+
+    assert rows["opencode"].status == "degraded"
+    assert rows["cursor"].status == "running"
+
+
 @pytest.mark.asyncio
 async def test_overview_connector_rows_empty_for_single_connector() -> None:
     """8.13 no-op: single-connector installs render no CONNECTORS table."""
@@ -6930,12 +7029,15 @@ def test_connectors_health_array_parsed() -> None:
                 {
                     "name": "codex",
                     "state": "running",
+                    "source": "manual",
                     "requests": 5,
                     "last_activity_at": "2026-07-01T14:35:00Z",
+                    "load_heartbeat_at": "2026-07-01T14:35:01Z",
                 },
                 {
                     "name": "cursor",
                     "state": "degraded",
+                    "source": 7,
                     "lastActivityAt": "2026-07-01T14:36:00Z",
                 },
                 {"state": "running"},  # nameless entry is skipped
@@ -6948,7 +7050,10 @@ def test_connectors_health_array_parsed() -> None:
     assert snap.connector is not None
     assert snap.connector.last_activity_at == "2026-07-01T14:35:00Z"
     assert snap.connectors[0].last_activity_at == "2026-07-01T14:35:00Z"
+    assert snap.connectors[0].source == "manual"
+    assert snap.connectors[0].load_heartbeat_at == "2026-07-01T14:35:01Z"
     assert snap.connectors[1].last_activity_at == "2026-07-01T14:36:00Z"
+    assert snap.connectors[1].source == ""
 
 
 # --- A2: _overview_config roster build is defensive -------------------------
@@ -7064,6 +7169,39 @@ def test_overview_config_no_connectors_yields_empty_claw_mode() -> None:
     overview = _overview_config(cfg)
     assert overview.claw_mode == ""
     assert OverviewPanelModel(overview, version="test").active_connector_name() == ""
+
+
+def test_overview_config_routes_cleanup_only_gemini_to_migration_notice() -> None:
+    guardrail = _RosterGuardrail(modes={"geminicli": "action"})
+    guardrail.connector = "geminicli"
+    cfg = _roster_config(lambda: ["geminicli"], guardrail)
+    cfg.claw = SimpleNamespace(mode="geminicli")
+
+    overview = _overview_config(cfg)
+
+    assert overview.connector_modes == ()
+    assert overview.claw_mode == ""
+    assert overview.guardrail_connector == ""
+    assert "Antigravity" in overview.roster_error
+    assert "setup remove geminicli --yes" in overview.roster_error
+
+
+def test_overview_config_excludes_gemini_from_mixed_active_roster() -> None:
+    guardrail = _RosterGuardrail(
+        modes={"geminicli": "action", "codex": "observe", "cursor": "action"}
+    )
+    guardrail.connector = "geminicli"
+    cfg = _roster_config(
+        lambda: ["geminicli", "codex", "cursor"],
+        guardrail,
+    )
+    cfg.claw = SimpleNamespace(mode="geminicli")
+
+    overview = _overview_config(cfg)
+
+    assert dict(overview.connector_modes) == {"codex": "observe", "cursor": "action"}
+    assert overview.claw_mode == "codex"
+    assert overview.guardrail_connector == "codex"
 
 
 def test_overview_config_sets_roster_error_when_enumeration_raises() -> None:

@@ -591,17 +591,39 @@ def _plan_missing_target(
         return _blocked_plan(kind, target, data_dir, "target-outside-data-dir")
 
     parent = os.path.dirname(target)
-    try:
-        custody = _custody_snapshot(data_dir, parent)
-    except RecoveryRefusedError as exc:
-        return _blocked_plan(kind, target, data_dir, exc.code)
+    if _platform_name() == "windows":
+        try:
+            target_stat = os.lstat(target)
+        except FileNotFoundError:
+            target_stat = None
+        except OSError:
+            return _blocked_plan(kind, target, data_dir, "target-custody-unavailable")
 
-    try:
-        target_stat = os.lstat(target)
-    except FileNotFoundError:
-        target_stat = None
-    except OSError:
-        return _blocked_plan(kind, target, data_dir, "target-custody-unavailable")
+        try:
+            custody = _custody_snapshot(
+                data_dir,
+                parent,
+                # Missing-target recovery must bind the parent namespace until
+                # its CREATE_NEW publication. Existing-target Doctor inspection
+                # does not mutate that namespace and must coexist with the
+                # gateway's own name-protecting lease on the data directory.
+                protect_name=target_stat is None,
+            )
+        except RecoveryRefusedError as exc:
+            return _blocked_plan(kind, target, data_dir, exc.code)
+    else:
+        # Preserve the original POSIX/Darwin custody-before-target ordering.
+        try:
+            custody = _custody_snapshot(data_dir, parent)
+        except RecoveryRefusedError as exc:
+            return _blocked_plan(kind, target, data_dir, exc.code)
+        try:
+            target_stat = os.lstat(target)
+        except FileNotFoundError:
+            target_stat = None
+        except OSError:
+            return _blocked_plan(kind, target, data_dir, "target-custody-unavailable")
+
     if target_stat is not None:
         target_attributes = int(getattr(target_stat, "st_file_attributes", 0))
         if (
@@ -739,11 +761,20 @@ def _platform_name() -> str:
     return "windows" if os.name == "nt" else "posix"
 
 
-def _custody_snapshot(data_dir: str, parent: str) -> CustodySnapshot:
+def _custody_snapshot(
+    data_dir: str,
+    parent: str,
+    *,
+    protect_name: bool = True,
+) -> CustodySnapshot:
     if _platform_name() == "windows":
         return CustodySnapshot(
             platform="windows",
-            windows_directories=_windows_directory_custody(data_dir, parent),
+            windows_directories=_windows_directory_custody(
+                data_dir,
+                parent,
+                protect_name=protect_name,
+            ),
         )
     return CustodySnapshot(
         platform="posix",
@@ -815,6 +846,8 @@ def _controlled_directory_paths(data_dir: str, parent: str) -> tuple[str, ...]:
 def _windows_directory_custody(
     data_dir: str,
     parent: str,
+    *,
+    protect_name: bool = True,
 ) -> tuple[WindowsDirectoryIdentity, ...]:
     """Capture exact private Windows directory descriptors under name leases."""
 
@@ -833,7 +866,7 @@ def _windows_directory_custody(
     paths = _controlled_directory_paths(data_dir, parent)
     identities: list[WindowsDirectoryIdentity] = []
     try:
-        with hold_directory_chain(parent):
+        with hold_directory_chain(parent, protect_name=protect_name):
             for path in paths:
                 reject_reparse_path(path)
                 info = os.lstat(path)

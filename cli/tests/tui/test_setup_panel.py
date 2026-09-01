@@ -648,8 +648,7 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "claudecode",
         "hermes",
         "cursor",
-        "windsurf",
-        "geminicli",
+        "devin",
         "copilot",
         "openhands",
         "antigravity",
@@ -719,7 +718,7 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
     seeded = wizard_field_value(connector_setup_wizard_fields(proxy_cfg, os_name="windows"), "Connector")
     assert seeded == win_options[0]
 
-    # macOS/Linux keep the full connector roster.
+    # macOS/Linux keep active connectors while hiding global retirements.
     mac_options = _wizard_options(connector_setup_wizard_fields({}, os_name="darwin"), "Connector")
     assert set(mac_options) == set(CONNECTORS)
 

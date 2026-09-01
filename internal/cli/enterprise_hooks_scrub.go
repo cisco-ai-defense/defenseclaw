@@ -86,6 +86,10 @@ var claudeManagedEnvKeys = map[string]struct{}{
 	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  {},
 	"OTEL_EXPORTER_OTLP_TRACES_HEADERS":   {},
 	"OTEL_LOG_USER_PROMPTS":               {},
+	"OTEL_LOG_ASSISTANT_RESPONSES":        {},
+	"OTEL_LOG_RAW_API_BODIES":             {},
+	"OTEL_LOG_TOOL_CONTENT":               {},
+	"OTEL_LOG_TOOL_DETAILS":               {},
 	"OTEL_RESOURCE_ATTRIBUTES":            {},
 	"OTEL_SERVICE_NAME":                   {},
 }

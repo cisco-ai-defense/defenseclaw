@@ -368,6 +368,13 @@ func TestWizardChoiceMappings(t *testing.T) {
 		{Label: "Codex CLI", Value: "codex"},
 		{Label: "Claude Code", Value: "claudecode"},
 		{Label: "Amp", Value: "amp"},
+		{Label: "Google Antigravity", Value: "antigravity"},
+		{Label: "GitHub Copilot CLI", Value: "copilot"},
+		{Label: "Cursor Agent", Value: "cursor"},
+		{Label: "Hermes Agent", Value: "hermes"},
+		{Label: "Devin CLI", Value: "devin"},
+		{Label: "OmniGent (native degraded)", Value: "omnigent"},
+		{Label: "OpenCode", Value: "opencode"},
 	}
 	modes := []wizardChoice{
 		{Label: "Observe", Value: "observe"},
@@ -410,7 +417,8 @@ func TestWizardChoiceMappings(t *testing.T) {
 }
 
 func TestOptionsFromWizardSelectionsMatrix(t *testing.T) {
-	for connectorSelection, connector := range []string{"none", "codex", "claudecode"} {
+	for connectorSelection, choice := range wizardConnectorChoices {
+		connector := choice.Value
 		for modeSelection, mode := range []string{"observe", "action"} {
 			for _, startGateway := range []bool{false, true} {
 				name := connector + "/" + mode
@@ -442,14 +450,37 @@ func TestOptionsFromWizardSelectionsMatrix(t *testing.T) {
 	}
 }
 
-func TestInteractiveInstallDefaultsPreserveExistingSelections(t *testing.T) {
+func TestPlainInteractiveRerunRoutesExistingInstallToRepair(t *testing.T) {
 	state := &installState{Connector: "claudecode", Mode: "action"}
-	opts := applyInteractiveInstallDefaults(options{Action: "install"}, state, true, true)
-	if opts.Connector != "claudecode" || opts.Mode != "action" || !opts.StartGateway {
-		t.Fatalf("existing interactive defaults were not preserved: %+v", opts)
+	opts := applyInteractiveInstallDefaults(options{
+		Action:    "install",
+		Connector: "none",
+		Mode:      "observe",
+	}, state, true, true)
+	if opts.Action != "repair" {
+		t.Fatalf("existing plain interactive launch action = %q, want repair", opts.Action)
 	}
 	if opts.ConnectorSet || opts.ModeSet || opts.StartGatewaySet {
-		t.Fatalf("defaults were incorrectly marked as explicit arguments: %+v", opts)
+		t.Fatalf("repair routing introduced connector-selection authority: %+v", opts)
+	}
+	if opts.Connector != "none" || opts.Mode != "observe" || opts.StartGateway {
+		t.Fatalf("repair routing copied lossy install-state defaults: %+v", opts)
+	}
+}
+
+func TestInteractiveInstallDefaultsRetireGeminiSelection(t *testing.T) {
+	state := &installState{Connector: "geminicli", Mode: "action"}
+	opts := applyInteractiveInstallDefaults(options{
+		Action:          "install",
+		Connector:       "none",
+		Mode:            "observe",
+		StartGatewaySet: true,
+	}, state, false, true)
+	if opts.Connector != "none" || opts.Mode != "action" || opts.StartGateway {
+		t.Fatalf("retired Gemini defaults = %+v, want connector-free install", opts)
+	}
+	if opts.ConnectorSet || opts.ModeSet || !opts.StartGatewaySet {
+		t.Fatalf("retired Gemini defaults changed explicit property markers: %+v", opts)
 	}
 }
 
@@ -471,7 +502,12 @@ func TestInteractiveInstallDefaultsRespectExplicitSelections(t *testing.T) {
 
 func TestInteractiveInstallDefaultsRestoreRequiredGateway(t *testing.T) {
 	state := &installState{Connector: "codex", Mode: "observe"}
-	opts := applyInteractiveInstallDefaults(options{Action: "install"}, state, false, true)
+	opts := applyInteractiveInstallDefaults(options{
+		Action:    "install",
+		Connector: "none",
+		Mode:      "observe",
+		ModeSet:   true,
+	}, state, false, true)
 	if !opts.StartGateway {
 		t.Fatalf("configured connector did not restore the required gateway: %+v", opts)
 	}
@@ -479,13 +515,46 @@ func TestInteractiveInstallDefaultsRestoreRequiredGateway(t *testing.T) {
 
 func TestInteractiveInstallDefaultsPreserveCLIOnlyOptOut(t *testing.T) {
 	state := &installState{Connector: "none", Mode: "observe"}
-	opts := applyInteractiveInstallDefaults(options{Action: "install"}, state, false, true)
+	opts := applyInteractiveInstallDefaults(options{
+		Action:    "install",
+		Connector: "none",
+		Mode:      "observe",
+		ModeSet:   true,
+	}, state, false, true)
 	if opts.StartGateway {
 		t.Fatalf("existing CLI-only autostart opt-out was lost: %+v", opts)
 	}
 	fresh := applyInteractiveInstallDefaults(options{Action: "install"}, nil, false, false)
 	if !fresh.StartGateway {
 		t.Fatalf("fresh interactive install did not retain the checked default: %+v", fresh)
+	}
+}
+
+func TestPlainInteractiveFreshInstallRetainsSelectorDefaults(t *testing.T) {
+	opts := applyInteractiveInstallDefaults(options{Action: "install"}, nil, false, false)
+	if opts.Action != "install" || !opts.StartGateway {
+		t.Fatalf("fresh interactive defaults = %+v, want install selector with gateway checked", opts)
+	}
+	if opts.ConnectorSet || opts.ModeSet || opts.StartGatewaySet {
+		t.Fatalf("fresh interactive defaults were incorrectly marked explicit: %+v", opts)
+	}
+}
+
+func TestWizardRepairCompletionDescribesPreservedSecurityState(t *testing.T) {
+	got := wizardRepairCompletionDescription()
+	normalized := strings.ToLower(got)
+	for _, want := range []string{
+		"connector roster",
+		"enforcement mode",
+		"audit history",
+		"run defenseclaw",
+	} {
+		if !strings.Contains(normalized, want) {
+			t.Fatalf("repair completion text %q does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(normalized, "defenseclaw init") {
+		t.Fatalf("repair completion text asks the user to reconfigure: %q", got)
 	}
 }
 
@@ -497,7 +566,13 @@ func TestWizardCompletionDescriptionMatchesConfiguredConnector(t *testing.T) {
 	}{
 		{connector: "codex", want: "trusted automatically", reject: "open /hooks"},
 		{connector: "claudecode", want: "Claude Code is configured", reject: "defenseclaw init"},
-		{connector: "amp", want: "--plugin-ready-timeout 30", reject: "defenseclaw init"},
+		{connector: "copilot", want: "GitHub Copilot CLI is configured", reject: "defenseclaw init"},
+		{connector: "cursor", want: "Cursor Agent is configured", reject: "certified"},
+		{connector: "hermes", want: "Hermes hooks", reject: "fail-closed"},
+		{connector: "devin", want: "Devin CLI is configured", reject: "certified"},
+		{connector: "antigravity", want: "Google Antigravity is configured", reject: "defenseclaw init"},
+		{connector: "omnigent", want: "native degraded policy integration", reject: "trusted automatically"},
+		{connector: "opencode", want: "OpenCode is configured", reject: "certified"},
 		{connector: "none", want: "defenseclaw init", reject: "open /hooks"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {

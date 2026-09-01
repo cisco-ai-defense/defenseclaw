@@ -44,7 +44,54 @@ def current_windows_gateway(tmp_path_factory: pytest.TempPathFactory) -> Path:
             stdout=output,
             stderr=subprocess.STDOUT,
             check=False,
-            timeout=300,
+            # Hosted Windows can exceed five minutes when the current gateway
+            # is rebuilt while the native Go matrix is also compiling. Keep
+            # the fixture bounded, but leave enough room for that cold path.
+            timeout=600,
+        )
+    assert completed.returncode == 0, build_log.read_text(encoding="utf-8", errors="replace")
+    return binary
+
+
+@pytest.fixture(scope="session")
+def current_windows_claude_version_probe(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build a native, version-probe-only Claude fixture without a live client."""
+
+    if os.name != "nt":
+        pytest.skip("native Windows Claude version fixture")
+    output_dir = tmp_path_factory.mktemp("current-windows-claude-version")
+    source = output_dir / "main.go"
+    binary = output_dir / "claude.exe"
+    build_log = output_dir / "go-build.log"
+    source.write_text(
+        """package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    if len(os.Args) == 2 && os.Args[1] == "--version" {
+        fmt.Println("2.1.154 (Claude Code)")
+        return
+    }
+    os.Exit(2)
+}
+""",
+        encoding="utf-8",
+    )
+    with build_log.open("wb") as output:
+        completed = subprocess.run(
+            ["go", "build", "-trimpath", "-o", str(binary), str(source)],
+            cwd=Path(__file__).resolve().parents[3],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            check=False,
+            # Hosted Windows can spend over a minute scheduling and priming a
+            # cold Go cache. Keep the build bounded with the allowance used by
+            # other native one-file test fixtures.
+            timeout=180,
         )
     assert completed.returncode == 0, build_log.read_text(encoding="utf-8", errors="replace")
     return binary

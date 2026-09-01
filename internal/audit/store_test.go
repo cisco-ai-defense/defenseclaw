@@ -579,24 +579,30 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	}
 	if _, err := store.db.Exec(`INSERT INTO audit_events (
 		id, timestamp, action, actor, details, severity, bucket, event_name,
-		payload_json
+		payload_json, connector, enforced
 	) VALUES
 		('v8-finding', '2026-07-07T10:00:00Z', 'scan-finding', 'scanner', 'finding',
-		 'HIGH', 'security.finding', 'finding.observed', '{}'),
+		 'HIGH', 'security.finding', 'finding.observed', '{}', NULL, NULL),
 		('v8-platform', '2026-07-07T10:00:01Z', 'sink-failure', 'system', 'degraded',
-		 'HIGH', 'platform.health', 'subsystem.degraded', '{}'),
+		 'HIGH', 'platform.health', 'subsystem.degraded', '{}', NULL, NULL),
 		('v8-enforcement', '2026-07-07T10:00:02Z', 'allowed', 'gateway', 'blocked',
 		 'INFO', 'enforcement.action', 'enforcement.decision',
-		 '{"defenseclaw.enforcement.effective_action":"block"}'),
+		 '{"defenseclaw.enforcement.effective_action":"block"}', NULL, NULL),
 		('v8-detection-only', '2026-07-07T10:00:03Z', 'scan-finding', 'scanner', 'source telemetry',
 		 'HIGH', 'security.finding', 'finding.observed',
-		 '{"defenseclaw.finding.tags":["detection-only"]}'),
+		 '{"defenseclaw.finding.tags":["detection-only"]}', NULL, NULL),
 		('v8-detection-only-padded-array', '2026-07-07T10:00:04Z', 'scan-finding', 'scanner', 'source telemetry',
 		 'HIGH', 'security.finding', 'finding.observed',
-		 '{"defenseclaw.finding.tags":[" Detection-Only "]}'),
+		 '{"defenseclaw.finding.tags":[" Detection-Only "]}', NULL, NULL),
 		('v8-detection-only-padded-scalar', '2026-07-07T10:00:05Z', 'scan-finding', 'scanner', 'source telemetry',
 		 'HIGH', 'security.finding', 'finding.observed',
-		 '{"defenseclaw.finding.tags":" \tDETECTION-ONLY\r\n"}')`); err != nil {
+		 '{"defenseclaw.finding.tags":" \tDETECTION-ONLY\r\n"}', NULL, NULL),
+		('v8-connector-block', '2026-07-07T10:00:06Z', 'connector-hook', 'gateway', 'blocked',
+		 'HIGH', 'tool.activity', 'tool.decision', '{}', 'cursor', 1),
+		('v8-connector-observe', '2026-07-07T10:00:07Z', 'connector-hook', 'gateway', 'observed',
+		 'HIGH', 'tool.activity', 'tool.decision', '{}', 'cursor', 0),
+		('v8-unattributed-block', '2026-07-07T10:00:08Z', 'connector-hook', 'gateway', 'blocked',
+		 'HIGH', 'tool.activity', 'tool.decision', '{}', NULL, 1)`); err != nil {
 		t.Fatal(err)
 	}
 	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
@@ -607,8 +613,9 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	for _, target := range targets {
 		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-	if len(targets) != 4 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
+	if len(targets) != 5 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
 		!targetIDs["v8-platform"] || !targetIDs["v8-enforcement"] ||
+		!targetIDs["v8-connector-block"] ||
 		targetIDs["v8-detection-only"] || targetIDs["v8-detection-only-padded-array"] ||
 		targetIDs["v8-detection-only-padded-scalar"] {
 		t.Fatalf("targets=%+v", targets)
@@ -623,11 +630,17 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		alertIDs[alert.ID] = true
 		alertSeverities[alert.ID] = alert.Severity
 	}
-	if len(alerts) != 4 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
+	if len(alerts) != 5 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
 		!alertIDs["v8-platform"] || !alertIDs["v8-enforcement"] ||
+		!alertIDs["v8-connector-block"] ||
 		alertIDs["v8-detection-only"] || alertIDs["v8-detection-only-padded-array"] ||
 		alertIDs["v8-detection-only-padded-scalar"] || alertSeverities["v8-enforcement"] != "HIGH" {
 		t.Fatalf("alerts=%+v", alerts)
+	}
+	for _, alert := range alerts {
+		if alert.ID == "v8-connector-block" && (alert.Connector != "cursor" || !alert.Enforced) {
+			t.Fatalf("connector block attribution=%+v", alert)
+		}
 	}
 	counts, err := store.GetCounts()
 	if err != nil {

@@ -218,8 +218,8 @@ func friendlyConnectorName(_ connector: String) -> String {
     case "codex": return "Codex"
     case "hermes": return "Hermes"
     case "cursor": return "Cursor"
-    case "windsurf": return "Windsurf"
-    case "geminicli": return "Gemini CLI"
+    case "devin": return "Devin"
+    case "geminicli": return "Gemini CLI (deprecated; use Antigravity)"
     case "copilot": return "GitHub Copilot CLI"
     case "openhands": return "OpenHands"
     case "antigravity": return "Antigravity"
@@ -261,6 +261,7 @@ struct SkillItem: Identifiable, Sendable {
     var skillDescription: String = ""
     var connector: String = ""
     var fromFilesystem: Bool = false  // listed by SkillScanner, read-only
+    var bundled: Bool = false         // vendor-managed; discovery/info only
     var status: String = "inactive"
     var verdict: String = "-"
     var scan: CatalogScanState?
@@ -276,6 +277,7 @@ struct MCPItem: Identifiable, Sendable {
     var source: String = ""           // registry file the entry came from (filesystem rows)
     var connector: String = ""
     var fromFilesystem: Bool = false  // discovered by MCPScanner, read-only
+    var bundled: Bool = false         // vendor-managed; discovery/info only
     var status: String = "active"
     var verdict: String = "-"
     var scan: CatalogScanState?

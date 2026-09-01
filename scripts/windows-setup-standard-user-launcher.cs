@@ -277,6 +277,14 @@ namespace DefenseClaw
         private const uint TOKEN_ADJUST_DEFAULT = 0x0080;
         private const uint DISABLE_MAX_PRIVILEGE = 0x0001;
         private const uint LUA_TOKEN = 0x0004;
+        private const uint WRITE_RESTRICTED = 0x0008;
+        private const uint GENERIC_ALL = 0x10000000;
+        private const int GRANT_ACCESS = 1;
+        private const int TRUSTEE_IS_SID = 0;
+        private const int TRUSTEE_IS_GROUP = 2;
+        private const uint SE_GROUP_LOGON_ID = 0xC0000000;
+        private const int ERROR_INSUFFICIENT_BUFFER = 122;
+        private const int ERROR_SUCCESS = 0;
         private const uint CREATE_SUSPENDED = 0x00000004;
         private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
         private const uint CREATE_NO_WINDOW = 0x08000000;
@@ -284,6 +292,7 @@ namespace DefenseClaw
         private const int STARTF_USESTDHANDLES = 0x00000100;
         private static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = new IntPtr(0x00020002);
         private const int TokenGroups = 2;
+        private const int TokenDefaultDacl = 6;
         private const int TokenTypeInformation = 8;
         private const int TokenElevationType = 18;
         private const int TokenLinkedToken = 19;
@@ -294,7 +303,6 @@ namespace DefenseClaw
         private const int TokenElevationTypeFull = 2;
         private const int TokenElevationTypeLimited = 3;
         private const int SecurityImpersonation = 2;
-        private const int ERROR_INSUFFICIENT_BUFFER = 122;
         private const uint SE_GROUP_ENABLED = 0x00000004;
         private const uint SE_GROUP_USE_FOR_DENY_ONLY = 0x00000010;
         private const uint SE_GROUP_INTEGRITY = 0x00000020;
@@ -323,6 +331,38 @@ namespace DefenseClaw
         {
             public IntPtr Sid;
             public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_GROUPS
+        {
+            public uint GroupCount;
+            public SID_AND_ATTRIBUTES Groups;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TRUSTEE
+        {
+            public IntPtr MultipleTrustee;
+            public int MultipleTrusteeOperation;
+            public int TrusteeForm;
+            public int TrusteeType;
+            public IntPtr Name;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct EXPLICIT_ACCESS
+        {
+            public uint AccessPermissions;
+            public int AccessMode;
+            public uint Inheritance;
+            public TRUSTEE Trustee;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_DEFAULT_DACL
+        {
+            public IntPtr DefaultDacl;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -384,6 +424,9 @@ namespace DefenseClaw
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CloseHandle(IntPtr handle);
 
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint ResumeThread(IntPtr thread);
 
@@ -442,6 +485,29 @@ namespace DefenseClaw
             int impersonationLevel,
             int tokenType,
             out IntPtr newToken);
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "SetEntriesInAclW",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true)]
+        private static extern uint SetEntriesInAcl(
+            uint explicitEntryCount,
+            IntPtr explicitEntries,
+            IntPtr oldAcl,
+            out IntPtr newAcl);
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "SetTokenInformation",
+            ExactSpelling = true,
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetTokenInformationDefaultDacl(
+            IntPtr token,
+            int informationClass,
+            ref TOKEN_DEFAULT_DACL information,
+            int informationLength);
 
         [DllImport(
             "advapi32.dll",
@@ -675,6 +741,86 @@ namespace DefenseClaw
             return primary;
         }
 
+        private static SecurityIdentifier GetTokenLogonSid(IntPtr token)
+        {
+            int required = 0;
+            if (GetTokenInformationBuffer(token, TokenGroups, IntPtr.Zero, 0, out required))
+            {
+                throw new InvalidOperationException(
+                    "GetTokenInformation(TokenGroups) unexpectedly accepted an empty buffer");
+            }
+            int sizeError = Marshal.GetLastWin32Error();
+            int groupsOffset = Marshal.OffsetOf(typeof(TOKEN_GROUPS), "Groups").ToInt32();
+            int entrySize = Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES));
+            if (sizeError != ERROR_INSUFFICIENT_BUFFER || required < groupsOffset)
+            {
+                throw new Win32Exception(
+                    sizeError,
+                    "GetTokenInformation(TokenGroups) did not return a valid buffer size");
+            }
+
+            IntPtr buffer = Marshal.AllocHGlobal(required);
+            try
+            {
+                int returned;
+                if (!GetTokenInformationBuffer(
+                    token,
+                    TokenGroups,
+                    buffer,
+                    required,
+                    out returned))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "GetTokenInformation(TokenGroups) failed");
+                }
+                if (returned < groupsOffset || returned > required)
+                {
+                    throw new InvalidOperationException(
+                        "GetTokenInformation(TokenGroups) returned an invalid length");
+                }
+
+                uint groupCount = unchecked((uint)Marshal.ReadInt32(buffer));
+                int availableEntries = (returned - groupsOffset) / entrySize;
+                if (groupCount > (uint)availableEntries)
+                {
+                    throw new InvalidOperationException(
+                        "GetTokenInformation(TokenGroups) returned a truncated group array");
+                }
+
+                SecurityIdentifier logonSid = null;
+                for (uint index = 0; index < groupCount; index++)
+                {
+                    IntPtr entryAddress = IntPtr.Add(
+                        buffer,
+                        groupsOffset + checked((int)index) * entrySize);
+                    SID_AND_ATTRIBUTES entry = (SID_AND_ATTRIBUTES)Marshal.PtrToStructure(
+                        entryAddress,
+                        typeof(SID_AND_ATTRIBUTES));
+                    if ((entry.Attributes & SE_GROUP_LOGON_ID) != SE_GROUP_LOGON_ID)
+                    {
+                        continue;
+                    }
+                    if (entry.Sid == IntPtr.Zero || logonSid != null)
+                    {
+                        throw new InvalidOperationException(
+                            "restricted LUA source token has an invalid logon SID set");
+                    }
+                    logonSid = new SecurityIdentifier(entry.Sid);
+                }
+                if (logonSid == null)
+                {
+                    throw new InvalidOperationException(
+                        "restricted LUA source token has no logon SID");
+                }
+                return logonSid;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
         private static bool IsAdministrator(IntPtr token)
         {
             int bufferLength;
@@ -751,6 +897,172 @@ namespace DefenseClaw
             finally
             {
                 Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static void SetRestrictedTokenDefaultDacl(
+            IntPtr token,
+            SecurityIdentifier logonSid)
+        {
+            SecurityIdentifier[] allowedSids = new SecurityIdentifier[]
+            {
+                logonSid
+            };
+            IntPtr[] sidBuffers = new IntPtr[allowedSids.Length];
+            IntPtr entryBuffer = IntPtr.Zero;
+            IntPtr newAcl = IntPtr.Zero;
+            try
+            {
+                int entrySize = Marshal.SizeOf(typeof(EXPLICIT_ACCESS));
+                entryBuffer = Marshal.AllocHGlobal(checked(entrySize * allowedSids.Length));
+                for (int index = 0; index < allowedSids.Length; index++)
+                {
+                    byte[] sidBytes = new byte[allowedSids[index].BinaryLength];
+                    allowedSids[index].GetBinaryForm(sidBytes, 0);
+                    sidBuffers[index] = Marshal.AllocHGlobal(sidBytes.Length);
+                    Marshal.Copy(sidBytes, 0, sidBuffers[index], sidBytes.Length);
+                    Marshal.StructureToPtr(
+                        new EXPLICIT_ACCESS
+                        {
+                            AccessPermissions = GENERIC_ALL,
+                            AccessMode = GRANT_ACCESS,
+                            Inheritance = 0,
+                            Trustee = new TRUSTEE
+                            {
+                                MultipleTrustee = IntPtr.Zero,
+                                MultipleTrusteeOperation = 0,
+                                TrusteeForm = TRUSTEE_IS_SID,
+                                TrusteeType = TRUSTEE_IS_GROUP,
+                                Name = sidBuffers[index]
+                            }
+                        },
+                        IntPtr.Add(entryBuffer, entrySize * index),
+                        false);
+                }
+
+                uint result = SetEntriesInAcl(
+                    (uint)allowedSids.Length,
+                    entryBuffer,
+                    IntPtr.Zero,
+                    out newAcl);
+                if (result != ERROR_SUCCESS || newAcl == IntPtr.Zero)
+                {
+                    throw new Win32Exception(
+                        unchecked((int)result),
+                        "SetEntriesInAclW failed for restricted LUA TokenDefaultDacl");
+                }
+                TOKEN_DEFAULT_DACL information = new TOKEN_DEFAULT_DACL
+                {
+                    DefaultDacl = newAcl
+                };
+                if (!SetTokenInformationDefaultDacl(
+                    token,
+                    TokenDefaultDacl,
+                    ref information,
+                    Marshal.SizeOf(typeof(TOKEN_DEFAULT_DACL))))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "SetTokenInformation(TokenDefaultDacl) failed for restricted LUA token");
+                }
+            }
+            finally
+            {
+                if (newAcl != IntPtr.Zero) LocalFree(newAcl);
+                if (entryBuffer != IntPtr.Zero) Marshal.FreeHGlobal(entryBuffer);
+                foreach (IntPtr sidBuffer in sidBuffers)
+                {
+                    if (sidBuffer != IntPtr.Zero) Marshal.FreeHGlobal(sidBuffer);
+                }
+            }
+        }
+
+        private static IntPtr CreateRestrictedLuaToken(IntPtr sourceToken)
+        {
+            IntPtr[] sidBuffers = null;
+            IntPtr restrictingSidBuffer = IntPtr.Zero;
+            IntPtr restrictedToken = IntPtr.Zero;
+            try
+            {
+                SecurityIdentifier userSid;
+                using (WindowsIdentity sourceIdentity = new WindowsIdentity(sourceToken))
+                {
+                    userSid = sourceIdentity.User;
+                }
+                if (userSid == null)
+                {
+                    throw new InvalidOperationException(
+                        "restricted LUA source token has no user SID");
+                }
+
+                SecurityIdentifier[] restrictingSids = new SecurityIdentifier[]
+                {
+                    userSid,
+                    GetTokenLogonSid(sourceToken),
+                    new SecurityIdentifier(WellKnownSidType.WorldSid, null)
+                };
+                sidBuffers = new IntPtr[restrictingSids.Length];
+                int entrySize = Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES));
+                restrictingSidBuffer = Marshal.AllocHGlobal(
+                    checked(entrySize * restrictingSids.Length));
+                for (int index = 0; index < restrictingSids.Length; index++)
+                {
+                    byte[] sidBytes = new byte[restrictingSids[index].BinaryLength];
+                    restrictingSids[index].GetBinaryForm(sidBytes, 0);
+                    sidBuffers[index] = Marshal.AllocHGlobal(sidBytes.Length);
+                    Marshal.Copy(sidBytes, 0, sidBuffers[index], sidBytes.Length);
+                    Marshal.StructureToPtr(
+                        new SID_AND_ATTRIBUTES
+                        {
+                            Sid = sidBuffers[index],
+                            Attributes = 0
+                        },
+                        IntPtr.Add(restrictingSidBuffer, entrySize * index),
+                        false);
+                }
+
+                if (!CreateRestrictedToken(
+                    sourceToken,
+                    DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED,
+                    0,
+                    IntPtr.Zero,
+                    0,
+                    IntPtr.Zero,
+                    (uint)restrictingSids.Length,
+                    restrictingSidBuffer,
+                    out restrictedToken))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "CreateRestrictedToken failed");
+                }
+                SetMediumIntegrity(restrictedToken);
+                // GitHub's UAC-disabled elevated token can carry an
+                // Administrators-only default DACL. LUA filtering makes that SID
+                // deny-only, so PowerShell cannot reopen its own default-secured
+                // IPC objects. Normalize only the synthetic restricted token;
+                // explicit product/file ACLs remain unchanged and fail closed.
+                SetRestrictedTokenDefaultDacl(
+                    restrictedToken,
+                    restrictingSids[1]);
+                IntPtr result = restrictedToken;
+                restrictedToken = IntPtr.Zero;
+                return result;
+            }
+            finally
+            {
+                if (restrictedToken != IntPtr.Zero) CloseHandle(restrictedToken);
+                if (restrictingSidBuffer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(restrictingSidBuffer);
+                }
+                if (sidBuffers != null)
+                {
+                    foreach (IntPtr sidBuffer in sidBuffers)
+                    {
+                        if (sidBuffer != IntPtr.Zero) Marshal.FreeHGlobal(sidBuffer);
+                    }
+                }
             }
         }
 
@@ -850,20 +1162,7 @@ namespace DefenseClaw
                 }
 
                 kind = LaunchTokenKind.RestrictedLua;
-                if (!CreateRestrictedToken(
-                    sourceToken,
-                    DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
-                    0,
-                    IntPtr.Zero,
-                    0,
-                    IntPtr.Zero,
-                    0,
-                    IntPtr.Zero,
-                    out launchToken))
-                {
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateRestrictedToken failed");
-                }
-                SetMediumIntegrity(launchToken);
+                launchToken = CreateRestrictedLuaToken(sourceToken);
                 ValidateStandardUserPrimaryToken(launchToken, kind, "restricted LUA Setup");
                 IntPtr fallback = launchToken;
                 launchToken = IntPtr.Zero;
@@ -1255,6 +1554,14 @@ namespace DefenseClaw
                     launchTokenKind,
                     "suspended Setup child");
                 process = Process.GetProcessById(checked((int)processInfo.dwProcessId));
+                // GetProcessById is PID-backed until a native handle is requested.
+                // Materialize that handle while the exact child is still suspended so
+                // fast exits retain their authoritative exit code until Dispose.
+                if (process.Handle == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException(
+                        "suspended Setup child has no process handle");
+                }
                 if (captureOutput)
                 {
                     capturedProcess = new RestrictedSetupProcess(process, stdoutPipe, stderrPipe);

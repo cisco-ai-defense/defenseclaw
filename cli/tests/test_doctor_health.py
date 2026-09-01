@@ -21,7 +21,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import defenseclaw.doctor_health as doctor_health
 import pytest
+from defenseclaw.connector_contracts import resolve_connector_contract
 from defenseclaw.doctor_health import (
     ComponentEvidence,
     HealthStatus,
@@ -173,6 +175,40 @@ def test_connector_contract_states_and_capabilities_are_manifest_derived() -> No
     )
     assert "never-reflect-this" not in rendered
     assert "secret.invalid" not in rendered
+
+
+@pytest.mark.parametrize("platform_name", ("darwin", "linux"))
+def test_doctor_does_not_report_unintegrated_copilot_native_otlp(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
+) -> None:
+    monkeypatch.setattr(
+        doctor_health,
+        "resolve_connector_contract",
+        lambda connector, version: resolve_connector_contract(
+            connector,
+            version,
+            platform_name=platform_name,
+        ),
+    )
+    discovery = SimpleNamespace(
+        agents={
+            "copilot": _signal(
+                installed=True,
+                version="GitHub Copilot CLI 1.0.76",
+            )
+        }
+    )
+
+    finding = assess_connector_health(("copilot",), discovery)[0]
+
+    assert finding.status is HealthStatus.SUPPORTED
+    assert finding.contract_id == "copilot-hooks-v2"
+    assert finding.capabilities is not None
+    assert finding.capabilities.connection_kind == "hook"
+    assert finding.capabilities.native_otlp is False
+    assert finding.capabilities.native_otlp_auth == ""
+    assert finding.capabilities.native_otlp_signals == ()
 
 
 def test_discovery_absence_is_unavailable_and_unregistered_names_are_bounded() -> None:

@@ -5646,15 +5646,15 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         cfg = Config()
         cfg.data_dir = "/private/upgrade-data"
         with TemporaryDirectory() as install_dir:
-            target = Path(install_dir, "target")
-            target.write_bytes(b"gateway")
-            target.chmod(0o700)
             symlink = Path(install_dir, "defenseclaw-gateway")
-            symlink.symlink_to(target)
             with (
                 patch.dict(os.environ, {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"}, clear=True),
                 patch("defenseclaw.commands.cmd_upgrade.platform.system", return_value="Linux"),
                 patch("defenseclaw.gateway.canonical_install_path", return_value=str(symlink)),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.os.lstat",
+                    return_value=types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777),
+                ),
                 patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run,
                 self.assertRaises(SystemExit),
             ):
@@ -7715,21 +7715,36 @@ class TestUpgradeManifest(unittest.TestCase):
             ),
         )
 
-    def test_native_windows_install_state_accepts_amp_connector(self):
-        with TemporaryDirectory() as temp:
-            local_appdata, profile, _state = self._native_install_state_fixture(
-                temp,
-                connector="amp",
-            )
+    def test_native_windows_install_state_accepts_every_installer_connector(self):
+        connectors = (
+            "none",
+            "amp",
+            "antigravity",
+            "claudecode",
+            "codex",
+            "copilot",
+            "cursor",
+            "geminicli",
+            "hermes",
+            "omnigent",
+            "opencode",
+            "windsurf",
+        )
+        for connector in connectors:
+            with self.subTest(connector=connector), TemporaryDirectory() as temp:
+                local_appdata, profile, _state = self._native_install_state_fixture(
+                    temp,
+                    connector=connector,
+                )
 
-            with patch(
-                "defenseclaw.commands.cmd_upgrade._windows_known_folder",
-                side_effect=[local_appdata, profile],
-            ), self._native_windows_acl_fixture():
-                loaded = _native_windows_install_state("windows", expected_version="0.8.7")
+                with patch(
+                    "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                    side_effect=[local_appdata, profile],
+                ), self._native_windows_acl_fixture():
+                    loaded = _native_windows_install_state("windows", expected_version="0.8.7")
 
-        self.assertIsNotNone(loaded)
-        self.assertEqual(loaded["connector"], "amp")
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["connector"], connector)
 
     def test_native_windows_install_state_ignores_environment_install_root(self):
         with TemporaryDirectory() as temp:
@@ -8224,6 +8239,60 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertIn("FROMVERSION=0.8.7", args)
         self.assertTrue(any(arg.startswith("WAITPID=") for arg in args))
         self.assertIn("DefenseClaw 9.9.9", output)
+
+    def test_windows_setup_handoff_preserves_supported_selection(self):
+        manifest = {
+            "windows_installer": {
+                "asset": "DefenseClawSetup-x64.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": False,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        }
+        for connector in (
+            "none",
+            "amp",
+            "antigravity",
+            "claudecode",
+            "codex",
+            "copilot",
+            "cursor",
+            "geminicli",
+            "hermes",
+            "omnigent",
+            "opencode",
+            "windsurf",
+        ):
+            with self.subTest(connector=connector):
+                state = {
+                    "version": "0.8.7",
+                    "connector": connector,
+                    "mode": "action",
+                    "maintenance_path": r"C:\Trusted\DefenseClawSetup-x64.exe",
+                }
+                with (
+                    patch(
+                        "defenseclaw.commands.cmd_upgrade._cache_verified_windows_setup",
+                        return_value=state["maintenance_path"],
+                    ),
+                    patch("defenseclaw.commands.cmd_upgrade.subprocess.Popen") as popen_mock,
+                ):
+                    _handoff_windows_setup_upgrade(
+                        r"C:\Download\DefenseClawSetup-x64.exe",
+                        "DefenseClawSetup-x64.exe",
+                        "9.9.9",
+                        state,
+                        manifest,
+                        yes=True,
+                    )
+
+                args = popen_mock.call_args.args[0]
+                self.assertIn(f"CONNECTOR={connector}", args)
+                self.assertIn("MODE=action", args)
 
     def test_machine_install_self_update_is_rejected(self):
         with self.assertRaises(SystemExit) as ctx:
