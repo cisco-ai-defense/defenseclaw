@@ -76,24 +76,77 @@ import { loadSidecarConfig } from "./sidecar-config.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
 
+const INSPECT_ACTIONS = new Set(["allow", "alert", "confirm", "block"]);
+const INSPECT_MODES = new Set(["action", "observe"]);
+const INSPECT_SEVERITIES = new Set([
+  "NONE",
+  "INFO",
+  "LOW",
+  "MEDIUM",
+  "HIGH",
+  "CRITICAL",
+]);
+
 type InspectVerdict = {
-  action: string;
-  raw_action?: string;
-  severity: string;
+  action: "allow" | "alert" | "confirm" | "block";
+  raw_action?: "allow" | "alert" | "confirm" | "block";
+  severity: "NONE" | "INFO" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   reason: string;
-  mode: string;
+  mode: "action" | "observe";
   approval_timeout_ms?: number;
 };
 
-// when the sidecar cannot deliver a verdict we MUST
-// fail closed instead of returning {allow,observe}. The legacy
-// {allow,observe} fallback turned every sidecar outage, non-2xx
-// response, malformed JSON body, or fetch rejection into a tool-call
-// allow, because the caller only blocked on action==block && mode==action.
-//
-// Operators that explicitly opt into the legacy fail-open behavior can
-// set DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN=1; the default is fail closed.
+function hasValidInspectActionContract(verdict: Record<string, unknown>): boolean {
+  if (verdict.mode === "observe" && verdict.action !== "allow") return false;
+
+  const rawAction = verdict.raw_action;
+  if (rawAction === undefined) return true;
+  if (typeof rawAction !== "string" || !INSPECT_ACTIONS.has(rawAction)) {
+    return false;
+  }
+  if (verdict.mode === "observe" || rawAction === verdict.action) return true;
+
+  // The gateway may turn an unsupported native confirmation into an effective
+  // block after applyMode(), while retaining "confirm" as the raw decision.
+  return verdict.action === "block" && rawAction === "confirm";
+}
+
+function isInspectVerdict(value: unknown): value is InspectVerdict {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const verdict = value as Record<string, unknown>;
+  return (
+    typeof verdict.action === "string" &&
+    INSPECT_ACTIONS.has(verdict.action) &&
+    typeof verdict.mode === "string" &&
+    INSPECT_MODES.has(verdict.mode) &&
+    typeof verdict.severity === "string" &&
+    INSPECT_SEVERITIES.has(verdict.severity) &&
+    typeof verdict.reason === "string" &&
+    hasValidInspectActionContract(verdict) &&
+    (verdict.approval_timeout_ms === undefined ||
+      (typeof verdict.approval_timeout_ms === "number" &&
+        Number.isSafeInteger(verdict.approval_timeout_ms) &&
+        verdict.approval_timeout_ms >= 0))
+  );
+}
+
+// A response that is present but unusable is never an availability failure:
+// non-2xx responses, malformed JSON, and invalid verdict envelopes all fail
+// closed even if the operator opted into transport fail-open behavior.
 function failClosedVerdict(reason: string): InspectVerdict {
+  return {
+    action: "block",
+    severity: "HIGH",
+    reason: `defenseclaw failing closed: ${reason}`,
+    mode: "action",
+  };
+}
+
+// The documented override applies only when no sidecar verdict is available
+// because the request itself failed (including timeout/abort).
+function unavailableVerdict(reason: string): InspectVerdict {
   const failOpen =
     (process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN || "")
       .trim()
@@ -106,12 +159,7 @@ function failClosedVerdict(reason: string): InspectVerdict {
       mode: "observe",
     };
   }
-  return {
-    action: "block",
-    severity: "HIGH",
-    reason: `defenseclaw failing closed: ${reason}`,
-    mode: "action",
-  };
+  return failClosedVerdict(reason);
 }
 
 function approvalSeverity(severity: string): "info" | "warning" | "critical" {
@@ -125,7 +173,9 @@ function approvalDescription(toolName: string, verdict: InspectVerdict): string 
 
 function approvalTimeoutMs(verdict: InspectVerdict): number | undefined {
   const timeout = verdict.approval_timeout_ms;
-  return typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined;
+  return typeof timeout === "number" && Number.isSafeInteger(timeout) && timeout > 0
+    ? timeout
+    : undefined;
 }
 
 function buildApprovalRequest(toolName: string, verdict: InspectVerdict) {
@@ -378,12 +428,40 @@ export default function (api: DefenseClawPluginHost) {
       const bodyPayload = sessionId
         ? { ...payload, session_id: sessionId, approval_surface: "native" }
         : { ...payload, approval_surface: "native" };
-      const res = await fetch(`${SIDECAR_API}/api/v1/inspect/tool`, {
+      const body = JSON.stringify(bodyPayload);
+      // Construct the complete request before entering the availability
+      // catch. Node validates the URL and headers here, so malformed local
+      // configuration cannot be mistaken for a transport outage and allowed
+      // by DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN.
+      const request = new Request(`${SIDECAR_API}/api/v1/inspect/tool`, {
         method: "POST",
         headers,
-        body: JSON.stringify(bodyPayload),
+        body,
         signal: controller.signal,
       });
+      let res: Response;
+      try {
+        // Keep the intercepted call in URL/init form. The interceptor can
+        // inspect this string body synchronously; passing the Request would
+        // clone its stream and can wait indefinitely for tee cancellation
+        // when the payload exceeds the bounded body-peek cap.
+        res = await fetch(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body,
+          signal: request.signal,
+        });
+      } catch {
+        const duration_ms = Math.round(performance.now() - started);
+        logOutboundRequest({
+          runId: toolCtx?.runId,
+          sessionId,
+          agentId: identityCache?.agentId ?? "unknown",
+          status_code: 0,
+          duration_ms,
+        });
+        return unavailableVerdict("sidecar unreachable");
+      }
       daemonClient.applyStickyFromHttpResponse(res);
       const duration_ms = Math.round(performance.now() - started);
       logOutboundRequest({
@@ -397,7 +475,10 @@ export default function (api: DefenseClawPluginHost) {
         return failClosedVerdict(`sidecar returned ${res.status}`);
       }
       try {
-        return (await res.json()) as InspectVerdict;
+        const verdict: unknown = await res.json();
+        return isInspectVerdict(verdict)
+          ? verdict
+          : failClosedVerdict("sidecar returned invalid verdict");
       } catch {
         return failClosedVerdict("sidecar returned malformed verdict");
       }
@@ -410,8 +491,7 @@ export default function (api: DefenseClawPluginHost) {
         status_code: 0,
         duration_ms,
       });
-      const msg = err instanceof Error ? err.message : String(err);
-      return failClosedVerdict(`sidecar unreachable: ${msg}`);
+      return failClosedVerdict("tool inspection failed");
     } finally {
       clearTimeout(timer);
     }
