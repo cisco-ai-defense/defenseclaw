@@ -22,6 +22,7 @@ failure, timeout, human output modes, and CLI integration.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -339,6 +340,117 @@ class TestLiveClawInventory(unittest.TestCase):
         titles = [f.title for f in result.findings]
         self.assertTrue(any("Skills" in t for t in titles))
         self.assertTrue(any("Memory" in t for t in titles))
+
+    def test_scan_result_preserves_small_category_payload(self):
+        payload = [{"id": "weather", "description": "Weather lookup"}]
+        inv = {
+            "skills": payload,
+            "plugins": [],
+            "mcp": [],
+            "agents": [],
+            "tools": [],
+            "model_providers": [],
+            "memory": [],
+        }
+
+        result = claw_aibom_to_scan_result(inv, self.cfg)
+
+        skills = next(
+            finding for finding in result.findings
+            if finding.title.startswith("Skills (")
+        )
+        self.assertEqual(json.loads(skills.description), payload)
+
+    def test_scan_result_preserves_empty_category_payload_json_type(self):
+        for payload in ({}, "", False, 0, None, []):
+            with self.subTest(payload=payload):
+                inv = {
+                    "skills": payload,
+                    "plugins": [],
+                    "mcp": [],
+                    "agents": [],
+                    "tools": [],
+                    "model_providers": [],
+                    "memory": [],
+                }
+
+                result = claw_aibom_to_scan_result(inv, self.cfg)
+                skills = next(
+                    finding for finding in result.findings
+                    if finding.title.startswith("Skills (")
+                )
+
+                self.assertEqual(json.loads(skills.description), payload)
+
+    def test_scan_result_summarizes_oversized_category_for_canonical_ingress(self):
+        payload = [
+            {
+                "id": f"skill-{index:03d}",
+                "name": f"Skill {index:03d}",
+                "description": "A documented connector capability. " + "x" * 200,
+                "source": (
+                    "/Users/example/.claude/plugins/cache/example-market/"
+                    f"skill-{index:03d}/2026.8.31/skills/skill-{index:03d}"
+                ),
+                "eligible": True,
+            }
+            for index in range(163)
+        ]
+        pretty = json.dumps(payload, indent=2)
+        self.assertGreater(len(pretty.encode("utf-8")), 65_536)
+        inv = {
+            "skills": payload,
+            "plugins": [],
+            "mcp": [],
+            "agents": [],
+            "tools": [],
+            "model_providers": [],
+            "memory": [],
+        }
+
+        result = claw_aibom_to_scan_result(inv, self.cfg)
+
+        skills = next(
+            finding for finding in result.findings
+            if finding.title.startswith("Skills (")
+        )
+        description = skills.description
+        self.assertLessEqual(len(description.encode("utf-8")), 65_536)
+        summary = json.loads(description)
+        self.assertEqual(
+            summary["schema"],
+            "defenseclaw.aibom.telemetry-summary.v1",
+        )
+        self.assertTrue(summary["truncated"])
+        self.assertEqual(summary["item_count"], 163)
+        self.assertEqual(summary["source_utf8_bytes"], len(pretty.encode("utf-8")))
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(summary["sha256"], hashlib.sha256(canonical).hexdigest())
+        self.assertIs(inv["skills"], payload)
+
+        wire = {
+            "kind": "scan",
+            "run_id": "aibom-regression",
+            "scan": {
+                "scanner": result.scanner,
+                "target": result.target,
+                "timestamp": result.timestamp.isoformat(),
+                "findings": [finding.to_dict() for finding in result.findings],
+                "duration_ms": 0,
+            },
+        }
+        self.assertLess(len(json.dumps(wire).encode("utf-8")), 1 << 20)
+        self.assertTrue(
+            all(
+                len(finding.description.encode("utf-8")) <= 65_536
+                for finding in result.findings
+            )
+        )
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
     def test_human_output_no_crash(self, _):

@@ -8,6 +8,7 @@
     "strict": true,
     "esModuleInterop": true,
     "declaration": true,
+    "newLine": "lf",
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,

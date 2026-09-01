@@ -93,8 +93,15 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
             },
         )
 
+    @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
+    @patch("defenseclaw.commands.cmd_doctor.os.path.lexists", return_value=False)
     @patch("defenseclaw.commands.cmd_doctor.resolve_scanner_binary", side_effect=_resolve)
-    def test_doctor_reports_resolved_managed_path(self, _resolve_binary):
+    def test_doctor_executes_resolved_managed_skill_launcher(self, _resolve_binary, _lexists, mock_run):
+        mock_run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout="skill-scanner 2.0.4\n",
+            stderr="",
+        )
         cfg = SimpleNamespace(
             scanners=SimpleNamespace(
                 skill_scanner=SimpleNamespace(binary="skill-scanner"),
@@ -106,12 +113,58 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
         _check_scanners(cfg, result)
 
         self.assertEqual(result.checks[0]["status"], "pass")
-        self.assertEqual(
-            result.checks[0]["detail"],
+        self.assertIn(
             r"C:\managed\.venv\Scripts\skill-scanner.exe",
+            result.checks[0]["detail"],
+        )
+        self.assertIn("skill-scanner 2.0.4", result.checks[0]["detail"])
+        mock_run.assert_called_once()
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            [r"C:\managed\.venv\Scripts\skill-scanner.exe", "--version"],
         )
         self.assertEqual(result.checks[1]["status"], "fail")
         self.assertIn("managed environment or on PATH", result.checks[1]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
+    @patch("defenseclaw.commands.cmd_doctor.os.path.expanduser", return_value="/Users/test/.local/bin/skill-scanner")
+    @patch("defenseclaw.commands.cmd_doctor.os.path.lexists", return_value=True)
+    @patch("defenseclaw.commands.cmd_doctor.resolve_scanner_binary", side_effect=_resolve)
+    def test_doctor_reports_broken_installed_skill_launcher_import(
+        self,
+        _resolve_binary,
+        _lexists,
+        _expanduser,
+        mock_run,
+    ):
+        mock_run.return_value = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="ModuleNotFoundError: No module named 'skill_scanner'\n",
+        )
+        cfg = SimpleNamespace(
+            scanners=SimpleNamespace(
+                skill_scanner=SimpleNamespace(binary="skill-scanner"),
+                mcp_scanner=SimpleNamespace(binary="mcp-scanner"),
+            )
+        )
+        result = _DoctorResult()
+
+        _check_scanners(cfg, result)
+
+        self.assertEqual(result.checks[0]["status"], "fail")
+        self.assertIn("failed --version (exit 1)", result.checks[0]["detail"])
+        self.assertIn("ModuleNotFoundError", result.checks[0]["detail"])
+        self.assertIn("upgrade/repair", result.checks[0]["detail"])
+        expected_launcher = (
+            r"C:\managed\.venv\Scripts\skill-scanner.exe"
+            if os.name == "nt"
+            else "/Users/test/.local/bin/skill-scanner"
+        )
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            [expected_launcher, "--version"],
+        )
 
 
 if __name__ == "__main__":

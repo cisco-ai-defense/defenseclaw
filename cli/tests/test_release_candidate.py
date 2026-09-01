@@ -3825,6 +3825,11 @@ def test_runtime_hard_cut_bundle_transaction_matches_path_safe_candidate_contrac
             "restart intent is not committed before stop",
         ),
         (
+            "            controller.down()\n",
+            "            controller.status()\n",
+            "restart intent is not committed before stop",
+        ),
+        (
             '            "schema_version": 2,\n',
             '            "schema_version": 1,\n',
             "schema version 2",

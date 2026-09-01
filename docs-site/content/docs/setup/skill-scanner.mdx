@@ -44,6 +44,12 @@ For each skill it runs:
 defenseclaw skill scan --all
 ```
 
+For automation, add `--json`. Batch JSON remains a single top-level array for
+backward compatibility. Successful results and per-skill error rows are always
+written before the command returns nonzero for a scanner failure; a telemetry
+recording warning is included on the affected result but does not fail or erase
+the completed scan.
+
 Walks every configured connector's skill directory, scans each bundle, prints connector-tagged findings, and exits non-zero if anything is high severity. Add `--json` to pipe into CI. Use `--connector <name>` to narrow the scan to one connector.
   </Tab>
   <Tab value="Specific path">

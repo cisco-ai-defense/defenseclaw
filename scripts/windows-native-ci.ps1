@@ -1307,7 +1307,10 @@ function Copy-MatchedFiles([string]$Pattern, [string]$Destination, [string]$Excl
     foreach ($item in $items) { Copy-Item -LiteralPath $item.FullName -Destination $Destination -Force }
 }
 
-function Stage-PackageData([string]$PackageRoot) {
+function Stage-PackageData(
+    [string]$PackageRoot,
+    [switch]$RequireExtensionFingerprint
+) {
     $data = Join-Path $PackageRoot '_data'
     if (Test-Path -LiteralPath $data) {
         Remove-SafeDisposableTree -Path $data -Root $data
@@ -1358,6 +1361,21 @@ function Stage-PackageData([string]$PackageRoot) {
     foreach ($name in @('splunk_local_bridge', 'local_observability_stack', 'splunk_o11y_dashboards')) {
         Copy-Tree (Join-Path $WorkspaceRoot "bundles\$name") (Join-Path $data $name)
     }
+    $extensionSource = Join-Path $WorkspaceRoot 'extensions\defenseclaw'
+    $extensionIndex = Join-Path $extensionSource 'dist\index.js'
+    if (Test-Path -LiteralPath $extensionIndex -PathType Leaf) {
+        $fingerprint = Join-Path $data 'plugin\extension-runtime-fingerprint.json'
+        Invoke-WindowsNativeProcess $uv @(
+            'run', '--no-project', '--python', '3.12', 'python',
+            'scripts/extension_runtime_fingerprint.py', 'stage',
+            '--source', $extensionSource, '--output', $fingerprint
+        ) -TimeoutSeconds 120 -WorkingDirectory $WorkspaceRoot | Out-Null
+        if (-not (Test-Path -LiteralPath $fingerprint -PathType Leaf)) {
+            throw 'extension fingerprint staging did not publish the required reference'
+        }
+    } elseif ($RequireExtensionFingerprint) {
+        throw 'extension fingerprint staging requires a built dist/index.js runtime'
+    }
 }
 
 function Invoke-BuildArtifacts {
@@ -1374,6 +1392,7 @@ function Invoke-BuildArtifacts {
     $go = Get-RequiredCommand 'go.exe'
     $uv = Get-RequiredCommand 'uv.exe'
     $git = Get-RequiredCommand 'git.exe'
+    $npm = Get-RequiredCommand 'npm.cmd'
     $epochResult = Invoke-WindowsNativeProcess $git @(
         '-C', $WorkspaceRoot, 'show', '-s', '--format=%ct', 'HEAD'
     ) -TimeoutSeconds 30
@@ -1487,6 +1506,23 @@ function Invoke-BuildArtifacts {
         $gatewayLicenseArchive.Dispose()
     }
 
+    # The Windows-native wheel ships beside the platform-neutral OpenClaw
+    # plugin release. Build the exact dist-plugin source projection before
+    # package-data staging so the wheel receives the same immutable runtime
+    # reference as the Make-based release path.
+    $pluginRoot = Join-Path $WorkspaceRoot 'extensions\defenseclaw'
+    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'internal\configs\providers.json') `
+        -Destination (Join-Path $pluginRoot 'src\providers.json') -Force
+    Invoke-WindowsNativeProcess $npm @(
+        'ci', '--include=dev', '--no-audit', '--no-fund'
+    ) -TimeoutSeconds 300 -WorkingDirectory $pluginRoot | Out-Null
+    Invoke-WindowsNativeProcess $npm @(
+        'run', 'build'
+    ) -TimeoutSeconds 300 -WorkingDirectory $pluginRoot | Out-Null
+    if (-not (Test-Path -LiteralPath (Join-Path $pluginRoot 'dist\index.js') -PathType Leaf)) {
+        throw 'OpenClaw extension build did not produce dist/index.js'
+    }
+
     $packageStage = Join-Path $root 'package-source'
     if (Test-Path -LiteralPath $packageStage) {
         Remove-SafeDisposableTree -Path $packageStage -Root $root
@@ -1497,7 +1533,7 @@ function Invoke-BuildArtifacts {
     }
     [IO.Directory]::CreateDirectory((Join-Path $packageStage 'cli')) | Out-Null
     Copy-Tree (Join-Path $WorkspaceRoot 'cli\defenseclaw') (Join-Path $packageStage 'cli\defenseclaw')
-    Stage-PackageData (Join-Path $packageStage 'cli\defenseclaw')
+    Stage-PackageData (Join-Path $packageStage 'cli\defenseclaw') -RequireExtensionFingerprint
     $packageVerificationStage = Join-Path $root 'package-source-verification'
     Copy-Tree $packageStage $packageVerificationStage
     $wheelVerificationRoot = Join-Path $root 'wheel-verification'
@@ -1525,6 +1561,7 @@ function Invoke-BuildArtifacts {
         $entries = @($archive.Entries.FullName)
         foreach ($required in @(
             'defenseclaw/_data/envvars/registry.json',
+            'defenseclaw/_data/plugin/extension-runtime-fingerprint.json',
             'defenseclaw/_data/skills/codeguard/SKILL.md',
             'defenseclaw/_data/llm/model_catalog.json',
             'defenseclaw/_data/config/v8/defenseclaw-config.schema.json',

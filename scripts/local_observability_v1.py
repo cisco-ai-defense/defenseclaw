@@ -33,6 +33,25 @@ COLLECTOR = BUNDLE / "otel-collector/config.yaml"
 COMPOSE = BUNDLE / "docker-compose.yml"
 RULES = BUNDLE / "prometheus/rules"
 
+_LOCAL_OBSERVABILITY_RUNTIME_SOURCE_FILES = {
+    ".grafana-access-mode",
+    ".grafana-admin-password",
+}
+
+
+def _is_runtime_source_file(relative: Path) -> bool:
+    """Identify only controller-generated private state in the source tree."""
+
+    if len(relative.parts) != 1:
+        return False
+    name = relative.name
+    if name in _LOCAL_OBSERVABILITY_RUNTIME_SOURCE_FILES:
+        return True
+    return any(
+        name.startswith(f".{runtime_name}.") and name.endswith(".tmp")
+        for runtime_name in _LOCAL_OBSERVABILITY_RUNTIME_SOURCE_FILES
+    )
+
 EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-activity",
     "defenseclaw-agent-360",
@@ -581,7 +600,12 @@ def histogram_inventory() -> dict[str, str]:
 
 def _bundle_parity_errors() -> list[str]:
     errors: list[str] = []
-    source_files = {path.relative_to(BUNDLE) for path in BUNDLE.rglob("*") if path.is_file()}
+    source_files = {
+        relative
+        for path in BUNDLE.rglob("*")
+        if path.is_file()
+        and not _is_runtime_source_file(relative := path.relative_to(BUNDLE))
+    }
     packaged_files = {path.relative_to(PACKAGED) for path in PACKAGED.rglob("*") if path.is_file()}
     if source_files != packaged_files:
         errors.append(
