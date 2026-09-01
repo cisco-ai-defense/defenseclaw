@@ -104,6 +104,10 @@ struct SetupDefinitionsParityTests {
         validatesDiscoveryCLIRanges()
         observabilityNeverEmitsAnUnsupportedConnectorOption()
         includesAmpAcrossSetupSurfaces()
+        includesOnlyCanonicalDevinAcrossSetupAndCatalogSurfaces()
+        bundledSkillsRemainDiscoveryOnlyAcrossNativeCatalogSurfaces()
+        bundledMCPRemainsDiscoveryOnlyAcrossNativeCatalogSurfaces()
+        localCatalogCoversActiveConnectorCompatibilityRoots()
         guardrailDefaultsNeverGuessTheWrongConnector()
         llmDefaultsPreserveTheSelectedProvider()
         llmBuilderDropsStaleRegionalOptions()
@@ -225,6 +229,128 @@ struct SetupDefinitionsParityTests {
             return
         }
         expect(options.contains("amp"), "Amp appears in connector setup choices")
+    }
+
+    private static func includesOnlyCanonicalDevinAcrossSetupAndCatalogSurfaces() {
+        expect(TUIWizards.connectors.contains("devin"), "Devin appears in the native connector picker")
+        expect(TUIWizards.hookConnectors.contains("devin"), "Devin is treated as a hook connector")
+        expect(!TUIWizards.connectors.contains("windsurf"), "legacy Windsurf is not selectable")
+
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let sourceRoot = testsDirectory.deletingLastPathComponent().appendingPathComponent("DefenseClawMac")
+        let scanner = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/SkillScanner.swift"),
+            encoding: .utf8
+        )) ?? ""
+        expect(
+            scanner.contains("case \"devin\": return [p(\".config\", \"devin\", \"skills\"), p(\".agents\", \"skills\")]"),
+            "native catalog scans Devin user and standardized skills"
+        )
+        expect(
+            scanner.contains("p(\".config\", \"devin\", \"mcp_config.json\")"),
+            "native catalog scans canonical Devin MCP config"
+        )
+        expect(
+            scanner.contains("p(\".config\", \"devin\", \"config.json\")"),
+            "native catalog retains legacy Devin MCP read compatibility"
+        )
+        expect(!scanner.localizedCaseInsensitiveContains("windsurf"),
+               "native catalog has no public Windsurf surface")
+    }
+
+    private static func bundledSkillsRemainDiscoveryOnlyAcrossNativeCatalogSurfaces() {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let sourceRoot = testsDirectory.deletingLastPathComponent().appendingPathComponent("DefenseClawMac")
+        let scanner = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/SkillScanner.swift"),
+            encoding: .utf8
+        )) ?? ""
+        let catalog = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/CatalogCLI.swift"),
+            encoding: .utf8
+        )) ?? ""
+        let models = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/Models.swift"),
+            encoding: .utf8
+        )) ?? ""
+
+        expect(scanner.contains("entry == \".system\""),
+               "native catalog expands Codex .system containers by child")
+        expect(scanner.contains("codexHomePath() + \"/skills\""),
+               "native catalog binds bundled provenance to the Codex home")
+        expect(scanner.contains("bundled: isBundledCodexSystem"),
+               "native fallback keeps arbitrary .system children user-owned")
+        expect(models.contains("var bundled: Bool = false"),
+               "native skill rows retain bundled provenance")
+        expect(catalog.contains("bundled: bool(row[\"bundled\"])"),
+               "CLI catalog preserves bundled provenance")
+        expect(catalog.contains("if item.bundled"),
+               "bundled native rows have a discovery-only action set")
+    }
+
+    private static func bundledMCPRemainsDiscoveryOnlyAcrossNativeCatalogSurfaces() {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let sourceRoot = testsDirectory.deletingLastPathComponent().appendingPathComponent("DefenseClawMac")
+        let scanner = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/SkillScanner.swift"),
+            encoding: .utf8
+        )) ?? ""
+        let catalog = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/CatalogCLI.swift"),
+            encoding: .utf8
+        )) ?? ""
+        let gateway = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/GatewayClient.swift"),
+            encoding: .utf8
+        )) ?? ""
+        let models = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/Models.swift"),
+            encoding: .utf8
+        )) ?? ""
+
+        expect(scanner.contains("name == \"openaiDeveloperDocs\""),
+               "native fallback recognizes only the exact Codex built-in MCP name")
+        expect(scanner.contains("config.count == 1"),
+               "modified Codex MCP tables remain scan-eligible")
+        expect(scanner.contains("bundled: bundled"),
+               "native fallback preserves exact MCP provenance")
+        expect(models.contains("var bundled: Bool = false         // vendor-managed; discovery/info only"),
+               "native MCP rows retain bundled provenance")
+        expect(catalog.contains("bundled: bool(row[\"bundled\"])"),
+               "CLI MCP catalog preserves bundled provenance")
+        expect(catalog.contains("if item.bundled"),
+               "bundled MCP rows have an Info-only action set")
+        expect(gateway.contains("bundled: (r[\"bundled\"] as? Bool) ?? false"),
+               "gateway MCP catalog preserves bundled provenance")
+    }
+
+    private static func localCatalogCoversActiveConnectorCompatibilityRoots() {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let sourceRoot = testsDirectory.deletingLastPathComponent().appendingPathComponent("DefenseClawMac")
+        let scanner = (try? String(
+            contentsOf: sourceRoot.appendingPathComponent("DataLayer/SkillScanner.swift"),
+            encoding: .utf8
+        )) ?? ""
+
+        for expected in [
+            "p(\".claude\", \"skills\"), p(\".codex\", \"skills\")",
+            "p(\".gemini\", \"config\", \"skills\")",
+            "p(\".gemini\", \"antigravity-cli\", \"skills\")",
+            "p(\".config\", \"agents\", \"skills\")",
+            "p(\".config\", \"amp\", \"skills\")",
+        ] {
+            expect(scanner.contains(expected), "native skill catalog is missing \(expected)")
+        }
+        for expected in [
+            "p(\".gemini\", \"config\", \"mcp_config.json\")",
+            "p(\".config\", \"opencode\", \"config.json\")",
+            "p(\".config\", \"opencode\", \"opencode.jsonc\")",
+            "p(\".opencode\", \"opencode.jsonc\")",
+            "p(\".config\", \"amp\", \"settings.jsonc\")",
+            "[[\"amp.mcpServers\"], [\"mcpServers\"]]",
+        ] {
+            expect(scanner.contains(expected), "native MCP catalog is missing \(expected)")
+        }
     }
 
     private static func guardrailDefaultsNeverGuessTheWrongConnector() {

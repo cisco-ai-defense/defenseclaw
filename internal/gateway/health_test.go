@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -129,6 +130,24 @@ func TestConnectorLastActivityNeverRegresses(t *testing.T) {
 	got := connByName(h.Snapshot().Connectors)["codex"].LastActivityAt
 	if got == nil || !got.Equal(later) {
 		t.Fatalf("last activity = %v, want %s", got, later)
+	}
+}
+
+func TestConnectorLoadHeartbeatIsSeparateFromOrdinaryActivity(t *testing.T) {
+	h := NewSidecarHealth()
+	h.SetConnector("opencode", "", "")
+	h.RecordConnectorRequestFor("opencode")
+	before := connByName(h.Snapshot().Connectors)["opencode"]
+	if before.LastLoadHeartbeatAt != nil {
+		t.Fatalf("ordinary request set load heartbeat: %v", before.LastLoadHeartbeatAt)
+	}
+
+	start := time.Now().UTC()
+	h.RecordConnectorLoadHeartbeatFor("opencode")
+	end := time.Now().UTC()
+	after := connByName(h.Snapshot().Connectors)["opencode"]
+	if after.LastLoadHeartbeatAt == nil || after.LastLoadHeartbeatAt.Before(start) || after.LastLoadHeartbeatAt.After(end) {
+		t.Fatalf("load heartbeat = %v, want timestamp in [%s, %s]", after.LastLoadHeartbeatAt, start, end)
 	}
 }
 
@@ -294,6 +313,7 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 				CircuitState: delivery.CircuitOpen, ConsecutiveFailures: 4,
 				CircuitOpenUntil: now.Add(24 * time.Hour),
 				LastFailureClass: delivery.FailureClassAuthentication,
+				LastFailureCode:  delivery.FailureCodeHTTPAuthentication,
 				Queue:            queue, Counters: delivery.Counters{Accepted: 8, Delivered: 5, Dropped: 2},
 				LastSuccess: now.Add(-time.Minute), LastFailure: now,
 				Sources: []delivery.HealthSnapshot{{
@@ -302,6 +322,7 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 					CircuitState: delivery.CircuitOpen, ConsecutiveFailures: 4,
 					CircuitOpenUntil: now.Add(24 * time.Hour),
 					LastFailureClass: delivery.FailureClassAuthentication,
+					LastFailureCode:  delivery.FailureCodeHTTPAuthentication,
 					Queue:            queue, Counters: delivery.Counters{Accepted: 8, Delivered: 5, Dropped: 2},
 					LastSuccess: now.Add(-time.Minute), LastFailure: now,
 				}},
@@ -318,12 +339,15 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 	health.observeObservabilityV8Failure("all-signals", 3, "stale_failure", now.Add(time.Hour))
 
 	snapshot := health.Snapshot()
-	if snapshot.Telemetry.State != StateError || snapshot.Telemetry.LastError != "" {
+	if snapshot.Telemetry.State != StateRunning || snapshot.Telemetry.LastError != "" {
 		t.Fatalf("telemetry=%+v", snapshot.Telemetry)
 	}
 	details := snapshot.Telemetry.Details
 	if details["generation"] != uint64(4) || details["destination_count"] != 3 ||
-		details["retention_state"] != "healthy" || details["retention_days"] != int64(90) {
+		details["retention_state"] != "healthy" || details["retention_days"] != int64(90) ||
+		details["optional_destination_state"] != "degraded" ||
+		details["optional_destination_failure_count"] != 1 ||
+		details["optional_destination_failure_summary"] != "all-signals:degraded:http_authentication" {
 		t.Fatalf("details=%+v", details)
 	}
 	if _, ok := details["event_history_failure"]; ok {
@@ -338,13 +362,15 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 		row["reason"] != "queue_full" || row["failure"] != nil ||
 		row["circuit_state"] != "open" || row["consecutive_failures"] != uint64(4) ||
 		row["circuit_open_until"] != now.Add(24*time.Hour).Format(time.RFC3339Nano) ||
-		row["last_failure_class"] != "authentication" {
+		row["last_failure_class"] != "authentication" ||
+		row["last_failure_code"] != "http_authentication" {
 		t.Fatalf("destination row=%+v", row)
 	}
 	signalRows, ok := row["signal_health"].([]map[string]interface{})
 	if !ok || len(signalRows) != 1 || signalRows[0]["circuit_state"] != "open" ||
 		signalRows[0]["consecutive_failures"] != uint64(4) ||
-		signalRows[0]["last_failure_class"] != "authentication" {
+		signalRows[0]["last_failure_class"] != "authentication" ||
+		signalRows[0]["last_failure_code"] != "http_authentication" {
 		t.Fatalf("signal health=%T %+v", row["signal_health"], row["signal_health"])
 	}
 	queueMap, ok := row["queue"].(map[string]interface{})
@@ -360,6 +386,39 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 		if stringContains(string(encoded), forbidden) {
 			t.Fatalf("health disclosed forbidden %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+func TestObservabilityV8HealthKeepsMandatoryLocalFailureFatalAndBoundsOptionalSummary(t *testing.T) {
+	destinations := []observabilityruntime.DestinationHealth{{
+		Name: config.ObservabilityV8LocalDestinationName,
+		Kind: config.ObservabilityV8DestinationLocalSQLite, Enabled: true,
+		Signals: []observability.Signal{observability.SignalLogs},
+		State:   delivery.HealthFailing, Reason: string(delivery.HealthReasonDeliveryFailed),
+	}}
+	for index := 0; index < observabilityV8MaxFailureSummaryItems+4; index++ {
+		destinations = append(destinations, observabilityruntime.DestinationHealth{
+			Name: fmt.Sprintf("optional-%02d", index), Kind: config.ObservabilityV8DestinationSplunkHEC,
+			Enabled: true, Signals: []observability.Signal{observability.SignalLogs},
+			State: delivery.HealthFailing, Reason: string(delivery.HealthReasonDeliveryFailed),
+			LastFailureCode: delivery.FailureCodeProjectionInvalid,
+		})
+	}
+	health := renderObservabilityV8Health(
+		time.Now().UTC(),
+		observabilityruntime.DestinationHealthSnapshot{Generation: 9, Destinations: destinations},
+		nil, "healthy", "", 30, observabilityV8EventHistorySnapshot{},
+	)
+	if health.State != StateError {
+		t.Fatalf("telemetry state=%q", health.State)
+	}
+	if health.Details["optional_destination_failure_count"] != observabilityV8MaxFailureSummaryItems+4 {
+		t.Fatalf("details=%+v", health.Details)
+	}
+	summary, ok := health.Details["optional_destination_failure_summary"].(string)
+	if !ok || len(summary) > observabilityV8MaxFailureSummaryBytes ||
+		strings.Count(summary, ",") >= observabilityV8MaxFailureSummaryItems {
+		t.Fatalf("summary=%q bytes=%d", summary, len(summary))
 	}
 }
 

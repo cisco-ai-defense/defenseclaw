@@ -1,12 +1,13 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
 HOOK_LAUNCHER := defenseclaw-hook
-VERSION     := 0.8.6
+VERSION     := 0.8.10
 .DEFAULT_GOAL := help
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
 PLUGIN_DIR  := extensions/defenseclaw
+EXTENSION_FINGERPRINT := cli/defenseclaw/_data/plugin/extension-runtime-fingerprint.json
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
 # The race-enabled gateway package can exceed the default test deadline on
@@ -102,9 +103,9 @@ endef
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
-        _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
+        _bundle-data _stage-extension-fingerprint _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
-        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-plugin dist-extension-contract dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Developer workflow help
@@ -1138,6 +1139,7 @@ go-lint: sync-openclaw-extension
 # ---------------------------------------------------------------------------
 
 dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-checksums
+	@$(MAKE) --no-print-directory dist-extension-contract
 	@echo ""
 	@echo "Unsigned release-build inputs:"
 	@ls -lh $(DIST_DIR)/
@@ -1154,7 +1156,13 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 	@echo "  workflow + scripts/install.sh + 'defenseclaw upgrade' all"
 	@echo "  resolve artifacts under https://github.com/.../releases/tag/X.Y.Z"
 
-dist-cli: _bundle-data
+_stage-extension-fingerprint: plugin
+	@mkdir -p $(dir $(EXTENSION_FINGERPRINT))
+	"$(BOOTSTRAP_PYTHON)" scripts/extension_runtime_fingerprint.py stage \
+		--source $(PLUGIN_DIR) \
+		--output $(EXTENSION_FINGERPRINT)
+
+dist-cli: _bundle-data _stage-extension-fingerprint
 	@mkdir -p $(DIST_DIR)
 	@rm -rf build cli/*.egg-info
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
@@ -1221,11 +1229,26 @@ _bundle-data:
 	@# sync-openclaw-extension above.
 	@for d in splunk_local_bridge local_observability_stack; do \
 	  if command -v rsync >/dev/null 2>&1; then \
-	    rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    if [ "$$d" = "local_observability_stack" ]; then \
+	      rsync -a --delete --delete-excluded --inplace \
+	        --exclude='/.grafana-admin-password' \
+	        --exclude='/..grafana-admin-password.*.tmp' \
+	        --exclude='/.grafana-access-mode' \
+	        --exclude='/..grafana-access-mode.*.tmp' \
+	        "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    else \
+	      rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    fi; \
 	  else \
 	    rm -rf "cli/defenseclaw/_data/$$d"; \
 	    mkdir -p "cli/defenseclaw/_data/$$d"; \
 	    cp -R "bundles/$$d/." "cli/defenseclaw/_data/$$d/"; \
+	  fi; \
+	  if [ "$$d" = "local_observability_stack" ]; then \
+	    rm -rf "cli/defenseclaw/_data/$$d/.grafana-admin-password" \
+	      "cli/defenseclaw/_data/$$d"/..grafana-admin-password.*.tmp \
+	      "cli/defenseclaw/_data/$$d/.grafana-access-mode" \
+	      "cli/defenseclaw/_data/$$d"/..grafana-access-mode.*.tmp; \
 	  fi; \
 	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
@@ -1243,15 +1266,26 @@ dist-gateway:
 	done
 	@echo "Gateway binaries built for all platforms"
 
-dist-plugin: plugin
+dist-plugin: _stage-extension-fingerprint
 	@mkdir -p $(DIST_DIR)
-	tar -czf $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz \
+	COPYFILE_DISABLE=1 tar -czf $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz \
 		-C $(PLUGIN_DIR) \
 		package.json openclaw.plugin.json dist/ \
 		$$(cd $(PLUGIN_DIR) && for dep in js-yaml argparse; do \
 			[ -d "node_modules/$$dep" ] && echo "node_modules/$$dep"; \
 		done)
+	"$(BOOTSTRAP_PYTHON)" scripts/extension_runtime_fingerprint.py verify-archive \
+		--source $(PLUGIN_DIR) \
+		--reference $(EXTENSION_FINGERPRINT) \
+		--archive $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz
 	@echo "Plugin tarball built"
+
+dist-extension-contract:
+	"$(BOOTSTRAP_PYTHON)" scripts/extension_runtime_fingerprint.py verify-contract \
+		--source $(PLUGIN_DIR) \
+		--reference $(EXTENSION_FINGERPRINT) \
+		--archive $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz \
+		--wheel $(DIST_DIR)/defenseclaw-$(VERSION)-py3-none-any.whl
 
 dist-sandbox:
 	@mkdir -p $(DIST_DIR)/sandbox/policies $(DIST_DIR)/sandbox/scripts

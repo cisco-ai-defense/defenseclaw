@@ -18,6 +18,7 @@ package connector
 
 import (
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
@@ -41,6 +42,7 @@ const (
 	CorrelationProfileCodexV2       CorrelationProfileVersion = "codex-correlation-v2"
 	CorrelationProfileHermesV1      CorrelationProfileVersion = "hermes-correlation-v1"
 	CorrelationProfileCursorV1      CorrelationProfileVersion = "cursor-correlation-v1"
+	CorrelationProfileDevinV1       CorrelationProfileVersion = "devin-correlation-v1"
 	CorrelationProfileWindsurfV1    CorrelationProfileVersion = "windsurf-correlation-v1"
 	CorrelationProfileGeminiCLIV1   CorrelationProfileVersion = "geminicli-correlation-v1"
 	CorrelationProfileCopilotV1     CorrelationProfileVersion = "copilot-correlation-v1"
@@ -117,6 +119,17 @@ const (
 	NativeTelemetryMetrics NativeTelemetrySignal = "metrics"
 )
 
+// NativeTelemetryBindingMode states whether the native exporter carries any
+// reviewed correlation identity. Exporter-only telemetry remains a genuine
+// capture capability, but it cannot be used to join occurrences across rails.
+type NativeTelemetryBindingMode string
+
+const (
+	NativeTelemetryBindingsNone         NativeTelemetryBindingMode = "none"
+	NativeTelemetryBindingsReviewed     NativeTelemetryBindingMode = "reviewed"
+	NativeTelemetryBindingsExporterOnly NativeTelemetryBindingMode = "exporter_only"
+)
+
 // NativeTelemetrySpec records native-rail capability independently from hook
 // decoding. Setup/custody code can therefore distinguish a supported native
 // exporter from a hook-only connector without inferring capability from the
@@ -125,6 +138,7 @@ type NativeTelemetrySpec struct {
 	InputSurface        CorrelationSurface
 	Signals             []NativeTelemetrySignal
 	Stability           NativeTelemetryStability
+	BindingMode         NativeTelemetryBindingMode
 	AcceptsW3C          bool
 	PropagatesW3C       bool
 	AuthoritativeFields []CorrelationTarget
@@ -361,7 +375,7 @@ func ExplicitCanonicalCorrelationSpec(connectorName string) CorrelationSpec {
 		// it explicitly supplies the canonical source_event_id field. No vendor
 		// alias or contextual inference is enabled by this declaration.
 		ReceiptTargets:  []CorrelationTarget{CorrelationTargetSourceEvent},
-		NativeTelemetry: NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Stability: NativeTelemetryNone},
+		NativeTelemetry: NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Stability: NativeTelemetryNone, BindingMode: NativeTelemetryBindingsNone},
 		Completeness: CorrelationCompleteness{
 			Session: CorrelationCompletenessUnknown, Turn: CorrelationCompletenessUnknown,
 			AgentLifecycle: CorrelationCompletenessUnknown, Tool: CorrelationCompletenessUnknown,
@@ -495,23 +509,26 @@ func nativeStandard(namespace string) []CorrelationFieldBinding {
 }
 
 func nativeTelemetryForConnector(name string) NativeTelemetrySpec {
-	none := NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Stability: NativeTelemetryNone}
+	none := NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Stability: NativeTelemetryNone, BindingMode: NativeTelemetryBindingsNone}
 	switch name {
 	case "codex":
 		// Only call_id is source-proven to be the same invocation exported to
 		// Codex hooks as tool_use_id. Standard GenAI attributes remain typed
 		// native evidence, but are not cross-rail identity authority by default.
-		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryStable, AcceptsW3C: true, PropagatesW3C: true, AuthoritativeFields: []CorrelationTarget{CorrelationTargetTool}}
+		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryStable, BindingMode: NativeTelemetryBindingsReviewed, AcceptsW3C: true, PropagatesW3C: true, AuthoritativeFields: []CorrelationTarget{CorrelationTargetTool}}
 	case "claudecode":
 		// Official monitoring documentation states that native tool_use_id and
 		// gen_ai.tool.call.id carry the same value passed to hooks.
-		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryMetrics, NativeTelemetryTraces}, Stability: NativeTelemetryBeta, AcceptsW3C: true, PropagatesW3C: true, AuthoritativeFields: []CorrelationTarget{CorrelationTargetTool}}
+		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryMetrics, NativeTelemetryTraces}, Stability: NativeTelemetryBeta, BindingMode: NativeTelemetryBindingsReviewed, AcceptsW3C: true, PropagatesW3C: true, AuthoritativeFields: []CorrelationTarget{CorrelationTargetTool}}
 	case "geminicli":
-		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryStable, AcceptsW3C: true, PropagatesW3C: true}
-	case "copilot":
-		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryStable, AcceptsW3C: true, PropagatesW3C: true}
+		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryStable, BindingMode: NativeTelemetryBindingsReviewed, AcceptsW3C: true, PropagatesW3C: true}
+	case "openhands":
+		if runtime.GOOS == "darwin" {
+			return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryTraces}, Stability: NativeTelemetryStable, BindingMode: NativeTelemetryBindingsExporterOnly, AcceptsW3C: true, PropagatesW3C: true}
+		}
+		return none
 	case "omnigent":
-		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryExperimental, AcceptsW3C: true, PropagatesW3C: true}
+		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryExperimental, BindingMode: NativeTelemetryBindingsReviewed, AcceptsW3C: true, PropagatesW3C: true}
 	default:
 		return none
 	}
@@ -645,6 +662,9 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		)
 		return makeSpec(CorrelationProfileCodexV2, correlationContractID, []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferenceUniqueActivePromptBoundary, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "Codex hooks do not report stable parent/depth lineage or a provider response ID"))
 	case "claudecode":
+		if hookContractID != "claudecode-hooks-v1" && hookContractID != "claudecode-hooks-v2" {
+			return CorrelationSpec{}, false
+		}
 		bindings := appendBindings(base,
 			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id"),
 			reported(CorrelationTargetAgent, ns, "agent", "agentId"),
@@ -658,7 +678,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetModelRequest, ns, "client_request", "client_request_id"),
 			reported(CorrelationTargetModelResponse, ns, "model_response", "request_id"),
 		)
-		spec, ok := makeSpec(CorrelationProfileClaudeCodeV1, "claudecode-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "prompt_id is available in Claude Code 2.1.196 and later; hook events do not report provider request/response IDs"))
+		spec, ok := makeSpec(CorrelationProfileClaudeCodeV1, hookContractID, []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "prompt_id is available in Claude Code 2.1.196 and later; hook events do not report provider request/response IDs"))
 		if ok {
 			// prompt_id is the exact hook/native turn anchor, but it was added
 			// after the broader v1 hook contract. Record the narrower reviewed
@@ -703,6 +723,12 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetSourceSeq, ns, "trajectory_step", "step_index", "stepIndex"),
 		)
 		return makeSpec(CorrelationProfileWindsurfV1, "windsurf-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "delegation and per-tool IDs are not consistently reported"))
+	case "devin":
+		bindings := appendBindings(base,
+			reported(CorrelationTargetSession, ns, "session", "session_id", "sessionId"),
+			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id", "promptId"),
+		)
+		return makeSpec(CorrelationProfileDevinV1, "devin-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "Devin publishes session and per-prompt IDs but no stable per-tool invocation or native OTLP identity"))
 	case "geminicli":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "sessionId", "conversation_id", "conversationId"),
@@ -720,30 +746,40 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		)
 		return makeSpec(CorrelationProfileGeminiCLIV1, "geminicli-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceModelBoundary, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "hook tool payloads may omit prompt and tool-call IDs; native tool IDs require trace or pending-operation correlation"))
 	case "copilot":
+		correlationContractID := hookContractID
+		switch correlationContractID {
+		case "copilot-hooks-v1", "copilot-hooks-v2":
+		default:
+			return CorrelationSpec{}, false
+		}
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "sessionId"),
-			reported(CorrelationTargetChildAgent, ns, "subagent", "subagent_id", "subagentId"),
+			// subagentStart reports only agentName; subagentStop adds the
+			// stable agentId and agentType. Bind the stable child identity only
+			// where the official field exists. The start event may derive a
+			// local agent identity from agentName for span grouping, but must
+			// not promote that display/name field to a reported child ID.
+			reported(CorrelationTargetChildAgent, ns, "subagent", "agentId"),
+			reported(CorrelationTargetAgentName, ns, "agent_name", "agentName"),
+			reported(CorrelationTargetAgentType, ns, "agent_type", "agentType"),
 		)
-		native := appendBindings(nativeStandard(ns),
-			reported(CorrelationTargetTurn, ns, "turn", "github.copilot.turn_id"),
-			// interaction_id identifies one native chat/LLM request, not a user
-			// message. Documented hook payloads do not carry this ID.
-			reported(CorrelationTargetModelRequest, ns, "interaction", "github.copilot.interaction_id"),
-		)
-		return makeSpec(CorrelationProfileCopilotV1, "copilot-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "documented hooks expose session membership but not native turn, interaction, response, or tool-call IDs"))
+		return makeSpec(CorrelationProfileCopilotV1, correlationContractID, []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "documented hooks expose session membership but not stable turn, interaction, response, or tool-call IDs; DefenseClaw does not integrate Copilot's upstream native OTel surface"))
 	case "openhands":
-		bindings := appendBindings(base,
-			reported(CorrelationTargetSession, ns, "conversation", "conversation_id", "conversationId"),
-			reported(CorrelationTargetTurn, ns, "message", "message_id", "messageId", "prompt_id", "promptId"),
-			reported(CorrelationTargetSourceEvent, ns, "event", "event_id", "eventId"),
-			reported(CorrelationTargetTool, ns, "tool_invocation", "tool_call_id", "toolCallId"),
-			// OpenHands action_id identifies an action event. It is independent
-			// from ActionEvent.tool_call_id and must never populate the canonical
-			// tool-invocation field merely because both appear around a tool.
-			reported(CorrelationTargetAction, ns, "action", "action_id", "actionId"),
-			reported(CorrelationTargetModelResponse, ns, "model_response", "llm_response_id", "llmResponseId"),
-		)
-		return makeSpec(CorrelationProfileOpenHandsV1, "openhands-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, "shell hook lacks the complete event-stream lineage surface; no authenticated event-stream adapter or native exporter is installed"))
+		// OpenHands SDK 1.39.1's HookEvent stdin still carries session_id,
+		// event_type, working_dir, and event content. action_id, message_id,
+		// tool_call_id, and model response IDs exist only on the SDK's separate
+		// in-process HookExecutionEvent and are not passed to command hooks.
+		// Keep this profile deliberately narrower than the generic canonical
+		// envelope so we never claim correlation IDs the connector cannot see.
+		bindings := []CorrelationFieldBinding{
+			reported(CorrelationTargetSemanticEvent, "defenseclaw", "semantic_event", "defenseclaw.semantic_event.id"),
+			reported(CorrelationTargetSession, ns, "session", "session_id"),
+		}
+		surfaces := []CorrelationSurface{CorrelationSurfaceHook}
+		if runtime.GOOS == "darwin" {
+			surfaces = append(surfaces, CorrelationSurfaceNativeOTLP)
+		}
+		return makeSpec(CorrelationProfileOpenHandsV1, "openhands-hooks-v1", surfaces, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "official command-hook stdin exposes session membership but no stable turn, action, tool-call, event, or model IDs", "native OTLP traces are exporter-only; upstream does not document a stable exported session attribute for hook/native identity equivalence"))
 	case "antigravity":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "conversation", "conversationId", "conversation_id", "sessionId"),
@@ -774,21 +810,40 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		)
 		return makeSpec(CorrelationProfileAMPV1, "amp-plugin-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "Amp plugin events do not report a stable agent ID, parent thread ID, or provider model request/response IDs", "Amp exposes no documented customer native-OTLP exporter"))
 	case "omnigent":
-		bindings := appendBindings(base,
-			reported(CorrelationTargetSession, ns, "conversation", "conversation_id", "conversationId"),
-			reported(CorrelationTargetRootSession, ns, "root_conversation", "root_conversation_id", "rootConversationId"),
-			reported(CorrelationTargetParentSession, ns, "parent_conversation", "parent_conversation_id", "parentConversationId"),
-			reported(CorrelationTargetTurn, ns, "response", "response_id", "responseId"),
-			reported(CorrelationTargetAgent, ns, "agent", "agent_id", "agentId"),
-			reported(CorrelationTargetTool, ns, "tool_invocation", "call_id", "callId"),
-			reported(CorrelationTargetModelRequest, ns, "model_request", "request_id", "requestId"),
-			reported(CorrelationTargetSourceEvent, ns, "item", "item_id", "itemId"),
+		// PolicyEvent v0.7.0 exposes type, target, data, context,
+		// session_state, llm_client, and request_data. It does not promise the
+		// conversation/response/item/call IDs previously attributed here.
+		// Accept only exact canonical DefenseClaw fields if a future explicit
+		// adapter adds them. On the separately authenticated native surface,
+		// v0.7.0 proves only session.id as an identity. Its gen_ai.agent.name,
+		// gen_ai.request.model, and gen_ai.tool.name attributes are names, not
+		// occurrence IDs, and must not populate agent/model/tool ID targets.
+		spec, ok := makeSpec(
+			CorrelationProfileOmniGentV1,
+			"omnigent-custom-policy-v1",
+			[]CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP},
+			base,
+			[]CorrelationFieldBinding{
+				reported(CorrelationTargetSession, ns, "session", "session.id"),
+			},
+			nil,
+			complete(
+				CorrelationCompletenessPartial,
+				CorrelationCompletenessAbsent,
+				CorrelationCompletenessAbsent,
+				CorrelationCompletenessAbsent,
+				CorrelationCompletenessAbsent,
+				CorrelationCompletenessPartial,
+				"OmniGent v0.7.0 PolicyEvent does not publish stable connector/session/turn/tool/model IDs",
+				"native OTel proves session.id on session-scoped spans but no cross-rail mirror identity or stable turn/tool/model occurrence IDs",
+			),
 		)
-		native := appendBindings(nativeStandard(ns),
-			reported(CorrelationTargetTurn, ns, "response", "omnigent.response.id", "response.id"),
-			reported(CorrelationTargetSourceEvent, ns, "item", "omnigent.item.id", "item.id"),
-		)
-		return makeSpec(CorrelationProfileOmniGentV1, "omnigent-custom-policy-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferenceModelBoundary, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessComplete))
+		if ok {
+			// v0.7.0 has no source-event occurrence ID on either reviewed
+			// surface, so the makeSpec default must not authorize receipts.
+			spec.ReceiptTargets = nil
+		}
+		return spec, ok
 	default:
 		return CorrelationSpec{}, false
 	}
@@ -1014,17 +1069,29 @@ func (s CorrelationSpec) Validate() error {
 		default:
 			return fmt.Errorf("unknown correlation surface %q", surface)
 		}
-		if len(bindings) == 0 {
+		if len(bindings) == 0 && !(surface == CorrelationSurfaceNativeOTLP && s.NativeTelemetry.BindingMode == NativeTelemetryBindingsExporterOnly) {
 			return fmt.Errorf("correlation surface %q has no reviewed bindings", surface)
 		}
 	}
 	switch s.NativeTelemetry.Stability {
 	case NativeTelemetryStable, NativeTelemetryBeta, NativeTelemetryExperimental:
-		if len(s.NativeTelemetry.Signals) == 0 || len(s.NativeOTLPBindings) == 0 || s.NativeTelemetry.InputSurface != CorrelationSurfaceNativeOTLP {
+		if len(s.NativeTelemetry.Signals) == 0 || s.NativeTelemetry.InputSurface != CorrelationSurfaceNativeOTLP {
 			return fmt.Errorf("native-capable profile requires signals and native_otlp input surface")
 		}
+		switch s.NativeTelemetry.BindingMode {
+		case NativeTelemetryBindingsReviewed:
+			if len(s.NativeOTLPBindings) == 0 {
+				return fmt.Errorf("reviewed native telemetry has no correlation bindings")
+			}
+		case NativeTelemetryBindingsExporterOnly:
+			if len(s.NativeOTLPBindings) != 0 || len(s.NativeTelemetry.AuthoritativeFields) != 0 || len(s.MirrorIdentityTargets) != 0 {
+				return fmt.Errorf("exporter-only native telemetry cannot declare correlation bindings or authorities")
+			}
+		default:
+			return fmt.Errorf("native-capable profile requires an explicit binding mode")
+		}
 	case NativeTelemetryNone:
-		if len(s.NativeTelemetry.Signals) != 0 || len(s.NativeTelemetry.AuthoritativeFields) != 0 ||
+		if s.NativeTelemetry.BindingMode != NativeTelemetryBindingsNone || len(s.NativeTelemetry.Signals) != 0 || len(s.NativeTelemetry.AuthoritativeFields) != 0 ||
 			len(s.MirrorIdentityTargets) != 0 {
 			return fmt.Errorf("native telemetry stability none cannot declare signals, authorities, or mirror targets")
 		}

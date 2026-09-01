@@ -1,14 +1,23 @@
 # Spec 006 — Windows Cursor managed-enterprise lifecycle
 
-Windows managed-enterprise supports Cursor through Cursor's documented
-machine-wide enterprise hook source:
+> **Scope/status:** This is an engineering specification for the separate
+> machine-wide managed-enterprise path. PR #655 shipped ordinary per-user
+> [native Windows Cursor support](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/cursor/)
+> through the user hook and managed PowerShell adapter. That general support
+> does not qualify this machine-wide enterprise design; the published managed-
+> enterprise connector set remains authoritative.
+
+This specification proposes extending Windows managed-enterprise to Cursor
+through Cursor's documented machine-wide enterprise hook source:
 
 `C:\ProgramData\Cursor\hooks.json`
 
 This path has higher priority than team, project, and user hook files. The
-integration deliberately does not modify `%USERPROFILE%\.cursor\hooks.json`.
+designed integration would not modify `%USERPROFILE%\.cursor\hooks.json`.
+The behavior below is proposed design and acceptance criteria, not shipped or
+qualified managed-enterprise support.
 
-## Architecture
+## Proposed architecture
 
 - Setup installs one administrator-owned `defenseclaw-hook.ps1` adapter under
   `C:\ProgramData\Cursor` and registers it in the enterprise `hooks.json`.
@@ -30,30 +39,31 @@ integration deliberately does not modify `%USERPROFILE%\.cursor\hooks.json`.
 - An unregistered SID, a changed path, an invalid ACL, or a drifted contract
   fails closed.
 
-## Ownership and lifecycle
+## Proposed ownership and lifecycle
 
-DefenseClaw owns only entries whose command exactly matches its protected
-adapter path. Reconcile preserves unrelated enterprise hooks and settings.
-The protected ownership state records the installed adapter digest, machine
-identity, and exact enrolled SID set. The separate private receipt records the
-original configuration and security metadata and is hash-bound to that state.
+Under this design, DefenseClaw would own only entries whose command exactly
+matches its protected adapter path. Reconcile would preserve unrelated
+enterprise hooks and settings. The protected ownership state would record the
+installed adapter digest, machine identity, and exact enrolled SID set. The
+separate private receipt would record the original configuration and security
+metadata and be hash-bound to that state.
 
-Install and repair reconcile all per-user runtimes before publishing the
-machine hook. Guardian revokes stale SIDs and publishes the exact desired set.
-Rollback and uninstall snapshot all four global artifacts (configuration,
-adapter, public ownership state, and private receipt) in the protected
-lifecycle journal. Teardown
-removes DefenseClaw-owned entries while preserving unrelated hooks; it leaves
-a credential-free allow-only adapter tombstone for Cursor processes that may
-have cached the old command.
+Install and repair would reconcile all per-user runtimes before publishing the
+machine hook. Guardian would revoke stale SIDs and publish the exact desired
+set. Rollback and uninstall would snapshot all four global artifacts
+(configuration, adapter, public ownership state, and private receipt) in the
+protected lifecycle journal. Teardown would remove DefenseClaw-owned entries
+while preserving unrelated hooks; it would leave a credential-free allow-only
+adapter tombstone for Cursor processes that may have cached the old command.
 
 ## Native Cursor scope
 
-The supported Windows lifecycle is for native Cursor installations under the
+The proposed Windows lifecycle is for native Cursor installations under the
 per-user or machine application roots. It does not treat `cursor-agent` in WSL
 or an npm package as a native Windows installation.
 
-Cursor remains enterprise-scoped and not certified for general Windows use
-until the native install, multi-user, Guardian, repair, rollback, non-purge
-reinstall, purge, and fail-closed test matrix completes. Amp support remains
-out of scope.
+This machine-wide Cursor lifecycle remains outside the published managed-
+enterprise connector set until its native install, multi-user, Guardian,
+repair, rollback, non-purge reinstall, purge, and fail-closed test matrix
+completes. That boundary does not downgrade the separate supported per-user
+Windows connector. Amp remains out of scope for this specification.

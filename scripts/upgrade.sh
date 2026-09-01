@@ -99,6 +99,7 @@ unset CONTROLLER_HOME_INPUT
 DEFENSECLAW_HOME="${CONTROLLER_HOME}"
 readonly DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"
 readonly INSTALL_DIR="${HOME}/.local/bin"
+readonly INSTALL_CUSTODY_ROOT="${HOME}/.defenseclaw-install-custody"
 if [[ -n "${DEFENSECLAW_CONFIG+x}" ]]; then
     CONFIG_OVERRIDE_EXPLICIT=1
 else
@@ -170,6 +171,33 @@ step()    { printf "  ${CYAN}→${NC} %s\n" "$*"; }
 
 die() { err "$@"; exit 1; }
 has() { command -v "$1" &>/dev/null; }
+
+repair_skill_scanner_launcher() {
+    local scanner="${DEFENSECLAW_VENV}/bin/skill-scanner"
+    local publication=""
+    [[ -x "${DEFENSECLAW_VENV}/bin/python" && -x "${scanner}" ]] \
+        || die "The managed skill-scanner entry point is missing after wheel installation"
+    "${scanner}" --version >/dev/null 2>&1 \
+        || die "The managed skill-scanner entry point cannot start with its venv interpreter"
+    publication="$(
+        env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+            "${DEFENSECLAW_VENV}/bin/python" -I -B \
+            -m defenseclaw.install_publish repair-console-symlink \
+            "${scanner}" "${INSTALL_DIR}/skill-scanner" \
+            --console-script skill-scanner \
+            --custody-root "${INSTALL_CUSTODY_ROOT}"
+    )" || die "Could not safely publish the managed skill-scanner launcher; a foreign destination was preserved"
+    [[ "${publication}" == "unchanged" \
+        || "${publication}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
+        || die "Managed skill-scanner publication returned an invalid identity"
+    "${INSTALL_DIR}/skill-scanner" --version >/dev/null 2>&1 \
+        || die "Published skill-scanner launcher does not use the managed environment"
+    if [[ "${publication}" == "unchanged" ]]; then
+        ok "skill-scanner launcher verified"
+    else
+        ok "skill-scanner launcher repaired"
+    fi
+}
 
 validate_version() {
     local version="$1"
@@ -8279,7 +8307,13 @@ PY
             "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes \
                 --version "${RELEASE_VERSION}" --health-timeout 60 \
             || recovery_status=$?
+        if [[ "${recovery_status}" -eq 0 ]]; then
+            repair_skill_scanner_launcher
+        fi
         exit "${recovery_status}"
+    fi
+    if [[ "${PLAN_ONLY}" -eq 0 ]]; then
+        repair_skill_scanner_launcher
     fi
     section "Version Already Verified"
     if [[ "${CHECKSUMS_SIGNATURE_VERIFIED}" -eq 1 ]]; then
@@ -8287,7 +8321,11 @@ PY
     else
         warn "Installed version ${CURRENT_VERSION} is already current, but this legacy release has no authenticated Sigstore provenance"
     fi
-    info "No backup, receipt, service stop, artifact install, or migration was performed."
+    if [[ "${PLAN_ONLY}" -eq 1 ]]; then
+        info "No changes were made."
+    else
+        info "No backup, receipt, service stop, artifact install, or migration was performed; the managed scanner launcher was reconciled."
+    fi
     exit 0
 fi
 
@@ -9279,6 +9317,9 @@ else
     ok "Python CLI installed"
 fi
 VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
+if [[ "${BRIDGE_PHASE1}" -ne 1 || -z "${STAGED_FINAL_VERSION}" ]]; then
+    repair_skill_scanner_launcher
+fi
 
 # ── Run migrations ────────────────────────────────────────────────────────────
 

@@ -129,6 +129,7 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	"CMD-SOCAT-EXEC":         CapExecShell,
 	"CMD-PIPE-BASE64":        CapExecShell,
 	"CMD-WIN-REMOVE-ITEM-RF": CapExecShell,
+	"CMD-WIN-RM-FORCE":       CapExecShell,
 	"CMD-WIN-RMDIR-SQ":       CapExecShell,
 	"CMD-WIN-IWR-IEX":        CapExecShell,
 	"CMD-WIN-REG-PERSIST":    CapExecShell,

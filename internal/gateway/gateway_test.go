@@ -22,6 +22,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -369,8 +370,7 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		// New hook-only connectors do not bind the proxy listener.
 		{"hermes_observability", &stubConnector{name: "hermes"}, false},
 		{"cursor_observability", &stubConnector{name: "cursor"}, false},
-		{"windsurf_observability", &stubConnector{name: "windsurf"}, false},
-		{"geminicli_observability", &stubConnector{name: "geminicli"}, false},
+		{"devin_observability", &stubConnector{name: "devin"}, false},
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
 		{"openhands_observability", &stubConnector{name: "openhands"}, false},
 		{"antigravity_observability", &stubConnector{name: "antigravity"}, false},
@@ -407,8 +407,7 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		{"zeptoclaw", "zeptoclaw", true},
 		{"hermes", "hermes", false},
 		{"cursor", "cursor", false},
-		{"windsurf", "windsurf", false},
-		{"geminicli", "geminicli", false},
+		{"devin", "devin", false},
 		{"copilot", "copilot", false},
 		{"openhands", "openhands", false},
 		{"opencode", "opencode", false},
@@ -533,10 +532,8 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		{"hermes_remote", "hermes", "gw.example.com", "", false},
 		{"cursor_loopback", "cursor", "127.0.0.1", "", false},
 		{"cursor_remote", "cursor", "10.0.0.5", "", false},
-		{"windsurf_loopback", "windsurf", "127.0.0.1", "", false},
-		{"windsurf_remote", "windsurf", "192.168.1.10", "", false},
-		{"geminicli_loopback", "geminicli", "127.0.0.1", "", false},
-		{"geminicli_remote", "geminicli", "gw.example.com", "", false},
+		{"devin_loopback", "devin", "127.0.0.1", "", false},
+		{"devin_remote", "devin", "192.168.1.10", "", false},
 		{"copilot_loopback", "copilot", "127.0.0.1", "", false},
 		{"copilot_remote", "copilot", "10.0.0.5", "", false},
 		{"openhands_loopback", "openhands", "127.0.0.1", "", false},
@@ -796,7 +793,7 @@ func TestSidecarFleetRPCsEnabled(t *testing.T) {
 	}{
 		{"codex_loopback_standalone", "codex", "127.0.0.1", "", false},
 		{"codex_remote_fleet", "codex", "10.0.0.5", "", true},
-		{"geminicli_hook_only", "geminicli", "10.0.0.5", "", false},
+		{"devin_hook_only", "devin", "10.0.0.5", "", false},
 		{"openclaw_default", "openclaw", "127.0.0.1", "", true},
 		{"override_disabled_on_openclaw", "openclaw", "127.0.0.1", "disabled", false},
 		{"override_enabled_on_codex_loopback", "codex", "127.0.0.1", "enabled", true},
@@ -898,9 +895,12 @@ func (h *fakeHookOwner) Setup(_ context.Context, _ connector.SetupOpts) error {
 	return nil
 }
 
-func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T) {
-	dir := t.TempDir()
-	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
+func TestRecordAndRollbackFailedConnectorSetup_DoesNotPublishFailedConnector(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	if err := connector.SaveActiveConnectors(dir, []string{"codex", "cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "opencode"}}
 
 	recordAndRollbackFailedConnectorSetup(conn, connector.SetupOpts{DataDir: dir}, context.Background())
 
@@ -910,8 +910,8 @@ func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T
 	if !conn.verifyCalled {
 		t.Fatal("rollback did not call connector VerifyClean")
 	}
-	if got := connector.LoadActiveConnector(dir); got != "codex" {
-		t.Fatalf("active connector = %q, want codex so future mode switches can retry teardown", got)
+	if got := connector.LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"codex", "cursor"}) {
+		t.Fatalf("active connectors = %v, want exact prior roster [codex cursor]", got)
 	}
 }
 
@@ -919,9 +919,8 @@ func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T
 // sidecar fail-loud contract: both the conn.Setup() error branch and
 // the verifyHookScriptsOrRetry error branch in runGuardrail funnel
 // through failGuardrailWithRollback, which MUST (a) run Teardown +
-// VerifyClean via recordAndRollbackFailedConnectorSetup, (b) persist
-// the partially-installed connector name so the next boot can finish
-// cleaning up, (c) flip Guardrail health to StateError with the
+// VerifyClean via recordAndRollbackFailedConnectorSetup, (b) never publish
+// the partially-installed connector as active, (c) flip Guardrail health to StateError with the
 // wrapped error message visible to operators, and (d) return the
 // wrapped error so the sidecar errCh propagates it. A future refactor
 // that drops any of these steps fails this test loudly.
@@ -941,8 +940,8 @@ func TestFailGuardrailWithRollback_ChainsHealthAndTeardown(t *testing.T) {
 	if !conn.verifyCalled {
 		t.Fatal("failGuardrailWithRollback did not chain into connector VerifyClean")
 	}
-	if got := connector.LoadActiveConnector(dir); got != "codex" {
-		t.Fatalf("active connector state = %q, want codex (operator must see what failed on next boot)", got)
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("active connector state = %q, want no failed connector publication", got)
 	}
 	snap := s.health.Snapshot()
 	if snap.Guardrail.State != StateError {
@@ -970,11 +969,136 @@ func TestSaveSingleConnectorReadyState_LockFailureRollsBack(t *testing.T) {
 	if !conn.teardownCalled || !conn.verifyCalled {
 		t.Fatal("lock-save failure did not roll the connector back")
 	}
-	if got := connector.LoadActiveConnector(dir); got != "codex" {
-		t.Fatalf("active connector = %q, want rollback marker codex", got)
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("active connector = %q, want lock failure never published active", got)
 	}
 	if got := s.health.Snapshot().Guardrail.State; got != StateError {
 		t.Fatalf("guardrail state = %q, want %q", got, StateError)
+	}
+}
+
+func TestWindsurfReadyState_LockFailureNeverPublishesActiveConnector(t *testing.T) {
+	dir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
+	s := &Sidecar{health: NewSidecarHealth()}
+	previousPublish := publishWindsurfReadyEvidence
+	previousSave := saveWindsurfReadyActiveState
+	previousInactive := markWindsurfReadyInactive
+	activeSaveCalled := false
+	activeClearCalled := false
+	publishWindsurfReadyEvidence = func(connector.SetupOpts, connector.Connector) error {
+		return errors.New("forced Windsurf lock failure")
+	}
+	saveWindsurfReadyActiveState = func(string, string) error {
+		activeSaveCalled = true
+		return nil
+	}
+	markWindsurfReadyInactive = func(_ string, name string) (func() error, error) {
+		if name != "windsurf" {
+			t.Fatalf("cleared peer connector %q", name)
+		}
+		activeClearCalled = true
+		return func() error { return nil }, nil
+	}
+	t.Cleanup(func() {
+		publishWindsurfReadyEvidence = previousPublish
+		saveWindsurfReadyActiveState = previousSave
+		markWindsurfReadyInactive = previousInactive
+	})
+
+	err := s.saveSingleConnectorReadyState(
+		context.Background(), connector.SetupOpts{DataDir: dir}, conn,
+	)
+	if err == nil || !strings.Contains(err.Error(), "hook contract lock save failed") {
+		t.Fatalf("saveSingleConnectorReadyState error = %v, want lock-save failure", err)
+	}
+	if !conn.teardownCalled || !conn.verifyCalled {
+		t.Fatal("Windsurf lock-save failure did not roll setup back")
+	}
+	if activeSaveCalled {
+		t.Fatal("Windsurf active state was attempted before the hook lock succeeded")
+	}
+	if !activeClearCalled {
+		t.Fatal("Windsurf failure did not clear any pre-existing active readiness")
+	}
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("active connector = %q, want no published Windsurf readiness", got)
+	}
+	if got := s.health.Snapshot().Guardrail.State; got != StateError {
+		t.Fatalf("guardrail state = %q, want %q", got, StateError)
+	}
+}
+
+func TestWindsurfReadyState_PublishesLockBeforeActiveWithoutPeerConnector(t *testing.T) {
+	dataDir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
+	opts := connector.SetupOpts{DataDir: dataDir}
+	previousPublish := publishWindsurfReadyEvidence
+	previousSave := saveWindsurfReadyActiveState
+	var order []string
+	publishWindsurfReadyEvidence = func(_ connector.SetupOpts, got connector.Connector) error {
+		if got.Name() != "windsurf" {
+			t.Fatalf("published peer connector %q", got.Name())
+		}
+		order = append(order, "lock")
+		return nil
+	}
+	saveWindsurfReadyActiveState = func(_ string, name string) error {
+		if name != "windsurf" {
+			t.Fatalf("saved peer connector %q", name)
+		}
+		order = append(order, "active")
+		return nil
+	}
+	t.Cleanup(func() {
+		publishWindsurfReadyEvidence = previousPublish
+		saveWindsurfReadyActiveState = previousSave
+	})
+	s := &Sidecar{health: NewSidecarHealth()}
+	if err := s.saveSingleConnectorReadyState(context.Background(), opts, conn); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(order, ","); got != "lock,active" {
+		t.Fatalf("Windsurf readiness publication order = %q, want lock,active", got)
+	}
+}
+
+func TestWindsurfReadyState_ActiveFailureClearsPublishedEvidence(t *testing.T) {
+	dataDir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
+	opts := connector.SetupOpts{DataDir: dataDir}
+	previousPublish := publishWindsurfReadyEvidence
+	previousSave := saveWindsurfReadyActiveState
+	previousInactive := markWindsurfReadyInactive
+	publishWindsurfReadyEvidence = func(_ connector.SetupOpts, _ connector.Connector) error {
+		return connector.SaveHookContractLockEntry(dataDir, connector.HookContractLockEntry{
+			Connector:  "windsurf",
+			ContractID: "windsurf-hooks-v1",
+		})
+	}
+	saveWindsurfReadyActiveState = func(string, string) error {
+		return errors.New("forced active-state failure")
+	}
+	markWindsurfReadyInactive = connector.MarkConnectorInactive
+	t.Cleanup(func() {
+		publishWindsurfReadyEvidence = previousPublish
+		saveWindsurfReadyActiveState = previousSave
+		markWindsurfReadyInactive = previousInactive
+	})
+
+	s := &Sidecar{health: NewSidecarHealth()}
+	err := s.saveSingleConnectorReadyState(context.Background(), opts, conn)
+	if err == nil || !strings.Contains(err.Error(), "active state save failed") {
+		t.Fatalf("saveSingleConnectorReadyState error = %v, want active-state failure", err)
+	}
+	if got := connector.LoadHookContractLockEntry(dataDir, "windsurf"); got.Connector != "" {
+		t.Fatalf("Windsurf lock survived failed active publication: %+v", got)
+	}
+	if got := connector.LoadActiveConnector(dataDir); got != "" {
+		t.Fatalf("active connector = %q, want explicit inactive state", got)
+	}
+	if !conn.teardownCalled || !conn.verifyCalled {
+		t.Fatal("Windsurf active-state failure did not roll setup back")
 	}
 }
 
@@ -2612,7 +2736,11 @@ func TestAPIHealthHandlerRejectsPut(t *testing.T) {
 
 func TestAPIStatusHandler(t *testing.T) {
 	health := NewSidecarHealth()
-	api := &APIServer{health: health, client: nil}
+	api := &APIServer{
+		health:     health,
+		client:     nil,
+		scannerCfg: &config.Config{DataDir: t.TempDir(), Environment: "windows"},
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	w := httptest.NewRecorder()
@@ -2630,6 +2758,13 @@ func TestAPIStatusHandler(t *testing.T) {
 	}
 	if result["gateway_hello"] != nil {
 		t.Error("gateway_hello should be absent when client is nil")
+	}
+	runtimeStatus, ok := result["runtime"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("response runtime = %#v; want object", result["runtime"])
+	}
+	if got := runtimeStatus["environment"]; got != "windows" {
+		t.Errorf("runtime environment = %#v; want %q", got, "windows")
 	}
 }
 
@@ -2715,18 +2850,18 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantTelemetryAll: []string{"hooks"},
 		},
 		{
-			name:             "geminicli_observability_hooks_and_otel",
-			connector:        "geminicli",
+			name:             "devin_observability_hooks_only",
+			connector:        "devin",
 			wantMode:         "observability",
 			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel"},
+			wantTelemetryAll: []string{"hooks"},
 		},
 		{
-			name:             "copilot_observability_hooks_and_otel",
+			name:             "copilot_observability_hooks_only",
 			connector:        "copilot",
 			wantMode:         "observability",
 			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel"},
+			wantTelemetryAll: []string{"hooks"},
 		},
 		{
 			name:             "openhands_observability_hooks",
@@ -6115,27 +6250,36 @@ func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) 
 }
 
 func TestTokenAuth_AcceptLoopbackOTLPScopedAuthorizationHeader(t *testing.T) {
-	api, called := tokenAuthTestServer(t, "master-token")
-	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeCodex:  "codex-scoped-token",
-		connector.OTLPScopeClaude: "claude-scoped-token",
-	})
-	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*called = true
-		if got := r.Header.Get(otelSourceHeader); got != "codex" {
-			t.Errorf("authenticated OTLP source = %q, want codex", got)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
+	for _, tc := range []struct {
+		name   string
+		scope  connector.OTLPPathTokenScope
+		token  string
+		signal string
+	}{
+		{name: "codex logs", scope: connector.OTLPScopeCodex, token: "codex-scoped-token", signal: "logs"},
+		{name: "openhands traces", scope: connector.OTLPScopeOpenHands, token: "openhands-scoped-token", signal: "traces"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, called := tokenAuthTestServer(t, "master-token")
+			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{tc.scope: tc.token})
+			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				*called = true
+				if got := r.Header.Get(otelSourceHeader); got != string(tc.scope) {
+					t.Errorf("authenticated OTLP source = %q, want %q", got, tc.scope)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
-	req.RemoteAddr = "127.0.0.1:54321"
-	req.Header.Set("Authorization", "Bearer codex-scoped-token")
-	req.Header.Set(otelSourceHeader, "codex")
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK || !*called {
-		t.Fatalf("Codex scoped Authorization rejected: status=%d called=%v", rr.Code, *called)
+			req := httptest.NewRequest(http.MethodPost, "/v1/"+tc.signal, nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			req.Header.Set(otelSourceHeader, string(tc.scope))
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK || !*called {
+				t.Fatalf("%s scoped Authorization rejected: status=%d called=%v", tc.scope, rr.Code, *called)
+			}
+		})
 	}
 }
 

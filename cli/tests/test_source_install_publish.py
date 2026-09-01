@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -466,6 +468,343 @@ def test_fresh_symlink_staging_preserves_late_foreign_destination(
     assert destination.is_symlink()
     assert os.readlink(destination) == foreign
     assert len(list(custody.glob("retired-*"))) == 1
+
+
+def _write_skill_scanner_console_script(path: Path, interpreter: Path) -> bytes:
+    payload = (
+        f"#!{interpreter}\n"
+        "# -*- coding: utf-8 -*-\n"
+        "import sys\n"
+        "from skill_scanner.cli.cli import main\n"
+        'if __name__ == "__main__":\n'
+        "    sys.exit(main())\n"
+    ).encode()
+    path.write_bytes(payload)
+    path.chmod(0o755)
+    return payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")
+def test_repair_console_symlink_retires_stale_interpreter_launcher(tmp_path: Path) -> None:
+    venv_bin = tmp_path / ".defenseclaw" / ".venv" / "bin"
+    install_dir = tmp_path / ".local" / "bin"
+    venv_bin.mkdir(parents=True)
+    install_dir.mkdir(parents=True)
+    interpreter = venv_bin / "python3"
+    interpreter.write_bytes(b"managed interpreter fixture\n")
+    interpreter.chmod(0o755)
+    target = venv_bin / "skill-scanner"
+    _write_skill_scanner_console_script(target, interpreter)
+    stale = install_dir / "skill-scanner"
+    stale_payload = _write_skill_scanner_console_script(
+        stale,
+        Path("/Library/Cisco/RADKit/python/bin/python3"),
+    )
+    custody = tmp_path / "custody"
+
+    repaired = _run(
+        "repair-console-symlink",
+        target,
+        stale,
+        "--console-script",
+        "skill-scanner",
+        "--custody-root",
+        custody,
+    )
+
+    _value, identity = _claim(repaired)
+    assert stale.is_symlink()
+    assert os.readlink(stale) == str(target)
+    assert identity[:2] == (os.lstat(stale).st_dev, os.lstat(stale).st_ino)
+    retired = list(custody.glob("retired-*"))
+    assert len(retired) == 1
+    assert retired[0].read_bytes() == stale_payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")
+def test_repair_console_symlink_retirement_recovers_after_crash_before_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    venv_bin = tmp_path / ".defenseclaw" / ".venv" / "bin"
+    install_dir = tmp_path / ".local" / "bin"
+    venv_bin.mkdir(parents=True)
+    install_dir.mkdir(parents=True)
+    interpreter = venv_bin / "python3"
+    interpreter.write_bytes(b"managed interpreter fixture\n")
+    interpreter.chmod(0o755)
+    target = venv_bin / "skill-scanner"
+    _write_skill_scanner_console_script(target, interpreter)
+    destination = install_dir / "skill-scanner"
+    stale_payload = _write_skill_scanner_console_script(
+        destination,
+        Path("/Library/Cisco/RADKit/python/bin/python3"),
+    )
+    custody = tmp_path / "custody"
+
+    real_exchange = install_publish._exchange
+    real_ensure_intent = install_publish._ensure_retirement_intent
+    exchanges = 0
+
+    def preserve_interrupted_exchange(
+        parent_fd: int,
+        source: str,
+        activated: str,
+    ) -> None:
+        nonlocal exchanges
+        exchanges += 1
+        if exchanges == 1:
+            real_exchange(parent_fd, source, activated)
+            return
+        raise install_publish.PublishError("simulated unavailable rollback")
+
+    def crash_after_intent(
+        custody_fd: int,
+        intent: str,
+        document: bytes,
+        *,
+        allow_create: bool,
+    ) -> bool:
+        created = real_ensure_intent(
+            custody_fd,
+            intent,
+            document,
+            allow_create=allow_create,
+        )
+        if created:
+            raise SystemExit("simulated process death after durable intent")
+        return created
+
+    monkeypatch.setattr(install_publish, "_exchange", preserve_interrupted_exchange)
+    monkeypatch.setattr(install_publish, "_ensure_retirement_intent", crash_after_intent)
+
+    with pytest.raises(SystemExit, match="durable intent"):
+        install_publish.repair_managed_console_symlink(
+            target,
+            destination,
+            "skill-scanner",
+            custody_root=custody,
+        )
+
+    staged = next(install_dir.glob(".skill-scanner.managed-console-*"))
+    intent = json.loads(
+        next(custody.glob("intent-*.json")).read_text(encoding="utf-8")
+    )
+    assert intent["canonical"] == str(staged)
+    assert destination.is_symlink()
+    assert staged.read_bytes() == stale_payload
+
+    monkeypatch.setattr(install_publish, "_exchange", real_exchange)
+    monkeypatch.setattr(install_publish, "_ensure_retirement_intent", real_ensure_intent)
+    install_publish.recover_custody(custody)
+
+    assert destination.is_symlink()
+    assert not staged.exists()
+    assert next(custody.glob("retired-*")).read_bytes() == stale_payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")
+def test_repair_console_symlink_is_idempotent_and_preserves_foreign_entries(tmp_path: Path) -> None:
+    venv_bin = tmp_path / ".defenseclaw" / ".venv" / "bin"
+    install_dir = tmp_path / ".local" / "bin"
+    venv_bin.mkdir(parents=True)
+    install_dir.mkdir(parents=True)
+    interpreter = venv_bin / "python"
+    interpreter.write_bytes(b"managed interpreter fixture\n")
+    interpreter.chmod(0o755)
+    target = venv_bin / "skill-scanner"
+    _write_skill_scanner_console_script(target, interpreter)
+    destination = install_dir / "skill-scanner"
+    destination.symlink_to(target)
+
+    unchanged = _run(
+        "repair-console-symlink",
+        target,
+        destination,
+        "--console-script",
+        "skill-scanner",
+    )
+    assert unchanged.returncode == 0, unchanged.stderr
+    assert unchanged.stdout.strip() == "unchanged"
+
+    destination.unlink()
+    destination.symlink_to("/opt/operator/bin/skill-scanner")
+    foreign_link = _run(
+        "repair-console-symlink",
+        target,
+        destination,
+        "--console-script",
+        "skill-scanner",
+    )
+    assert foreign_link.returncode != 0
+    assert os.readlink(destination) == "/opt/operator/bin/skill-scanner"
+
+    destination.unlink()
+    destination.write_text("#!/bin/sh\nprintf 'operator-owned scanner\\n'\n", encoding="utf-8")
+    destination.chmod(0o755)
+    refused = _run(
+        "repair-console-symlink",
+        target,
+        destination,
+        "--console-script",
+        "skill-scanner",
+    )
+    assert refused.returncode != 0
+    assert destination.read_text(encoding="utf-8").endswith("operator-owned scanner\\n'\n")
+
+    destination.write_text(
+        "#!/usr/bin/python3\n"
+        "# operator-owned environment and logging wrapper\n"
+        "import os\n"
+        "import sys\n"
+        "from skill_scanner.cli.cli import main\n"
+        'os.environ.setdefault("SKILL_SCANNER_LOG", "operator")\n'
+        'if __name__ == "__main__":\n'
+        "    sys.exit(main())\n",
+        encoding="utf-8",
+    )
+    destination.chmod(0o755)
+    foreign_payload = destination.read_bytes()
+    custody = tmp_path / "foreign-wrapper-custody"
+
+    foreign_wrapper = _run(
+        "repair-console-symlink",
+        target,
+        destination,
+        "--console-script",
+        "skill-scanner",
+        "--custody-root",
+        custody,
+    )
+
+    assert foreign_wrapper.returncode != 0
+    assert destination.read_bytes() == foreign_payload
+    assert not custody.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")
+def test_repair_console_symlink_rejects_target_with_foreign_shebang(tmp_path: Path) -> None:
+    venv_bin = tmp_path / ".defenseclaw" / ".venv" / "bin"
+    install_dir = tmp_path / ".local" / "bin"
+    venv_bin.mkdir(parents=True)
+    install_dir.mkdir(parents=True)
+    target = venv_bin / "skill-scanner"
+    _write_skill_scanner_console_script(target, Path("/usr/local/bin/python3"))
+    destination = install_dir / "skill-scanner"
+
+    refused = _run(
+        "repair-console-symlink",
+        target,
+        destination,
+        "--console-script",
+        "skill-scanner",
+    )
+
+    assert refused.returncode != 0
+    assert "does not use its venv interpreter" in refused.stderr
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")
+def test_repair_console_symlink_safely_creates_missing_launcher_directory(tmp_path: Path) -> None:
+    venv_bin = tmp_path / ".defenseclaw" / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    interpreter = venv_bin / "python"
+    interpreter.write_bytes(b"managed interpreter fixture\n")
+    interpreter.chmod(0o755)
+    target = venv_bin / "skill-scanner"
+    _write_skill_scanner_console_script(target, interpreter)
+    destination = tmp_path / ".local" / "bin" / "skill-scanner"
+
+    repaired = _run(
+        "repair-console-symlink",
+        target,
+        destination,
+        "--console-script",
+        "skill-scanner",
+    )
+
+    assert repaired.returncode == 0, repaired.stderr
+    assert destination.is_symlink()
+    assert os.readlink(destination) == str(target)
+    assert stat.S_IMODE(destination.parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")
+def test_repair_console_symlink_preserves_destination_that_appears_concurrently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    venv_bin = tmp_path / ".defenseclaw" / ".venv" / "bin"
+    install_dir = tmp_path / ".local" / "bin"
+    venv_bin.mkdir(parents=True)
+    install_dir.mkdir(parents=True)
+    interpreter = venv_bin / "python"
+    interpreter.write_bytes(b"managed interpreter fixture\n")
+    interpreter.chmod(0o755)
+    target = venv_bin / "skill-scanner"
+    _write_skill_scanner_console_script(target, interpreter)
+    destination = install_dir / "skill-scanner"
+    foreign = "/opt/operator/bin/skill-scanner"
+    real_rename = install_publish._rename_no_replace_between
+    injected = False
+
+    def inject_before_activation(source_parent, source, destination_parent, activated):
+        nonlocal injected
+        if activated == destination.name and not injected:
+            injected = True
+            os.symlink(foreign, destination.name, dir_fd=destination_parent)
+        real_rename(source_parent, source, destination_parent, activated)
+
+    monkeypatch.setattr(install_publish, "_rename_no_replace_between", inject_before_activation)
+
+    with pytest.raises(install_publish.PublishError, match="appeared concurrently"):
+        install_publish.repair_managed_console_symlink(
+            target,
+            destination,
+            "skill-scanner",
+        )
+
+    assert destination.is_symlink()
+    assert os.readlink(destination) == foreign
+    assert [entry.name for entry in install_dir.iterdir()] == ["skill-scanner"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")
+def test_repair_console_symlink_preserves_publication_error_when_stage_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    venv_bin = tmp_path / ".defenseclaw" / ".venv" / "bin"
+    install_dir = tmp_path / ".local" / "bin"
+    venv_bin.mkdir(parents=True)
+    install_dir.mkdir(parents=True)
+    interpreter = venv_bin / "python"
+    interpreter.write_bytes(b"managed interpreter fixture\n")
+    interpreter.chmod(0o755)
+    target = venv_bin / "skill-scanner"
+    _write_skill_scanner_console_script(target, interpreter)
+    destination = install_dir / "skill-scanner"
+    foreign = "/opt/operator/bin/skill-scanner"
+    real_unlink = install_publish.os.unlink
+
+    def collide(_source_parent, _source, destination_parent, activated):
+        os.symlink(foreign, activated, dir_fd=destination_parent)
+        raise FileExistsError
+
+    def refuse_stage_cleanup(path, *, dir_fd=None):
+        if ".managed-console-" in os.fsdecode(path):
+            raise OSError("injected stage cleanup failure")
+        return real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(install_publish, "_rename_no_replace_between", collide)
+    monkeypatch.setattr(install_publish.os, "unlink", refuse_stage_cleanup)
+
+    with pytest.raises(install_publish.PublishError, match="appeared concurrently"):
+        install_publish.repair_managed_console_symlink(target, destination, "skill-scanner")
+
+    assert destination.is_symlink()
+    assert os.readlink(destination) == foreign
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="exact O_SYMLINK regression is Darwin-only")

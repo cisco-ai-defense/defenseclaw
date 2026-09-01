@@ -29,8 +29,11 @@ struct ConnectorOnboardingTests {
         subsetActionLeadsWithAnEnforcedConnector()
         subsetWithoutGatewayStartNeverRestarts()
         emptyRegistrationDefensivelyRegistersEverything()
+        proxyConnectorsNeverEnterInitializationPlans()
         setupCommandNameHyphenatesOnlyClaudeCode()
         commandRegistryIncludesAmpSetup()
+        commandRegistryIncludesOmniGentSetup()
+        commandRegistryIncludesCanonicalDevinSetup()
         parsesCommandArguments()
         rejectsMalformedCommandArguments()
         quotesDisplayedShellArguments()
@@ -43,14 +46,16 @@ struct ConnectorOnboardingTests {
         {"agents":{
           "cursor":{"installed":true,"name":"cursor"},
           "claude-code":{"installed":true,"name":"claude-code"},
+          "openclaw":{"installed":true,"name":"openclaw"},
+          "zeptoclaw":{"installed":true,"name":"zeptoclaw"},
           "codex":{"installed":false,"name":"codex"}
         }}
         """
         let result = ConnectorOnboarding.installedConnectors(
             from: output,
-            supportedOrder: ["codex", "claudecode", "cursor"]
+            supportedOrder: ["openclaw", "zeptoclaw", "codex", "claudecode", "cursor"]
         )
-        expect(result == ["claudecode", "cursor"], "installed connector parsing")
+        expect(result == ["claudecode", "cursor"], "discovery excludes proxy connectors")
     }
 
     private static func usesObserveAllWhenEverythingIsRegistered() {
@@ -146,7 +151,7 @@ struct ConnectorOnboardingTests {
 
     private static func multipleAdditiveSetupsRestartOnlyAfterTheFinalConnector() {
         let plan = makePlan(
-            detected: ["codex", "claudecode", "cursor", "openclaw"],
+            detected: ["codex", "claudecode", "cursor", "hermes", "openclaw"],
             registered: ["codex", "claudecode", "cursor"],
             action: [],
             profile: "observe"
@@ -162,7 +167,8 @@ struct ConnectorOnboardingTests {
             "final additive setup preserves connector order"
         )
         expect(!plan[2].contains("--no-restart"), "final additive setup performs the restart")
-        expect(!plan.contains { $0.contains("openclaw") }, "unregistered connector stays absent")
+        expect(!plan.contains { $0.contains("hermes") }, "unregistered hook connector stays absent")
+        expect(!plan.contains { $0.contains("openclaw") }, "proxy connector stays absent")
     }
 
     private static func subsetWithoutGatewayStartNeverRestarts() {
@@ -188,6 +194,28 @@ struct ConnectorOnboardingTests {
         expect(plan[0].contains("--observe-all"), "empty registration defensively registers everything")
     }
 
+    private static func proxyConnectorsNeverEnterInitializationPlans() {
+        let plan = makePlan(
+            detected: ["openclaw", "codex", "zeptoclaw"],
+            registered: ["openclaw", "codex", "zeptoclaw"],
+            action: ["openclaw", "codex", "zeptoclaw"],
+            profile: "action"
+        )
+        expect(!plan.contains { $0.contains("openclaw") }, "OpenClaw is absent from first-run plans")
+        expect(!plan.contains { $0.contains("zeptoclaw") }, "ZeptoClaw is absent from first-run plans")
+
+        let fallback = makePlan(
+            detected: [],
+            registered: [],
+            action: [],
+            profile: "observe",
+            fallbackConnector: "openclaw"
+        )
+        let connectorIndex = fallback[0].firstIndex(of: "--connector")
+        expect(connectorIndex.map { fallback[0][$0 + 1] } == "codex",
+               "proxy fallback resolves to a hook connector")
+    }
+
     private static func setupCommandNameHyphenatesOnlyClaudeCode() {
         expect(ConnectorOnboarding.setupCommandName("claudecode") == "claude-code", "claudecode maps to claude-code")
         expect(ConnectorOnboarding.setupCommandName("claude-code") == "claude-code", "claude-code stays hyphenated")
@@ -198,6 +226,21 @@ struct ConnectorOnboardingTests {
         let command = CommandRegistry.all.first { $0.title == "setup amp" }
         expect(command?.arguments == ["setup", "amp", "--yes"], "Amp setup command is available")
         expect(CommandRegistry.all.count == CommandRegistry.sourceCount, "native command count matches source")
+    }
+
+    private static func commandRegistryIncludesOmniGentSetup() {
+        let command = CommandRegistry.all.first { $0.title == "setup omnigent" }
+        expect(
+            command?.arguments == ["setup", "omnigent", "--yes"],
+            "OmniGent setup command is available"
+        )
+    }
+
+    private static func commandRegistryIncludesCanonicalDevinSetup() {
+        let command = CommandRegistry.all.first { $0.title == "setup devin" }
+        expect(command?.arguments == ["setup", "devin", "--yes"], "Devin setup command is available")
+        expect(CommandRegistry.all.allSatisfy { !$0.arguments.contains("windsurf") },
+               "legacy Windsurf setup is absent from the native command registry")
     }
 
     private static func parsesCommandArguments() {
@@ -243,12 +286,13 @@ struct ConnectorOnboardingTests {
         registered: Set<String>,
         action: Set<String>,
         profile: String,
+        fallbackConnector: String = "codex",
         startGateway: Bool = true
     ) -> [[String]] {
         ConnectorOnboarding.initializationPlan(
             detectedConnectors: detected,
             registeredConnectors: registered,
-            fallbackConnector: "codex",
+            fallbackConnector: fallbackConnector,
             actionConnectors: action,
             profile: profile,
             scannerMode: "local",

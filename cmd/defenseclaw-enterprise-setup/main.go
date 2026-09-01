@@ -349,7 +349,7 @@ func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
 	manifestBytes, err := fs.ReadFile(payloadFS, "payload/manifest.json")
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return enterprisePayload{}, errors.New("enterprise payload missing; build with scripts/build-windows-enterprise-installer.ps1")
+			return enterprisePayload{}, errors.New("enterprise payload missing; build with `make packaging-windows-enterprise-installer VERSION=<version>` for a local unsigned artifact or `make packaging-windows-avc-buildkit VERSION=<version>` for the signed AVC handoff")
 		}
 		return enterprisePayload{}, fmt.Errorf("read embedded enterprise manifest: %w", err)
 	}

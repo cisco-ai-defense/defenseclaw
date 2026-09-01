@@ -134,6 +134,62 @@ if versions != [expected]:
 PY
 }
 
+seed_stale_skill_scanner_launcher() {
+    local launcher="${SMOKE_HOME}/.local/bin/skill-scanner"
+    local expected="${WORKDIR}/stale-skill-scanner-${FROM_VERSION}.expected"
+    python3 - "${launcher}" <<'PY'
+from pathlib import Path
+import sys
+
+launcher = Path(sys.argv[1])
+launcher.unlink(missing_ok=True)
+launcher.write_bytes(
+    b"#!/nonexistent/defenseclaw-fixture/python3\n"
+    b"# -*- coding: utf-8 -*-\n"
+    b"import sys\n"
+    b"from skill_scanner.cli.cli import main\n"
+    b"if __name__ == \"__main__\":\n"
+    b"    sys.exit(main())\n"
+)
+launcher.chmod(0o755)
+PY
+    cp "${launcher}" "${expected}"
+    if "${launcher}" --version >/dev/null 2>&1; then
+        die "stale skill-scanner fixture unexpectedly started"
+    fi
+}
+
+assert_repaired_skill_scanner_launcher() {
+    local launcher="${SMOKE_HOME}/.local/bin/skill-scanner"
+    local managed="${SMOKE_HOME}/.defenseclaw/.venv/bin/skill-scanner"
+    local expected="${WORKDIR}/stale-skill-scanner-${FROM_VERSION}.expected"
+    local output
+    [[ -L "${launcher}" ]] || die "upgraded skill-scanner launcher is not a symlink"
+    [[ "$(readlink "${launcher}")" == "${managed}" ]] \
+        || die "upgraded skill-scanner launcher does not target the managed environment"
+    output="$(HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        "${launcher}" --version 2>&1)" \
+        || die "upgraded skill-scanner launcher failed"
+    python3 - "${output}" "${expected}" "${SMOKE_HOME}/.defenseclaw-install-custody" <<'PY' \
+        || die "upgraded skill-scanner launcher or retirement custody is invalid"
+from pathlib import Path
+import re
+import sys
+
+output, expected_path, custody_path = sys.argv[1:]
+if re.fullmatch(r"skill-scanner (?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", output) is None:
+    raise SystemExit(f"unexpected skill-scanner version output: {output!r}")
+expected = Path(expected_path).read_bytes()
+retired = [
+    path
+    for path in Path(custody_path).glob("retired-*")
+    if path.is_file() and path.read_bytes() == expected
+]
+if len(retired) != 1:
+    raise SystemExit(f"expected one retired stale skill-scanner launcher, found {len(retired)}")
+PY
+}
+
 cleanup() {
     local status=$?
     stop_smoke_gateway
@@ -1189,6 +1245,7 @@ download_old_asset() {
         upgrade-manifest.json) max_bytes=4194304 ;;
     esac
     if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+        --retry 3 --retry-delay 1 --retry-all-errors \
         --max-filesize "${max_bytes}" "${url}" -o "${temporary}"; then
         rm -f "${temporary}"
         return 1
@@ -2961,12 +3018,14 @@ run_one_upgrade_smoke() {
     mkdir -p "${SMOKE_HOME}"
 
     install_baseline
+    seed_stale_skill_scanner_launcher
     seed_upgrade_fixture
     start_source_gateway_canary
     assert_source_gateway_canary_preserved_fixture
     patch_installed_upgrade_endpoint
     run_upgrade
     verify_upgrade
+    assert_repaired_skill_scanner_launcher
     stop_smoke_gateway
 
     ok "Upgrade smoke passed: ${FROM_VERSION} -> ${TARGET_VERSION} (${OS_NAME}/${ARCH_NAME})"

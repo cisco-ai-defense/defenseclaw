@@ -1,6 +1,6 @@
 [project]
 name = "defenseclaw"
-version = "0.8.6"
+version = "0.8.10"
 description = "Enterprise governance layer for OpenClaw — secures agentic AI deployments"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -134,6 +134,7 @@ defenseclaw = [
     "_data/policies/rego/*.rego",
     "_data/policies/rego/*.json",
     "_data/envvars/*.json",
+    "_data/plugin/*.json",
     "_data/skills/codeguard/*.md",
     "_data/skills/codeguard/*.yaml",
     "_data/skills/codeguard/*.py",
@@ -178,6 +179,7 @@ defenseclaw = [
     "_data/local_observability_stack/*.md",
     "_data/local_observability_stack/*.yml",
     "_data/local_observability_stack/*.sh",
+    "_data/local_observability_stack/.gitignore",
     "_data/local_observability_stack/bin/*",
     "_data/local_observability_stack/otel-collector/*.yaml",
     "_data/local_observability_stack/prometheus/*.yml",

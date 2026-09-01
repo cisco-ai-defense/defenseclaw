@@ -46,6 +46,13 @@ EXPECTED_WHEEL_LICENSE_FILES = {
         "THIRD_PARTY_LICENSES.txt",
     )
 }
+GENERATED_GRAFANA_CREDENTIAL_NAMES = (
+    ".grafana-admin-password",
+    "..grafana-admin-password.interrupted-write.tmp",
+    ".grafana-access-mode",
+    "..grafana-access-mode.interrupted-write.tmp",
+)
+GENERATED_GRAFANA_CREDENTIAL_MARKER = b"generated-grafana-" + b"credential-marker"
 
 
 class BuiltArtifacts(NamedTuple):
@@ -121,6 +128,18 @@ def _copy_pristine_source(destination: Path) -> None:
         )
 
 
+def _seed_generated_grafana_credentials(destination: Path) -> None:
+    """Contaminate canonical and staged bundles without mutating real sources."""
+
+    for bundle in (
+        destination / "bundles/local_observability_stack",
+        destination / "cli/defenseclaw/_data/local_observability_stack",
+    ):
+        bundle.mkdir(parents=True, exist_ok=True)
+        for name in GENERATED_GRAFANA_CREDENTIAL_NAMES:
+            (bundle / name).write_bytes(GENERATED_GRAFANA_CREDENTIAL_MARKER)
+
+
 @pytest.mark.parametrize("mutation", ["missing", "unexpected", "malformed-config", "malformed-gzip"])
 def test_build_hook_fails_closed_for_invalid_v8_inputs(
     build_hook_module: ModuleType,
@@ -189,6 +208,11 @@ def pristine_artifacts() -> Iterator[BuiltArtifacts]:
         source.mkdir()
         _copy_pristine_source(source)
         assert not (source / "cli/defenseclaw/_data").exists()
+        # A developer build can run while the managed stack has already
+        # generated its credential, and an interrupted atomic write can leave
+        # a sibling temp file. Exercise both the authoritative source graft and
+        # a stale package staging mirror at every build boundary.
+        _seed_generated_grafana_credentials(source)
 
         environment = os.environ.copy()
         environment.pop("PYTHONHOME", None)
@@ -226,7 +250,12 @@ def pristine_artifacts() -> Iterator[BuiltArtifacts]:
             environment=environment,
         )
         sdist_wheel = next(sdist_wheel_output.glob("defenseclaw-*.whl"))
-        assert not (source / "cli/defenseclaw/_data").exists()
+        for relative in (
+            Path("bundles/local_observability_stack"),
+            Path("cli/defenseclaw/_data/local_observability_stack"),
+        ):
+            for name in GENERATED_GRAFANA_CREDENTIAL_NAMES:
+                assert (source / relative / name).read_bytes() == (GENERATED_GRAFANA_CREDENTIAL_MARKER)
         yield BuiltArtifacts(wheel=wheel, sdist=sdist, sdist_wheel=sdist_wheel)
 
 
@@ -258,14 +287,19 @@ def _assert_exact_v8_wheel(wheel: Path) -> None:
         metadata_lines = archive.read(metadata_members[0]).decode("utf-8").splitlines()
         assert metadata_lines.count("License-Expression: Apache-2.0") == 1
         for source_name, source in EXPECTED_WHEEL_LICENSE_FILES.items():
-            members = [
-                name
-                for name in names
-                if name.endswith(f".dist-info/licenses/{source_name}")
-            ]
+            members = [name for name in names if name.endswith(f".dist-info/licenses/{source_name}")]
             assert len(members) == 1
             assert archive.read(members[0]) == source.read_bytes()
             assert f"License-File: {source_name}" in metadata_lines
+
+
+def _assert_generated_grafana_credentials_absent_from_wheel(wheel: Path) -> None:
+    with zipfile.ZipFile(wheel) as archive:
+        files = [member for member in archive.infolist() if not member.is_dir()]
+        assert not {PurePosixPath(member.filename).name for member in files}.intersection(
+            GENERATED_GRAFANA_CREDENTIAL_NAMES
+        )
+        assert all(GENERATED_GRAFANA_CREDENTIAL_MARKER not in archive.read(member) for member in files)
 
 
 def _extract_wheel_safely(wheel: Path, destination: Path) -> None:
@@ -295,6 +329,7 @@ def test_pristine_pep517_wheel_contains_exact_v8_resources(
     pristine_artifacts: BuiltArtifacts,
 ) -> None:
     _assert_exact_v8_wheel(pristine_artifacts.wheel)
+    _assert_generated_grafana_credentials_absent_from_wheel(pristine_artifacts.wheel)
 
 
 def test_sdist_contains_exact_build_inputs_and_builds_complete_wheel(
@@ -302,10 +337,17 @@ def test_sdist_contains_exact_build_inputs_and_builds_complete_wheel(
 ) -> None:
     with tarfile.open(pristine_artifacts.sdist, mode="r:gz") as archive:
         relative_names = []
+        generated_credential_markers = []
         for member in archive.getmembers():
             parts = PurePosixPath(member.name).parts
             if len(parts) > 1 and member.isfile():
                 relative_names.append(PurePosixPath(*parts[1:]).as_posix())
+                extracted = archive.extractfile(member)
+                assert extracted is not None
+                generated_credential_markers.append(GENERATED_GRAFANA_CREDENTIAL_MARKER in extracted.read())
+
+    assert not set(PurePosixPath(name).name for name in relative_names).intersection(GENERATED_GRAFANA_CREDENTIAL_NAMES)
+    assert not any(generated_credential_markers)
 
     assert set(name for name in relative_names if name.startswith("schemas/config/v8/")) == (
         EXPECTED_SDIST_CONFIG_INPUTS
@@ -325,6 +367,7 @@ def test_sdist_contains_exact_build_inputs_and_builds_complete_wheel(
         assert relative_names.count(required) == 1
 
     _assert_exact_v8_wheel(pristine_artifacts.sdist_wheel)
+    _assert_generated_grafana_credentials_absent_from_wheel(pristine_artifacts.sdist_wheel)
 
 
 @pytest.mark.parametrize("wheel_kind", ["wheel", "sdist_wheel"])

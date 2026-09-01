@@ -20,6 +20,8 @@ import { basePath } from '@/lib/site';
 type ConnectorRow = {
   id: string;
   label: string;
+  windowsSupport: 'supported' | 'degraded' | 'unsupported';
+  windowsNote: string;
   family: 'proxy' | 'hooks';
   toolInspection: string;
   subprocessPolicy: string;
@@ -42,6 +44,7 @@ type ScannerMode = 'local' | 'remote' | 'both';
 type DetectionStrategy = 'regex_only' | 'regex_judge' | 'judge_first';
 type RulePack = 'default' | 'strict' | 'permissive';
 type HitlSeverity = 'high' | 'medium' | 'low' | 'critical';
+type ShellFlavor = 'bash' | 'powershell';
 // Advanced judge-provider knobs. Empty string = "omit the flag" for the
 // select-backed fields; the tri-state covers --inherit-llm/--no-inherit-llm.
 type LlmRole = '' | 'judge_only' | 'judge_and_agent';
@@ -100,7 +103,7 @@ interface GeneratorState {
   showJudgeProvider: boolean;
 }
 
-const DEFAULT_STATE: GeneratorState = {
+export const DEFAULT_STATE: GeneratorState = {
   connector: 'claudecode',
   mode: 'observe',
   scannerMode: 'local',
@@ -182,14 +185,56 @@ function splitLines(value: string): string[] {
 // quoted means there is no path where injected metacharacters survive
 // the rendered command. The output is for display + copy-paste only;
 // the generator never executes any shell.
-function shellQuote(value: string): string {
+export function shellQuote(value: string, shell: ShellFlavor): string {
   if (value === '') return "''";
+  // PowerShell has additional bare-word expression forms, including @name
+  // splatting and $name expansion. Always single-quote operator-provided
+  // values so they remain one literal native-command argument.
+  if (shell === 'powershell') {
+    return "'" + value.replace(/'/g, "''") + "'";
+  }
   // Conservative allow-list: bare tokens only when the value is
   // strictly alphanumeric plus a handful of always-safe punctuation
   // (model slugs, env-var names, hostnames, integer ports). Everything
   // else gets the single-quote treatment.
   if (/^[A-Za-z0-9_./:@\-]+$/.test(value)) return value;
   return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function environmentAssignment(
+  name: string,
+  placeholder: string,
+  shell: ShellFlavor,
+): string {
+  const value = shellQuote(placeholder, shell);
+  return shell === 'powershell'
+    ? `$env:${name} = ${value}`
+    : `export ${name}=${value}`;
+}
+
+function appendEnvironmentPlaceholder(
+  preExports: string[],
+  warnings: string[],
+  name: string,
+  placeholder: string,
+  shell: ShellFlavor,
+): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    warnings.push(
+      `Environment variable name ${JSON.stringify(name)} is not portable. Use letters, digits, and underscores, starting with a letter or underscore. The placeholder assignment was omitted.`,
+    );
+    return;
+  }
+  const controlsCommandLookup = shell === 'powershell'
+    ? /^(?:path|pathext)$/i.test(name)
+    : name === 'PATH' || name === 'path';
+  if (controlsCommandLookup) {
+    warnings.push(
+      `Environment variable name ${JSON.stringify(name)} controls executable lookup in ${shell === 'powershell' ? 'PowerShell' : 'Bash/zsh'}. The placeholder assignment was omitted so the defenseclaw command remains resolvable.`,
+    );
+    return;
+  }
+  preExports.push(environmentAssignment(name, placeholder, shell));
 }
 
 // Emit the advanced judge-provider + provider-typed auth flags. Only the
@@ -202,24 +247,26 @@ function shellQuote(value: string): string {
 // command.
 function appendJudgeProviderFlags(
   s: GeneratorState,
+  shell: ShellFlavor,
   lines: string[],
   preExports: string[],
   warnings: string[],
 ): void {
+  const quote = (value: string) => shellQuote(value, shell);
   if (s.judgeProvider.trim()) {
-    lines.push(`--judge-provider ${shellQuote(s.judgeProvider.trim())}`);
+    lines.push(`--judge-provider ${quote(s.judgeProvider.trim())}`);
   }
   if (s.judgeRegion.trim()) {
-    lines.push(`--judge-region ${shellQuote(s.judgeRegion.trim())}`);
+    lines.push(`--judge-region ${quote(s.judgeRegion.trim())}`);
   }
   if (s.judgeInstanceName.trim()) {
-    lines.push(`--judge-instance-name ${shellQuote(s.judgeInstanceName.trim())}`);
+    lines.push(`--judge-instance-name ${quote(s.judgeInstanceName.trim())}`);
   }
   if (s.llmRole) {
     lines.push(`--llm-role ${s.llmRole}`);
   }
   if (s.inheritFrom) {
-    lines.push(`--inherit-from ${shellQuote(s.inheritFrom)}`);
+    lines.push(`--inherit-from ${quote(s.inheritFrom)}`);
   }
   if (s.inheritLlm === 'yes') {
     lines.push('--inherit-llm');
@@ -233,68 +280,72 @@ function appendJudgeProviderFlags(
 
   if (bedrock) {
     if (s.judgeBedrockRegion.trim()) {
-      lines.push(`--judge-bedrock-region ${shellQuote(s.judgeBedrockRegion.trim())}`);
+      lines.push(`--judge-bedrock-region ${quote(s.judgeBedrockRegion.trim())}`);
     }
     if (s.judgeBedrockAuthMode) {
       lines.push(`--judge-bedrock-auth-mode ${s.judgeBedrockAuthMode}`);
     }
     if (s.judgeBedrockAccessKeyEnv.trim()) {
-      lines.push(`--judge-bedrock-access-key-env ${shellQuote(s.judgeBedrockAccessKeyEnv.trim())}`);
-      preExports.push(`export ${s.judgeBedrockAccessKeyEnv.trim()}=<aws-access-key-id>`);
+      lines.push(`--judge-bedrock-access-key-env ${quote(s.judgeBedrockAccessKeyEnv.trim())}`);
+      appendEnvironmentPlaceholder(preExports, warnings, s.judgeBedrockAccessKeyEnv.trim(), '<aws-access-key-id>', shell);
     }
     if (s.judgeBedrockSecretKeyEnv.trim()) {
-      lines.push(`--judge-bedrock-secret-key-env ${shellQuote(s.judgeBedrockSecretKeyEnv.trim())}`);
-      preExports.push(`export ${s.judgeBedrockSecretKeyEnv.trim()}=<aws-secret-access-key>`);
+      lines.push(`--judge-bedrock-secret-key-env ${quote(s.judgeBedrockSecretKeyEnv.trim())}`);
+      appendEnvironmentPlaceholder(preExports, warnings, s.judgeBedrockSecretKeyEnv.trim(), '<aws-secret-access-key>', shell);
     }
     if (s.judgeBedrockSessionTokenEnv.trim()) {
-      lines.push(`--judge-bedrock-session-token-env ${shellQuote(s.judgeBedrockSessionTokenEnv.trim())}`);
-      preExports.push(`export ${s.judgeBedrockSessionTokenEnv.trim()}=<aws-session-token>`);
+      lines.push(`--judge-bedrock-session-token-env ${quote(s.judgeBedrockSessionTokenEnv.trim())}`);
+      appendEnvironmentPlaceholder(preExports, warnings, s.judgeBedrockSessionTokenEnv.trim(), '<aws-session-token>', shell);
     }
     if (s.judgeBedrockProfileName.trim()) {
-      lines.push(`--judge-bedrock-profile-name ${shellQuote(s.judgeBedrockProfileName.trim())}`);
+      lines.push(`--judge-bedrock-profile-name ${quote(s.judgeBedrockProfileName.trim())}`);
     }
     if (s.judgeBedrockInferenceProfile.trim()) {
-      lines.push(`--judge-bedrock-inference-profile ${shellQuote(s.judgeBedrockInferenceProfile.trim())}`);
+      lines.push(`--judge-bedrock-inference-profile ${quote(s.judgeBedrockInferenceProfile.trim())}`);
     }
     for (const alias of splitLines(s.judgeBedrockDeployments)) {
-      lines.push(`--judge-bedrock-deployment ${shellQuote(alias)}`);
+      lines.push(`--judge-bedrock-deployment ${quote(alias)}`);
     }
   } else if (vertex) {
     if (s.judgeVertexProjectId.trim()) {
-      lines.push(`--judge-vertex-project-id ${shellQuote(s.judgeVertexProjectId.trim())}`);
+      lines.push(`--judge-vertex-project-id ${quote(s.judgeVertexProjectId.trim())}`);
     }
     if (s.judgeVertexRegion.trim()) {
-      lines.push(`--judge-vertex-region ${shellQuote(s.judgeVertexRegion.trim())}`);
+      lines.push(`--judge-vertex-region ${quote(s.judgeVertexRegion.trim())}`);
     }
     if (s.judgeVertexAuthMode) {
       lines.push(`--judge-vertex-auth-mode ${s.judgeVertexAuthMode}`);
     }
     if (s.judgeVertexServiceAccountJsonEnv.trim()) {
       lines.push(
-        `--judge-vertex-service-account-json-env ${shellQuote(s.judgeVertexServiceAccountJsonEnv.trim())}`,
+        `--judge-vertex-service-account-json-env ${quote(s.judgeVertexServiceAccountJsonEnv.trim())}`,
       );
-      preExports.push(
-        `export ${s.judgeVertexServiceAccountJsonEnv.trim()}=<path-to-service-account-json>`,
+      appendEnvironmentPlaceholder(
+        preExports,
+        warnings,
+        s.judgeVertexServiceAccountJsonEnv.trim(),
+        '<path-to-service-account-json>',
+        shell,
       );
     }
   } else if (azure) {
     if (s.judgeAzureEndpoint.trim()) {
-      lines.push(`--judge-azure-endpoint ${shellQuote(s.judgeAzureEndpoint.trim())}`);
+      lines.push(`--judge-azure-endpoint ${quote(s.judgeAzureEndpoint.trim())}`);
     }
     if (s.judgeAzureApiVersion.trim()) {
-      lines.push(`--judge-azure-api-version ${shellQuote(s.judgeAzureApiVersion.trim())}`);
+      lines.push(`--judge-azure-api-version ${quote(s.judgeAzureApiVersion.trim())}`);
     }
     if (s.judgeAzureAuthMode) {
       lines.push(`--judge-azure-auth-mode ${s.judgeAzureAuthMode}`);
     }
     for (const alias of splitLines(s.judgeAzureDeployments)) {
-      lines.push(`--judge-azure-deployment-alias ${shellQuote(alias)}`);
+      lines.push(`--judge-azure-deployment-alias ${quote(alias)}`);
     }
   }
 
   // Provider-agnostic judge TLS knobs.
   if (s.judgeTlsCaCertFile.trim()) {
-    lines.push(`--judge-tls-ca-cert-file ${shellQuote(s.judgeTlsCaCertFile.trim())}`);
+    lines.push(`--judge-tls-ca-cert-file ${quote(s.judgeTlsCaCertFile.trim())}`);
   }
   if (s.judgeInsecureSkipVerify) {
     lines.push('--judge-insecure-skip-verify');
@@ -304,8 +355,12 @@ function appendJudgeProviderFlags(
   }
 }
 
-function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[]; warnings: string[] } {
+export function buildCommand(
+  s: GeneratorState,
+  shell: ShellFlavor,
+): { lines: string[]; preExports: string[]; warnings: string[] } {
   const connectorRow = CONNECTORS.find((c) => c.id === s.connector);
+  const quote = (value: string) => shellQuote(value, shell);
 
   // Teardown short-circuit. `--disable` calls _disable_guardrail and
   // returns *before* the CLI applies --connector or any other flag, so the
@@ -326,12 +381,28 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
     };
   }
 
+  if (shell === 'powershell' && connectorRow?.windowsSupport === 'unsupported') {
+    return {
+      lines: [`# ${connectorRow.label} setup is unsupported on native Windows.`],
+      preExports: [],
+      warnings: [
+        `${connectorRow.label} cannot be configured by this native Windows command. ${connectorRow.windowsNote} Choose a supported connector or switch to Bash / zsh on macOS or Linux.`,
+      ],
+    };
+  }
+
   const lines: string[] = ['defenseclaw setup guardrail', '--non-interactive'];
   const preExports: string[] = [];
   const warnings: string[] = [];
 
+  if (shell === 'powershell' && connectorRow?.windowsSupport === 'degraded') {
+    warnings.push(
+      `${connectorRow.label} has degraded native Windows support. ${connectorRow.windowsNote} Review the connector guide before running this command.`,
+    );
+  }
+
   if (connectorRow) {
-    lines.push(`--connector ${shellQuote(connectorRow.id)}`);
+    lines.push(`--connector ${quote(connectorRow.id)}`);
   }
 
   lines.push(`--mode ${s.mode}`);
@@ -340,14 +411,16 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
   lines.push(`--scanner-mode ${s.scannerMode}`);
   if (s.scannerMode === 'remote' || s.scannerMode === 'both') {
     if (s.ciscoEndpoint.trim()) {
-      lines.push(`--cisco-endpoint ${shellQuote(s.ciscoEndpoint.trim())}`);
+      lines.push(`--cisco-endpoint ${quote(s.ciscoEndpoint.trim())}`);
     } else {
       warnings.push(
-        'Remote scanner is enabled but no Cisco endpoint is set. The CLI will reject the run unless an endpoint is already in ~/.defenseclaw/config.yaml.',
+        shell === 'powershell'
+          ? 'Remote scanner is enabled but no Cisco endpoint is set. The CLI will reject the run unless an endpoint is already in $env:USERPROFILE\\.defenseclaw\\config.yaml.'
+          : 'Remote scanner is enabled but no Cisco endpoint is set. The CLI will reject the run unless an endpoint is already in ~/.defenseclaw/config.yaml.',
       );
     }
     if (s.ciscoApiKeyEnv.trim() && s.ciscoApiKeyEnv !== 'CISCO_AI_DEFENSE_API_KEY') {
-      lines.push(`--cisco-api-key-env ${shellQuote(s.ciscoApiKeyEnv.trim())}`);
+      lines.push(`--cisco-api-key-env ${quote(s.ciscoApiKeyEnv.trim())}`);
     }
     if (s.ciscoTimeoutMs.trim()) {
       const n = Number(s.ciscoTimeoutMs.trim());
@@ -356,14 +429,14 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
       }
     }
     const apiKeyEnv = s.ciscoApiKeyEnv.trim() || 'CISCO_AI_DEFENSE_API_KEY';
-    preExports.push(`export ${apiKeyEnv}=<your-cisco-ai-defense-api-key>`);
+    appendEnvironmentPlaceholder(preExports, warnings, apiKeyEnv, '<your-cisco-ai-defense-api-key>', shell);
   }
 
   // Action-mode-only enforcement knobs.
   if (s.mode === 'action') {
     lines.push(`--rule-pack ${s.rulePack}`);
     if (s.blockMessage.trim()) {
-      lines.push(`--block-message ${shellQuote(s.blockMessage)}`);
+      lines.push(`--block-message ${quote(s.blockMessage)}`);
     }
     if (s.humanApproval) {
       lines.push('--human-approval');
@@ -390,23 +463,23 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
   lines.push(`--detection-strategy ${s.detectionStrategy}`);
   if (s.detectionStrategy !== 'regex_only') {
     if (s.judgeModel.trim()) {
-      lines.push(`--judge-model ${shellQuote(s.judgeModel.trim())}`);
+      lines.push(`--judge-model ${quote(s.judgeModel.trim())}`);
     } else {
       warnings.push(
         `Detection strategy ${s.detectionStrategy} requires --judge-model. Pick a judge model below or the CLI will fall back to regex_only.`,
       );
     }
     if (s.judgeApiBase.trim()) {
-      lines.push(`--judge-api-base ${shellQuote(s.judgeApiBase.trim())}`);
+      lines.push(`--judge-api-base ${quote(s.judgeApiBase.trim())}`);
     }
     if (s.judgeApiKeyEnv.trim()) {
-      lines.push(`--judge-api-key-env ${shellQuote(s.judgeApiKeyEnv.trim())}`);
+      lines.push(`--judge-api-key-env ${quote(s.judgeApiKeyEnv.trim())}`);
     }
     const apiKeyEnv = s.judgeApiKeyEnv.trim() || 'DEFENSECLAW_LLM_KEY';
-    preExports.push(`export ${apiKeyEnv}=<your-llm-api-key>`);
+    appendEnvironmentPlaceholder(preExports, warnings, apiKeyEnv, '<your-llm-api-key>', shell);
 
     // Advanced judge provider + provider-typed auth.
-    appendJudgeProviderFlags(s, lines, preExports, warnings);
+    appendJudgeProviderFlags(s, shell, lines, preExports, warnings);
   }
 
   // Advanced knobs.
@@ -420,7 +493,7 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
   }
 
   if (s.workspaceDir.trim()) {
-    lines.push(`--workspace ${shellQuote(s.workspaceDir.trim())}`);
+    lines.push(`--workspace ${quote(s.workspaceDir.trim())}`);
   }
 
   if (!s.restart) lines.push('--no-restart');
@@ -448,31 +521,36 @@ function buildCommand(s: GeneratorState): { lines: string[]; preExports: string[
   return { lines, preExports, warnings };
 }
 
-function renderShellScript(preExports: string[], lines: string[]): string {
+function renderShellScript(
+  shell: ShellFlavor,
+  preExports: string[],
+  lines: string[],
+): string {
   const out: string[] = [];
   for (const e of preExports) {
     out.push(e);
   }
   if (preExports.length > 0) out.push('');
-  // Join the verb + flags as one logical command with `\` line
-  // continuations so the rendered output is a copy-pasteable POSIX
-  // shell command, not a list.
+  const continuation = shell === 'powershell' ? ' `' : ' \\';
+  // Join the verb + flags as one logical command using the selected shell's
+  // continuation character so the rendered output remains copy-pasteable.
   for (let i = 0; i < lines.length; i += 1) {
     const isLast = i === lines.length - 1;
     const indent = i === 0 ? '' : '  ';
-    out.push(`${indent}${lines[i]}${isLast ? '' : ' \\'}`);
+    out.push(`${indent}${lines[i]}${isLast ? '' : continuation}`);
   }
   return out.join('\n');
 }
 
 export function CommandGenerator() {
   const [state, setState] = useState<GeneratorState>(DEFAULT_STATE);
+  const [shell, setShell] = useState<ShellFlavor>('bash');
   const [copied, setCopied] = useState(false);
 
-  const built = useMemo(() => buildCommand(state), [state]);
+  const built = useMemo(() => buildCommand(state, shell), [state, shell]);
   const script = useMemo(
-    () => renderShellScript(built.preExports, built.lines),
-    [built],
+    () => renderShellScript(shell, built.preExports, built.lines),
+    [built, shell],
   );
 
   const update = <K extends keyof GeneratorState>(key: K, value: GeneratorState[K]) => {
@@ -495,14 +573,34 @@ export function CommandGenerator() {
 
   const onReset = () => {
     setState(DEFAULT_STATE);
+    setShell('bash');
     setCopied(false);
   };
 
   const selected = CONNECTORS.find((c) => c.id === state.connector);
+  const unsupportedOnSelectedShell =
+    !state.disableGuardrail &&
+    shell === 'powershell' &&
+    selected?.windowsSupport === 'unsupported';
 
   return (
     <div className="command-generator not-prose my-6 grid gap-6 border border-fd-border bg-fd-card/60 p-5 lg:grid-cols-[1.1fr_1fr]">
       <div className="grid gap-6">
+        <Section title="Output shell" subtitle="Choose the syntax for the host where you will run the command.">
+          <SegmentedControl<ShellFlavor>
+            name="output-shell"
+            options={[
+              { value: 'bash', label: 'Bash / zsh', hint: 'macOS + Linux' },
+              { value: 'powershell', label: 'PowerShell', hint: 'Windows' },
+            ]}
+            value={shell}
+            onChange={(value) => {
+              setShell(value);
+              setCopied(false);
+            }}
+          />
+        </Section>
+
         <Section title="Connector" subtitle="Pick the agent framework.">
           <div className="grid gap-2 sm:grid-cols-2">
             {CONNECTORS.map((c) => (
@@ -511,6 +609,8 @@ export function CommandGenerator() {
                 row={c}
                 selected={state.connector === c.id}
                 onSelect={() => update('connector', c.id)}
+                disabled={shell === 'powershell' && c.windowsSupport === 'unsupported'}
+                showWindowsSupport={shell === 'powershell'}
               />
             ))}
           </div>
@@ -961,6 +1061,9 @@ defenseclaw-gateway restart`}
                 {selected?.label ?? state.connector}
               </span>{' '}
               <span className="text-fd-muted-foreground">/ {state.mode}</span>
+              <span className="text-fd-muted-foreground">
+                {' '}/ {shell === 'powershell' ? 'PowerShell' : 'Bash / zsh'}
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -973,17 +1076,18 @@ defenseclaw-gateway restart`}
               <button
                 type="button"
                 onClick={onCopy}
+                disabled={unsupportedOnSelectedShell}
                 className="rounded-md bg-[var(--brand-cisco)]/15 px-2 py-1 text-xs font-medium text-[var(--brand-cisco-strong)] hover:bg-[var(--brand-cisco)]/25"
                 aria-live="polite"
               >
-                {copied ? 'Copied' : 'Copy'}
+                {unsupportedOnSelectedShell ? 'Unavailable' : copied ? 'Copied' : 'Copy'}
               </button>
             </div>
           </div>
           <pre
             className="m-0 overflow-x-auto whitespace-pre p-4 font-mono text-[12.5px] leading-6 text-fd-foreground"
             tabIndex={0}
-            aria-label="Generated setup command"
+            aria-label={`Generated ${shell === 'powershell' ? 'PowerShell' : 'Bash'} setup command`}
           >
             {script}
           </pre>
@@ -1075,18 +1179,25 @@ function ConnectorOption({
   row,
   selected,
   onSelect,
+  disabled,
+  showWindowsSupport,
 }: {
   row: ConnectorRow;
   selected: boolean;
   onSelect: () => void;
+  disabled: boolean;
+  showWindowsSupport: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onSelect}
       aria-pressed={selected}
+      disabled={disabled}
+      title={showWindowsSupport ? row.windowsNote : undefined}
       className={[
         'flex flex-col items-start gap-1 rounded-lg border px-3 py-2 text-left transition-colors',
+        disabled ? 'cursor-not-allowed opacity-50' : '',
         selected
           ? 'border-[var(--brand-cisco)] bg-[var(--brand-cisco)]/10'
           : 'border-fd-border bg-fd-card hover:border-[var(--brand-cisco)]/40 hover:bg-fd-muted/40',
@@ -1109,6 +1220,11 @@ function ConnectorOption({
         {' · '}
         {row.hooks.supportsFailClosed ? 'fail-closed ok' : 'fail-open only'}
       </span>
+      {showWindowsSupport && (
+        <span className="text-[11px] text-fd-muted-foreground">
+          Windows: {row.windowsSupport}
+        </span>
+      )}
     </button>
   );
 }

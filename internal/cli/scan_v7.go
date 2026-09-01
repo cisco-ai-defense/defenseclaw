@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -56,6 +56,47 @@ type scanFindingV7 struct {
 }
 
 func marshalScanResultV7(r *scanner.ScanResult, binaryVer string) ([]byte, error) {
+	redactor, err := scanoutput.NewEphemeralRedactor()
+	if err != nil {
+		return nil, fmt.Errorf("cli: initialize scan output redaction: %w", err)
+	}
+	return marshalScanResultV7WithOptions(r, binaryVer, scanResultV7Options{Redactor: redactor})
+}
+
+type scanResultV7Options struct {
+	Redactor *scanoutput.Redactor
+	Raw      bool
+}
+
+func marshalScanResultV7WithOptions(
+	r *scanner.ScanResult,
+	binaryVer string,
+	options scanResultV7Options,
+) ([]byte, error) {
+	if r == nil {
+		return nil, fmt.Errorf("cli: marshal scan v7: nil result")
+	}
+	// Rule identity must be derived from the canonical finding, before any
+	// destination-specific redaction changes the title or other synthesis
+	// inputs. Work on a detached copy so rendering never mutates scan results.
+	canonical := scanoutput.Clone(r)
+	for i := range canonical.Findings {
+		finding := &canonical.Findings[i]
+		findingScanner := strings.TrimSpace(finding.Scanner)
+		if findingScanner == "" {
+			findingScanner = canonical.Scanner
+		}
+		finding.RuleID = scanner.EnsureRuleID(finding, findingScanner)
+	}
+
+	projected := canonical
+	if !options.Raw {
+		if options.Redactor == nil {
+			return nil, fmt.Errorf("cli: marshal scan v7: redactor is required")
+		}
+		projected = options.Redactor.Project(canonical)
+	}
+
 	prov := version.Current()
 	sv := version.SchemaVersion
 	gen := prov.Generation
@@ -65,16 +106,19 @@ func marshalScanResultV7(r *scanner.ScanResult, binaryVer string) ([]byte, error
 		bv = binaryVer
 	}
 
-	sid := uuid.New().String()
+	sid := strings.TrimSpace(projected.ScanID)
+	if _, err := uuid.Parse(sid); err != nil {
+		sid = uuid.NewString()
+	}
 	dur := r.Duration.String()
 	agentID := getenvOrNil("DEFENSECLAW_AGENT_ID")
 	agentInst := getenvOrNil("DEFENSECLAW_AGENT_INSTANCE_ID")
 	sidecarInst := getenvOrNil("DEFENSECLAW_SIDECAR_INSTANCE_ID")
 
 	out := scanResultV7{
-		Scanner:           r.Scanner,
-		Target:            r.Target,
-		Timestamp:         r.Timestamp.UTC(),
+		Scanner:           projected.Scanner,
+		Target:            projected.Target,
+		Timestamp:         projected.Timestamp.UTC(),
 		Duration:          &dur,
 		ScanID:            &sid,
 		SchemaVersion:     &sv,
@@ -84,10 +128,10 @@ func marshalScanResultV7(r *scanner.ScanResult, binaryVer string) ([]byte, error
 		AgentID:           agentID,
 		AgentInstanceID:   agentInst,
 		SidecarInstanceID: sidecarInst,
-		Findings:          make([]scanFindingV7, 0, len(r.Findings)),
+		Findings:          make([]scanFindingV7, 0, len(projected.Findings)),
 	}
-	for i := range r.Findings {
-		out.Findings = append(out.Findings, findingToV7(&r.Findings[i], r.Scanner))
+	for i := range projected.Findings {
+		out.Findings = append(out.Findings, findingToV7(&projected.Findings[i], projected.Scanner))
 	}
 
 	b, err := json.MarshalIndent(out, "", "  ")
@@ -103,45 +147,45 @@ func findingToV7(f *scanner.Finding, scannerName string) scanFindingV7 {
 		findingScanner = scannerName
 	}
 	rid := scanner.EnsureRuleID(f, findingScanner)
-	ln := lineNumberFromLocation(f.Location)
+	ln := cloneIntPtr(f.LineNumber)
+	if ln == nil {
+		ln = lineNumberFromLocation(f.Location)
+	}
 	var tags *[]string
 	if len(f.Tags) > 0 {
 		t := append([]string(nil), f.Tags...)
 		tags = &t
 	}
-	// H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
-	// findings"): findings produced by CodeGuard / plugin scanners can
-	// embed the raw matched source line in Description, the raw path in
-	// Location, and operator-supplied text in Remediation. The persistent
-	// audit path already runs each of these through redaction.ForSinkString
-	// (see audit/scan_persist.go:78-80), but the v7 wire output
-	// (`defenseclaw scan code --json`, gateway API scan endpoint)
-	// historically bypassed it and rendered raw text. Apply the same sink
-	// redaction here so secret-bearing matched lines never leak through
-	// stdout, file output, or the API response.
-	//
-	// Title is intentionally NOT redacted to stay symmetric with the
-	// audit DB path, which keeps Title as the operator-searchable
-	// human-readable summary. Scanner conventions render Title as a
-	// rule-name (e.g. "Hardcoded API key detected"), not the matched
-	// value. If a scanner does embed sensitive bytes in Title, fix the
-	// scanner — never widen this redaction to Title without also
-	// updating audit/scan_persist.go (otherwise the two sinks
-	// disagree on what's stored vs. what's emitted).
+	var confidence *float64
+	if f.Confidence != 0 {
+		value := f.Confidence
+		confidence = &value
+	}
+	// Machine-output redaction is applied once to a detached ScanResult by
+	// internal/scanoutput. This conversion must not introduce a second policy:
+	// it only maps the already-projected values into the v7 wire shape.
 	return scanFindingV7{
 		ID:          f.ID,
 		Severity:    string(f.Severity),
 		Title:       f.Title,
-		Description: strPtrOrNil(redaction.ForSinkString(f.Description)),
-		Location:    strPtrOrNil(redaction.ForSinkString(f.Location)),
-		Remediation: strPtrOrNil(redaction.ForSinkString(f.Remediation)),
+		Description: strPtrOrNil(f.Description),
+		Location:    strPtrOrNil(f.Location),
+		Remediation: strPtrOrNil(f.Remediation),
 		Scanner:     findingScanner,
 		Tags:        tags,
 		RuleID:      &rid,
 		LineNumber:  ln,
 		Category:    nil,
-		Confidence:  nil,
+		Confidence:  confidence,
 	}
+}
+
+func cloneIntPtr(input *int) *int {
+	if input == nil {
+		return nil
+	}
+	value := *input
+	return &value
 }
 
 func lineNumberFromLocation(loc string) *int {

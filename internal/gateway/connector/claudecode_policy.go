@@ -287,7 +287,13 @@ func claudeCodeSourceHasHookContract(source *claudeCodeSettingsSource, opts Setu
 	if !ok {
 		return false, fmt.Errorf("Claude Code hooks from %s have unsupported type %T", source.label(), rawHooks)
 	}
-	for _, group := range hookGroups {
+	groups, err := claudeCodeHookGroupsForSetup(opts)
+	if err != nil {
+		return false, err
+	}
+	expectedEvents := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		expectedEvents[group.eventType] = struct{}{}
 		entries, ok := hooks[group.eventType].([]interface{})
 		if !ok || !claudeCodeEventHasEnforcingHook(entries, group.eventType, group.matcher, group.async, opts) {
 			if diagnoseMissing {
@@ -295,6 +301,23 @@ func claudeCodeSourceHasHookContract(source *claudeCodeSettingsSource, opts Setu
 			}
 			return false, nil
 		}
+	}
+	for eventType, rawEntries := range hooks {
+		if _, expected := expectedEvents[eventType]; expected {
+			continue
+		}
+		entries, ok := rawEntries.([]interface{})
+		if !ok || !claudeCodeEventTargetsCurrentRuntime(entries, opts) {
+			continue
+		}
+		if diagnoseMissing {
+			return false, fmt.Errorf(
+				"Claude Code %s contains an unexpected DefenseClaw %s hook outside the selected contract",
+				source.label(),
+				eventType,
+			)
+		}
+		return false, nil
 	}
 	return true, nil
 }

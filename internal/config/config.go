@@ -1592,6 +1592,10 @@ func normalizeConnectorKey(name string) string {
 	switch n {
 	case "open-hands", "open_hands":
 		return "openhands"
+	case "claude-code", "claude_code":
+		return "claudecode"
+	case "gemini-cli", "gemini_cli", "gemini":
+		return "geminicli"
 	default:
 		return n
 	}

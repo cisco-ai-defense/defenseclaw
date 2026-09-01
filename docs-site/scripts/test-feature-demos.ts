@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import matrix from '../data/capability-matrix.json' with { type: 'json' };
 import { featureDemos } from '../data/feature-demos';
@@ -8,13 +9,111 @@ import {
 } from '../components/feature-demo/reducer';
 import { scenarioConnectorMappings } from '../components/feature-demo/types';
 import type { ScenarioStep } from '../components/feature-demo/types';
+import {
+  buildCommand,
+  DEFAULT_STATE,
+  shellQuote,
+} from '../components/command-generator';
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
+const cursorStory = readFileSync(
+  new URL('../content/docs/stories/cursor-secret-exfil.mdx', import.meta.url),
+  'utf8',
+);
 const approvedFixtureHosts = new Set([
   'collector.example.invalid',
   'provider.example.invalid',
   'registry.example.invalid',
 ]);
+
+function buildRemoteCommand(ciscoApiKeyEnv: string, shell: 'bash' | 'powershell') {
+  return buildCommand(
+    {
+      ...DEFAULT_STATE,
+      scannerMode: 'remote',
+      ciscoEndpoint: 'https://aidefense.example.com',
+      ciscoApiKeyEnv,
+    },
+    shell,
+  );
+}
+
+describe('command generator shell safety', () => {
+  it('quotes every operator-provided PowerShell value literally', () => {
+    assert.equal(shellQuote('@args', 'powershell'), "'@args'");
+    assert.equal(shellQuote("O'Brien", 'powershell'), "'O''Brien'");
+    assert.equal(shellQuote('$env:PATH', 'powershell'), "'$env:PATH'");
+    assert.equal(shellQuote('first; Get-ChildItem', 'powershell'), "'first; Get-ChildItem'");
+  });
+
+  it('classifies native Windows support for every active connector', () => {
+    const statuses = new Map(
+      matrix.connectors.map((connector) => [connector.id, connector.windowsSupport]),
+    );
+    assert.equal(statuses.size, matrix.connectors.length);
+    assert.equal(statuses.get('omnigent'), 'degraded');
+    assert.equal(statuses.get('openclaw'), 'unsupported');
+    assert.equal(statuses.get('openhands'), 'unsupported');
+    assert.equal(statuses.get('zeptoclaw'), 'unsupported');
+    for (const status of statuses.values()) {
+      assert.match(status, /^(supported|degraded|unsupported)$/);
+    }
+  });
+
+  it('keeps global teardown available for unsupported Windows connectors', () => {
+    const result = buildCommand(
+      {
+        ...DEFAULT_STATE,
+        connector: 'openclaw',
+        disableGuardrail: true,
+      },
+      'powershell',
+    );
+    assert.deepStrictEqual(result.lines, [
+      'defenseclaw setup guardrail',
+      '--disable',
+    ]);
+    assert.match(result.warnings.join(' '), /turns the guardrail off globally/i);
+    assert.doesNotMatch(result.warnings.join(' '), /unsupported on native Windows/i);
+  });
+
+  it('omits placeholder assignments that can hide the CLI from Bash or zsh', () => {
+    for (const name of ['PATH', 'path']) {
+      const result = buildRemoteCommand(name, 'bash');
+      assert.deepStrictEqual(result.preExports, []);
+      assert.match(result.warnings.join(' '), /controls executable lookup in Bash\/zsh/i);
+      assert.ok(result.lines.includes(`--cisco-api-key-env ${name}`));
+    }
+
+    for (const name of ['Path', 'PATHEXT', 'PATH_API_KEY']) {
+      const valid = buildRemoteCommand(name, 'bash');
+      assert.deepStrictEqual(valid.preExports, [
+        `export ${name}='<your-cisco-ai-defense-api-key>'`,
+      ]);
+    }
+
+    const invalid = buildRemoteCommand('BAD-NAME', 'bash');
+    assert.deepStrictEqual(invalid.preExports, []);
+    assert.match(invalid.warnings.join(' '), /is not portable/i);
+    assert.doesNotMatch(invalid.warnings.join(' '), /controls executable lookup/i);
+  });
+
+  it('omits case-insensitive Windows command-search placeholder assignments', () => {
+    for (const name of ['PATH', 'Path', 'path', 'pAtH', 'PATHEXT', 'PathExt', 'pathext']) {
+      const result = buildRemoteCommand(name, 'powershell');
+      assert.deepStrictEqual(result.preExports, []);
+      assert.match(result.warnings.join(' '), /controls executable lookup in PowerShell/i);
+      assert.ok(result.lines.includes(`--cisco-api-key-env '${name}'`));
+    }
+
+    for (const name of ['MY_PATH_TOKEN', 'PATH_API_KEY']) {
+      const valid = buildRemoteCommand(name, 'powershell');
+      assert.deepStrictEqual(valid.preExports, [
+        `$env:${name} = '<your-cisco-ai-defense-api-key>'`,
+      ]);
+    }
+  });
+});
 
 function allStepSets(scenario: (typeof featureDemos)[number]): ScenarioStep[][] {
   return [scenario.steps, ...(scenario.variants?.map((variant) => variant.steps) ?? [])];
@@ -69,9 +168,17 @@ describe('feature demo catalog', () => {
     const claude = matrix.connectors.find((connector) => connector.id === 'claudecode');
     const codex = matrix.connectors.find((connector) => connector.id === 'codex');
     assert.equal(cursor?.hooks.canBlock, true);
+    assert.equal(cursor?.hooks.supportsFailClosed, true);
     assert.equal(claude?.hooks.canBlock, true);
     assert.equal(claude?.hooks.canAskNative, true);
     assert.equal(codex?.hooks.canAskNative, false);
+
+    const cursorScenario = featureDemos.find((scenario) => scenario.id === 'runtime-secret-exfiltration');
+    assert.equal(cursorScenario?.outcomes.at(-1)?.kind, 'block');
+    assert.match(JSON.stringify(cursorScenario), /native deny/i);
+    assert.equal(cursorScenario?.syntheticDataNotice, 'Guided example · Synthetic event data');
+    assert.match(cursorScenario?.boundaries.didNot.join(' ') ?? '', /conflict detection|human approval/i);
+    assert.doesNotMatch(JSON.stringify(cursorScenario), /certif|official.client|live.evidence/i);
 
     for (const scenario of featureDemos) {
       const evidence = new Map(scenario.evidence.map((item) => [item.id, item]));
@@ -88,6 +195,20 @@ describe('feature demo catalog', () => {
         }
       }
     }
+  });
+
+  it('models Codex as a non-resumable review-only alert', () => {
+    const scenario = featureDemos.find((entry) => entry.id === 'hitl-native-approval');
+    const variant = scenario!.variants!.find((entry) => entry.id === 'codex');
+    const finalStep = variant!.steps.at(-1)!;
+    const outcome = scenario!.outcomes.find((entry) => entry.id === finalStep.outcomeId)!;
+    const codexSurface = JSON.stringify({ variant, outcome, evidence: scenario!.evidence });
+
+    assert.equal(outcome.kind, 'review');
+    assert.match(codexSurface, /alert\/systemMessage/i);
+    assert.match(codexSurface, /raw_action=confirm/i);
+    assert.match(codexSurface, /cannot resume|non-resumable/i);
+    assert.doesNotMatch(codexSurface, /Prompt through DefenseClaw TUI/i);
   });
 
   it('preserves admission workflow boundaries', () => {
@@ -114,6 +235,17 @@ describe('feature demo catalog', () => {
         }
       }
     }
+  });
+
+  it('labels the supported Cursor walkthrough as synthetic without claiming validation evidence', () => {
+    assert.match(cursorStory, /title="Synthetic walkthrough"/);
+    assert.match(cursorStory, /not an executable fixture, official-client test,\s*or certification record/);
+    assert.match(cursorStory, /Cursor is supported, while validated evidence remains empty/);
+    assert.match(cursorStory, /separate authenticated acceptance campaign/);
+    assert.match(cursorStory, /permission: \"deny\"/);
+    assert.match(cursorStory, /conflict-detection\s+API/);
+    assert.match(cursorStory, /does not enable native ask\/HITL/);
+    assert.doesNotMatch(cursorStory, /Keep the user hook advisory|would-block|allow \+ advisory evidence/);
   });
 });
 

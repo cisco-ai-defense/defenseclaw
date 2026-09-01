@@ -22,9 +22,10 @@ tokens are separate from the `keys list` registry.
 
 ## Where keys live
 
-```
-~/.defenseclaw/.env       # 0o600 file. Never commit. Never log.
-```
+| Platform | Credential file | Protection |
+| --- | --- | --- |
+| macOS/Linux | `~/.defenseclaw/.env` | Mode `0o600` |
+| Native Windows | `%USERPROFILE%\.defenseclaw\.env` | Owner-private DACL; inherited broad access is removed |
 
 Created on demand by `defenseclaw keys set <ENV>` using an atomic tmp+rename
 write. New CLI processes read the updated value immediately. Long-running
@@ -33,19 +34,23 @@ configuration reload, so restart the gateway after rotating a key unless the
 specific setup command documents hot reload. Run `defenseclaw doctor` to verify
 the new credential.
 
-The CLI also supports overriding any value at runtime by `export`-ing it in your shell. That's the highest-priority source.
+The CLI also supports process-environment overrides. Use `export NAME='value'`
+on macOS/Linux or `$env:NAME = 'value'` in PowerShell. That is the
+highest-priority source.
 
-<Callout title="No macOS Keychain, no AWS Secrets Manager">
-DefenseClaw does **not** read or write the macOS Keychain, AWS Secrets Manager, HashiCorp Vault, or any other external secret store. If you want secrets sourced from one of those, fetch them in your shell init and `export` the result — the CLI will pick them up via the env-var resolution path.
+<Callout title="No OS keychain or external secret manager">
+DefenseClaw does **not** read or write macOS Keychain, Windows Credential
+Manager, AWS Secrets Manager, HashiCorp Vault, or another external secret
+store. Fetch those secrets before startup and expose them through the process
+environment using the syntax for your shell.
 </Callout>
 
 ## Resolution order
 
-```
-1. process environment           ← highest priority
-2. ~/.defenseclaw/.env
-3. unset                          ← REQUIRED keys here mark the install MISSING
-```
+1. Process environment — highest priority.
+2. The current user's `.defenseclaw/.env` file (`~` on macOS/Linux,
+   `%USERPROFILE%` on Windows).
+3. Unset — required keys here mark the installation missing.
 
 Implemented for the Python CLI by
 `cli/defenseclaw/credentials.py::resolve`. `keys list`, `quickstart`, and
@@ -55,6 +60,10 @@ precedence for supported credentials; a long-running process may therefore
 need the documented reload or restart after a change.
 
 ## The four `keys` subcommands
+
+<Tabs items={['macOS / Linux', 'Windows PowerShell']}>
+
+<Tab value="macOS / Linux">
 
 ```bash
 defenseclaw keys list                            # tabular: env name, feature, requirement, source
@@ -69,6 +78,28 @@ defenseclaw keys fill-missing --yes              # skip the upfront confirmation
 
 defenseclaw keys check                           # exit 0 iff every REQUIRED is set
 ```
+
+</Tab>
+
+<Tab value="Windows PowerShell">
+
+```powershell
+defenseclaw keys list
+defenseclaw keys list --json
+defenseclaw keys list --missing-only
+
+defenseclaw keys set DEFENSECLAW_LLM_KEY
+defenseclaw keys set DEFENSECLAW_LLM_KEY --value $env:LLM_KEY
+
+defenseclaw keys fill-missing
+defenseclaw keys fill-missing --yes
+
+defenseclaw keys check
+```
+
+</Tab>
+
+</Tabs>
 
 `keys set` logs a `config.update` activity with target `dotenv:<ENV>` and only
 the before/after presence state; the value itself is never logged.

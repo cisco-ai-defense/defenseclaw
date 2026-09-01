@@ -56,6 +56,40 @@ try {
     Assert-DisposableChildAcl $payload $childSid `
         ([Security.AccessControl.FileSystemRights]::ReadAndExecute) -ExpectInheritance
 
+    $administrativeCleanup = Join-Path $sandbox 'administrative-cleanup'
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    Set-DisposableProtectedDirectoryAcl $administrativeCleanup $currentSid `
+        ([Security.AccessControl.FileSystemRights]::FullControl) `
+        -InheritChildRights -UseAdministratorsForCleanup
+    Assert-DisposableChildAcl $administrativeCleanup $currentSid `
+        ([Security.AccessControl.FileSystemRights]::FullControl) `
+        -ExpectInheritance -AllowOwnershipBootstrap
+    $administrativeSecurity = [IO.FileSystemAclExtensions]::GetAccessControl(
+        [IO.DirectoryInfo]::new($administrativeCleanup),
+        [Security.AccessControl.AccessControlSections]::Access -bor
+            [Security.AccessControl.AccessControlSections]::Owner
+    )
+    $administrativeOwner = $administrativeSecurity.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    )
+    if (-not $administrativeOwner.Equals($currentSid)) {
+        throw 'administrative cleanup ACL did not preserve the child as owner'
+    }
+    $administrativeRules = @($administrativeSecurity.GetAccessRules(
+        $true,
+        $false,
+        [Security.Principal.SecurityIdentifier]
+    ))
+    if (@($administrativeRules | Where-Object {
+            $_.IdentityReference.Equals($administratorsSid) -and
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq
+                [Security.AccessControl.FileSystemRights]::FullControl
+        }).Count -ne 1) {
+        throw 'administrative cleanup ACL did not retain the trusted cleanup principal'
+    }
+
     $leaseBoundary = Join-Path $base 'lease-boundary'
     $leaseMiddle = Join-Path $leaseBoundary 'middle'
     $leaseBase = Join-Path $leaseMiddle 'state-base'

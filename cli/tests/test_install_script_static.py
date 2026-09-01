@@ -25,7 +25,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib
 
-from defenseclaw.platform_support import supported_connectors
+from defenseclaw.platform_support import UNSUPPORTED, WINDOWS_CONNECTOR_SUPPORT
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
@@ -109,11 +109,24 @@ def test_windows_native_workflow_builds_exact_setup_before_lifecycle_acceptance(
     package = package_match.group(0)
     acceptance = acceptance_match.group(0)
 
+    checkout = package.index("name: Verify exact package source checkout")
     artifacts = package.index("-Operation build-artifacts")
     installer = package.index("-Operation build-installer")
+    identity = package.index("name: Verify exact package source identity")
     wizard = package.index("-Mode wizard-smoke")
     upload = package.index("name: windows-native-package")
-    assert artifacts < installer < wizard < upload
+    assert checkout < artifacts < installer < identity < wizard < upload
+    assert (
+        "DC_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}"
+        in package
+    )
+    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in package
+    assert "provenance.source_commit -cne $expected" in package
+    assert '"DefenseClaw source commit: $expected"' in package
+    assert "Packaged CLI wheel digest does not match exact-head provenance" in package
+    assert "Packaged gateway archive digest does not match exact-head provenance" in package
+    assert "@('--version-json')" in package
+    assert "[string]$report.commit -cne $expected" in package
     assert "installer smoke stub" not in package
     assert "needs: package-artifact" in acceptance
     assert "name: windows-native-package" in acceptance
@@ -250,23 +263,75 @@ def test_release_installers_track_known_connector_choices() -> None:
 
     assert shell_choices == (*CONNECTOR_CHOICES, "none")
 
-    windows_choices = tuple(supported_connectors(CONNECTOR_CHOICES, "windows"))
-    assert ps_choices == (*windows_choices, "none")
+    expected_windows_choices = {
+        name
+        for name, support in WINDOWS_CONNECTOR_SUPPORT.items()
+        if support.status != UNSUPPORTED
+    }
+    assert ps_choices[-1] == "none"
+    assert len(ps_choices) == len(set(ps_choices))
+    assert set(ps_choices[:-1]) == expected_windows_choices
     assert hook_choices == ()
 
 
-def test_posix_install_and_upgrade_validate_cli_before_launcher_publication() -> None:
+def test_posix_install_and_upgrade_validate_cli_and_skill_scanner_before_publication() -> None:
     install_text = INSTALL_SH.read_text(encoding="utf-8")
     install_cli = install_text.split("install_python_cli()", 1)[1].split("# ── Install: OpenClaw Plugin", 1)[0]
     validation = '"${DEFENSECLAW_VENV}/bin/defenseclaw" --help'
+    scanner_validation = '"${DEFENSECLAW_VENV}/bin/skill-scanner" --version'
     assert install_cli.index("uv pip install") < install_cli.index(validation)
-    assert install_cli.index(validation) < install_cli.index("fresh-symlink")
+    assert install_cli.index(validation) < install_cli.index(scanner_validation)
+    assert install_cli.index(scanner_validation) < install_cli.index(
+        '"${DEFENSECLAW_VENV}/bin/skill-scanner" "${INSTALL_DIR}/skill-scanner"'
+    )
+    assert '"${INSTALL_DIR}/skill-scanner" --version' in install_cli
 
     upgrade_text = UPGRADE_SH.read_text(encoding="utf-8")
     install_start = upgrade_text.index('VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"')
     launcher = upgrade_text.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', install_start)
     upgrade_install = upgrade_text[install_start:launcher]
     assert upgrade_install.index("pip install") < upgrade_install.index(validation)
+    repair_call = upgrade_text.index("repair_skill_scanner_launcher\n", launcher)
+    migrations = upgrade_text.index("# ── Run migrations", launcher)
+    assert launcher < repair_call < migrations
+    repair_guard = upgrade_text[launcher:repair_call]
+    assert '[[ "${BRIDGE_PHASE1}" -ne 1 || -z "${STAGED_FINAL_VERSION}" ]]' in repair_guard
+
+    repair_function = upgrade_text.split("repair_skill_scanner_launcher()", 1)[1].split("\n}", 1)[0]
+    assert '"${scanner}" --version' in repair_function
+    assert "-m defenseclaw.install_publish repair-console-symlink" in repair_function
+    assert '"${INSTALL_DIR}/skill-scanner" --version' in repair_function
+    assert "--console-script skill-scanner" in repair_function
+
+    same_version = upgrade_text.split('same_version_recovery="clean"', 1)[1].split(
+        'if [[ "${CURRENT_VERSION}" != "unknown"',
+        1,
+    )[0]
+    assert "repair_skill_scanner_launcher" in same_version
+    recovery = same_version.split('if [[ "${same_version_recovery}" == "recover" ]]', 1)[1].split(
+        'section "Version Already Verified"',
+        1,
+    )[0]
+    assert recovery.index('if [[ "${recovery_status}" -eq 0 ]]') < recovery.index(
+        "repair_skill_scanner_launcher"
+    ) < recovery.index('exit "${recovery_status}"')
+
+    fresh_smoke = (ROOT / "scripts/test-fresh-install-release.sh").read_text(encoding="utf-8")
+    scanner_smoke = fresh_smoke.split("assert_managed_skill_scanner_launcher()", 1)[1].split("\n}", 1)[0]
+    assert '[[ -L "${launcher}" ]]' in scanner_smoke
+    assert 'readlink "${launcher}"' in scanner_smoke
+    assert '"${launcher}" --version' in scanner_smoke
+    assert fresh_smoke.count("assert_managed_skill_scanner_launcher \"") == 2
+
+
+def test_windows_native_install_and_repair_publish_and_execute_skill_scanner_launcher() -> None:
+    setup = (ROOT / "cmd/defenseclaw-setup/main.go").read_text(encoding="utf-8")
+    acceptance = (ROOT / "scripts/windows-native-ci.ps1").read_text(encoding="utf-8")
+
+    assert '"skill-scanner.exe"' in setup
+    assert "publishNativeLaunchers(staging)" in setup
+    assert "stageInstallTree(payload" in setup
+    assert "Invoke-Installed (Join-Path $installRoot 'bin\\skill-scanner.exe') @('--help')" in acceptance
 
 
 def test_posix_upgrade_binds_sigstore_to_exact_release_workflow() -> None:

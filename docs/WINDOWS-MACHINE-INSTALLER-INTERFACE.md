@@ -12,7 +12,7 @@ windows`, and every one of them requires an elevated caller except `status`.
 
 | Command | Purpose |
 | --- | --- |
-| `install` | Create the protected tree, register both services, and start them. |
+| `install` | Create the protected tree, register all four SCM services, and start them. |
 | `upgrade` | Replace artifacts and re-register in one transaction. |
 | `repair` | Reapply ACL, service, environment, and recovery invariants. |
 | `reconcile` | Restart the guardian and wait for a fresh reconcile pass. |
@@ -44,9 +44,12 @@ The lifecycle is implemented in PowerShell, and an installed Windows
 `defenseclaw.exe` carries both script files inside the binary. This lets the
 installed CLI service an existing deployment without loose sidecar scripts.
 It does not make that CLI a first-install package: initial installation also
-requires the gateway, hook, CLI source, protected configuration, and target
-manifest. `DefenseClawSetup-Enterprise-x64.exe` is the self-contained delivery
-artifact that carries those release sources and invokes this lifecycle.
+requires the CMID broker, trusted provider library, gateway, hook, CLI source,
+protected configuration, and target manifest.
+`DefenseClawSetup-Enterprise-x64.exe` is the self-contained delivery artifact
+that carries the DefenseClaw release sources and invokes this lifecycle; the
+provider library remains in its independently trusted Cisco Secure Client
+installation.
 
 Resolution order for the entry script:
 
@@ -70,84 +73,82 @@ environment, profile, or working directory.
 
 The public `DefenseClawSetup-x64.exe` is the non-elevating per-user product. It
 must never be relabeled as the enterprise installer. The separate
-`DefenseClawSetup-Enterprise-x64.exe` requests administrator elevation, embeds
-the three machine-lifecycle executables plus the enterprise PowerShell pair,
-and delegates every mutation to the transaction documented above. Its gateway
-links the private CMID provider so it can authenticate to AI Defense; that
-requires a `-tags cmid` build with the private cloudreg overlay and a pinned
-`github.com/cisco-aispg/ai-common/cmid` pseudo-version.
+`DefenseClawSetup-Enterprise-x64.exe` requests administrator elevation and
+embeds six signed inner files: the credential broker, gateway, native hook,
+enterprise CLI, installer script, and PowerShell module. It delegates every
+mutation to the transaction documented above. The gateway and isolated broker
+use the private CMID overlay and a pinned
+`github.com/cisco-aispg/ai-common/cmid` pseudo-version to authenticate to AI
+Defense.
 
-The build is split so the Windows tester never needs SSH access to the
-private `cisco-aispg/ai-common` repo:
+The former native-Windows builder was removed. The current release flow is an
+AVC signing handoff: DefenseClaw creates an unsigned, offline-buildable kit on
+macOS or Linux; AVC signs the inner payload, assembles the outer Setup in its
+pipeline, then signs and finalizes the outer artifact.
 
-### macOS (or Linux) — prep the managed gateway zip
+### DefenseClaw — prepare the AVC build kit
 
-`packaging/scripts/build-managed-windows-bundle.sh` clones `cisco-aispg/ai-common` at
-`--ref` (default `develop`), computes the Go pseudo-version for that ref,
-snapshots the OSS cloudreg stub + `go.mod` + `go.sum`, applies the private
-overlay, runs `go get` to pin the ai-common/cmid module, and cross-builds
-`defenseclaw.exe` + `defenseclaw-hook.exe` with `GOOS=windows GOARCH=amd64
--tags cmid`. The two binaries get VERSIONINFO + icon stamped via the
-cross-platform `internal/tools/windowsresources` tool (Go, works on any host
-that can produce Windows PEs). The result is packaged into the goreleaser-
-shaped `defenseclaw_<version>_windows_amd64.zip` alongside a
-`gateway-source-commit.txt` recording the defenseclaw HEAD used. The
-snapshot is restored on exit — whether the build succeeded or failed — so
-the OSS working tree stays clean.
+From the exact release commit, on a host with access to
+`cisco-aispg/ai-common`, run:
 
-```
-packaging/scripts/build-managed-windows-bundle.sh \
-    --ref develop \
-    --version 0.9.0-rc1 \
-    --dist-dir ./dist
+```bash
+make packaging-windows-avc-buildkit VERSION=0.9.0-rc1
 ```
 
-Or via Make:
+This invokes `packaging/scripts/build-managed-windows-bundle.sh`, applies the
+private CMID overlay in a restorable snapshot, cross-builds and stamps
+`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and
+`defenseclaw-cmid-broker.exe`, and writes:
 
-```
-make packaging-managed-windows-bundle VERSION=0.9.0-rc1
-```
-
-Requires: `git`, `go`, and either SSH access to
-`git@github.com-aispg:cisco-aispg/ai-common.git` or an HTTPS-token path.
-
-### Windows — consume the pre-staged zip
-
-Copy `defenseclaw_<version>_windows_amd64.zip` and
-`gateway-source-commit.txt` into one directory, sync the DefenseClaw working
-tree to the commit listed in the sidecar, and run the separate enterprise
-builder:
-
-```powershell
-$expected = (Get-Content .\dist\gateway-source-commit.txt -Raw).Trim()
-git checkout $expected
-
-.\scripts\build-windows-enterprise-installer.ps1 `
-    -DistRoot .\dist `
-    -OutRoot .\dist\windows-enterprise-installer `
-    -StateRoot .\dist\windows-enterprise-installer-state `
-    -Version 0.9.0-rc1
+```text
+dist/windows-enterprise-buildkit-0.9.0-rc1/
 ```
 
-The enterprise builder always cross-checks local `git HEAD` against the
-sidecar and has no bypass. The commit is repeated in the embedded manifest and
-external provenance record.
+The kit contains the six unsigned files under `payload/`, the trimmed vendored
+Go source needed to build the outer Setup offline, one root-level assembler,
+both shell families' reproducibility/signature/finalize helpers,
+`payload-metadata.json`, and the generated `README-AVC.md`. The bundler also
+emits the legacy gateway ZIP and source-commit sidecar for compatibility; those
+are not the input to the signed Setup flow.
 
-Or via Make on the Windows box:
+Requires `git`, `go`, and `zip`, plus either SSH access to
+`git@github.com-aispg:cisco-aispg/ai-common.git` or an approved HTTPS-token
+path. The script restores the OSS cloudreg stub and `go.mod`/`go.sum` on every
+exit and refuses to overwrite a pre-existing repository `vendor` path.
 
+### AVC — sign inner, assemble, sign outer, finalize
+
+Follow [Windows AVC packaging handoff](WINDOWS-AVC-PACKAGING-HANDOFF.md). The
+ordering is part of the artifact contract:
+
+1. Sign every expected file under `payload/` and verify the Cisco signer.
+2. Export the commit-derived `SOURCE_DATE_EPOCH`, then run the shipped
+   `assemble.sh` or `assemble.ps1`. The assembler validates the exact payload
+   inventory and signatures, emits the embedded manifest, and builds
+   `out/DefenseClawSetup-Enterprise-x64.exe` from vendored source.
+3. Sign the outer Setup EXE.
+4. Run the shipped `finalize.sh`/`finalize.ps1`, or equivalent AVC logic, to
+   write the signed EXE's `.sha256` and populate `setup_sha256` and
+   `setup_size` in provenance.
+
+AVC returns the signed `DefenseClawSetup-Enterprise-x64.exe`, its `.sha256`,
+and `.provenance.json`. The runtime accepts only an exact
+`managed-enterprise` payload with the six-file manifest.
+
+### Local unsigned developer build
+
+For disposable certification only:
+
+```bash
+make packaging-windows-enterprise-installer VERSION=0.9.0-rc1
 ```
-make packaging-windows-managed-bundle VERSION=0.9.0-rc1
-```
 
-The Windows box does not need access to `cisco-aispg/ai-common`. Everything
-CMID-specific already happened on the macOS side; the Windows flow only
-consumes the gateway zip and produces the setup.exe.
-
-The result is `DefenseClawSetup-Enterprise-x64.exe` plus its `.sha256` and
-`.provenance.json` files. `cmd/defenseclaw-enterprise-setup` accepts only the
-`managed-enterprise` payload flavor. For disposable certification, add
-`-SkipSigning`; that artifact then requires the existing exact run-scoped
-`--allow-unsigned` lifecycle contract and cannot target production roots.
+This emits the build kit and runs the assembler locally with
+`--allow-unsigned`, producing a runnable artifact below
+`dist/windows-enterprise-buildkit-0.9.0-rc1-unsigned/out/`. It is stamped
+`managed-enterprise-unsigned`, requires the exact run-scoped
+`--allow-unsigned` lifecycle contract, and cannot target production names or
+roots. It must not enter a release channel.
 
 ## AVC env_config.json contract
 

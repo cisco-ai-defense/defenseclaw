@@ -74,6 +74,7 @@ def _selects_full_connector_matrix(path: str) -> bool:
         "scripts/build-windows-installer.ps1",
         "scripts/initialize-windows-native-ci-paths.ps1",
         "scripts/install.ps1",
+        "scripts/install-pinned-windows-cosign.ps1",
         "scripts/invoke-windows-setup-standard-user-ci.ps1",
         "scripts/test-fresh-install-release-windows.ps1",
         "scripts/test-upgrade-release-windows.ps1",
@@ -135,13 +136,13 @@ def test_amp_is_reachable_through_contract_and_manual_live_layers() -> None:
     assert "if: ${{ github.event_name == 'workflow_dispatch' }}" in live
     assert "{ connector: amp,        os: ubuntu-latest,  dcos: linux }" in live
     assert "{ connector: amp,        os: macos-latest,   dcos: macos }" in live
-    assert "AMP_API_KEY: ${{ secrets.AMP_API_KEY }}" in live
+    assert "AMP_API_KEY: ${{ matrix.connector == 'amp' && secrets.AMP_API_KEY || '' }}" in live
     assert "AMP_VERSION:" in live
 
     windows = workflow.split("  windows-live:", 1)[1].split("  report:", 1)[0]
     assert "github.event_name == 'workflow_dispatch'" in windows
-    assert "connector: [codex, claudecode, amp]" in windows
-    assert "AMP_API_KEY: ${{ secrets.AMP_API_KEY }}" in windows
+    assert "connector: [codex, claudecode, amp, cursor, opencode]" in windows
+    assert "AMP_API_KEY: ${{ matrix.connector == 'amp' && secrets.AMP_API_KEY || '' }}" in windows
     assert "AMP_VERSION: ${{ inputs.version }}" in windows
 
     run = (ROOT / "scripts/live-connector-e2e/run.sh").read_text(encoding="utf-8")
@@ -167,3 +168,52 @@ def test_amp_is_reachable_through_contract_and_manual_live_layers() -> None:
     assert 'amp -x "${prompt}" --plugin-ready-timeout 30' in driver
     assert "DC_DRIVER_SUPPORTS_BLOCK=1" in driver
     assert "DC_DRIVER_SUPPORTS_OTLP=0" in driver
+
+
+def test_unix_contract_matrix_covers_executable_shell_hook_connectors() -> None:
+    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(
+        encoding="utf-8"
+    )
+    full_match = re.search(r"^\s*full='([^']+)'$", workflow, flags=re.MULTILINE)
+    assert full_match is not None
+    expected = {
+        "codex",
+        "claudecode",
+        "amp",
+        "cursor",
+        "copilot",
+        "openhands",
+        "hermes",
+        "devin",
+        "antigravity",
+    }
+    assert set(json.loads(full_match.group(1))["connector"]) == expected
+
+    run = (ROOT / "scripts/live-connector-e2e/run.sh").read_text(encoding="utf-8")
+    shell_match = re.search(r"^ALL_CONNECTORS=\(([^)]*)\)$", run, flags=re.MULTILINE)
+    assert shell_match is not None
+    assert set(shell_match.group(1).split()) == expected
+
+    dispatch = workflow.split("      connector:", 1)[1].split("      os:", 1)[0]
+    for connector in expected:
+        assert f"          - {connector}" in dispatch
+    # OpenCode and OmniGent use plugin/policy transports rather than the shell
+    # hook entrypoint exercised by contract-smoke.sh. Neither belongs in this
+    # generic executable-hook matrix.
+    assert "opencode" not in json.loads(full_match.group(1))["connector"]
+    assert "omnigent" not in json.loads(full_match.group(1))["connector"]
+    assert "          - openclaw" not in dispatch
+    assert "          - zeptoclaw" not in dispatch
+    assert "          - geminicli" not in dispatch
+
+
+def test_copilot_contract_normalizes_fixture_event_to_native_registration() -> None:
+    fixture = json.loads(
+        (ROOT / "scripts/live-connector-e2e/golden/copilot/pre_tool_allow.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert fixture["hook_event_name"] == "preToolUse"
+
+    common = (ROOT / "scripts/live-connector-e2e/lib/common.sh").read_text(encoding="utf-8")
+    assert 'copilot:PreToolUse) bound_event="preToolUse" ;;' in common

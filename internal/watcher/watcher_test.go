@@ -29,12 +29,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger *audit.Logger, skillDir string) {
 	t.Helper()
 
-	tmpDir := t.TempDir()
+	tmpDir := testenv.PrivateTempDir(t)
 	skillDir = filepath.Join(tmpDir, "skills")
 	if err := os.MkdirAll(skillDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -127,6 +128,60 @@ func TestClassifyEvent_SkillDir(t *testing.T) {
 	}
 }
 
+func TestClassifyEvent_ClaudeSkillsAndCacheUseExactBoundaries(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cacheRoot := filepath.Join(t.TempDir(), "plugins", "cache")
+	plain := filepath.Join(skillDir, "plain")
+	plugin := filepath.Join(skillDir, "plugin")
+	cacheVersion := filepath.Join(cacheRoot, "marketplace", "cached", "1.2.3")
+	for _, dir := range []string{plain, plugin, cacheVersion} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifestDir := filepath.Join(plugin, ".claude-plugin")
+	if err := os.MkdirAll(manifestDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, "plugin.json"), []byte(`{"name":"semantic-name"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(
+		cfg,
+		[]string{skillDir},
+		[]string{skillDir, cacheRoot},
+		store,
+		logger,
+		nil,
+		nil,
+		nil,
+	)
+
+	if got := w.classifyEvent(plain).Type; got != InstallSkill {
+		t.Fatalf("plain Claude skill classified as %q", got)
+	}
+	if got := w.classifyEvent(plugin).Type; got != InstallPlugin {
+		t.Fatalf("skills-directory Claude plugin classified as %q", got)
+	}
+	if got := w.classifyEvent(plugin).Name; got != "semantic-name@skills-dir" {
+		t.Fatalf("skills-directory Claude plugin identity = %q", got)
+	}
+	cacheEvent := w.classifyEvent(cacheVersion)
+	if cacheEvent.Type != InstallPlugin {
+		t.Fatalf("Claude cache version classified as %q", cacheEvent.Type)
+	}
+	if cacheEvent.Name != "cached@marketplace" {
+		t.Fatalf("Claude cache plugin identity = %q", cacheEvent.Name)
+	}
+	if !w.isDirectChildDir(cacheVersion) {
+		t.Fatal("exact Claude cache version was not an admission boundary")
+	}
+	if w.isDirectChildDir(filepath.Dir(cacheVersion)) {
+		t.Fatal("Claude cache plugin container was treated as an admission boundary")
+	}
+}
+
 func TestAdmission_BlockedSkill(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
@@ -170,6 +225,74 @@ func TestAdmission_AllowedSkill(t *testing.T) {
 
 	if result.Verdict != VerdictAllowed {
 		t.Errorf("expected verdict %q, got %q", VerdictAllowed, result.Verdict)
+	}
+}
+
+func TestAdmission_BundledSkillIsDiscoveryOnly(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	t.Setenv("CODEX_HOME", filepath.Dir(skillDir))
+	cfg.Guardrail.Connector = "codex"
+	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
+
+	skillPath := filepath.Join(skillDir, enforce.BundledSkillContainer, "imagegen")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	evt := InstallEvent{
+		Type: InstallSkill, Name: "imagegen", Path: skillPath, Timestamp: time.Now(),
+	}
+
+	result := w.runAdmission(context.Background(), evt)
+
+	if result.Verdict != VerdictAllowed || result.Reason != "vendor-bundled skill is discovery-only" {
+		t.Fatalf("bundled admission = %+v", result)
+	}
+	if w.isDirectChildDir(filepath.Join(skillDir, enforce.BundledSkillContainer)) {
+		t.Fatal(".system container entered realtime watcher admission")
+	}
+	if action, err := store.GetAction("skill", "imagegen"); err != nil || action != nil {
+		t.Fatalf("bundled skill action = %+v, err=%v", action, err)
+	}
+	scans, err := store.LatestScansByScanner("skill-scanner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scans) != 0 {
+		t.Fatalf("bundled skill produced scanner rows: %+v", scans)
+	}
+}
+
+func TestAdmission_ExactManagedPluginIsDiscoveryOnly(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(pluginDir, "defenseclaw.js")
+	foreign := filepath.Join(pluginDir, "foreign.js")
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil, nil)
+	w.SetManagedArtifacts([]string{managed, managed})
+
+	result := w.runAdmission(context.Background(), InstallEvent{
+		Type: InstallPlugin, Name: "defenseclaw", Path: managed, Timestamp: time.Now(),
+	})
+	if result.Verdict != VerdictAllowed || result.Reason != "connector-managed plugin is lifecycle-owned and discovery-only" {
+		t.Fatalf("managed plugin admission = %+v", result)
+	}
+	if w.isManagedArtifact(foreign) {
+		t.Fatalf("managed artifact exemption escaped to sibling %s", foreign)
+	}
+	if len(w.managedArtifacts) != 1 {
+		t.Fatalf("managed artifact set = %v, want one exact path", w.managedArtifacts)
+	}
+}
+
+func TestBundledSkillWatchPathDoesNotExemptArbitrarySystemDirectory(t *testing.T) {
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+	target := filepath.Join(t.TempDir(), "skills", ".system", "operator-skill")
+	if isBundledSkillWatchPath(target) {
+		t.Fatalf("arbitrary .system path was incorrectly exempted: %s", target)
 	}
 }
 
@@ -571,6 +694,69 @@ func TestWatcherQuarantineRecordsConnectorHashAndRestoresWithoutRequarantine(t *
 	}
 	if records, err := store.ListQuarantineRecordsForConnector(
 		context.Background(), "skill", "review-pr", "codex",
+	); err != nil || len(records) != 0 {
+		t.Fatalf("retired records = %#v err=%v", records, err)
+	}
+}
+
+func TestWatcherQuarantineKeepsLogicalAssetIdentitySeparateFromPhysicalDirectory(t *testing.T) {
+	cfg, store, logger, skillDir := setupQuarantineProvenanceTestEnv(t)
+	cfg.Guardrail.Connector = "hermes"
+	physicalName := "defenseclaw-skill-scanner-test-20260901080229"
+	logicalName := "agent-security-refusals"
+	skillPath := filepath.Join(skillDir, physicalName)
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(skillPath, "SKILL.md"),
+		[]byte("---\nname: agent-security-refusals\n---\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	w := New(
+		cfg, []string{skillDir}, nil, store, logger,
+		sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir), nil, nil,
+	)
+	evt := InstallEvent{
+		Type: InstallSkill, Name: logicalName, Path: skillPath,
+		Connector: "hermes", Timestamp: time.Now().UTC(),
+	}
+	w.quarantineAsset(context.Background(), evt)
+
+	records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", logicalName, "hermes",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("quarantine records = %#v", records)
+	}
+	record := records[0]
+	wantQuarantine := filepath.Join(cfg.QuarantineDir, "skills", "hermes", physicalName)
+	if record.TargetName != logicalName || record.OriginalPath != filepath.Clean(skillPath) ||
+		record.QuarantinePath != wantQuarantine || record.State != audit.QuarantineStateActive {
+		t.Fatalf("quarantine record = %#v", record)
+	}
+	if _, err := os.Lstat(skillPath); !os.IsNotExist(err) {
+		t.Fatalf("logical-name source still exists: %v", err)
+	}
+	if matches, err := enforce.AssetContentHashMatches(wantQuarantine, record.ContentHash); err != nil || !matches {
+		t.Fatalf("quarantine hash match=%t err=%v", matches, err)
+	}
+
+	if err := w.RestoreQuarantined(
+		context.Background(), "skill", logicalName, "hermes", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if matches, err := enforce.AssetContentHashMatches(skillPath, record.ContentHash); err != nil || !matches {
+		t.Fatalf("restore hash match=%t err=%v", matches, err)
+	}
+	if records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", logicalName, "hermes",
 	); err != nil || len(records) != 0 {
 		t.Fatalf("retired records = %#v err=%v", records, err)
 	}

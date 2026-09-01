@@ -11,7 +11,7 @@
 """Install / disable / uninstall lifecycle smoke matrix (plan C5 / S7.6).
 
 Pre-existing tests (``test_cmd_uninstall.py``) cover the planning surface;
-this module covers the **round-trip** side of the lifecycle for every
+this module covers the **round-trip** side of the lifecycle for every active
 built-in connector. We exercise the Python CLI plumbing — config write,
 config persistence, uninstall planning — for every built-in
 connector without invoking the destructive
@@ -50,7 +50,6 @@ CONNECTORS = (
     "hermes",
     "cursor",
     "windsurf",
-    "geminicli",
     "copilot",
     "openhands",
     "antigravity",

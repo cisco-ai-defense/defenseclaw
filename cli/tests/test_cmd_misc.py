@@ -316,8 +316,11 @@ class TestAlertsCommand(unittest.TestCase):
                   details="connector=claudecode y=2")
         c = Event(action="sink-failure", target="/c", severity="HIGH",
                   details="sink_kind=splunk_hec")  # no connector attribution
+        persisted = Event(action="connector-hook", target="/d", severity="HIGH",
+                          connector="cursor", details="action=block")
 
         self.assertEqual(_event_connector(a), "codex")
+        self.assertEqual(_event_connector(persisted), "cursor")
         self.assertEqual(_event_connector(c), "")
         # Substring + case-insensitive, and a no-op for empty needle.
         self.assertEqual(_filter_by_connector([a, b, c], "codex"), [a])
@@ -681,12 +684,11 @@ class TestAIBOMCommand(unittest.TestCase):
     @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
     @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
     @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
-    def test_scan_retries_change_when_observability_admission_fails(
+    def test_scan_retries_change_when_any_telemetry_logger_call_fails(
         self, mock_build, mock_to_scan, mock_enrich
     ):
         from defenseclaw.commands.cmd_aibom import aibom
         from defenseclaw.inventory.claw_inventory import claw_aibom_digest
-        from defenseclaw.logger import CanonicalObservabilityUnavailableError
         from defenseclaw.models import ScanResult
 
         baseline = self._make_inventory(skills=[{"id": "baseline"}])
@@ -709,14 +711,13 @@ class TestAIBOMCommand(unittest.TestCase):
             self.assertEqual(json.load(handle)["openclaw"], claw_aibom_digest(baseline))
 
         mock_build.return_value = changed
-        self.app.logger.log_scan.side_effect = CanonicalObservabilityUnavailableError(
-            "gateway unavailable"
+        self.app.logger.log_scan.side_effect = RuntimeError("unexpected logger failure")
+        failed = self.runner.invoke(
+            aibom, ["scan", "--connector", "openclaw"],
+            obj=self.app, catch_exceptions=False,
         )
-        with self.assertRaises(CanonicalObservabilityUnavailableError):
-            self.runner.invoke(
-                aibom, ["scan", "--connector", "openclaw"],
-                obj=self.app, catch_exceptions=False,
-            )
+        self.assertEqual(failed.exit_code, 0, failed.output)
+        self.assertIn("Warning: AIBOM telemetry was not recorded", failed.output)
 
         # A failed admission must leave the acknowledged baseline checkpoint
         # in place so an unchanged retry reaches the logger again.
@@ -733,12 +734,94 @@ class TestAIBOMCommand(unittest.TestCase):
         with open(state_path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["openclaw"], claw_aibom_digest(changed))
 
-        repeat = self.runner.invoke(
-            aibom, ["scan", "--connector", "openclaw"],
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_json_survives_observability_admission_failure(
+        self, mock_build, mock_to_scan, mock_enrich
+    ):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.logger import CanonicalObservabilityError
+        from defenseclaw.models import ScanResult
+
+        inventory = self._make_inventory(skills=[{"id": "still-rendered"}])
+        mock_build.return_value = inventory
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["openclaw"]  # type: ignore[method-assign]
+        self.app.logger = MagicMock()
+        self.app.logger.log_scan.side_effect = CanonicalObservabilityError(
+            "canonical admission rejected"
+        )
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--json"], obj=self.app, catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["skills"][0]["id"], "still-rendered")
+        self.assertIn("Warning: AIBOM telemetry was not recorded", result.stderr)
+
+    @patch("defenseclaw.inventory.claw_inventory.commit_claw_aibom_digest")
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_json_survives_digest_checkpoint_failure(
+        self, mock_build, mock_to_scan, mock_enrich, mock_commit
+    ):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        inventory = self._make_inventory(skills=[{"id": "still-rendered"}])
+        mock_build.return_value = inventory
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        mock_commit.side_effect = OSError("read-only checkpoint")
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--json", "--connector", "openclaw"],
             obj=self.app, catch_exceptions=False,
         )
-        self.assertEqual(repeat.exit_code, 0, repeat.output)
-        self.assertEqual(self.app.logger.log_scan.call_count, 3)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["skills"][0]["id"], "still-rendered")
+        self.assertIn("Warning: AIBOM telemetry checkpoint failed", result.stderr)
+        self.assertIn("read-only checkpoint", result.stderr)
+        mock_commit.assert_called_once()
+
+    @patch("defenseclaw.inventory.claw_inventory.commit_claw_aibom_digest")
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_warns_when_digest_checkpoint_is_not_committed(
+        self, mock_build, mock_to_scan, mock_enrich, mock_commit
+    ):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        mock_build.return_value = self._make_inventory(skills=[{"id": "rendered"}])
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        mock_commit.return_value = False
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--json", "--connector", "openclaw"],
+            obj=self.app, catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(result.stdout)["skills"][0]["id"], "rendered")
+        self.assertIn("Warning: AIBOM telemetry checkpoint failed", result.stderr)
+        self.assertIn("telemetry will be retried", result.stderr)
+        mock_commit.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

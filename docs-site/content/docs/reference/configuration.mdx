@@ -163,7 +163,7 @@ observability:
   local:
     path: ~/.defenseclaw/audit.db
     judge_bodies_path: ~/.defenseclaw/judge_bodies.db
-    retention_days: 90
+    retention_days: 7          # default rolling window; larger values are deliberate overrides
   # Omit defaults/buckets for full-fidelity collection. List only deliberate
   # overrides; a route cannot resurrect a signal disabled at collection.
   buckets:
@@ -418,9 +418,11 @@ signal.
 
 Exactly one generated local SQLite destination is mandatory. It is configured
 only through `observability.local`, not listed under `destinations`, and cannot
-be disabled or filtered. `retention_days: 0` means retain forever and produces a
-capacity warning. `guardrail.retain_judge_bodies` independently controls whether
-new raw judge bodies are captured.
+be disabled or filtered. Omitting `retention_days` uses the seven-day rolling
+default shown above. Set a larger value only when the additional local storage
+and retention scope are intentional. `retention_days: 0` means retain forever
+and produces a capacity warning. `guardrail.retain_judge_bodies` independently
+controls whether new raw judge bodies are captured.
 
 ### Destination transport and queue limits
 
@@ -452,7 +454,7 @@ change:
 | Mode | Behavior |
 | --- | --- |
 | `hot` | Default. Reload, validate, diff, and reconcile in the running gateway. Simple guardrail settings are hot-applied; affected in-process loops are restarted only when needed. |
-| `restart` | Validate first, then use a fresh gateway process for substantive config edits. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
+| `restart` | Validate first, then use a fresh gateway process only for edits that cross a restart boundary, such as listener, topology, or storage changes. Fields that are explicitly hot-reloadable—including observability destinations—still reconcile in process so active agent sessions are not interrupted. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path when one is required; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
 
 Live reload rejects storage identity changes such as `data_dir`, audit DB path,
 judge bodies DB path, and `gateway.device_key_file` unless restart mode is
@@ -586,15 +588,15 @@ upstream agent-gateway address. Set log verbosity through the sidecar's
 | Claude Code | `~/.claude/settings.json` |
 | Codex | `~/.codex/config.toml` |
 | Cursor | `~/.cursor/hooks.json` |
-| Windsurf | `~/.codeium/windsurf/hooks.json` |
-| Gemini CLI | `~/.gemini/settings.json` |
+| Devin | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` |
+| Gemini CLI (retired cleanup only) | `~/.gemini/settings.json`; new setup is unavailable. |
 | GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` by default; `<workspace>/.github/hooks/defenseclaw.json` with `--workspace` |
 | OpenHands | `~/.openhands/hooks.json` by default; `<workspace>/.openhands/hooks.json` with `--workspace` |
-| Antigravity | `~/.gemini/config/hooks.json` (global only — the path agy v1.0.x actually evaluates; the marketing-facing `~/.gemini/antigravity-cli/hooks.json` is silently ignored at runtime; agy merges all discovered hooks files, so DefenseClaw never patches workspace-local copies) |
+| Antigravity | `~/.gemini/config/hooks.json`; Google documents no configuration-home environment override, and DefenseClaw owns only this global registration. Antigravity also discovers `<workspace>/.agents/hooks.json`, which DefenseClaw does not patch to avoid duplicate ownership. |
 | Hermes | `~/.hermes/config.yaml` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |
-| OmniGent | `$OMNIGENT_CONFIG_HOME/config.yaml` when set (otherwise `~/.omnigent/config.yaml`), `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, and `defenseclaw_omnigent.pth` in OmniGent's Python environment |
+| OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`; and `defenseclaw_omnigent.pth` in OmniGent's Python environment. The CLI server must receive the selected YAML through `--config`. |
 
 A managed backup record is stored at
 `~/.defenseclaw/connector_backups/<connector>/<logical-name>.json` before the

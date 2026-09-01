@@ -182,12 +182,11 @@ contract or agent-version boundary.
 | [Claude Code](https://code.claude.com/docs/en/hooks) | `PreToolUse`; `PermissionRequest` is direct-only | `PostToolUse` success; `PostToolUseFailure` failure; `PermissionDenied` denial | paired `tool_use_id` on tool-use events; none on `PermissionRequest` | `paired-outcomes` |
 | [Hermes](https://github.com/NousResearch/hermes-agent/blob/126ff7071b6b755055879648f4e859b3187d0fac/agent/shell_hooks.py) | `pre_tool_call` | `post_tool_call`; only `extra.status=ok` succeeds, while `error` and `blocked` discard | paired `extra.tool_call_id` | `paired-outcomes` |
 | [Cursor](https://cursor.com/docs/hooks) | generic `preToolUse`; specialized shell, MCP, and read hooks remain direct | generic `postToolUse` success and `postToolUseFailure` failure; specialized after-hooks are result content | paired `tool_use_id` only on the generic tool lifecycle | `paired-outcomes` for generic events |
-| [Windsurf / Cascade](https://docs.devin.ai/desktop/cascade/hooks) | `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` | successful read/write/MCP post surfaces; `post_run_command` has no authoritative exit status or output | `trajectory_id` and `execution_id` identify conversation/turn, not a tool call | `detection-only` |
-| [Gemini CLI](https://geminicli.com/docs/hooks/reference/) | `BeforeTool` | `AfterTool`; inspect `tool_response.error` because the event covers both outcomes | session ID only; no stable hook tool-call ID | `detection-only` |
+| [Devin](https://docs.devin.ai/cli/extensibility/hooks/overview) | `PreToolUse` | `PostToolUse`; `tool_response.success` is authoritative | `session_id` and per-turn `prompt_id`; no stable per-tool invocation ID | `detection-only` |
 | [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/hooks-reference) | `preToolUse`, `permissionRequest` | `postToolUse` has `resultType=success`; `postToolUseFailure` is failure | session ID only; no per-tool invocation ID | `detection-only` |
 | [OpenHands](https://docs.openhands.dev/sdk/guides/hooks) | `pre_tool_use` | `post_tool_use`; only `tool_response.is_error=false` succeeds | the shell-hook payload omits the SDK's internal action ID | `detection-only` |
 | [Antigravity](https://www.antigravity.google/docs/hooks) | `PreToolUse` | `PostToolUse`; success requires an absent/empty error | paired `(conversationId, stepIdx)` sequence, not an opaque call ID | `detection-only` |
-| [OpenCode](https://github.com/anomalyco/opencode/blob/e4bd9757a3a5dc7461d286000a19e9bd7df57c40/packages/plugin/src/index.ts) | `tool.execute.before` | v7 awaits `tool.execute.after` with the executed args and validated result; `bash` additionally requires numeric `metadata.exit=0` | paired `(sessionID, callID)` | `paired-outcomes` |
+| [OpenCode](https://github.com/anomalyco/opencode/blob/2b72179c663cadcb54f54d9f19221b3fb3d11fb6/packages/plugin/src/index.ts) | `tool.execute.before` | v7 awaits `tool.execute.after` with the executed args and validated result; `bash` additionally requires numeric `metadata.exit=0` | paired `(sessionID, callID)` | `paired-outcomes` |
 | [Amp](https://ampcode.com/manual/plugin-api) | `tool.call` | terminal `tool.result`; `status=done` succeeds, `error` fails, and `cancelled` discards | paired `toolUseID` on both events | `paired-outcomes` |
 | [OmniGent](https://omnigent.ai/docs/policies/custom) | `tool_call` mapped to `PreToolUse` | `tool_result` repeats request data but has no authoritative success/failure field | no stable call or session ID in `PolicyEvent` | `direct-only` |
 
@@ -225,7 +224,7 @@ through the connector's generic or MCP tool event, with the exact reported tool
 identity and arguments. DefenseClaw does not guess that a custom tool is mail.
 This is a cross-platform contract catalog, not a promise that every connector
 is available on Windows. DefenseClaw enables and tests only the connectors in
-the [native Windows connector matrix](/docs/get-started/windows#certified-connector-scope)
+the [connector platform matrix](/docs/connectors#platform-support)
 and does not create hook integrations for clients that are not installed or
 supported there.
 
@@ -240,8 +239,7 @@ claims.
 | Claude Code | yes | yes | yes | yes | yes | yes, with slash-expansion gaps | generic or MCP only |
 | Hermes | yes | yes | yes | yes | yes | yes | generic or MCP only |
 | Cursor | yes | yes | yes | yes | yes | no dedicated lifecycle | generic or MCP only |
-| Windsurf / Cascade | no generic event | yes | yes | yes | yes | no dedicated lifecycle | MCP only |
-| Gemini CLI | yes | yes | yes | yes | yes | yes | generic or MCP only |
+| Devin | yes | yes | yes | yes | yes | no dedicated lifecycle | MCP only |
 | GitHub Copilot CLI | yes | yes | yes | yes | yes when emitted as a tool | no dedicated lifecycle | generic or MCP only |
 | OpenHands | yes | yes | yes | yes | yes | yes (`InvokeSkill`) | generic or MCP only |
 | Antigravity | yes | yes | yes | yes | undocumented | no dedicated lifecycle | generic only; MCP undocumented |
@@ -353,7 +351,7 @@ which is outside this experimental contract.
   not have complete hook coverage. Shell and generic `PostToolUse` payloads do
   not prove success, so they cannot advance ordered state. Only the exact
   `apply_patch` scalar response and MCP `CallToolResult` shape currently do.
-- **Windsurf, Gemini CLI, Copilot CLI, and OpenHands:** post-tool inspection is
+- **Devin, Copilot CLI, and OpenHands:** post-tool inspection is
   useful, but absent per-call identity keeps cross-event state detection-only.
 - **OmniGent:** no authoritative tool outcome exists in the policy event, so
   only direct pre-tool decisions are eligible for enforcement.

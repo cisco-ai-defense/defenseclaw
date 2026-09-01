@@ -291,6 +291,69 @@ type destinationTestRuntimeFixture struct {
 	optionalAdapter *destinationTestRecordingAdapter
 }
 
+func TestDeliveryFailureAndRecoveryPersistLocallyWithoutFanout(t *testing.T) {
+	fixture := newDestinationTestRuntimeFixture(t, true, true)
+	sidecar := &Sidecar{observabilityV8: fixture.runtime, health: NewSidecarHealth()}
+	generation := fixture.runtime.Active().Generation()
+	occurredAt := time.Date(2026, 8, 20, 20, 0, 0, 0, time.UTC)
+	sidecar.observeObservabilityV8Delivery(delivery.HealthTransition{
+		Destination: "must-not-export", Generation: generation, Signal: string(observability.SignalLogs),
+		Previous: delivery.HealthHealthy, Current: delivery.HealthFailing,
+		Reason:       delivery.HealthReasonDeliveryFailed,
+		FailureClass: delivery.FailureClassPermanentPayload,
+		FailureCode:  delivery.FailureCodeProjectionInvalid,
+		OccurredAt:   occurredAt,
+	})
+	sidecar.observeObservabilityV8Delivery(delivery.HealthTransition{
+		Destination: "must-not-export", Generation: generation, Signal: string(observability.SignalLogs),
+		Previous: delivery.HealthFailing, Current: delivery.HealthHealthy,
+		Reason: delivery.HealthReasonRecovered, FailureCode: delivery.FailureCodeProjectionInvalid,
+		OccurredAt: occurredAt.Add(time.Second),
+	})
+
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query(`SELECT COALESCE(event_name,''), COALESCE(projected_record_json,'')
+		FROM audit_events WHERE action = ? ORDER BY rowid`, sidecarDeliveryHealthAction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var events []string
+	var records []string
+	for rows.Next() {
+		var eventName, record string
+		if err := rows.Scan(&eventName, &record); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, eventName)
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(events, []string{
+		observability.TelemetryEventDestinationExportFailed,
+		observability.TelemetryEventSubsystemRestored,
+	}) {
+		t.Fatalf("events=%v records=%v", events, records)
+	}
+	if !strings.Contains(records[0], `"defenseclaw.schema.error_code":"projection_invalid"`) ||
+		!strings.Contains(records[0], `"defenseclaw.health.subsystem":"must-not-export/logs"`) {
+		t.Fatalf("failure record=%s", records[0])
+	}
+	if strings.Contains(records[1], "projection_invalid") ||
+		!strings.Contains(records[1], `"defenseclaw.health.state":"restored"`) {
+		t.Fatalf("recovery record=%s", records[1])
+	}
+	if got := fixture.optionalAdapter.deliveries.Load(); got != 0 {
+		t.Fatalf("local-only transition recursively exported %d records", got)
+	}
+}
+
 func newDestinationTestRuntimeFixture(
 	t *testing.T,
 	collectCompliance bool,

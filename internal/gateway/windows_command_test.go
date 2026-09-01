@@ -57,6 +57,8 @@ func TestWindowsCommandRulesMaliciousCorpus(t *testing.T) {
 		{"remove item case and order", "shell", `powershell.exe -NoProfile -Command "REMOVE-ITEM C:\Temp\fixture -fOrCe -rEcUrSe"`, "CMD-WIN-REMOVE-ITEM-RF"},
 		{"remove item aliases", "shell", `pwsh -c 'ri -fo C:\Temp\fixture -rec'`, "CMD-WIN-REMOVE-ITEM-RF"},
 		{"remove item boolean switches", "PowerShell", `Remove-Item C:\Temp\fixture -Recurse:$true -Force:true`, "CMD-WIN-REMOVE-ITEM-RF"},
+		{"remove item forced file", "PowerShell", `Remove-Item -LiteralPath 'D:\DefenseClaw-Synthetic\blocked-target.txt' -Force`, "CMD-WIN-RM-FORCE"},
+		{"remove item disabled recurse remains forced", "PowerShell", `Remove-Item C:\Temp\fixture -Recurse:$false -Force:$true`, "CMD-WIN-RM-FORCE"},
 		{"remove item after separator", "PowerShell", `Write-Output ready; rm -Recurse C:\Temp\fixture -Force`, "CMD-WIN-REMOVE-ITEM-RF"},
 		{"remove item after literal caret", "PowerShell", `Write-Output '^'; Remove-Item -Recurse -Force C:\Temp\fixture`, "CMD-WIN-REMOVE-ITEM-RF"},
 		{"cmd rmdir wrapped", "shell", `cmd.exe /d /c "rmdir C:\Temp\fixture /q /s"`, "CMD-WIN-RMDIR-SQ"},
@@ -98,9 +100,9 @@ func TestWindowsCommandRulesBenignCorpus(t *testing.T) {
 	cases := []struct {
 		name, tool, command string
 	}{
-		{"remove item single file", "PowerShell", `Remove-Item -Force C:\Temp\fixture.txt`},
+		{"remove item single file without force", "PowerShell", `Remove-Item C:\Temp\fixture.txt`},
+		{"remove item explicit false force", "PowerShell", `Remove-Item C:\Temp\fixture.txt -Force:$false`},
 		{"remove item recursive without force", "PowerShell", `Remove-Item C:\Temp\fixture -Recurse`},
-		{"remove item disabled recurse", "PowerShell", `Remove-Item C:\Temp\fixture -Recurse:$false -Force:$true`},
 		{"non destructive listing", "PowerShell", `Get-ChildItem -Recurse C:\Temp\fixture`},
 		{"cmd rmdir without quiet", "cmd", `cmd.exe /c rmdir /s C:\Temp\fixture`},
 		{"download without execution", "PowerShell", `iwr https://example.invalid/file -OutFile C:\Temp\file`},
@@ -153,6 +155,12 @@ func TestWindowsCommandArrayShape(t *testing.T) {
 	t.Parallel()
 	input := `{"command":["powershell.exe","-Command","Remove-Item -Recurse -Force C:\\Temp\\fixture"]}`
 	assertWindowsRule(t, scanTrustedWindowsRules(input, "shell"), "CMD-WIN-REMOVE-ITEM-RF")
+}
+
+func TestWindowsCommandAntigravityOfficialArgsShape(t *testing.T) {
+	t.Parallel()
+	input := `{"Cwd":"C:\\workspace","CommandLine":"Get-Content -LiteralPath C:\\Windows\\System32\\config\\SAM"}`
+	assertWindowsRule(t, ScanAllRules(input, "run_command"), "PATH-WIN-SAM")
 }
 
 func TestWindowsCommandArraySkipsNonStringElements(t *testing.T) {
@@ -247,7 +255,6 @@ func TestWindowsCommandHookParityObserveAndAction(t *testing.T) {
 
 		benign := []string{
 			`Remove-Item -Force C:\Temp\fixture -Recurse`,
-			`Remove-Item -Force C:\Temp\fixture.txt`,
 			`Remove-Item C:\Temp\fixture -Recurse`,
 			`Remove-Item C:\Temp\fixture -Recurse:$false -Force:$true`,
 			`Remove-Item C:\ -rec:$false -fo:$true`,
@@ -434,6 +441,9 @@ func TestWindowsCommandFullHookAuditCorrelation(t *testing.T) {
 					})
 					req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connector+"/hook", bytes.NewReader(body))
 					req.Header.Set("Content-Type", "application/json")
+					if connector == "codex" {
+						setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+					}
 					w := httptest.NewRecorder()
 					api.handleAgentHook(connector).ServeHTTP(w, req)
 					if w.Code != http.StatusOK {

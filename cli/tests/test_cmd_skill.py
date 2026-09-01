@@ -45,6 +45,7 @@ from defenseclaw.commands.cmd_skill import (
 )
 from defenseclaw.config import SeverityAction
 from defenseclaw.enforce.policy import PolicyEngine
+from defenseclaw.hermes_skills import directory_md5
 from defenseclaw.models import ActionState, Finding, ScanResult
 
 from tests.environment import requires_symlink_privilege
@@ -90,6 +91,11 @@ class TestSkillInstallTargets(unittest.TestCase):
             [("amp", "/workspace/.agents/skills")],
         )
 
+        self.assertEqual(
+            _skill_install_targets(app, ["opencode"], explicit_connector=True),
+            [("opencode", "/workspace/.agents/skills")],
+        )
+
 
 class TestSkillBlock(SkillCommandTestBase):
     def test_block_adds_to_block_list(self):
@@ -113,6 +119,58 @@ class TestSkillBlock(SkillCommandTestBase):
         self.invoke(["block", "/path/to/evil-skill"])
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_blocked("skill", "evil-skill"))
+
+    def test_hermes_unchanged_bundled_skill_cannot_be_blocked_or_quarantined(self):
+        hermes_home = os.path.join(self.tmp_dir, "hermes")
+        skill_root = os.path.join(hermes_home, "skills")
+        skill_dir = os.path.join(skill_root, "productivity", "vendor-docs")
+        os.makedirs(skill_dir)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nname: vendor-docs\n---\n")
+        source_dir = os.path.join(
+            hermes_home,
+            "hermes-agent",
+            "skills",
+            "productivity",
+            "vendor-docs",
+        )
+        os.makedirs(source_dir)
+        with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nname: vendor-docs\n---\n")
+        origin_hash = directory_md5(skill_dir)
+        self.assertTrue(origin_hash)
+        with open(os.path.join(skill_root, ".bundled_manifest"), "w", encoding="utf-8") as handle:
+            handle.write(f"vendor-docs:{origin_hash}\n")
+
+        self.app.cfg.active_connector = lambda: "hermes"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda _connector=None: [skill_root]  # type: ignore[method-assign]
+        with patch.dict(os.environ, {"HERMES_HOME": hermes_home}):
+            blocked = self.invoke(["block", "vendor-docs", "--connector", "hermes"])
+            quarantined = self.invoke(
+                ["quarantine", "vendor-docs", "--connector", "hermes"]
+            )
+
+        self.assertEqual(blocked.exit_code, 2, blocked.output)
+        self.assertEqual(quarantined.exit_code, 2, quarantined.output)
+        self.assertTrue(os.path.isfile(os.path.join(skill_dir, "SKILL.md")))
+        self.assertFalse(
+            self.app.store.has_action(
+                "skill",
+                "vendor-docs",
+                "install",
+                "block",
+                "hermes",
+            )
+        )
+        self.assertEqual(
+            self.app.store.list_quarantine_records(
+                "skill",
+                "vendor-docs",
+                "hermes",
+            ),
+            [],
+        )
 
 
 class TestSkillAllow(SkillCommandTestBase):
@@ -753,6 +811,26 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(called, {"claudecode", "codex"})
 
     @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_multi_connector_continues_after_scanner_system_exit(
+        self, mock_scanner_cls, mock_scan_all
+    ):
+        mock_scanner_cls.return_value = MagicMock()
+        mock_scan_all.side_effect = [SystemExit(23), []]
+        self.app.cfg.active_connectors = lambda: [  # type: ignore[method-assign]
+            "claudecode",
+            "codex",
+        ]
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(
+            [call.kwargs["connector"] for call in mock_scan_all.call_args_list],
+            ["claudecode", "codex"],
+        )
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.commands.cmd_skill._build_skill_scanner")
     def test_scan_all_multi_connector_reuses_rule_pack_cache(self, mock_build, _mock_scan_all):
         mock_build.return_value = MagicMock()
@@ -839,6 +917,54 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_remote.assert_called_once_with(self.app, False, connector="codex")
 
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    def test_scan_all_remote_json_mixed_multi_connector_failure_is_nonzero(
+        self, mock_client_factory, mock_list,
+    ):
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        skill_paths = {
+            "claudecode": ["/remote/claudecode/alpha"],
+            "codex": ["/remote/codex/beta", "/remote/codex/gamma"],
+        }
+
+        def list_skills(_app, connector=None):
+            return {
+                "skills": [
+                    {"name": os.path.basename(path), "baseDir": path}
+                    for path in skill_paths[connector]
+                ]
+            }
+
+        def scan_skill(*, target, name):
+            if name == "beta":
+                raise RuntimeError("codex sidecar unavailable")
+            return {
+                "scanner": "skill-scanner",
+                "target": target,
+                "findings": [],
+            }
+
+        mock_list.side_effect = list_skills
+        mock_client_factory.return_value.scan_skill.side_effect = scan_skill
+
+        result = self.invoke(["scan", "--all", "--remote", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(
+            [(row["connector"], row["target"]) for row in payload],
+            [
+                ("claudecode", "/remote/claudecode/alpha"),
+                ("codex", "/remote/codex/beta"),
+                ("codex", "/remote/codex/gamma"),
+            ],
+        )
+        self.assertIn("codex sidecar unavailable", payload[1]["error"])
+        self.assertEqual(mock_client_factory.return_value.scan_skill.call_count, 3)
+
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
     def test_info_connector_flag_threads_connector(self, mock_info):
         # D4 parity: `skill info --connector X` must inspect X's skill.
@@ -882,7 +1008,7 @@ class TestSkillScan(SkillCommandTestBase):
 
         scanner.scan.assert_called_once_with(skill_dir)
 
-    def test_scan_all_nonactive_codex_expands_system_child_skills(self):
+    def test_scan_all_nonactive_codex_discovers_but_does_not_scan_system_skills(self):
         from defenseclaw.commands.cmd_skill import _scan_all
 
         codex_root = os.path.join(self.tmp_dir, ".codex", "skills")
@@ -911,12 +1037,89 @@ class TestSkillScan(SkillCommandTestBase):
             duration=timedelta(seconds=0.1),
         )
 
-        _scan_all(self.app, scanner, as_json=False, connector="codex")
+        with patch.dict(
+            os.environ,
+            {"CODEX_HOME": os.path.join(self.tmp_dir, ".codex")},
+        ):
+            _scan_all(self.app, scanner, as_json=False, connector="codex")
 
         scanned = [call.args[0] for call in scanner.scan.call_args_list]
-        self.assertEqual(scanned, [regular, child_a, child_b])
+        self.assertEqual(scanned, [regular])
         self.assertNotIn(system_root, scanned)
+        self.assertNotIn(child_a, scanned)
+        self.assertNotIn(child_b, scanned)
         self.assertNotIn(os.path.join(system_root, "not-a-skill"), scanned)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_scan_all_remote_skips_bundled_entries(self, mock_list):
+        from defenseclaw.commands.cmd_skill import _scan_all_remote
+
+        regular = os.path.join(self.tmp_dir, ".codex", "skills", "operator-skill")
+        bundled = os.path.join(self.tmp_dir, ".codex", "skills", ".system", "imagegen")
+        mock_list.return_value = {
+            "skills": [
+                {"name": "operator-skill", "baseDir": regular, "bundled": False},
+                {"name": "imagegen", "baseDir": bundled, "bundled": True},
+            ]
+        }
+        client = MagicMock()
+        client.scan_skill.return_value = {"findings": [], "max_severity": "INFO"}
+
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client", return_value=client):
+            _scan_all_remote(self.app, as_json=False, connector="codex")
+
+        client.scan_skill.assert_called_once_with(target=regular, name="operator-skill")
+
+    def test_explicit_bundled_skill_scan_is_skipped_without_scanner_or_action(self):
+        bundled = os.path.join(
+            self.tmp_dir, ".codex", "skills", ".system", "imagegen"
+        )
+        os.makedirs(bundled, exist_ok=True)
+        with open(os.path.join(bundled, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("# bundled\n")
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [  # type: ignore[method-assign]
+            os.path.join(self.tmp_dir, ".codex", "skills")
+        ]
+
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_HOME": os.path.join(self.tmp_dir, ".codex")},
+            ),
+            patch("defenseclaw.scanner.skill.SkillScannerWrapper") as scanner_cls,
+        ):
+            result = self.invoke(["scan", "imagegen", "--path", bundled, "--action"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("vendor-bundled skills are discovery-only", result.output)
+        scanner_cls.return_value.scan.assert_not_called()
+        self.assertIsNone(self.app.store.get_action("skill", "imagegen"))
+
+    def test_explicit_arbitrary_system_directory_remains_scan_eligible(self):
+        target = os.path.join(self.tmp_dir, "workspace", ".system", "operator-skill")
+        os.makedirs(target, exist_ok=True)
+        with open(os.path.join(target, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("# operator\n")
+        codex_home = os.path.join(self.tmp_dir, "real-codex-home")
+        clean = ScanResult(
+            scanner="skill-scanner",
+            target=target,
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+
+        with (
+            patch.dict(os.environ, {"CODEX_HOME": codex_home}),
+            patch("defenseclaw.scanner.skill.SkillScannerWrapper") as scanner_cls,
+        ):
+            scanner_cls.return_value.scan.return_value = clean
+            result = self.invoke(["scan", "operator-skill", "--path", target])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        scanner_cls.return_value.scan.assert_called_once_with(target)
 
 
 class TestSkillScanContainment(SkillCommandTestBase):
@@ -2945,25 +3148,112 @@ class TestSkillListMultiConnectorDefault(SkillCommandTestBase):
         self.assertEqual(data[0]["name"], "claudecode-skill")
         self.assertNotIn("connector", data[0])
 
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_identical_skill_names_use_each_connector_latest_scan(self, mock_list):
+        roots = {
+            connector: os.path.join(self.tmp_dir, connector, "skills")
+            for connector in ("codex", "devin")
+        }
+        for root in roots.values():
+            os.makedirs(os.path.join(root, "codeguard"))
+        self.app.cfg.active_connectors = lambda: ["codex", "devin"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [roots[connector]]  # type: ignore[method-assign]
+        mock_list.return_value = {
+            "skills": [{
+                "name": "codeguard",
+                "description": "connector-local copy",
+                "eligible": True,
+                "source": "user",
+            }],
+        }
 
-class TestSkillListOpencodeEmpty(SkillCommandTestBase):
-    """SK-1 (re-scope): opencode exposes no skills surface — listing it must
-    say so and never fall back to OpenClaw's skill directories. The path arm
-    itself lives in connector_paths (already returns []); this guards the
-    CLI-visible behaviour from regressing."""
+        codex_target = os.path.join(roots["codex"], "codeguard")
+        devin_target = os.path.join(roots["devin"], "codeguard")
+        now = datetime.now(timezone.utc)
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", codex_target,
+            now - timedelta(minutes=1), 400, 1, "LOW", "{}",
+        )
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", devin_target,
+            now, 400, 7, "HIGH", "{}",
+        )
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        groups = {group["connector"]: group["skills"] for group in json.loads(result.output)}
+        codex_scan = groups["codex"][0]["scan"]
+        devin_scan = groups["devin"][0]["scan"]
+        self.assertEqual(codex_scan["target"], codex_target)
+        self.assertEqual(codex_scan["total_findings"], 1)
+        self.assertEqual(devin_scan["target"], devin_target)
+        self.assertEqual(devin_scan["total_findings"], 7)
 
     @patch(
         "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
         return_value={"skills": []},
     )
-    def test_opencode_lists_no_skills_not_openclaw_paths(self, _mock_list):
+    def test_scan_history_phantom_does_not_leak_to_no_root_connector(self, _mock_list):
+        devin_root = os.path.join(self.tmp_dir, "devin", "skills")
+        os.makedirs(os.path.join(devin_root, "codeguard"))
+        self.app.cfg.active_connectors = lambda: ["devin", "omnigent"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: (  # type: ignore[method-assign]
+            [devin_root] if connector == "devin" else []
+        )
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner",
+            os.path.join(devin_root, "codeguard"),
+            datetime.now(timezone.utc), 400, 3, "MEDIUM", "{}",
+        )
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        groups = {group["connector"]: group["skills"] for group in json.loads(result.output)}
+        self.assertEqual(groups["devin"][0]["name"], "codeguard")
+        self.assertEqual(groups["devin"][0]["source"], "scan-history")
+        self.assertEqual(groups["omnigent"], [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows path casing semantics")
+    @patch(
+        "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
+        return_value={"skills": []},
+    )
+    def test_removed_skill_scan_matches_connector_root_case_insensitively(self, _mock_list):
+        codex_root = os.path.join(self.tmp_dir, "Codex", "skills")
+        os.makedirs(codex_root)
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda _connector=None: [codex_root]  # type: ignore[method-assign]
+        target = os.path.join(codex_root.swapcase(), "removed-skill")
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", target,
+            datetime.now(timezone.utc), 400, 2, "MEDIUM", "{}",
+        )
+
+        result = self.invoke(["list", "--json", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output)
+        self.assertEqual(data["skills"][0]["name"], "removed-skill")
+        self.assertEqual(data["skills"][0]["scan"]["target"], target)
+
+
+class TestSkillListOpencodeNative(SkillCommandTestBase):
+    def test_opencode_lists_native_skill_not_openclaw_paths(self):
+        root = os.path.join(self.tmp_dir, ".opencode", "skills")
+        skill_dir = os.path.join(root, "reviewer")
+        os.makedirs(skill_dir)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nname: reviewer\ndescription: Review code\n---\n")
         self.app.cfg.active_connector = lambda: "opencode"  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [root] if connector == "opencode" else []  # type: ignore[method-assign]
 
         result = self.invoke(["list", "--connector", "opencode"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No skills found for connector='opencode'", result.output)
+        self.assertIn("reviewer", result.output)
         self.assertNotIn(".openclaw", result.output)
 
 
@@ -3380,9 +3670,9 @@ class TestSkillBareNameResolution(SkillCommandTestBase):
         result = self.invoke(["scan", "dup"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("── connector: codex ──", result.output)
+        self.assertRegex(result.output, r"(?:──|--) connector: codex (?:──|--)")
         self.assertIn("Scanning 1 skill on codex", result.output)
-        self.assertIn("── connector: hermes ──", result.output)
+        self.assertRegex(result.output, r"(?:──|--) connector: hermes (?:──|--)")
         self.assertIn("Scanning 1 skill on hermes", result.output)
         self.assertEqual(mock_scan.call_count, 2)
 
@@ -3451,11 +3741,14 @@ class TestSkillBareNameResolution(SkillCommandTestBase):
         result = self.invoke(["scan", "dc-skill-final", "--no-use-llm"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("── connector: antigravity ──", result.output)
+        self.assertRegex(
+            result.output,
+            r"(?:──|--) connector: antigravity (?:──|--)",
+        )
         self.assertIn("Scanning 1 skill on antigravity", result.output)
-        self.assertIn("── connector: hermes ──", result.output)
+        self.assertRegex(result.output, r"(?:──|--) connector: hermes (?:──|--)")
         self.assertIn("Scanning 1 skill on hermes", result.output)
-        self.assertIn("── connector: opencode ──", result.output)
+        self.assertRegex(result.output, r"(?:──|--) connector: opencode (?:──|--)")
         self.assertIn("Scanning 1 skill on opencode", result.output)
         self.assertEqual(
             [call.args[0] for call in mock_scan.call_args_list],

@@ -58,7 +58,8 @@ agent_install() {
 
 agent_run() {
   local prompt="$1"
-  # DefenseClaw's PreToolUse deny still overrides this auto-approval flag.
+  # Exercise the manual visibility gate with the official auto-approval flag;
+  # the result must be persisted before any override claim is published.
   # agy treats every argument after --print as prompt text, so flags go first.
   dc_timeout 180 "${AGY_BIN}" --dangerously-skip-permissions --print "${prompt}"
 }

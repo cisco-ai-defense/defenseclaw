@@ -232,6 +232,19 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
         }
     ),
     "DEFENSECLAW_TEST_LLM_KEY_": frozenset({"internal/gateway/passthrough_hydration_test.go"}),
+    # Exact synthetic Gemini settings payload names. These prove $VAR and
+    # ${VAR:-default} expansion; they are not environment variables consumed
+    # by DefenseClaw itself. Keep each token and its only fixture path exact so
+    # a future runtime-looking name in the same test file remains visible.
+    "DEFENSECLAW_TEST_BLOCKED_HOOK": frozenset(
+        {"internal/gateway/connector/gemini_effective_settings_test.go"}
+    ),
+    "DEFENSECLAW_TEST_UNSET_ENDPOINT": frozenset(
+        {"internal/gateway/connector/gemini_effective_settings_test.go"}
+    ),
+    "DEFENSECLAW_TEST_UNSET_HOOK": frozenset(
+        {"internal/gateway/connector/gemini_effective_settings_test.go"}
+    ),
 }
 
 

@@ -20,6 +20,7 @@ package cli
 
 import (
 	"errors"
+	"io"
 	"os"
 	"strconv"
 	"syscall"
@@ -55,6 +56,21 @@ func watchdogHasStrongProcessIdentity(info watchdogPIDInfo) bool {
 	}
 	current, err := os.Readlink("/proc/" + strconv.Itoa(info.PID) + "/exe")
 	return err == nil && current != ""
+}
+
+func watchdogRequiresStrongProcessIdentity() bool { return false }
+
+func watchdogProcessExecutableMatches(info watchdogPIDInfo) bool {
+	if info.Executable == "" {
+		return true
+	}
+	current, err := os.Readlink("/proc/" + strconv.Itoa(info.PID) + "/exe")
+	if err != nil || current == "" {
+		// Preserve the established best-effort compatibility on non-/proc Unix
+		// platforms. Linux callers with a live signalable process fail closed.
+		return true
+	}
+	return current == info.Executable
 }
 
 func watchdogCreateControl() (string, <-chan struct{}, func(), error) {
@@ -107,73 +123,95 @@ func acquireWatchdogPIDFile(path string, info watchdogPIDInfo) (*os.File, error)
 	return f, nil
 }
 
-// watchdogIsLocked reports whether the PID-file flock is currently held by
+// On Unix, do not inspect the flock until the child has finished publishing
+// its canonical record. Otherwise the readiness observer can acquire the
+// newly-created, still-empty file between open and flock and make the child
+// lose its one-shot ownership acquisition.
+func watchdogStartPublicationReady(path string, expectedPID int) (bool, error) {
+	info, err := readWatchdogPIDInfo(path)
+	if err != nil {
+		return false, err
+	}
+	return info.PID == expectedPID, nil
+}
+
+// inspectWatchdogPIDOwnership reports whether the PID-file flock is currently held by
 // another process (the live watchdog). It always releases any lock it
 // acquires before returning so the real watchdog child can take it.
-func watchdogIsLocked(path string) (bool, watchdogPIDInfo, error) {
+func inspectWatchdogPIDOwnership(path string) watchdogPIDOwnershipInspection {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, watchdogPIDInfo{}, nil
+			return watchdogPIDOwnershipInspection{}
 		}
-		return false, watchdogPIDInfo{}, err
+		return watchdogPIDOwnershipInspection{publicationErr: err}
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			return false, watchdogPIDInfo{}, err
+			return watchdogPIDOwnershipInspection{publicationErr: err}
 		}
 		info, readErr := readWatchdogPIDInfoFile(f)
 		if readErr != nil {
-			return false, watchdogPIDInfo{}, readErr
+			return watchdogPIDOwnershipInspection{locked: true, publicationErr: readErr}
 		}
-		return true, info, nil
+		return watchdogPIDOwnershipInspection{locked: true, info: info}
 	}
+	info, readErr := readWatchdogPIDInfoFile(f)
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
-		return false, watchdogPIDInfo{}, err
+		return watchdogPIDOwnershipInspection{publicationErr: err}
 	}
-	return false, watchdogPIDInfo{}, nil
+	return watchdogPIDOwnershipInspection{info: info, publicationErr: readErr}
 }
 
-func removeWatchdogPIDFileIf(path string, matches func(watchdogPIDInfo) bool) error {
+func removeWatchdogPIDFileIf(path string, matches func([]byte) bool) (bool, error) {
 	if matches == nil {
-		return errors.New("watchdog: nil PID file matcher")
+		return false, errors.New("watchdog: nil PID file matcher")
 	}
 	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
-	current, err := readWatchdogPIDInfoFile(f)
-	if err != nil || !matches(current) {
-		return err
+	if _, err := f.Seek(0, 0); err != nil {
+		return false, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxWatchdogPIDFileBytes+1))
+	if err != nil {
+		return false, err
+	}
+	if len(data) > maxWatchdogPIDFileBytes {
+		return false, errors.New("watchdog: PID file exceeds inspection limit")
+	}
+	if !matches(data) {
+		return false, nil
 	}
 	opened, err := f.Stat()
 	if err != nil {
-		return err
+		return false, err
 	}
 	named, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if !os.SameFile(opened, named) {
-		return nil
+		return false, nil
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }

@@ -1000,6 +1000,19 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         f'export PYTHONPATH={str(source_site_packages)!r}\n'
         f'exec {sys.executable!r} "${{args[@]}}"\n',
     )
+    (source_venv / "bin" / "python3").symlink_to(packaged_target_controller_python)
+    _write_executable(
+        source_venv / "bin" / "skill-scanner",
+        f"#!{source_venv / 'bin' / 'python3'}\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('skill-scanner 2.0.4')\n"
+        "    raise SystemExit(0)\n"
+        "if False:\n"
+        "    from skill_scanner.cli.cli import main\n"
+        "    sys.exit(main())\n"
+        "raise SystemExit(93)\n",
+    )
     (install_dir / "defenseclaw").symlink_to(source_cli)
 
     source_gateway = install_dir / "defenseclaw-gateway"
@@ -1053,6 +1066,12 @@ if [[ "$*" == *"from defenseclaw import __version__"* ]]; then
 fi
 if [[ "$*" == *"defenseclaw-legacy-readiness-v1"* ]]; then
   exec "${TARGET_RUNTIME_VENV_PYTHON:?}" "$@"
+fi
+if [[ "$*" == *"-m defenseclaw.install_publish repair-console-symlink"* ]]; then
+  args=()
+  for arg in "$@"; do [[ "${arg}" == "-I" ]] || args+=("${arg}"); done
+  export PYTHONPATH="${TARGET_PUBLISH_PYTHONPATH:?}"
+  exec "${TARGET_RUNTIME_PYTHON:?}" "${args[@]}"
 fi
 if [[ "${1:-}" == '-I' && "${2:-}" == '-B' && "${3:-}" == '-' ]]; then
   exec "${TARGET_RUNTIME_PYTHON:?}" "$@"
@@ -1143,13 +1162,24 @@ if [[ -n "${venv}" ]]; then
   mkdir -p "${venv}/bin"
   cp "${TARGET_PYTHON_TEMPLATE}" "${venv}/bin/python"
   cp "${TARGET_CLI_TEMPLATE}" "${venv}/bin/defenseclaw"
+  ln -sf "${TARGET_RUNTIME_VENV_PYTHON}" "${venv}/bin/python3"
+  printf '%s\n' \
+    "#!${venv}/bin/python3" \
+    'import sys' \
+    "if sys.argv[1:] == ['--version']:" \
+    "    print('skill-scanner 2.0.4')" \
+    '    raise SystemExit(0)' \
+    'if False:' \
+    '    from skill_scanner.cli.cli import main' \
+    '    sys.exit(main())' \
+    'raise SystemExit(93)' > "${venv}/bin/skill-scanner"
   if [[ "${venv}" == */target-controller-venv ]]; then
     sed 's/0\\.8\\.4/0.8.5/g' "${venv}/bin/python" > "${venv}/bin/python.final"
     sed 's/0\\.8\\.4/0.8.5/g' "${venv}/bin/defenseclaw" > "${venv}/bin/defenseclaw.final"
     mv "${venv}/bin/python.final" "${venv}/bin/python"
     mv "${venv}/bin/defenseclaw.final" "${venv}/bin/defenseclaw"
   fi
-  chmod 755 "${venv}/bin/python" "${venv}/bin/defenseclaw"
+  chmod 755 "${venv}/bin/python" "${venv}/bin/defenseclaw" "${venv}/bin/skill-scanner"
 fi
 exit 0
 """,
@@ -1242,6 +1272,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             "FIXTURE_UV_ARCHIVE": str(fixture_uv_archive),
             "TARGET_PYTHON_TEMPLATE": str(target_python_template),
             "TARGET_CLI_TEMPLATE": str(target_cli_template),
+            "TARGET_PUBLISH_PYTHONPATH": str(ROOT / "cli"),
             "TARGET_RUNTIME_PYTHON": sys.executable,
             "TARGET_RUNTIME_VENV_PYTHON": str(packaged_target_controller_python),
             "POST_BRIDGE_081_CONFIG": str(post_bridge_081_config),

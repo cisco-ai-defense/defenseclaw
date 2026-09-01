@@ -215,6 +215,13 @@ type Store struct {
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
+
+	// findingLifecycleMu serializes the one mutable state projection and its
+	// process-local up/down-counter baselines. SQLite serializes these writers
+	// too, but owning the boundary here also keeps concurrent first scans from
+	// publishing two current-state baselines after a runtime restart/reload.
+	findingLifecycleMu      sync.Mutex
+	findingGaugeInitialized map[string]struct{}
 }
 
 // SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
@@ -260,6 +267,11 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //   - busy_timeout=5000         SQLite waits up to 5 seconds before
 //     returning SQLITE_BUSY, absorbing the
 //     vast majority of write contention.
+//   - wal_autocheckpoint=0      disables SQLite's connection-local commit
+//     hook. DefenseClaw checkpoints through the serialized Store connection
+//     in health and retention maintenance; running a second checkpoint from
+//     inside a commit can race a retiring sidecar process over the shared WAL
+//     mapping and terminate the gateway with SIGBUS.
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
 //     across crashes (loses only the last
 //     transaction on power loss) while ~3x
@@ -284,6 +296,7 @@ type auditIntegerPragma struct {
 
 var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
 	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "wal_autocheckpoint", dsnValue: "0", want: 0},
 	{name: "synchronous", dsnValue: "NORMAL", want: 1},
 	{name: "cache_size", dsnValue: "-20000", want: -20000},
 	{name: "temp_store", dsnValue: "MEMORY", want: 2},
@@ -1748,6 +1761,10 @@ var migrations = []migration{
 		description: historicalEvidencePurgeMigrationDescription,
 		apply:       purgeHistoricalEvidence,
 	},
+	{
+		description: "scan findings: add compact distinct lifecycle projection",
+		apply:       migrateFindingLifecycleState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1862,6 +1879,8 @@ func (s *Store) Init() error {
 		"guardrail_chain_pending_boundaries",
 		"guardrail_chain_terminal_resets",
 		"guardrail_chain_cutoff_barriers",
+		"finding_scopes",
+		"finding_states",
 	} {
 		present, err := tableExists(s.db, table)
 		if err != nil {
@@ -1870,6 +1889,11 @@ func (s *Store) Init() error {
 		if !present {
 			return fmt.Errorf("audit: mandatory SQLite table %s is missing", table)
 		}
+	}
+	if present, err := s.hasColumn("scan_findings", "finding_fingerprint"); err != nil {
+		return fmt.Errorf("audit: verify mandatory finding lifecycle identity: %w", err)
+	} else if !present {
+		return fmt.Errorf("audit: mandatory finding lifecycle identity is missing")
 	}
 	if err := s.verifyMandatoryPragmas(context.Background()); err != nil {
 		return err
@@ -2055,6 +2079,8 @@ var knownTables = map[string]bool{
 	"schema_version":        true,
 	// v7 additions
 	"scan_findings":   true,
+	"finding_states":  true,
+	"finding_scopes":  true,
 	"activity_events": true,
 	"sink_health":     true,
 	// Observability v8 alert acknowledgement protected state.
@@ -3417,11 +3443,25 @@ func legacyExplicitAlertSQL() string {
 	)`
 }
 
+// connectorEnforcedAlertSQL preserves the native-connector alert contract for
+// hook records that predate the canonical enforcement.action bucket. Only an
+// attributed, actually enforced decision is actionable; observe-mode and
+// unattributed hook telemetry remain outside the alert queue.
+func connectorEnforcedAlertSQL() string {
+	return `(
+		LOWER(COALESCE(event.action,'')) = 'connector-hook'
+		AND COALESCE(event.enforced, 0) = 1
+		AND LENGTH(TRIM(COALESCE(event.connector,''))) > 0
+	)`
+}
+
 func alertEligibilitySQL(legacyActionPlaceholders string) string {
 	findingTagsPath := `$."defenseclaw.finding.tags"`
 	canonicalOutcome := canonicalAlertOutcomeSQL()
 	legacyExplicit := legacyExplicitAlertSQL()
 	return `(
+		` + connectorEnforcedAlertSQL() + `
+		OR
 		(
 			event.bucket = 'security.finding'
 			AND event.event_name = 'finding.observed'
@@ -3481,6 +3521,7 @@ func alertEffectiveSeveritySQL() string {
 	return `CASE
 		WHEN UPPER(TRIM(COALESCE(event.severity,''))) NOT IN ('','INFO')
 			THEN UPPER(TRIM(event.severity))
+		WHEN ` + connectorEnforcedAlertSQL() + ` THEN 'HIGH'
 		WHEN event.bucket = 'network.egress'
 		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
 			THEN 'WARNING'
@@ -3619,12 +3660,12 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
 			event.details, event.structured_json, ` + alertEffectiveSeveritySQL() + `,
 			event.run_id,
-			event.trace_id, event.request_id
+			event.trace_id, event.request_id, event.connector, event.enforced
 		 FROM audit_events AS event
-		 WHERE (event.bucket IS NULL OR event.bucket IN (
+		 WHERE ((event.bucket IS NULL OR event.bucket IN (
 			'security.finding','enforcement.action','network.egress',
 			'platform.health','diagnostic'
-		 ))
+		 )) OR ` + connectorEnforcedAlertSQL() + `)
 		 AND ` + alertEligibilitySQL(placeholders) + `
 		 AND NOT EXISTS (
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
@@ -3645,8 +3686,12 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, structuredJSON, severity, runID, traceID, requestID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity, &runID, &traceID, &requestID); err != nil {
+		var target, details, structuredJSON, severity, runID, traceID, requestID, connector sql.NullString
+		var enforced sql.NullBool
+		if err := rows.Scan(
+			&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON,
+			&severity, &runID, &traceID, &requestID, &connector, &enforced,
+		); err != nil {
 			return nil, fmt.Errorf("audit: scan alert row: %w", err)
 		}
 		e.Target = target.String
@@ -3660,6 +3705,8 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		e.RunID = runID.String
 		e.TraceID = traceID.String
 		e.RequestID = requestID.String
+		e.Connector = connector.String
+		e.Enforced = enforced.Bool
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -3772,9 +3819,9 @@ func (s *Store) GetCounts() (Counts, error) {
 	legacyActions := legacyAlertEligibleActions()
 	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
-		WHERE (event.bucket IS NULL OR event.bucket IN (
+		WHERE ((event.bucket IS NULL OR event.bucket IN (
 			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
-		))
+		)) OR ` + connectorEnforcedAlertSQL() + `)
 		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
 		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
 		  AND NOT EXISTS (

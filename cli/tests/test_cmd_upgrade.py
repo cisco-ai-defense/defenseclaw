@@ -132,6 +132,125 @@ from defenseclaw.upgrade_receipt import (
 )
 
 
+def test_restored_local_observability_controller_prefers_native_and_never_uses_bash_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    recovery_home = tmp_path / "recovery-home"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(recovery_home))
+    destination = data_dir / "observability-stack"
+    bridge = destination / "bin/openclaw-observability-bridge"
+    posix_native = recovery_home / ".venv/bin/defenseclaw-observability"
+    windows_native = recovery_home / ".venv/Scripts/defenseclaw-observability.exe"
+    bridge.parent.mkdir(parents=True)
+    posix_native.parent.mkdir(parents=True)
+    windows_native.parent.mkdir(parents=True)
+    bridge.write_bytes(b"#!/usr/bin/env bash\n")
+    posix_native.write_bytes(b"native-posix\n")
+    windows_native.write_bytes(b"native-windows\r\n")
+
+    assert (
+        cmd_upgrade_module._restored_local_observability_controller(
+            str(data_dir), destination, os_name="posix"
+        )
+        == posix_native
+    )
+    assert (
+        cmd_upgrade_module._restored_local_observability_controller(
+            str(data_dir), destination, os_name="nt"
+        )
+        == windows_native
+    )
+
+    windows_native.unlink()
+    with pytest.raises(OSError, match="native local observability controller"):
+        cmd_upgrade_module._restored_local_observability_controller(
+            str(data_dir), destination, os_name="nt"
+        )
+
+
+@pytest.mark.parametrize(
+    ("os_name", "native_relative_path"),
+    [
+        ("posix", ".venv/bin/defenseclaw-observability"),
+        ("nt", ".venv/Scripts/defenseclaw-observability.exe"),
+        ("windows", ".venv/Scripts/defenseclaw-observability.exe"),
+    ],
+)
+def test_restored_local_observability_restart_invokes_native_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    os_name: str,
+    native_relative_path: str,
+) -> None:
+    data_dir = tmp_path / "data"
+    recovery_home = tmp_path / "recovery-home"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(recovery_home))
+    destination = data_dir / "observability-stack"
+    native = recovery_home / native_relative_path
+    destination.mkdir(parents=True)
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native\n")
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
+    completed = Mock(returncode=0, stdout=json.dumps(contract) + "\n")
+
+    with patch(
+        "defenseclaw.commands.cmd_upgrade._run_phase_two_mutator",
+        return_value=completed,
+    ) as run:
+        result = cmd_upgrade_module._restart_restored_local_observability_stack(
+            str(data_dir),
+            health_timeout=3,
+            os_name=os_name,
+        )
+
+    assert result == {"restarted": True, "degraded_errors": []}
+    command = run.call_args.args[0]
+    assert command[0] == str(native)
+    assert command[1:3] == ["--stack-dir", str(destination)]
+    assert "openclaw-observability-bridge" not in " ".join(command)
+
+
+def test_restored_local_observability_restart_keeps_legacy_bridge_arguments_compatible(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    destination = data_dir / "observability-stack"
+    bridge = destination / "bin/openclaw-observability-bridge"
+    bridge.parent.mkdir(parents=True)
+    bridge.write_bytes(b"#!/usr/bin/env bash\n")
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
+    completed = Mock(returncode=0, stdout=json.dumps(contract) + "\n")
+
+    with patch(
+        "defenseclaw.commands.cmd_upgrade._run_phase_two_mutator",
+        return_value=completed,
+    ) as run:
+        result = cmd_upgrade_module._restart_restored_local_observability_stack(
+            str(data_dir),
+            health_timeout=3,
+            os_name="posix",
+        )
+
+    assert result == {"restarted": True, "degraded_errors": []}
+    command = run.call_args.args[0]
+    assert command[0] == str(bridge)
+    assert "--stack-dir" not in command
+
+
 def _hard_cut_provenance_payload(
     bridge_checksums_sha256: str,
     *,
@@ -1820,6 +1939,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
 
     def test_crash_restart_failure_cannot_report_rollback_success(self):
@@ -1878,6 +1998,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
             receipt = load_upgrade_receipt(receipt_path)
             self.assertEqual(receipt.status, "failed")
@@ -1929,6 +2050,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
 
     def test_rollback_discards_target_dotenv_value_before_loading_restored_bridge(self):
@@ -5533,15 +5655,15 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         cfg = Config()
         cfg.data_dir = "/private/upgrade-data"
         with TemporaryDirectory() as install_dir:
-            target = Path(install_dir, "target")
-            target.write_bytes(b"gateway")
-            target.chmod(0o700)
             symlink = Path(install_dir, "defenseclaw-gateway")
-            symlink.symlink_to(target)
             with (
                 patch.dict(os.environ, {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"}, clear=True),
                 patch("defenseclaw.commands.cmd_upgrade.platform.system", return_value="Linux"),
                 patch("defenseclaw.gateway.canonical_install_path", return_value=str(symlink)),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.os.lstat",
+                    return_value=types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777),
+                ),
                 patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run,
                 self.assertRaises(SystemExit),
             ):
@@ -7602,21 +7724,36 @@ class TestUpgradeManifest(unittest.TestCase):
             ),
         )
 
-    def test_native_windows_install_state_accepts_amp_connector(self):
-        with TemporaryDirectory() as temp:
-            local_appdata, profile, _state = self._native_install_state_fixture(
-                temp,
-                connector="amp",
-            )
+    def test_native_windows_install_state_accepts_every_installer_connector(self):
+        connectors = (
+            "none",
+            "amp",
+            "antigravity",
+            "claudecode",
+            "codex",
+            "copilot",
+            "cursor",
+            "geminicli",
+            "hermes",
+            "omnigent",
+            "opencode",
+            "windsurf",
+        )
+        for connector in connectors:
+            with self.subTest(connector=connector), TemporaryDirectory() as temp:
+                local_appdata, profile, _state = self._native_install_state_fixture(
+                    temp,
+                    connector=connector,
+                )
 
-            with patch(
-                "defenseclaw.commands.cmd_upgrade._windows_known_folder",
-                side_effect=[local_appdata, profile],
-            ), self._native_windows_acl_fixture():
-                loaded = _native_windows_install_state("windows", expected_version="0.8.7")
+                with patch(
+                    "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                    side_effect=[local_appdata, profile],
+                ), self._native_windows_acl_fixture():
+                    loaded = _native_windows_install_state("windows", expected_version="0.8.7")
 
-        self.assertIsNotNone(loaded)
-        self.assertEqual(loaded["connector"], "amp")
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["connector"], connector)
 
     def test_native_windows_install_state_ignores_environment_install_root(self):
         with TemporaryDirectory() as temp:
@@ -8111,6 +8248,60 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertIn("FROMVERSION=0.8.7", args)
         self.assertTrue(any(arg.startswith("WAITPID=") for arg in args))
         self.assertIn("DefenseClaw 9.9.9", output)
+
+    def test_windows_setup_handoff_preserves_supported_selection(self):
+        manifest = {
+            "windows_installer": {
+                "asset": "DefenseClawSetup-x64.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": False,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        }
+        for connector in (
+            "none",
+            "amp",
+            "antigravity",
+            "claudecode",
+            "codex",
+            "copilot",
+            "cursor",
+            "geminicli",
+            "hermes",
+            "omnigent",
+            "opencode",
+            "windsurf",
+        ):
+            with self.subTest(connector=connector):
+                state = {
+                    "version": "0.8.7",
+                    "connector": connector,
+                    "mode": "action",
+                    "maintenance_path": r"C:\Trusted\DefenseClawSetup-x64.exe",
+                }
+                with (
+                    patch(
+                        "defenseclaw.commands.cmd_upgrade._cache_verified_windows_setup",
+                        return_value=state["maintenance_path"],
+                    ),
+                    patch("defenseclaw.commands.cmd_upgrade.subprocess.Popen") as popen_mock,
+                ):
+                    _handoff_windows_setup_upgrade(
+                        r"C:\Download\DefenseClawSetup-x64.exe",
+                        "DefenseClawSetup-x64.exe",
+                        "9.9.9",
+                        state,
+                        manifest,
+                        yes=True,
+                    )
+
+                args = popen_mock.call_args.args[0]
+                self.assertIn(f"CONNECTOR={connector}", args)
+                self.assertIn("MODE=action", args)
 
     def test_machine_install_self_update_is_rejected(self):
         with self.assertRaises(SystemExit) as ctx:

@@ -28,6 +28,7 @@ SMOKE_PATH = ROOT / ".github" / "workflows" / "release-candidate-smoke.yml"
 WINDOWS_NATIVE_PATH = ROOT / ".github" / "workflows" / "windows-native.yml"
 FRESH_INSTALL = (ROOT / "scripts" / "test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
 DISPOSABLE_LAUNCHER = (ROOT / "scripts" / "invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
+WINDOWS_COSIGN_INSTALLER = (ROOT / "scripts" / "install-pinned-windows-cosign.ps1").read_text(encoding="utf-8")
 DISPOSABLE_FILE_GUARD = (ROOT / "scripts" / "windows-disposable-file-guard.cs").read_text(encoding="utf-8")
 STANDARD_USER_PROCESS_LAUNCHER = (ROOT / "scripts" / "windows-disposable-standard-user-launcher.cs").read_text(
     encoding="utf-8"
@@ -424,6 +425,63 @@ def test_windows_setup_bytes_are_bound_into_the_single_sealed_candidate() -> Non
     assert "--windows-dir candidate-input/windows" in str(assemble)
 
 
+def test_windows_jobs_stage_digest_pinned_cosign_without_executable_cleanup() -> None:
+    helper = "./scripts/install-pinned-windows-cosign.ps1"
+    expected_action = "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
+    native_jobs = _workflow(WINDOWS_NATIVE_PATH)["jobs"]
+    smoke_jobs = _workflow(SMOKE_PATH)["jobs"]
+
+    for job in (
+        native_jobs["public-bootstrap-acceptance"],
+        native_jobs["release-validator-replay"],
+        smoke_jobs["windows-fresh-install"],
+    ):
+        stage_steps = [
+            step
+            for step in job["steps"]
+            if step.get("name") == "Stage pinned Windows Cosign verifier"
+        ]
+        assert len(stage_steps) == 1
+        assert stage_steps[0]["run"] == helper
+        assert expected_action not in str(job)
+
+    for job_name in ("posix-fresh-install", "posix-upgrade", "macos-intel-refusal"):
+        installers = [
+            step
+            for step in smoke_jobs[job_name]["steps"]
+            if step.get("uses", "").startswith("sigstore/cosign-installer@")
+        ]
+        assert len(installers) == 1
+        assert installers[0]["uses"] == expected_action
+        assert installers[0]["with"] == {"cosign-release": "v2.6.2"}
+
+    assert (
+        "https://github.com/sigstore/cosign/releases/download/"
+        "v2.6.2/cosign-windows-amd64.exe"
+    ) in WINDOWS_COSIGN_INSTALLER
+    assert "DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE" in (
+        WINDOWS_COSIGN_INSTALLER
+    )
+    assert "$maximumBytes = 268435456" in WINDOWS_COSIGN_INSTALLER
+    for required in (
+        "'--proto', '=https'",
+        "'--proto-redir', '=https'",
+        "'--tlsv1.2'",
+        "'--max-filesize', [string]$maximumBytes",
+        "'--retry', '3'",
+        "'--retry-max-time', '300'",
+    ):
+        assert required in WINDOWS_COSIGN_INSTALLER
+    assert "--retry-all-errors" not in WINDOWS_COSIGN_INSTALLER
+    assert "Remove-Item" not in WINDOWS_COSIGN_INSTALLER
+    assert "[IO.File]::Delete" not in WINDOWS_COSIGN_INSTALLER
+    assert "[IO.File]::Move" not in WINDOWS_COSIGN_INSTALLER
+    assert not re.search(r"(?m)^\s*&\s+\$cosign(?:\s|$)", WINDOWS_COSIGN_INSTALLER)
+    assert WINDOWS_COSIGN_INSTALLER.index("Get-FileHash -LiteralPath $cosign") < (
+        WINDOWS_COSIGN_INSTALLER.index("[IO.File]::AppendAllLines")
+    )
+
+
 def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> None:
     smoke_workflow = _workflow(SMOKE_PATH)
     windows_jobs = {
@@ -447,6 +505,9 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     assert "-UninstallContract deferred" in rendered
     assert "-SuccessPathOnly" not in rendered
     assert "defenseclaw-release-bootstrap-diagnostics" in rendered
+    cosign = _step(job, "Stage pinned Windows Cosign verifier")
+    assert cosign["run"] == "./scripts/install-pinned-windows-cosign.ps1"
+    assert "sigstore/cosign-installer@" not in rendered
     diagnostics = _step(job, "Upload Windows bootstrap diagnostics on failure")
     assert diagnostics["if"] == "${{ failure() || cancelled() }}"
     assert diagnostics["with"]["path"] == ("${{ runner.temp }}/defenseclaw-release-bootstrap-diagnostics/**")
@@ -710,7 +771,7 @@ def test_release_documentation_matches_the_fresh_only_gate() -> None:
     assert "first native Windows release" not in release
 
 
-def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
+def test_native_wheel_stages_and_verifies_runtime_assets() -> None:
     stage = _function("Stage-PackageData")
     build = _function("Invoke-BuildArtifacts")
 
@@ -718,13 +779,23 @@ def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
         "schemas\\config\\v8\\defenseclaw-config.schema.json",
         "schemas\\config\\v8\\reference\\$name",
         "scripts/telemetry_runtime_assets.py",
+        "scripts/extension_runtime_fingerprint.py",
     ):
         assert source in stage
+
+    for build_contract in (
+        "Get-RequiredCommand 'npm.cmd'",
+        "'ci', '--include=dev', '--no-audit', '--no-fund'",
+        "'run', 'build'",
+        "-RequireExtensionFingerprint",
+    ):
+        assert build_contract in build
 
     for packaged in (
         "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
         "defenseclaw/_data/config/v8/observability.yaml",
         "defenseclaw/_data/config/v8/observability.md",
+        "defenseclaw/_data/plugin/extension-runtime-fingerprint.json",
         "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
         "defenseclaw/_data/telemetry/v8/catalog.json",
         "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",
@@ -773,6 +844,84 @@ def test_setup_acceptance_validates_packaged_resources_before_first_run() -> Non
     assert acceptance.index(probe) < acceptance.index("'init', '--skip-install'")
 
 
+def test_seeded_setup_upgrade_captures_bounded_external_health() -> None:
+    start = _function("Start-SetupAcceptanceHealthSampler")
+    stop = _function("Stop-SetupAcceptanceHealthSampler")
+    contract = _function("Test-SetupAcceptanceHealthSamplerContract")
+    self_test = _function("Invoke-SelfTest")
+    acceptance = _function("Invoke-SetupAcceptance")
+
+    assert "host PowerShell outside the installed tree" in start
+    assert "Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1'" in start
+    assert "gateway_start_identity" in start
+    assert "[DateTime]::UnixEpoch.Ticks" in start
+    assert "$liveStartIdentity -cne $startIdentity" in start
+    assert "sidecar_instance_id" in start
+    assert "event_config_generation" in start
+    assert "health_telemetry_generation" in start
+    assert "health_config_generation" not in start
+    assert "$health.provenance.generation" not in start
+    assert "provenance_generation" not in start
+    assert "[int]$candidate.provenance.config_generation -ne $healthConfigGeneration" in start
+    assert "$candidate.PSObject.Properties['observed_at']" in start
+    assert "$candidate.PSObject.Properties['timestamp']" in start
+    assert "AddMilliseconds(-250)" in start
+    assert "telemetry_last_error_digest" in start
+    assert "$stream.Length + $bytes.Length -le 65536" in start
+    assert "kind = 'sample_error'" in start
+    assert "stage = $stage" in start
+    assert "category = $category" in start
+    assert "event_correlation" in start
+    assert "$_.Exception" not in start
+    assert "runtime\\python" not in start
+    assert "$prewarmDeadline = [DateTime]::UtcNow.AddSeconds(20)" in start
+    assert "if ($prewarmListeners.Count -gt 0) { break }" in start
+    assert "$deadline = [DateTime]::UtcNow.AddSeconds(30)" in start
+    assert "Setup health sampler readiness cleanup timed out" in start
+    assert "$process.Kill($true)" in stop
+    assert "started_at = $startedAt" in contract
+    assert "uptime_ms = 1" in contract
+    assert "application_protection = $running" in contract
+    assert "telemetry = [ordered]@{" in contract
+    assert "generation = 7" in contract
+    assert "A reset, timeout, or malformed request is isolated to its client" in contract
+    assert (
+        "$resetClient.Client.LingerState = "
+        "[Net.Sockets.LingerOption]::new($true, 0)"
+    ) in contract
+    assert "synthetic Setup health server did not isolate a reset client" in contract
+    assert "provenance_generation" in contract
+    assert "$null -ne $sample.PSObject.Properties['provenance_generation']" in contract
+    assert "Setup health sampler did not emit its bounded stage diagnostic" in contract
+    assert "Setup health sampler did not emit a correlated health sample" in contract
+    sample_sampler_start = contract.index(
+        "$sampler = Start-SetupAcceptanceHealthSampler $pwsh $sampleOutcomePath"
+    )
+    sample_deadline_start = contract.index(
+        "$sampleDeadline = [DateTime]::UtcNow.AddSeconds(15)"
+    )
+    assert sample_sampler_start < sample_deadline_start
+    assert contract[sample_sampler_start:].count("Start-SetupAcceptanceHealthSampler") == 1
+    assert "foreach ($attempt in 1..2)" not in contract
+    assert "Test-SetupAcceptanceHealthSamplerContract $root" in self_test
+    assert "(Join-Path $PSHOME 'pwsh.exe')" in acceptance
+    assert acceptance.index("Start-SetupAcceptanceHealthSampler") < acceptance.index(
+        "Invoke-WindowsSetupStandardUserProcess $setup @(",
+        acceptance.index("$gatewayBeforeSeededUpgrade"),
+    )
+    assert "Stop-SetupAcceptanceHealthSampler $setupHealthSampler" in acceptance
+
+
+def test_setup_transition_health_diagnostic_is_exactly_captured() -> None:
+    capture = _function("Get-WindowsNativeCaptureFiles")
+    self_test = _function("Invoke-SelfTest")
+
+    assert "$_.Name -ceq 'setup-seeded-health.jsonl'" in capture
+    assert "elseif ($_.Name -ceq 'setup-seeded-health.jsonl') { -1 }" in capture
+    assert "setup-seeded-health-extra.jsonl" in self_test
+    assert "exact Setup transition health diagnostic capture contract failed" in self_test
+
+
 def test_setup_uninstall_acceptance_retains_connector_cleanup_authority() -> None:
     acceptance = _function("Invoke-SetupAcceptance")
     authority = _function("Assert-NativeConnectorCleanupAuthorityPresent")
@@ -811,9 +960,12 @@ def test_amp_native_windows_coverage_is_separate_from_the_release_channel() -> N
     for secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AMP_API_KEY"):
         assert secret not in release
 
-    assert "connector: [codex, claudecode, amp]" in windows_native
-    assert "connector: [codex, claudecode, amp]" in connector_live
-    assert "AMP_API_KEY: ${{ secrets.AMP_API_KEY }}" in connector_live
+    assert (
+        "connector: [codex, claudecode, amp, copilot, cursor, devin, hermes, "
+        "antigravity, opencode]"
+    ) in windows_native
+    assert "connector: [codex, claudecode, amp, cursor, opencode]" in connector_live
+    assert "AMP_API_KEY: ${{ matrix.connector == 'amp' && secrets.AMP_API_KEY || '' }}" in connector_live
     assert "AMP_VERSION: ${{ inputs.version }}" in connector_live
     assert "-Layer live" in connector_live
 
@@ -911,6 +1063,9 @@ def test_minimal_gateway_fixture_disables_external_v8_destinations() -> None:
 def test_packaged_rotation_probes_only_owned_gateway_without_secret_output() -> None:
     process = _function("Invoke-WindowsNativeProcess")
     rotation = _function("Assert-PackagedClaudeTokenRotation")
+    failure_reason = _function("Get-PackagedRotationFailureReason")
+    failure_diagnostic = _function("Write-PackagedRotationFailureDiagnostic")
+    capture = _function("Get-WindowsNativeCaptureFiles")
     authentication = _function("Assert-ClaudeNativeOtlpRotationAuthentication")
     authority = _function("Assert-ClaudeNativeOtlpProbeAuthority")
     listener = _function("Assert-OwnedGatewayApiListener")
@@ -925,6 +1080,29 @@ def test_packaged_rotation_probes_only_owned_gateway_without_secret_output() -> 
     assert "[credential-bearing process output intentionally suppressed]" in process
     assert 'if ($SuppressOutput) { throw "$FilePath $reason" }' in process
     assert rotation.count("-SuppressOutput") == 5
+    assert "-AllowedExitCodes @(0, 1) -TimeoutSeconds 1200" in rotation
+    assert "Get-PackagedRotationFailureReason" in rotation
+    assert "Write-PackagedRotationFailureDiagnostic" in rotation
+    assert "Join-Path $Logs 'rotation-failure.json'" in rotation
+    assert "exit=1 reason=$rotationFailureReason" in rotation
+    assert "switch -CaseSensitive ($line)" in failure_reason
+    assert "Error: Gateway stop failed during the token-rotation transaction." in failure_reason
+    assert "Error: Gateway start failed during the token-rotation transaction." in failure_reason
+    assert "return 'unclassified-cli-exit'" in failure_reason
+    assert "schema = 1" in failure_diagnostic
+    assert "exit = $ExitCode" in failure_diagnostic
+    assert "reason = $Reason" in failure_diagnostic
+    assert "-MaxBytes 4096" in failure_diagnostic
+    assert "$StdOut" not in failure_diagnostic
+    assert "$StdErr" not in failure_diagnostic
+    assert "$_.Name -ceq 'rotation-failure.json'" in capture
+    assert "^rotation-.*\\.log$" in capture
+    assert "^(?:gateway|watchdog).*\\.(?:json|jsonl|txt|log)$" in capture
+    assert "if ($_.Name -ceq 'rotation-failure.json') { -4 }" in capture
+    assert "elseif ($_.Name -match '^rotation-.*\\.log$') { -3 }" in capture
+    assert "elseif ($_.Name -match '^(?:gateway|watchdog).*\\.(?:json|jsonl|txt|log)$') { -2 }" in capture
+    assert "elseif ($_.Name -ceq 'setup-seeded-health.jsonl') { -1 }" in capture
+    assert "'{0:D2}|{1}' -f ($priority + 4)" in capture
     for operation in (
         "setup-codex",
         "setup-claudecode",

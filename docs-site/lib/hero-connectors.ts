@@ -10,7 +10,7 @@
 // Setup aliases verified against docs/setup/guardrail/aliases/:
 //   - proxies (OpenClaw, ZeptoClaw) → defenseclaw setup guardrail
 //   - hooks  → defenseclaw setup {claude-code|codex|hermes|opencode|amp|
-//                                  cursor|windsurf|geminicli|copilot|
+//                                  cursor|devin|copilot|
 //                                  openhands|antigravity|omnigent}
 
 export interface ConnectorBlock {
@@ -29,14 +29,13 @@ export const TERMINAL_CONNECTORS: ConnectorBlock[] = [
   { id: 'codex',      label: 'Codex',              command: 'defenseclaw setup codex',       modeId: 'codex' },
   { id: 'openclaw',   label: 'OpenClaw',           command: 'defenseclaw setup guardrail',   modeId: 'openclaw' },
   { id: 'cursor',     label: 'Cursor',             command: 'defenseclaw setup cursor',      modeId: 'cursor' },
+  { id: 'devin',      label: 'Devin',              command: 'defenseclaw setup devin',       modeId: 'devin' },
   { id: 'hermes',     label: 'Hermes',             command: 'defenseclaw setup hermes',      modeId: 'hermes' },
   { id: 'opencode',   label: 'OpenCode',           command: 'defenseclaw setup opencode',    modeId: 'opencode' },
   { id: 'amp',        label: 'Amp',                command: 'defenseclaw setup amp',         modeId: 'amp' },
   { id: 'omnigent',   label: 'OmniGent',           command: 'defenseclaw setup omnigent',    modeId: 'omnigent' },
-  { id: 'geminicli',  label: 'Gemini CLI',         command: 'defenseclaw setup geminicli',   modeId: 'geminicli' },
   { id: 'copilot',    label: 'GitHub Copilot CLI', command: 'defenseclaw setup copilot',     modeId: 'copilot' },
   { id: 'openhands',  label: 'OpenHands',          command: 'defenseclaw setup openhands',   modeId: 'openhands' },
   { id: 'antigravity',label: 'Antigravity',        command: 'defenseclaw setup antigravity', modeId: 'antigravity' },
-  { id: 'windsurf',   label: 'Windsurf',           command: 'defenseclaw setup windsurf',    modeId: 'windsurf' },
   { id: 'zeptoclaw',  label: 'ZeptoClaw',          command: 'defenseclaw setup guardrail',   modeId: 'zeptoclaw' },
 ];

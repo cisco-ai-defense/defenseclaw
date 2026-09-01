@@ -360,8 +360,7 @@ jobs:
         run: |
           set -euo pipefail
           scripts/stamp-version.sh "$RELEASE_TAG"
-          make dist-cli
-          make dist-plugin
+          make dist-cli dist-plugin dist-extension-contract
           make dist-upgrade-manifest
           python3 scripts/release_candidate.py prepare-runtime \
             --release-dir dist \

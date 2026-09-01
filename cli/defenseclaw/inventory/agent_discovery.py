@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import locale
 import ntpath
@@ -52,11 +53,19 @@ from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
     _expand,
     amp_managed_settings_path,
+    claude_settings_paths,
     connector_config_files,
+    connector_home,
+    devin_hook_config_path,
     hermes_config_path,
     omnigent_config_path,
 )
-from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.file_permissions import (
+    atomic_write_private_bytes,
+    open_regular_file_no_follow,
+    reject_reparse_path,
+)
+from defenseclaw.platform_support import DEPRECATED_CONNECTORS
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -70,12 +79,14 @@ UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 # separates a connector's on-disk configuration from a verified application
 # installation; older caches therefore cannot represent every current install
 # signal faithfully.
-CACHE_SCHEMA_VERSION = 4
+CACHE_SCHEMA_VERSION = 5
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
+_ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
 _WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
+_WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 
 # Canonical install prefixes that we trust enough to exec
 # `<binary> --version` against. Anything outside this allow-list is
@@ -216,7 +227,10 @@ def _windows_current_user_known_folder(identifier: str) -> str:
     ole32.CoTaskMemFree.restype = None
 
     # Supplying the actual token prevents inherited HOME/USERPROFILE or
-    # process-level Known Folder overrides from redirecting discovery.
+    # process-level Known Folder overrides from redirecting discovery. The
+    # no-package flag is equally important: a packaged agent host such as
+    # Codex Desktop otherwise redirects LocalAppData into its package cache,
+    # which cannot identify an updater-managed connector installation.
     token_query = 0x0008
     token_impersonate = 0x0004
     if not advapi32.OpenProcessToken(
@@ -228,7 +242,7 @@ def _windows_current_user_known_folder(identifier: str) -> str:
     try:
         status = shell32.SHGetKnownFolderPath(
             ctypes.byref(guid),
-            0,
+            _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION,
             token,
             ctypes.byref(result_path),
         )
@@ -670,25 +684,40 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                 os.path.join(codex_local_app_data, "Programs", "OpenAI", "Codex", "bin"),
                 os.path.join(codex_local_app_data, "OpenAI", "Codex", "bin"),
                 os.path.join(codex_local_app_data, "OpenAI", "Codex", "runtimes"),
-            )
-        )
-    if local_app_data:
-        candidates.extend(
-            (
+                # Cursor's official native PowerShell installer writes the
+                # agent CLI and its agent/cursor-agent aliases directly here.
+                # Use the token-bound Known Folder root, never an ambient
+                # LOCALAPPDATA override, and retain the ACL-chain admission
+                # checks applied to every built-in prefix.
+                os.path.join(codex_local_app_data, "cursor-agent"),
+                # Google's Windows installer writes the Antigravity CLI only
+                # to this token-bound product directory and verifies its
+                # updater-manifest SHA-512 before publication.
+                os.path.join(codex_local_app_data, "agy", "bin"),
+                # Devin Local installs its canonical CLI at one exact
+                # token-bound product path. Native Setup performs signer
+                # admission; passive Python discovery only trusts this
+                # bounded path and the existing ACL-chain checks.
+                os.path.join(codex_local_app_data, "devin", "cli", "bin"),
+                # Hermes' official Windows updater owns this exact venv. Bind
+                # discovery to the current token's Known Folder instead of an
+                # inherited LOCALAPPDATA value or a coexisting legacy home.
                 os.path.join(
-                    local_app_data,
+                    codex_local_app_data,
                     "hermes",
                     "hermes-agent",
                     "venv",
                     "Scripts",
                 ),
+            )
+        )
+    if local_app_data:
+        candidates.extend(
+            (
                 # Hermes/uv installs the native uvx.exe launcher here. Keep
                 # the prefix product-specific; never trust all LOCALAPPDATA.
                 os.path.join(local_app_data, "hermes", "bin"),
-                os.path.join(local_app_data, "agy", "bin"),
-                os.path.join(local_app_data, "Programs", "antigravity"),
                 os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"),
-                os.path.join(local_app_data, "Programs", "Windsurf", "bin"),
                 os.path.join(local_app_data, "Microsoft", "WinGet", "Links"),
             )
         )
@@ -716,7 +745,6 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
                 os.path.join(root, "nodejs"),
                 os.path.join(root, "OpenAI", "Codex", "bin"),
                 os.path.join(root, "cursor", "resources", "app", "bin"),
-                os.path.join(root, "Windsurf", "bin"),
             )
         )
     if system_root:
@@ -748,14 +776,20 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "zeptoclaw",
     "hermes",
     "cursor",
-    "windsurf",
-    "geminicli",
+    "devin",
     "copilot",
     "openhands",
     "antigravity",
     "opencode",
     "amp",
     "omnigent",
+)
+
+# Keep deprecated names in connector_paths.KNOWN_CONNECTORS so exact legacy
+# teardown can still resolve them, but never scan, cache, or render them as
+# install candidates.
+DISCOVERABLE_CONNECTORS: tuple[str, ...] = tuple(
+    name for name in KNOWN_CONNECTORS if name not in DEPRECATED_CONNECTORS
 )
 
 
@@ -802,17 +836,10 @@ _SPECS: dict[str, _AgentSpec] = {
     # Hermes' path is resolved dynamically in _scan_agent so HERMES_HOME and
     # the native Windows %LOCALAPPDATA% default are honored.
     "hermes": _AgentSpec((), "hermes", ("--version",)),
-    "cursor": _AgentSpec(("~/.cursor/hooks.json", "~/.cursor/mcp.json"), "cursor", ("--version",)),
-    "windsurf": _AgentSpec(
-        (
-            "~/.codeium/windsurf/hooks.json",
-            "~/.codeium/windsurf/mcp_config.json",
-            "~/.codeium/windsurf/mcp.json",
-        ),
-        "windsurf",
-        ("--version",),
-    ),
-    "geminicli": _AgentSpec(("~/.gemini/settings.json",), "gemini", ("--version",)),
+    "cursor": _AgentSpec(("~/.cursor/hooks.json", "~/.cursor/mcp.json"), "agent", ("--version",)),
+    # Devin configuration candidates are resolved dynamically so native
+    # Windows uses %APPDATA% while macOS/Linux use ~/.config/devin.
+    "devin": _AgentSpec((), "devin", ("--version",)),
     "copilot": _AgentSpec(
         (
             "~/.copilot/mcp-config.json",
@@ -821,7 +848,7 @@ _SPECS: dict[str, _AgentSpec] = {
             ".mcp.json",
         ),
         "copilot",
-        ("version",),
+        ("--version",),
     ),
     "openhands": _AgentSpec(
         (
@@ -836,11 +863,8 @@ _SPECS: dict[str, _AgentSpec] = {
         ("--version",),
     ),
     "antigravity": _AgentSpec(
-        # agy v1.0.x reads PreToolUse hooks from ~/.gemini/config/
-        # hooks.json (the canonical runtime path). The legacy
-        # ~/.gemini/antigravity-cli/hooks.json file remains a legacy
-        # signal, but the parent directory alone is not installation
-        # evidence: other tools can create empty plugin/skill folders.
+        # The documented global hooks file is configuration evidence, but
+        # configuration alone never proves an installed official client.
         (
             "~/.gemini/config/hooks.json",
             "~/.gemini/antigravity-cli/hooks.json",
@@ -891,8 +915,16 @@ def discover_agents(
     use_cache: bool = True,
     refresh: bool = False,
     data_dir: str | os.PathLike[str] | None = None,
+    persist_cache: bool = True,
 ) -> AgentDiscovery:
-    """Return cached or freshly scanned local agent install signals."""
+    """Return cached or freshly scanned local agent install signals.
+
+    ``persist_cache=False`` is for a caller that needs a fresh, read-only
+    admission decision for one connector.  The returned scan still covers the
+    complete connector catalog, but it cannot replace unrelated version
+    evidence that a subsequent gateway restart uses to refresh existing hook
+    contract locks.
+    """
     if use_cache and not refresh:
         cached = _read_cache(data_dir=data_dir)
         if cached is not None:
@@ -913,7 +945,7 @@ def discover_agents(
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
                 ),
-                KNOWN_CONNECTORS,
+                DISCOVERABLE_CONNECTORS,
             )
         )
     agents = {signal.name: signal for signal in signals}
@@ -921,7 +953,8 @@ def discover_agents(
     # Cache persistence is deliberately best-effort: the freshly computed
     # discovery result is authoritative and must still be returned when the
     # optional acceleration cache cannot be protected or written.
-    _write_cache(discovery, data_dir=data_dir)
+    if persist_cache:
+        _write_cache(discovery, data_dir=data_dir)
     return discovery
 
 
@@ -937,7 +970,7 @@ def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
         if signal and signal.installed:
             return name
 
-    return fallback if fallback in KNOWN_CONNECTORS else "codex"
+    return fallback if fallback in DISCOVERABLE_CONNECTORS else "codex"
 
 
 def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
@@ -1018,24 +1051,46 @@ def _scan_agent(
     if name == "codex":
         config_candidates = (connector_config_files("codex")[0],)
     elif name == "claudecode":
-        config_candidates = (
-            connector_config_files("claudecode")[0],
-            "~/.claude.json",
-            ".claude/settings.json",
-            ".claude/settings.local.json",
-        )
+        # MCP state is inventory, not generic configuration evidence. Use the
+        # current workspace for project scopes and apply Anthropic's effective
+        # settings precedence: local, project, then user.
+        config_candidates = tuple(reversed(claude_settings_paths(os.getcwd())))
     elif name == "hermes":
         config_candidates = (hermes_config_path(),)
-    elif name == "amp":
-        # Enterprise managed settings are valid configuration evidence but
-        # are platform-specific and administrator-owned. Keep them read-only
-        # and ahead of user/workspace candidates in the displayed signal.
+    elif name == "antigravity":
         config_candidates = _dedup_nonempty_candidates(
-            (amp_managed_settings_path(), *config_candidates),
+            (
+                os.path.join(connector_home("antigravity"), "hooks.json"),
+                *spec.config_candidates,
+            )
+        )
+    elif name == "opencode":
+        config_home = connector_home("opencode")
+        config_candidates = (
+            connector_config_files("opencode")[0],
+            os.path.join(config_home, "opencode.json"),
+            os.path.join(config_home, "opencode.jsonc"),
+            os.path.join(config_home, "tui.json"),
+            os.path.join(config_home, "tui.jsonc"),
+            *spec.config_candidates,
+        )
+    elif name == "amp":
+        # Enterprise managed settings are read-only configuration evidence.
+        # Keep the platform-owned path ahead of user/workspace candidates.
+        config_candidates = _dedup_nonempty_candidates(
+            (amp_managed_settings_path(), *config_candidates)
         )
     elif name == "omnigent":
         config_path = omnigent_config_path()
         config_candidates = (config_path,)
+    elif name == "devin":
+        workspace = os.getcwd()
+        config_candidates = _dedup_nonempty_candidates(
+            (
+                devin_hook_config_path(workspace),
+                *connector_config_files("devin", workspace_dir=workspace),
+            )
+        )
     config_path = _first_existing_file(config_candidates)
     binary_candidates = _binary_candidates_for_agent(name, spec)
     binary_path = binary_candidates[0] if binary_candidates else ""
@@ -1049,7 +1104,11 @@ def _scan_agent(
             name,
             candidate,
             spec.version_args,
-            require_trusted_binary_paths=require_trusted_binary_paths,
+            require_trusted_binary_paths=(
+                True
+                if name == "antigravity" and _is_windows_host()
+                else require_trusted_binary_paths
+            ),
             data_dir=data_dir,
         )
         if candidate_version and not candidate_error:
@@ -1643,10 +1702,25 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name in {"claude", "hermes", "openhands"}:
+    if binary_name in {"claude", "hermes", "omnigent", "openhands"} or (
+        os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
+    ):
         timeout = 8.0
+    elif binary_name == "opencode":
+        # The official WinGet binary is a packaged Bun executable. Windows
+        # Defender inspection routinely makes its otherwise trivial
+        # ``--version`` probe take 6-8 seconds on first and subsequent runs.
+        # Keep discovery bounded, but do not reject the authentic client at
+        # the generic two-second budget before signature/version admission.
+        timeout = 10.0
     if binary_name == "openhands":
         env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
+    elif binary_name == "gemini":
+        # DEFENSECLAW_GEMINI_CONFIG_HOME is DefenseClaw's private derived
+        # config-directory authority and must not reach the vendor. Preserve
+        # Gemini's official GEMINI_CLI_HOME parent-root contract.
+        env = dict(os.environ)
+        env.pop("DEFENSECLAW_GEMINI_CONFIG_HOME", None)
 
     try:
         result = subprocess.run(
@@ -1686,18 +1760,128 @@ def _version_for_agent_binary(
 
     if name == "cursor" and _macos_app_bundle_for_binary(binary_path) is not None:
         return _macos_app_version_for_binary(binary_path)
-    if name == "antigravity" and _binary_command_name(binary_path) == "antigravity":
-        return _windows_file_version_for_binary(
+
+    if name == "antigravity" and _is_windows_host():
+        if not _is_canonical_antigravity_windows_binary(binary_path):
+            return "", "binary is not the official token-bound LocalAppData\\agy\\bin\\agy.exe path"
+        if not _is_trusted_binary_path(binary_path, data_dir=data_dir):
+            return "", UNTRUSTED_PREFIX_ERROR
+        try:
+            before_digest = _stable_binary_sha512(binary_path)
+        except OSError as exc:
+            return "", f"official Antigravity CLI digest inspection failed: {exc}"
+        version, error = _version_for_binary(
             binary_path,
-            require_trusted_binary_paths=require_trusted_binary_paths,
+            version_args,
+            require_trusted_binary_paths=True,
             data_dir=data_dir,
         )
-    return _version_for_binary(
+        if error:
+            return version, error
+        try:
+            after_digest = _stable_binary_sha512(binary_path)
+        except OSError as exc:
+            return "", f"official Antigravity CLI digest revalidation failed: {exc}"
+        if before_digest != after_digest:
+            return "", "official Antigravity CLI changed during its version probe"
+        return version, ""
+
+    version, error = _version_for_binary(
         binary_path,
         version_args,
-        require_trusted_binary_paths=require_trusted_binary_paths,
+        require_trusted_binary_paths=(
+            True if name == "devin" and _is_windows_host() else require_trusted_binary_paths
+        ),
         data_dir=data_dir,
     )
+    if name == "devin" and not error:
+        version = _normalize_devin_cli_version_output(version)
+    return version, error
+
+
+def _normalize_devin_cli_version_output(output: str) -> str:
+    """Extract the version from Devin's exact canonical ``--version`` banner.
+
+    The native CLI reports ``devin <semver> (<8-char git revision>)``.  Keep
+    this parser deliberately narrower than general version discovery: any
+    extra field, non-canonical numeric component, or malformed revision is
+    returned unchanged so the exact connector-contract gate rejects it.
+    """
+
+    fields = output.split(" ")
+    if len(fields) != 3 or fields[0] != "devin":
+        return output
+
+    version = fields[1]
+    components = version.split(".")
+    if len(components) != 3:
+        return output
+    for component in components:
+        if not component or any(character not in "0123456789" for character in component):
+            return output
+        if len(component) > 1 and component.startswith("0"):
+            return output
+
+    revision = fields[2]
+    if len(revision) != 10 or not revision.startswith("(") or not revision.endswith(")"):
+        return output
+    if any(character not in "0123456789abcdef" for character in revision[1:-1]):
+        return output
+    return version
+
+
+def _is_canonical_antigravity_windows_binary(binary_path: str) -> bool:
+    candidate = _path_key(binary_path)
+    return any(
+        candidate == _path_key(os.path.join(root, "agy", "bin", "agy.exe"))
+        for root in _windows_current_user_local_app_data_roots()
+    )
+
+
+def _stable_binary_sha512(binary_path: str) -> str:
+    """Hash one stable no-follow executable and reject oversize/replacement races."""
+
+    fd = open_regular_file_no_follow(binary_path)
+    try:
+        before = os.fstat(fd)
+        if before.st_size > _ANTIGRAVITY_BINARY_MAX_BYTES:
+            raise OSError(
+                f"binary exceeds {_ANTIGRAVITY_BINARY_MAX_BYTES} byte provenance limit"
+            )
+        digest = hashlib.sha512()
+        remaining = _ANTIGRAVITY_BINARY_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(1 << 20, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if remaining == 0:
+            raise OSError(
+                f"binary exceeds {_ANTIGRAVITY_BINARY_MAX_BYTES} byte provenance limit"
+            )
+        after = os.fstat(fd)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise OSError("binary changed while it was hashed")
+        reject_reparse_path(binary_path)
+        named = os.stat(binary_path, follow_symlinks=False)
+        if not os.path.samestat(before, named):
+            raise OSError("binary was replaced while it was hashed")
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
 
 
 def _macos_app_version_for_binary(binary_path: str) -> tuple[str, str]:
@@ -1849,16 +2033,42 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
 
     if not spec.binary_name:
         return ()
+    if name == "hermes" and _is_windows_host():
+        root = _windows_current_user_known_folder(_WINDOWS_LOCAL_APP_DATA_FOLDER_ID)
+        if not root:
+            return ()
+        candidate = os.path.join(root, "hermes", "hermes-agent", "venv", "Scripts", "hermes.exe")
+        return (candidate,) if os.path.isfile(candidate) else ()
+    if name == "antigravity" and _is_windows_host():
+        return tuple(
+            candidate
+            for root in _windows_current_user_local_app_data_roots()
+            for candidate in (os.path.join(root, "agy", "bin", "agy.exe"),)
+            if os.path.isfile(candidate)
+        )
     candidates: list[str] = []
+    # Cursor made ``agent`` its primary CLI entrypoint on 2026-01-08 while
+    # retaining ``cursor-agent`` as a compatibility alias. The Desktop
+    # ``cursor`` launcher has a separate release/version stream and therefore
+    # must never become Agent CLI hook-contract evidence.
     binary_names = (spec.binary_name,)
     if name == "cursor":
-        # Cursor's standalone/headless installer exposes ``cursor-agent``;
-        # the desktop application's optional shell command remains ``cursor``.
-        binary_names = ("cursor-agent", spec.binary_name)
-    for binary_name in dict.fromkeys(binary_names):
-        path = _which(binary_name)
-        if path:
-            candidates.append(path)
+        if _is_macos_host():
+            # Keep both standalone and app-bundle launchers. The latter is
+            # metadata-probed without execution and must still pass the
+            # configured application-root trust boundary.
+            binary_names = ("cursor-agent", "cursor", "agent")
+        else:
+            # Cursor renamed the primary Agent CLI entrypoint to ``agent``;
+            # ``cursor-agent`` remains the compatibility alias.
+            binary_names = ("agent", "cursor-agent")
+    # Windows Devin discovery is deliberately not PATH-based. The native
+    # product exposes one canonical CLI under token-bound LocalAppData.
+    if not (name == "devin" and _is_windows_host()):
+        for binary_name in dict.fromkeys(binary_names):
+            path = _which(binary_name)
+            if path:
+                candidates.append(path)
     if not _is_windows_host() and _is_macos_host():
         for candidate in _macos_binary_candidates(name):
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -1879,16 +2089,6 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             # probe, not directory naming, decides whether a candidate works.
             for candidate in sorted(desktop_bin.glob("*/codex.exe")):
                 if candidate.is_file():
-                    candidates.append(os.path.abspath(candidate))
-
-    if name == "antigravity":
-        local_app_data = os.environ.get("LOCALAPPDATA", "")
-        if local_app_data:
-            for candidate in (
-                os.path.join(local_app_data, "agy", "bin", "agy.exe"),
-                os.path.join(local_app_data, "Programs", "antigravity", "Antigravity.exe"),
-            ):
-                if os.path.isfile(candidate):
                     candidates.append(os.path.abspath(candidate))
 
     return _deduplicate_paths(candidates)
@@ -1972,6 +2172,13 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
 
     if not binary_name:
         return ()
+    if connector == "devin":
+        if _binary_command_name(binary_name) != "devin":
+            return ()
+        return tuple(
+            os.path.join(root, "devin", "cli", "bin", "devin.exe")
+            for root in _windows_current_user_local_app_data_roots()
+        )
     suffix = os.path.splitext(binary_name)[1]
     names = [binary_name] if suffix else [binary_name + ext for ext in (".exe", ".cmd", ".bat", ".com")]
     local_app_data = os.environ.get("LOCALAPPDATA", "")
@@ -2000,23 +2207,23 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
             os.path.join(root, "Programs", "OpenAI", "Codex", "bin")
             for root in _windows_current_user_local_app_data_roots()
         ]
-    elif connector == "hermes" and local_app_data:
-        prefixes.insert(
-            0,
-            os.path.join(
-                local_app_data,
-                "hermes",
-                "hermes-agent",
-                "venv",
-                "Scripts",
-            ),
-        )
-    elif connector == "cursor" and local_app_data:
-        prefixes.insert(0, os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"))
-    elif connector == "windsurf" and local_app_data:
-        prefixes.insert(0, os.path.join(local_app_data, "Programs", "Windsurf", "bin"))
-    elif connector == "antigravity" and local_app_data:
-        prefixes.insert(0, os.path.join(local_app_data, "agy", "bin"))
+    elif connector == "hermes":
+        prefixes[0:0] = [
+            os.path.join(root, "hermes", "hermes-agent", "venv", "Scripts")
+            for root in _windows_current_user_local_app_data_roots()
+        ]
+    elif connector == "cursor":
+        prefixes[0:0] = [
+            os.path.join(root, "cursor-agent")
+            for root in _windows_current_user_local_app_data_roots()
+        ]
+        if local_app_data:
+            prefixes.insert(0, os.path.join(local_app_data, "Programs", "cursor", "resources", "app", "bin"))
+    elif connector == "antigravity":
+        prefixes[0:0] = [
+            os.path.join(root, "agy", "bin")
+            for root in _windows_current_user_local_app_data_roots()
+        ]
     elif connector == "opencode" and home:
         prefixes.insert(0, os.path.join(home, ".opencode", "bin"))
 
@@ -2025,8 +2232,6 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
             prefixes.append(os.path.join(root, "OpenAI", "Codex", "bin"))
         elif connector == "cursor":
             prefixes.append(os.path.join(root, "cursor", "resources", "app", "bin"))
-        elif connector == "windsurf":
-            prefixes.append(os.path.join(root, "Windsurf", "bin"))
 
     candidates: list[str] = []
     for prefix in prefixes:
@@ -2068,7 +2273,7 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
 
     agents: dict[str, AgentSignal] = {}
     try:
-        for name in KNOWN_CONNECTORS:
+        for name in DISCOVERABLE_CONNECTORS:
             raw = raw_agents.get(name)
             if not isinstance(raw, dict):
                 return None
@@ -2145,7 +2350,7 @@ def _ordered_connector_names(disc: AgentDiscovery) -> list[str]:
     for name in DISCOVERY_PRECEDENCE:
         if name in disc.agents:
             names.append(name)
-    for name in KNOWN_CONNECTORS:
+    for name in DISCOVERABLE_CONNECTORS:
         if name in disc.agents and name not in names:
             names.append(name)
     return names

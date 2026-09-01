@@ -103,10 +103,14 @@ def scan(
         connectors = [None]
 
     invs: list[dict] = []
+    pending_telemetry: list[tuple[object, str, str]] = []
     for c in connectors:
         if len(connectors) > 1 and not as_json:
             click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
-        invs.append(_scan_one_connector(app, c, cats, as_json, summary_only))
+        inv, pending = _scan_one_connector(app, c, cats, as_json, summary_only)
+        invs.append(inv)
+        if pending is not None:
+            pending_telemetry.append(pending)
 
     if as_json:
         # Emit a bare object when exactly one connector resolved (unchanged
@@ -116,6 +120,14 @@ def scan(
             click.echo(json.dumps(invs[0], indent=2))
         else:
             click.echo(json.dumps(invs, indent=2))
+
+    # Product output is authoritative; observability is best-effort. Emit only
+    # after the complete human/JSON result has been rendered so an admission
+    # outage cannot erase the inventory the operator requested.
+    for result, digest, label in pending_telemetry:
+        _emit_aibom_telemetry_best_effort(app, result, digest, label)
+
+    if as_json:
         return
 
     if not as_json:
@@ -132,7 +144,7 @@ def _scan_one_connector(
     cats: set[str] | None,
     as_json: bool,
     summary_only: bool,
-) -> dict:
+) -> tuple[dict, tuple[object, str, str] | None]:
     """Build, enrich, log and render the inventory for a single connector.
 
     Returns the inventory dict so the caller can aggregate every active
@@ -141,7 +153,6 @@ def _scan_one_connector(
     from defenseclaw.inventory.claw_inventory import (
         build_claw_aibom,
         claw_aibom_to_scan_result,
-        commit_claw_aibom_digest,
         enrich_with_policy,
         format_claw_aibom_human,
         pending_claw_aibom_digest,
@@ -162,15 +173,13 @@ def _scan_one_connector(
 
     # The inventory sweep re-runs every ai_discovery.process_interval_s across
     # every active connector. Persisting the per-category INFO findings on each
-    # pass wrote thousands of identical rows a day; log only on real change.
+    # pass wrote thousands of identical rows a day; queue telemetry only on a
+    # real change. The caller emits this after rendering product output.
+    pending_telemetry: tuple[object, str, str] | None = None
     if app.logger:
         pending_digest = pending_claw_aibom_digest(inv, app.cfg, connector=label)
         if pending_digest is not None:
-            app.logger.log_scan(result)
-            # Advance only after canonical Observability v8 acknowledges the
-            # scan. If checkpointing fails, the next sweep duplicates this
-            # record instead of silently losing an unacknowledged transition.
-            commit_claw_aibom_digest(pending_digest, app.cfg, connector=label)
+            pending_telemetry = (result, pending_digest, label)
 
     errors = inv.get("errors", [])
     if errors:
@@ -185,7 +194,40 @@ def _scan_one_connector(
         # The caller aggregates every connector's inventory and prints once
         # (a bare object for one connector, a list for several), so just
         # hand the dict back here.
-        return inv
+        return inv, pending_telemetry
 
     format_claw_aibom_human(inv, summary_only=summary_only)
-    return inv
+    return inv, pending_telemetry
+
+
+def _emit_aibom_telemetry_best_effort(
+    app: AppContext,
+    result: object,
+    digest: str,
+    label: str,
+) -> None:
+    """Record a rendered inventory without letting telemetry break the CLI."""
+
+    from defenseclaw.inventory.claw_inventory import commit_claw_aibom_digest
+    try:
+        app.logger.log_scan(result)
+    except Exception as exc:  # noqa: BLE001 - telemetry is explicitly best-effort.
+        click.echo(
+            f"Warning: AIBOM telemetry was not recorded for connector={label}: {exc}",
+            err=True,
+        )
+        # Keep the last acknowledged digest. An unchanged retry must attempt
+        # admission again rather than silently checkpointing a dropped event.
+        return
+    try:
+        if not commit_claw_aibom_digest(digest, app.cfg, connector=label):
+            click.echo(
+                "Warning: AIBOM telemetry checkpoint failed for "
+                f"connector={label}; telemetry will be retried",
+                err=True,
+            )
+    except Exception as exc:  # noqa: BLE001 - checkpointing is best-effort.
+        click.echo(
+            f"Warning: AIBOM telemetry checkpoint failed for connector={label}: {exc}",
+            err=True,
+        )

@@ -1145,6 +1145,7 @@ def atomic_write_private(
     write: Callable[[int], None],
     *,
     protect_parent: bool = True,
+    allow_windows_system_controllers_in_parent: bool = False,
     windows_managed_custody: bool = False,
     windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
@@ -1164,9 +1165,19 @@ def atomic_write_private(
     A rollback may provide its previously captured ``windows_managed_security``
     so the exact accepted descriptor, rather than generation B's descriptor,
     is applied to the staged replacement before publication.
+
+    ``allow_windows_system_controllers_in_parent`` applies only when an
+    operator-selected parent is preserved. It admits the Windows system
+    controller SIDs already trusted by the custody policy while still
+    requiring current-user ownership and rejecting every other writer. The
+    staged and published file retains the stricter owner/SYSTEM-only policy.
     """
     if windows_managed_security is not None and not windows_managed_custody:
         raise ValueError("managed Windows security requires managed-custody mode")
+    if allow_windows_system_controllers_in_parent and protect_parent:
+        raise ValueError("trusted Windows parent custody requires protect_parent=False")
+    if allow_windows_system_controllers_in_parent and windows_managed_custody:
+        raise ValueError("trusted Windows parent custody and managed-custody mode are mutually exclusive")
     target = os.path.abspath(os.fspath(path))
     parent = os.path.dirname(target) or os.curdir
     _reject_reparse_chain(parent)
@@ -1184,7 +1195,10 @@ def atomic_write_private(
         elif protect_parent:
             _protect_private_directory(parent)
         else:
-            _validate_unmodified_parent(parent)
+            _validate_unmodified_parent(
+                parent,
+                allow_windows_system_controllers=allow_windows_system_controllers_in_parent,
+            )
         _reject_reparse_path(target, allow_missing=True)
 
         managed_security = windows_managed_security
@@ -1259,6 +1273,7 @@ def atomic_write_private_bytes(
     data: bytes,
     *,
     protect_parent: bool = True,
+    allow_windows_system_controllers_in_parent: bool = False,
     windows_managed_custody: bool = False,
     windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
@@ -1276,6 +1291,7 @@ def atomic_write_private_bytes(
         path,
         _write,
         protect_parent=protect_parent,
+        allow_windows_system_controllers_in_parent=allow_windows_system_controllers_in_parent,
         windows_managed_custody=windows_managed_custody,
         windows_managed_security=windows_managed_security,
     )
@@ -1502,10 +1518,21 @@ def _protect_private_directory(path: str) -> None:
         copy_windows_dacl(path, path)
 
 
-def _validate_unmodified_parent(path: str) -> None:
+def _validate_unmodified_parent(
+    path: str,
+    *,
+    allow_windows_system_controllers: bool = False,
+) -> None:
     """Fail closed when an operator-selected parent is replaceable by others."""
     if os.name == "nt":
-        problem = windows_acl_write_error(path)
+        if allow_windows_system_controllers:
+            problem = windows_acl_custody_write_error(
+                path,
+                allow_current_user=True,
+                require_current_user_owner=True,
+            )
+        else:
+            problem = windows_acl_write_error(path)
         if problem is not None:
             raise OSError(f"unsafe export parent {path}: {problem}")
         return
@@ -1731,14 +1758,14 @@ def _windows_current_user_sid() -> str:
 
 
 def _reject_reparse_chain(path: str) -> None:
-    current = Path(os.path.abspath(path))
     if os.name != "nt":
         # POSIX systems intentionally ship symlinked system ancestors (for
         # example macOS /tmp -> /private/tmp). The caller-owned leaf must not
         # itself be a symlink, while Windows requires checking every ancestor
         # because a junction is transparent to ordinary path operations.
-        _reject_reparse_path(os.fspath(current), allow_missing=True)
+        _reject_reparse_path(os.path.abspath(path), allow_missing=True)
         return
+    current = Path(os.path.abspath(path))
     while True:
         _reject_reparse_path(os.fspath(current), allow_missing=True)
         if current.parent == current:

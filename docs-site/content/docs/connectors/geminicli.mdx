@@ -1,171 +1,76 @@
 ---
-title: Gemini CLI
-description: Gemini CLI connector wires eleven settings.json lifecycle hooks; five are block-capable, and the native logs/metrics/traces exporter points at the gateway.
+title: Gemini CLI (deprecated)
+description: Gemini CLI setup is retired in DefenseClaw; use the Antigravity connector and remove any existing managed Gemini CLI hooks safely.
 keywords:
-  - DefenseClaw Gemini CLI connector
-  - Gemini CLI hooks
-  - Gemini CLI OTLP
-  - Gemini CLI observability
+  - DefenseClaw Gemini CLI deprecation
+  - migrate Gemini CLI to Antigravity
 ---
 
-The Gemini CLI connector wires DefenseClaw into
-[Google's Gemini CLI hooks](https://github.com/google-gemini/gemini-cli) and
-points the agent's native OTLP exporter at the gateway so traces, metrics, and
-logs land in one place.
+<Callout type="warning" title="Deprecated on every platform">
+DefenseClaw no longer offers new Gemini CLI setup on Windows, macOS, or Linux.
+Use the supported [Antigravity connector](/docs/connectors/antigravity) instead.
+</Callout>
+
+Gemini CLI has been removed from installers, setup pickers, the TUI, active
+connector matrices, and live-test lanes. An explicit `defenseclaw setup
+geminicli` command now refuses before changing configuration.
+
+Gemini CLI is also excluded from AI-asset discovery and from skill, plugin,
+MCP, and CodeGuard catalog or install operations. MCP set/unset is disabled;
+use Antigravity's supported asset surfaces for new work. The legacy Gemini CLI
+home and `settings.json` paths remain resolvable only for doctor, verified
+receipt migration, teardown, and uninstall cleanup.
+
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Deprecated / unsupported** | New Gemini CLI setup is disabled. Existing receipt-bound managed state can only be inspected or removed. |
+| Native Windows x64 | **Deprecated / unsupported** | New Gemini CLI setup is disabled. Existing receipt-bound managed state can only be inspected or removed. |
 
 ## Setup
 
-```bash
-defenseclaw setup geminicli
-```
+<Tabs items={['macOS / Linux', 'Windows']}>
 
-<Callout type="warning">
-Gemini CLI setup is supported on macOS and Linux. The DefenseClaw connector is
-not certified on native Windows x64, so setup rejects it there.
+<Tab value="macOS / Linux">
+
+<Callout type="warning" title="Gemini CLI setup is deprecated">
+DefenseClaw refuses new Gemini CLI setup on macOS and Linux. There is no
+supported flag or compatibility workaround that re-enables it; use the
+[Antigravity connector](/docs/connectors/antigravity) instead.
 </Callout>
 
-`setup geminicli` is the dedicated Gemini CLI alias. It uses the shared
-guardrail setup backend, wires hooks against `~/.gemini/settings.json`, and
-points Gemini's native OTLP exporter at the gateway. **There is no
-proxy-enforcement path** — blocking happens hook-side via `BeforeAgent`,
-`BeforeModel`, `BeforeTool`, `AfterTool`, and `AfterAgent`. Gemini CLI has no
-native ask surface, so confirm verdicts use an immediate alert/context
-fallback with `raw_action` preserved for audit.
-
-#### What `setup geminicli` actually does
-
-The table highlights convenience options rather than the complete alias
-surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
-approval, block-message, add/replace, workspace, and rule-pack-directory
-options. See the [quick-alias reference](/docs/setup/guardrail/aliases); use
-[full guardrail setup](/docs/setup/guardrail) for scanner, detection-strategy,
-and judge-provider configuration.
-
-| Flag | Default | What it does |
-| --- | --- | --- |
-| `--yes / -y` | off | Skip the confirmation prompt. |
-| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks + OTLP env vars wire in. |
-| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
-
-Redaction remains a v8 bucket/profile policy (`none` for fresh v8). Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy).
-
-The alias defaults Gemini CLI to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Gemini CLI after install, keep using [`defenseclaw setup guardrail --connector geminicli`](/docs/setup/guardrail) — see the variations below.
-
-#### Common variations — pick the recipe that fits your phase
-
-<Tabs items={['Standard', 'Local stack', 'Add scanning rigor', 'Hook-side enforcement']}>
-
-<Tab value="Standard">
-
-```bash
-defenseclaw setup geminicli
-```
-
-Confirms once, wires the hooks against `~/.gemini/settings.json`, points OTLP at the gateway, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
-
 </Tab>
 
-<Tab value="Local stack">
+<Tab value="Windows">
 
-```bash
-defenseclaw setup geminicli --yes --with-local-stack
-```
-
-Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo/Grafana come up locally — particularly useful for Gemini since native OTLP feeds traces and metrics directly into Tempo and Prometheus. That command writes the export destination after the alias has already restarted the gateway, so run its printed `defenseclaw-gateway restart` step before expecting exports. See [Local observability](/docs/observability/local-observability).
-
-</Tab>
-
-<Tab value="Add scanning rigor">
-
-```bash
-export DEFENSECLAW_LLM_KEY='replace-with-your-key'
-
-defenseclaw setup geminicli                               # base alias first
-defenseclaw setup guardrail \
-  --connector geminicli \
-  --rule-pack strict \
-  --scanner-mode local \
-  --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
-  --judge-api-key-env DEFENSECLAW_LLM_KEY \
-  --judge-hook-connectors geminicli \
-  --restart
-```
-
-The alias selects Gemini CLI; the follow-up `setup guardrail --connector geminicli` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/setup/guardrail), which validates its endpoint and API-key environment variable.
-
-</Tab>
-
-<Tab value="Hook-side enforcement">
-
-Gemini CLI has no proxy enforcement, but its hooks can enforce directly:
-
-```bash
-defenseclaw setup geminicli --mode action --fail-mode closed
-```
-
-With `mode=action`, the declared blocking hooks stop policy-denied work.
-Because Gemini CLI has no native ask surface, `confirm` uses an alert/context
-fallback; operators can review the event in audit or the TUI, but cannot
-resume it there.
+<Callout type="warning" title="Gemini CLI setup is deprecated">
+DefenseClaw refuses new Gemini CLI setup on native Windows x64. There is no
+supported PowerShell, WSL, Git Bash, or mixed-path workaround that re-enables
+it; use the [Antigravity connector](/docs/connectors/antigravity) instead.
+</Callout>
 
 </Tab>
 
 </Tabs>
 
-#### Decision aids — should I turn this on?
+## Remove an existing managed installation
 
-<Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Gemini CLI has no native ask; confirm uses an alert/context fallback preserved in audit." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector geminicli`." />
-  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
-</Cards>
-
-<Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
-</Callout>
-
-## Files DefenseClaw will modify
-
-<Files>
-  <Folder name="~/.gemini" defaultOpen>
-    <File name="settings.json (hooks + telemetry blocks)" />
-  </Folder>
-  <Folder name="~/.defenseclaw" defaultOpen>
-    <Folder name="hooks">
-      <File name="geminicli-hook.sh" />
-    </Folder>
-  </Folder>
-</Files>
-
-## Hook capabilities
-
-<HookEventsList connector="geminicli" />
-
-<Callout>
-Gemini CLI has no native human-approval surface. Confirm verdicts fall back to an alert/context response with `raw_action` preserved in the audit log; the TUI is review-only.
-</Callout>
-
-## Telemetry channels
-
-<Flow
-  direction="LR"
-  compact
-  caption="Hooks cover the lifecycle; native OTLP delivers logs, metrics, and traces out-of-band."
->
-  <Node id="gemini" kind="agent">Gemini CLI</Node>
-  <Node id="hooks" kind="connector">{`11 lifecycle hooks\n(5 block-capable)`}</Node>
-  <Node id="otlp" kind="connector">Native OTLP exporter</Node>
-  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
-  <Edge from="gemini" to="hooks" />
-  <Edge from="hooks" to="gateway" />
-  <Edge from="gemini" to="otlp" />
-  <Edge from="otlp" to="gateway" />
-</Flow>
-
-## Disable
+DefenseClaw retains the old Gemini CLI lifecycle code only so existing users
+can restore their pre-DefenseClaw settings without losing unrelated Gemini
+configuration:
 
 ```bash
-defenseclaw guardrail disable --connector geminicli --yes
+defenseclaw setup remove geminicli --yes
+```
+
+Full DefenseClaw uninstall also invokes the same receipt-bound cleanup. The
+cleanup removes only DefenseClaw-owned hook and telemetry entries, restores an
+authenticated pristine backup when it is still safe to do so, and preserves
+foreign or drifted content for manual review.
+
+For new configuration, run:
+
+```bash
+defenseclaw setup antigravity
 ```

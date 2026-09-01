@@ -22,8 +22,9 @@ from typing import Any
 import yaml
 
 MANIFEST_FILES = (
-    os.path.join(".codex-plugin", "plugin.json"),
-    os.path.join(".claude-plugin", "plugin.json"),
+    ".cursor-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
     "plugin.json",
     "plugin.yaml",
     "plugin.yml",
@@ -123,7 +124,10 @@ def read_plugin_manifest(plugin_path: str) -> tuple[dict[str, Any], str] | None:
     if is_link_or_reparse(plugin_path) or not os.path.isdir(root):
         raise PluginIdentityError("plugin source must be a regular directory, not a link")
     for rel in MANIFEST_FILES:
-        path = os.path.join(plugin_path, rel)
+        # Manifest names are serialized in connector metadata and JSON output,
+        # so keep their public representation POSIX-stable on every host.
+        # Build the native filesystem path separately for Windows.
+        path = os.path.join(plugin_path, *rel.split("/"))
         if not _regular_file_no_links(path, root):
             continue
         try:

@@ -79,13 +79,89 @@ const (
 	FailureClassUnsafeEndpoint   FailureClass = "unsafe_endpoint"
 )
 
-// DeliveryResult contains no free-form adapter diagnostics. DeliveredItems and
-// RejectedItems must both be positive, non-overflowing, and sum to Batch.Len
-// only when Outcome is OutcomePartial. They must be zero for every other
-// outcome. The dispatcher rejects malformed adapter results without retrying or
-// over-reporting remote delivery.
+// FailureCode is the closed, content-free failure identity propagated from an
+// adapter into delivery health. Codes describe only the failed stage; they
+// never contain an endpoint, response body, payload, header, or recovered
+// panic value.
+type FailureCode string
+
+const (
+	FailureCodeUnspecified          FailureCode = "unspecified"
+	FailureCodeSizeEstimateRejected FailureCode = "size_estimate_rejected"
+	FailureCodeSizeEstimatorPanic   FailureCode = "size_estimator_panic"
+	FailureCodeAdapterPanic         FailureCode = "adapter_panic"
+	FailureCodeAdapterResultInvalid FailureCode = "adapter_result_invalid"
+	FailureCodeAdapterInputInvalid  FailureCode = "adapter_input_invalid"
+	FailureCodeQueueFull            FailureCode = "queue_full"
+	FailureCodeOriginLoop           FailureCode = "origin_loop"
+	FailureCodeProjectionInvalid    FailureCode = "projection_invalid"
+	FailureCodeEnvelopeEncodeFailed FailureCode = "envelope_encode_failed"
+	FailureCodeEnvelopeSizeInvalid  FailureCode = "envelope_size_invalid"
+	FailureCodeRequestBuildFailed   FailureCode = "request_build_failed"
+	FailureCodeEndpointProhibited   FailureCode = "endpoint_prohibited"
+	FailureCodeResolutionFailed     FailureCode = "resolution_failed"
+	FailureCodeConnectionFailed     FailureCode = "connection_failed"
+	FailureCodeRequestCanceled      FailureCode = "request_canceled"
+	FailureCodeRequestTimeout       FailureCode = "request_timeout"
+	FailureCodeAcknowledgementLost  FailureCode = "acknowledgement_lost"
+	FailureCodeTransportFailed      FailureCode = "transport_failed"
+	FailureCodeHTTPAuthentication   FailureCode = "http_authentication"
+	FailureCodeHTTPRetryable        FailureCode = "http_retryable"
+	FailureCodeHTTPRejected         FailureCode = "http_rejected"
+	FailureCodeHECAckInvalid        FailureCode = "hec_ack_invalid"
+	FailureCodeHECAckAuthentication FailureCode = "hec_ack_authentication"
+	FailureCodeHECAckRetryable      FailureCode = "hec_ack_retryable"
+	FailureCodeHECAckRejected       FailureCode = "hec_ack_rejected"
+)
+
+// IsFailureCode reports whether code belongs to the closed delivery failure
+// vocabulary. The empty value means no failure and is valid only on successful
+// delivery results.
+func IsFailureCode(code FailureCode) bool {
+	switch code {
+	case FailureCodeUnspecified,
+		FailureCodeSizeEstimateRejected,
+		FailureCodeSizeEstimatorPanic,
+		FailureCodeAdapterPanic,
+		FailureCodeAdapterResultInvalid,
+		FailureCodeAdapterInputInvalid,
+		FailureCodeQueueFull,
+		FailureCodeOriginLoop,
+		FailureCodeProjectionInvalid,
+		FailureCodeEnvelopeEncodeFailed,
+		FailureCodeEnvelopeSizeInvalid,
+		FailureCodeRequestBuildFailed,
+		FailureCodeEndpointProhibited,
+		FailureCodeResolutionFailed,
+		FailureCodeConnectionFailed,
+		FailureCodeRequestCanceled,
+		FailureCodeRequestTimeout,
+		FailureCodeAcknowledgementLost,
+		FailureCodeTransportFailed,
+		FailureCodeHTTPAuthentication,
+		FailureCodeHTTPRetryable,
+		FailureCodeHTTPRejected,
+		FailureCodeHECAckInvalid,
+		FailureCodeHECAckAuthentication,
+		FailureCodeHECAckRetryable,
+		FailureCodeHECAckRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+// DeliveryResult contains no free-form adapter diagnostics. Delivered outcomes
+// must have an empty FailureCode. Every failure accepts only a closed code; an
+// empty failure code normalizes to unspecified, and an unknown code is rejected
+// as an invalid adapter result. DeliveredItems and RejectedItems must both be
+// positive, non-overflowing, and sum to Batch.Len only when Outcome is
+// OutcomePartial. They must be zero for every other outcome. The dispatcher
+// rejects malformed adapter results without retrying or over-reporting remote
+// delivery.
 type DeliveryResult struct {
 	Outcome        DeliveryOutcome
+	FailureCode    FailureCode
 	DeliveredItems int
 	RejectedItems  int
 }
@@ -256,6 +332,7 @@ type HealthSnapshot struct {
 	ConsecutiveFailures uint64
 	CircuitOpenUntil    time.Time
 	LastFailureClass    FailureClass
+	LastFailureCode     FailureCode
 	Queue               *QueueSnapshot
 	Counters            Counters
 	LastSuccess         time.Time
@@ -269,16 +346,20 @@ type SnapshotSource interface {
 }
 
 // HealthTransition is safe for mandatory platform-health reporting. It carries
-// only bounded destination identity, closed state/reason values, and counters.
+// only bounded destination and signal identities, closed state/reason/failure
+// values, and counters.
 type HealthTransition struct {
-	Destination string
-	Generation  uint64
-	Previous    HealthState
-	Current     HealthState
-	Reason      HealthReason
-	Counters    Counters
-	OccurredAt  time.Time
-	sequence    uint64
+	Destination  string
+	Generation   uint64
+	Signal       string
+	Previous     HealthState
+	Current      HealthState
+	Reason       HealthReason
+	FailureClass FailureClass
+	FailureCode  FailureCode
+	Counters     Counters
+	OccurredAt   time.Time
+	sequence     uint64
 }
 
 type Observer interface{ Observe(HealthTransition) }

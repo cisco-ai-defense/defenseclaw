@@ -1992,7 +1992,7 @@ func (a *APIServer) emitInferredDelegatedAgentTransitions(
 
 func connectorNeedsInferredDelegation(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "antigravity", "geminicli", "windsurf", "openhands":
+	case "antigravity", "devin", "geminicli", "openhands":
 		return true
 	default:
 		return false

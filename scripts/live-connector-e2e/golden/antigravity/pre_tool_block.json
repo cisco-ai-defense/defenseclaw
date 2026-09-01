@@ -1,14 +1,14 @@
 {
-  "hookEventName": "PreToolUse",
   "conversationId": "dc-e2e-antigravity",
+  "workspacePaths": ["C:\\dc-e2e-workspace"],
+  "transcriptPath": "C:\\dc-e2e-workspace\\transcript.jsonl",
+  "artifactDirectoryPath": "C:\\dc-e2e-workspace\\artifacts",
+  "stepIdx": 2,
   "toolCall": {
     "name": "run_command",
     "args": {
-      "CommandLine": "rm -rf /",
-      "Cwd": "/tmp/antigravity-workspace"
+      "Cwd": "C:\\dc-e2e-workspace",
+      "CommandLine": "rm -rf /"
     }
-  },
-  "workspacePaths": [
-    "/tmp/antigravity-workspace"
-  ]
+  }
 }

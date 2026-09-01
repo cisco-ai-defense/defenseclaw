@@ -1,13 +1,12 @@
 #!/bin/bash
-# defenseclaw-managed-hook v6
-# DefenseClaw Antigravity (`agy`) hook — forwards Antigravity hook payloads
-# to the DefenseClaw gateway. Modelled on geminicli-hook.sh (PR #284) because
-# both connectors signal verdicts via JSON on stdout (decision/reason)
-# rather than the exit-code 2 convention used by Windsurf. Intentional
-# policy blocks are returned as flat JSON: {"decision":"deny","reason":"..."}
-# or {"decision":"ask","reason":"..."}.
+# defenseclaw-managed-hook v8
+# DefenseClaw Antigravity (`agy`) hook. Setup passes the documented lifecycle
+# event as argv[1] because Antigravity's official stdin schemas omit it.
+# PreToolUse blocks only through synchronous stdout {"decision":"deny"}; this
+# bridge does not rely on undocumented non-zero-exit enforcement.
 set -euo pipefail
 
+HOOK_EVENT="${1:-}"
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
@@ -55,18 +54,45 @@ defenseclaw_harden_env
 
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
+antigravity_emit_fallback() {
+  local closed="${1:-0}"
+  case "$HOOK_EVENT" in
+    PreToolUse)
+      if [ "$closed" = "1" ]; then
+        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}'
+      else
+        printf '%s\n' '{"decision":"allow"}'
+      fi
+      ;;
+    Stop)
+      printf '%s\n' '{"decision":"allow"}'
+      ;;
+    *)
+      printf '%s\n' '{}'
+      ;;
+  esac
+}
+
 DEFENSECLAW_HOOK_CONNECTOR="antigravity"
 DEFENSECLAW_HOOK_NAME="antigravity-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token antigravity antigravity-hook "antigravity tool"
+  defenseclaw_log_hook_failure antigravity antigravity-hook "missing gateway token" transport "$FAIL_MODE"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    antigravity_emit_fallback 1
+  else
+    antigravity_emit_fallback 0
+  fi
+  exit 0
 fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: antigravity hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
-    exit 2
+    antigravity_emit_fallback 1
+  else
+    antigravity_emit_fallback 0
   fi
   exit 0
 }
@@ -87,7 +113,9 @@ fail_unreachable() {
   defenseclaw_log_hook_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "antigravity tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    exit 2
+    antigravity_emit_fallback 1
+  else
+    antigravity_emit_fallback 0
   fi
   exit 0
 }
@@ -95,10 +123,12 @@ fail_unreachable() {
 fail_response() {
   defenseclaw_log_hook_failure antigravity antigravity-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: antigravity hook error: $1" >&2
-  if [ "$FAIL_MODE" = "open" ]; then
-    exit 0
+  if [ "$FAIL_MODE" = "closed" ]; then
+    antigravity_emit_fallback 1
+  else
+    antigravity_emit_fallback 0
   fi
-  exit 2
+  exit 0
 }
 
 AUTH_HEADER_ARGS=()
@@ -115,10 +145,11 @@ fi
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/antigravity/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: antigravity-hook/1.0" \
+  -H "X-DefenseClaw-Antigravity-Event: ${HOOK_EVENT}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
-  --max-time 10 \
+  --max-time 29 \
   -d "$PAYLOAD" 2>/dev/null) || {
   fail_unreachable "gateway unreachable"
 }
@@ -139,5 +170,7 @@ OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
+else
+  antigravity_emit_fallback 0
 fi
 exit 0

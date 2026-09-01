@@ -11,7 +11,7 @@ t_install_help() {
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--mode {observe|action}" "mode flag in help"
   assert_contains "${out}" "--connector LIST"        "connector flag in help"
-  assert_contains "${out}" "amp, codex, claudecode, cursor" "Amp listed as supported"
+  assert_contains "${out}" "amp, codex, claudecode, cursor, opencode" "full auto-wire roster listed as supported"
   assert_not_contains "${out}" "--disable-redaction" "removed global redaction flag"
   assert_contains "${out}" "comma-separated"         "comma-separated note in help"
   assert_contains "${out}" "Per-user hook wiring"    "per-user section header"
@@ -21,6 +21,12 @@ t_install_accepts_amp_as_auto_wire_connector() {
   local out rc=0
   out="$("${INSTALL_SH}" --connector "amp" 2>&1)" || rc=$?
   assert_not_contains "${out}" "is not in the auto-wire list" "Amp must be auto-wired"
+}
+
+t_install_accepts_opencode_as_auto_wire_connector() {
+  local out rc=0
+  out="$("${INSTALL_SH}" --connector "opencode" 2>&1)" || rc=$?
+  assert_not_contains "${out}" "is not in the auto-wire list" "OpenCode must be auto-wired"
 }
 
 t_install_bad_mode_exits_nonzero() {
@@ -252,6 +258,7 @@ run_case "install --connector cursor,,X"  t_install_empty_connector_entry_exits_
 run_case "install --port out-of-range"    t_install_bad_port_exits_nonzero
 run_case "install unsupported connector"  t_install_warns_unsupported_connector
 run_case "install Amp connector is auto-wired" t_install_accepts_amp_as_auto_wire_connector
+run_case "install OpenCode connector is auto-wired" t_install_accepts_opencode_as_auto_wire_connector
 run_case "install non-root rejected"      t_install_requires_root
 run_case "install --env flag documented"  t_install_help_documents_env
 run_case "install --env garbage rejected" t_install_bad_env_exits_nonzero

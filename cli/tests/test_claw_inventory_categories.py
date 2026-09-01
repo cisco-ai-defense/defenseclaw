@@ -38,8 +38,10 @@ from tests.environment import isolated_home_env
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import connector_paths
 from defenseclaw.inventory.claw_inventory import (
     _agents_for_connector,
+    _agents_from_copilot_dirs,
     _memory_for_connector,
     _model_providers_for_connector,
     _tools_for_connector,
@@ -53,6 +55,14 @@ class _FakeCfg:
     they don't actually read fields off the Config instance. We pass an
     empty stub to avoid the heavy real loader.
     """
+
+
+class _WorkspaceCfg:
+    def __init__(self, workspace: str):
+        self.workspace = workspace
+
+    def connector_workspace_dir(self) -> str:
+        return self.workspace
 
 
 class AgentsAdapterTests(unittest.TestCase):
@@ -72,14 +82,79 @@ class AgentsAdapterTests(unittest.TestCase):
         os.makedirs(agents_dir)
         for name in ("planner.md", "reviewer.md", "ignored.txt"):
             with open(os.path.join(agents_dir, name), "w") as fh:
-                fh.write("# example\n")
+                identity = os.path.splitext(name)[0]
+                fh.write(
+                    f"---\nname: {identity}\ndescription: {identity} work\n---\n",
+                )
 
         out = _agents_for_connector("claudecode", _FakeCfg())
         ids = sorted(a["id"] for a in out)
-        self.assertEqual(ids, ["ignored", "planner", "reviewer"])
+        self.assertEqual(ids, ["planner", "reviewer"])
         for entry in out:
             self.assertEqual(entry["kind"], "subagent")
-            self.assertTrue(entry["source"].endswith((".md", ".txt")))
+            self.assertTrue(entry["source"].endswith(".md"))
+
+    def test_claudecode_agents_include_explicit_project_markdown_only(self):
+        project = os.path.join(self.tmp, "project")
+        agents_dir = os.path.join(project, ".claude", "agents")
+        os.makedirs(agents_dir)
+        for name in ("project.md", "ignored.yaml"):
+            with open(os.path.join(agents_dir, name), "w") as fh:
+                fh.write(
+                    "---\nname: project\ndescription: project work\n---\n",
+                )
+
+        class ProjectCfg:
+            @staticmethod
+            def connector_workspace_dir():
+                return project
+
+        out = _agents_for_connector("claudecode", ProjectCfg())
+        self.assertEqual([entry["id"] for entry in out], ["project"])
+
+    def test_claudecode_agents_use_recursive_frontmatter_identity_and_closest_scope(self):
+        repository = os.path.join(self.tmp, "repo")
+        launch = os.path.join(repository, "apps", "web")
+        os.makedirs(os.path.join(repository, ".git"))
+        user_agent = os.path.join(self.tmp, ".claude", "agents", "user.md")
+        parent_agent = os.path.join(repository, ".claude", "agents", "review", "parent.md")
+        closest_agent = os.path.join(launch, ".claude", "agents", "nested", "filename-does-not-matter.md")
+        invalid_agent = os.path.join(launch, ".claude", "agents", "invalid.md")
+        for path, body in {
+            user_agent: "---\nname: reviewer\ndescription: user reviewer\n---\n",
+            parent_agent: "---\nname: reviewer\ndescription: parent reviewer\n---\n",
+            closest_agent: "---\nname: reviewer\ndescription: closest reviewer\n---\n",
+            invalid_agent: "---\nname: Invalid:Name\ndescription: invalid\n---\n",
+        }.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(body)
+
+        class ProjectCfg:
+            @staticmethod
+            def connector_workspace_dir():
+                return launch
+
+        out = _agents_for_connector("claude-code", ProjectCfg())
+        self.assertEqual([entry["id"] for entry in out], ["reviewer"])
+        self.assertEqual(out[0]["description"], "closest reviewer")
+        self.assertEqual(out[0]["source"], closest_agent)
+
+    def test_claudecode_duplicate_identity_in_one_scope_is_ambiguous(self):
+        project = os.path.join(self.tmp, "project")
+        for relative in ("agents/one.md", "agents/nested/two.md"):
+            path = os.path.join(project, ".claude", relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("---\nname: duplicate\ndescription: duplicate\n---\n")
+
+        class ProjectCfg:
+            @staticmethod
+            def connector_workspace_dir():
+                return project
+
+        with self.assertRaisesRegex(ValueError, "duplicated"):
+            _agents_for_connector("claudecode", ProjectCfg())
 
     def test_codex_agents_dir_missing_returns_empty(self):
         # No ~/.codex/agents directory; adapter should return [] not raise.
@@ -108,6 +183,83 @@ class AgentsAdapterTests(unittest.TestCase):
         out = _agents_for_connector("zeptoclaw", _FakeCfg())
         ids = sorted(a["id"] for a in out)
         self.assertEqual(ids, ["alpha", "beta", "name-only-fallback"])
+
+    def test_antigravity_agents_from_global_workspace_and_plugin_paths(self):
+        workspace = os.path.join(self.tmp, "workspace")
+        global_agents = os.path.join(self.tmp, ".gemini", "config", "agents")
+        workspace_agents = os.path.join(workspace, ".agents", "agents")
+        plugin_agents = os.path.join(
+            self.tmp,
+            ".gemini",
+            "config",
+            "plugins",
+            "review-bundle",
+            "agents",
+        )
+        os.makedirs(global_agents)
+        os.makedirs(os.path.join(workspace_agents, "workspace-reviewer"))
+        os.makedirs(plugin_agents)
+        with open(os.path.join(global_agents, "global-reviewer.md"), "w") as fh:
+            fh.write("# Global reviewer\n")
+        with open(os.path.join(workspace_agents, "workspace-reviewer", "agent.md"), "w") as fh:
+            fh.write("# Workspace reviewer\n")
+        with open(os.path.join(plugin_agents, "plugin-reviewer.md"), "w") as fh:
+            fh.write("# Plugin reviewer\n")
+
+        out = _agents_for_connector("antigravity", _WorkspaceCfg(workspace))
+
+        self.assertEqual(
+            sorted(agent["id"] for agent in out),
+            ["global-reviewer", "plugin-reviewer", "workspace-reviewer"],
+        )
+        self.assertTrue(all(agent["kind"] == "subagent" for agent in out))
+
+    def test_copilot_agents_reject_reparse_files(self):
+        agents_dir = os.path.join(self.tmp, "copilot-agents")
+        os.makedirs(agents_dir)
+        safe = os.path.join(agents_dir, "safe.md")
+        redirected = os.path.join(agents_dir, "redirected.md")
+        for path in (safe, redirected):
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("# agent\n")
+        real_reject = connector_paths.reject_reparse_path
+
+        def reject_redirected(path: str) -> None:
+            if os.path.normcase(path) == os.path.normcase(redirected):
+                raise OSError("mocked Windows reparse point")
+            real_reject(path)
+
+        with patch.object(connector_paths, "reject_reparse_path", side_effect=reject_redirected):
+            out = _agents_from_copilot_dirs([agents_dir])
+
+        ids = {agent["id"] for agent in out}
+        self.assertIn("safe", ids)
+        self.assertNotIn("redirected", ids)
+
+    def test_antigravity_agents_reject_reparse_files_and_nested_directories(self):
+        workspace = os.path.join(self.tmp, "workspace")
+        agents_dir = os.path.join(workspace, ".agents", "agents")
+        nested = os.path.join(agents_dir, "redirected-nested")
+        direct = os.path.join(agents_dir, "redirected-direct.md")
+        os.makedirs(nested)
+        with open(os.path.join(nested, "agent.md"), "w", encoding="utf-8") as stream:
+            stream.write("# nested\n")
+        with open(direct, "w", encoding="utf-8") as stream:
+            stream.write("# direct\n")
+        real_reject = connector_paths.reject_reparse_path
+
+        def reject_redirected(path: str) -> None:
+            normalized = os.path.normcase(path)
+            if normalized in {os.path.normcase(direct), os.path.normcase(nested)}:
+                raise OSError("mocked Windows reparse point")
+            real_reject(path)
+
+        with patch.object(connector_paths, "reject_reparse_path", side_effect=reject_redirected):
+            out = _agents_for_connector("antigravity", _WorkspaceCfg(workspace))
+
+        ids = {agent["id"] for agent in out}
+        self.assertNotIn("redirected-direct", ids)
+        self.assertNotIn("redirected-nested", ids)
 
     def test_unknown_connector_returns_empty(self):
         out = _agents_for_connector("openclaw", _FakeCfg())
@@ -282,24 +434,51 @@ class MemoryAdapterTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_claudecode_memory_dir_present(self):
-        d = os.path.join(self.tmp, ".claude", "memory")
+        project = os.path.join(self.tmp, "project")
+        os.makedirs(os.path.join(project, ".git"))
+        config_dir = os.path.join(self.tmp, ".claude")
+        settings = os.path.join(config_dir, "settings.json")
+        d = os.path.join(self.tmp, "custom-memory")
         os.makedirs(d)
-        with open(os.path.join(d, "ctx.txt"), "w") as fh:
+        os.makedirs(config_dir, exist_ok=True)
+        with open(settings, "w") as fh:
+            json.dump({"autoMemoryDirectory": d}, fh)
+        with open(os.path.join(d, "MEMORY.md"), "w") as fh:
             fh.write("history")
 
-        out = _memory_for_connector("claudecode", _FakeCfg())
+        class ProjectCfg:
+            @staticmethod
+            def connector_workspace_dir():
+                return project
+
+        out = _memory_for_connector("claudecode", ProjectCfg())
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["kind"], "filesystem")
         self.assertEqual(out[0]["entry_count"], 1)
+        self.assertEqual(out[0]["settings_source"], settings)
+        self.assertFalse(out[0]["activation_verified"])
 
-    def test_codex_memory_multiple_candidates(self):
-        os.makedirs(os.path.join(self.tmp, ".codex", "memory"))
-        os.makedirs(os.path.join(self.tmp, ".codex", "history"))
-        out = _memory_for_connector("codex", _FakeCfg())
-        sources = sorted(e["source"] for e in out)
-        self.assertEqual(len(sources), 2)
-        self.assertTrue(any(s.endswith("memory") for s in sources))
-        self.assertTrue(any(s.endswith("history") for s in sources))
+    def test_codex_memory_uses_codex_home_memories_only(self):
+        codex_home = os.path.join(self.tmp, "custom-codex-home")
+        memories = os.path.join(codex_home, "memories")
+        os.makedirs(memories)
+        with open(os.path.join(memories, "summary.md"), "w") as fh:
+            fh.write("generated memory")
+
+        # These stale directory assumptions and the separate transcript file
+        # must not be reported as Codex memory stores.
+        os.makedirs(os.path.join(codex_home, "memory"))
+        os.makedirs(os.path.join(codex_home, "history"))
+        with open(os.path.join(codex_home, "history.jsonl"), "w") as fh:
+            fh.write('{"session":"separate history surface"}\n')
+
+        with patch.dict(os.environ, {"CODEX_HOME": codex_home}, clear=False):
+            out = _memory_for_connector("codex", _FakeCfg())
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["id"], "memories")
+        self.assertEqual(out[0]["source"], memories)
+        self.assertEqual(out[0]["entry_count"], 1)
 
     def test_unknown_connector_returns_empty(self):
         self.assertEqual(_memory_for_connector("openclaw", _FakeCfg()), [])

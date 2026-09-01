@@ -10,7 +10,18 @@ keywords:
 
 The OpenHands connector wires DefenseClaw into [OpenHands lifecycle hooks](https://docs.openhands.dev/openhands/usage/customization/hooks). DefenseClaw installs the hook globally at `~/.openhands/hooks.json` by default so local OpenHands sessions across repositories report into the same DefenseClaw gateway, while OpenHands still talks directly to its configured upstream model provider.
 
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | DefenseClaw installs the POSIX hook runtime and supports the OpenHands CLI `>=1.12.0` hook contract. macOS can additionally use the protected launch-command trace-only native OTLP path; Linux remains hook-only. |
+| Native Windows x64 | **Unsupported** | OpenHands CLI requires WSL, and DefenseClaw does not implement a WSL connector path. |
+
 ## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
 
 ```bash
 defenseclaw setup openhands                # observe (default) - record only
@@ -18,11 +29,19 @@ defenseclaw setup openhands --mode action  # block on policy hits via hook deny
 defenseclaw setup openhands --workspace /path/to/repo
 ```
 
-<Callout type="warning">
-OpenHands connector setup is supported on macOS and Linux. OpenHands CLI
-requires WSL on Windows, and DefenseClaw does not implement a WSL connector
-path, so native Windows setup is unsupported.
+</Tab>
+
+<Tab value="Windows">
+
+<Callout type="warning" title="Native Windows setup is unsupported">
+DefenseClaw has no native Windows or WSL connector path for OpenHands. There
+is no supported Git Bash, PowerShell, WSL, Docker, or mixed-path workaround;
+run this connector on macOS or Linux instead.
 </Callout>
+
+</Tab>
+
+</Tabs>
 
 By default this is **global/user-scoped**: DefenseClaw writes native OpenHands hook entries into `~/.openhands/hooks.json` and installs the shared hook script at `~/.defenseclaw/hooks/openhands-hook.sh`. Pass `--workspace /path/to/repo` only when you intentionally want repo-local `.openhands/hooks.json` wiring for that repository. **There is no proxy-enforcement path** for OpenHands — blocking happens hook-side with OpenHands' documented exit code `2` deny response.
 
@@ -52,7 +71,7 @@ configuration.
 
 #### Version contract
 
-DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The OpenHands connector is documented and tested against `OpenHands CLI 1.16.0`; the hook contract remains listed as "unversioned / documented hooks" until upstream publishes a hook-version floor for `.openhands/hooks.json`.
+DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The supported POSIX contract starts at `OpenHands CLI 1.12.0`, the first version that loads user-global `~/.openhands/hooks.json`. It is source-reviewed against `OpenHands CLI 1.16.0` with no maximum version currently declared.
 
 <Callout type="warning">
 Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. A repository-local `.openhands/hooks.json` can still override or layer with that behavior depending on OpenHands' own config loading. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly.

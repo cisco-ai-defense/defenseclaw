@@ -428,7 +428,7 @@ func platformEditorExtensionRoots(_ string) []string {
 func windowsEditorExtensionRoots(resolve windowsDiscoveryKnownFolderResolver) []string {
 	var roots []string
 	if roaming := windowsKnownFolderValue(resolve, windows.FOLDERID_RoamingAppData); roaming != "" {
-		for _, product := range []string{"Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"} {
+		for _, product := range []string{"Code", "Code - Insiders", "VSCodium", "Cursor"} {
 			roots = append(roots, filepath.Join(roaming, product, "User", "globalStorage"))
 		}
 		if matches, err := filepath.Glob(filepath.Join(roaming, "JetBrains", "*", "plugins")); err == nil {

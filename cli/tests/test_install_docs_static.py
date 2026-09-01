@@ -28,9 +28,9 @@ import pytest
 from defenseclaw import install_publish
 
 ROOT = Path(__file__).resolve().parents[2]
-# Checked-in source fixtures intentionally retain the unstamped development
-# identity. Published documentation is allowed to advance independently.
-CURRENT_RELEASE = "0.8.6"
+# Checked-in source fixtures and published documentation share one release
+# identity so native repair/upgrade comparisons remain monotonic.
+CURRENT_RELEASE = "0.8.10"
 CURRENT_PUBLISHED_RELEASE = "0.8.10"
 LATEST_POSIX_INSTALL_URL = (
     "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh"
@@ -65,7 +65,6 @@ OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
     "docs-site/content/docs/connectors/codex.mdx",
-    "docs-site/content/docs/connectors/geminicli.mdx",
     "docs-site/content/docs/setup/index.mdx",
     "docs-site/content/docs/reference/redaction.mdx",
     "docs-site/content/docs/reference/cli.mdx",
@@ -88,7 +87,6 @@ OBSERVABILITY_V8_CONNECTOR_GUIDES = (
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
     "docs-site/content/docs/connectors/codex.mdx",
-    "docs-site/content/docs/connectors/geminicli.mdx",
 )
 
 OBSERVABILITY_V8_JSONL_GUIDES = {
@@ -815,6 +813,9 @@ def test_legacy_macos_installer_claims_gateway_after_copy_and_codesign(
         "  cli=${python%/python}/defenseclaw\n"
         "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
         '  chmod +x "$cli"\n'
+        "  scanner=${python%/python}/skill-scanner\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$scanner\"\n"
+        '  chmod +x "$scanner"\n'
         "  exit 0\n"
         "fi\n"
         "exit 90\n",
@@ -1087,6 +1088,9 @@ def test_posix_installer_never_replaces_entrypoint_that_appears_after_preflight(
         "  cli=${python%/python}/defenseclaw\n"
         "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
         '  chmod +x "$cli"\n'
+        "  scanner=${python%/python}/skill-scanner\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$scanner\"\n"
+        '  chmod +x "$scanner"\n'
         "  exit 0\n"
         "fi\n"
         "exit 90\n",
@@ -1127,6 +1131,18 @@ def test_posix_installer_never_replaces_entrypoint_that_appears_after_preflight(
         assert completed.returncode == 0, output
         assert (home / ".defenseclaw/.venv/bin/defenseclaw").is_file()
         assert (home / ".local/bin/defenseclaw").is_symlink()
+        scanner = home / ".local/bin/skill-scanner"
+        assert (home / ".defenseclaw/.venv/bin/skill-scanner").is_file()
+        assert scanner.is_symlink()
+        assert os.readlink(scanner) == str(home / ".defenseclaw/.venv/bin/skill-scanner")
+        scanner_probe = subprocess.run(
+            [scanner, "--version"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        assert scanner_probe.returncode == 0, scanner_probe.stderr
         assert (home / ".local/bin/defenseclaw-gateway").is_file()
         custody = home / ".defenseclaw-install-custody"
         attempt_marker = custody / ".defenseclaw-install-in-progress-v1"
@@ -1306,6 +1322,9 @@ def test_posix_failed_install_removes_attempt_owned_plugin_marker_and_bin_dirs(
         "  cli=${python%/python}/defenseclaw\n"
         "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
         '  chmod +x "$cli"\n'
+        "  scanner=${python%/python}/skill-scanner\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$scanner\"\n"
+        '  chmod +x "$scanner"\n'
         "  exit 0\n"
         "fi\n"
         "exit 90\n",
@@ -1349,6 +1368,7 @@ def test_posix_failed_install_removes_attempt_owned_plugin_marker_and_bin_dirs(
     assert not (home / ".local").exists()
     assert not (home / ".local/bin/defenseclaw").exists()
     assert not (home / ".local/bin/defenseclaw-gateway").exists()
+    assert not (home / ".local/bin/skill-scanner").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source-install Makefile preflight uses POSIX symlinks")
@@ -2122,9 +2142,7 @@ def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> No
 def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> None:
     redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
     setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
-    windows = (
-        ROOT / "docs-site/content/docs/get-started/windows/capabilities-commands.mdx"
-    ).read_text(encoding="utf-8")
+    cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
     windows_paths = (
         ROOT / "docs-site/content/docs/get-started/windows/paths-troubleshooting.mdx"
     ).read_text(encoding="utf-8")
@@ -2139,12 +2157,23 @@ def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> 
         assert expected in redaction
     assert "TUI → Setup → Redaction Policy" in setup
     assert "Logs → Redaction policy…" in setup
-    assert "Redaction policy CLI and TUI" in windows
     assert "config.yaml.before-redaction-*" in windows_paths
     assert (
-        "redaction status/remove-all/apply/defaults/bucket/profile/destination/route"
-        in windows
+        "`defenseclaw setup redaction "
+        "[status\\|remove-all\\|apply\\|defaults\\|bucket\\|profile\\|destination\\|route]`"
+        in cli
     )
+    for command_surface in (
+        "status --json",
+        "remove-all --dry-run",
+        "apply --scope",
+        "defaults set",
+        "bucket set",
+        "profile set",
+        "destination send",
+        "route add",
+    ):
+        assert f"defenseclaw setup redaction {command_surface}" in redaction
 
 
 def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> None:

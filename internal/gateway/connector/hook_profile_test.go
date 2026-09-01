@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"runtime"
 	"testing"
 )
 
@@ -33,6 +34,10 @@ import (
 // before opening a config file.
 func TestHookProfileMatrix(t *testing.T) {
 	t.Parallel()
+	openHandsNativeOTLPKind := NativeOTLPKind("")
+	if runtime.GOOS == "darwin" {
+		openHandsNativeOTLPKind = NativeOTLPEnvBlock
+	}
 
 	cases := []struct {
 		name               string
@@ -51,10 +56,13 @@ func TestHookProfileMatrix(t *testing.T) {
 		{"codex", true, NativeOTLPTOMLBlock, true, false, true, true},
 		{"claudecode", true, NativeOTLPEnvBlock, true, true, true, true},
 		{"geminicli", true, NativeOTLPJSONBlock, true, false, true, true},
-		{"copilot", true, NativeOTLPEnvBlock, true, true, false, true},
-		{"openhands", true, "", true, false, true, true},
-		{"cursor", true, "", true, true, true, true},
-		{"windsurf", true, "", true, false, false, true},
+		{"copilot", true, "", true, true, false, true},
+		{"openhands", true, openHandsNativeOTLPKind, true, false, true, true},
+		// Cursor's native beforeShellExecution and preToolUse events can deny
+		// synchronously. The client has no native ask/HITL response, but action
+		// mode can block and fail closed on the reviewed event contract.
+		{"cursor", true, "", true, false, true, true},
+		{"devin", true, "", true, false, true, true},
 		{"hermes", true, "", true, false, false, true},
 		// opencode's JS bridge does not propagate W3C traceparent, so
 		// SupportsTraceparent is false; it can block and fail closed.

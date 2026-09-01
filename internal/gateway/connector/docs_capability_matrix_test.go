@@ -78,6 +78,11 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir()}
 	for _, conn := range newBuiltinConnectors() {
+		if conn.Name() == "geminicli" {
+			// Gemini CLI remains constructible only for legacy teardown. The
+			// operator-facing capability matrix intentionally omits it.
+			continue
+		}
 		row, exists := rows[conn.Name()]
 		if !exists {
 			t.Errorf("connector %q is missing from docs capability matrix", conn.Name())

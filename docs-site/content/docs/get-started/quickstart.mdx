@@ -12,10 +12,10 @@ keywords:
 After the [install](/docs/get-started/install), DefenseClaw is on disk but not yet configured. You then run **one** first-run command. There are two of them — they do the same work, with different UX.
 
 <Callout>
-On native Windows, first review the [Windows connector matrix and setup
-notes](/docs/get-started/windows). Windows uses native agent hooks, excludes WSL
-agents and proxy-only connectors, and otherwise uses the same `init` and
-`quickstart` backend described here.
+On native Windows, first review the [connector platform table and setup
+notes](/docs/connectors#platform-support). Windows uses native hook, plugin, or
+awaited-policy lanes, excludes WSL agents and proxy-only connectors, and
+otherwise uses the same `init` and `quickstart` backend described here.
 </Callout>
 
 <Cards>
@@ -80,10 +80,13 @@ defenseclaw quickstart --connector claudecode
 ```
 
 Replace `claudecode` with the setup name for the agent you use. On native
-Windows, choose Codex CLI, Claude Code, or Amp from the [Native Windows
-guide](/docs/get-started/windows); they are the certified connectors. Other
-platforms also offer proxy and additional hook connectors. `quickstart`
-configures **one** connector. If you
+Windows, choose a supported connector: Amp, Antigravity, Claude Code, Codex
+CLI, Copilot CLI, Cursor Agent, Devin CLI, Hermes, OmniGent (native degraded),
+or OpenCode. OpenHands and the OpenClaw/ZeptoClaw proxy connectors are
+unsupported there and `quickstart` rejects them before setup writes. See the
+[Native Windows guide](/docs/get-started/windows) for each connector's exact
+boundary. Other platforms also offer proxy and additional hook connectors.
+`quickstart` configures **one** connector. If you
 skip `--connector`, it uses the single configured or detected connector; if
 more than one connector is configured/detected, or the installer hint disagrees
 with the detected connector, it exits and asks you to rerun with `--connector
@@ -168,7 +171,7 @@ and redaction profile that file is allowed to receive.
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|amp|omnigent",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|devin|copilot|openhands|antigravity|opencode|amp|omnigent",
       description: "Agent connector. Required when more than one connector is configured or detected; otherwise quickstart uses the single configured/detected connector, then the installer hint if no connector can be detected.",
     },
     "--mode": {
@@ -234,7 +237,7 @@ and redaction profile that file is allowed to receive.
 ## Next
 
 <Cards>
-  <Card title="First guardrail in 5 minutes" href="/docs/get-started/first-guardrail" description="A walkthrough that ends with a real block decision." />
+  <Card title="First guardrail in 5 minutes" href="/docs/get-started/first-guardrail" description="A macOS/Linux walkthrough that ends with a real block decision; Windows operators are directed to the native verification checklist." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface — modes, judge, rule packs, HITL — for tuning after the first run." />
   <Card title="AI Discovery" href="/docs/ai-discovery" description="See what AI is already running on the host before you start applying rules." />
 </Cards>

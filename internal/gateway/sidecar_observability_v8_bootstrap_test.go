@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -606,7 +607,10 @@ func TestSidecarBootstrapLocalObservabilityCanaryReachesAgent360Projection(t *te
 			http.Error(writer, "invalid protobuf", http.StatusBadRequest)
 			return
 		}
-		requests <- decoded
+		select {
+		case requests <- decoded:
+		default:
+		}
 		response, _ := proto.Marshal(&collectortracepb.ExportTraceServiceResponse{})
 		writer.Header().Set("Content-Type", "application/x-protobuf")
 		_, _ = writer.Write(response)
@@ -783,6 +787,189 @@ func TestSidecarBootstrapControlPlaneActionPersistsAndRoutesExactlyOnce(t *testi
 	}
 	if remoteMatches != 1 {
 		t.Fatalf("remote control-plane deliveries=%d, want exactly 1", remoteMatches)
+	}
+}
+
+func TestSidecarBootstrapSplunkHECFailureIsNestedAndRecoversWithoutFanout(t *testing.T) {
+	const (
+		token          = "issue768-super-secret-token"
+		responseSecret = "issue768-secret-response-body"
+		tokenEnv       = "DC_TEST_ISSUE_768_HEC_TOKEN"
+		destination    = "issue-768-hec"
+	)
+	t.Setenv(tokenEnv, token)
+
+	var rejectAcknowledgement atomic.Bool
+	var requests atomic.Int64
+	var invalidAuthorization atomic.Bool
+	rejectAcknowledgement.Store(true)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		if request.Header.Get("Authorization") != "Splunk "+token {
+			invalidAuthorization.Store(true)
+		}
+		_, _ = io.Copy(io.Discard, request.Body)
+		writer.Header().Set("Content-Type", "application/json")
+		if rejectAcknowledgement.Load() {
+			_, _ = io.WriteString(writer, `{"code":12,"text":"`+responseSecret+`"}`)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"code":0}`)
+	}))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	raw := []byte(fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\nobservability:\n  destinations:\n    - name: %s\n      kind: splunk_hec\n      endpoint: %q\n      token_env: %s\n      source: defenseclaw\n      sourcetype: defenseclaw:json\n      network_safety:\n        allow_private_networks: true\n      batch:\n        max_export_batch_size: 1\n        scheduled_delay_ms: 1\n      send:\n        signals: [logs]\n        buckets: ['*']\n        redaction_profile: none\n",
+		fixture.dataDir,
+		destination,
+		server.URL,
+		tokenEnv,
+	))
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+		t.Context(), fixture.configPath, raw,
+	)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+
+	emit := func(requestID string) {
+		t.Helper()
+		err := fixture.logger.LogActionCtx(
+			audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
+				RunID: "issue-768-run", RequestID: requestID,
+			}),
+			string(audit.ActionConfigUpdate),
+			"config.yaml",
+			"bounded delivery health fixture",
+		)
+		if err != nil {
+			t.Fatalf("emit %s: %v", requestID, err)
+		}
+	}
+	findDestination := func(
+		telemetry SubsystemHealth,
+		name string,
+	) (map[string]interface{}, bool) {
+		rows, ok := telemetry.Details["destinations"].([]map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		for _, row := range rows {
+			if row["name"] == name {
+				return row, true
+			}
+		}
+		return nil, false
+	}
+	waitFor := func(label string, condition func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			if condition() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", label)
+	}
+
+	emit("issue-768-failure")
+	var failedHealth SubsystemHealth
+	waitFor("nested HEC failure health", func() bool {
+		telemetry := fixture.sidecar.health.Snapshot().Telemetry
+		remote, remoteOK := findDestination(telemetry, destination)
+		local, localOK := findDestination(telemetry, config.ObservabilityV8LocalDestinationName)
+		if telemetry.State != StateRunning || !remoteOK || !localOK ||
+			remote["state"] != string(delivery.HealthFailing) ||
+			remote["last_failure_code"] != string(delivery.FailureCodeHECAckRejected) ||
+			local["state"] != string(delivery.HealthHealthy) ||
+			telemetry.Details["optional_destination_state"] != "degraded" ||
+			telemetry.Details["optional_destination_failure_count"] != 1 ||
+			telemetry.Details["optional_destination_failure_summary"] != destination+":failing:hec_ack_rejected" {
+			return false
+		}
+		failedHealth = telemetry
+		return true
+	})
+	encodedHealth, err := json.Marshal(failedHealth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{token, server.URL, responseSecret, `"code":12`} {
+		if bytes.Contains(encodedHealth, []byte(forbidden)) {
+			t.Fatalf("bounded health exposed forbidden collector material")
+		}
+	}
+	if invalidAuthorization.Load() {
+		t.Fatal("Splunk HEC authorization header was not resolved exactly")
+	}
+
+	database, err := sql.Open("sqlite", fixture.store.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	transitionCount := func(eventName string) int {
+		var count int
+		if err := database.QueryRowContext(
+			t.Context(),
+			`SELECT COUNT(*) FROM audit_events WHERE action = ? AND event_name = ?`,
+			sidecarDeliveryHealthAction,
+			eventName,
+		).Scan(&count); err != nil {
+			return 0
+		}
+		return count
+	}
+	waitFor("locally persisted HEC failure", func() bool {
+		return transitionCount(observability.TelemetryEventDestinationExportFailed) == 1
+	})
+	var failedTransition string
+	if err := database.QueryRowContext(
+		t.Context(),
+		`SELECT COALESCE(projected_record_json,'') FROM audit_events WHERE action = ? AND event_name = ?`,
+		sidecarDeliveryHealthAction,
+		observability.TelemetryEventDestinationExportFailed,
+	).Scan(&failedTransition); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(failedTransition, `"defenseclaw.schema.error_code":"hec_ack_rejected"`) ||
+		!strings.Contains(failedTransition, `"defenseclaw.health.subsystem":"issue-768-hec/logs"`) {
+		t.Fatalf("local transition omitted the bounded HEC failure identity")
+	}
+	for _, forbidden := range []string{token, server.URL, responseSecret, `"code":12`} {
+		if strings.Contains(failedTransition, forbidden) {
+			t.Fatal("local transition exposed forbidden collector material")
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("failure plus local health persistence produced %d remote requests, want 1", got)
+	}
+
+	rejectAcknowledgement.Store(false)
+	emit("issue-768-recovery")
+	waitFor("recovered HEC destination health", func() bool {
+		telemetry := fixture.sidecar.health.Snapshot().Telemetry
+		remote, ok := findDestination(telemetry, destination)
+		return ok && telemetry.State == StateRunning &&
+			remote["state"] == string(delivery.HealthHealthy) &&
+			remote["reason"] == string(delivery.HealthReasonRecovered) &&
+			telemetry.Details["optional_destination_state"] == "healthy" &&
+			telemetry.Details["optional_destination_failure_count"] == 0
+	})
+	waitFor("locally persisted HEC recovery", func() bool {
+		return transitionCount(observability.TelemetryEventSubsystemRestored) == 1
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("failure, recovery, and local transition persistence produced %d remote requests, want 2", got)
 	}
 }
 
@@ -1328,7 +1515,7 @@ func TestSidecarConfigManagerV8SamePrometheusBindingRequiresRestartBeforeReplace
 	assertMetricsListenerBound()
 }
 
-func TestSidecarConfigManagerV8RestartModeDoesNotHotApplyPlan(t *testing.T) {
+func TestSidecarConfigManagerV8RestartModeHotAppliesObservabilityPlan(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	initialRaw := []byte(fmt.Sprintf(
 		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  config_reload:\n    mode: restart\nobservability: {}\n",
@@ -1380,15 +1567,16 @@ func TestSidecarConfigManagerV8RestartModeDoesNotHotApplyPlan(t *testing.T) {
 	fixture.sidecar.observabilityV8Mu.Lock()
 	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
 	fixture.sidecar.observabilityV8Mu.Unlock()
-	if !helperCalled || owner.runtime.Active().Generation() != 1 ||
-		fixture.sidecar.currentConfig().Environment != "original" {
+	if helperCalled || owner.runtime.Active().Generation() != 2 ||
+		owner.runtime.Active().RetentionDays() != 30 ||
+		fixture.sidecar.currentConfig().Environment != "original" || mgr.gen.Load() != 1 {
 		t.Fatalf("restart helper/generation/environment = %t/%d/%q",
 			helperCalled, owner.runtime.Active().Generation(), fixture.sidecar.currentConfig().Environment)
 	}
 	select {
 	case <-runCtx.Done():
+		t.Fatal("restart-mode observability-only change requested a process restart")
 	default:
-		t.Fatal("restart-mode v8 change did not request process restart")
 	}
 }
 
@@ -1473,7 +1661,7 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 	}
 }
 
-func TestSidecarConfigManagerV8RestartHelperFailureIsAtomic(t *testing.T) {
+func TestSidecarConfigManagerV8RestartRequiredChangeHelperFailureIsAtomic(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
 	initialRaw := []byte(fmt.Sprintf(
 		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  config_reload:\n    mode: restart\nobservability: {}\n",
@@ -1504,7 +1692,7 @@ func TestSidecarConfigManagerV8RestartHelperFailureIsAtomic(t *testing.T) {
 		fixture.sidecar.applyConfigReloadSnapshot,
 	)
 	nextRaw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  config_reload:\n    mode: restart\nobservability:\n  local:\n    retention_days: 30\n",
+		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  api_port: 18971\n  config_reload:\n    mode: restart\nobservability: {}\n",
 		fixture.dataDir,
 	))
 	if err := os.WriteFile(fixture.configPath, nextRaw, 0o600); err != nil {

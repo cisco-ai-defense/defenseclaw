@@ -16,10 +16,14 @@ Authoritative source for any flag is `defenseclaw <command> --help`. These group
 
 <Callout title="Command availability is platform-specific">
 A registered command or connector alias is not, by itself, a native Windows
-support claim. Native Windows certifies Codex, Claude Code, and Amp, and some
+support claim. Native Windows supports Amp plus Codex, Claude Code, Cursor,
+Devin, GitHub Copilot CLI, Antigravity, OpenCode, Hermes, and OmniGent.
+Gemini CLI setup is deprecated on every platform; existing managed state remains
+removable; use `defenseclaw setup antigravity` for new Google agent setup.
+OpenHands, OpenClaw, and ZeptoClaw remain unavailable there. Some
 commands require optional configuration or are unavailable there. Use the
-[native Windows command matrix](/docs/get-started/windows/capabilities-commands)
-for the certified Windows classification and safe examples.
+[connector platform table](/docs/connectors#platform-support) for availability
+and each connector page for native Windows setup and quirks.
 </Callout>
 
 DefenseClaw ships **two** binaries:
@@ -90,19 +94,18 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage the `~/.defenseclaw/custom-providers.json` overlay used to route LLM traffic through internal or self-hosted endpoints. `add` accepts `--base-url`, `--domain` (repeatable; required alongside `--base-url` so the gateway can match inbound URLs back to this overlay entry — `defenseclaw doctor` warns when the `base_url` host is not covered), `--base-provider-type`, `--env-key`, `--allowed-request`, `--available-model`, `--request-path-override`, TLS knobs (`--ca-cert-file`, `--insecure-skip-verify`), and provider-typed regional flags: Bedrock — `--bedrock-region`, `--bedrock-auth-mode`, `--bedrock-access-key-env`, `--bedrock-secret-key-env`, `--bedrock-session-token-env`, `--bedrock-profile-name`, `--bedrock-inference-profile`, `--bedrock-deployment alias=model-id` (repeatable); Vertex AI — `--vertex-project-id`, `--vertex-region`, `--vertex-auth-mode`, `--vertex-service-account-json-env`; Azure OpenAI — `--azure-endpoint`, `--azure-api-version`, `--azure-auth-mode`, `--azure-deployment-alias model=deployment` (repeatable). Each family is rejected against a mismatched `--base-provider-type`. Omit `--name` interactively for the wizard. |
 | `defenseclaw setup claude-code` | Hook setup alias for Claude Code; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup codex` | Hook setup alias for Codex; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup cursor` | Hook setup alias for Cursor; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup windsurf` | Hook setup alias for Windsurf; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup geminicli` | Hook setup alias for Gemini CLI; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup cursor` | User-hook alias for Cursor; defaults to observe, while `--mode action` uses event-native deny with `failClosed: true`. Native human approval is not enabled. |
+| `defenseclaw setup devin` | Native Devin CLI hook alias; defaults to observe, while `--mode action` can block only on the four documented block-capable events. |
 | `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup openhands` | Hook setup alias for OpenHands; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Returning `decision=ask` from the hook overrides agy's `--dangerously-skip-permissions` flag. |
+| `defenseclaw setup openhands` | Hook setup alias for OpenHands on supported non-Windows platforms; it is unsupported in the native Windows release. Defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Native ask and deny are documented only for `PreToolUse`; no permission-bypass override is claimed. |
 | `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup amp` | Direct-to-upstream system-policy setup for Amp; writes the TypeScript plugin. Defaults to observe; pass `--mode action` for synchronous `tool.call` execution gating and model-bound `tool.result` output gating. Native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding. |
 | `defenseclaw setup omnigent` | Hook setup alias for OmniGent; installs the custom Python policy bridge. Defaults to observe, pass `--mode action` for ALLOW/ASK/DENY enforcement. |
-| `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
-| `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
-| `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
+| `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector); unsupported in the native Windows release. |
+| `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector); unsupported in the native Windows release. |
+| `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. `up --password` requires the managed Grafana credential; `up --no-password` explicitly selects anonymous Admin on managed loopback. New stacks default to password and previously used anonymous stacks retain their mode. |
 | `defenseclaw setup galileo [status\|test\|enable\|disable\|remove]` | Configure and verify Galileo Cloud or self-hosted OTLP traces. |
 | `defenseclaw setup splunk` | Configure local Splunk in Docker, Splunk Enterprise HEC, or Splunk Observability Cloud. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
@@ -162,13 +165,15 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
 | `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set behavior for hook delivery, authentication, and invalid-response failures. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. |
-| `defenseclaw guardrail block-message "<text>" [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. |
+| `defenseclaw guardrail block-message ["<text>"] [--clear] [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. `--clear --connector X` removes that connector's override so it inherits the global message, or the built-in default when the global value is empty. Unscoped `--clear` also clears active connector overrides, returning the active roster to the built-in default. Do not pass text and `--clear` together. |
 
 ```bash
 defenseclaw guardrail status                              # full per-connector roster
 defenseclaw guardrail status --connector codex            # one connector's resolved posture
 defenseclaw guardrail fail-mode closed --connector codex  # scope to one connector
 defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail block-message --clear --connector codex # inherit global / built-in
+defenseclaw guardrail block-message --clear                # clear global + active overrides
 defenseclaw guardrail disable --connector codex           # then `enable --connector codex` to restore
 ```
 
@@ -202,6 +207,7 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
 | `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` therefore returns the earliest N matching rows, not the newest N. Omit `--limit` and pipe to `tail` for the most recent rows. `--include-activity` also dumps `activity_events`. |
+| `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail the optional v8 JSONL destination when configured at that path. Mandatory local history is SQLite; JSONL is not an implicit mirror. |
 
 ## AI discovery
@@ -237,13 +243,22 @@ The Python CLI exposes one scan group per asset family — there is no top-level
 
 | Command | Binary | Use it for |
 | --- | --- | --- |
-| `defenseclaw skill scan [target] [--connector X] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. A bare skill name searches matching configured connector copies; `--connector X` narrows. |
+| `defenseclaw skill scan [target] [--connector X] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. A bare skill name searches matching configured connector copies; `--connector X` narrows. `--all --json` always emits one top-level result array, including per-skill error rows, before returning nonzero for scanner failures; a telemetry-recording warning never discards or fails a completed scan. |
 | `defenseclaw mcp scan [target] [--connector X] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, every configured server with `--all`, or every server on one connector with `--connector X`. |
-| `defenseclaw plugin scan [name_or_path] [--all] [--connector X] [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan one plugin/extension package, or all discovered plugins with `--all`. `--connector X` narrows discovery or duplicate plugin names to one connector. |
+| `defenseclaw plugin scan [name_or_path] [--all] [--connector X] [--profile default\|strict] [--use-llm] [--include-self]` | `defenseclaw` | Scan one plugin/extension package, or all discovered plugins with `--all`. `--connector X` narrows discovery or duplicate plugin names to one connector. Exact first-party DefenseClaw package/connector artifacts are excluded by default; `--include-self` opts into scanning them for product development. Ordinary third-party `dist/` trees and plugins merely named `defenseclaw` remain in scope. |
 | `defenseclaw aibom scan [--connector X] [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) for every active connector by default, or one connector when scoped. |
 | `defenseclaw registry sync [source...] [--all] [--scan]` | `defenseclaw` | Sync registries; with `--scan`, runs the scanner pipeline against every fetched entry. |
 | `defenseclaw codeguard {status,install,install-skill} [--connector X]` | `defenseclaw` | Manage the CodeGuard skill/rule install across active connectors by default, or one connector when scoped. |
-| `defenseclaw-gateway scan code <path> [--json] [--schema]` | `defenseclaw-gateway` | Scan source files in `<path>` using the bundled CodeGuard rule pack. Runs the scanner in-process — does **not** require the sidecar daemon to be running. |
+| `defenseclaw-gateway scan code <path> [--json] [--no-redact] [--schema]` | `defenseclaw-gateway` | Scan source files in `<path>` using the bundled CodeGuard rule pack. The version-7 CLI schema preserves safe context in its declared `location`/`line_number` fields while replacing detected sensitive substrings; detached REST/API responses may additionally expose a structured `file` field. `--no-redact` is an explicit local-stdout-only opt-in, requires `--json`, and prints a warning; the REST API remains protected. Runs in-process and does **not** require the sidecar daemon. |
+
+Plugin `META-*` findings are correlations over the atomic plugin findings that
+remain after the active scan policy is applied. Disabled/suppressed rules,
+low-confidence matches, documentation, examples, benchmarks, tests, and
+fixtures cannot become correlation legs. Each emitted correlation carries the
+atomic rule IDs, locations, and propagated confidence that produced it; its
+severity never exceeds its strongest atomic input, and its title says
+`pattern (correlated, N signals)` because static correlation is not proof that
+the behavior executed.
 
 ## Asset Policy Commands
 
@@ -280,7 +295,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw upgrade [--version X] [--yes]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. The immutable `0.8.4` built-in command cannot parse the truthful `0.8.5` manifest because that manifest has an empty Windows bridge matrix; a `0.8.3`-or-older built-in command also cannot learn the two-process bridge handoff retroactively. To cross into `0.8.5`, use the authenticated target-release POSIX resolver in latest mode without a version override. That resolver, and built-in controllers from `0.8.5` onward for later compatible manifests, can authenticate a temporary pinned Cosign when no system Cosign exists. `--allow-unverified` cannot bypass provenance. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw upgrade [--version X] [--yes] [--recover-corrupt-audit]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. The immutable `0.8.4` built-in command cannot parse the truthful `0.8.5` manifest because that manifest has an empty Windows bridge matrix; a `0.8.3`-or-older built-in command also cannot learn the two-process bridge handoff retroactively. To cross into `0.8.5`, use the authenticated target-release POSIX resolver in latest mode without a version override. That resolver, and built-in controllers from `0.8.5` onward for later compatible manifests, can authenticate a temporary pinned Cosign when no system Cosign exists. On macOS/Linux, `--recover-corrupt-audit` delegates to the authenticated resolver, which requires an explicit post-stop SQLite corruption result before preserving the exact database/WAL set in private same-filesystem custody and activating a fresh store. Native Windows rejects that option before mutation. `--allow-unverified` cannot bypass provenance. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
 | `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
 | `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
 | `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |

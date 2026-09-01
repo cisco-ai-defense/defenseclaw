@@ -115,8 +115,7 @@ import click
             "codex",
             "hermes",
             "cursor",
-            "windsurf",
-            "geminicli",
+            "devin",
             "copilot",
             "openhands",
             "antigravity",
@@ -161,6 +160,7 @@ def quickstart_cmd(
     anything) to wire up before the guardrail becomes useful.
     """
     from defenseclaw import config as cfg_mod
+    from defenseclaw import platform_support
     from defenseclaw.bootstrap import FirstRunOptions, run_first_run
     from defenseclaw.commands.cmd_init import _render_first_run_report
     from defenseclaw.commands.cmd_setup import (
@@ -214,11 +214,19 @@ def quickstart_cmd(
             )
             sys.exit(2)
 
+    support = platform_support.connector_platform_support(connector)
+    if not support.available:
+        raise click.ClickException(
+            f"connector {connector!r} is {support.status} on "
+            f"{platform_support.host_os()}: {support.reason}"
+        )
+
     profile = mode or "observe"
 
     report = run_first_run(
         FirstRunOptions(
             connector=connector,
+            connector_settings=[{"connector": connector}],
             profile=profile,
             scanner_mode=scanner_mode,
             with_judge=with_judge,

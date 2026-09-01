@@ -19,7 +19,7 @@ enabled. Only ask-capable connector events can pause.
 
 ### Pick a connector with native ask
 
-This walkthrough uses [Claude Code](/docs/connectors/claudecode), whose `PreToolUse` hook can return a native approval decision. [OpenClaw](/docs/connectors/openclaw), [Cursor](/docs/connectors/cursor), [GitHub Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), [Amp](/docs/connectors/amp), and [OmniGent](/docs/connectors/omnigent) also expose native ask on the specific events listed on the [HITL reference](/docs/hitl).
+This walkthrough uses [Claude Code](/docs/connectors/claudecode), whose `PreToolUse` hook can return a native approval decision. [OpenClaw](/docs/connectors/openclaw), [GitHub Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), [Amp](/docs/connectors/amp), and [OmniGent](/docs/connectors/omnigent) also expose native ask on the specific events listed on the [HITL reference](/docs/hitl).
 
 </Step>
 
@@ -95,7 +95,9 @@ rm -rf /tmp/defenseclaw-hilt-demo
 
 ## Connectors without native ask
 
-[ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Gemini CLI](/docs/connectors/geminicli), [Windsurf](/docs/connectors/windsurf), [OpenHands](/docs/connectors/openhands), and [OpenCode](/docs/connectors/opencode) cannot pause for a DefenseClaw approval on their documented hook surfaces. Their integrations apply an explicit connector-specific fallback—typically alert, allow, or injected context—and keep `raw_action: "confirm"` available for audit.
+[Cursor](/docs/connectors/cursor), [ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), and [OpenHands](/docs/connectors/openhands) cannot pause for a DefenseClaw approval on their documented hook surfaces. These integrations apply explicit connector-specific alert, allow, or injected-context behavior and keep `raw_action: "confirm"` available for audit. Cursor exposes ask-capable event schemas, but DefenseClaw deliberately does not enable their native ask response; its confirm verdicts remain attributed alerts and cannot resume the original call.
+
+[OpenCode](/docs/connectors/opencode) also cannot pause, but for a narrower reason: OpenCode v1.18.10-v1.18.19 publishes `permission.ask` and chat/context hooks, while DefenseClaw intentionally does not implement or claim those surfaces. The connector makes no native-ask, context-injection, or TUI-resume claim.
 
 ```bash
 defenseclaw tui

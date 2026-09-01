@@ -46,6 +46,7 @@ enum CatalogCLI {
                 enabled: bool(row["eligible"]) && !bool(row["disabled"]),
                 skillDescription: string(row["description"]),
                 connector: connector,
+                bundled: bool(row["bundled"]),
                 status: status,
                 verdict: string(row["verdict"]).nonEmpty ?? "-",
                 scan: scan(row["scan"])
@@ -74,6 +75,7 @@ enum CatalogCLI {
                 enabled: status != "disabled",
                 source: string(row["source"]),
                 connector: connector,
+                bundled: bool(row["bundled"]),
                 status: status,
                 verdict: string(row["verdict"]).nonEmpty ?? "-",
                 scan: scan(row["scan"])
@@ -240,6 +242,11 @@ struct CatalogInvocation: Identifiable {
 
 enum CatalogActions {
     static func skills(_ item: SkillItem) -> [CatalogResourceAction] {
+        if item.bundled {
+            return [
+                action("info", "Info", "Show bundled skill details", "info.circle", readOnly: true),
+            ]
+        }
         var actions = [
             action("scan", "Scan", "Run the skill security scan", "shield.lefthalf.filled", readOnly: true),
             action("info", "Info", "Show full skill details", "info.circle", readOnly: true),
@@ -269,6 +276,11 @@ enum CatalogActions {
     }
 
     static func mcps(_ item: MCPItem) -> [CatalogResourceAction] {
+        if item.bundled {
+            return [
+                action("info", "Info", "Show bundled MCP details", "info.circle", readOnly: true),
+            ]
+        }
         var actions = [
             action("scan", "Scan", "Run the MCP security scan", "shield.lefthalf.filled", readOnly: true),
             action("info", "Info", "Show MCP list details", "info.circle", readOnly: true),

@@ -37,11 +37,13 @@ Enterprise hardening separates **policy authority**, **inspection runtime**, and
 <Flow
   direction="TB"
   compact
-  caption="Administrator policy and target authorization remain outside the agent user's authority. The gateway evaluates hook traffic; the guardian repairs only allow-listed user integrations."
+  caption="Administrator policy and target authorization remain outside the agent user's authority. Administrators author Linux/macOS targets; on Windows the enumerator maintains eligible profile rows in the protected manifest. The gateway evaluates hook traffic, and the guardian repairs only enrolled integrations."
 >
   <Node id="admin" kind="operator">Administrator / MDM</Node>
   <Node id="policy" kind="policy">{`Root-owned\nconfig + services`}</Node>
-  <Node id="manifest" kind="policy">{`Target allow-list\nusers · connectors`}</Node>
+  <Node id="profiles" kind="agent">{`Windows eligible\ninteractive profiles`}</Node>
+  <Node id="enumerator" kind="operator">{`DefenseClawHookEnumerator\nfiltered enrollment`}</Node>
+  <Node id="manifest" kind="policy">{`Protected targets\nusers · connectors`}</Node>
   <Node id="guardian" kind="operator">{`Hook guardian\nprivileged repair`}</Node>
   <Node id="agent" kind="agent">{`User AI agent\nCodex · Claude · …`}</Node>
   <Node id="hooks" kind="connector">{`Native hooks\nscoped token`}</Node>
@@ -50,7 +52,10 @@ Enterprise hardening separates **policy authority**, **inspection runtime**, and
   <Node id="ledger" kind="datastore">{`Authorization ledger\nroot-owned`}</Node>
   <Node id="readiness" kind="generic">{`Managed readiness\nenforcement health`}</Node>
   <Edge from="admin" to="policy" />
-  <Edge from="admin" to="manifest" />
+  <Edge from="admin" to="manifest" label="Linux / macOS targets" />
+  <Edge from="policy" to="enumerator" label="Windows connector scope" />
+  <Edge from="profiles" to="enumerator" />
+  <Edge from="enumerator" to="manifest" label="publish eligible rows" />
   <Edge from="policy" to="gateway" />
   <Edge from="manifest" to="guardian" />
   <Edge from="guardian" to="hooks" label="install + repair" />
@@ -62,14 +67,14 @@ Enterprise hardening separates **policy authority**, **inspection runtime**, and
   <Edge from="ledger" to="readiness" />
 </Flow>
 
-The gateway is intentionally unable to write broadly into user homes. The guardian is the only privileged component that repairs allow-listed per-user integrations, and it does not discover arbitrary users or applications on its own.
+The gateway is intentionally unable to write broadly into user homes. The guardian is the only privileged component that repairs enrolled per-user integrations. Linux and macOS use administrator-authored target manifests. Managed Windows adds a separate LocalSystem enumerator that discovers eligible interactive profiles and maintains the protected manifest as described under [Windows enrollment and discovery](#windows-enrollment-and-discovery); the gateway itself still does not enumerate or write profiles.
 
 ### Deployment-mode behavior matrix
 
 | Effective mode | Linux | Windows | macOS | Hook repair owner |
 | --- | --- | --- | --- | --- |
 | Empty/default or any non-managed mode, including `unmanaged_byod`, `ci_cd`, `sandboxed`, `server`, and `saas` | Existing user/process deployment behavior | Existing per-user startup/watchdog and hook auto-heal behavior | Existing user/process deployment behavior | The ordinary gateway/application-protection hook guard. No added enterprise service enforcement is activated. |
-| `managed_enterprise` | Administrator-owned systemd gateway plus privileged manifest guardian; event watcher and periodic timer | Administrator-owned SCM gateway plus LocalSystem manifest guardian; event watcher and periodic backstop | Administrator-owned LaunchDaemons; periodic guardian reconcile | The privileged, allow-list-bound enterprise guardian. The gateway does not write interactive-user homes. |
+| `managed_enterprise` | Administrator-owned systemd gateway plus privileged manifest guardian; event watcher and periodic timer | Four administrator-owned SCM services: gateway, credential broker, manifest guardian, and profile enumerator; guardian watch plus periodic reconciliation | Administrator-owned LaunchDaemons; periodic guardian reconcile | The privileged enterprise guardian repairs only the protected target manifest. The gateway does not write interactive-user homes. |
 
 The matrix is an ownership switch, not an auto-heal switch. Both rows repair hook drift: normal mode uses the existing per-user repair loop, while managed mode transfers repair to an administrator-owned guardian that a standard user cannot unregister or reconfigure.
 
@@ -81,7 +86,8 @@ The matrix is an ownership switch, not an auto-heal switch. Both rows repair hoo
 | Another unprivileged local user | Access permitted by normal UNIX permissions, macOS ACLs, or Windows DACLs | Cannot read protected runtime state or scoped service credentials; cannot repair or authorize another user's hooks. |
 | Endpoint administrator, root, MDM, or a process with equivalent privilege | Full machine administration | Can install, upgrade, disable, or remove DefenseClaw. DefenseClaw does not attempt to defend the machine from its trusted administrator. |
 | Compromised gateway process | Service identity plus the platform service boundary | Can write only its declared runtime/log paths; cannot write user homes, managed config, binaries, service definitions, or arbitrary host paths. The packaged Linux unit adds a systemd sandbox; Windows uses a dedicated virtual service account and protected DACLs. |
-| Compromised guardian process | Root on Linux/macOS or LocalSystem on Windows | Can repair declared user-home footprints and guardian state. Risk is reduced through the explicit target manifest, trusted path checks, per-target credential changes or impersonation, narrow service arguments, and platform filesystem controls. |
+| Compromised guardian process | Control of a process running as root on Linux/macOS or LocalSystem on Windows | Inherits authority equivalent to the trusted administrator and can bypass the manifest, path, and impersonation safeguards to modify host state allowed by that token. Those safeguards bound normal guardian behavior and malformed-input handling; they do not sandbox an attacker who controls the process. This collapses to the trusted-administrator non-goal above. |
+| Compromised enumerator process | Control of a process running as LocalSystem on Windows | Inherits authority equivalent to the trusted administrator and can bypass the managed-hook filter, manifest publication contract, and fixed-DACL targets to modify host state allowed by that token. Those controls bound normal enumerator behavior; they do not contain an attacker who controls the process. This collapses to the trusted-administrator non-goal above. |
 
 ### Security goals and non-goals
 
@@ -133,7 +139,7 @@ The important qualifier is **permanently**. A standard user—or an AI agent exe
 | Trusted config path | Managed config and policy inputs | Rejects unsafe ownership, writable ancestors, symlinks, and platform-specific ACL/DACL or reparse-point hazards. |
 | Administrator-owned binaries and service definitions | Executable integrity and startup | Standard users cannot replace the gateway or guardian, edit systemd units or LaunchDaemons, or change/delete Windows SCM services. |
 | Gateway service sandbox | Host filesystem, devices, kernel, namespaces, and process visibility | Linux gateway runs with `NoNewPrivileges=true`, an empty capability set, strict filesystem protection, private devices/tmp, filtered syscalls, and hidden non-service processes. |
-| Explicit guardian manifest | Privileged repair scope | Root chooses exact user/connector/version targets; no broad home-directory enumeration. |
+| Protected guardian manifest | Privileged repair scope | Linux/macOS administrators choose exact user/connector/version targets. Managed Windows maintains the manifest from filtered HKLM ProfileList discovery and configured supported hook connectors; it does not scan arbitrary filesystem roots. |
 | Administrator-owned authorization ledger | Managed readiness claims | A target is enforcement-covered only after a privileged successful reconcile writes trusted authorization. |
 | Connector-scoped hook token | API least privilege and connector isolation | Token is accepted only for the matching hook/notify route and cannot authorize management APIs or another connector. |
 | Raw scoped-token format | Service/hook format consistency | The service validator and generated hook consume the same raw file; inherited generic gateway credentials cannot shadow it. |
@@ -162,7 +168,7 @@ Use a staged deployment rather than enabling action mode everywhere at once:
 1. **Inventory endpoints and agent versions.** Record OS, interactive user, home directory, connector, native config path, and exact agent version.
 2. **Deploy the system service in observe mode.** Validate config ownership, loopback listeners, service sandboxing, audit output, and operational monitoring.
 3. **Initialize each agent profile as the user.** The native agent must create its config before the privileged guardian performs a first installation.
-4. **Create the root-owned guardian allow-list.** Add only known users and connectors. Pin the version used for hook-contract validation.
+4. **Establish protected guardian targets.** On Linux/macOS, add only approved users and connectors to the administrator-owned manifest. On Windows, configure the approved connector families and review the enumerator-produced SID/version rows before acceptance.
 5. **Run one manual reconcile.** Review JSON/status output and resolve every failed target before enabling the watcher.
 6. **Enable event-driven and periodic repair.** On Linux, run the watcher plus timer. On macOS, the packaged LaunchDaemon performs periodic reconcile; use MDM/EDR for stronger native-config prevention.
 7. **Move selected connectors to action mode.** Confirm allow and deterministic block events, then monitor error/block counters and guardian health.
@@ -234,7 +240,7 @@ observability:
   local:
     path: /var/lib/defenseclaw/audit.db
     judge_bodies_path: /var/lib/defenseclaw/judge_bodies.db
-    retention_days: 90
+    retention_days: 7
   defaults:
     redaction_profile: sensitive
 gateway:
@@ -250,6 +256,10 @@ guardrail:
 application_protection:
   enabled: false
 ```
+
+Seven days is the runtime default. Increase `retention_days` only as an
+intentional, capacity-planned override backed by storage sizing and your audit
+retention requirements.
 
 The packaged macOS installer (`packaging/macos/install.sh`) defaults `guardrail.mode` to `action` for managed_enterprise deployments so hooks enforce their verdict from the first tick. Pass `--mode observe` on the initial rollout if you want a logging-only pilot; validate telemetry and guardian coverage, then change back to `action` through the administrator-owned file and restart the service. Do not use a user-writable overlay config to stage enterprise policy.
 
@@ -307,8 +317,8 @@ three privilege domains:
 | --- | --- | --- | --- |
 | `DefenseClawGateway` | `NT SERVICE\DefenseClawGateway` virtual service account | Managed runtime and logs only | Inspection, policy, audit, hook API, health, and least-privilege service-token access. |
 | `DefenseClawCMIDBroker` | LocalSystem with only `SeChangeNotifyPrivilege` | Broker authentication key, named pipe, broker log, and the pinned Cisco provider DLL | Isolate access to the machine credential provider behind an authenticated gateway-only IPC boundary. |
-| `DefenseClawHookGuardian` | LocalSystem | Allow-listed user hook footprints plus guardian state | Impersonate each declared interactive user, install or repair that user's files with the user's ownership, and return to LocalSystem for protected state. |
-| `DefenseClawHookEnumerator` | LocalSystem | Protected target manifest and allow-listed profile discovery | Refresh the declared connector inventory without granting the gateway broad profile traversal. |
+| `DefenseClawHookGuardian` | LocalSystem | Enrolled user hook footprints plus guardian state | Impersonate each manifest SID, install or repair that user's files with the user's ownership, and return to LocalSystem for protected state. |
+| `DefenseClawHookEnumerator` | LocalSystem | HKLM ProfileList discovery, protected target manifest, and bounded inventory-directory DACL grants | Refresh eligible connector enrollment without granting the gateway access to an entire user profile. |
 | AI agent | Interactive standard user at medium integrity | Its normal profile | Invoke native hooks; cannot stop or reconfigure any managed service or modify administrator assets. |
 
 The default managed layout is:
@@ -318,6 +328,7 @@ The default managed layout is:
 | Broker, gateway/guardian/enumerator host, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
 | Managed config | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
 | Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
+| Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. |
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
 | Guardian manifest | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml` | Administrators/LocalSystem write; guardian reads. |
 | Trusted authorization ledger | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\protected_targets.json` | LocalSystem/Administrators only; gateway receives the narrow read access required for readiness. |
@@ -382,8 +393,11 @@ normal per-user application-protection controller is not removed from the
 product; managed mode deliberately transfers that work to the guardian so the
 gateway virtual account never scans or writes arbitrary profiles.
 
-Create an explicit `targets.yaml`. The target user must already have initialized
-the native application config:
+Stage a schema-valid `targets.yaml` for the first transaction. The enumerator
+subsequently maintains this protected file from eligible Windows profiles. A
+target user must already have a supported CLI installation that the enumerator
+can version, and any required native application config must exist before the
+guardian can complete enrollment:
 
 ```yaml
 version: 1
@@ -408,6 +422,44 @@ declared user's trusted path:
     connector: codex
     agent_version: "codex-cli 0.144.3"
 ```
+
+#### Windows enrollment and discovery
+
+`DefenseClawHookEnumerator` does not treat the staged manifest as a permanent
+manual allow-list. On service start it waits 30 seconds for gateway and guardian
+health to settle, then walks
+`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`. It repeats
+every five minutes, with a 60-second ceiling on each cycle, and atomically
+publishes `targets.yaml` only when its bytes change.
+
+The enumerator considers only syntactically valid interactive-user SIDs shaped
+like `S-1-5-21-…` with a final user RID. It rejects well-known, service, and
+bare-domain SIDs; non-absolute or missing profile paths; profiles whose path or
+ancestor is a reparse point; explicitly excluded SIDs; and duplicate SID rows
+except for the newest validated profile. Connector families come from the
+managed config and are filtered to the Windows managed-hook implementation.
+Recognition by this discovery layer is not a certification claim; deploy only
+connectors explicitly qualified by the managed-enterprise acceptance guidance.
+
+For a previously known `(SID, connector)` row, the enumerator preserves the
+administrator's `enabled`, `deferred`, and `agent_version` state. For a new row,
+it enables and publishes the target automatically only when a supported
+per-user CLI and acceptable version can be discovered. Profiles without a
+discoverable supported CLI are omitted and logged as skipped. Consequently,
+adding a supported CLI to an eligible profile can enroll that user on the next
+five-minute cycle without a separate administrator edit to `targets.yaml`.
+Control which connector families are eligible in the protected managed config,
+and monitor the enumerator log and manifest as security-sensitive enrollment
+state.
+
+After publishing a manifest, the enumerator grants the gateway virtual service
+SID read/execute/traverse access on existing inventory-relevant profile
+directories such as `.claude`, `.codex`, `.cursor`, `.agents`, and `.config`.
+The inheritable grant lets managed AI discovery read the enrolled user's
+connector inventory; it is not a grant across the whole profile. Missing
+directories are skipped and retried on a later cycle. A per-directory DACL
+failure is logged without blocking enrollment for other users, so operators
+must monitor these warnings to avoid silent inventory gaps.
 
 ### Install the Windows services
 
@@ -454,6 +506,8 @@ $Installer = Join-Path $Stage 'install-enterprise.ps1'
 
 & $PowerShell -NoLogo -NoProfile -NonInteractive -File $Installer `
   -Action Install `
+  -BrokerBinary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
+  -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
@@ -470,6 +524,7 @@ preflight:
 $DefenseClaw = Join-Path $Stage 'defenseclaw.exe'
 & $DefenseClaw enterprise windows install `
   --installer $Installer `
+  --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
   --cli-binary $DefenseClaw `
@@ -609,7 +664,7 @@ rollback and `Uninstall -Purge`; uninstall never claims shared vendor state.
 
 The deployment-mode environment pin is part of the security boundary. A user
 setting `DEFENSECLAW_DEPLOYMENT_MODE=unmanaged_byod`, replacing a user config,
-or launching another copy cannot downgrade either installed service.
+or launching another copy cannot downgrade the managed services.
 
 All managed services use exactly three SCM failure actions: restart after 5 seconds,
 15 seconds, then 60 seconds, with a one-day failure-count reset period and
@@ -1196,7 +1251,6 @@ First installation is intentionally conservative. The guardian requires the nati
 | --- | --- | --- |
 | Codex | `~/.codex/config.toml` | Launch Codex once as the user, then verify the file is user-owned and not group/other writable. |
 | Claude Code | `~/.claude/settings.json` | Launch Claude Code once as the user, then verify the file is user-owned and not group/other writable. |
-| Gemini CLI | `~/.gemini/settings.json` | Initialize Gemini CLI and verify the settings file before adding the target. |
 | Other hook-native connectors | Connector-specific native hook config | Consult the connector page and confirm the declared config surface exists. |
 
 Collect the exact version using the same binary the user invokes. In managed action mode, version information is part of the hook-contract decision:
@@ -1287,7 +1341,7 @@ targets:
     agent_version: "2.1.187 (Claude Code)"
   - user: alice
     connector: claudecode
-    agent_version: "Claude Code v2.1.152"
+    agent_version: "Claude Code v2.1.154"
   - user: disabled-user
     connector: codex
     enabled: false
@@ -1634,7 +1688,7 @@ Treat this evidence as a release gate for the managed endpoint image. Run destru
 - [ ] Managed config, policy, units/plists/SCM definitions, manifest, and authorization directory have trusted path chains.
 - [ ] Gateway service runs as the dedicated service identity (or the documented root identity on macOS), not the AI user.
 - [ ] Linux gateway sandbox properties match the packaged unit or a reviewed stricter override.
-- [ ] Guardian target manifest contains only explicit, current user/connector/version pairs.
+- [ ] Guardian targets are current and authorized: Linux/macOS manifests contain only explicit approved pairs; Windows enumerator output contains only expected interactive SIDs, configured connector families that pass the Windows managed-hook filter, and discovered supported versions.
 - [ ] First reconcile succeeds for every enabled target before action mode is enabled.
 - [ ] Watcher and periodic backstop are enabled according to OS capabilities.
 - [ ] Scoped token files are connector-specific; no automation copies a shared gateway token into user hooks.

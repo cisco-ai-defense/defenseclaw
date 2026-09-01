@@ -47,7 +47,7 @@ const runtimeTabs = [
     language: 'yaml' as const,
     source: `guardrail:
   mode: action
-  human_approval: true
+  human_approval: false
   block_severity_min: high
 rules:
   - id: secret.file-read
@@ -68,12 +68,13 @@ actions:
   "session_id": "demo-session-017",
   "connector": "cursor",
   "decision": "block",
+  "native_response": "deny",
   "severity": "critical",
   "rules": [
     "secret.file-read",
     "shell.data-egress-pipe"
   ],
-  "executed": false
+  "scope": "user-hook"
 }`,
   },
 ];
@@ -83,7 +84,7 @@ const runtimeEvidence = [
     id: 'runtime-hook',
     label: 'Interception point',
     value: 'beforeShellExecution',
-    detail: 'Cursor exposes a pre-execution hook that can block this action.',
+    detail: 'Cursor exposes a pre-execution hook that can return its documented native deny response.',
     tone: 'info' as const,
   },
   {
@@ -103,8 +104,8 @@ const runtimeEvidence = [
   {
     id: 'critical-map',
     label: 'Policy mapping',
-    value: 'critical → block',
-    detail: 'CRITICAL findings block unconditionally; HITL is not offered.',
+    value: 'critical → deny',
+    detail: 'Action mode maps the CRITICAL finding to Cursor\'s event-native deny response.',
     tone: 'danger' as const,
   },
   {
@@ -119,19 +120,19 @@ const runtimeEvidence = [
 const scenarios: ScenarioDefinition[] = [
   {
     id: 'runtime-secret-exfiltration',
-    title: 'Cursor attempts to send a sensitive file externally',
-    summary: 'DefenseClaw inspects a pending shell action, correlates two findings, and blocks it before execution.',
+    title: 'Cursor surfaces a sensitive outbound action',
+    summary: 'DefenseClaw inspects a pending shell action, correlates two findings, and returns Cursor\'s native deny response.',
     syntheticDataNotice: 'Guided example · Synthetic event data',
     connectorIds: ['cursor'],
     tabs: runtimeTabs,
     evidence: runtimeEvidence,
     outcomes: [
       {
-        id: 'runtime-block',
+        id: 'runtime-review',
         kind: 'block',
-        label: 'Block before execution',
+        label: 'Native deny',
         reason: 'shell.data-egress-pipe reached CRITICAL severity',
-        action: 'Write a correlated enforcement event',
+        action: 'Deny and write a correlated enforcement event',
       },
     ],
     steps: [
@@ -140,12 +141,12 @@ const scenarios: ScenarioDefinition[] = [
       step('inspect-destination', 'Inspect destination', 'The same action targets an external synthetic destination.', 'cursor-event', ['secret-read', 'egress-pipe'], [{ tabId: 'cursor-event', start: 7, end: 9, tone: 'danger' }]),
       step('correlate', 'Correlate', 'Two rules combine into a CRITICAL exfiltration finding.', 'default-policy', ['secret-read', 'egress-pipe'], [{ tabId: 'default-policy', start: 5, end: 9, tone: 'danger' }]),
       step('resolve', 'Resolve policy', 'The active action mapping blocks CRITICAL findings without approval.', 'default-policy', ['egress-pipe', 'critical-map'], [{ tabId: 'default-policy', start: 10, end: 12, tone: 'danger' }]),
-      step('enforce', 'Enforce', 'Cursor keeps the shell action pending while DefenseClaw returns block.', 'cursor-event', ['runtime-hook', 'critical-map'], [{ tabId: 'cursor-event', start: 10, end: 10, tone: 'danger' }]),
-      step('record', 'Record evidence', 'The decision and findings share one traceable audit record.', 'audit-event', ['critical-map', 'audit-write'], [{ tabId: 'audit-event', start: 5, end: 13, tone: 'success' }], 'runtime-block', 1350),
+      step('enforce', 'Deny', 'DefenseClaw returns Cursor\'s documented event-native deny response.', 'cursor-event', ['runtime-hook', 'critical-map'], [{ tabId: 'cursor-event', start: 10, end: 10, tone: 'danger' }]),
+      step('record', 'Record evidence', 'The deny decision and findings share one traceable audit record.', 'audit-event', ['critical-map', 'audit-write'], [{ tabId: 'audit-event', start: 5, end: 14, tone: 'success' }], 'runtime-review', 1350),
     ],
     boundaries: {
-      did: ['Inspected the event before execution', 'Correlated rule evidence and applied the active severity mapping', 'Recorded a synthetic enforcement event'],
-      didNot: ['Execute the displayed command', 'Send data to an external service', 'Offer HITL for a CRITICAL finding'],
+      did: ['Inspected the event before execution', 'Correlated rule evidence and applied the active severity mapping', 'Returned a synthetic native deny response'],
+      didNot: ['Execute the displayed command', 'Send data to an external service', 'Claim higher-priority conflict detection or native human approval'],
     },
   },
   {
@@ -316,7 +317,7 @@ human_approval: true
 hitl_min_severity: high
 connectors:
   claudecode: native_ask
-  codex: downgraded_confirm
+  codex: alert_system_message
 critical_behavior: always_block` },
       { id: 'hitl-audit', label: 'approval-audit.json', language: 'json', source: `{
   "connector": "claudecode",
@@ -338,14 +339,14 @@ critical_behavior: always_block` },
       { id: 'hitl-high', label: 'Finding', value: 'system.path-change · HIGH', detail: 'HIGH meets the configured approval threshold.', tone: 'warning' },
       { id: 'hitl-enabled', label: 'Mode', value: 'Action + HITL', detail: 'HITL only participates in action mode.', tone: 'warning' },
       { id: 'hitl-native', label: 'Claude Code', value: 'Native ask', detail: 'The approval appears in the agent surface.', tone: 'success' },
-      { id: 'hitl-codex', label: 'Codex', value: 'Downgraded confirm', detail: 'Codex does not expose native ask in the capability matrix.', tone: 'info' },
+      { id: 'hitl-codex', label: 'Codex', value: 'Alert/systemMessage', detail: 'The original confirm is preserved as raw_action for review, but Codex does not pause.', tone: 'info' },
       { id: 'operator-approved', label: 'Operator', value: 'Approve', detail: 'The action resumes and the decision is audited.', tone: 'success' },
       { id: 'operator-denied', label: 'Operator', value: 'Deny', detail: 'The agent receives the denial reason.', tone: 'danger' },
     ],
     outcomes: [
       { id: 'hitl-approved', kind: 'allow', label: 'Approve and continue', reason: 'Operator approved the HIGH-risk action', action: 'Audit and resume agent' },
       { id: 'hitl-denied', kind: 'block', label: 'Deny action', reason: 'Operator denied the HIGH-risk action', action: 'Audit and return reason' },
-      { id: 'codex-confirm', kind: 'pause', label: 'Downgraded confirm', reason: 'Codex has no native ask event', action: 'Prompt through DefenseClaw TUI' },
+      { id: 'codex-review', kind: 'review', label: 'Review-only alert/systemMessage', reason: 'Codex has no native ask event; raw_action=confirm is preserved', action: 'Record for audit or TUI review; cannot resume the hook' },
     ],
     steps: [
       step('hitl-fire', 'Hook fires', 'PreToolUse captures the pending action.', 'hitl-event', ['hitl-hook'], [{ tabId: 'hitl-event', start: 2, end: 5, tone: 'info' }]),
@@ -365,14 +366,14 @@ critical_behavior: always_block` },
         step('deny-native', 'Native ask', 'Action + HITL produces a native Claude Code prompt.', 'hitl-config', ['hitl-enabled', 'hitl-native'], [{ tabId: 'hitl-config', start: 1, end: 7, tone: 'warning' }]),
         step('deny-final', 'Deny', 'The pre-authored denial branch stops the action.', 'hitl-denied-audit', ['operator-denied'], [{ tabId: 'hitl-denied-audit', start: 2, end: 6, tone: 'danger' }], 'hitl-denied'),
       ] },
-      { id: 'codex', label: 'Codex', description: 'Show the downgraded confirm path.', steps: [
+      { id: 'codex', label: 'Codex', description: 'Show the non-resumable review-only alert path.', steps: [
         step('codex-hook', 'Inspect', 'The connector presents the same HIGH finding.', 'hitl-event', ['hitl-high'], [{ tabId: 'hitl-event', start: 4, end: 6, tone: 'warning' }]),
-        step('codex-final', 'Downgrade', 'Without native ask, DefenseClaw returns confirm.', 'hitl-config', ['hitl-codex'], [{ tabId: 'hitl-config', start: 4, end: 7, tone: 'info' }], 'codex-confirm'),
+        step('codex-final', 'Surface alert', 'Without native ask, DefenseClaw emits an alert/systemMessage for review; it cannot resume the hook.', 'hitl-config', ['hitl-codex'], [{ tabId: 'hitl-config', start: 4, end: 7, tone: 'info' }], 'codex-review'),
       ] },
     ],
     boundaries: {
-      did: ['Pause a HIGH finding before execution', 'Use connector capability to choose native ask or downgraded confirm', 'Audit the chosen branch'],
-      didNot: ['Offer HITL in observe mode', 'Offer approval for CRITICAL findings', 'Execute either branch in the browser'],
+      did: ['Show a native pause only where the connector supports it', 'Use connector capability to choose native ask or a review-only alert', 'Audit the chosen branch'],
+      didNot: ['Offer HITL in observe mode', 'Offer approval for CRITICAL findings', 'Resume a Codex hook from an alert or TUI review', 'Execute either branch in the browser'],
     },
   },
   {
@@ -446,7 +447,7 @@ critical_behavior: always_block` },
   "session_id": "demo-session-017",
   "connector": "cursor",
   "kind": "enforcement_decision",
-  "decision": "block",
+  "decision": "would_block",
   "rule": "shell.data-egress-pipe",
   "severity": "critical"
 }` },
@@ -467,7 +468,7 @@ exporters:
     outcomes: [{ id: 'telemetry-export', kind: 'export', label: 'Correlate and export', reason: 'Shared dimensions preserve decision context', action: 'Fan out to configured sinks' }],
     steps: [
       step('tool-span', 'Capture event', 'The pending tool action starts a correlated trace.', 'tool-event', ['trace-dimensions'], [{ tabId: 'tool-event', start: 2, end: 6, tone: 'info' }]),
-      step('decision-span', 'Join verdict', 'The enforcement decision keeps the trace, session, and connector.', 'verdict-event', ['trace-dimensions', 'decision-dimensions'], [{ tabId: 'verdict-event', start: 2, end: 9, tone: 'danger' }]),
+      step('decision-span', 'Join verdict', 'The advisory decision keeps the trace, session, and connector.', 'verdict-event', ['trace-dimensions', 'decision-dimensions'], [{ tabId: 'verdict-event', start: 2, end: 9, tone: 'danger' }]),
       step('audit-local', 'Write locally', 'SQLite and JSONL preserve durable evidence when enabled.', 'fanout', ['decision-dimensions', 'local-audit'], [{ tabId: 'fanout', start: 1, end: 3, tone: 'success' }]),
       step('export-configured', 'Export', 'Configured OTLP, Splunk, and webhook sinks receive the same dimensions.', 'fanout', ['local-audit', 'external-fanout'], [{ tabId: 'fanout', start: 4, end: 7, tone: 'success' }], 'telemetry-export'),
     ],

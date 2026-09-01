@@ -40,7 +40,7 @@ defenseclaw agent discover
 ```
 
 That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw,
-Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI,
+Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI,
 OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent), checks for config files
 and binaries, probes versions under the configured trusted-prefix policy, and
 prints a table of what's installed.
@@ -87,7 +87,7 @@ The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every s
 
 | Category | What it surfaces |
 | --- | --- |
-| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent |
+| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
 | `active_process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
 | `editor_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |
@@ -100,11 +100,19 @@ The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every s
 | `shell_history_match` | Shell-history references to AI binaries (last-touched timestamps) |
 | `provider_domain` | DNS resolutions to known provider endpoints |
 | `workspace_artifact` | `.openclaw/`, `.claude/`, `.cursor/` directories in active workspaces |
-| `desktop_app` | Claude Desktop, Cursor, Windsurf macOS / Windows app installs |
+| `desktop_app` | Claude Desktop, Cursor, and Devin macOS / Windows app installs |
 | `local_ai_endpoint` | Vetted Ollama, Lemonade, LM Studio, LocalAI, and vLLM loopback metadata endpoints |
 | `local_model` | Models installed on disk or reported as loaded by a vetted loopback model server |
 
-The local snapshot uses `state ∈ {new, seen, changed, gone}` with `last_seen` / `first_seen` timestamps. `seen` is the steady state for an unchanged signal. Outbound `ai_discovery` events remain delta-focused and emit only `new`, `changed`, or `gone` transitions.
+The local snapshot uses `state ∈ {new, seen, changed, gone}` with `last_seen` /
+`first_seen` timestamps. `seen` is the steady state for an unchanged signal. In
+unmanaged deployments, outbound `ai_discovery` events remain delta-focused and
+emit only `new`, `changed`, or `gone` transitions. In `managed_enterprise`, each
+full scan publishes a complete endpoint snapshot, including unchanged `seen`
+records. Full scans default to a five-minute cadence. The process-only tick
+refreshes local process state between full scans, but it does not republish the
+`ai_discovery` snapshot or the companion managed connector/MCP inventory to AI
+Defense.
 
 ### Local model inventory
 
@@ -224,7 +232,12 @@ Limits do not turn a partial observation into a false deletion. API inventories 
 
 ## Continuous discovery (gateway)
 
-The continuous scanner runs inside the gateway and emits `ai_discovery` events whenever a signal transitions state. It's off by default — turn it on once you have observability wired up:
+The continuous scanner runs inside the gateway. Unmanaged deployments emit
+`ai_discovery` events when a signal transitions state; managed-enterprise full
+scans emit the complete snapshot described above. Fresh CLI-generated configs
+enable discovery; an older or minimal config that omits the `ai_discovery`
+block leaves the gateway runtime default disabled. Use these commands to make
+the intended state explicit:
 
 <Tabs items={['Enable', 'Status', 'One-shot scan', 'Disable']}>
   <Tab value="Enable">
@@ -246,7 +259,11 @@ Prints what's enabled, the active scan roots, the loaded signature pack, the las
 defenseclaw agent discovery scan
 ```
 
-Triggers `POST /api/v1/ai-usage/scan`. The scanner runs immediately, refreshes the local snapshot, and emits `ai_discovery` events for any `new`, `changed`, or `gone` transitions. Unchanged `seen` rows are not replayed. No restart needed.
+Triggers `POST /api/v1/ai-usage/scan`. The scanner runs an immediate full scan
+and refreshes the local snapshot. Unmanaged deployments emit any `new`,
+`changed`, or `gone` transitions without replaying unchanged `seen` rows.
+Managed enterprise emits the complete snapshot, including `seen`, and refreshes
+the companion managed endpoint inventory. No restart needed.
   </Tab>
   <Tab value="Disable">
 ```bash
@@ -451,6 +468,32 @@ custom JSON downstream if your SBOM tooling requires CycloneDX.
 ## Where the data lands
 
 Both continuous and on-demand discovery feed the same audit pipeline. Once you've got [Observability](/docs/observability) wired up, the bundled dashboards light up automatically.
+
+### Managed enterprise export
+
+When `deployment_mode: managed_enterprise` has a valid top-level
+`cisco_ai_defense.endpoint`, DefenseClaw generates the reserved
+`managed-enterprise-ai-defense` destination. Operators cannot declare, disable,
+retarget, or attach credentials to this destination through the observability
+source config. It uses the managed CMID identity, applies the built-in
+`sensitive` projection, and posts to the release-owned AI Defense ingest path.
+
+Every complete managed endpoint-inventory collection is durable in mandatory
+local SQLite. Its summary is accompanied by one `ai_component.observed` record
+per item. Connector and MCP inventory are exported at that granularity; the
+latest full discovery snapshot also contributes per-item skills, plugins, and
+discovered MCP servers tagged with their parent connector. Sanitized coding-
+agent inventory received through agent discovery uses the same per-item model.
+Incomplete, overflowed, or otherwise non-authoritative collections are retained
+as local diagnostics instead of being exported as authoritative snapshots.
+
+The release-owned managed agent, connector, MCP, skill, and plugin inventory
+actions are blocked from operator-configured remote destinations. Mandatory
+SQLite remains authoritative locally, and the generated CMID-authenticated AI
+Defense destination is the only optional exporter allowed to receive those
+actions. That exclusivity applies to the release-owned managed inventory
+actions; canonical `ai_discovery` records continue to follow the compiled v8
+destination policy and also reach the generated destination in managed mode.
 
 ### Splunk: AI Discovery Inventory
 

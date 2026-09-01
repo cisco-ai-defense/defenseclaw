@@ -22,7 +22,7 @@ runtime, and maintenance copy as one transaction.
 | User context | A signed-in, **non-elevated interactive user**. Setup rejects Run as administrator, service identities, session zero, and background/batch launch for every state-changing action, including `/quiet`. |
 | Install scope | Current user only. There is no machine-scope Setup or MSI. |
 | Terminal | The installed commands run from PowerShell or cmd. Windows Terminal and PowerShell 7 are optional hosts, not prerequisites. |
-| Agent | A supported agent installed natively for the same Windows user. Claude Code also retains its own Git for Windows requirement. |
+| Agent | A [supported connector](/docs/connectors#platform-support) installed natively for the same Windows user. The connector page is canonical for its admitted version, executable path, provider login, reload requirements, upstream dependencies, and degraded or unsupported surfaces. Do not substitute WSL or mix native and WSL connector homes. |
 | Included runtime | Setup includes the CLI/TUI runtime, gateway, hook launcher, scanners, and pinned packages. No separate Python, `uv`, Go, Node.js, or global scanner install is required. |
 | Networking | Release download needs network unless staged offline. At runtime, the certified DefenseClaw path is authenticated loopback, normally `127.0.0.1:18970`; each agent still reaches its own upstream normally. |
 | Disk and memory | No exact minimum is published. Setup checks and stages the packaged transaction; an allocation or publication failure is reported and recovered rather than converted into an invented requirement. |
@@ -84,13 +84,15 @@ is a stop condition; do not bypass it.
 
 ### Run Setup as the signed-in user
 
-Double-click the EXE without **Run as administrator**. Choose one of:
-
-- **Codex**, **Claude Code**, or **Amp** to configure that native connector.
-- **Configure later** for a CLI-only installation with no agent changes.
+Double-click the EXE without **Run as administrator**. Choose a supported
+native Windows connector from the [connector platform table](/docs/connectors#platform-support),
+or choose **Configure later** for a CLI-only installation with no agent
+changes. The connector page is canonical for provider login, admitted client
+version and path, hook or plugin topology, reload steps, HITL, and degraded
+surfaces.
 
 Start in **Observe** mode. Choose **Action** only after reviewing observed
-events and the [connector enforcement boundary](/docs/get-started/windows/connectors-enforcement).
+events and the connector's documented [platform and enforcement boundary](/docs/connectors#platform-support).
 When a connector is selected, Setup must start the gateway and install its
 current-user logon registration; this is required for the hook to function.
 
@@ -132,11 +134,11 @@ DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MOD
   </Tab>
 </Tabs>
 
-Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=amp` for Amp. To
-install without configuring an agent or starting the gateway, use
-`CONNECTOR=none STARTGATEWAY=0`. `STARTGATEWAY=0` cannot leave a Codex, Claude
-Code, or Amp installation stopped: those connectors require gateway startup
-and current-user logon integration.
+Set `CONNECTOR` to a supported setup name from the
+[connector platform table](/docs/connectors#platform-support). To install
+without configuring an agent or starting the gateway, use
+`CONNECTOR=none STARTGATEWAY=0`. Every configured connector requires gateway
+startup and current-user logon integration.
 
 Public Setup properties are:
 
@@ -145,7 +147,7 @@ Public Setup properties are:
 | Action | fresh install, `/repair`, `/upgrade`, or `/uninstall` |
 | UI | interactive or `/quiet` (`/qn` alias); `/norestart` is accepted |
 | Scope | `INSTALLSCOPE=user` only |
-| Connector | `CONNECTOR=codex`, `claudecode`, `amp`, or `none` |
+| Connector | `CONNECTOR=amp`, `antigravity`, `codex`, `claudecode`, `copilot`, `cursor`, `devin`, `hermes`, `omnigent`, `opencode`, or `none` |
 | Policy mode | `MODE=observe` or `action` |
 | Gateway | `STARTGATEWAY=1` or `0`, subject to the connector rule above |
 | User data on uninstall | `DELETEUSERDATA=0` (default) or `1` |
@@ -167,33 +169,58 @@ For explicit supported connectors:
 defenseclaw setup codex --mode observe
 defenseclaw setup claude-code --mode observe
 defenseclaw setup amp --mode observe
+defenseclaw setup cursor --mode observe
+defenseclaw setup devin --mode observe
+defenseclaw setup hermes --mode observe
+defenseclaw setup omnigent --mode observe
+defenseclaw setup opencode --mode observe
+defenseclaw setup copilot --mode observe
+defenseclaw setup antigravity --mode observe
 ```
 
-One local gateway can host any or all three. Add connectors without removing
-an existing one:
+One local gateway can host all ten native lifecycle connectors. Add connectors without removing the
+first:
 
 ```powershell
 defenseclaw setup `
   --connector codex `
   --connector claudecode `
   --connector amp `
+  --connector cursor `
+  --connector devin `
+  --connector hermes `
+  --connector omnigent `
+  --connector opencode `
+  --connector copilot `
+  --connector antigravity `
   --mode observe `
   --restart `
   --yes
 ```
 
-Setup records validated `CODEX_HOME` and `CLAUDE_CONFIG_DIR` values when they
-are used. Repair and upgrade preserve those recorded homes instead of following
-later environment drift. Amp has no connector-home override: its system plugin
-uses `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. The packaged data root
-itself is fixed to the current Windows profile; see
+Setup records validated `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`,
+`OMNIGENT_CONFIG_HOME`, and `OPENCODE_CONFIG_DIR` values when they are used,
+plus `HERMES_HOME` when Hermes is selected. Antigravity uses the
+`%USERPROFILE%\.gemini\config` home. A predecessor custom path is retained only as
+internal custody long enough to restore its exact file and migrate the managed
+registration to the official path. Setup records the two `.gemini` ownership
+boundaries independently so repair, rollback, and teardown cannot cross them.
+Cursor publishes no configuration-home
+environment variable, so Setup records its exact configuration home
+internally. Devin setup records `%APPDATA%\devin` and the exact admitted CLI
+path for lifecycle custody. Repair and upgrade preserve all other
+recorded homes instead of following later profile or environment drift. The transaction retains both the
+current and previous recorded Hermes home until reconciliation, rollback, or
+teardown has finished, so an environment change cannot strand an owned
+`config.yaml` registration. Restart OpenCode after lifecycle changes so the running
+client loads the reconciled plugin state. The packaged data root itself is
+fixed to the current Windows profile; see
 [Path and override rules](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
 
-Fully restart Codex or Claude Code after setup changes. Fully exit and relaunch
-Amp; for headless execute mode, use `--plugin-ready-timeout 30` so the policy
-plugin is ready before the turn begins. An authenticated live Amp turn requires
-`AMP_API_KEY`, but that optional smoke is not the deterministic native Windows
-certification gate.
+Amp has no connector-home override: its system plugin uses
+`%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. Fully exit and relaunch Amp
+after setup changes; headless execute mode must use `--plugin-ready-timeout 30`
+so the policy plugin is ready before the turn begins.
 
 ## Startup behavior
 
@@ -232,7 +259,8 @@ trusted maintenance copy:
 
 Repair republishes the packaged files and reconciles connector wiring while
 preserving user configuration, audit history, the connector roster and modes,
-recorded connector homes, and the prior gateway/watchdog running state.
+recorded connector homes (including `HERMES_HOME`), current/previous connector
+backup custody, and the prior gateway/watchdog running state.
 
 Do not replace files in the install tree by hand. If a foreground DefenseClaw
 client has a runtime file locked, Setup leaves committed state unchanged and
@@ -310,7 +338,12 @@ optional network operations, not offline guarantees.
 
 Normal uninstall removes product-owned application files, the maintenance
 cache, Installed Apps registration, the owned user `PATH` entry, the owned Run
-value, and supported connector wiring. It preserves
+value, and supported connector wiring. Gemini teardown removes only
+DefenseClaw-owned groups and telemetry fields from its recorded `settings.json`
+and never touches Antigravity's nested `config\hooks.json`. For Hermes, teardown removes only the
+owned handlers and marker or restores the pre-Setup `config.yaml` bytes exactly;
+an unresolved current or previous home is retained for deferred cleanup rather
+than declared clean. It preserves
 `%USERPROFILE%\.defenseclaw` by default, including configuration, local audit,
 and recovery evidence.
 

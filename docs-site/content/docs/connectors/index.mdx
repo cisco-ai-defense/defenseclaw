@@ -1,6 +1,6 @@
 ---
 title: Connectors
-description: Fourteen built-in connectors share one adapter interface while exposing connector-specific proxy, hook, policy, telemetry, and approval capabilities.
+description: Thirteen active connectors share one adapter interface while exposing connector-specific proxy, hook, policy, telemetry, and approval capabilities.
 keywords:
   - DefenseClaw connectors
   - Claude Code connector
@@ -10,8 +10,7 @@ keywords:
   - GitHub Copilot CLI connector
   - OpenHands connector
   - Antigravity connector
-  - Gemini CLI connector
-  - Windsurf connector
+  - Devin connector
   - Hermes connector
   - OpenCode connector
   - Amp connector
@@ -28,7 +27,8 @@ native telemetry, and approval support therefore vary by connector.
 
 <Cards>
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. Model requests routed through the DefenseClaw proxy and their responses are inspected; OpenClaw classifies recognized provider/request shapes, while ZeptoClaw rewrites configured provider api_base values." />
-  <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent. DefenseClaw wires into the agent's native lifecycle hooks or policy API; the agent talks directly to its upstream." />
+  <Card title="Hook connectors" description="Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, and OpenCode. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream." />
+  <Card title="Custom policy connector" description="OmniGent. DefenseClaw installs an in-process Python policy bridge and maps six awaited policy phases to ALLOW, ASK, or DENY without proxying model traffic." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
 
@@ -40,20 +40,52 @@ native telemetry, and approval support therefore vary by connector.
 
 <ConnectorCatalog />
 
+## Platform support
+
+Every connector page now keeps its macOS/Linux and native Windows setup in one
+place, including platform-specific paths, dependencies, and enforcement
+limits. **Supported** means the connector is available through the ordinary
+setup path; it does not invent official-client validation evidence when that
+evidence has not been recorded.
+
+| Connector | macOS / Linux | Native Windows x64 | Important Windows boundary |
+| --- | --- | --- | --- |
+| [Claude Code](/docs/connectors/claudecode) | **Supported** | **Supported** | Direct executable hooks; Git for Windows is optional and WSL is outside the native contract. |
+| [Codex](/docs/connectors/codex) | **Supported** | **Supported** | Event-bound system PowerShell bridge to the packaged hook executable plus native OTLP; no resumable native ask response. |
+| [Amp](/docs/connectors/amp) | **Supported** | **Supported** | Owner-only TypeScript system-policy plugin; no shell hook or native OTLP exporter. |
+| [Cursor](/docs/connectors/cursor) | **Supported** | **Supported** | Managed PowerShell adapter; DefenseClaw does not enable Cursor's native ask response. |
+| [Devin](/docs/connectors/devin) | **Supported** | **Supported** | Exact same-user CLI `3000.4.25` admission; cloud Devin, ACP, proxy, and native OTLP are excluded. |
+| [GitHub Copilot CLI](/docs/connectors/copilot) | **Supported** | **Supported** | Uses Copilot's PowerShell hook field; upstream Windows sandboxing cannot enforce per-path denials. |
+| [Antigravity](/docs/connectors/antigravity) | **Supported** | **Supported** | Native PowerShell launcher; only `PreToolUse` can block or ask. |
+| [Hermes](/docs/connectors/hermes) | **Supported** | **Supported** | Direct executable hook is shell-free, but Hermes' own terminal tool depends on its bundled Git Bash. |
+| [OpenCode](/docs/connectors/opencode) | **Supported** | **Supported** | Direct Windows execution is supported; only awaited `tool.execute.before` can block. |
+| [OmniGent](/docs/connectors/omnigent) | **Supported** | **Supported — native degraded** | Server/SDK policy path only; terminal wrappers and filesystem/network/L7 sandbox parity are unavailable. |
+| [OpenHands](/docs/connectors/openhands) | **Supported** | **Unsupported** | OpenHands CLI requires WSL, and DefenseClaw has no WSL connector path. |
+| [OpenClaw](/docs/connectors/openclaw) | **Supported** | **Unsupported** | Its DefenseClaw integration requires the guardrail proxy, which native Windows does not host. |
+| [ZeptoClaw](/docs/connectors/zeptoclaw) | **Supported** | **Unsupported** | Its DefenseClaw integration requires the guardrail proxy and upstream publishes macOS/Linux builds. |
+
+Gemini CLI is deprecated and unavailable for new setup on every platform. Use
+[Antigravity](/docs/connectors/antigravity) for new Google agent integration;
+the [legacy Gemini CLI page](/docs/connectors/geminicli) exists only for safe,
+receipt-bound teardown.
+
 ## Capability summary
 
 | Family | Connectors | Data path | Enforcement boundary |
 | --- | --- | --- | --- |
 | Proxy | OpenClaw, ZeptoClaw | DefenseClaw receives and forwards model traffic | Request/response policy in the proxy |
-| Hook | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract |
+| Hook | Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook |
 | Custom policy | OmniGent | Agent remains connected directly to its upstream | Six in-process policy phases mapped to `ALLOW`, `ASK`, or `DENY` |
 
-Native ask is event-specific: Claude Code (`PreToolUse`), Cursor
-(`beforeShellExecution`, `beforeMCPExecution`), Copilot CLI (`preToolUse`),
-Antigravity (`PreInvocation`, `PreToolUse`), and OmniGent's three pre-action
-phases. Other confirmation verdicts use the connector's documented fallback.
-For exact version ranges, supported events, and script generations, see
-[Connector Compatibility](/docs/connectors/compatibility).
+Native ask is event-specific: OpenClaw (`before_tool_call`), Claude Code
+(`PreToolUse`), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only),
+Amp (`tool.call` and model-bound `tool.result` in the active foreground
+thread), and OmniGent's three pre-action phases. DefenseClaw does not enable
+Cursor's native ask response; Cursor confirm verdicts remain attributed
+alerts. Other confirmation verdicts use the connector's documented fallback.
+See the [HITL reference](/docs/hitl) for the canonical per-event matrix and
+[Connector Compatibility](/docs/connectors/compatibility) for exact version
+ranges and script generations.
 
 ## How a connector is structured
 

@@ -1780,6 +1780,248 @@ def publish_symlink(
         os.close(parent_fd)
 
 
+_MANAGED_CONSOLE_ENTRY_POINTS: dict[str, tuple[bytes, bytes]] = {
+    "skill-scanner": (
+        b"from skill_scanner.cli.cli import main",
+        b"sys.exit(main())",
+    ),
+}
+_MAX_MANAGED_CONSOLE_SCRIPT_BYTES = 16 * 1024
+
+
+def _read_managed_console_script_at(
+    parent_fd: int,
+    leaf: str,
+    expected: ObjectIdentity,
+    console_script: str,
+    expected_body: bytes,
+) -> bytes:
+    """Read one exact, recognized console-script launcher without following links."""
+
+    markers = _MANAGED_CONSOLE_ENTRY_POINTS.get(console_script)
+    if markers is None:
+        raise PublishError(f"unsupported managed console script: {console_script}")
+    descriptor = _open_regular(parent_fd, leaf)
+    try:
+        metadata = os.fstat(descriptor)
+        if _strong_identity(descriptor) != expected:
+            raise PublishError("managed console launcher changed while it was inspected")
+        if (
+            metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+            or not stat.S_IMODE(metadata.st_mode) & stat.S_IXUSR
+            or not 0 < metadata.st_size <= _MAX_MANAGED_CONSOLE_SCRIPT_BYTES
+        ):
+            raise PublishError("existing managed console launcher has unsafe custody")
+        chunks: list[bytes] = []
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                raise PublishError("managed console launcher changed while it was read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    if not payload.startswith(b"#!") or any(marker not in payload for marker in markers):
+        raise PublishError("destination is not a recognized managed console launcher")
+    if _managed_console_script_body(payload) != expected_body:
+        raise PublishError("destination is not the exact managed console launcher template")
+    return payload
+
+
+def _managed_console_script_body(payload: bytes) -> bytes:
+    """Return every launcher byte after its interpreter-specific shebang."""
+
+    newline = payload.find(b"\n")
+    if newline <= 2:
+        raise PublishError("managed console launcher has an invalid shebang")
+    return payload[newline + 1 :]
+
+
+def _validate_managed_console_target(target: Path, console_script: str) -> bytes:
+    """Require the venv entry point to bind its sibling venv interpreter."""
+
+    if not target.is_absolute() or target.name != console_script:
+        raise PublishError("managed console target has an unexpected path")
+    descriptor = _open_path_regular(target)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+            or not stat.S_IMODE(metadata.st_mode) & stat.S_IXUSR
+            or not 0 < metadata.st_size <= _MAX_MANAGED_CONSOLE_SCRIPT_BYTES
+        ):
+            raise PublishError("managed console target has unsafe custody")
+        payload = os.read(descriptor, _MAX_MANAGED_CONSOLE_SCRIPT_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(payload) > _MAX_MANAGED_CONSOLE_SCRIPT_BYTES:
+        raise PublishError("managed console target exceeds its size bound")
+    markers = _MANAGED_CONSOLE_ENTRY_POINTS.get(console_script)
+    if markers is None or any(marker not in payload for marker in markers):
+        raise PublishError("managed console target has an unexpected entry point")
+    first_line = payload.splitlines()[0] if payload else b""
+    if not first_line.startswith(b"#!"):
+        raise PublishError("managed console target has an invalid shebang")
+    try:
+        interpreter = os.fsdecode(first_line[2:])
+    except UnicodeError as exc:
+        raise PublishError("managed console target has an invalid shebang") from exc
+    if (
+        not os.path.isabs(interpreter)
+        or os.path.abspath(os.path.dirname(interpreter)) != os.path.abspath(target.parent)
+        or os.path.basename(interpreter) not in {"python", "python3"}
+    ):
+        raise PublishError("managed console target does not use its venv interpreter")
+    return _managed_console_script_body(payload)
+
+
+def repair_managed_console_symlink(
+    target: Path,
+    destination: Path,
+    console_script: str,
+    *,
+    custody_root: Path | None = None,
+) -> StrongIdentity | None:
+    """Publish a venv launcher, replacing only a recognized stale console script.
+
+    The affected legacy launcher is a small pip-generated regular file whose
+    shebang can point at an unrelated interpreter. Foreign files and foreign
+    symlinks remain no-clobber. A recognized stale file is atomically exchanged
+    with the new symlink and retired into deterministic private custody.
+    """
+
+    if os.name == "nt":
+        raise PublishError("managed console symlink repair is POSIX-only")
+    target = Path(target)
+    destination = Path(destination)
+    managed_body = _validate_managed_console_target(target, console_script)
+    if not destination.is_absolute() or destination.name != console_script:
+        raise PublishError("managed console destination has an unexpected name")
+
+    parent_fd = _open_directory(destination.parent, create=True)
+    retirement_root = custody_root or _default_custody_root(destination)
+    custody_fd = -1
+    stage = f".{destination.name}.managed-console-{uuid.uuid4().hex}"
+    stage_identity: StrongIdentity | None = None
+    displaced_identity: StrongIdentity | None = None
+    activated_new = False
+    exchanged = False
+    succeeded = False
+    try:
+        try:
+            current_target = os.readlink(destination.name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            current_target = None
+        except OSError as exc:
+            if exc.errno != errno.EINVAL:
+                raise
+            current_target = None
+        else:
+            if current_target == str(target):
+                return None
+            raise PublishError(
+                f"managed console destination points to another installation: {destination}"
+            )
+
+        displaced_identity = _entry_strong_identity(parent_fd, destination.name)
+        if displaced_identity is None:
+            os.symlink(str(target), stage, dir_fd=parent_fd)
+            stage_identity = _entry_strong_identity(parent_fd, stage)
+            if stage_identity is None or os.readlink(stage, dir_fd=parent_fd) != str(target):
+                raise PublishError("managed console symlink staging changed")
+            try:
+                _rename_no_replace_between(parent_fd, stage, parent_fd, destination.name)
+            except FileExistsError:
+                raise PublishError(
+                    f"managed console destination appeared concurrently and was preserved: {destination}"
+                ) from None
+            activated_new = True
+            if _entry_strong_identity(parent_fd, destination.name) != stage_identity:
+                raise PublishError("managed console symlink activation identity changed")
+            os.fsync(parent_fd)
+            succeeded = True
+            return stage_identity
+        _read_managed_console_script_at(
+            parent_fd,
+            destination.name,
+            displaced_identity,
+            console_script,
+            managed_body,
+        )
+        custody_fd = _open_custody_root(retirement_root, create=True)
+        if os.fstat(parent_fd).st_dev != os.fstat(custody_fd).st_dev:
+            raise PublishError("retirement custody must be on the managed launcher's filesystem")
+
+        os.symlink(str(target), stage, dir_fd=parent_fd)
+        stage_identity = _entry_strong_identity(parent_fd, stage)
+        if stage_identity is None or os.readlink(stage, dir_fd=parent_fd) != str(target):
+            raise PublishError("managed console symlink staging changed")
+        if _entry_strong_identity(parent_fd, destination.name) != displaced_identity:
+            raise PublishError("managed console destination changed before publication")
+
+        _exchange(parent_fd, stage, destination.name)
+        exchanged = True
+        if (
+            _entry_strong_identity(parent_fd, destination.name) != stage_identity
+            or _entry_strong_identity(parent_fd, stage) != displaced_identity
+        ):
+            try:
+                _exchange(parent_fd, stage, destination.name)
+                exchanged = False
+            except PublishError:
+                pass
+            raise PublishError("managed console destination changed during publication")
+        os.fsync(parent_fd)
+        if not _retire_exact_at(
+            parent_fd,
+            stage,
+            displaced_identity,
+            custody_fd,
+            str(destination.parent / stage),
+            "entry",
+        ):
+            raise PublishError("stale managed console launcher changed and was preserved")
+        os.fsync(parent_fd)
+        succeeded = True
+        return stage_identity
+    finally:
+        if not succeeded and stage_identity is not None:
+            if activated_new and _entry_strong_identity(parent_fd, destination.name) == stage_identity:
+                try:
+                    os.unlink(destination.name, dir_fd=parent_fd)
+                    activated_new = False
+                    os.fsync(parent_fd)
+                except OSError:
+                    pass
+            if (
+                exchanged
+                and displaced_identity is not None
+                and _entry_strong_identity(parent_fd, destination.name) == stage_identity
+                and _entry_strong_identity(parent_fd, stage) == displaced_identity
+            ):
+                try:
+                    _exchange(parent_fd, stage, destination.name)
+                    exchanged = False
+                    os.fsync(parent_fd)
+                except PublishError:
+                    pass
+            if not exchanged and _entry_strong_identity(parent_fd, stage) == stage_identity:
+                try:
+                    os.unlink(stage, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                except OSError:
+                    # Cleanup is best-effort after publication has already
+                    # failed. Preserve the original, actionable refusal.
+                    pass
+        if custody_fd >= 0:
+            os.close(custody_fd)
+        os.close(parent_fd)
+
+
 def _encode_rollback_token(
     destination: Path,
     stage: Path,
@@ -2182,6 +2424,11 @@ def main() -> int:
     fresh_symlink.add_argument("target")
     fresh_symlink.add_argument("destination", type=Path)
     fresh_symlink.add_argument("--custody-root", type=Path)
+    repair_console = subparsers.add_parser("repair-console-symlink")
+    repair_console.add_argument("target", type=Path)
+    repair_console.add_argument("destination", type=Path)
+    repair_console.add_argument("--console-script", required=True)
+    repair_console.add_argument("--custody-root", type=Path)
     regular = subparsers.add_parser("regular")
     regular.add_argument("source", type=Path)
     regular.add_argument("destination", type=Path)
@@ -2248,6 +2495,14 @@ def main() -> int:
             if identity is None:
                 raise PublishError("fresh-install symlink identity is unavailable")
             print(_format_strong_identity(identity))
+        elif args.command == "repair-console-symlink":
+            identity = repair_managed_console_symlink(
+                args.target,
+                args.destination,
+                args.console_script,
+                custody_root=args.custody_root,
+            )
+            print("unchanged" if identity is None else _format_strong_identity(identity))
         elif args.command == "regular":
             publish_regular(
                 args.source,

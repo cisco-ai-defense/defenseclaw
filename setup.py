@@ -157,21 +157,30 @@ class BuildPyWithRuntimeAssets(build_py):
             if not source.is_dir():
                 raise RuntimeError(f"required runtime bundle is missing: {source}")
             shutil.rmtree(destination, ignore_errors=True)
+            ignored_names = ["__pycache__", "*.pyc"]
+            if bundle_name == "local_observability_stack":
+                ignored_names.extend(
+                    [
+                        ".grafana-admin-password",
+                        "..grafana-admin-password.*.tmp",
+                        ".grafana-access-mode",
+                        "..grafana-access-mode.*.tmp",
+                    ]
+                )
             shutil.copytree(
                 source,
                 destination,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                ignore=shutil.ignore_patterns(*ignored_names),
             )
 
         registry_source = root / "internal" / "envvars" / "registry.json"
-        registry_destination = (
-            Path(self.build_lib) / "defenseclaw" / "_data" / "envvars" / "registry.json"
-        )
+        registry_destination = Path(self.build_lib) / "defenseclaw" / "_data" / "envvars" / "registry.json"
         if not registry_source.is_file():
             raise RuntimeError(f"required environment registry is missing: {registry_source}")
         registry_destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(registry_source, registry_destination)
 
         _stage_v8_assets(root, Path(self.build_lib))
+
 
 setup(cmdclass={"build_py": BuildPyWithRuntimeAssets})
