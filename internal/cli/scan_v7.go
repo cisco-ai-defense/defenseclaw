@@ -106,7 +106,10 @@ func marshalScanResultV7WithOptions(
 		bv = binaryVer
 	}
 
-	sid := uuid.New().String()
+	sid := strings.TrimSpace(projected.ScanID)
+	if _, err := uuid.Parse(sid); err != nil {
+		sid = uuid.NewString()
+	}
 	dur := r.Duration.String()
 	agentID := getenvOrNil("DEFENSECLAW_AGENT_ID")
 	agentInst := getenvOrNil("DEFENSECLAW_AGENT_INSTANCE_ID")

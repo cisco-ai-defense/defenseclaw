@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -73,7 +74,10 @@ func runScanCode(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
-	target := args[0]
+	target, err := filepath.Abs(args[0])
+	if err != nil {
+		return fmt.Errorf("resolve scan target: %w", err)
+	}
 
 	if _, err := os.Stat(target); err != nil {
 		return fmt.Errorf("target not found: %w", err)
@@ -90,7 +94,7 @@ func runScanCode(_ *cobra.Command, args []string) error {
 	}
 
 	var redactor *scanoutput.Redactor
-	if scanNeedsRedactor(false) {
+	if scanNeedsRedactor(auditLog != nil) {
 		dataDir := ""
 		if cfg != nil {
 			dataDir = strings.TrimSpace(cfg.DataDir)
@@ -106,7 +110,14 @@ func runScanCode(_ *cobra.Command, args []string) error {
 	}
 
 	if auditLog != nil {
-		_ = auditLog.LogScan(result)
+		// Persistence sanitizes sensitive findings in place. Commit a detached
+		// copy so --no-redact remains an explicit local-output choice while the
+		// forensic database always receives the protected projection.
+		persisted := scanoutput.Clone(result)
+		if err := auditLog.PersistStandaloneScan(persisted, redactor); err != nil {
+			return fmt.Errorf("persist code scan: %w", err)
+		}
+		result.ScanID = persisted.ScanID
 	}
 
 	if scanOutputJSON {

@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -362,5 +367,120 @@ func TestScanResultV7PreservesFindingScanner(t *testing.T) {
 	}
 	if !strings.HasPrefix(top.Findings[0].RuleID, "clawshield-malware.") {
 		t.Fatalf("rule_id = %q, want clawshield-malware prefix", top.Findings[0].RuleID)
+	}
+}
+
+func TestRunScanCodePersistsStandaloneFindingLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "exec.py")
+	if err := os.WriteFile(target, []byte("os.system(cmd)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := audit.NewStore(filepath.Join(dataDir, "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	previousConfig, previousStore, previousLog := cfg, auditStore, auditLog
+	previousJSON, previousRaw, previousSchema := scanOutputJSON, scanNoRedact, scanPrintSchema
+	previousFindingScanner, previousFindingTarget := auditFindingsScanner, auditFindingsTarget
+	previousFindingSince, previousFindingNewOnly := auditFindingsSince, auditFindingsNewOnly
+	previousFindingResolved, previousFindingLimit := auditFindingsIncludeResolved, auditFindingsLimit
+	t.Cleanup(func() {
+		cfg, auditStore, auditLog = previousConfig, previousStore, previousLog
+		scanOutputJSON, scanNoRedact, scanPrintSchema = previousJSON, previousRaw, previousSchema
+		auditFindingsScanner, auditFindingsTarget = previousFindingScanner, previousFindingTarget
+		auditFindingsSince, auditFindingsNewOnly = previousFindingSince, previousFindingNewOnly
+		auditFindingsIncludeResolved, auditFindingsLimit = previousFindingResolved, previousFindingLimit
+		_ = store.Close()
+	})
+
+	localConfig := config.DefaultConfig()
+	localConfig.DataDir = dataDir
+	localConfig.AuditDB = filepath.Join(dataDir, "audit.db")
+	localConfig.Scanners.CodeGuard = ""
+	cfg, auditStore, auditLog = localConfig, store, audit.NewLogger(store)
+	scanOutputJSON, scanNoRedact, scanPrintSchema = false, false, false
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanArgument := target
+	if relativeTarget, relativeErr := filepath.Rel(workingDir, target); relativeErr == nil &&
+		!filepath.IsAbs(relativeTarget) {
+		scanArgument = relativeTarget
+	}
+
+	for run := 1; run <= 2; run++ {
+		if err := runScanCode(nil, []string{scanArgument}); err != nil {
+			t.Fatalf("standalone scan %d: %v", run, err)
+		}
+	}
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.TotalScans != 2 {
+		t.Fatalf("scan_results count = %d, want 2", counts.TotalScans)
+	}
+	states, err := store.ListFindingStates("codeguard", target, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) == 0 {
+		t.Fatal("standalone scan left finding_states empty")
+	}
+	for _, state := range states {
+		if state.OccurrenceCount != 2 || state.State != "active" || state.Target != target ||
+			!filepath.IsAbs(state.FilePath) {
+			t.Fatalf("finding state was not deduplicated across scans: %+v", state)
+		}
+	}
+
+	auditFindingsScanner = "codeguard"
+	auditFindingsTarget = target
+	auditFindingsSince = ""
+	auditFindingsNewOnly = false
+	auditFindingsIncludeResolved = false
+	auditFindingsLimit = 100
+	var output bytes.Buffer
+	command := &cobra.Command{}
+	command.SetOut(&output)
+	if err := runAuditFindings(command, nil); err != nil {
+		t.Fatalf("audit findings after standalone scan: %v", err)
+	}
+	var report auditFindingsReport
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatalf("decode audit findings report: %v\n%s", err, output.String())
+	}
+	if report.Count != int64(len(states)) || report.Returned != len(states) {
+		t.Fatalf("audit findings report count/returned = %d/%d, want %d: %s",
+			report.Count, report.Returned, len(states), output.String())
+	}
+}
+
+func TestMarshalScanResultV7PreservesPersistedScanID(t *testing.T) {
+	const scanID = "f24a58bd-e929-4cc8-a5c8-9c0399340f5a"
+	result := &scanner.ScanResult{
+		ScanID: scanID, Scanner: "codeguard", Target: "/repo/main.py",
+		Timestamp: time.Now().UTC(),
+	}
+	body, err := marshalScanResultV7WithOptions(result, "test", scanResultV7Options{Raw: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output scanResultV7
+	if err := json.Unmarshal(body, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.ScanID == nil || *output.ScanID != scanID {
+		t.Fatalf("machine output scan_id = %v, want persisted %q", output.ScanID, scanID)
 	}
 }

@@ -20,10 +20,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// emitScanV8 emits every finding before the finalized scan summary on one
-// immutable runtime generation. Each operation retains its own collection
-// decision; disabling security.finding does not suppress asset.scan and vice
-// versa. The scanner's forensic tables have already committed before entry.
+// emitScanV8 emits new or materially changed asset findings before the
+// finalized scan summary on one immutable runtime generation. Repeated asset
+// observations update the compact lifecycle state without growing the static
+// transition ledger or default event stream; runtime inspection occurrences
+// are always emitted. Each operation retains its own collection decision;
+// disabling security.finding does not suppress asset.scan and vice versa. The
+// scanner's forensic tables have already committed before entry.
 func (l *Logger) emitScanV8(
 	ctx context.Context,
 	binding runtimeV8Binding,
@@ -45,6 +48,10 @@ func (l *Logger) emitScanV8(
 	operations := make([]RuntimeV8LogOperation, 0, len(result.Findings)+1)
 	for index := range result.Findings {
 		finding := result.Findings[index]
+		if result.FindingLifecycle != nil &&
+			!result.FindingLifecycle.ShouldEmitOccurrence(finding.FindingOccurrenceID) {
+			continue
+		}
 		operation, err := scanFindingV8Operation(
 			ctx, finding, result, scanID, observedAt, correlation,
 		)
@@ -383,6 +390,23 @@ func newScanRuntimeV8GeneratedMetrics(
 	targetType := result.EffectiveTargetType()
 	durationMS := float64(result.Duration) / float64(time.Millisecond)
 	counts := scanV8SeverityCounts(result)
+	gaugeValues := counts
+	if lifecycle := result.FindingLifecycle; lifecycle != nil {
+		if lifecycle.Managed {
+			counts = make(map[scanner.Severity]int64)
+			for _, observation := range lifecycle.Observations {
+				if observation.Status != scanner.FindingLifecycleRepeated {
+					counts[observation.Severity]++
+				}
+			}
+			gaugeValues = lifecycle.GaugeDelta
+		} else {
+			// Runtime and failed scans are immutable occurrences rather than
+			// open asset state. They keep occurrence counters and logs, but must
+			// not accumulate forever in the current-open up/down counter.
+			gaugeValues = nil
+		}
+	}
 	type metricInput struct {
 		family                                                    observability.EventName
 		valueInt                                                  int64
@@ -398,17 +422,26 @@ func newScanRuntimeV8GeneratedMetrics(
 		scanner.SeverityCritical, scanner.SeverityHigh, scanner.SeverityMedium,
 		scanner.SeverityLow, scanner.SeverityInfo,
 	} {
-		count := counts[severity]
-		if count == 0 {
-			continue
+		if count := counts[severity]; count != 0 {
+			inputs = append(inputs, metricInput{
+				family:   observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindings),
+				valueInt: count, scanner: result.Scanner, targetType: targetType,
+				connector: connector, severity: string(severity),
+			})
 		}
-		inputs = append(inputs,
-			metricInput{family: observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindings), valueInt: count, scanner: result.Scanner, targetType: targetType, connector: connector, severity: string(severity)},
-			metricInput{family: observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsGauge), valueInt: count, targetType: targetType, severity: string(severity)},
-		)
+		if value := gaugeValues[severity]; value != 0 {
+			inputs = append(inputs, metricInput{
+				family:   observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsGauge),
+				valueInt: value, targetType: targetType, severity: string(severity),
+			})
+		}
 	}
 	for index := range result.Findings {
 		finding := result.Findings[index]
+		if result.FindingLifecycle != nil &&
+			!result.FindingLifecycle.ShouldEmitOccurrence(finding.FindingOccurrenceID) {
+			continue
+		}
 		inputs = append(inputs, metricInput{
 			family:   observability.EventName(observability.TelemetryInstrumentDefenseClawScanFindingsByRule),
 			valueInt: 1, scanner: result.Scanner, connector: connector,

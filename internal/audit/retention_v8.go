@@ -412,6 +412,7 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"scan_findings": retentionOwnedHistory, "findings": retentionOwnedHistory,
 	"scan_results": retentionOwnedHistory, "judge_responses": retentionOwnedHistory,
 	"actions": retentionOwnedProtected, "target_snapshots": retentionOwnedProtected,
+	"finding_scopes": retentionOwnedProtected, "finding_states": retentionOwnedProtected,
 	"schema_version": retentionOwnedProtected, "observability_store_readiness": retentionOwnedProtected,
 	"alert_acknowledgement_projection":   retentionOwnedProtected,
 	"alert_acknowledgement_operations":   retentionOwnedProtected,
