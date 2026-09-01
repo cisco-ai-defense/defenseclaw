@@ -815,6 +815,9 @@ def test_legacy_macos_installer_claims_gateway_after_copy_and_codesign(
         "  cli=${python%/python}/defenseclaw\n"
         "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
         '  chmod +x "$cli"\n'
+        "  scanner=${python%/python}/skill-scanner\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$scanner\"\n"
+        '  chmod +x "$scanner"\n'
         "  exit 0\n"
         "fi\n"
         "exit 90\n",
@@ -1087,6 +1090,9 @@ def test_posix_installer_never_replaces_entrypoint_that_appears_after_preflight(
         "  cli=${python%/python}/defenseclaw\n"
         "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
         '  chmod +x "$cli"\n'
+        "  scanner=${python%/python}/skill-scanner\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$scanner\"\n"
+        '  chmod +x "$scanner"\n'
         "  exit 0\n"
         "fi\n"
         "exit 90\n",
@@ -1127,6 +1133,18 @@ def test_posix_installer_never_replaces_entrypoint_that_appears_after_preflight(
         assert completed.returncode == 0, output
         assert (home / ".defenseclaw/.venv/bin/defenseclaw").is_file()
         assert (home / ".local/bin/defenseclaw").is_symlink()
+        scanner = home / ".local/bin/skill-scanner"
+        assert (home / ".defenseclaw/.venv/bin/skill-scanner").is_file()
+        assert scanner.is_symlink()
+        assert os.readlink(scanner) == str(home / ".defenseclaw/.venv/bin/skill-scanner")
+        scanner_probe = subprocess.run(
+            [scanner, "--version"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        assert scanner_probe.returncode == 0, scanner_probe.stderr
         assert (home / ".local/bin/defenseclaw-gateway").is_file()
         custody = home / ".defenseclaw-install-custody"
         attempt_marker = custody / ".defenseclaw-install-in-progress-v1"
@@ -1306,6 +1324,9 @@ def test_posix_failed_install_removes_attempt_owned_plugin_marker_and_bin_dirs(
         "  cli=${python%/python}/defenseclaw\n"
         "  printf '#!/bin/sh\\nexit 0\\n' > \"$cli\"\n"
         '  chmod +x "$cli"\n'
+        "  scanner=${python%/python}/skill-scanner\n"
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$scanner\"\n"
+        '  chmod +x "$scanner"\n'
         "  exit 0\n"
         "fi\n"
         "exit 90\n",
@@ -1349,6 +1370,7 @@ def test_posix_failed_install_removes_attempt_owned_plugin_marker_and_bin_dirs(
     assert not (home / ".local").exists()
     assert not (home / ".local/bin/defenseclaw").exists()
     assert not (home / ".local/bin/defenseclaw-gateway").exists()
+    assert not (home / ".local/bin/skill-scanner").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source-install Makefile preflight uses POSIX symlinks")
