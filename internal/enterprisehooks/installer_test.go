@@ -53,7 +53,7 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 	newOpts := func(dataDir string) connector.SetupOpts {
 		return connector.SetupOpts{
 			DataDir:           dataDir,
-			AgentVersion:      "2.1.152",
+			AgentVersion:      "2.1.154",
 			ManagedEnterprise: true,
 		}
 	}
