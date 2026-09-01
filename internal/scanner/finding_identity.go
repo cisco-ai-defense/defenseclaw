@@ -212,8 +212,8 @@ type FindingLifecycleDelta struct {
 
 // IndexOccurrenceEmissions prepares constant-time transition lookups after the
 // lifecycle observations have been assembled. Persistence calls this before a
-// delta is attached to a scan result; ShouldEmitOccurrence also initializes it
-// lazily for callers that construct managed deltas directly.
+// delta is attached to a scan result, so normal emission paths only read the
+// finalized index.
 func (delta *FindingLifecycleDelta) IndexOccurrenceEmissions() {
 	if delta == nil || !delta.Managed || delta.emitByOccurrence != nil {
 		return
@@ -236,6 +236,17 @@ func (delta *FindingLifecycleDelta) ShouldEmitOccurrence(occurrenceID string) bo
 	if delta == nil || !delta.Managed {
 		return true
 	}
-	delta.IndexOccurrenceEmissions()
-	return delta.emitByOccurrence[occurrenceID]
+	if delta.emitByOccurrence != nil {
+		return delta.emitByOccurrence[occurrenceID]
+	}
+	// Manually constructed deltas have not been finalized by persistence. Keep
+	// this fallback read-only so concurrent lookups cannot race on lazy map
+	// initialization and later observation edits retain the former behavior.
+	for index := range delta.Observations {
+		observation := delta.Observations[index]
+		if observation.OccurrenceID == occurrenceID {
+			return observation.Status != FindingLifecycleRepeated
+		}
+	}
+	return false
 }

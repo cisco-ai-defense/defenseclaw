@@ -137,15 +137,22 @@ func TestFindingLifecycleDeltaIndexesOccurrenceEmissions(t *testing.T) {
 	}
 }
 
-func TestFindingLifecycleDeltaLazilyIndexesAndPreservesUnmanagedBehavior(t *testing.T) {
+func TestFindingLifecycleDeltaUnindexedFallbackPreservesPriorBehavior(t *testing.T) {
 	managed := &FindingLifecycleDelta{
 		Managed: true,
 		Observations: []FindingLifecycleObservation{
 			{OccurrenceID: "reopened", Status: FindingLifecycleReopened},
 		},
 	}
-	if !managed.ShouldEmitOccurrence("reopened") || managed.emitByOccurrence == nil {
-		t.Fatal("managed delta did not lazily index a reopened occurrence")
+	if !managed.ShouldEmitOccurrence("reopened") {
+		t.Fatal("unindexed managed delta did not emit a reopened occurrence")
+	}
+	if managed.emitByOccurrence != nil {
+		t.Fatal("read-only fallback unexpectedly initialized an emission index")
+	}
+	managed.Observations[0].Status = FindingLifecycleRepeated
+	if managed.ShouldEmitOccurrence("reopened") {
+		t.Fatal("unindexed fallback did not reflect a later observation edit")
 	}
 
 	if !(*FindingLifecycleDelta)(nil).ShouldEmitOccurrence("any") {
