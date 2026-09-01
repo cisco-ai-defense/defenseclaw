@@ -131,9 +131,13 @@ jobs:
           ) -join '|') + ')$'
           # The gateway and connector packages are large enough that one native
           # Windows test binary can retain the full suite's resources until it
-          # reaches Go's package timeout. Partition both top-level test lists in
-          # the same process-isolation shape as Linux CI. Shards remain
-          # sequential on this four-core hosted runner.
+          # reaches Go's package timeout. Go's testing package also recompiles
+          # the -run expression while matching parallel tests, so selectors
+          # containing hundreds of exact test names can exhaust the hosted
+          # runner even after the tests themselves have released resources.
+          # Keep the shards sequential but small enough to bound both retained
+          # test state and selector compilation memory.
+          $nativeTestShardCount = 16
           $gatewayList = Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-list', '^(Test|Fuzz|Example)', './internal/gateway'
           ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-gateway-list.log')
@@ -147,10 +151,10 @@ jobs:
           }
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
-          foreach ($shard in 0..3) {
+          foreach ($shard in 0..($nativeTestShardCount - 1)) {
             $shardTests = @(
               for ($index = 0; $index -lt $gatewayTests.Count; $index++) {
-                if (($index % 4) -eq $shard) { [regex]::Escape($gatewayTests[$index]) }
+                if (($index % $nativeTestShardCount) -eq $shard) { [regex]::Escape($gatewayTests[$index]) }
               }
             )
             $gatewayShardPattern = '^(' + ($shardTests -join '|') + ')$'
@@ -172,10 +176,10 @@ jobs:
           if ($connectorTests.Count -lt 4) {
             throw "native connector sharding discovered only $($connectorTests.Count) top-level tests"
           }
-          foreach ($shard in 0..3) {
+          foreach ($shard in 0..($nativeTestShardCount - 1)) {
             $shardTests = @(
               for ($index = 0; $index -lt $connectorTests.Count; $index++) {
-                if (($index % 4) -eq $shard) { [regex]::Escape($connectorTests[$index]) }
+                if (($index % $nativeTestShardCount) -eq $shard) { [regex]::Escape($connectorTests[$index]) }
               }
             )
             $connectorShardPattern = '^(' + ($shardTests -join '|') + ')$'
