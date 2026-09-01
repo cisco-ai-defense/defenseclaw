@@ -57,15 +57,17 @@ def _write_atomic(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     published = False
+    created = False
     try:
         with temporary.open("xb") as handle:
+            created = True
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         published = True
     finally:
-        if not published:
+        if created and not published:
             try:
                 temporary.unlink()
             except FileNotFoundError:

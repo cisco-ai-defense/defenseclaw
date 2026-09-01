@@ -109,6 +109,18 @@ def test_atomic_write_does_not_unlink_reused_temporary_name_after_publish(
     assert temporary.read_bytes() == b"unrelated"
 
 
+def test_atomic_write_does_not_unlink_preexisting_temporary_name(tmp_path: Path) -> None:
+    output = tmp_path / "extension-runtime-fingerprint.json"
+    temporary = output.with_name(f".{output.name}.{extension_runtime_fingerprint.os.getpid()}.tmp")
+    temporary.write_bytes(b"preexisting")
+
+    with pytest.raises(FileExistsError):
+        extension_runtime_fingerprint._write_atomic(output, b"published")
+
+    assert not output.exists()
+    assert temporary.read_bytes() == b"preexisting"
+
+
 def test_release_contract_rejects_plugin_bytes_changed_after_wheel_staging(tmp_path: Path) -> None:
     source = tmp_path / "source"
     _write_source_runtime(source)
