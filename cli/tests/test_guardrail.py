@@ -2379,14 +2379,16 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_name = "cursor-hook.ps1" if os.name == "nt" else "cursor-hook.sh"
             runtime_path = os.path.join(tmpdir, runtime_name)
-            runtime_body = "# defenseclaw-managed-hook v8\n"
             if os.name == "nt":
-                runtime_body += (
-                    "$failClosed = $true\n--input-file\ndefenseclaw-hook.exe\n"
-                    "ProcessStartInfo\nRedirectStandardOutput\nWaitForExit\n"
+                runtime_body = (
+                    "# defenseclaw-managed-hook v9\ndefenseclaw-hook.exe\n"
+                    "ProcessStartInfo\nRedirectStandardInput\n"
+                    "RedirectStandardOutput\nWaitForExit\n"
+                    '{"continue":false,"permission":"deny"}\n'
                 )
                 command = "& '" + runtime_path.replace("'", "''") + "'"
             else:
+                runtime_body = "# defenseclaw-managed-hook v8\n"
                 command = runtime_path
             with open(runtime_path, "w", encoding="utf-8") as runtime_file:
                 runtime_file.write(runtime_body)
@@ -3010,14 +3012,16 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_name = "cursor-hook.ps1" if os.name == "nt" else "cursor-hook.sh"
             runtime_path = os.path.join(tmpdir, runtime_name)
-            runtime_body = "# defenseclaw-managed-hook v8\n"
             if os.name == "nt":
-                runtime_body += (
-                    "$failClosed = $false\n--input-file\ndefenseclaw-hook.exe\n"
-                    "ProcessStartInfo\nRedirectStandardOutput\nWaitForExit\n"
+                runtime_body = (
+                    "# defenseclaw-managed-hook v9\ndefenseclaw-hook.exe\n"
+                    "ProcessStartInfo\nRedirectStandardInput\n"
+                    "RedirectStandardOutput\nWaitForExit\n"
+                    '{"continue":true}\n'
                 )
                 command = "& '" + runtime_path.replace("'", "''") + "'"
             else:
+                runtime_body = "# defenseclaw-managed-hook v8\n"
                 command = runtime_path
             with open(runtime_path, "w", encoding="utf-8") as runtime_file:
                 runtime_file.write(runtime_body)

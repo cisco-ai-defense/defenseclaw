@@ -262,16 +262,19 @@ def validate_cursor_registration(
     if require_runtime_markers:
         markers = ["defenseclaw-managed-hook v8"]
         if basename == "cursor-hook.ps1":
-            markers.extend(
-                [
-                    "--input-file",
-                    "defenseclaw-hook.exe",
-                    "ProcessStartInfo",
-                    "RedirectStandardOutput",
-                    "WaitForExit",
-                    f"$failClosed = ${str(expected_fail_closed).lower()}",
-                ]
-            )
+            # The v9 Windows adapter streams reconstructed pipeline JSON to
+            # the consoleless launcher. Keep this validator in lockstep with
+            # the Go verifier and template; v8's --input-file/$failClosed
+            # markers no longer exist.
+            markers = [
+                "defenseclaw-managed-hook v9",
+                "defenseclaw-hook.exe",
+                "ProcessStartInfo",
+                "RedirectStandardInput",
+                "RedirectStandardOutput",
+                "WaitForExit",
+                '"permission":"deny"' if expected_fail_closed else '{"continue":true}',
+            ]
         try:
             with open(runtime_path, encoding="utf-8") as fh:
                 body = fh.read(512 * 1024 + 1)

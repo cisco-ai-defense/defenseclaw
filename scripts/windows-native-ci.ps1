@@ -4850,10 +4850,11 @@ function Assert-WizardHookRegistration(
             }
         }
         $adapter = [IO.File]::ReadAllText($expectedHook)
-        $expectedAdapterMode = if ($expectedFailClosed) { '$failClosed = $true' } else { '$failClosed = $false' }
+        $expectedAdapterMode = if ($expectedFailClosed) { '"permission":"deny"' } else { '{"continue":true}' }
         foreach ($marker in @(
-            'defenseclaw-managed-hook v8', 'defenseclaw-hook.exe', '--input-file',
-            'ProcessStartInfo', 'RedirectStandardOutput', 'WaitForExit', $expectedAdapterMode
+            'defenseclaw-managed-hook v9', 'defenseclaw-hook.exe',
+            'ProcessStartInfo', 'RedirectStandardInput', 'RedirectStandardOutput',
+            'WaitForExit', $expectedAdapterMode
         )) {
             if ($adapter.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
                 throw "wizard-selected Cursor adapter is missing required marker $marker"

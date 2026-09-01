@@ -27,6 +27,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -1862,7 +1863,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:       req.ToolName,
+				Tool:       agentHookTrustedActionTool(req.ConnectorName, req.ToolName, runtime.GOOS),
 				Args:       req.ToolArgs,
 				CWD:        req.CWD,
 				ActiveHome: trustedSameHostHome(),
@@ -1945,6 +1946,22 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	return resp
+}
+
+// agentHookTrustedActionTool preserves the official connector tool label for
+// policy and telemetry while selecting the host shell grammar used for trusted
+// action facts. OpenCode calls its built-in terminal tool "bash" on every
+// platform, but on native Windows that tool executes through PowerShell. Treat
+// it as a generic shell only at this server-owned boundary so dialect inference
+// can recognize exact PowerShell/CMD syntax without trusting a payload-supplied
+// dialect hint or changing OpenCode's recorded tool identity.
+func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
+	if strings.EqualFold(strings.TrimSpace(platformName), "windows") &&
+		strings.EqualFold(strings.TrimSpace(connectorName), "opencode") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "bash") {
+		return "shell"
+	}
+	return toolName
 }
 
 // collectAgentHookAssetDecisions runs the runtime asset-policy

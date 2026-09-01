@@ -1124,6 +1124,9 @@ try {
                 'live-connector-e2e\golden\amp\agent_end.json'
             )
         }
+        if ($Connector -eq 'copilot') {
+            $harnessFiles += 'live-connector-e2e\golden\copilot\pre_tool_block_windows.json'
+        }
     } elseif ($Mode -eq 'bootstrap-acceptance') {
         $harnessFiles += @(
             'test-fresh-install-release-windows.ps1'

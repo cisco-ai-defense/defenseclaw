@@ -5484,13 +5484,14 @@ function Assert-CursorSynchronousWindowsHookCommand(
         throw "$Context Cursor adapter is missing: $adapter"
     }
     $adapterText = [IO.File]::ReadAllText($adapter)
-    $expectedMode = if ($ExpectedFailClosed) { '$failClosed = $true' } else { '$failClosed = $false' }
+    $expectedMode = if ($ExpectedFailClosed) { '"permission":"deny"' } else { '{"continue":true}' }
     foreach ($marker in @(
-        'defenseclaw-managed-hook v8',
+        'defenseclaw-managed-hook v9',
+        'defenseclaw-hook.exe',
         'ProcessStartInfo',
+        'RedirectStandardInput',
         'RedirectStandardOutput',
         'WaitForExit',
-        '--input-file',
         $expectedMode
     )) {
         if ($adapterText.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
@@ -9363,6 +9364,11 @@ function Assert-TimeoutHandling {
 
 function Invoke-ContractRun {
     $golden = Join-Path $WorkspaceRoot "scripts\live-connector-e2e\golden\$Connector"
+    $blockFixture = if ($Connector -eq 'copilot') {
+        Join-Path $golden 'pre_tool_block_windows.json'
+    } else {
+        Join-Path $golden 'pre_tool_block.json'
+    }
     Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT -ErrorAction SilentlyContinue
     Assert-TimeoutHandling
     Assert-NativeEnterpriseHooksRequireElevation
@@ -9379,7 +9385,7 @@ function Invoke-ContractRun {
     Assert-DoctorHookRegistration
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
-    Invoke-Hook $blockEvent (Join-Path $golden 'pre_tool_block.json') allow $true
+    Invoke-Hook $blockEvent $blockFixture allow $true
     Invoke-Teardown
     try {
         # Locally built fixtures do not carry a release hook-contract version.
@@ -9414,7 +9420,7 @@ function Invoke-ContractRun {
     $actionBlockExpectation = 'block'
     $requireAdvisoryBlock = $false
     $blockIdentitySuffix = if ($Connector -eq 'amp') { 'action-block' } else { '' }
-    Invoke-Hook 'PreTool-block' (Join-Path $golden 'pre_tool_block.json') `
+    Invoke-Hook 'PreTool-block' $blockFixture `
         $actionBlockExpectation $requireAdvisoryBlock -IdentitySuffix $blockIdentitySuffix
     if ($Connector -eq 'amp') {
         Invoke-Hook 'agent.end' (Join-Path $golden 'agent_end.json') allow

@@ -447,12 +447,17 @@ class TestCheckConnectorHooks(unittest.TestCase):
             runtime = os.path.join(runtime_dir, "cursor-hook.ps1")
             with open(runtime, "w", encoding="utf-8") as fh:
                 fh.write(
-                    "# defenseclaw-managed-hook v8\n"
-                    f"$failClosed = ${str(fail_closed).lower()}\n"
+                    "# defenseclaw-managed-hook v9\n"
                     "$startInfo = New-Object System.Diagnostics.ProcessStartInfo\n"
+                    "$startInfo.RedirectStandardInput = $true\n"
                     "$startInfo.RedirectStandardOutput = $true\n"
                     "$process.WaitForExit()\n"
-                    "# defenseclaw-hook.exe hook --connector cursor --input-file $payloadPath\n"
+                    "# defenseclaw-hook.exe hook --connector cursor\n"
+                    + (
+                        '{\"continue\":false,\"permission\":\"deny\"}\n'
+                        if fail_closed
+                        else '{\"continue\":true}\n'
+                    )
                 )
             command = "& '" + runtime.replace("'", "''") + "'"
         hooks_path = os.path.join(tmp, "hooks.json")
