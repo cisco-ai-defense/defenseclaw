@@ -73,6 +73,12 @@ from typing import Protocol
 
 import yaml
 
+from defenseclaw.observability.local_stack import (
+    GRAFANA_ACCESS_PASSWORD,
+    LocalStackController,
+    LocalStackError,
+    ensure_grafana_admin_password,
+)
 from defenseclaw.paths import (
     bundled_local_observability_dir,
     bundled_splunk_bridge_dir,
@@ -280,6 +286,10 @@ _LOCAL_OBSERVABILITY_DEST_REL: str = "observability-stack"
 _LOCAL_OBSERVABILITY_MANIFEST = ".defenseclaw-bundle-manifest.json"
 _LOCAL_OBSERVABILITY_RESTART_INTENT = "restart-intent.json"
 _LOCAL_OBSERVABILITY_MANIFEST_SCHEMA = 1
+_LOCAL_OBSERVABILITY_RUNTIME_STATE: tuple[tuple[str, str], ...] = (
+    (".grafana-admin-password", "..grafana-admin-password."),
+    (".grafana-access-mode", "..grafana-access-mode."),
+)
 _BUNDLE_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
 _MAX_BUNDLE_ROLLBACK_METADATA_BYTES = 4 * 1024 * 1024
 _NOFOLLOW_DIRECTORY_OPEN_FLAGS = (
@@ -290,6 +300,7 @@ _NOFOLLOW_DIRECTORY_OPEN_FLAGS = (
 )
 _LOCAL_OBSERVABILITY_REQUIRED_FILES: tuple[str, ...] = (
     "bin/openclaw-observability-bridge",
+    "docker-compose.password.yml",
     "docker-compose.yml",
     "grafana/provisioning/dashboards/dashboards.yml",
     "grafana/provisioning/datasources/datasources.yml",
@@ -330,6 +341,16 @@ _LOCAL_OBSERVABILITY_DASHBOARD_UIDS: tuple[str, ...] = (
     "defenseclaw-security",
     "defenseclaw-traffic",
 )
+
+
+def _is_local_observability_runtime_secret(relative: str) -> bool:
+    """Return whether a root-relative path is generated private runtime state."""
+
+    normalized = relative.replace("\\", "/").strip("/")
+    return "/" not in normalized and any(
+        normalized == final_name or (normalized.startswith(temp_prefix) and normalized.endswith(".tmp"))
+        for final_name, temp_prefix in _LOCAL_OBSERVABILITY_RUNTIME_STATE
+    )
 
 
 @dataclass(frozen=True)
@@ -391,6 +412,7 @@ def refresh_local_observability_stack(
             src=Path(bundle),
             dest=Path(dest),
             preserve=(),
+            exclude=_is_local_observability_runtime_secret,
         )
         result.errors.extend(errors)
         if errors:
@@ -414,6 +436,7 @@ def refresh_local_observability_stack(
         src=Path(bundle),
         dest=Path(dest),
         preserve=preserve,
+        exclude=_is_local_observability_runtime_secret,
     )
     result.refreshed_paths = refreshed
     result.preserved_paths = preserved
@@ -469,9 +492,6 @@ def upgrade_local_observability_stack(
     _preflight_upgrade_destination(destination, target, managed_retired)
 
     was_running = _strict_compose_project_running(LOCAL_OBSERVABILITY_COMPOSE_PROJECT)
-    bridge = destination / "bin" / "openclaw-observability-bridge"
-    if was_running:
-        _require_regular_file(destination, bridge, "bridge")
     backup_root = _prepare_local_observability_backup_custody(
         Path(backup_dir).expanduser().absolute(),
         target_manifest_sha256=target.sha256,
@@ -499,17 +519,10 @@ def upgrade_local_observability_stack(
     stopped = False
     if was_running:
         try:
-            completed = subprocess.run(
-                [str(bridge), "down"],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            controller = LocalStackController(destination)
+            controller.down()
+        except (LocalStackError, OSError) as exc:
             raise LocalObservabilityUpgradeError("stack_stop_failed", "stop") from exc
-        if completed.returncode != 0:
-            raise LocalObservabilityUpgradeError("stack_stop_failed", "stop")
         if _strict_compose_project_running(LOCAL_OBSERVABILITY_COMPOSE_PROJECT):
             raise LocalObservabilityUpgradeError("stack_still_running", "stop")
         stopped = True
@@ -736,30 +749,38 @@ def restart_upgraded_local_observability_stack(
             installed=False,
             degraded_errors=("installed_bundle_missing",),
         )
-    bridge = destination / "bin" / "openclaw-observability-bridge"
     try:
-        _require_regular_file(destination, bridge, "bridge")
-        completed = subprocess.run(
-            [str(bridge), "up", "--output", "json", "--timeout", str(timeout)],
-            capture_output=True,
-            text=True,
-            timeout=max(timeout + 30, 60),
-            check=False,
-        )
-    except (LocalObservabilityUpgradeError, OSError, subprocess.TimeoutExpired):
+        # Construct this after activation so no cached pre-upgrade Compose
+        # path or controller state participates in the restart.
+        controller = LocalStackController(destination)
+        started = controller.up(timeout=timeout, wait=True)
+    except (LocalStackError, OSError):
         return LocalObservabilityUpgradeResult(
             installed=True,
             restart_required=True,
             degraded_errors=("stack_restart_failed",),
         )
-    if completed.returncode != 0 or not _bridge_contract_valid(completed.stdout):
+    if not _bridge_contract_valid(json.dumps(started.contract)):
         return LocalObservabilityUpgradeResult(
             installed=True,
             restart_required=True,
             degraded_errors=("stack_restart_failed",),
         )
 
-    errors = _live_local_observability_smoke(timeout=min(max(timeout, 1), 30))
+    grafana_password: str | None = None
+    if started.grafana_access_mode == GRAFANA_ACCESS_PASSWORD:
+        try:
+            _credential_path, grafana_password = ensure_grafana_admin_password(destination)
+        except (LocalStackError, OSError):
+            return LocalObservabilityUpgradeResult(
+                installed=True,
+                restart_required=True,
+                degraded_errors=("grafana_credential_unavailable",),
+            )
+    errors = _live_local_observability_smoke(
+        timeout=min(max(timeout, 1), 30),
+        grafana_password=grafana_password,
+    )
     return LocalObservabilityUpgradeResult(
         installed=True,
         restart_required=True,
@@ -797,8 +818,10 @@ def _build_local_observability_manifest(source: Path, bundle_version: str) -> _B
                 raise LocalObservabilityUpgradeError("target_bundle_unsafe", "manifest")
         for name in files:
             path = root_path / name
-            _require_regular_file(source, path, "target")
             relative = _safe_relative_path(path.relative_to(source).as_posix())
+            if _is_local_observability_runtime_secret(relative):
+                continue
+            _require_regular_file(source, path, "target")
             metadata = path.stat()
             entries.append(
                 _BundleFile(
@@ -2044,7 +2067,11 @@ def _bridge_contract_valid(stdout: str | None) -> bool:
     return False
 
 
-def _live_local_observability_smoke(timeout: int) -> list[str]:
+def _live_local_observability_smoke(
+    timeout: int,
+    *,
+    grafana_password: str | None = None,
+) -> list[str]:
     deadline = time.monotonic() + max(timeout, 1)
     readiness = (
         ("collector", "http://127.0.0.1:13133/"),
@@ -2066,7 +2093,10 @@ def _live_local_observability_smoke(timeout: int) -> list[str]:
     inventory_error = "grafana_inventory_unavailable"
     while time.monotonic() < deadline:
         try:
-            search = _http_get_json("http://127.0.0.1:3000/api/search?type=dash-db")
+            search = _http_get_json(
+                "http://127.0.0.1:3000/api/search?type=dash-db",
+                basic_auth=("admin", grafana_password) if grafana_password is not None else None,
+            )
         except (OSError, ValueError, urllib.error.URLError):
             inventory_error = "grafana_inventory_unavailable"
         else:
@@ -2091,8 +2121,21 @@ def _http_ready(url: str) -> bool:
         return False
 
 
-def _http_get_json(url: str) -> object:
-    with urllib.request.urlopen(url, timeout=3) as response:  # noqa: S310 - fixed loopback URL
+def _http_get_json(
+    url: str,
+    *,
+    basic_auth: tuple[str, str] | None = None,
+) -> object:
+    request: str | urllib.request.Request = url
+    if basic_auth is not None:
+        username, password = basic_auth
+        encoded = base64.b64encode(f"{username}:{password}".encode("ascii")).decode("ascii")
+        request = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Basic {encoded}"},
+            method="GET",
+        )
+    with urllib.request.urlopen(request, timeout=3) as response:  # noqa: S310 - fixed loopback URL
         if not 200 <= response.status < 300:
             raise OSError("unexpected HTTP status")
         raw = response.read(2 * 1024 * 1024 + 1)
@@ -2278,7 +2321,10 @@ def _ensure_local_observability_container_access(
                 source_file = root_path / name
                 if source_file.is_symlink() or not source_file.is_file():
                     continue
-                managed_files.add((relative_root / name).as_posix())
+                relative = (relative_root / name).as_posix()
+                if _is_local_observability_runtime_secret(relative):
+                    continue
+                managed_files.add(relative)
     except (OSError, ValueError) as exc:
         return [f"container access inventory: {exc}"]
 
@@ -2390,6 +2436,7 @@ def _rsync_overwrite(
     src: Path,
     dest: Path,
     preserve: tuple[str, ...],
+    exclude: Callable[[str], bool] | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Copy every file from ``src`` over ``dest``, except ``preserve`` paths.
 
@@ -2439,6 +2486,8 @@ def _rsync_overwrite(
 
         for fname in files:
             rel_file = Path(os.path.join(rel_root, fname) if rel_root else fname).as_posix()
+            if exclude is not None and exclude(rel_file):
+                continue
             if _path_is_preserved(rel_file, preserve_norm):
                 preserved.append(rel_file)
                 continue
@@ -2522,8 +2571,7 @@ def _is_reparse_or_symlink(path: Path) -> bool:
     except OSError:
         return False
     return stat.S_ISLNK(info.st_mode) or bool(
-        getattr(info, "st_file_attributes", 0)
-        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     )
 
 
@@ -2545,9 +2593,7 @@ def _assert_safe_bundle_destination(root: Path, candidate: Path) -> None:
     try:
         resolved_candidate.relative_to(resolved_root)
     except ValueError as exc:
-        raise OSError(
-            f"resolved path escapes canonical bundle root: {resolved_candidate}"
-        ) from exc
+        raise OSError(f"resolved path escapes canonical bundle root: {resolved_candidate}") from exc
 
     current = root_abs
     if _is_reparse_or_symlink(current):

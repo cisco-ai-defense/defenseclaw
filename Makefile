@@ -1229,11 +1229,26 @@ _bundle-data:
 	@# sync-openclaw-extension above.
 	@for d in splunk_local_bridge local_observability_stack; do \
 	  if command -v rsync >/dev/null 2>&1; then \
-	    rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    if [ "$$d" = "local_observability_stack" ]; then \
+	      rsync -a --delete --delete-excluded --inplace \
+	        --exclude='/.grafana-admin-password' \
+	        --exclude='/..grafana-admin-password.*.tmp' \
+	        --exclude='/.grafana-access-mode' \
+	        --exclude='/..grafana-access-mode.*.tmp' \
+	        "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    else \
+	      rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	    fi; \
 	  else \
 	    rm -rf "cli/defenseclaw/_data/$$d"; \
 	    mkdir -p "cli/defenseclaw/_data/$$d"; \
 	    cp -R "bundles/$$d/." "cli/defenseclaw/_data/$$d/"; \
+	  fi; \
+	  if [ "$$d" = "local_observability_stack" ]; then \
+	    rm -rf "cli/defenseclaw/_data/$$d/.grafana-admin-password" \
+	      "cli/defenseclaw/_data/$$d"/..grafana-admin-password.*.tmp \
+	      "cli/defenseclaw/_data/$$d/.grafana-access-mode" \
+	      "cli/defenseclaw/_data/$$d"/..grafana-access-mode.*.tmp; \
 	  fi; \
 	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/

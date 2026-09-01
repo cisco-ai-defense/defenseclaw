@@ -179,6 +179,7 @@ defenseclaw = [
     "_data/local_observability_stack/*.md",
     "_data/local_observability_stack/*.yml",
     "_data/local_observability_stack/*.sh",
+    "_data/local_observability_stack/.gitignore",
     "_data/local_observability_stack/bin/*",
     "_data/local_observability_stack/otel-collector/*.yaml",
     "_data/local_observability_stack/prometheus/*.yml",

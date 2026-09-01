@@ -939,7 +939,7 @@ def test_agent360_topology_groups_model_and_normalized_tool_families_per_agent()
 
 def test_agent360_enables_layered_node_graph_layout() -> None:
     compose = COMPOSE.read_text(encoding="utf-8")
-    assert "GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,nodeGraphDotLayout" in compose
+    assert "GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,nodeGraphDotLayout" in compose
 
 
 def test_agent360_correlates_hook_decisions_to_recovery_paths() -> None:
