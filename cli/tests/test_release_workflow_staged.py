@@ -590,8 +590,7 @@ def test_release_target_must_be_absent_from_published_stable_state() -> None:
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert text.count("goreleaser/goreleaser-action@") == 1
-    assert text.count("make dist-cli") == 1
-    assert text.count("make dist-plugin") == 1
+    assert text.count("make dist-cli dist-plugin dist-extension-contract") == 1
     assert text.count("make extensions") == 1
     assert text.count("scripts/release_candidate.py prepare-runtime") == 1
     assert text.count("scripts/release_candidate.py assemble") == 1
