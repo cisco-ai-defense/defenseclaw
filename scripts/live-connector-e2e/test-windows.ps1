@@ -3895,8 +3895,12 @@ connection.close()
         '(?s)function Invoke-DangerousHook\b.*?(?=\nfunction Invoke-DangerousCommandCorpus\b)'
     ).Value
     Assert-True ($dangerousHookContract -match "\`$telemetryMode = if \(\`$Mode -eq 'action'\)" -and
-        $dangerousHookContract -match "\`$effectiveObserve = \`$Mode -eq 'observe'" -and
+        $dangerousHookContract -match 'if \(\$Mode -eq ''observe''\)' -and
         $dangerousHookContract -match 'Invoke-RegisteredNativeHook' -and
+        $dangerousHookContract -match
+            '-SessionID \$sessionID -HookEvent \$hookEvent' -and
+        $dangerousHookContract -match
+            '-ToolInvocationID \$toolInvocationID -ExpectedRequestID \$requestID' -and
         $dangerousHookContract -match "\`$decision\.raw_action -ne 'block'" -and
         $dangerousHookContract -match 'Test-BlockVerdict' -and
         $dangerousHookContract -match '\$decision\.rule_ids') `

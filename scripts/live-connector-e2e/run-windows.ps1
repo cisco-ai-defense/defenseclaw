@@ -6400,6 +6400,31 @@ function Invoke-DangerousHook(
 ) {
     $before = @(Get-EventLines $script:AuditDb).Count
     $eventName = Get-RegisteredHookEvent "PreTool-$Name" $Payload
+    $hookInputPath = if ($Connector -eq 'copilot') {
+        ConvertTo-CopilotOfficialToolPayload $Payload "dangerous-$Name-$Mode"
+    } else {
+        $Payload
+    }
+    $payloadObject = [IO.File]::ReadAllText($hookInputPath) |
+        ConvertFrom-Json -ErrorAction Stop
+    $sessionID = [string](Get-JsonPropertyValue $payloadObject 'session_id')
+    if ([string]::IsNullOrWhiteSpace($sessionID)) {
+        $sessionID = [string](Get-JsonPropertyValue $payloadObject 'sessionId')
+    }
+    if ([string]::IsNullOrWhiteSpace($sessionID)) {
+        $sessionID = [string](Get-JsonPropertyValue $payloadObject 'conversationId')
+    }
+    $hookEvent = $eventName
+    $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'tool_call_id')
+    if ([string]::IsNullOrWhiteSpace($toolInvocationID)) {
+        $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'tool_use_id')
+    }
+    if ([string]::IsNullOrWhiteSpace($toolInvocationID)) {
+        $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'toolUseId')
+    }
+    if ([string]::IsNullOrWhiteSpace($toolInvocationID)) {
+        $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'callID')
+    }
     $result = if ($Connector -eq 'opencode') {
         try {
             $payloadDocument = [IO.File]::ReadAllText($Payload) | ConvertFrom-Json -ErrorAction Stop
@@ -6410,22 +6435,25 @@ function Invoke-DangerousHook(
         $expectedPluginVerdict = if ($Mode -eq 'action' -and $Expected -eq 'block') { 'block' } else { 'allow' }
         Invoke-OpenCodePluginProbe $expectedPluginVerdict $command "dangerous-$Name-$Mode"
     } else {
-        $hookInputPath = if ($Connector -eq 'copilot') {
-            ConvertTo-CopilotOfficialToolPayload $Payload "dangerous-$Name-$Mode"
-        } else {
-            $Payload
-        }
         Invoke-RegisteredNativeHook $eventName $hookInputPath @(0, 2) `
             $CommandTimeoutSeconds "dangerous-$Name-$Mode"
     }
-
-    $decision = $null
-    for ($attempt = 0; $attempt -lt 30 -and $null -eq $decision; $attempt++) {
-        Start-Sleep -Milliseconds 100
-        $decision = Get-LatestHookDecision $script:AuditDb $Connector $before
+    if ($Connector -eq 'opencode') {
+        $sessionID = [string]$result.SessionID
+        $toolInvocationID = [string]$result.ToolInvocationID
     }
-    if ($null -eq $decision) { throw "$Name did not emit a connector hook_decision" }
-    $hasBlockVerdict = Test-BlockVerdict $script:AuditDb $before
+    $evidence = Wait-GatewayEvidenceAfter `
+        -Path $script:AuditDb -Name $Connector -Since $before `
+        -RequireBlock $false -TimeoutMilliseconds 10000 `
+        -SessionID $sessionID -HookEvent $hookEvent `
+        -ToolInvocationID $toolInvocationID
+    $decision = Get-LatestHookDecision `
+        -Path $script:AuditDb -Name $Connector -Since $before `
+        -SessionID $sessionID -HookEvent $hookEvent `
+        -ToolInvocationID $toolInvocationID
+    if (-not $evidence.ConnectorEvent -or $null -eq $decision) {
+        throw "$Name did not emit its exact connector hook_decision"
+    }
     $telemetryMode = if ($Mode -eq 'action') {
         'enforce'
     } else {
@@ -6445,6 +6473,23 @@ function Invoke-DangerousHook(
         throw "$Name hook_decision is missing rule $RuleID"
     }
 
+    $requestID = [string]$decision.request_id
+    if ([string]::IsNullOrWhiteSpace($requestID)) {
+        throw "$Name hook_decision has no request identity"
+    }
+    if ($Expected -eq 'block') {
+        $evidence = Wait-GatewayEvidenceAfter `
+            -Path $script:AuditDb -Name $Connector -Since $before `
+            -RequireBlock $true -TimeoutMilliseconds 10000 `
+            -SessionID $sessionID -HookEvent $hookEvent `
+            -ToolInvocationID $toolInvocationID -ExpectedRequestID $requestID
+        $hasBlockVerdict = [bool]$evidence.BlockVerdict
+    } else {
+        $hasBlockVerdict = Test-BlockVerdict `
+            -Path $script:AuditDb -Since $before -Name $Connector `
+            -RequestID $requestID -SessionID $sessionID `
+            -ToolInvocationID $toolInvocationID
+    }
     if ($Expected -eq 'block') {
         if (-not $hasBlockVerdict) { throw "$Name has no underlying gateway block verdict" }
         if ([string]$decision.raw_action -ne 'block') { throw "$Name raw_action=$($decision.raw_action), expected block" }
