@@ -406,7 +406,7 @@ function buildCommand(
     } else {
       warnings.push(
         shell === 'powershell'
-          ? 'Remote scanner is enabled but no Cisco endpoint is set. The CLI will reject the run unless an endpoint is already in %USERPROFILE%\\.defenseclaw\\config.yaml.'
+          ? 'Remote scanner is enabled but no Cisco endpoint is set. The CLI will reject the run unless an endpoint is already in $env:USERPROFILE\\.defenseclaw\\config.yaml.'
           : 'Remote scanner is enabled but no Cisco endpoint is set. The CLI will reject the run unless an endpoint is already in ~/.defenseclaw/config.yaml.',
       );
     }

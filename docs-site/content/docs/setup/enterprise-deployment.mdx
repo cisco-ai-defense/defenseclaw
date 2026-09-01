@@ -37,10 +37,12 @@ Enterprise hardening separates **policy authority**, **inspection runtime**, and
 <Flow
   direction="TB"
   compact
-  caption="Administrator policy and target authorization remain outside the agent user's authority. The gateway evaluates hook traffic; the guardian repairs only integrations present in the protected target manifest."
+  caption="Administrator policy and target authorization remain outside the agent user's authority. Administrators author Linux/macOS targets; on Windows the enumerator maintains eligible profile rows in the protected manifest. The gateway evaluates hook traffic, and the guardian repairs only enrolled integrations."
 >
   <Node id="admin" kind="operator">Administrator / MDM</Node>
   <Node id="policy" kind="policy">{`Root-owned\nconfig + services`}</Node>
+  <Node id="profiles" kind="agent">{`Windows eligible\ninteractive profiles`}</Node>
+  <Node id="enumerator" kind="operator">{`DefenseClawHookEnumerator\nfiltered enrollment`}</Node>
   <Node id="manifest" kind="policy">{`Protected targets\nusers · connectors`}</Node>
   <Node id="guardian" kind="operator">{`Hook guardian\nprivileged repair`}</Node>
   <Node id="agent" kind="agent">{`User AI agent\nCodex · Claude · …`}</Node>
@@ -50,7 +52,10 @@ Enterprise hardening separates **policy authority**, **inspection runtime**, and
   <Node id="ledger" kind="datastore">{`Authorization ledger\nroot-owned`}</Node>
   <Node id="readiness" kind="generic">{`Managed readiness\nenforcement health`}</Node>
   <Edge from="admin" to="policy" />
-  <Edge from="admin" to="manifest" />
+  <Edge from="admin" to="manifest" label="Linux / macOS targets" />
+  <Edge from="policy" to="enumerator" label="Windows connector scope" />
+  <Edge from="profiles" to="enumerator" />
+  <Edge from="enumerator" to="manifest" label="publish eligible rows" />
   <Edge from="policy" to="gateway" />
   <Edge from="manifest" to="guardian" />
   <Edge from="guardian" to="hooks" label="install + repair" />
