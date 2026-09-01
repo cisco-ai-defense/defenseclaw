@@ -87,3 +87,38 @@ func TestOpenCodeWindowsBashToolSelectsPowerShellActionFacts(t *testing.T) {
 		t.Fatalf("Windows OpenCode command did not produce an enforceable CMD-RM-RF finding: %v", FindingStrings(findings))
 	}
 }
+
+func TestOpenCodeWindowsBashToolKeepsProtectedSAMReadAdvisory(t *testing.T) {
+	const command = `Get-Content -LiteralPath 'C:\Windows\System32\config\SAM'`
+	args, err := json.Marshal(map[string]any{
+		"command": command,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool: agentHookTrustedActionTool("opencode", "bash", "windows"),
+		Args: args,
+	})
+	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
+		t.Fatalf("dialect = %q, want %q", facts.Parse.Dialect, actionfacts.DialectPowerShell)
+	}
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		t.Fatalf(
+			"Windows OpenCode SAM-read facts are not enforceable: status=%q commands=%d",
+			facts.Parse.Status,
+			len(facts.Commands),
+		)
+	}
+	installDefaultProfileConnector(t, "opencode")
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:              actionfacts.Input{Tool: "shell", Args: args},
+		LegacyText:         command,
+		Connector:          "opencode",
+		EnforcementCapable: true,
+	})
+	matched := findingWithID(findings, "PATH-WIN-SAM")
+	if matched == nil || matched.contributesToEnforcement() || matched.Severity != "MEDIUM" {
+		t.Fatalf("Windows OpenCode SAM read did not remain a MEDIUM advisory PATH-WIN-SAM finding: %#v", matched)
+	}
+}

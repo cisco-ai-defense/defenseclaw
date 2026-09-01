@@ -6651,7 +6651,7 @@ function Assert-OpenCodePluginContract {
     Write-Result 'doctor:windows-hook-registration' pass "label=$label target=$pluginPath digest=current user-admin-boundary=reported"
 
     Invoke-OpenCodePluginProbe allow 'Write-Output defenseclaw-opencode-allow' 'contract-allow' | Out-Null
-    Invoke-OpenCodePluginProbe block "Get-Content -LiteralPath 'C:\Windows\System32\config\SAM'" 'contract-block' | Out-Null
+    Invoke-OpenCodePluginProbe block 'Remove-Item -Force C:\ -Recurse' 'contract-block' | Out-Null
     Write-Result 'opencode:plugin-before' pass 'allow returned and denied tool threw synchronously; after remained observe-only'
 
     $original = [IO.File]::ReadAllBytes($pluginPath)

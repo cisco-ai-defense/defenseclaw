@@ -3935,6 +3935,10 @@ connection.close()
     Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks elevation rejection is bounded, exit 1, and checks an unchanged tree'
     Assert-True ($harnessText -match 'Assert-DoctorWindowsHookRegistration' -and $harnessText -match 'healthy Windows-native executable registration') 'connector contract runs Doctor against the registered Windows hook executable'
     $contractRun = [regex]::Match($harnessText, '(?s)function Invoke-ContractRun\b.*?\n\}').Value
+    $openCodePluginContract = [regex]::Match(
+        $harnessText,
+        '(?s)function Assert-OpenCodePluginContract\b.*?(?=\r?\nfunction )'
+    ).Value
     $ampFiveEventContract = [regex]::Match(
         $harnessText,
         '(?s)function Invoke-AmpFiveEventProviderContract\b.*?(?=\r?\nfunction )'
@@ -3953,6 +3957,10 @@ connection.close()
         $contractRun.Contains('Invoke-Hook $blockEvent $blockFixture allow $true', [StringComparison]::Ordinal) -and
         $contractRun.Contains("Invoke-Hook 'PreTool-block' `$blockFixture", [StringComparison]::Ordinal)) `
         'connector contracts use native Windows block fixtures in observe and action modes when present'
+    Assert-True ($openCodePluginContract.Contains(
+        "Invoke-OpenCodePluginProbe block 'Remove-Item -Force C:\ -Recurse' 'contract-block'",
+        [StringComparison]::Ordinal
+    )) 'OpenCode plugin contract uses an enforceable native Windows CMD-RM-RF probe'
     Assert-True ($contractRun -match "\`$actionBlockExpectation = 'block'" -and
         $contractRun -match "\`$requireAdvisoryBlock = \`$false" -and
         $contractRun -match "(?s)Invoke-DangerousCommandCorpus action.*?Invoke-Hook 'PreTool-block'.*?\`$actionBlockExpectation \`$requireAdvisoryBlock") `
