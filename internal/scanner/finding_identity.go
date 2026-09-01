@@ -207,6 +207,26 @@ type FindingLifecycleDelta struct {
 	Resolved          []FindingLifecycleResolution
 	GaugeDelta        map[Severity]int64
 	CurrentBySeverity map[Severity]int64
+	emitByOccurrence  map[string]bool
+}
+
+// IndexOccurrenceEmissions prepares constant-time transition lookups after the
+// lifecycle observations have been assembled. Persistence calls this before a
+// delta is attached to a scan result; ShouldEmitOccurrence also initializes it
+// lazily for callers that construct managed deltas directly.
+func (delta *FindingLifecycleDelta) IndexOccurrenceEmissions() {
+	if delta == nil || !delta.Managed || delta.emitByOccurrence != nil {
+		return
+	}
+	delta.emitByOccurrence = make(map[string]bool, len(delta.Observations))
+	for index := range delta.Observations {
+		observation := delta.Observations[index]
+		if _, exists := delta.emitByOccurrence[observation.OccurrenceID]; exists {
+			continue
+		}
+		delta.emitByOccurrence[observation.OccurrenceID] =
+			observation.Status != FindingLifecycleRepeated
+	}
 }
 
 // ShouldEmitOccurrence reports whether a finding is a meaningful current-state
@@ -216,12 +236,6 @@ func (delta *FindingLifecycleDelta) ShouldEmitOccurrence(occurrenceID string) bo
 	if delta == nil || !delta.Managed {
 		return true
 	}
-	for index := range delta.Observations {
-		observation := delta.Observations[index]
-		if observation.OccurrenceID != occurrenceID {
-			continue
-		}
-		return observation.Status != FindingLifecycleRepeated
-	}
-	return false
+	delta.IndexOccurrenceEmissions()
+	return delta.emitByOccurrence[occurrenceID]
 }

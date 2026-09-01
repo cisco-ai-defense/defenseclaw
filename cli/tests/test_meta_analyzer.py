@@ -23,6 +23,7 @@ consensus removal from LLM client.
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -507,11 +508,16 @@ class TestMetaAnalyzerEdgeCases(unittest.TestCase):
             )
         ]
 
-        result = MetaAnalyzer({"enabled": True, "model": "unused"}).analyze(ctx)
+        with patch(
+            "defenseclaw.scanner.plugin_scanner.llm_analyzer.call_llm",
+            side_effect=AssertionError("docs-only input reached the LLM provider"),
+        ) as call_llm:
+            result = MetaAnalyzer({"enabled": True, "model": "unused"}).analyze(ctx)
 
         self.assertNotIn("SCAN-LLM-NO-SOURCE", [finding.rule_id for finding in result])
         self.assertIs(ctx.previous_findings, previous)
         self.assertEqual(ctx.source_files[0].rel_path, "docs/walkthrough.md")
+        call_llm.assert_not_called()
 
 
 class TestConsensusRemoved(unittest.TestCase):

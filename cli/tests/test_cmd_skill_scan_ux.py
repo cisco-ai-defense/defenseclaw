@@ -44,6 +44,7 @@ import sys
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -292,6 +293,28 @@ class TestScanAllUX(_SkillScanUXBase):
             with open(os.path.join(d, "SKILL.md"), "w") as f:
                 f.write(f"# {n}\n")
         return root
+
+    @patch("defenseclaw.commands.resolve_list_connectors", return_value=["openclaw"])
+    @patch(
+        "defenseclaw.commands.cmd_skill._build_skill_scanner",
+        side_effect=RuntimeError("original scan failure"),
+    )
+    def test_scan_all_json_failure_uses_safe_legacy_connector_label(
+        self, mock_build, _mock_resolve,
+    ) -> None:
+        original_cfg = self.app.cfg
+        self.app.cfg = SimpleNamespace()
+        try:
+            result = self.invoke(["scan", "--all", "--json"])
+        finally:
+            self.app.cfg = original_cfg
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload[0]["target"], "connector:openclaw")
+        self.assertEqual(payload[0]["connector"], "openclaw")
+        self.assertIn("original scan failure", payload[0]["error"])
+        mock_build.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
@@ -623,25 +646,48 @@ class TestScanAllUX(_SkillScanUXBase):
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
-    def test_scan_all_json_telemetry_failure_preserves_completed_scan(
+    def test_scan_all_json_telemetry_failure_preserves_batch_before_nonzero_exit(
         self, mock_cls, _mock_list,
     ) -> None:
-        root = self._make_skills_dir(["alpha"])
-        target = os.path.join(root, "alpha")
+        root = self._make_skills_dir(["alpha", "beta"])
+        targets = [os.path.join(root, name) for name in ("alpha", "beta")]
         self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
         self.app.cfg.skill_dirs = lambda connector=None: [root]
         self.app.logger.log_scan = MagicMock(side_effect=RuntimeError("admission rejected"))
-        mock_cls.return_value.scan.return_value = self._clean_result(target)
+        mock_cls.return_value.scan.side_effect = self._clean_result
 
         result = self.invoke(["scan", "--all", "--json"])
 
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
         payload = json.loads(result.output)
-        self.assertEqual(len(payload), 1)
-        self.assertEqual(payload[0]["target"], target)
-        self.assertEqual(payload[0]["telemetry_error"], "admission rejected")
-        self.assertEqual(payload[0]["findings"], [])
+        self.assertEqual([row["target"] for row in payload], targets)
+        self.assertEqual(
+            [row["telemetry_error"] for row in payload],
+            ["admission rejected", "admission rejected"],
+        )
+        self.assertTrue(all(row["findings"] == [] for row in payload))
+        self.assertEqual(self.app.logger.log_scan.call_count, 2)
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all_remote")
+    def test_scan_all_remote_json_telemetry_failure_is_nonzero(
+        self, mock_remote,
+    ) -> None:
+        row = {
+            "scanner": "skill-scanner",
+            "target": "/remote/alpha",
+            "connector": "codex",
+            "findings": [],
+            "telemetry_error": "remote admission rejected",
+        }
+        mock_remote.return_value = [row]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--remote", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(json.loads(result.stdout), [row])
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

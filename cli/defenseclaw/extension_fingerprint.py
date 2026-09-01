@@ -35,7 +35,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Final
+from typing import Final, NoReturn
 
 REFERENCE_FORMAT: Final = "defenseclaw-openclaw-extension-runtime-v1"
 REFERENCE_ALGORITHM: Final = "sha256"
@@ -111,7 +111,7 @@ def _is_runtime_relative(relative: str, *, directory: bool) -> bool:
     return False
 
 
-def _raise_walk_error(error: OSError) -> None:
+def _raise_walk_error(error: OSError) -> NoReturn:
     raise ExtensionFingerprintError("extension runtime inventory is not fully readable") from error
 
 
@@ -130,7 +130,10 @@ def _walk_selected_directory(root: Path, relative_root: str) -> list[tuple[str, 
         current_path = Path(current)
         for name in [*directories, *files]:
             child = current_path / name
-            info = child.lstat()
+            try:
+                info = child.lstat()
+            except OSError as exc:
+                _raise_walk_error(exc)
             reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
             attributes = getattr(info, "st_file_attributes", 0)
             if stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag):

@@ -10542,6 +10542,7 @@ def _execute_hard_cut_rollback(
             restored_bundle = _restart_restored_local_observability_stack(
                 plan.data_dir,
                 health_timeout=max(health_timeout, 1),
+                os_name=plan.os_name,
             )
             errors = restored_bundle.get("degraded_errors", [])
             if restored_bundle.get("restarted") is not True or errors:

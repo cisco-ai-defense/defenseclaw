@@ -363,10 +363,11 @@ class TestScanAllSweep(_PluginScanUXBase):
                     ["scan", "--all", "--connector", "claudecode", "--json"]
                 )
                 self.assertEqual(json_result.exit_code, 1, json_result.output)
-                payload = json.loads(json_result.output)
-                self.assertEqual(payload["error"], "plugin_discovery_failed")
-                self.assertEqual(payload["discovery"][0]["source"], registry)
-                self.assertEqual(payload["discovery"][0]["state"], expected_state)
+                self.assertEqual(json.loads(json_result.stdout), [])
+                error_payload = json.loads(json_result.stderr)
+                self.assertEqual(error_payload["error"], "plugin_discovery_failed")
+                self.assertEqual(error_payload["discovery"][0]["source"], registry)
+                self.assertEqual(error_payload["discovery"][0]["state"], expected_state)
         mock_scan.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])

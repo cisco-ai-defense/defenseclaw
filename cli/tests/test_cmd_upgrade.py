@@ -1933,6 +1933,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
 
     def test_crash_restart_failure_cannot_report_rollback_success(self):
@@ -1991,6 +1992,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
             receipt = load_upgrade_receipt(receipt_path)
             self.assertEqual(receipt.status, "failed")
@@ -2042,6 +2044,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
 
     def test_rollback_discards_target_dotenv_value_before_loading_restored_bridge(self):

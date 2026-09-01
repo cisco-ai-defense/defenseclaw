@@ -1536,6 +1536,11 @@ def scan(
             else [None]
         )
         json_rows: list[dict[str, Any]] = []
+        active_label = (
+            str(app.cfg.active_connector() or "openclaw")
+            if hasattr(app.cfg, "active_connector")
+            else "openclaw"
+        )
         batch_failed = False
         pack_cache: RulePackOverlayCache = {}
         for c in connectors:
@@ -1544,7 +1549,8 @@ def scan(
             if remote:
                 rows = _scan_all_remote(app, as_json, connector=c)
                 if as_json and any(
-                    isinstance(row, dict) and bool(row.get("error"))
+                    isinstance(row, dict)
+                    and bool(row.get("error") or row.get("telemetry_error"))
                     for row in rows
                 ):
                     batch_failed = True
@@ -1573,17 +1579,18 @@ def scan(
                     if not as_json and len(connectors) == 1:
                         raise
                     batch_failed = True
+                    label = str(c or active_label)
                     if as_json:
                         rows = [
                             _skill_scan_error_json_payload(
-                                f"connector:{c or app.cfg.active_connector()}",
+                                f"connector:{label}",
                                 exc,
-                                connector=str(c or app.cfg.active_connector()),
+                                connector=label,
                             )
                         ]
                     else:
                         click.echo(
-                            f"[scan] connector {c or app.cfg.active_connector()!r} failed: {exc}",
+                            f"[scan] connector {label!r} failed: {exc}",
                             err=True,
                         )
                         rows = []
@@ -2274,6 +2281,7 @@ def _scan_all(
     pe = PolicyEngine(app.store)
     verdicts = []
     errors = 0
+    telemetry_errors = 0
 
     connector = resolved_connector
 
@@ -2450,6 +2458,7 @@ def _scan_all(
                 app.logger.log_scan(result)
             except Exception as exc:
                 telemetry_error = exc
+                telemetry_errors += 1
 
         verdicts.append({"name": name, "result": result})
         if as_json:
@@ -2510,10 +2519,11 @@ def _scan_all(
             hint("View alerts:       defenseclaw alerts")
         else:
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
-    if errors:
+    batch_errors = errors + telemetry_errors
+    if batch_errors:
         if error_sink is None:
             raise SystemExit(1)
-        error_sink.append(errors)
+        error_sink.append(batch_errors)
     return json_rows
 
 

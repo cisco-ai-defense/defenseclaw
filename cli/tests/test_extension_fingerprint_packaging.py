@@ -126,6 +126,26 @@ def test_release_contract_rejects_wheel_reference_for_different_runtime(tmp_path
         verify_contract(source, reference, archive, wheel)
 
 
+def test_repository_fingerprint_normalizes_disappearing_walk_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    _write_source_runtime(source)
+    disappearing = source / "dist" / "index.js"
+    real_lstat = Path.lstat
+
+    def disappear_during_walk(path: Path):
+        if path == disappearing:
+            raise FileNotFoundError("removed during inventory")
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", disappear_during_walk)
+
+    with pytest.raises(ExtensionFingerprintError, match="inventory is not fully readable"):
+        fingerprint_repository_runtime(source)
+
+
 def test_plugin_archive_rejects_entry_count_before_materializing_all_members(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

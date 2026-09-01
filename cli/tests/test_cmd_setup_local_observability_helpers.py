@@ -176,6 +176,9 @@ class TestManagedNoWaitSecurityGate(unittest.TestCase):
             ("--no-password", GRAFANA_ACCESS_NO_PASSWORD),
         ):
             controller = MagicMock()
+            controller.grafana_password_file = Path(
+                "/canonical/observability-stack/.grafana-admin-password"
+            )
             controller.preflight.return_value = {}
             controller.up.return_value = SimpleNamespace(
                 contract=dict(CONTRACT),
@@ -207,6 +210,8 @@ class TestManagedNoWaitSecurityGate(unittest.TestCase):
             if expected == GRAFANA_ACCESS_NO_PASSWORD:
                 self.assertIn("anonymous Admin", result.output)
                 self.assertIn("every local process", result.output)
+            else:
+                self.assertIn(str(controller.grafana_password_file), result.output)
 
     def test_exact_no_refresh_no_wait_route_propagates_security_failure(self):
         from defenseclaw.commands.cmd_setup_local_observability import local_observability
@@ -287,11 +292,15 @@ class TestStackSummary(unittest.TestCase):
             patch("defenseclaw.commands.cmd_setup_local_observability.ux.subhead"),
             patch("defenseclaw.commands.cmd_setup_local_observability.print_redaction_status_hint"),
         ):
-            _print_stack_summary({}, logs_enabled=False)
+            _print_stack_summary(
+                {},
+                logs_enabled=False,
+                grafana_password_file="/resolved/stack/.grafana-admin-password",
+            )
 
         rendered = "\n".join(output)
         self.assertIn("user: admin", rendered)
-        self.assertIn(".grafana-admin-password", rendered)
+        self.assertIn("/resolved/stack/.grafana-admin-password", rendered)
         self.assertNotIn("anonymous Admin", rendered)
         self.assertNotIn("admin / admin", rendered)
         self.assertIn("hot-reloads", rendered)

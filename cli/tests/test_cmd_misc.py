@@ -765,6 +765,36 @@ class TestAIBOMCommand(unittest.TestCase):
         self.assertEqual(payload["skills"][0]["id"], "still-rendered")
         self.assertIn("Warning: AIBOM telemetry was not recorded", result.stderr)
 
+    @patch("defenseclaw.inventory.claw_inventory.commit_claw_aibom_digest")
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_json_survives_digest_checkpoint_failure(
+        self, mock_build, mock_to_scan, mock_enrich, mock_commit
+    ):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        inventory = self._make_inventory(skills=[{"id": "still-rendered"}])
+        mock_build.return_value = inventory
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        mock_commit.side_effect = OSError("read-only checkpoint")
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--json", "--connector", "openclaw"],
+            obj=self.app, catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["skills"][0]["id"], "still-rendered")
+        self.assertIn("Warning: AIBOM telemetry checkpoint failed", result.stderr)
+        self.assertIn("read-only checkpoint", result.stderr)
+        mock_commit.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Setup command (non-interactive)

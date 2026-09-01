@@ -705,6 +705,7 @@ func applyFindingLifecycle(
 	if err := countRows.Close(); err != nil {
 		return scanner.FindingLifecycleDelta{}, fmt.Errorf("audit: close current finding counts: %w", err)
 	}
+	delta.IndexOccurrenceEmissions()
 	return delta, nil
 }
 

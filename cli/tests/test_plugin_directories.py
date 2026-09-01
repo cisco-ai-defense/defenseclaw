@@ -561,10 +561,16 @@ def test_claude_registry_probe_reports_linked_and_unreadable_sources(
     )
     real_open = plugin_directories_module.os.open
 
-    def deny_registry(path: str, flags: int) -> int:
+    def deny_registry(
+        path: str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
         if path == str(unreadable_registry):
             raise PermissionError("denied for test")
-        return real_open(path, flags)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(plugin_directories_module.os, "open", deny_registry)
     unreadable = probe_claude_plugin_registry(str(unreadable_root))

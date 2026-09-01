@@ -857,7 +857,11 @@ def _scan_all_plugins(
         connectors,
         registry_cache=registry_cache,
     )
-    _fail_on_plugin_registry_errors(discovery, as_json=as_json)
+    _fail_on_plugin_registry_errors(
+        discovery,
+        as_json=as_json,
+        preserve_json_array=as_json,
+    )
 
     scan_options = _build_scan_options(
         app,

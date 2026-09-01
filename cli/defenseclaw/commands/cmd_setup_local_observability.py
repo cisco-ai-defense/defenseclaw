@@ -239,6 +239,7 @@ def up_cmd(
         logs_enabled=logs_enabled,
         cfg=app.cfg,
         grafana_access_mode=started.grafana_access_mode,
+        grafana_password_file=str(controller.grafana_password_file),
     )
 
     if app.logger:
@@ -567,8 +568,9 @@ def _print_stack_summary(
     logs_enabled: bool = False,
     cfg: Any = None,
     grafana_access_mode: str = GRAFANA_ACCESS_PASSWORD,
+    grafana_password_file: str | None = None,
 ) -> None:
-    password_file = os.path.join(
+    password_file = grafana_password_file or os.path.join(
         getattr(cfg, "data_dir", "~/.defenseclaw"),
         "observability-stack",
         GRAFANA_PASSWORD_FILE_NAME,

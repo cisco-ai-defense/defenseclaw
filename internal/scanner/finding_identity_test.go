@@ -113,3 +113,45 @@ func TestStableFindingStateIdentityPreservesAmbiguousNumericFilenameSuffix(t *te
 		t.Fatal("numeric filename and explicit source line collapsed to one identity")
 	}
 }
+
+func TestFindingLifecycleDeltaIndexesOccurrenceEmissions(t *testing.T) {
+	delta := FindingLifecycleDelta{
+		Managed: true,
+		Observations: []FindingLifecycleObservation{
+			{OccurrenceID: "new", Status: FindingLifecycleNew},
+			{OccurrenceID: "repeated", Status: FindingLifecycleRepeated},
+			{OccurrenceID: "updated", Status: FindingLifecycleUpdated},
+		},
+	}
+	delta.IndexOccurrenceEmissions()
+
+	for occurrenceID, want := range map[string]bool{
+		"new": true, "repeated": false, "updated": true, "unknown": false,
+	} {
+		if got := delta.ShouldEmitOccurrence(occurrenceID); got != want {
+			t.Errorf("ShouldEmitOccurrence(%q) = %t, want %t", occurrenceID, got, want)
+		}
+	}
+	if delta.emitByOccurrence == nil {
+		t.Fatal("occurrence emission index was not retained")
+	}
+}
+
+func TestFindingLifecycleDeltaLazilyIndexesAndPreservesUnmanagedBehavior(t *testing.T) {
+	managed := &FindingLifecycleDelta{
+		Managed: true,
+		Observations: []FindingLifecycleObservation{
+			{OccurrenceID: "reopened", Status: FindingLifecycleReopened},
+		},
+	}
+	if !managed.ShouldEmitOccurrence("reopened") || managed.emitByOccurrence == nil {
+		t.Fatal("managed delta did not lazily index a reopened occurrence")
+	}
+
+	if !(*FindingLifecycleDelta)(nil).ShouldEmitOccurrence("any") {
+		t.Fatal("nil lifecycle delta must preserve emit-every-occurrence behavior")
+	}
+	if !(&FindingLifecycleDelta{}).ShouldEmitOccurrence("any") {
+		t.Fatal("unmanaged lifecycle delta must preserve emit-every-occurrence behavior")
+	}
+}
