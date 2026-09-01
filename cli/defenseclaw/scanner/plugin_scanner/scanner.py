@@ -48,6 +48,7 @@ from defenseclaw.scanner.plugin_scanner.policy import (
     from_yaml,
     is_suppressed,
 )
+from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
 from defenseclaw.scanner.plugin_scanner.types import (
     Finding,
     PluginManifest,
@@ -67,6 +68,23 @@ def scan_plugin(
 ) -> ScanResult:
     start_ms = time.time() * 1000
     target = os.path.abspath(plugin_dir)
+
+    # DefenseClaw's shipped connector runtime necessarily contains its own
+    # signatures, security prose, process/network calls, and scanner helpers.
+    # Exclude only an exact first-party identity (or a byte-identical relocated
+    # bundle); arbitrary plugins named ``defenseclaw`` and ordinary ``dist/``
+    # trees remain in scope. ``include_self`` is the explicit developer escape
+    # hatch for auditing the product itself.
+    if not (options and options.include_self) and is_first_party_self_target(
+        target,
+        trusted_paths=options.trusted_self_paths if options else (),
+    ):
+        return build_result(
+            target,
+            [],
+            start_ms,
+            ScanMetadata(manifest_name="defenseclaw"),
+        )
 
     # --- Load policy ---
     policy: PluginScanPolicy
@@ -163,9 +181,15 @@ def scan_plugin(
         all_findings.append(f)
 
     for analyzer in analyzers:
-        # Feed accumulated findings to meta analyzer
+        # Policy is a precondition of correlation, not merely an output
+        # filter. Feed MetaAnalyzer only atomic findings that survive disabled
+        # rules, min-confidence, and severity overrides; otherwise a finding
+        # the operator explicitly suppressed can still manufacture a CRITICAL
+        # META-* alert before disappearing from the final result.
         if analyzer.name == "meta":
-            ctx.previous_findings = list(all_findings)
+            for finding in all_findings:
+                apply_severity_override(finding, policy.severity_overrides)
+            ctx.previous_findings = [finding for finding in all_findings if not is_suppressed(finding, policy)]
 
         findings = analyzer.analyze(ctx)
 

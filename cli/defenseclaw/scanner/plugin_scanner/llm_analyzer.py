@@ -19,13 +19,16 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import secrets
+import unicodedata
 from typing import Any
 
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.helpers import make_finding
 from defenseclaw.scanner.plugin_scanner.llm_client import call_llm
-from defenseclaw.scanner.plugin_scanner.types import Finding
+from defenseclaw.scanner.plugin_scanner.types import Finding, compare_severity, max_severity
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -133,6 +136,30 @@ def _safe_title(value: str | None) -> str:
     cleaned = "".join(ch if ch == " " or ch == "\t" or (ord(ch) >= 0x20 and ord(ch) != 0x7F) else " " for ch in cleaned)
     if len(cleaned) > 256:
         cleaned = cleaned[:256] + "\u2026"
+    return cleaned
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])")
+
+
+def _terminal_safe_line(value: str) -> str:
+    """Remove terminal controls while preserving visible evidence text."""
+
+    without_ansi = _ANSI_ESCAPE_RE.sub("", value)
+    cleaned = "".join(
+        " " if unicodedata.category(character).startswith("C") else character for character in without_ansi
+    )
+    return " ".join(cleaned.split())
+
+
+def _safe_description(value: str | None) -> str:
+    """Render model-authored prose as one bounded, terminal-safe line."""
+
+    if not value:
+        return ""
+    cleaned = _terminal_safe_line(value)
+    if len(cleaned) > 2048:
+        cleaned = cleaned[:2048] + "\u2026"
     return cleaned
 
 
@@ -504,23 +531,60 @@ def run_meta_llm(
 
     correlations = result.get("correlations")
     if isinstance(correlations, list):
+        eligible_by_id = {finding.id: finding for finding in ctx.previous_findings}
         for corr in correlations:
             if not isinstance(corr, dict):
                 continue
-            ref_ids = ", ".join(corr.get("finding_ids", []))
-            desc = corr.get("description", "")
-            if ref_ids:
-                desc = f"{desc}\n\nCorrelated findings: {ref_ids}"
+            raw_ids = corr.get("finding_ids")
+            if not isinstance(raw_ids, list):
+                continue
+            finding_ids = list(dict.fromkeys(str(value) for value in raw_ids if isinstance(value, str)))
+            referenced = [eligible_by_id[finding_id] for finding_id in finding_ids if finding_id in eligible_by_id]
+            # A correlation must cite at least two distinct, real inputs from
+            # the host-gated finding set. Hallucinated or partially unknown
+            # IDs cannot manufacture a META finding.
+            if len(referenced) < 2 or len(referenced) != len(finding_ids):
+                continue
+            input_confidences = [finding.confidence for finding in referenced]
+            if any(
+                confidence is None
+                or not math.isfinite(confidence)
+                or confidence < 0.65
+                or confidence > 1.0
+                for confidence in input_confidences
+            ):
+                continue
+            confidence = min(0.85, *(float(value) for value in input_confidences if value is not None))
+            requested_severity = str(corr.get("severity") or "HIGH").upper()
+            severity = "HIGH" if requested_severity not in {"MEDIUM", "LOW", "INFO"} else requested_severity
+            evidence_ceiling = max_severity([finding.severity for finding in referenced])
+            if compare_severity(severity, evidence_ceiling) > 0:
+                severity = evidence_ceiling
+            evidence = _terminal_safe_line(
+                "; ".join(
+                    f"{finding.rule_id or finding.id}@{finding.location or '(manifest)'} "
+                    f"(confidence={(finding.confidence or 0.0):.2f})"
+                    for finding in referenced
+                )
+            )
+            desc = _safe_description(str(corr.get("description") or ""))
+            desc = (
+                f"{desc} This is an LLM-assisted static correlation, not proof that execution occurred. "
+                f"Evidence chain: {evidence}."
+            ).strip()
+            correlation_name = _safe_title(str(corr.get("name") or "Unknown")) or "Unknown"
 
             new_findings.append(
                 make_finding(
                     ctx.finding_counter[0],
                     rule_id="META-LLM-CORR",
-                    severity=corr.get("severity", "HIGH"),
-                    confidence=0.85,
-                    title=f"Attack chain: {corr.get('name', 'unknown')}",
+                    severity=severity,
+                    confidence=confidence,
+                    title=f"{correlation_name} pattern (correlated, {len(referenced)} signals)",
                     description=desc,
-                    tags=["llm-detected", "correlation"],
+                    evidence=evidence,
+                    location=referenced[0].location,
+                    tags=["llm-detected", "correlation", "static-analysis"],
                 )
             )
             ctx.finding_counter[0] += 1
