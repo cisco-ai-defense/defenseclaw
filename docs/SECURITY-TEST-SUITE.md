@@ -8,7 +8,8 @@ in
 | Target | Scope |
 | --- | --- |
 | `make security-suite-test` | Deterministic trusted-tool-call, regex/rule, stubbed-judge, and severity benchmark tests |
-| `go test ./internal/gateway -run '^TestGuardrailProfilesCELActionFactsCorpusMatrix$' -v` | Every shipped profile's exact typed `f` CEL expressions against every authoritative, projectable CEL-targeted tool-call case |
+| `go test ./internal/gateway -run '^TestGuardrailProfilesCELActionFactsCorpusMatrix$' -v` | Every shipped profile's exact typed `f` CEL and checked-AST-translated stock `input` CEL against every authoritative, projectable CEL-targeted tool-call case, with equivalent results and error classifications |
+| `AGENTCEL_BIN=/path/to/agentcel go test ./internal/gateway -run '^TestGuardrailPortableCELAgentCELE2E$' -v` | Optional process-boundary proof through AgentCEL's public bare-document CEL CLI; DefenseClaw does not import AgentCEL |
 | `make security-suite-eval` | Opt-in live-model evaluation; requires `DEFENSECLAW_LLM_KEY` |
 | `go test ./internal/gateway/ -run TestSecuritySuiteE2E -v` | In-process HTTP inspect and audit path; `DEFENSECLAW_GATEWAY_URL` selects an external gateway |
 
@@ -29,9 +30,14 @@ tool actions. It contains inert payloads only and asserts canonical owner
 routing without duplicating low-level parser grammar tests.
 
 `TestGuardrailProfilesCELActionFactsCorpusMatrix` discovers every shipped
-profile, compiles each embedded expression without rewriting the typed `f`
-activation, and evaluates the complete rule-by-case matrix through
-`actionfacts.Analyze`, `semantic.Project`, and the bounded CEL evaluator.
+profile, compiles each embedded expression as its native typed `f` activation,
+translates the admitted checked AST to canonical stock document CEL with
+`input: dyn`, and evaluates both forms through `actionfacts.Analyze`,
+`semantic.Project`, and their bounded CEL evaluators. The current gate covers
+147 rule instances, 31 unique expressions, and 26,460 native/document
+equivalence pairs over 180 authoritative, projectable cases. Its protobuf JSON
+document uses snake-case names, emitted defaults and empty lists, canonical
+enum strings, and lossless decimal strings for `int64`.
 Non-authoritative structured rows remain legacy-fallback cases, as they do in
 production. Regex, judge, live-eval, and HTTP corpus rows carry text rather
 than authenticated ActionFacts; the test inventories and reports them as

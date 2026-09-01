@@ -47,15 +47,17 @@ type guardrailCELRule struct {
 	id         string
 	expression string
 	program    *semantic.Program
+	portable   *semantic.PortableProgram
 }
 
 type securityCorpusIdentity struct {
 	ID string `json:"id"`
 }
 
-// TestGuardrailProfilesCELActionFactsCorpusMatrix is the exhaustive native
-// compatibility gate for shipped CEL. Every profile is loaded, every embedded
-// typed-f expression is compiled as authored, and every compiled program is
+// TestGuardrailProfilesCELActionFactsCorpusMatrix is the exhaustive native and
+// stock-document compatibility gate for shipped CEL. Every profile is loaded,
+// every embedded typed-f expression is compiled as authored and translated
+// from its checked AST to canonical input-dyn CEL, and both programs are
 // evaluated against every CEL-targeted tool-call case whose ActionFacts are
 // authoritative and project successfully, matching the production boundary.
 //
@@ -93,11 +95,20 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 
 	ruleIDs := make(map[string]struct{})
 	uniqueExpressions := make(map[string]struct{})
+	portableIdentities := make(map[string]struct{})
+	portableByExpression := make(map[string]string)
 	expressionsByRuleID := make(map[string]map[string]struct{})
 	profileRuleCounts := make(map[string]int, len(profiles))
 	for _, rule := range rules {
 		ruleIDs[rule.id] = struct{}{}
 		uniqueExpressions[rule.expression] = struct{}{}
+		portableIdentities[rule.portable.Identity()] = struct{}{}
+		if previous, ok := portableByExpression[rule.expression]; ok &&
+			previous != rule.portable.Identity() {
+			t.Fatalf("expression %q has nondeterministic portable identities %q and %q",
+				rule.expression, previous, rule.portable.Identity())
+		}
+		portableByExpression[rule.expression] = rule.portable.Identity()
 		profileRuleCounts[rule.profile]++
 		if expressionsByRuleID[rule.id] == nil {
 			expressionsByRuleID[rule.id] = make(map[string]struct{})
@@ -124,7 +135,7 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 		t.Fatal("tool-call corpus has no CEL-targeted ActionFacts cases")
 	}
 
-	evaluations := 0
+	equivalencePairs := 0
 	applicableCases := 0
 	nonAuthoritativeCases := 0
 	projectionRejectedCases := 0
@@ -147,18 +158,33 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 			coveredExpressions[expression] = struct{}{}
 		}
 		for _, rule := range rules {
-			_, evalCode := rule.program.EvalBool(t.Context(), projection)
-			if evalCode != semantic.EvalOK {
+			nativeResult, nativeCode := rule.program.EvalBool(t.Context(), projection)
+			portableResult, portableCode := rule.portable.EvalBool(t.Context(), projection)
+			if nativeCode != portableCode || nativeResult.Matched != portableResult.Matched {
+				t.Fatalf(
+					"portable mismatch profile=%q category=%q rule=%q case=%q: native=(matched=%t code=%s) portable=(matched=%t code=%s) portable_identity=%q",
+					rule.profile,
+					rule.category,
+					rule.id,
+					corpusCase.ID,
+					nativeResult.Matched,
+					nativeCode,
+					portableResult.Matched,
+					portableCode,
+					rule.portable.Identity(),
+				)
+			}
+			if nativeCode != semantic.EvalOK {
 				t.Fatalf(
 					"evaluate profile=%q category=%q rule=%q case=%q: %s",
 					rule.profile,
 					rule.category,
 					rule.id,
 					corpusCase.ID,
-					evalCode,
+					nativeCode,
 				)
 			}
-			evaluations++
+			equivalencePairs++
 		}
 	}
 	if applicableCases == 0 {
@@ -173,18 +199,19 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	}
 
 	wantEvaluations := len(rules) * applicableCases
-	if evaluations != wantEvaluations {
-		t.Fatalf("CEL evaluations=%d, want complete matrix of %d", evaluations, wantEvaluations)
+	if equivalencePairs != wantEvaluations {
+		t.Fatalf("CEL equivalence pairs=%d, want complete matrix of %d", equivalencePairs, wantEvaluations)
 	}
 	for _, profile := range profiles {
 		t.Logf("profile %s: %d CEL rule instances", profile, profileRuleCounts[profile])
 	}
 	t.Logf(
-		"guardrail CEL corpus matrix: profiles=%d rule_instances=%d rule_ids=%d unique_expressions=%d toolcall_cases=%d cel_targeted_cases=%d applicable_cases=%d non_authoritative_cel_targets=%d projection_rejected_cel_targets=%d structured_non_cel_targets=%d text_only_cases=%d evaluations=%d",
+		"guardrail CEL corpus matrix: profiles=%d rule_instances=%d rule_ids=%d unique_expressions=%d portable_identities=%d toolcall_cases=%d cel_targeted_cases=%d applicable_cases=%d non_authoritative_cel_targets=%d projection_rejected_cel_targets=%d structured_non_cel_targets=%d text_only_cases=%d equivalence_pairs=%d native_evaluations=%d portable_evaluations=%d",
 		len(profiles),
 		len(rules),
 		len(ruleIDs),
 		len(uniqueExpressions),
+		len(portableIdentities),
 		len(allToolCallCases),
 		len(celTargeted),
 		applicableCases,
@@ -192,7 +219,9 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 		projectionRejectedCases,
 		len(allToolCallCases)-len(celTargeted),
 		textOnlyCases,
-		evaluations,
+		equivalencePairs,
+		equivalencePairs,
+		equivalencePairs,
 	)
 	if len(coveredRuleIDs) != len(ruleIDs) {
 		t.Logf(
@@ -251,12 +280,23 @@ func loadShippedGuardrailCELRules(t *testing.T) ([]string, []guardrailCELRule) {
 						compileCode,
 					)
 				}
+				portable, portableCode := compiler.CompilePortable(rule.Expression)
+				if portableCode != semantic.CompileOK {
+					t.Fatalf(
+						"compile portable profile=%q category=%q rule=%q: %s",
+						profile,
+						ruleFile.Category,
+						rule.ID,
+						portableCode,
+					)
+				}
 				rules = append(rules, guardrailCELRule{
 					profile:    profile,
 					category:   ruleFile.Category,
 					id:         rule.ID,
 					expression: rule.Expression,
 					program:    program,
+					portable:   portable,
 				})
 				profileRules++
 			}

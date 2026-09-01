@@ -197,6 +197,39 @@ defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE
 The authoritative schema is
 [`internal/guardrail/semanticpb/facts.proto`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/guardrail/semanticpb/facts.proto).
 
+## Stock document-CEL form
+
+Rule authors continue to write the typed `f` form above. DefenseClaw also has
+an internal portability compiler for checking the shipped rules with a stock
+CEL implementation that knows only one declaration, `input: dyn`. It operates
+on the resolved, type-checked AST after normal admission; it never replaces
+identifiers or enum names in source text.
+
+The canonical document contract is:
+
+| Typed source | Stock document form |
+| --- | --- |
+| Root `f` | Root `input` |
+| Protobuf snake-case selections | The same snake-case object keys |
+| Fully qualified enum constant | Canonical enum-name string such as `"PATH_ACCESS_DELETE"` |
+| Protobuf enum value | The same canonical enum-name string |
+| CEL/protobuf `int64` | Canonical decimal string, including `"0"` and values above JavaScript's `2^53` exact-integer boundary |
+| Empty repeated field | `[]` |
+| Unpopulated scalar | Its protobuf default |
+
+The data document is produced with protobuf JSON using proto field names and
+unpopulated values. An absent `parse` message is materialized as its default
+object so typed and document field selection agree. Unknown enum values and
+any checked node, operator, type, or comprehension shape outside the closed
+portable allowlist fail closed. Comprehension variables are alpha-renamed to
+prevent a source variable from shadowing the document root. Canonical source
+also receives a versioned SHA-256 identity.
+
+This is a compatibility and regression boundary, not a second public policy
+ingress. The gateway still compiles and executes the authored typed rule in
+production. The portable Facts document is private, ephemeral policy material
+and must not be logged, persisted, audited, or exposed through an API.
+
 ## Validate what you author
 
 <Steps>
@@ -246,6 +279,9 @@ before enabling action mode.
 There is no public CLI that injects synthetic `ActionFacts` into one CEL
 expression. Repository contributors should add focused Go fixtures and run
 `go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway`.
+The shipped-rule matrix also compiles the checked-AST document form and compares
+its result and error classification with native typed evaluation for every
+authoritative, projectable ActionFacts case.
 When the compiled default catalog changes, also run `make generate-guardrail-catalog` and
 `make check-guardrail-catalog`.
 </Callout>

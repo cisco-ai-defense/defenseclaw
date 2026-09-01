@@ -36,3 +36,16 @@ func newEnvironment() (*cel.Env, error) {
 		cel.ExpressionNodeLimit(maxParserNodes),
 	)
 }
+
+// newPortableEnvironment is deliberately schema-free. Portable expressions
+// are rechecked against the same stock document declaration available in CEL
+// implementations that do not know DefenseClaw's private protobuf schema.
+func newPortableEnvironment() (*cel.Env, error) {
+	return cel.NewEnv(
+		cel.Variable("input", cel.DynType),
+		cel.ParserExpressionSizeLimit(maxExpressionRunes),
+		cel.ParserRecursionLimit(maxParserRecursion),
+		cel.ParserErrorRecoveryLimit(maxParserRecoveries),
+		cel.ExpressionNodeLimit(maxParserNodes),
+	)
+}

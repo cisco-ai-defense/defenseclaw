@@ -94,6 +94,37 @@ and list equality are rejected. DefenseClaw adds no custom CEL helper
 functions. `matches` must use a literal Go/RE2 pattern of at most 512 bytes;
 dynamic regexes and global-form `matches(value, pattern)` are rejected.
 
+## Native and portable equivalence
+
+Production evaluates the admitted typed program against
+`f: defenseclaw.guardrail.semantic.v1.Facts`. The repository also compiles each
+shipped expression into canonical stock document CEL with `input: dyn` and
+checks both programs over the same authoritative projections.
+
+The translation boundary is checked-AST-only and fail-closed:
+
+- only the resolved root `f` becomes `input`; local variables are
+  alpha-renamed, so shadowing cannot redirect a field selection;
+- resolved protobuf enum constants become their canonical enum-name strings;
+- every CEL/protobuf `int64` literal becomes a canonical decimal string to
+  match protobuf JSON's lossless `int64` representation;
+- only the admitted Boolean calls, scalar/list literals, typed schema selects,
+  and the exact standard `exists` expansion can be emitted; and
+- the result is canonically unparsed, checked again in the schema-free stock
+  environment, and assigned a versioned SHA-256 identity.
+
+Facts are serialized with protobuf JSON `UseProtoNames` and
+`EmitUnpopulated`. This yields snake-case keys, canonical enum strings,
+lossless decimal strings for `int64`, and explicit empty lists/default
+scalars. The internal adapter materializes the default `parse` object and
+rejects unknown enum values before evaluation.
+
+The portability evaluator does not replace the production engine, expose a
+new public input endpoint, or relax rule admission. It exists to make the
+cross-engine document contract executable and regression-testable without
+importing another policy engine. Its activation remains subject to the same
+privacy boundary as typed `ActionFacts`.
+
 ## Resource limits
 
 | Limit | Maximum |
@@ -203,7 +234,12 @@ pending-to-success contract and connector matrix.
 `defenseclaw guardrail validate-pack` is the public authority for schema,
 regex, CEL typing and admission, and aggregate-cost checks. It does not inject
 synthetic facts or prove that a connector projects the fields an expression
-expects.
+expects. The repository matrix separately compiles both typed and portable
+forms of all 147 shipped rule instances (31 unique expressions) and compares
+26,460 native/document result-and-error pairs across 180 authoritative,
+projectable tool-call cases. Text-only regex, judge, live-eval, and HTTP rows
+are explicitly non-applicable because they cannot construct authenticated
+ActionFacts.
 
 Repository contributors should add focused Go fixtures and run:
 

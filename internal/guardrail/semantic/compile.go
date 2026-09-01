@@ -30,12 +30,20 @@ type cachedCompile struct {
 	code    CompileCode
 }
 
-// Compiler owns one candidate-local expression cache. Compile is safe for
-// concurrent use so callers may validate independent rules in parallel.
+type cachedPortableCompile struct {
+	program *PortableProgram
+	code    CompileCode
+}
+
+// Compiler owns candidate-local native and portable expression caches.
+// Compile and CompilePortable are safe for concurrent use so callers may
+// validate independent rules in parallel.
 type Compiler struct {
-	mu    sync.Mutex
-	env   *cel.Env
-	cache map[string]cachedCompile
+	mu            sync.Mutex
+	env           *cel.Env
+	portableEnv   *cel.Env
+	cache         map[string]cachedCompile
+	portableCache map[string]cachedPortableCompile
 }
 
 // Program is an immutable, reusable checked CEL program.
@@ -51,8 +59,9 @@ func NewCompiler() (*Compiler, error) {
 		return nil, err
 	}
 	return &Compiler{
-		env:   env,
-		cache: make(map[string]cachedCompile),
+		env:           env,
+		cache:         make(map[string]cachedCompile),
+		portableCache: make(map[string]cachedPortableCompile),
 	}, nil
 }
 
@@ -75,61 +84,9 @@ func (c *Compiler) Compile(expression string) (*Program, CompileCode) {
 }
 
 func (c *Compiler) compile(expression string) (*Program, CompileCode) {
-	if !utf8.ValidString(expression) {
-		return nil, CompileExpressionEncoding
-	}
-	if len(expression) > maxExpressionBytes ||
-		utf8.RuneCountInString(expression) > maxExpressionRunes {
-		return nil, CompileExpressionSize
-	}
-	parsed, issues := c.env.Parse(expression)
-	if issues != nil && issues.Err() != nil {
-		return nil, CompileSyntax
-	}
-	if parsed == nil || parsed.NativeRep() == nil {
-		return nil, CompileSyntax
-	}
-	if celast.NodeCount(parsed.NativeRep()) > maxExpressionNodes {
-		return nil, CompileASTNodes
-	}
-	if celast.ExceedsDepth(parsed.NativeRep(), maxExpressionDepth+1) {
-		return nil, CompileASTDepth
-	}
-
-	checked, issues := c.env.Check(parsed)
-	if issues != nil && issues.Err() != nil {
-		return nil, CompileType
-	}
-	if checked == nil || checked.NativeRep() == nil {
-		return nil, CompileType
-	}
-	if celast.NodeCount(checked.NativeRep()) > maxExpressionNodes {
-		return nil, CompileASTNodes
-	}
-	if celast.ExceedsDepth(checked.NativeRep(), maxExpressionDepth+1) {
-		return nil, CompileASTDepth
-	}
-	if !checked.OutputType().IsExactType(cel.BoolType) {
-		return nil, CompileResultType
-	}
-	if !validateSurface(checked) {
-		return nil, CompileSurface
-	}
-	if !validateEnumDomains(checked) {
-		return nil, CompileEnumDomain
-	}
-	if !validateComprehensionDepth(checked) {
-		return nil, CompileComprehensionDepth
-	}
-	if code := validateRegexes(checked); code != CompileOK {
+	checked, staticCost, code := c.check(expression)
+	if code != CompileOK {
 		return nil, code
-	}
-	estimate, err := c.env.EstimateCost(checked, boundedCostEstimator{})
-	if err != nil || estimate.Max == math.MaxUint64 {
-		return nil, CompileStaticCostUnbounded
-	}
-	if estimate.Max > maxRuleStaticCost {
-		return nil, CompileStaticCost
 	}
 	evaluable, err := c.env.Program(
 		checked,
@@ -142,8 +99,68 @@ func (c *Compiler) compile(expression string) (*Program, CompileCode) {
 	}
 	return &Program{
 		program:    evaluable,
-		staticCost: estimate.Max,
+		staticCost: staticCost,
 	}, CompileOK
+}
+
+func (c *Compiler) check(expression string) (*cel.Ast, uint64, CompileCode) {
+	if !utf8.ValidString(expression) {
+		return nil, 0, CompileExpressionEncoding
+	}
+	if len(expression) > maxExpressionBytes ||
+		utf8.RuneCountInString(expression) > maxExpressionRunes {
+		return nil, 0, CompileExpressionSize
+	}
+	parsed, issues := c.env.Parse(expression)
+	if issues != nil && issues.Err() != nil {
+		return nil, 0, CompileSyntax
+	}
+	if parsed == nil || parsed.NativeRep() == nil {
+		return nil, 0, CompileSyntax
+	}
+	if celast.NodeCount(parsed.NativeRep()) > maxExpressionNodes {
+		return nil, 0, CompileASTNodes
+	}
+	if celast.ExceedsDepth(parsed.NativeRep(), maxExpressionDepth+1) {
+		return nil, 0, CompileASTDepth
+	}
+
+	checked, issues := c.env.Check(parsed)
+	if issues != nil && issues.Err() != nil {
+		return nil, 0, CompileType
+	}
+	if checked == nil || checked.NativeRep() == nil {
+		return nil, 0, CompileType
+	}
+	if celast.NodeCount(checked.NativeRep()) > maxExpressionNodes {
+		return nil, 0, CompileASTNodes
+	}
+	if celast.ExceedsDepth(checked.NativeRep(), maxExpressionDepth+1) {
+		return nil, 0, CompileASTDepth
+	}
+	if !checked.OutputType().IsExactType(cel.BoolType) {
+		return nil, 0, CompileResultType
+	}
+	if !validateSurface(checked) {
+		return nil, 0, CompileSurface
+	}
+	if !validateEnumDomains(checked) {
+		return nil, 0, CompileEnumDomain
+	}
+	if !validateComprehensionDepth(checked) {
+		return nil, 0, CompileComprehensionDepth
+	}
+	if code := validateRegexes(checked); code != CompileOK {
+		return nil, 0, code
+	}
+	estimate, err := c.env.EstimateCost(checked, boundedCostEstimator{})
+	if err != nil || estimate.Max == math.MaxUint64 {
+		return nil, 0, CompileStaticCostUnbounded
+	}
+	if estimate.Max > maxRuleStaticCost {
+		return nil, 0, CompileStaticCost
+	}
+	return checked, estimate.Max, CompileOK
 }
 
 // StaticCost returns the admitted checked-expression maximum.

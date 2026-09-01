@@ -22,8 +22,13 @@ surface.
 # deterministic tiers (tool-call semantics + regex + stubbed judge), no secrets:
 go test ./internal/gateway/ -run 'TestSecuritySuite(ToolCall|Regex|Judge)' -v
 
-# exact typed-CEL matrix for every shipped profile and applicable ActionFacts case:
+# exact typed/native-versus-stock-document CEL matrix for every shipped profile
+# and applicable ActionFacts case:
 go test ./internal/gateway/ -run '^TestGuardrailProfilesCELActionFactsCorpusMatrix$' -v
+
+# optional external proof through AgentCEL's bare-document CEL CLI:
+AGENTCEL_BIN=/path/to/agentcel \
+  go test ./internal/gateway/ -run '^TestGuardrailPortableCELAgentCELE2E$' -v
 
 # live judge scoring against a real model:
 GUARDRAIL_BENCHMARK_LLM=1 DEFENSECLAW_LLM_KEY=... \
@@ -58,7 +63,10 @@ ActionFacts tests instead of being duplicated here.
 
 The typed-CEL matrix treats a row as evaluable only when its target rule owns a
 CEL expression and `ActionFacts` is authoritative and projects successfully.
-CEL-targeted rows with partial or unsupported facts remain fallback-only.
+For every such row it compares the native typed result/error with the
+checked-AST-translated `input: dyn` result/error over the canonical protobuf
+JSON document. CEL-targeted rows with partial or unsupported facts remain
+fallback-only.
 Every other corpus tier is text-only and is explicitly reported as
 non-applicable to the ActionFacts CEL activation.
 

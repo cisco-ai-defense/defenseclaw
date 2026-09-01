@@ -21,6 +21,7 @@ import (
 	"errors"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
+	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/interpreter"
 )
@@ -42,10 +43,15 @@ func (p *Program) EvalBool(
 	if ctx == nil || facts == nil {
 		return Result{}, EvalProjectionInvalid
 	}
-	value, details, err := p.program.ContextEval(
-		ctx,
-		map[string]any{"f": facts},
-	)
+	return evalBoolProgram(ctx, p.program, map[string]any{"f": facts})
+}
+
+func evalBoolProgram(
+	ctx context.Context,
+	program cel.Program,
+	activation map[string]any,
+) (Result, EvalCode) {
+	value, details, err := program.ContextEval(ctx, activation)
 	result := Result{}
 	if details != nil && details.ActualCost() != nil {
 		result.Cost = *details.ActualCost()
