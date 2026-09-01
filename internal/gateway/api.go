@@ -52,6 +52,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -74,6 +75,14 @@ type APIServer struct {
 	notifier          *notifier.Dispatcher
 	aiDiscoveryMu     sync.RWMutex
 	aiDiscovery       *inventory.ContinuousDiscoveryService
+	// scanOutputRedactor is initialized only if the code-scan response path is
+	// used. Failed loads are deliberately not cached: repairing key-store
+	// permissions must restore useful protected output without a restart.
+	scanOutputRedactionMu sync.Mutex
+	scanOutputRedactor    *scanoutput.Redactor
+	// codeScanner is a hermetic test seam. Production leaves it nil and always
+	// executes scanner.ScanCode.
+	codeScanner func(context.Context, string, string) (*scanner.ScanResult, error)
 
 	// inspectToolScanTimeout optionally overrides the synchronous
 	// /api/v1/inspect/tool scan budget for this server. Runtime constructors
@@ -3837,30 +3846,63 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
 
-	result, err := scanner.ScanCode(r.Context(), req.Path, rulesDir)
+	codeScanner := scanner.ScanCode
+	if a.codeScanner != nil {
+		codeScanner = a.codeScanner
+	}
+	result, err := codeScanner(r.Context(), req.Path, rulesDir)
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "codeguard", "code", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
+	// The canonical logger intentionally neutralizes sensitive findings in
+	// place before persistence. Snapshot scanner-owned response facts first so
+	// the detached output projector can preserve safe location/remediation
+	// context while independently removing detected spans.
+	responseSource := scanoutput.Clone(result)
 	if a.logger != nil {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	// Keep the authenticated REST response conservative by default. Canonical
-	// persistence above already retained the source facts so each configured
-	// destination can independently apply `none`, `detect`, or `whole`
-	// redaction. This in-place copy change affects only the response body.
-	// Title remains an operator-searchable rule summary.
-	for i := range result.Findings {
-		f := &result.Findings[i]
-		f.Description = redaction.ForSinkString(f.Description)
-		f.Location = redaction.ForSinkString(f.Location)
-		f.Remediation = redaction.ForSinkString(f.Remediation)
-	}
+	// Canonical persistence above owns the raw local facts. Project a detached
+	// response copy so detector-recognized spans are protected while ordinary
+	// file/line and remediation context remains useful. The REST contract has
+	// no raw-output switch; only the local CLI can make that explicit choice.
+	a.writeJSON(w, http.StatusOK, a.codeScanOutputProjector().Project(responseSource))
+}
 
-	a.writeJSON(w, http.StatusOK, result)
+func (a *APIServer) codeScanOutputProjector() *scanoutput.Redactor {
+	if a == nil {
+		return scanoutput.NewUnavailableRedactor()
+	}
+	a.scanOutputRedactionMu.Lock()
+	defer a.scanOutputRedactionMu.Unlock()
+	if a.scanOutputRedactor != nil {
+		return a.scanOutputRedactor
+	}
+	cfg := a.runtimeConfigSnapshot()
+	dataDir := ""
+	if cfg != nil {
+		dataDir = strings.TrimSpace(cfg.DataDir)
+	}
+	var (
+		redactor *scanoutput.Redactor
+		err      error
+	)
+	if dataDir == "" {
+		redactor, err = scanoutput.NewEphemeralRedactor()
+	} else {
+		redactor, err = scanoutput.LoadRedactor(dataDir)
+	}
+	if err != nil || redactor == nil {
+		// Fail closed for this response, but retry after an operator repairs
+		// key custody instead of pinning degraded output for process lifetime.
+		return scanoutput.NewUnavailableRedactor()
+	}
+	a.scanOutputRedactor = redactor
+	return redactor
 }
 
 // handleNetworkEgress serves GET /api/v1/network-egress and

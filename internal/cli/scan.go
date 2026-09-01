@@ -20,15 +20,18 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 )
 
 var (
 	scanOutputJSON  bool
 	scanPrintSchema bool
+	scanNoRedact    bool
 )
 
 var scanCmd = &cobra.Command{
@@ -52,12 +55,16 @@ YAML, JSON, XML, C/C++, and Rust files.`,
 
 func init() {
 	scanCodeCmd.Flags().BoolVar(&scanOutputJSON, "json", false, "Output results as JSON (v7 scan-result contract)")
+	scanCodeCmd.Flags().BoolVar(&scanNoRedact, "no-redact", false, "Emit raw finding text to local JSON stdout (requires --json)")
 	scanCodeCmd.Flags().BoolVar(&scanPrintSchema, "schema", false, "Print scan-result.json schema (for downstream validators) and exit")
 	scanCmd.AddCommand(scanCodeCmd)
 	rootCmd.AddCommand(scanCmd)
 }
 
 func runScanCode(_ *cobra.Command, args []string) error {
+	if scanNoRedact && !scanOutputJSON {
+		return fmt.Errorf("--no-redact requires --json")
+	}
 	if scanPrintSchema {
 		if _, err := os.Stdout.Write(scanResultSchemaJSON); err != nil {
 			return err
@@ -82,12 +89,32 @@ func runScanCode(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("code scan failed: %w", err)
 	}
 
+	var redactor *scanoutput.Redactor
+	if scanNeedsRedactor(false) {
+		dataDir := ""
+		if cfg != nil {
+			dataDir = strings.TrimSpace(cfg.DataDir)
+		}
+		if dataDir == "" {
+			redactor, err = scanoutput.NewEphemeralRedactor()
+		} else {
+			redactor, err = scanoutput.LoadRedactor(dataDir)
+		}
+		if err != nil {
+			return fmt.Errorf("initialize scan output redaction: %w", err)
+		}
+	}
+
 	if auditLog != nil {
 		_ = auditLog.LogScan(result)
 	}
 
 	if scanOutputJSON {
-		b, err := marshalScanResultV7(result, appVersion)
+		options := scanResultV7Options{Raw: scanNoRedact, Redactor: redactor}
+		if scanNoRedact {
+			_, _ = fmt.Fprintln(os.Stderr, "WARNING: --no-redact exposes raw local scan paths and finding text")
+		}
+		b, err := marshalScanResultV7WithOptions(result, appVersion, options)
 		if err != nil {
 			return err
 		}
@@ -101,6 +128,10 @@ func runScanCode(_ *cobra.Command, args []string) error {
 
 	printCodeScanResults(result)
 	return nil
+}
+
+func scanNeedsRedactor(persistProtectedCopy bool) bool {
+	return persistProtectedCopy || (scanOutputJSON && !scanNoRedact)
 }
 
 func printCodeScanResults(result *scanner.ScanResult) {

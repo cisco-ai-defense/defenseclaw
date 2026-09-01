@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -84,38 +85,14 @@ func TestScanFixtureFileJSONSchemaPython(t *testing.T) {
 	}
 }
 
-// TestScanResultV7RedactsSecretsFromFindingText is a regression test for
-// the H.MEDIUM finding "Raw scan JSON stores unredacted
-// secret-bearing findings". Per-finding text in the v7 wire output
-// (`defenseclaw scan code --json`, gateway API scan endpoint) MUST go
-// through redaction.ForSinkString — the audit DB has done so since
-// audit/scan_persist.go:78 but the JSON path historically did not.
-//
-// We assert two properties:
-//
-//  1. A scanner-emitted finding whose Description embeds an obvious
-//     secret (an OpenAI-style sk- key) is redacted before serialization.
-//     The literal secret bytes MUST NOT appear anywhere in the marshaled
-//     JSON output (Title, Description, Location, Remediation are all
-//     attacker-influenceable depending on scanner).
-//  2. The redacted JSON still parses and the finding shape is preserved
-//     (severity, scanner, rule_id) — only the user-visible text fields
-//     changed.
-//
-// Use a synthetic ScanResult rather than running CodeGuard so the test
-// is hermetic and the secret value is precisely what we look for.
+// TestScanResultV7RedactsSecretsFromFindingText is the #797 regression:
+// detector-recognized substrings must disappear without replacing the whole
+// description/remediation/location fields that machine consumers need.
 func TestScanResultV7RedactsSecretsFromFindingText(t *testing.T) {
 	t.Parallel()
 	version.ResetForTesting()
 	version.SetBinaryVersion("0.0.0-test")
 
-	// A literal value the redaction layer recognises as an OpenAI key.
-	// Embed it in Description and Remediation — the two finding fields
-	// scanner.Finding fills with attacker-influenced source bytes (matched
-	// line, suggested fix). Title is intentionally NOT exercised because
-	// scan_v7.go keeps it raw to stay symmetric with the audit DB path
-	// (see comment in findingToV7); if a scanner ever puts secrets into
-	// Title, that scanner is the bug.
 	const secret = "sk-test1234567890abcdef1234567890abcdef1234567890ab"
 	r := &scanner.ScanResult{
 		Scanner:   "codeguard",
@@ -141,13 +118,19 @@ func TestScanResultV7RedactsSecretsFromFindingText(t *testing.T) {
 	if string(b) == "" {
 		t.Fatal("marshalScanResultV7 returned empty body")
 	}
-	// Property 1: literal secret bytes must not survive serialization.
 	if strings.Contains(string(b), secret) {
 		t.Fatalf("scan v7 JSON contains raw secret %q (must be redacted before persistence/output):\n%s", secret, string(b))
 	}
-	// Property 2: shape is preserved.
 	var top struct {
-		Findings []map[string]any `json:"findings"`
+		Target   string `json:"target"`
+		Findings []struct {
+			Severity    string `json:"severity"`
+			Scanner     string `json:"scanner"`
+			RuleID      string `json:"rule_id"`
+			Description string `json:"description"`
+			Location    string `json:"location"`
+			Remediation string `json:"remediation"`
+		} `json:"findings"`
 	}
 	if err := json.Unmarshal(b, &top); err != nil {
 		t.Fatalf("v7 JSON not parseable: %v", err)
@@ -155,16 +138,183 @@ func TestScanResultV7RedactsSecretsFromFindingText(t *testing.T) {
 	if len(top.Findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d", len(top.Findings))
 	}
-	if got, _ := top.Findings[0]["severity"].(string); got == "" {
+	if got := top.Findings[0].Severity; got == "" {
 		t.Fatal("severity round-trip lost: got empty")
 	} else if !strings.EqualFold(got, "high") {
 		t.Fatalf("severity round-trip wrong: got %q, want HIGH-equivalent", got)
 	}
-	if got, _ := top.Findings[0]["scanner"].(string); got != "codeguard" {
+	if got := top.Findings[0].Scanner; got != "codeguard" {
 		t.Fatalf("scanner round-trip lost: got %q", got)
 	}
-	if got, _ := top.Findings[0]["rule_id"].(string); got == "" {
+	if got := top.Findings[0].RuleID; got == "" {
 		t.Fatal("rule_id should be populated by EnsureRuleID")
+	}
+	if top.Target != "/tmp/leak.go" || top.Findings[0].Location != "/tmp/leak.go:42" {
+		t.Fatalf("safe path context was lost: target=%q location=%q", top.Target, top.Findings[0].Location)
+	}
+	if strings.Contains(string(b), `"file"`) {
+		t.Fatalf("v7 output added an undeclared field and broke strict consumers: %s", b)
+	}
+	if !strings.Contains(top.Findings[0].Description, "matched line: api_key = \"") ||
+		!strings.Contains(top.Findings[0].Description, "<redacted type=credentials.api_token") ||
+		!strings.HasSuffix(top.Findings[0].Description, "\"") {
+		t.Fatalf("description did not retain safe context around token: %q", top.Findings[0].Description)
+	}
+	if !strings.HasPrefix(top.Findings[0].Remediation, "rotate ") ||
+		!strings.HasSuffix(top.Findings[0].Remediation, " immediately") {
+		t.Fatalf("remediation did not retain safe context: %q", top.Findings[0].Remediation)
+	}
+}
+
+func TestScanResultV7SafeFieldsAndExplicitLineRemainExact(t *testing.T) {
+	line := 9
+	r := &scanner.ScanResult{
+		Scanner: "codeguard", Target: `C:\work\repo\main.go`, Timestamp: time.Now(),
+		Findings: []scanner.Finding{{
+			ID: "CG-SAFE", Severity: scanner.SeverityMedium, Title: "Unsafe command",
+			Description: "Command substitution is present", Location: `C:\work\repo\main.go:9`,
+			Remediation: "Use an argument vector", Scanner: "codeguard", LineNumber: &line,
+		}},
+	}
+	redactor, err := scanoutput.LoadRedactor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := marshalScanResultV7WithOptions(r, "test", scanResultV7Options{Redactor: redactor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got scanResultV7
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	finding := got.Findings[0]
+	if got.Target != r.Target || finding.Title != r.Findings[0].Title ||
+		finding.Description == nil || *finding.Description != r.Findings[0].Description ||
+		finding.Location == nil || *finding.Location != r.Findings[0].Location ||
+		finding.Remediation == nil || *finding.Remediation != r.Findings[0].Remediation ||
+		finding.LineNumber == nil || *finding.LineNumber != line {
+		t.Fatalf("safe v7 projection changed values: %+v", got)
+	}
+}
+
+func TestScanResultV7DefaultIgnoresLegacyRevealEnvironment(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
+	const secret = "sk-test1234567890abcdef1234567890abcdef1234567890ab"
+	r := &scanner.ScanResult{Scanner: "codeguard", Findings: []scanner.Finding{{
+		ID: "CG-SECRET", Severity: scanner.SeverityHigh, Scanner: "codeguard",
+		Description: "api_key=\"" + secret + "\"",
+	}}}
+	b, err := marshalScanResultV7(r, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), secret) || !strings.Contains(string(b), "redacted type=") {
+		t.Fatalf("legacy reveal environment bypassed scan projection: %s", b)
+	}
+}
+
+func TestScanResultV7ExplicitRawOptionIsLocalProjectionOnly(t *testing.T) {
+	const secret = "sk-test1234567890abcdef1234567890abcdef1234567890ab"
+	r := &scanner.ScanResult{Scanner: "codeguard", Target: "/tmp/raw.go", Findings: []scanner.Finding{{
+		ID: "CG-SECRET", Severity: scanner.SeverityHigh, Scanner: "codeguard",
+		Description: "value=" + secret, Location: "/tmp/raw.go:7",
+	}}}
+	b, err := marshalScanResultV7WithOptions(r, "test", scanResultV7Options{Raw: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), secret) || !strings.Contains(string(b), `"location": "/tmp/raw.go:7"`) ||
+		strings.Contains(string(b), `"file"`) {
+		t.Fatalf("explicit raw projection did not retain local values: %s", b)
+	}
+}
+
+func TestScanResultV7SynthesizesRuleIDBeforeRedaction(t *testing.T) {
+	const title = "Prompt injection: role override attempt"
+	r := &scanner.ScanResult{
+		Scanner: "clawshield-injection",
+		Findings: []scanner.Finding{{
+			ID:       "CS-INJ-role-override",
+			Severity: scanner.SeverityHigh,
+			Title:    title,
+			Scanner:  "clawshield-injection",
+		}},
+	}
+	want := scanner.SynthesizeRuleID("clawshield-injection", "", title, r.Findings[0].ID)
+
+	ruleID := func(t *testing.T, options scanResultV7Options) string {
+		t.Helper()
+		body, err := marshalScanResultV7WithOptions(r, "test", options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var output scanResultV7
+		if err := json.Unmarshal(body, &output); err != nil {
+			t.Fatal(err)
+		}
+		if len(output.Findings) != 1 || output.Findings[0].RuleID == nil {
+			t.Fatalf("missing rule identity in output: %s", body)
+		}
+		return *output.Findings[0].RuleID
+	}
+
+	redactorA, err := scanoutput.LoadRedactor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactorB, err := scanoutput.LoadRedactor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]string{
+		"raw":        ruleID(t, scanResultV7Options{Raw: true}),
+		"redacted-a": ruleID(t, scanResultV7Options{Redactor: redactorA}),
+		"redacted-b": ruleID(t, scanResultV7Options{Redactor: redactorB}),
+	} {
+		if got != want {
+			t.Errorf("%s rule_id = %q, want canonical synthesis %q", name, got, want)
+		}
+		if strings.Contains(got, "redacted") || strings.Contains(got, "hmac=") || strings.Contains(got, "key=") {
+			t.Errorf("%s rule_id contains projection material: %q", name, got)
+		}
+	}
+	if r.Findings[0].RuleID != "" {
+		t.Fatalf("rendering mutated input rule_id: %q", r.Findings[0].RuleID)
+	}
+}
+
+func TestScanNoRedactRequiresJSON(t *testing.T) {
+	oldJSON, oldRaw := scanOutputJSON, scanNoRedact
+	t.Cleanup(func() { scanOutputJSON, scanNoRedact = oldJSON, oldRaw })
+	scanOutputJSON, scanNoRedact = false, true
+	if err := runScanCode(nil, []string{"unused"}); err == nil || err.Error() != "--no-redact requires --json" {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
+func TestScanRedactorRequirementMatchesOutputBoundary(t *testing.T) {
+	oldJSON, oldRaw := scanOutputJSON, scanNoRedact
+	t.Cleanup(func() { scanOutputJSON, scanNoRedact = oldJSON, oldRaw })
+
+	for _, test := range []struct {
+		name     string
+		json     bool
+		raw      bool
+		persist  bool
+		required bool
+	}{
+		{name: "human output", required: false},
+		{name: "raw local JSON", json: true, raw: true, required: false},
+		{name: "protected JSON", json: true, required: true},
+		{name: "protected persistence", raw: true, persist: true, required: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			scanOutputJSON, scanNoRedact = test.json, test.raw
+			if got := scanNeedsRedactor(test.persist); got != test.required {
+				t.Fatalf("scanNeedsRedactor(%v) = %v, want %v", test.persist, got, test.required)
+			}
+		})
 	}
 }
 

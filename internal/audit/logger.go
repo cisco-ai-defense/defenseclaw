@@ -504,6 +504,7 @@ func isTrustExploitFinding(finding scanner.Finding) bool {
 	}
 	if hasFindingIDPrefix(finding.RuleID, "TRUST-") || hasFindingIDPrefix(finding.ID, "TRUST-") ||
 		hasFindingIDPrefix(finding.RuleID, "LP-INJ-") || hasFindingIDPrefix(finding.ID, "LP-INJ-") ||
+		hasFindingIDPrefix(finding.RuleID, "CS-INJ-") || hasFindingIDPrefix(finding.ID, "CS-INJ-") ||
 		hasFindingIDPrefix(finding.RuleID, "JUDGE-ADJ-INJECTION") || hasFindingIDPrefix(finding.ID, "JUDGE-ADJ-INJECTION") ||
 		isTrustExploitLabel(finding.Category) {
 		return true
@@ -522,7 +523,7 @@ func hasFindingIDPrefix(value, prefix string) bool {
 
 func isTrustExploitLabel(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
-	return value == "prompt-injection" || value == "trust-exploit"
+	return value == "injection" || value == "prompt-injection" || value == "trust-exploit"
 }
 
 func stableRedactedTrustTags(tags []string) []string {
