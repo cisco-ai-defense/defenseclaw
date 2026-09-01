@@ -156,6 +156,9 @@ type ScanResult struct {
 	Verdict    string        `json:"verdict,omitempty"`
 	ExitCode   int           `json:"exit_code,omitempty"`
 	ScanError  string        `json:"error,omitempty"`
+	// FindingLifecycle is populated by the canonical audit persistence path.
+	// It is process-local projection metadata, never part of scanner JSON.
+	FindingLifecycle *FindingLifecycleDelta `json:"-"`
 }
 
 // EffectiveTargetType returns TargetType when set, otherwise InferTargetType(Scanner).
