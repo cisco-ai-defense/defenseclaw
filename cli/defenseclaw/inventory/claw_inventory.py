@@ -40,12 +40,9 @@ from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.inventory.plugin_directories import (
+    PluginInstallClaims,
     discover_plugin_directories,
     read_amp_plugin_source,
-)
-from defenseclaw.inventory.plugin_identity import (
-    AmbiguousPluginIdentityError,
-    filesystem_identity_key,
 )
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
@@ -2723,37 +2720,39 @@ def _enumerate_plugins_filesystem(
 ) -> list[dict[str, Any]]:
     """One row per logical plugin under ``cfg.plugin_dirs(connector)``.
 
-    A plugin is treated as a directory containing one of the
-    documented manifest names (matches plugin_scanner._MANIFEST_CANDIDATES
-    after S2.3): package.json, manifest.json, plugin.json,
-    openclaw.plugin.json, .codex-plugin/plugin.json,
-    .claude-plugin/plugin.json. Codex cache registry buckets are expanded to
-    their exact manifest roots and logical names are deduplicated using Codex's
-    active-plugin metadata. ``connector`` scopes the walk for multi-connector
-    focus (defaults to active).
+    A plugin is normally a directory containing one of the documented
+    manifest names (matches plugin_scanner._MANIFEST_CANDIDATES after S2.3):
+    package.json, manifest.json, plugin.json, openclaw.plugin.json,
+    .codex-plugin/plugin.json, .claude-plugin/plugin.json. Authoritative
+    connector registries may also identify a manifestless installed bundle.
+    Codex and Claude cache containers are expanded to their exact plugin roots.
+    ``connector`` scopes the walk for multi-connector focus (defaults to
+    active).
     """
     rows: list[dict[str, Any]] = []
-    seen: dict[str, str] = {}
+    claimed = PluginInstallClaims()
     resolved_connector = connector or cfg.active_connector()
     for plugin_dir in cfg.plugin_dirs(connector):
         for discovered in discover_plugin_directories(plugin_dir, connector=resolved_connector):
             entry = discovered.id
-            entry_key = filesystem_identity_key(entry, plugin_dir)
             full = discovered.path
-            if entry_key in seen and os.path.realpath(seen[entry_key]) != os.path.realpath(full):
-                raise AmbiguousPluginIdentityError(
-                    f"ambiguous plugin identity {entry!r}: {seen[entry_key]}, {full}; "
-                    "remove or rename duplicate directories"
-                )
-            seen[entry_key] = full
+            if not claimed.add_directory(discovered, plugin_dir):
+                continue
             manifest = discovered.manifest or _detect_plugin_manifest(full)
+            installed = bool(manifest or discovered.cached)
             row: dict[str, Any] = {
                 "id": entry,
                 "name": discovered.name or entry,
                 "version": discovered.version,
                 "origin": discovered.origin or plugin_dir,
                 "enabled": discovered.enabled,
-                "status": ("loaded" if manifest and discovered.enabled else "disabled" if manifest else "no-manifest"),
+                "status": (
+                    "loaded"
+                    if installed and discovered.enabled
+                    else "disabled"
+                    if installed
+                    else "no-manifest"
+                ),
                 "path": full,
             }
             if manifest:
@@ -2764,6 +2763,12 @@ def _enumerate_plugins_filesystem(
                 row["registry"] = discovered.registry
             if discovered.cached:
                 row["cached"] = True
+            if discovered.scope:
+                row["scope"] = discovered.scope
+            if discovered.project_path:
+                row["project_path"] = discovered.project_path
+            if discovered.registry_source:
+                row["registry_source"] = discovered.registry_source
             rows.append(row)
     return rows
 

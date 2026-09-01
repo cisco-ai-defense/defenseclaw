@@ -2473,6 +2473,128 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         ids = [s["id"] for s in inv["skills"]]
         self.assertIn("weather", ids)
 
+    def test_claudecode_inventory_reads_v2_plugin_registry(self):
+        cfg = _make_cfg_for_connector(self.tmp, "claudecode")
+        plugin_root = os.path.join(self.tmp, ".claude", "plugins")
+        compound = os.path.join(
+            plugin_root,
+            "cache",
+            "compound-market",
+            "compound-engineering",
+            "1.2.3",
+        )
+        ponytail = os.path.join(
+            plugin_root,
+            "cache",
+            "ponytail-market",
+            "ponytail",
+            "2.0.0",
+        )
+        os.makedirs(os.path.join(compound, ".claude-plugin"), exist_ok=True)
+        os.makedirs(ponytail, exist_ok=True)
+        with open(
+            os.path.join(compound, ".claude-plugin", "plugin.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "name": "compound-engineering",
+                    "displayName": "Compound Engineering",
+                    "version": "1.2.3",
+                },
+                handle,
+            )
+        with open(
+            os.path.join(plugin_root, "installed_plugins.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "compound-engineering@compound-market": [
+                            {
+                                "scope": "user",
+                                "installPath": compound,
+                                "version": "1.2.3",
+                            }
+                        ],
+                        "ponytail@ponytail-market": [
+                            {
+                                "scope": "user",
+                                "installPath": ponytail,
+                                "version": "2.0.0",
+                            }
+                        ],
+                    },
+                },
+                handle,
+            )
+
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True, categories={"plugins"})
+
+        plugins = {row["id"]: row for row in inv["plugins"]}
+        self.assertEqual(set(plugins), {"compound-engineering", "ponytail"})
+        self.assertEqual(plugins["compound-engineering"]["path"], compound)
+        self.assertEqual(
+            plugins["compound-engineering"]["manifest"],
+            ".claude-plugin/plugin.json",
+        )
+        self.assertEqual(plugins["compound-engineering"]["status"], "loaded")
+        self.assertEqual(plugins["ponytail"]["path"], ponytail)
+        self.assertEqual(plugins["ponytail"]["status"], "loaded")
+        self.assertNotIn("manifest", plugins["ponytail"])
+        self.assertTrue(all(row["cached"] for row in plugins.values()))
+
+    def test_claudecode_inventory_preserves_scope_specific_installations(self):
+        cfg = _make_cfg_for_connector(self.tmp, "claudecode")
+        plugin_root = os.path.join(self.tmp, ".claude", "plugins")
+        user = os.path.join(plugin_root, "cache", "market", "shared", "1.0.0")
+        project = os.path.join(plugin_root, "cache", "market", "shared", "2.0.0")
+        os.makedirs(user)
+        os.makedirs(project)
+        project_root = os.path.join(self.tmp, "workspace", "alpha")
+        with open(
+            os.path.join(plugin_root, "installed_plugins.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "shared@market": [
+                            {"scope": "user", "installPath": user},
+                            {
+                                "scope": "project",
+                                "projectPath": project_root,
+                                "installPath": project,
+                            },
+                        ]
+                    },
+                },
+                handle,
+            )
+
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True, categories={"plugins"})
+
+        self.assertEqual(len(inv["plugins"]), 2)
+        self.assertEqual(
+            {(row["scope"], row.get("project_path", ""), row["path"]) for row in inv["plugins"]},
+            {
+                ("user", "", user),
+                ("project", project_root, project),
+            },
+        )
+
     def test_zeptoclaw_walks_disk(self):
         cfg = _make_cfg_for_connector(self.tmp, "zeptoclaw")
         skill_root = os.path.join(self.tmp, ".zeptoclaw", "skills")
