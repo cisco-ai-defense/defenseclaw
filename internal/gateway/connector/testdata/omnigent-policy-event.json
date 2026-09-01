@@ -12,8 +12,20 @@
     "actor": {
       "client_id": "client-123",
       "run_as": "alice@example.test"
-    }
+    },
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 5,
+      "total_tokens": 15,
+      "total_cost_usd": 0.001
+    },
+    "user_daily_cost": {},
+    "harness": null,
+    "labels": {},
+    "subtree_usage": {}
   },
+  "session_state": {},
+  "llm_client": null,
   "request_data": {
     "name": "shell",
     "arguments": {

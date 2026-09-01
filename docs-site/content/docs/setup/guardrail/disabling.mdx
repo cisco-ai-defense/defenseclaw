@@ -31,15 +31,15 @@ defenseclaw guardrail enable  --connector codex
 | Claude Code | `~/.claude/settings.json` (hooks + `OTEL_*` env) | DefenseClaw hook entries only |
 | Codex | `~/.codex/config.toml` (hooks, otel, notify) | DefenseClaw blocks only |
 | Cursor | `~/.cursor/hooks.json` | DefenseClaw hook entries only |
-| Windsurf | `~/.codeium/windsurf/hooks.json` | DefenseClaw hook entries only |
-| Gemini CLI | `~/.gemini/settings.json` | DefenseClaw hook entries + native OTLP block |
+| Devin | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` | DefenseClaw hook groups only; foreign JSONC content is preserved |
+| Gemini CLI (retired cleanup only) | `~/.gemini/settings.json` | Use `defenseclaw setup remove geminicli --yes` to remove receipt-bound DefenseClaw hook and telemetry entries. |
 | GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` or pinned `<workspace>/.github/hooks/defenseclaw.json` | DefenseClaw hook entries |
 | OpenHands | `~/.openhands/hooks.json` or pinned `<workspace>/.openhands/hooks.json` | DefenseClaw hook entries |
 | Antigravity | `~/.gemini/config/hooks.json` | DefenseClaw `defenseclaw-antigravity-*` entries |
 | Hermes | `~/.hermes/config.yaml` | DefenseClaw hook entries |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` | Managed bridge plugin (file removed) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` or native Windows equivalent | Unchanged managed system plugin is removed; a prior file is restored |
-| OmniGent | `$OMNIGENT_CONFIG_HOME/config.yaml` when set (otherwise `~/.omnigent/config.yaml`), managed policy module, Python `.pth` file | DefenseClaw policy entries; unchanged managed files are restored/removed |
+| OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; managed policy module; Python `.pth` file | DefenseClaw policy entries; unchanged managed files are restored/removed |
 | OpenClaw | `~/.openclaw/openclaw.json` | Plugin allow/load entries |
 | ZeptoClaw | `~/.zeptoclaw/config.json` (api_base, safety) | DefenseClaw rewrites |
 

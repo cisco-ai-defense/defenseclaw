@@ -861,16 +861,23 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 		d.removePIDFileIfStarted(info)
 		return nil
 	}
-	if err := sendKillSignal(proc); err != nil &&
-		!errors.Is(err, os.ErrProcessDone) &&
-		d.verifyProcessForControl(info) {
-		return fmt.Errorf("daemon: force kill started process %d: %w", pid, err)
+	killErr := sendKillSignal(proc)
+	// TerminateProcess is asynchronous. On Windows the first accepted
+	// termination can still be draining when the redundant force-kill returns
+	// ERROR_ACCESS_DENIED. The retained original handle, not that second return
+	// value, is authoritative for whether this exact child has exited.
+	if waitForProcessExit(proc, pid, forcedStopWait) {
+		d.removePIDFileIfStarted(info)
+		return nil
 	}
-	if !waitForProcessExit(proc, pid, forcedStopWait) && d.verifyProcessForControl(info) {
-		return ErrStopTimeout
+	if !d.verifyProcessForControl(info) {
+		d.removePIDFileIfStarted(info)
+		return nil
 	}
-	d.removePIDFileIfStarted(info)
-	return nil
+	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		return fmt.Errorf("daemon: force kill started process %d: %w", pid, killErr)
+	}
+	return ErrStopTimeout
 }
 
 func (d *Daemon) removePIDFileIfStarted(started pidInfo) {

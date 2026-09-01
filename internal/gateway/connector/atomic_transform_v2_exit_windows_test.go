@@ -2954,6 +2954,20 @@ func TestAtomicTransformV2RejectsSUBSTVolumeLocator(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = exec.Command("subst.exe", drive, "/D").CombinedOutput() })
 	aliasPath := filepath.Join(drive+`\`, "config", "settings.json")
+	bound, err := bindAtomicTransformDirectory(realConfigDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bound.Close()
+	err = atomicTransformValidateStableVolumeLocatorWindows(
+		aliasPath, bound,
+		func(*uint16, *uint16, uint32) (uint32, error) {
+			return 0, windows.ERROR_ACCESS_DENIED
+		},
+	)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "mount manager") {
+		t.Fatalf("access-denied SUBST locator error = %v, want Mount Manager rejection", err)
+	}
 	err = atomicTransformFileWithStateDir(
 		aliasPath, filepath.Join(root, "protected-state"), 0o600,
 		func(_ []byte, _ bool) (atomicTransformResult, error) {
@@ -2968,6 +2982,213 @@ func TestAtomicTransformV2RejectsSUBSTVolumeLocator(t *testing.T) {
 	data, readErr := os.ReadFile(realPath)
 	if readErr != nil || !bytes.Equal(data, initial) {
 		t.Fatalf("SUBST rejection mutated physical config: %q, %v", data, readErr)
+	}
+}
+
+func TestAtomicTransformV2RejectsRawDOSDeviceVolumeLocator(t *testing.T) {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "settings.json")
+	initial := []byte(`{"old":true}`)
+	if err := os.WriteFile(realPath, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	physicalDrive := filepath.VolumeName(realPath)
+	physicalPointer, err := windows.UTF16PtrFromString(physicalDrive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceBuffer := make([]uint16, 32768)
+	length, err := windows.QueryDosDevice(
+		physicalPointer, &deviceBuffer[0], uint32(len(deviceBuffer)),
+	)
+	if err != nil {
+		t.Skipf("physical DOS-device lookup unavailable: %v", err)
+	}
+	physicalTarget := windows.UTF16ToString(deviceBuffer[:length])
+	if physicalTarget == "" || strings.HasPrefix(strings.ToLower(physicalTarget), `\??\`) {
+		t.Skipf("physical drive has unsupported DOS-device target %q", physicalTarget)
+	}
+	drive := ""
+	for letter := 'Z'; letter >= 'P'; letter-- {
+		candidate := fmt.Sprintf("%c:", letter)
+		pointer, pointerErr := windows.UTF16PtrFromString(candidate)
+		if pointerErr != nil {
+			t.Fatal(pointerErr)
+		}
+		buffer := make([]uint16, 256)
+		if _, queryErr := windows.QueryDosDevice(pointer, &buffer[0], uint32(len(buffer))); queryErr != nil {
+			drive = candidate
+			break
+		}
+	}
+	if drive == "" {
+		t.Skip("no free drive letter for raw DOS-device validation")
+	}
+	drivePointer, err := windows.UTF16PtrFromString(drive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPointer, err := windows.UTF16PtrFromString(physicalTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const defineFlags = windows.DDD_RAW_TARGET_PATH | windows.DDD_NO_BROADCAST_SYSTEM
+	if err := windows.DefineDosDevice(defineFlags, drivePointer, targetPointer); err != nil {
+		t.Skipf("raw DOS-device mapping unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = windows.DefineDosDevice(
+			defineFlags|windows.DDD_REMOVE_DEFINITION|windows.DDD_EXACT_MATCH_ON_REMOVE,
+			drivePointer, targetPointer,
+		)
+	})
+	aliasPath := drive + strings.TrimPrefix(realPath, physicalDrive)
+	aliasInfo, err := os.Stat(aliasPath)
+	if err != nil {
+		t.Skipf("raw DOS-device alias is not a usable filesystem locator: %v", err)
+	}
+	realInfo, err := os.Stat(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(aliasInfo, realInfo) {
+		t.Fatal("raw DOS-device alias did not resolve to the intended physical file")
+	}
+	err = atomicTransformFileWithStateDir(
+		aliasPath, filepath.Join(root, "protected-state-raw-device"), 0o600,
+		func(_ []byte, _ bool) (atomicTransformResult, error) {
+			return atomicTransformResult{Data: []byte(`{"new":true}`)}, nil
+		},
+	)
+	if err == nil || (!strings.Contains(strings.ToLower(err.Error()), "dos-device") &&
+		!strings.Contains(strings.ToLower(err.Error()), "mount manager")) {
+		t.Fatalf("raw DOS-device locator error = %v, want stable-volume rejection", err)
+	}
+	data, readErr := os.ReadFile(realPath)
+	if readErr != nil || !bytes.Equal(data, initial) {
+		t.Fatalf("raw DOS-device rejection mutated physical config: %q, %v", data, readErr)
+	}
+}
+
+func TestAtomicTransformStableVolumeLocatorUsesMountManagerWhenQueryDosDeviceIsDenied(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "settings.json")
+	if err := os.WriteFile(path, []byte(`{"old":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := bindAtomicTransformDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bound.Close()
+	for _, locator := range []string{path, `\\?\` + path} {
+		calls := 0
+		err := atomicTransformValidateStableVolumeLocatorWindows(
+			locator, bound,
+			func(*uint16, *uint16, uint32) (uint32, error) {
+				calls++
+				return 0, windows.ERROR_ACCESS_DENIED
+			},
+		)
+		if err != nil {
+			t.Fatalf("validate registered locator %q after QueryDosDevice denial: %v", locator, err)
+		}
+		if calls != 1 {
+			t.Fatalf("QueryDosDevice calls for %q = %d, want 1", locator, calls)
+		}
+	}
+}
+
+func TestAtomicTransformStableVolumeLocatorRejectsOtherQueryDosDeviceErrors(t *testing.T) {
+	root := t.TempDir()
+	bound, err := bindAtomicTransformDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bound.Close()
+	err = atomicTransformValidateStableVolumeLocatorWindows(
+		filepath.Join(root, "settings.json"), bound,
+		func(*uint16, *uint16, uint32) (uint32, error) {
+			return 0, windows.ERROR_INVALID_FUNCTION
+		},
+	)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "query windows dos-device mapping") {
+		t.Fatalf("non-access-denied QueryDosDevice error = %v, want fail-closed query error", err)
+	}
+}
+
+func TestAtomicTransformWindowsMountProofRejectsAliasSpellings(t *testing.T) {
+	tests := []struct {
+		name       string
+		mount      string
+		locator    string
+		registered []string
+		want       bool
+	}{
+		{
+			name:  "ordinary drive",
+			mount: `C:\`, locator: `C:\Users\fixture\settings.json`,
+			registered: []string{`C:\`}, want: true,
+		},
+		{
+			name:  "extended ordinary drive",
+			mount: `\\?\C:\`, locator: `\\?\C:\Users\fixture\settings.json`,
+			registered: []string{`C:\`}, want: true,
+		},
+		{
+			name:  "case-insensitive components",
+			mount: `C:\USERS\Fixture\`, locator: `c:\users\fixture\settings.json`,
+			registered: []string{`c:\users\fixture\`}, want: true,
+		},
+		{
+			name:  "nested registered mount",
+			mount: `C:\mnt\`, locator: `C:\mnt\profile\settings.json`,
+			registered: []string{`C:\`, `C:\mnt\`}, want: true,
+		},
+		{
+			name:  "component prefix collision",
+			mount: `C:\mnt\`, locator: `C:\mnt-other\settings.json`,
+			registered: []string{`C:\mnt\`}, want: false,
+		},
+		{
+			name:  "alias spelling retained",
+			mount: `X:\`, locator: `X:\profile\settings.json`,
+			registered: []string{`C:\`}, want: false,
+		},
+		{
+			name:  "alias followed to physical mount",
+			mount: `C:\`, locator: `X:\profile\settings.json`,
+			registered: []string{`C:\`}, want: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := atomicTransformWindowsMountContainsLocator(test.mount, test.locator) &&
+				atomicTransformWindowsMountIsRegistered(test.mount, test.registered)
+			if got != test.want {
+				t.Fatalf("Mount Manager proof = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAtomicTransformParseWindowsMultiStringRejectsMalformedResults(t *testing.T) {
+	valid := []uint16{'C', ':', '\\', 0, 'D', ':', '\\', 0, 0}
+	paths, err := atomicTransformParseWindowsMultiString(valid)
+	if err != nil || !reflect.DeepEqual(paths, []string{`C:\`, `D:\`}) {
+		t.Fatalf("valid Mount Manager MULTI_SZ = %q, %v", paths, err)
+	}
+	for name, value := range map[string][]uint16{
+		"empty":              {0, 0},
+		"missing terminator": {'C', ':', '\\', 0},
+		"empty entry":        {'C', ':', '\\', 0, 0, 0},
+		"relative entry":     {'r', 'e', 'l', 0, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := atomicTransformParseWindowsMultiString(value); err == nil {
+				t.Fatalf("malformed Mount Manager MULTI_SZ %v unexpectedly parsed", value)
+			}
+		})
 	}
 }
 

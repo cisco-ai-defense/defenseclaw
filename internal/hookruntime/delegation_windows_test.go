@@ -23,6 +23,8 @@ import (
 
 const delegationHelperEnvironment = "DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER"
 
+const delegatedAdmissionHelperEnvironment = "DEFENSECLAW_HOOK_DELEGATED_ADMISSION_TEST_ROOT"
+
 type delegationFixture struct {
 	paths      Paths
 	source     string
@@ -64,6 +66,213 @@ func TestHookDelegationHelper(t *testing.T) {
 	}
 	fmt.Fprint(os.Stderr, "delegated-stderr")
 	os.Exit(37)
+}
+
+func TestTrustedDelegatedAdmissionHelper(t *testing.T) {
+	root := os.Getenv(delegatedAdmissionHelperEnvironment)
+	if root == "" {
+		return
+	}
+	paths := Paths{
+		Root:     root,
+		Launcher: filepath.Join(root, LauncherName),
+		State:    filepath.Join(root, StateName),
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(95)
+	}
+	if samePath(executable, paths.Launcher) {
+		os.Exit(delegateAt(
+			paths,
+			executable,
+			[]string{"-test.run=^TestTrustedDelegatedAdmissionHelper$"},
+			os.Stdin,
+			os.Stdout,
+			os.Stderr,
+		))
+	}
+	marker, _ := lookupDelegationGeneration(os.Environ())
+	state, recognized, admissionErr := readTrustedDelegatedForExecutableAt(
+		paths,
+		executable,
+		marker,
+		liveCanonicalDelegatingParent,
+	)
+	report := struct {
+		Recognized    bool   `json:"recognized"`
+		Active        bool   `json:"active"`
+		TransactionID string `json:"transaction_id"`
+		Error         string `json:"error,omitempty"`
+	}{
+		Recognized:    recognized,
+		Active:        state.Active(),
+		TransactionID: state.TransactionID,
+	}
+	if admissionErr != nil {
+		report.Error = admissionErr.Error()
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(94)
+	}
+	os.Exit(0)
+}
+
+func TestDelegatedChildUsesExactParentVerifiedGenerationWithoutSecondFullImageRead(t *testing.T) {
+	paths := testRuntimePaths(t)
+	launcherSource := copyDelegationTestExecutableAs(t, HookLauncherName)
+	hook := copyDelegationTestExecutable(t)
+	if err := publishAt(
+		paths,
+		launcherSource,
+		hook,
+		writeRuntimeGateway(t, "MZ-delegated-admission-gateway"),
+		filepath.Join(t.TempDir(), "data"),
+		stableRuntimeTransactionOne,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(paths.Launcher, "-test.run=^TestTrustedDelegatedAdmissionHelper$")
+	cmd.Env = append(
+		os.Environ(),
+		delegatedAdmissionHelperEnvironment+"="+paths.Root,
+		delegationGenerationEnvName+"=spoofed-project-value",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run exact stable-parent delegation: %v: %s", err, output)
+	}
+	var report struct {
+		Recognized    bool   `json:"recognized"`
+		Active        bool   `json:"active"`
+		TransactionID string `json:"transaction_id"`
+		Error         string `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(output), &report); err != nil {
+		t.Fatalf("decode delegated admission report %q: %v", output, err)
+	}
+	if !report.Recognized || !report.Active || report.Error != "" ||
+		report.TransactionID != stableRuntimeTransactionOne {
+		t.Fatalf("delegated admission report = %+v", report)
+	}
+}
+
+func TestDelegatedAdmissionFailsClosedForSpoofedParentAndGenerationRotation(t *testing.T) {
+	fixture := newDelegationFixture(t)
+	state, _, err := readTrustedAt(fixture.paths, fixture.paths.Launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := delegationGenerationPrefix + "1:" + state.TransactionID + ":" + state.HookSHA256
+
+	t.Run("direct spoofed marker has no parent authority", func(t *testing.T) {
+		got, recognized, err := readTrustedDelegatedForExecutableAt(
+			fixture.paths,
+			fixture.hook,
+			marker,
+			func(string, windows.Handle) (bool, error) { return false, nil },
+		)
+		if err != nil || recognized || got.Active() {
+			t.Fatalf("spoofed direct admission = %+v, recognized=%t, err=%v", got, recognized, err)
+		}
+	})
+
+	t.Run("live wrong parent has no launcher authority", func(t *testing.T) {
+		proof, proofErr := inheritableCurrentProcessProof()
+		if proofErr != nil {
+			t.Fatal(proofErr)
+		}
+		defer windows.CloseHandle(proof)
+		trusted, err := liveCanonicalDelegatingParent(fixture.paths.Launcher, proof)
+		if err == nil && trusted {
+			t.Fatal("non-launcher test parent authenticated as the protected stable launcher")
+		}
+	})
+
+	t.Run("malformed parent marker", func(t *testing.T) {
+		_, recognized, err := readTrustedDelegatedForExecutableAt(
+			fixture.paths,
+			fixture.hook,
+			delegationGenerationPrefix+"1:malformed:"+strings.Repeat("a", 64),
+			func(string, windows.Handle) (bool, error) { return true, nil },
+		)
+		if !recognized || err == nil || !strings.Contains(err.Error(), "malformed") {
+			t.Fatalf("malformed marker recognized=%t, err=%v", recognized, err)
+		}
+	})
+
+	t.Run("digest mismatch", func(t *testing.T) {
+		wrong := delegationGenerationPrefix + "1:" + state.TransactionID + ":" + strings.Repeat("c", 64)
+		_, recognized, err := readTrustedDelegatedForExecutableAt(
+			fixture.paths,
+			fixture.hook,
+			wrong,
+			func(string, windows.Handle) (bool, error) { return true, nil },
+		)
+		if !recognized || err == nil || !strings.Contains(err.Error(), "no longer matches") {
+			t.Fatalf("digest mismatch recognized=%t, err=%v", recognized, err)
+		}
+	})
+
+	t.Run("target path mismatch", func(t *testing.T) {
+		_, recognized, err := readTrustedDelegatedForExecutableAt(
+			fixture.paths,
+			filepath.Join(t.TempDir(), LauncherName),
+			marker,
+			func(string, windows.Handle) (bool, error) { return true, nil },
+		)
+		if !recognized || err == nil || !strings.Contains(err.Error(), "no longer matches") {
+			t.Fatalf("target mismatch recognized=%t, err=%v", recognized, err)
+		}
+	})
+
+	t.Run("protected generation rotates after parent start", func(t *testing.T) {
+		rotated := state
+		rotated.TransactionID = stableRuntimeTransactionTwo
+		if err := writeState(fixture.paths, rotated); err != nil {
+			t.Fatal(err)
+		}
+		_, recognized, err := readTrustedDelegatedForExecutableAt(
+			fixture.paths,
+			fixture.hook,
+			marker,
+			func(string, windows.Handle) (bool, error) { return true, nil },
+		)
+		if !recognized || err == nil || !strings.Contains(err.Error(), "no longer matches") {
+			t.Fatalf("rotated generation recognized=%t, err=%v", recognized, err)
+		}
+	})
+}
+
+func TestPreparedDelegatedGenerationRefreshRequiresExactProtectedState(t *testing.T) {
+	fixture := newDelegationFixture(t)
+	prepared, recognized, err := readTrustedForExecutableAt(fixture.paths, fixture.hook)
+	if err != nil || !recognized || !prepared.Active() {
+		t.Fatalf("initial full-hook admission = %+v, recognized=%t, err=%v", prepared, recognized, err)
+	}
+	refreshed, err := revalidatePreparedGenerationForExecutableAt(
+		fixture.paths,
+		fixture.hook,
+		prepared,
+	)
+	if err != nil || refreshed != prepared {
+		t.Fatalf("unchanged prepared generation refresh = %+v, err=%v", refreshed, err)
+	}
+
+	rotated := prepared
+	rotated.TransactionID = stableRuntimeTransactionTwo
+	if err := writeState(fixture.paths, rotated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := revalidatePreparedGenerationForExecutableAt(
+		fixture.paths,
+		fixture.hook,
+		prepared,
+	); err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("rotated protected state refresh error = %v", err)
+	}
 }
 
 func TestActiveDelegationPreservesArgumentsCWDStdioEnvironmentAndExit(t *testing.T) {
@@ -524,12 +733,16 @@ func newDelegationFixture(t *testing.T) delegationFixture {
 }
 
 func copyDelegationTestExecutable(t *testing.T) string {
+	return copyDelegationTestExecutableAs(t, LauncherName)
+}
+
+func copyDelegationTestExecutableAs(t *testing.T, name string) string {
 	t.Helper()
 	source, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(t.TempDir(), LauncherName)
+	target := filepath.Join(t.TempDir(), name)
 	input, err := os.Open(source)
 	if err != nil {
 		t.Fatal(err)

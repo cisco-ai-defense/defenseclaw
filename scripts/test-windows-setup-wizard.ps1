@@ -1,4 +1,4 @@
-﻿# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
 <#
@@ -11,8 +11,9 @@
     without entering setup. -ActivateInstall is intentionally restricted to a
     GitHub-hosted Windows runner and a state directory below RUNNER_TEMP or the
     explicitly approved DC_WINDOWS_NATIVE_BASE_ROOT. In that mode the same real
-    controls select the requested values, activate Install, wait for the
-    completion page, and activate Finish.
+    controls select the requested values for a fresh install, or verify the
+    repair-only surface for an existing install, then wait for the completion
+    page and activate Finish.
 #>
 
 [CmdletBinding()]
@@ -22,10 +23,12 @@ param(
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-wizard-smoke-$PID"),
     [ValidateRange(1, 60)]
     [int]$TimeoutSeconds = 15,
-    [ValidateSet('none', 'codex', 'claudecode', 'amp')]
+    [ValidateSet('none', 'codex', 'claudecode', 'amp', 'antigravity', 'copilot', 'cursor', 'hermes', 'devin', 'omnigent', 'opencode')]
     [string]$Connector = 'claudecode',
     [ValidateSet('observe', 'action')]
     [string]$Mode = 'observe',
+    [ValidateSet('install', 'repair')]
+    [string]$ExpectedAction = 'install',
     [switch]$StartGateway,
     [switch]$ActivateInstall,
     [switch]$InteropSelfTestOnly,
@@ -118,6 +121,10 @@ namespace DefenseClaw
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr GetDlgItem(IntPtr dialog, int controlId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr window);
 
         [DllImport(
             "user32.dll",
@@ -265,6 +272,26 @@ function Set-AndAssertComboSelection([IntPtr]$Control, [int]$Index, [string]$Lab
     }
 }
 
+function Get-BoundedComboItemText([IntPtr]$Control, [int]$Index, [string]$Label) {
+    $length = Invoke-BoundedWindowMessage -Window $Control -Message 0x0149 `
+        -WParam ([UIntPtr]$Index) # CB_GETLBTEXTLEN
+    if ($length -gt 32767) {
+        throw "$Label item $Index returned an invalid text length $length."
+    }
+    $characters = [int]$length + 1
+    $buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal($characters * 2)
+    try {
+        $copied = Invoke-BoundedWindowMessage -Window $Control -Message 0x0148 `
+            -WParam ([UIntPtr]$Index) -LParam $buffer # CB_GETLBTEXT
+        if ($copied -ne $length) {
+            throw "$Label item $Index copied $copied characters; expected $length."
+        }
+        return [Runtime.InteropServices.Marshal]::PtrToStringUni($buffer)
+    } finally {
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer)
+    }
+}
+
 function Set-AndAssertCheckState([IntPtr]$Control, [bool]$Checked) {
     $expected = if ($Checked) { 1 } else { 0 }
     $null = Invoke-BoundedWindowMessage -Window $Control -Message 0x00F1 -WParam ([UIntPtr]$expected)
@@ -364,7 +391,35 @@ function Get-WizardObservation(
     }
 }
 
-$connectorIndices = @{ none = 0; codex = 1; claudecode = 2; amp = 3 }
+$connectorIndices = @{
+    none = 0
+    codex = 1
+    claudecode = 2
+    amp = 3
+    antigravity = 4
+    copilot = 5
+    cursor = 6
+    hermes = 7
+    devin = 8
+    omnigent = 9
+    opencode = 10
+}
+$connectorLabels = @(
+    'Configure later',
+    'Codex CLI',
+    'Claude Code',
+    'Amp',
+    'Google Antigravity',
+    'GitHub Copilot CLI',
+    'Cursor Agent',
+    'Hermes Agent',
+    'Devin CLI',
+    'OmniGent (native degraded)',
+    'OpenCode'
+)
+if ($connectorLabels.Count -ne $connectorIndices.Count) {
+    throw 'Wizard connector label and index contracts have different lengths.'
+}
 $modeIndices = @{ observe = 0; action = 1 }
 $process = $null
 $finished = $false
@@ -390,6 +445,7 @@ $observedWatchdogPID = Join-Path $observedDataRoot 'watchdog.pid'
 $observedARPKey = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
 [IO.File]::WriteAllText($wizardTracePath, '', [Text.UTF8Encoding]::new($false))
 Write-WizardTrace 'driver-start' ([ordered]@{
+    expected_action = $ExpectedAction
     connector      = $Connector
     mode           = $Mode
     start_gateway  = $StartGateway.IsPresent
@@ -452,19 +508,48 @@ try {
     $headingControl = Get-WizardControl $window 1011 'heading'
 
     $control = [Diagnostics.Stopwatch]::StartNew()
-    foreach ($index in 0..3) {
-        Set-AndAssertComboSelection $connectorControl $index 'Connector'
+    $initialHeading = Get-BoundedWindowText $headingControl
+    $initialPrimary = Get-BoundedWindowText $primaryControl
+    if ($ExpectedAction -eq 'repair') {
+        if ($initialHeading -ne 'Repair DefenseClaw' -or $initialPrimary -ne 'Repair') {
+            throw "Existing-install wizard exposed heading '$initialHeading' and primary action '$initialPrimary'; expected the repair-only surface."
+        }
+        foreach ($entry in @(
+            @{ Window = $connectorControl; Label = 'connector' },
+            @{ Window = $modeControl; Label = 'mode' },
+            @{ Window = $startControl; Label = 'start-gateway' }
+        )) {
+            if ([DefenseClaw.SetupWizardSmokeNativeMethods]::IsWindowVisible($entry.Window)) {
+                throw "Existing-install repair exposed the $($entry.Label) selector."
+            }
+        }
+    } else {
+        if ($initialHeading -ne 'Install DefenseClaw' -or $initialPrimary -ne 'Install') {
+            throw "Fresh-install wizard exposed heading '$initialHeading' and primary action '$initialPrimary'; expected the install selector."
+        }
+        foreach ($index in 0..($connectorIndices.Count - 1)) {
+            Set-AndAssertComboSelection $connectorControl $index 'Connector'
+            $observedLabel = Get-BoundedComboItemText $connectorControl $index 'Connector'
+            if (-not [string]::Equals(
+                $observedLabel,
+                $connectorLabels[$index],
+                [StringComparison]::Ordinal
+            )) {
+                throw "Connector item $index was '$observedLabel'; expected '$($connectorLabels[$index])'."
+            }
+        }
+        foreach ($index in 0..1) {
+            Set-AndAssertComboSelection $modeControl $index 'Mode'
+        }
+        Set-AndAssertCheckState $startControl $false
+        Set-AndAssertCheckState $startControl $true
+        Set-AndAssertComboSelection $connectorControl $connectorIndices[$Connector] 'Connector'
+        Set-AndAssertComboSelection $modeControl $modeIndices[$Mode] 'Mode'
+        Set-AndAssertCheckState $startControl $StartGateway.IsPresent
     }
-    foreach ($index in 0..1) {
-        Set-AndAssertComboSelection $modeControl $index 'Mode'
-    }
-    Set-AndAssertCheckState $startControl $false
-    Set-AndAssertCheckState $startControl $true
-    Set-AndAssertComboSelection $connectorControl $connectorIndices[$Connector] 'Connector'
-    Set-AndAssertComboSelection $modeControl $modeIndices[$Mode] 'Mode'
-    Set-AndAssertCheckState $startControl $StartGateway.IsPresent
     $control.Stop()
     Write-WizardTrace 'controls-selected' ([ordered]@{
+        expected_action = $ExpectedAction
         connector_index = $connectorIndices[$Connector]
         mode_index      = $modeIndices[$Mode]
         start_gateway   = $StartGateway.IsPresent
@@ -473,8 +558,8 @@ try {
     $completion = $null
     if ($ActivateInstall) {
         $install = [Diagnostics.Stopwatch]::StartNew()
-        Send-WizardCommand $window 1 'Install'
-        Write-WizardTrace 'install-posted'
+        Send-WizardCommand $window 1 $ExpectedAction
+        Write-WizardTrace "$ExpectedAction-posted"
         $nextTraceSeconds = 0
         $lastObservation = $null
         while ($install.Elapsed.TotalSeconds -lt $InstallTimeoutSeconds) {
@@ -511,8 +596,19 @@ try {
             heading = $heading
             install_ms = [Math]::Round($install.Elapsed.TotalMilliseconds, 1)
         })
-        if ($heading -ne 'DefenseClaw is installed') {
+        $expectedCompletionHeading = if ($ExpectedAction -eq 'repair') {
+            'DefenseClaw was repaired'
+        } else {
+            'DefenseClaw is installed'
+        }
+        if ($heading -ne $expectedCompletionHeading) {
             throw "Setup wizard completion heading was '$heading': $description"
+        }
+        if ($ExpectedAction -eq 'repair' -and
+            ($description -notmatch 'connector roster' -or
+             $description -notmatch 'enforcement mode' -or
+             $description -notmatch 'audit history')) {
+            throw "Setup wizard repair completion did not explain preserved security state: $description"
         }
         Send-WizardCommand $window 1 'Finish'
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
@@ -520,7 +616,7 @@ try {
         }
         $finished = $true
         if ($process.ExitCode -ne 0) {
-            throw "Setup wizard exit code was $($process.ExitCode); expected 0 after install."
+            throw "Setup wizard exit code was $($process.ExitCode); expected 0 after $ExpectedAction."
         }
         $completion = [ordered]@{
             heading     = $heading
@@ -543,7 +639,7 @@ try {
     [ordered]@{
         setup_path       = $setup
         process_id       = $process.Id
-        action           = if ($ActivateInstall) { 'install' } else { 'cancel-only' }
+        action           = if ($ActivateInstall) { $ExpectedAction } else { "cancel-only-$ExpectedAction" }
         connector        = $Connector
         mode             = $Mode
         start_gateway    = $StartGateway.IsPresent

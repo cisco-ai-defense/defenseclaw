@@ -99,10 +99,11 @@ def _preflight(
 
 
 def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
+    source_release = source_release_identity.validate_source_tree(repo)["source_release"]
     return {
         "schema_version": 2,
         "checkout_root": str(repo.resolve()),
-        "source_release": "0.8.6",
+        "source_release": source_release,
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
         "gateway_sha256": hashlib.sha256(gateway.read_bytes()).hexdigest(),
@@ -112,20 +113,20 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
 def test_reviewed_source_identity_binds_every_canonical_version_source() -> None:
     identity = source_release_identity.validate_source_tree(
         ROOT,
-        expected_release="0.8.6",
+        expected_release="0.8.10",
     )
 
     assert identity == {
         "schema_version": 1,
-        "source_release": "0.8.6",
+        "source_release": "0.8.10",
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
     }
-    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.6"}
+    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.10"}
     assert source_release_identity.compatibility_config_version(ROOT) == 7
     assert source_release_identity.observability_v8_config_version(ROOT) == 8
     assert source_release_identity.runtime_config_version(ROOT) == 8
-    assert release_candidate._reviewed_source_install_identity("0.8.6") == identity
+    assert release_candidate._reviewed_source_install_identity("0.8.10") == identity
 
 
 def test_dynamic_release_identity_uses_dispatch_version_with_reviewed_epoch() -> None:
@@ -169,7 +170,7 @@ def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path
     before = {relative: reviewed_bytes(relative) for relative in VERSION_PATHS}
 
     completed = subprocess.run(
-        [BASH, str(stamp), "0.8.6"],
+        [BASH, str(stamp), "0.8.10"],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -255,7 +256,7 @@ def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
     path.write_text(source.replace(old, new), encoding="utf-8")
 
     with pytest.raises(source_release_identity.SourceIdentityError, match=message):
-        source_release_identity.validate_source_tree(repo, expected_release="0.8.6")
+        source_release_identity.validate_source_tree(repo, expected_release="0.8.10")
 
 
 def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> None:

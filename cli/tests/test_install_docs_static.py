@@ -28,9 +28,9 @@ import pytest
 from defenseclaw import install_publish
 
 ROOT = Path(__file__).resolve().parents[2]
-# Checked-in source fixtures intentionally retain the unstamped development
-# identity. Published documentation is allowed to advance independently.
-CURRENT_RELEASE = "0.8.6"
+# Checked-in source fixtures and published documentation share one release
+# identity so native repair/upgrade comparisons remain monotonic.
+CURRENT_RELEASE = "0.8.10"
 CURRENT_PUBLISHED_RELEASE = "0.8.10"
 LATEST_POSIX_INSTALL_URL = (
     "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh"
@@ -65,7 +65,6 @@ OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
     "docs-site/content/docs/connectors/codex.mdx",
-    "docs-site/content/docs/connectors/geminicli.mdx",
     "docs-site/content/docs/setup/index.mdx",
     "docs-site/content/docs/reference/redaction.mdx",
     "docs-site/content/docs/reference/cli.mdx",
@@ -88,7 +87,6 @@ OBSERVABILITY_V8_CONNECTOR_GUIDES = (
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
     "docs-site/content/docs/connectors/codex.mdx",
-    "docs-site/content/docs/connectors/geminicli.mdx",
 )
 
 OBSERVABILITY_V8_JSONL_GUIDES = {

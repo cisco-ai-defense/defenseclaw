@@ -121,7 +121,9 @@ func (*HTTPJSONL) EncodedSize(projectedSizes []int) (int, bool) {
 
 func (adapter *HTTPJSONL) Deliver(ctx context.Context, batch delivery.Batch) delivery.DeliveryResult {
 	if adapter == nil || ctx == nil || batch.Len() == 0 {
-		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeAdapterInputInvalid,
+		}
 	}
 	var body bytes.Buffer
 	if batch.EncodedSize() > 0 {
@@ -130,18 +132,24 @@ func (adapter *HTTPJSONL) Deliver(ctx context.Context, batch delivery.Batch) del
 	for _, item := range batch.Items() {
 		projected := item.Bytes()
 		if !validNDJSONProjection(projected) {
-			return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+			return delivery.DeliveryResult{
+				Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeProjectionInvalid,
+			}
 		}
 		_, _ = body.Write(projected)
 		_ = body.WriteByte('\n')
 	}
 	if body.Len() != batch.EncodedSize() {
-		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeEnvelopeSizeInvalid,
+		}
 	}
 	writeTracker := &requestWriteTracker{}
 	req, err := http.NewRequestWithContext(writeTracker.traceContext(ctx), adapter.method, adapter.endpoint, bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload}
+		return delivery.DeliveryResult{
+			Outcome: delivery.OutcomePermanentPayload, FailureCode: delivery.FailureCodeRequestBuildFailed,
+		}
 	}
 	req.Header = adapter.headers.Clone()
 	req.Header.Set("Content-Type", "application/x-ndjson")
@@ -151,9 +159,9 @@ func (adapter *HTTPJSONL) Deliver(ctx context.Context, batch delivery.Batch) del
 		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
 	}
 	if err != nil {
-		return delivery.DeliveryResult{Outcome: classifyTransportError(err, writeTracker.mayHaveReachedPeer())}
+		return classifyTransportResult(err, writeTracker.mayHaveReachedPeer())
 	}
-	return delivery.DeliveryResult{Outcome: classifyHTTPStatus(resp.StatusCode)}
+	return classifyHTTPResult(resp.StatusCode)
 }
 
 func validNDJSONProjection(projected []byte) bool {

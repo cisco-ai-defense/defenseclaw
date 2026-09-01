@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import builtins
+import hashlib
 import json
 import os
 import plistlib
@@ -28,7 +30,6 @@ from pathlib import Path
 import pytest
 from defenseclaw import file_permissions
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
-from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.inventory import agent_discovery as ad
 
 from tests.permissions import grant_everyone, set_known_windows_directory_acl
@@ -49,7 +50,7 @@ def _signal(name: str, installed: bool = False) -> ad.AgentSignal:
 def _discovery(*installed: str, cache_hit: bool = False) -> ad.AgentDiscovery:
     return ad.AgentDiscovery(
         scanned_at="2026-05-04T18:21:00Z",
-        agents={name: _signal(name, name in installed) for name in KNOWN_CONNECTORS},
+        agents={name: _signal(name, name in installed) for name in ad.DISCOVERABLE_CONNECTORS},
         cache_hit=cache_hit,
     )
 
@@ -58,6 +59,167 @@ def _pin_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / ".defenseclaw"))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+
+def _pin_claude_home(monkeypatch, tmp_path: Path) -> None:
+    """Bind Claude's platform home without activating its optional override."""
+
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+
+def test_copilot_packaged_inventory_uses_documented_version_probe() -> None:
+    inventory_dir = Path(ad.__file__).parent
+    probes = {
+        name: json.loads((inventory_dir / name).read_text(encoding="utf-8"))["connectors"]["copilot"][
+            "version_probe"
+        ]
+        for name in ("hook_contracts.json", "validated_versions.json")
+    }
+
+    assert probes == {
+        "hook_contracts.json": "copilot --version",
+        "validated_versions.json": "copilot --version",
+    }
+
+
+def test_devin_windows_version_probes_exact_cli_for_supported_version(monkeypatch) -> None:
+    calls: list[tuple[str, tuple[str, ...], bool]] = []
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_version_for_binary",
+        lambda path, args, **kwargs: (
+            calls.append((path, args, kwargs["require_trusted_binary_paths"]))
+            or "devin 3000.4.25 (7e8e528a)",
+            "",
+        ),
+    )
+
+    result = ad._version_for_agent_binary(
+        "devin",
+        r"C:\Users\tester\AppData\Local\devin\cli\bin\devin.exe",
+        ("--version",),
+        require_trusted_binary_paths=False,
+    )
+
+    assert result == ("3000.4.25", "")
+    assert calls == [
+        (
+            r"C:\Users\tester\AppData\Local\devin\cli\bin\devin.exe",
+            ("--version",),
+            True,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        "Devin 3000.4.25 (7e8e528a)",
+        "devin 03000.4.25 (7e8e528a)",
+        "devin 3000.4.25 (7e8e528g)",
+        "devin 3000.4.25 (7e8e528a) extra",
+        "prefix devin 3000.4.25 (7e8e528a)",
+        "devin 3000.4.25 runtime 1.2.3",
+    ),
+)
+def test_devin_version_probe_does_not_extract_from_noncanonical_output(
+    monkeypatch,
+    output: str,
+) -> None:
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_version_for_binary", lambda *_args, **_kwargs: (output, ""))
+
+    version, error = ad._version_for_agent_binary(
+        "devin",
+        "/opt/devin/bin/devin",
+        ("--version",),
+    )
+
+    assert error == ""
+    assert version == output
+
+
+def test_antigravity_windows_version_probe_requires_canonical_stable_digest(monkeypatch) -> None:
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(ad, "_is_canonical_antigravity_windows_binary", lambda _path: True)
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda *_args, **_kwargs: True)
+    digests = iter(("a" * 128, "a" * 128))
+    monkeypatch.setattr(ad, "_stable_binary_sha512", lambda _path: next(digests))
+
+    def version_probe(path, args, **kwargs):
+        assert path == r"C:\Users\tester\AppData\Local\agy\bin\agy.exe"
+        assert args == ("--version",)
+        assert kwargs["require_trusted_binary_paths"] is True
+        return "1.1.9", ""
+
+    monkeypatch.setattr(ad, "_version_for_binary", version_probe)
+
+    result = ad._version_for_agent_binary(
+        "antigravity",
+        r"C:\Users\tester\AppData\Local\agy\bin\agy.exe",
+        ("--version",),
+        require_trusted_binary_paths=False,
+    )
+
+    assert result == ("1.1.9", "")
+
+    changed = iter(("a" * 128, "b" * 128))
+    monkeypatch.setattr(ad, "_stable_binary_sha512", lambda _path: next(changed))
+    version, error = ad._version_for_agent_binary(
+        "antigravity",
+        r"C:\Users\tester\AppData\Local\agy\bin\agy.exe",
+        ("--version",),
+        require_trusted_binary_paths=False,
+    )
+    assert version == ""
+    assert "changed during its version probe" in error
+
+
+def test_antigravity_binary_digest_is_bounded_and_matches_stable_bytes(monkeypatch, tmp_path) -> None:
+    binary = tmp_path / "agy.exe"
+    payload = b"stable official cli bytes"
+    binary.write_bytes(payload)
+
+    assert ad._stable_binary_sha512(str(binary)) == hashlib.sha512(payload).hexdigest()
+
+    monkeypatch.setattr(ad, "_ANTIGRAVITY_BINARY_MAX_BYTES", len(payload) - 1)
+    with pytest.raises(OSError, match="provenance limit"):
+        ad._stable_binary_sha512(str(binary))
+
+
+def test_omnigent_version_probe_uses_bounded_slow_start_timeout(monkeypatch) -> None:
+    invocation: dict[str, object] = {}
+
+    def run(command, **kwargs):
+        invocation["command"] = command
+        invocation.update(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=b"omnigent 0.7.0 (built 2026-07-27T22:01:50Z)\r\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    version, error = ad._version_for_agent_binary(
+        "omnigent",
+        r"C:\Users\tester\.local\bin\omnigent.exe",
+        ("--version",),
+        require_trusted_binary_paths=False,
+    )
+
+    assert (version, error) == ("omnigent 0.7.0 (built 2026-07-27T22:01:50Z)", "")
+    assert invocation["command"] == [
+        r"C:\Users\tester\.local\bin\omnigent.exe",
+        "--version",
+    ]
+    assert invocation["shell"] is False
+    assert invocation["timeout"] == 8.0
+    assert invocation["capture_output"] is True
+    assert invocation["text"] is False
 
 
 @pytest.fixture
@@ -119,7 +281,8 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     first = ad.discover_agents()
     assert first.cache_hit is False
     assert first.agents["codex"].installed is True
-    assert len(calls) == len(KNOWN_CONNECTORS)
+    assert set(calls) == set(ad.DISCOVERABLE_CONNECTORS)
+    assert "geminicli" not in calls
 
     cache_file = Path(os.environ["DEFENSECLAW_HOME"]) / ad.CACHE_FILENAME
     assert cache_file.is_file()
@@ -155,6 +318,32 @@ def test_cache_write_failure_is_truthful_and_preserves_existing(monkeypatch, tmp
 
     assert ad._write_cache(_discovery("codex"), data_dir=tmp_path) is False
     assert cache.read_text(encoding="utf-8") == "ORIGINAL\n"
+
+
+def test_read_only_refresh_returns_fresh_scan_without_replacing_cache(monkeypatch, tmp_path):
+    cached = _discovery("cursor")
+    assert ad._write_cache(cached, data_dir=tmp_path) is True
+    cache = tmp_path / ad.CACHE_FILENAME
+    original = cache.read_bytes()
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(
+        ad,
+        "_scan_agent",
+        lambda name, **_kwargs: _signal(name, installed=name == "omnigent"),
+    )
+
+    refreshed = ad.discover_agents(
+        use_cache=False,
+        refresh=True,
+        data_dir=tmp_path,
+        persist_cache=False,
+    )
+
+    assert refreshed.cache_hit is False
+    assert refreshed.agents["omnigent"].installed is True
+    assert refreshed.agents["cursor"].installed is False
+    assert cache.read_bytes() == original
 
 
 def test_cache_refuses_symlinked_parent_without_escape(tmp_path):
@@ -223,6 +412,46 @@ def test_empty_connector_home_does_not_detect_opencode(monkeypatch, tmp_path):
     assert signal.installed is False
     assert signal.config_path == ""
     assert signal.binary_path == ""
+
+
+def test_opencode_discovery_honors_custom_config_dir(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path / "ambient-home")
+    monkeypatch.chdir(tmp_path)
+    custom = tmp_path / "custom-opencode"
+    plugin = custom / "plugins" / "defenseclaw.js"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("// defenseclaw-managed-plugin v6\n", encoding="utf-8")
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("opencode")
+
+    # Config evidence alone does not manufacture a verified installation;
+    # discovery schema v3 keeps those states separate.
+    assert signal.installed is False
+    assert signal.configured is True
+    assert signal.config_path == str(plugin)
+
+
+@pytest.mark.parametrize("filename", ["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"])
+def test_opencode_discovery_honors_config_files_in_custom_dir(
+    monkeypatch,
+    tmp_path,
+    filename,
+):
+    _pin_home(monkeypatch, tmp_path / "ambient-home")
+    monkeypatch.chdir(tmp_path)
+    custom = tmp_path / "custom-opencode"
+    config = custom / filename
+    config.parent.mkdir(parents=True)
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("opencode")
+
+    assert signal.configured is True
+    assert signal.config_path == str(config)
 
 
 def test_config_evidence_helper_rejects_directories(tmp_path):
@@ -295,9 +524,50 @@ def test_empty_home_has_no_config_only_false_positives(monkeypatch, tmp_path):
     monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "program-files-x86"))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
 
-    signals = {name: ad._scan_agent(name) for name in KNOWN_CONNECTORS}
+    signals = {name: ad._scan_agent(name) for name in ad.DISCOVERABLE_CONNECTORS}
 
     assert {name for name, signal in signals.items() if signal.installed} == set()
+
+
+def test_devin_discovery_uses_pinned_workspace_hook_not_ambient_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ambient = tmp_path / "ambient-profile"
+    workspace = tmp_path / "workspace"
+    hooks = workspace / ".devin" / "hooks.v1.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}\n", encoding="utf-8")
+    _pin_home(monkeypatch, ambient)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("devin")
+
+    assert signal.configured is True
+    assert signal.config_path == str(hooks)
+    assert str(ambient) not in signal.config_path
+
+
+def test_devin_canonical_user_mcp_file_is_configuration_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "ambient-profile"
+    _pin_home(monkeypatch, home)
+    if os.name == "nt":
+        roaming = tmp_path / "roaming"
+        monkeypatch.setenv("APPDATA", str(roaming))
+        mcp = roaming / "devin" / "mcp_config.json"
+    else:
+        mcp = home / ".config" / "devin" / "mcp_config.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("devin")
+
+    assert signal.configured is True
+    assert signal.config_path == str(mcp)
 
 
 @pytest.mark.parametrize(
@@ -309,8 +579,7 @@ def test_empty_home_has_no_config_only_false_positives(monkeypatch, tmp_path):
         ("zeptoclaw", (".zeptoclaw", "config.json")),
         ("hermes", (".hermes", "config.yaml")),
         ("cursor", (".cursor", "hooks.json")),
-        ("windsurf", (".codeium", "windsurf", "hooks.json")),
-        ("geminicli", (".gemini", "settings.json")),
+        ("devin", (".devin", "hooks.v1.json")),
         ("copilot", (".copilot", "mcp-config.json")),
         ("openhands", (".openhands", "hooks.json")),
         ("antigravity", (".gemini", "config", "hooks.json")),
@@ -370,6 +639,76 @@ def test_codex_and_claude_discovery_honor_client_config_homes(
     assert signal.config_path == str(config)
 
 
+def test_claude_discovery_does_not_count_mcp_only_state_as_generic_config(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "default-home"
+    _pin_claude_home(monkeypatch, home)
+    state = home / ".claude.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode")
+
+    assert signal.configured is False
+    assert signal.config_path == ""
+
+
+def test_claude_discovery_finds_project_settings_without_user_settings(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_claude_home(monkeypatch, tmp_path / "default-home")
+    project_settings = tmp_path / ".claude" / "settings.json"
+    project_settings.parent.mkdir(parents=True)
+    project_settings.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode")
+
+    assert signal.configured is True
+    assert signal.config_path == str(project_settings)
+
+
+def test_claude_discovery_prefers_local_over_project_and_user_settings(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "default-home"
+    _pin_claude_home(monkeypatch, home)
+    user_settings = home / ".claude" / "settings.json"
+    project_settings = tmp_path / ".claude" / "settings.json"
+    local_settings = tmp_path / ".claude" / "settings.local.json"
+    for settings in (user_settings, project_settings, local_settings):
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode")
+
+    assert signal.configured is True
+    assert signal.config_path == str(local_settings)
+
+
+def test_claude_discovery_falls_back_to_user_settings(monkeypatch, tmp_path):
+    home = tmp_path / "default-home"
+    _pin_claude_home(monkeypatch, home)
+    user_settings = home / ".claude" / "settings.json"
+    user_settings.parent.mkdir(parents=True)
+    user_settings.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode")
+
+    assert signal.configured is True
+    assert signal.config_path == str(user_settings)
+
+
 def test_amp_discovery_reads_platform_managed_settings_without_mutating(
     monkeypatch,
     tmp_path,
@@ -397,11 +736,19 @@ def test_hermes_legacy_windows_config_is_not_current_configuration_evidence(
     _pin_home(monkeypatch, tmp_path)
     legacy = tmp_path / ".hermes" / "config.yaml"
     legacy.parent.mkdir(parents=True)
-    legacy.write_text("hooks: {}\n", encoding="utf-8")
+    legacy.write_text("synthetic credential fixture\n", encoding="utf-8")
     effective = tmp_path / "local-app-data" / "hermes" / "config.yaml"
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
     monkeypatch.setattr(ad, "hermes_config_path", lambda: str(effective))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    real_open = builtins.open
+
+    def deny_legacy_read(path, *args, **kwargs):
+        if ad._path_key(os.fspath(path)) == ad._path_key(str(legacy)):
+            raise AssertionError("legacy Hermes configuration must not be read")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", deny_legacy_read)
 
     signal = ad._scan_agent("hermes")
 
@@ -423,26 +770,40 @@ def test_hermes_native_windows_venv_is_discovered_without_path(
     binary.write_bytes(b"test executable")
     config.write_text("hooks: {}\n", encoding="utf-8")
     _pin_home(monkeypatch, home)
-    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    poisoned_local_app_data = tmp_path / "poisoned-local-app-data"
+    poisoned_binary = poisoned_local_app_data / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes.exe"
+    poisoned_binary.parent.mkdir(parents=True)
+    poisoned_binary.write_bytes(b"path decoy")
+    monkeypatch.setenv("LOCALAPPDATA", str(poisoned_local_app_data))
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(
+        ad,
+        "_windows_current_user_known_folder",
+        lambda identifier: str(local_app_data)
+        if identifier == ad._WINDOWS_LOCAL_APP_DATA_FOLDER_ID
+        else "",
+    )
     monkeypatch.setattr(ad, "hermes_config_path", lambda: str(config))
     monkeypatch.setattr(
         ad,
         "_version_for_agent_binary",
         lambda name, path, _args, **_kwargs: (
-            ("Hermes Agent v0.17.0", "")
+            ("Hermes Agent v0.20.0 (2026.8.3)", "")
             if name == "hermes" and ad._path_key(path) == ad._path_key(str(binary))
             else ("", "bad")
         ),
     )
 
     signal = ad._scan_agent("hermes")
+    repeated = ad._scan_agent("hermes")
 
     assert signal.installed is True
     assert signal.configured is True
     assert ad._path_key(signal.binary_path) == ad._path_key(str(binary))
     assert ad._path_key(signal.config_path) == ad._path_key(str(config))
-    assert signal.version == "Hermes Agent v0.17.0"
+    assert signal.version == "Hermes Agent v0.20.0 (2026.8.3)"
+    assert repeated.binary_path == signal.binary_path
+    assert repeated.version == signal.version
 
 
 def test_antigravity_windows_cli_fallback_is_detected(
@@ -456,23 +817,44 @@ def test_antigravity_windows_cli_fallback_is_detected(
     agy.parent.mkdir(parents=True)
     agy.write_bytes(b"test executable")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
-    monkeypatch.setattr(
-        ad,
-        "_version_for_agent_binary",
-        lambda name, path, _args, **_kwargs: (
-            ("1.0.13", "") if name == "antigravity" and path == str(agy) else ("", "bad")
-        ),
-    )
+    probes: list[tuple[str, str, bool]] = []
+
+    def version_probe(name, path, _args, **kwargs):
+        probes.append((name, path, kwargs["require_trusted_binary_paths"]))
+        return ("1.1.9", "") if name == "antigravity" and path == str(agy) else ("", "bad")
+
+    monkeypatch.setattr(ad, "_version_for_agent_binary", version_probe)
 
     signal = ad._scan_agent("antigravity")
 
     assert signal.installed is True
     assert signal.binary_path == str(agy)
     assert signal.config_path == ""
-    assert signal.version == "1.0.13"
+    assert signal.version == "1.1.9"
+    assert probes == [("antigravity", str(agy), True)]
 
 
-def test_antigravity_gui_fallback_reads_metadata_without_launch(
+def test_antigravity_config_evidence_ignores_undocumented_home_overrides(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    configured = tmp_path / "custom-antigravity"
+    decoy = configured / "hooks.json"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("{}\n", encoding="utf-8")
+    hooks = tmp_path / ".gemini" / "config" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("ANTIGRAVITY_CONFIG_DIR", str(configured))
+    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(configured / "gemini"))
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args, **_kwargs: ())
+
+    signal = ad._scan_agent("antigravity")
+
+    assert signal.installed is False
+    assert signal.configured is True
+    assert signal.config_path == str(hooks)
+
+
+def test_antigravity_windows_discovery_rejects_path_and_gui_fallbacks(
     monkeypatch,
     tmp_path,
     windows_host_no_path,
@@ -482,20 +864,52 @@ def test_antigravity_gui_fallback_reads_metadata_without_launch(
     gui = local_app_data / "Programs" / "antigravity" / "Antigravity.exe"
     gui.parent.mkdir(parents=True)
     gui.write_bytes(b"test executable")
+    path_decoy = tmp_path / "path" / "agy.exe"
+    path_decoy.parent.mkdir(parents=True)
+    path_decoy.write_bytes(b"path decoy")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
-    monkeypatch.setattr(ad, "_windows_file_version_for_binary", lambda path, **_kwargs: ("2.2.1", ""))
+    monkeypatch.setattr(ad, "_which", lambda _name: str(path_decoy))
     monkeypatch.setattr(
-        ad.subprocess,
-        "run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("GUI executable was launched")),
+        ad,
+        "_version_for_agent_binary",
+        lambda *_args, **_kwargs: pytest.fail("non-canonical Antigravity binary was probed"),
     )
 
     signal = ad._scan_agent("antigravity")
 
-    assert signal.installed is True
-    assert signal.binary_path == str(gui)
+    assert signal.installed is False
+    assert signal.binary_path == ""
     assert signal.config_path == ""
-    assert signal.version == "2.2.1"
+    assert signal.version == ""
+
+
+def test_antigravity_windows_version_probe_rejects_gui_fallback(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    local_app_data = tmp_path / "local-app-data"
+    gui = local_app_data / "Programs" / "antigravity" / "Antigravity.exe"
+    monkeypatch.setattr(
+        ad,
+        "_windows_current_user_local_app_data_roots",
+        lambda: (str(local_app_data),),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_windows_file_version_for_binary",
+        lambda *_args, **_kwargs: pytest.fail("GUI metadata must not be trusted"),
+    )
+
+    version, error = ad._version_for_agent_binary(
+        "antigravity",
+        str(gui),
+        ("--version",),
+        require_trusted_binary_paths=False,
+    )
+
+    assert version == ""
+    assert "official token-bound LocalAppData\\agy\\bin\\agy.exe path" in error
 
 
 def test_cursor_macos_app_fallback_reads_metadata_without_launch(
@@ -668,14 +1082,28 @@ def test_cursor_standalone_agent_alias_is_detected(monkeypatch, tmp_path):
 
 
 def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_path):
-    local_app_data = tmp_path / "local-app-data"
-    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    token_local_app_data = tmp_path / "token-local-app-data"
+    ambient_local_app_data = tmp_path / "ambient-local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(ambient_local_app_data))
+    monkeypatch.setattr(
+        ad,
+        "_windows_current_user_local_app_data_roots",
+        lambda: (str(token_local_app_data),),
+    )
 
     prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
 
-    assert ad._path_key(str(local_app_data / "agy" / "bin")) in prefixes
-    assert ad._path_key(str(local_app_data / "Programs" / "antigravity")) in prefixes
-    assert ad._path_key(str(local_app_data)) not in prefixes
+    assert ad._path_key(str(token_local_app_data / "agy" / "bin")) in prefixes
+    assert ad._path_key(str(ambient_local_app_data / "agy" / "bin")) not in prefixes
+    assert ad._path_key(str(token_local_app_data / "Programs" / "antigravity")) not in prefixes
+    assert ad._path_key(str(ambient_local_app_data / "Programs" / "antigravity")) not in prefixes
+    assert ad._path_key(str(token_local_app_data)) not in prefixes
+    assert ad._is_canonical_antigravity_windows_binary(
+        str(token_local_app_data / "agy" / "bin" / "agy.exe")
+    )
+    assert not ad._is_canonical_antigravity_windows_binary(
+        str(ambient_local_app_data / "agy" / "bin" / "agy.exe")
+    )
 
 
 def test_codex_desktop_runtime_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
@@ -1198,6 +1626,18 @@ def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     assert ad._path_key(str(local_app_data)) not in prefixes
 
 
+def test_devin_windows_cli_uses_exact_product_trust_root(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+
+    assert ad._path_key(str(local_app_data / "devin" / "cli" / "bin")) in prefixes
+    assert ad._path_key(str(local_app_data / "Programs" / "Devin")) not in prefixes
+    assert ad._path_key(str(local_app_data / "Programs")) not in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
 @pytest.mark.parametrize(
     ("connector", "relative_binary"),
     [
@@ -1216,9 +1656,8 @@ def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
                 "hermes.exe",
             ),
         ),
-        ("cursor", ("local", "Programs", "cursor", "resources", "app", "bin", "cursor.cmd")),
-        ("windsurf", ("local", "Programs", "Windsurf", "bin", "windsurf.exe")),
-        ("geminicli", ("roaming", "npm", "gemini.cmd")),
+        ("cursor", ("local", "cursor-agent", "agent.exe")),
+        ("devin", ("local", "devin", "cli", "bin", "devin.exe")),
         ("copilot", ("roaming", "npm", "copilot.cmd")),
         ("openhands", ("home", ".local", "bin", "openhands.exe")),
         ("antigravity", ("local", "agy", "bin", "agy.exe")),
@@ -1244,10 +1683,187 @@ def test_windows_discovery_finds_known_binary_outside_path(
     _pin_home(monkeypatch, home)
     monkeypatch.setenv("LOCALAPPDATA", str(local))
     monkeypatch.setenv("APPDATA", str(roaming))
+    if connector == "hermes":
+        monkeypatch.setattr(
+            ad,
+            "_windows_current_user_known_folder",
+            lambda identifier: str(local)
+            if identifier == ad._WINDOWS_LOCAL_APP_DATA_FOLDER_ID
+            else "",
+        )
 
     resolved = ad._binary_path_for_agent(connector, ad._SPECS[connector])
 
     assert ad._path_key(resolved) == ad._path_key(str(binary))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows npm shim selection regression")
+def test_windows_copilot_npm_shims_select_cmd_and_use_documented_probe(
+    monkeypatch,
+    tmp_path,
+):
+    roaming = tmp_path / "roaming-app-data"
+    npm_bin = roaming / "npm"
+    extensionless = npm_bin / "copilot"
+    command_shim = npm_bin / "copilot.cmd"
+    npm_bin.mkdir(parents=True)
+    extensionless.write_text("#!/bin/sh\n", encoding="utf-8")
+    command_shim.write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("PATH", str(npm_bin))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_is_trusted_binary_path",
+        lambda path, **_kwargs: ad._path_key(path) == ad._path_key(str(command_shim)),
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=b"copilot version 1.0.77\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    candidates = ad._binary_candidates_for_agent("copilot", ad._SPECS["copilot"])
+    signal = ad._scan_agent("copilot", require_trusted_binary_paths=True)
+
+    assert ad._path_key(ad._which("copilot")) == ad._path_key(str(command_shim))
+    assert tuple(map(ad._path_key, candidates)).count(ad._path_key(str(command_shim))) == 1
+    assert ad._path_key(str(extensionless)) not in tuple(map(ad._path_key, candidates))
+    assert signal.installed is True
+    assert ad._path_key(signal.binary_path) == ad._path_key(str(command_shim))
+    assert signal.version == "copilot version 1.0.77"
+    assert len(calls) == 1
+    assert ad._path_key(calls[0][0]) == ad._path_key(str(command_shim))
+    assert calls[0][1:] == ["--version"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows executable admission regression")
+def test_windows_trust_rejects_extensionless_npm_shim(monkeypatch, tmp_path):
+    shim = tmp_path / "npm" / "copilot"
+    shim.parent.mkdir()
+    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(
+        ad,
+        "_trusted_bin_prefixes",
+        lambda _data_dir=None: (str(shim.parent),),
+    )
+    monkeypatch.setattr(ad, "_default_trusted_bin_prefixes", lambda: frozenset())
+
+    assert not ad._is_trusted_binary_path(str(shim))
+
+
+def test_devin_windows_discovery_finds_exact_cli_without_path_launcher(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    local = tmp_path / "local-app-data"
+    binary = local / "devin" / "cli" / "bin" / "devin.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+
+    candidates = ad._binary_candidates_for_agent("devin", ad._SPECS["devin"])
+
+    assert tuple(map(ad._path_key, candidates)) == (ad._path_key(str(binary)),)
+
+
+def test_devin_windows_discovery_rejects_gui_product_root(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    local = tmp_path / "local-app-data"
+    binary = local / "Programs" / "Devin" / "Devin.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+
+    candidates = ad._binary_candidates_for_agent("devin", ad._SPECS["devin"])
+
+    assert ad._path_key(str(binary)) not in tuple(map(ad._path_key, candidates))
+
+
+def test_cursor_discovery_prefers_primary_agent_entrypoint(monkeypatch, tmp_path):
+    primary = tmp_path / "agent.exe"
+    compatibility = tmp_path / "cursor-agent.exe"
+    desktop = tmp_path / "cursor.cmd"
+    for path in (primary, compatibility, desktop):
+        path.write_bytes(b"test executable")
+
+    candidates = {
+        "agent": str(primary),
+        "cursor-agent": str(compatibility),
+        "cursor": str(desktop),
+    }
+    monkeypatch.setattr(ad, "_which", lambda name: candidates.get(name, ""))
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+
+    resolved = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
+
+    assert tuple(map(ad._path_key, resolved)) == tuple(
+        map(ad._path_key, (str(primary), str(compatibility)))
+    )
+
+
+def test_cursor_windows_discovery_uses_official_token_bound_agent_root(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    known_local_app_data = tmp_path / "token-local-app-data"
+    redirected_local_app_data = tmp_path / "redirected-local-app-data"
+    primary = known_local_app_data / "cursor-agent" / "agent.exe"
+    primary.parent.mkdir(parents=True)
+    primary.write_bytes(b"native Cursor agent")
+    monkeypatch.setenv("LOCALAPPDATA", str(redirected_local_app_data))
+    monkeypatch.setattr(
+        ad,
+        "_windows_current_user_known_folder",
+        lambda identifier: (
+            str(known_local_app_data)
+            if identifier == "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
+            else ""
+        ),
+    )
+
+    candidates = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
+    trusted = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    official_root = known_local_app_data / "cursor-agent"
+
+    assert ad._path_key(str(primary)) in {ad._path_key(path) for path in candidates}
+    assert ad._path_key(str(official_root)) in trusted
+    assert ad._path_key(str(known_local_app_data)) not in trusted
+    assert ad._path_key(str(redirected_local_app_data / "cursor-agent" / "agent.exe")) not in {
+        ad._path_key(path) for path in candidates
+    }
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args, **_kwargs: (
+            ("2026.07.23-e383d2b", "")
+            if name == "cursor" and ad._path_key(path) == ad._path_key(str(primary))
+            else ("", "not launchable")
+        ),
+    )
+
+    signal = ad._scan_agent("cursor")
+
+    assert signal.installed is True
+    assert signal.binary_path == str(primary)
+    assert signal.version == "2026.07.23-e383d2b"
 
 
 def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):
@@ -1330,21 +1946,90 @@ OpenHands CLI 1.16.0
 def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     calls = []
-    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/hermes")
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path, **_kwargs: True)
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="Hermes Agent v0.13.0\n", stderr="")
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="Hermes Agent v0.20.0 (2026.8.3)\n",
+            stderr="",
+        )
 
     monkeypatch.setattr(ad.subprocess, "run", fake_run)
 
-    signal = ad._scan_agent("hermes")
+    version, error = ad._version_for_agent_binary("hermes", "/opt/bin/hermes", ("--version",))
 
-    assert signal.installed is True
-    assert signal.version == "Hermes Agent v0.13.0"
+    assert error == ""
+    assert version == "Hermes Agent v0.20.0 (2026.8.3)"
     _, kwargs = calls[0]
     assert kwargs["timeout"] == 8.0
+
+
+@pytest.mark.parametrize(
+    "binary_path",
+    (
+        r"C:\Tools\amp.CMD",
+        r"C:\Tools\agent.CMD",
+        r"C:\Tools\copilot.EXE",
+        r"C:\Tools\cursor-agent.EXE",
+    ),
+)
+@pytest.mark.skipif(os.name != "nt", reason="Windows native launcher startup budget")
+def test_slow_windows_agent_version_probes_get_only_the_named_startup_budget(
+    monkeypatch,
+    binary_path,
+):
+    calls = []
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="client 1.2.3\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    version, error = ad._version_for_agent_binary(
+        "codex",
+        binary_path,
+        ("--version",),
+    )
+
+    assert error == ""
+    assert version == "client 1.2.3"
+    assert calls[0][1]["timeout"] == 8.0
+
+
+def test_unrelated_logical_and_binary_names_keep_generic_version_probe_budget(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="codex-cli 1.2.3\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    version, error = ad._version_for_agent_binary(
+        "codex",
+        r"C:\Tools\codex.EXE",
+        ("--version",),
+    )
+
+    assert error == ""
+    assert version == "codex-cli 1.2.3"
+    assert calls[0][1]["timeout"] == ad.VERSION_TIMEOUT_SECONDS
 
 
 def test_version_probe_decodes_utf8_hermes_output_from_isolated_subprocess(
@@ -1417,6 +2102,48 @@ def test_claude_version_probe_gets_longer_timeout_with_exe_suffix(monkeypatch):
     assert calls[0][1]["timeout"] == 8.0
 
 
+def test_opencode_version_probe_allows_bounded_packaged_binary_startup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="1.18.19\n", stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    version, error = ad._version_for_binary(r"C:\Tools\opencode.EXE", ("--version",))
+
+    assert error == ""
+    assert version == "1.18.19"
+    assert calls[0][1]["timeout"] == 10.0
+
+
+def test_gemini_version_probe_does_not_receive_private_path_authority(monkeypatch):
+    calls = []
+    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", "/authenticated/.gemini")
+    monkeypatch.setenv("GEMINI_CLI_HOME", "/authenticated")
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="0.26.0\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    version, error = ad._version_for_binary("/opt/bin/gemini", ("--version",))
+
+    assert error == ""
+    assert version == "0.26.0"
+    assert "DEFENSECLAW_GEMINI_CONFIG_HOME" not in calls[0][1]["env"]
+    assert calls[0][1]["env"]["GEMINI_CLI_HOME"] == "/authenticated"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PATHEXT regression")
 def test_which_discovers_cmd_wrapper(monkeypatch, tmp_path):
     wrapper = tmp_path / "cursor.CMD"
@@ -1454,10 +2181,10 @@ def test_config_state_marks_selected_observe_connectors_active():
         error="",
         configured=True,
     )
-    disc.agents["windsurf"] = ad.AgentSignal(
-        name="windsurf",
+    disc.agents["devin"] = ad.AgentSignal(
+        name="devin",
         installed=False,
-        config_path="/tmp/.codeium/windsurf/hooks.json",
+        config_path="/tmp/project/.devin/hooks.v1.json",
         binary_path="",
         version="",
         error="",
@@ -1466,12 +2193,12 @@ def test_config_state_marks_selected_observe_connectors_active():
     cfg = default_config()
     cfg.guardrail.connectors = {
         "hermes": PerConnectorGuardrailConfig(mode="observe"),
-        "windsurf": PerConnectorGuardrailConfig(mode="observe"),
+        "devin": PerConnectorGuardrailConfig(mode="observe"),
     }
 
     ad.apply_config_state(disc, cfg)
 
-    for name in ("hermes", "windsurf"):
+    for name in ("hermes", "devin"):
         assert disc.agents[name].installed is False
         assert disc.agents[name].configured is True
         assert disc.agents[name].active is True
@@ -1830,7 +2557,8 @@ def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_p
 
 def test_first_installed_precedence():
     assert ad.first_installed(_discovery("claudecode"), "claudecode") == "claudecode"
-    assert ad.first_installed(_discovery(*KNOWN_CONNECTORS), "codex") == "codex"
+    assert ad.first_installed(_discovery(*ad.DISCOVERABLE_CONNECTORS), "codex") == "codex"
+    assert ad.first_installed(_discovery(), "geminicli") == "codex"
     assert ad.first_installed(_discovery(), "codex") == "codex"
     assert ad.first_installed(_discovery("openclaw"), "not-real") == "openclaw"
 

@@ -635,6 +635,16 @@ func TestTrustedActionLegacyPathFallbackRequiresPathFacts(t *testing.T) {
 			wantMatch: true,
 		},
 		{
+			name: "native exec JSON args sensitive path read",
+			input: actionfacts.Input{
+				Tool: "exec",
+				Args: []byte(`{"command":"cat /etc/sha` + `dow"}`),
+			},
+			legacy:    `{"command":"cat /etc/sha` + `dow"}`,
+			ruleID:    "PATH-ETC-SHADOW",
+			wantMatch: true,
+		},
+		{
 			name: "actual cognitive file write",
 			input: actionfacts.Input{
 				Tool:             "write_file",

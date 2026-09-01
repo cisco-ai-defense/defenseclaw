@@ -38,6 +38,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -174,6 +175,14 @@ func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 }
 
 func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest) codexHookResponse {
+	return a.evaluateCodexHookForProfile(ctx, req, a.hookProfileForConnector("codex"))
+}
+
+func (a *APIServer) evaluateCodexHookForProfile(
+	ctx context.Context,
+	req codexHookRequest,
+	profile connector.HookProfile,
+) codexHookResponse {
 	mode := a.codexMode()
 	if a.scannerCfg != nil && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
@@ -261,22 +270,36 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
-	action := rawAction
-	wouldBlock := rawAction == "block" && mode != "action"
-	if mode != "action" && rawAction == "block" {
-		action = "allow"
-	}
-	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
-		action = "allow"
-	}
-	if mode == "action" && rawAction == "confirm" {
-		action = "alert"
-	}
+	caps := profile.Capabilities
+	action, wouldBlock := mapHookActionForProfile(
+		rawAction,
+		mode,
+		req.HookEventName,
+		caps,
+		profile,
+		req.Payload,
+	)
 	assetContextEligible := false
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
 			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
 		)
+		if mergedAction == "block" {
+			capable, capableWouldBlock := mapHookActionForProfile(
+				"block",
+				mode,
+				req.HookEventName,
+				caps,
+				profile,
+				req.Payload,
+			)
+			if capable != "block" {
+				mergedAction = capable
+				if capableWouldBlock {
+					assetWouldBlock = true
+				}
+			}
+		}
 		action = mergedAction
 		rawAction = mergedRawAction
 		verdict.Severity = mergedSeverity
@@ -451,6 +474,11 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 }
 
 func codexOutput(event, action, rawAction, reason, additional string) map[string]interface{} {
+	if event == "SessionEnd" {
+		// SessionEnd is advisory. Official Codex behavior ignores output, so do
+		// not emit a block/ask-looking shape even if an upstream verdict drifts.
+		return nil
+	}
 	if action == "block" {
 		switch event {
 		case "PreToolUse":
@@ -471,7 +499,12 @@ func codexOutput(event, action, rawAction, reason, additional string) map[string
 					},
 				},
 			}
-		case "UserPromptSubmit", "PostToolUse", "Stop":
+		case "SessionStart", "PreCompact", "PostCompact":
+			return map[string]interface{}{
+				"continue":   false,
+				"stopReason": reasonOrDefault(reason),
+			}
+		case "UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop":
 			out := map[string]interface{}{
 				"decision": "block",
 				"reason":   reasonOrDefault(reason),
@@ -3656,8 +3689,16 @@ func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookReques
 	targets := codexComponentTargets(req.CWD)
 	count := 0
 	for component, paths := range targets {
+		if component == "mcp" {
+			paths = codexMCPEntryScanTargets(paths)
+		}
 		for _, p := range paths {
-			if _, err := os.Stat(p); err != nil {
+			if component != "mcp" {
+				if _, err := os.Stat(p); err != nil {
+					continue
+				}
+			}
+			if strings.TrimSpace(p) == "" {
 				continue
 			}
 			if a.scanCodexComponent(ctx, component, p) {
@@ -3666,6 +3707,51 @@ func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookReques
 		}
 	}
 	return count
+}
+
+// codexMCPEntryScanTargets expands Codex config files into per-server scan
+// targets. The exact vendor-managed developer-docs registration remains
+// discoverable through inventory but is never handed to the MCP scanner.
+// A same-named project entry and every other user entry remain scan-eligible.
+func codexMCPEntryScanTargets(configPaths []string) []string {
+	userConfig := filepath.Join(connector.CodexHomeDir(), "config.toml")
+	var targets []string
+	for _, configPath := range configPaths {
+		var (
+			entries []config.MCPServerEntry
+			err     error
+		)
+		if sameCleanPath(configPath, userConfig) {
+			entries, err = config.ReadMCPFromCodexUserConfigTOML(configPath)
+		} else {
+			entries, err = config.ReadMCPFromCodexConfigTOML(configPath)
+		}
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.Bundled {
+				continue
+			}
+			target := strings.TrimSpace(entry.URL)
+			if target == "" {
+				target = strings.TrimSpace(entry.Name)
+			}
+			if target != "" {
+				targets = append(targets, target)
+			}
+		}
+	}
+	seen := make(map[string]struct{}, len(targets))
+	out := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		out = append(out, target)
+	}
+	return out
 }
 
 func (a *APIServer) codexComponentScanDue() bool {
@@ -3692,48 +3778,99 @@ func codexComponentTargets(cwd string) map[string][]string {
 		"skill":  {},
 		"plugin": {},
 		"mcp":    {},
+		"agent":  {},
+		"rule":   {},
+		"memory": {},
 	}
 
-	home, err := os.UserHomeDir()
-	if err == nil {
-		codexHome := filepath.Join(home, ".codex")
+	codexHome := connector.CodexHomeDir()
+	if personalSkills := connector.CodexPersonalSkillsPath(); strings.TrimSpace(personalSkills) != "" {
+		targets["skill"] = append(targets["skill"], childDirs(personalSkills)...)
+	}
+	if strings.TrimSpace(codexHome) != "" {
 		targets["skill"] = append(targets["skill"], childDirs(filepath.Join(codexHome, "skills"))...)
 		targets["plugin"] = append(targets["plugin"],
-			childDirs(filepath.Join(codexHome, "plugins"))...)
-		targets["plugin"] = append(targets["plugin"],
-			childDirs(filepath.Join(codexHome, "plugins", "cache"))...)
+			codexInstalledPluginDirs(filepath.Join(codexHome, "plugins", "cache"))...)
 		targets["mcp"] = append(targets["mcp"], existingFiles(filepath.Join(codexHome, "config.toml"))...)
+		targets["agent"] = append(targets["agent"], childFilesWithExtension(filepath.Join(codexHome, "agents"), ".toml")...)
+		targets["rule"] = append(targets["rule"], childFilesWithExtension(filepath.Join(codexHome, "rules"), ".rules")...)
+		targets["memory"] = append(targets["memory"], existingFiles(filepath.Join(codexHome, "memories"))...)
+	}
+	if runtime.GOOS != "windows" {
+		targets["skill"] = append(targets["skill"], childDirs(filepath.FromSlash("/etc/codex/skills"))...)
 	}
 
-	for _, root := range workspaceCodexRoots(cwd) {
+	targets["plugin"] = append(targets["plugin"], connector.CodexPluginSourceDirs(cwd)...)
+	for _, root := range connector.CodexProjectLayerDirs(cwd) {
 		targets["skill"] = append(targets["skill"],
-			childDirs(filepath.Join(root, ".codex", "skills"))...)
-		targets["skill"] = append(targets["skill"],
-			childDirs(filepath.Join(root, "skills"))...)
-		targets["plugin"] = append(targets["plugin"],
-			childDirs(filepath.Join(root, ".codex", "plugins"))...)
-		targets["plugin"] = append(targets["plugin"],
-			childDirs(filepath.Join(root, ".codex", "plugins", "cache"))...)
-		targets["plugin"] = append(targets["plugin"],
-			childDirs(filepath.Join(root, ".agents", "plugins"))...)
+			childDirs(filepath.Join(root, ".agents", "skills"))...)
 		targets["mcp"] = append(targets["mcp"],
-			existingFiles(filepath.Join(root, ".codex", "config.toml"), filepath.Join(root, ".mcp.json"))...)
+			existingFiles(filepath.Join(root, ".codex", "config.toml"))...)
+		targets["agent"] = append(targets["agent"],
+			childFilesWithExtension(filepath.Join(root, ".codex", "agents"), ".toml")...)
+		targets["rule"] = append(targets["rule"],
+			childFilesWithExtension(filepath.Join(root, ".codex", "rules"), ".rules")...)
 	}
 	for k, paths := range targets {
+		if k == "skill" {
+			filtered := paths[:0]
+			for _, path := range paths {
+				if !isBundledSkillScanPath(path) {
+					filtered = append(filtered, path)
+				}
+			}
+			paths = filtered
+		}
 		targets[k] = uniqueExistingPaths(paths)
 	}
 	return targets
 }
 
+func codexInstalledPluginDirs(cacheRoot string) []string {
+	var out []string
+	for _, marketplaceDir := range childDirs(cacheRoot) {
+		for _, pluginDir := range childDirs(marketplaceDir) {
+			versions := childDirs(pluginDir)
+			if len(versions) == 0 {
+				continue
+			}
+			out = append(out, versions...)
+		}
+	}
+	return out
+}
+
 func workspaceCodexRoots(cwd string) []string {
-	roots := []string{}
-	if strings.TrimSpace(cwd) != "" {
-		roots = append(roots, cwd)
-		if root := gitRootForCWD(cwd); root != "" {
-			roots = append(roots, root)
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return nil
+	}
+	roots := []string{cwd}
+	repoRoot := gitRootForCWD(cwd)
+	if repoRoot != "" {
+		roots = roots[:0]
+		for dir := filepath.Clean(cwd); ; dir = filepath.Dir(dir) {
+			roots = append(roots, dir)
+			if sameCleanPath(dir, repoRoot) {
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				// A defensive guard for an unexpected git root/cwd mismatch.
+				return uniqueExistingDirs([]string{cwd, repoRoot})
+			}
 		}
 	}
 	return uniqueExistingDirs(roots)
+}
+
+func sameCleanPath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func gitRootForCWD(cwd string) string {
@@ -3761,6 +3898,20 @@ func childDirs(root string) []string {
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
+			out = append(out, filepath.Join(root, entry.Name()))
+		}
+	}
+	return out
+}
+
+func childFilesWithExtension(root, extension string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), extension) {
 			out = append(out, filepath.Join(root, entry.Name()))
 		}
 	}
@@ -3813,6 +3964,9 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 	if a.scannerCfg == nil {
 		return false
 	}
+	if component == "skill" && isBundledSkillScanPath(target) {
+		return false
+	}
 	var (
 		result *scanner.ScanResult
 		err    error
@@ -3837,6 +3991,10 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 			a.scannerCfg.CiscoAIDefense,
 		)
 		result, err = ms.Scan(scanCtx, target)
+	default:
+		// Agent, rule, and memory targets participate in inventory/discovery,
+		// but there is no dedicated Go policy scanner for those formats yet.
+		return false
 	}
 	if err != nil {
 		return false

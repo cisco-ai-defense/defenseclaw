@@ -1196,7 +1196,6 @@ First installation is intentionally conservative. The guardian requires the nati
 | --- | --- | --- |
 | Codex | `~/.codex/config.toml` | Launch Codex once as the user, then verify the file is user-owned and not group/other writable. |
 | Claude Code | `~/.claude/settings.json` | Launch Claude Code once as the user, then verify the file is user-owned and not group/other writable. |
-| Gemini CLI | `~/.gemini/settings.json` | Initialize Gemini CLI and verify the settings file before adding the target. |
 | Other hook-native connectors | Connector-specific native hook config | Consult the connector page and confirm the declared config surface exists. |
 
 Collect the exact version using the same binary the user invokes. In managed action mode, version information is part of the hook-contract decision:
@@ -1287,7 +1286,7 @@ targets:
     agent_version: "2.1.187 (Claude Code)"
   - user: alice
     connector: claudecode
-    agent_version: "Claude Code v2.1.152"
+    agent_version: "Claude Code v2.1.154"
   - user: disabled-user
     connector: codex
     enabled: false

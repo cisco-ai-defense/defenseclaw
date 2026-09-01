@@ -20,7 +20,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +35,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestManagedPluginTokenPathJavaScriptEscapingIsCrossPlatform(t *testing.T) {
@@ -57,7 +61,7 @@ func TestManagedPluginTokenPathJavaScriptEscapingIsCrossPlatform(t *testing.T) {
 // auto-load plugin directory — with no template placeholders left behind
 // and no executable bit. Teardown removes the managed file.
 func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(dir, ".config", "opencode", "plugins", "defenseclaw.js")
 	prev := OpenCodePluginPathOverride
 	OpenCodePluginPathOverride = pluginPath
@@ -70,6 +74,7 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 		APIToken:     "tok-opencode-123",
 		HookFailMode: "closed",
 	}
+	opts = prepareOpenCodeSetupOptsForTest(t, opts)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -104,10 +109,10 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 		`if (offset > DC_MAX_TOKEN_FILE_BYTES)`,
 		`/^[0-9a-f]{64}$/`,
 		`if (actionable) return { reason: "DefenseClaw hook credential is unavailable." }`,
-		"tool.execute.before",         // block hook wired
-		"input && input.args",         // after-hook preserves exact executed args
-		"tool_response: toolResponse", // after-hook forwards the result
-		"await defenseclawPost(",      // success is persisted before the next call
+		"tool.execute.before",              // block hook wired
+		"input && input.args",              // after-hook preserves exact executed args
+		"payload.tool_result = toolResult", // after-hook forwards the result
+		"await defenseclawPost(",           // success is persisted before the next call
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("plugin missing %q\n%s", want, body)
@@ -129,6 +134,17 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 			t.Errorf("plugin mode = %o, want 600 (managed policy bridge, never executable)", perm)
 		}
 	}
+	present, err = OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if !present {
+		t.Fatal("managed OpenCode plugin was not recognized after Setup")
+	}
+	current, err := OpenCodeRegistrationCurrent(opts)
+	if err != nil || !current {
+		t.Fatalf("OpenCode registration publication = %v, %v; want plugin plus custody receipt", current, err)
+	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
@@ -138,6 +154,80 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Errorf("VerifyClean after teardown: %v", err)
+	}
+}
+
+func TestOpenCodeHookContractLockIncludesManagedPluginDigest(t *testing.T) {
+	dir := t.TempDir()
+	pluginPath := filepath.Join(dir, "plugins", "defenseclaw.js")
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pluginBody := []byte("// defenseclaw-managed-plugin v7\nconst route = \"/api/v1/opencode/hook\";\n")
+	if err := os.WriteFile(pluginPath, pluginBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = previousPath })
+
+	entry := NewHookContractLockEntry(
+		SetupOpts{DataDir: filepath.Join(dir, "dc")},
+		NewOpenCodeConnector(),
+		"test-build",
+	)
+	wantPluginDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(pluginBody))
+	if got := entry.HookScriptDigests[filepath.Base(pluginPath)]; got != wantPluginDigest {
+		t.Fatalf("OpenCode lock plugin digest = %q, want %q", got, wantPluginDigest)
+	}
+}
+
+func TestOpenCodeSetupRollsBackPluginAndReceiptWhenFinalPublicationFails(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	pluginPath := filepath.Join(dir, "plugins", "defenseclaw.js")
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pristine := []byte("// operator-owned plugin\n")
+	if err := os.WriteFile(pluginPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = previousPath })
+
+	previousWriter := openCodeWritePluginFile
+	openCodeWritePluginFile = func(path string, body []byte, mode os.FileMode) error {
+		backup, err := loadManagedFileBackupPath(
+			managedFileBackupPath(filepath.Join(dir, "dc"), "opencode", "config"),
+		)
+		if err != nil {
+			t.Fatalf("custody receipt was not finalized before plugin publication: %v", err)
+		}
+		if backup.PostSHA256 != managedFileSnapshotHash(body, true) {
+			t.Fatalf("receipt post hash = %q, want rendered plugin digest", backup.PostSHA256)
+		}
+		return errors.New("injected final plugin publication failure")
+	}
+	t.Cleanup(func() { openCodeWritePluginFile = previousWriter })
+
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, "dc"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-opencode-rollback",
+	}
+	opts = prepareOpenCodeSetupOptsForTest(t, opts)
+	err := NewOpenCodeConnector().Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "injected final plugin publication failure") {
+		t.Fatalf("Setup error = %v, want injected publication failure", err)
+	}
+	body, readErr := os.ReadFile(pluginPath)
+	if readErr != nil || !reflect.DeepEqual(body, pristine) {
+		t.Fatalf("plugin rollback = %q, %v; want exact pristine bytes", body, readErr)
+	}
+	backupPath := managedFileBackupPath(opts.DataDir, "opencode", "config")
+	if _, statErr := os.Stat(backupPath); !os.IsNotExist(statErr) {
+		t.Fatalf("failed setup left a backup receipt: %v", statErr)
 	}
 }
 
@@ -156,7 +246,7 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 	}))
 	defer server.Close()
 
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(root, "plugins", "defenseclaw.mjs")
 	previous := OpenCodePluginPathOverride
 	OpenCodePluginPathOverride = pluginPath
@@ -177,6 +267,7 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 	if err := atomicWriteFile(tokenPath, []byte(aToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	opts = prepareOpenCodeSetupOptsForTest(t, opts)
 	conn := NewOpenCodeConnector()
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -294,7 +385,7 @@ for await (const _ of lines) {
 }
 
 func TestOpenCodeOwnedHookContractRequiresExactRegularFileMarker(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(dir, ".config", "opencode", "plugins", "defenseclaw.js")
 	prev := OpenCodePluginPathOverride
 	OpenCodePluginPathOverride = pluginPath
@@ -306,6 +397,7 @@ func TestOpenCodeOwnedHookContractRequiresExactRegularFileMarker(t *testing.T) {
 		APIAddr:  "127.0.0.1:18970",
 		APIToken: "tok-opencode-marker-test",
 	}
+	opts = prepareOpenCodeSetupOptsForTest(t, opts)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -362,14 +454,15 @@ func TestOpenCodeOwnedHookContractRequiresExactRegularFileMarker(t *testing.T) {
 // renders the bridge in fail-closed mode, matching defaultHookFailMode
 // (deny by default; see normalizeHookFailMode).
 func TestOpenCodeSetup_FailModeDefaultsClosed(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(dir, "plugins", "defenseclaw.js")
 	prev := OpenCodePluginPathOverride
 	OpenCodePluginPathOverride = pluginPath
 	t.Cleanup(func() { OpenCodePluginPathOverride = prev })
 
 	conn := NewOpenCodeConnector()
-	if err := conn.Setup(context.Background(), SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970"}); err != nil {
+	opts := prepareOpenCodeSetupOptsForTest(t, SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970"})
+	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	raw, err := os.ReadFile(pluginPath)
@@ -378,6 +471,235 @@ func TestOpenCodeSetup_FailModeDefaultsClosed(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `DC_FAIL_MODE = "closed"`) {
 		t.Errorf("default fail mode should be closed:\n%s", string(raw))
+	}
+}
+
+func TestOpenCodeBridgeDistinguishesBlockingAndObserveOnlyHooks(t *testing.T) {
+	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
+	if err != nil {
+		t.Fatalf("read bridge: %v", err)
+	}
+	text := string(body)
+	beforeStart := strings.Index(text, `"tool.execute.before": async`)
+	beforeAwait := strings.Index(text, `const verdict = await defenseclawPost(`)
+	beforeThrow := strings.Index(text, `if (verdict && verdict.reason) throw new Error(verdict.reason);`)
+	if beforeStart < 0 || beforeAwait < beforeStart || beforeThrow < beforeAwait {
+		t.Fatal("tool.execute.before must await the gateway verdict and throw synchronously on block")
+	}
+	afterStart := strings.Index(text, `"tool.execute.after": async`)
+	afterPost := strings.Index(text[afterStart:], `"tool.execute.after",`)
+	if afterStart < 0 || afterPost < 0 {
+		t.Fatal("tool.execute.after observe path is missing")
+	}
+	afterBody := text[afterStart:]
+	afterEnd := strings.Index(afterBody, "\n    },")
+	if afterEnd < 0 {
+		t.Fatal("tool.execute.after body terminator is missing")
+	}
+	if !strings.Contains(afterBody[:afterEnd], "await defenseclawPost") {
+		t.Fatal("tool.execute.after must await delivery so the result is attributed to the exact call")
+	}
+	if strings.Contains(afterBody[:afterEnd], "const verdict") || strings.Contains(afterBody[:afterEnd], "throw new Error") {
+		t.Fatal("tool.execute.after must ignore the advisory verdict and remain observe-only")
+	}
+	for _, field := range []string{"output.title", "output.output", "output.metadata"} {
+		if !strings.Contains(afterBody[:afterEnd], field) {
+			t.Fatalf("tool.execute.after omits official result field %q", field)
+		}
+	}
+	if !strings.Contains(afterBody[:afterEnd], "input && input.args") {
+		t.Fatal("tool.execute.after must read tool args from the official input object")
+	}
+	if strings.Contains(afterBody[:afterEnd], "output.args") {
+		t.Fatal("tool.execute.after must not read before-hook args from its result object")
+	}
+	if !strings.Contains(text, "payload.tool_result = toolResult") {
+		t.Fatal("tool.execute.after result must use the gateway's inspectable tool_result field")
+	}
+	if !strings.Contains(text, "OpenCode does not await this hook dispatch") {
+		t.Fatal("lifecycle hook must document best-effort upstream dispatch")
+	}
+	if !strings.Contains(text, `source_event_id: event.id || ""`) {
+		t.Fatal("lifecycle hook must preserve OpenCode's official event ID")
+	}
+	spec := DefaultCorrelationSpec("opencode")
+	source, ok := spec.HookValue(
+		map[string]interface{}{"source_event_id": "event-123"},
+		CorrelationTargetSourceEvent,
+	)
+	if !ok || source.Value != "event-123" || source.IDKind != "source_event" {
+		t.Fatalf("source event correlation = (%+v, %v), want event-123", source, ok)
+	}
+}
+
+func TestOpenCodeBridgePinsPluginOrderMCPIdentityAndHeartbeat(t *testing.T) {
+	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"defenseclaw-managed-plugin v7",
+		"const DC_PLUGIN_URL = import.meta.url",
+		"Array.isArray(config.plugin_origins)",
+		"DC_ARGUMENTS_AUTHORITATIVE = ownIndex >= 0 && DC_LATER_PLUGIN_COUNT === 0",
+		`replace(/[^a-zA-Z0-9_-]/g, "_")`,
+		`mcp[name].enabled !== false`,
+		`return { status: "ambiguous", name: "" }`,
+		"payload.mcp_server_name = mcpIdentity.name",
+		`verdict.mode === "action" && mcpIdentity.status === "ambiguous"`,
+		`verdict.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE`,
+		`hook_event_name: "defenseclaw.plugin.loaded"`,
+		`load_heartbeat: true`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("OpenCode bridge is missing audited v1.18.10-v1.18.19 behavior %q", want)
+		}
+	}
+	if strings.Contains(text, "mcp__") || strings.Contains(text, "mcp:") {
+		t.Fatal("OpenCode bridge must not fall back to another connector's MCP naming grammar")
+	}
+}
+
+func TestOpenCodeProfileMapsAmbiguousMCPIdentityByMode(t *testing.T) {
+	profile := NewOpenCodeConnector().HookProfile(SetupOpts{})
+	for _, tc := range []struct {
+		name           string
+		mode           string
+		status         string
+		wantAction     string
+		wantWouldBlock bool
+	}{
+		{name: "ambiguous observe", mode: "observe", status: "ambiguous", wantAction: "allow", wantWouldBlock: true},
+		{name: "ambiguous action", mode: "action", status: "ambiguous", wantAction: "block", wantWouldBlock: false},
+		{name: "authoritative action", mode: "action", status: "authoritative", wantAction: "allow", wantWouldBlock: false},
+		{name: "non-MCP action", mode: "action", status: "not_mcp", wantAction: "allow", wantWouldBlock: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := profile.MapVerdict(HookVerdictInput{
+				RawAction: "allow",
+				Event:     "tool.execute.before",
+				Mode:      tc.mode,
+				Caps:      profile.Capabilities,
+				Payload:   map[string]interface{}{"mcp_identity_status": tc.status},
+			})
+			if out.Action != tc.wantAction || out.WouldBlock != tc.wantWouldBlock {
+				t.Fatalf("verdict = %+v, want action=%q would_block=%v", out, tc.wantAction, tc.wantWouldBlock)
+			}
+			response := profile.Respond(HookRespondInput{
+				Req: HookProfileRequest{
+					ConnectorName: "opencode",
+					HookEventName: "tool.execute.before",
+					ToolName:      "alpha_beta_list",
+				},
+				Action: out.Action,
+				Caps:   profile.Capabilities,
+			})
+			if tc.wantAction == "block" {
+				if response.Output["decision"] != "deny" {
+					t.Fatalf("action ambiguity response = %#v, want synchronous deny", response.Output)
+				}
+			} else if response.Output != nil {
+				t.Fatalf("non-blocking ambiguity response = %#v, want no OpenCode mutation", response.Output)
+			}
+		})
+	}
+}
+
+func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required for the executable OpenCode plugin contract")
+	}
+	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := testenv.PrivateTempDir(t)
+	tokenPath := filepath.Join(dir, ".hook-opencode.token")
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	render := func(failMode string) []byte {
+		t.Helper()
+		text := strings.NewReplacer(
+			"{{.APIAddr}}", "127.0.0.1:18970",
+			"{{.TokenFileJS}}", javaScriptStringContent(tokenPath),
+			"{{.FailMode}}", failMode,
+		).Replace(string(body))
+		if strings.Contains(text, "{{.") {
+			t.Fatalf("rendered %s plugin retains a template placeholder", failMode)
+		}
+		return []byte(text)
+	}
+	openPlugin := filepath.Join(dir, "opencode-open.mjs")
+	closedPlugin := filepath.Join(dir, "opencode-closed.mjs")
+	if err := os.WriteFile(openPlugin, render("open"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(closedPlugin, render("closed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	harness := filepath.Join("testdata", "opencode-plugin-contract.mjs")
+	output, err := exec.CommandContext(ctx, node, harness, openPlugin, closedPlugin).CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("executable OpenCode plugin contract timed out: %v\n%s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("executable OpenCode plugin contract: %v\n%s", err, output)
+	}
+}
+
+func TestOpenCodeOwnedHooksPresentRejectsManagedPluginDrift(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	pluginPath := filepath.Join(dir, "OpenCode Config", "plugins", "defenseclaw.js")
+	previous := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = previous })
+	conn := NewOpenCodeConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-opencode-receipt",
+	}
+	opts = prepareOpenCodeSetupOptsForTest(t, opts)
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil || !present {
+		t.Fatalf("healthy plugin present=%v err=%v", present, err)
+	}
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pluginPath, append(data, []byte("\n// operator edit\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	present, err = OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("drift inspection: %v", err)
+	}
+	if present {
+		t.Fatal("digest-drifted OpenCode plugin was accepted as owned and healthy")
+	}
+}
+
+func TestOpenCodePluginPathHonorsConfigDir(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "OpenCode Config")
+	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+	previous := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = ""
+	t.Cleanup(func() { OpenCodePluginPathOverride = previous })
+
+	got := opencodePluginPath(SetupOpts{})
+	want := filepath.Join(configDir, "plugins", "defenseclaw.js")
+	if got != want {
+		t.Fatalf("opencodePluginPath() = %q, want %q", got, want)
 	}
 }
 
@@ -401,7 +723,7 @@ func TestOpenCodeSetup_FailModeDefaultsClosed(t *testing.T) {
 // `make extensions`); when it is absent the openclaw assertions are
 // logged-and-skipped while the opencode half still runs.
 func TestOpenCode_OpenClaw_NoCollision(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	dataDir := filepath.Join(dir, "dc")
 	pluginPath := filepath.Join(dir, "opencode-home", ".config", "opencode", "plugins", "defenseclaw.js")
 	openclawHome := filepath.Join(dir, "openclaw-home", ".openclaw")
@@ -415,6 +737,7 @@ func TestOpenCode_OpenClaw_NoCollision(t *testing.T) {
 
 	opencode := NewOpenCodeConnector()
 	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-isolation"}
+	opts = prepareOpenCodeSetupOptsForTest(t, opts)
 	if err := opencode.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("opencode Setup: %v", err)
 	}
@@ -531,4 +854,255 @@ func TestOpenCodeProfileRespond(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpenCodeCapabilitiesExposeReviewedAssetSurfaces(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restoreHome, err := BindUserHomeDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	opts := SetupOpts{WorkspaceDir: workspace}
+	conn := NewOpenCodeConnector()
+	caps := conn.Capabilities(opts)
+	if !caps.MCP.Supported || caps.MCP.DiscoveryOnly || !caps.MCP.SupportsBackup || !caps.MCP.SupportsRestore {
+		t.Fatalf("OpenCode MCP capability=%+v", caps.MCP)
+	}
+	wantWrite := filepath.Join(workspace, "opencode.json")
+	if len(caps.MCP.WritePaths) != 1 || filepath.Clean(caps.MCP.WritePaths[0]) != wantWrite {
+		t.Fatalf("OpenCode MCP write paths=%v want [%s]", caps.MCP.WritePaths, wantWrite)
+	}
+	for name, surface := range map[string]SurfaceCapability{
+		"skills":  caps.Skills,
+		"rules":   caps.Rules,
+		"plugins": caps.Plugins,
+		"agents":  caps.Agents,
+	} {
+		if !surface.Supported {
+			t.Errorf("OpenCode reviewed %s surface is missing: %+v", name, surface)
+		}
+	}
+	if !caps.Skills.RequiresOptIn || caps.Skills.DiscoveryOnly || len(caps.Skills.WritePaths) == 0 {
+		t.Fatalf("OpenCode skill capability=%+v", caps.Skills)
+	}
+	if !caps.Rules.DiscoveryOnly || !caps.Plugins.DiscoveryOnly || !caps.Agents.DiscoveryOnly {
+		t.Fatalf("OpenCode discovery-only capability mismatch: rules=%+v plugins=%+v agents=%+v", caps.Rules, caps.Plugins, caps.Agents)
+	}
+	if !caps.CodeGuard.Supported {
+		t.Fatalf("OpenCode CodeGuard skill capability is missing: %+v", caps.CodeGuard)
+	}
+
+	targets := conn.ComponentTargets(workspace)
+	if len(targets) != 5 || len(targets["mcp"]) == 0 {
+		t.Fatalf("OpenCode component targets=%v want all five reviewed surfaces", targets)
+	}
+	for _, want := range []string{
+		filepath.Join(home, ".config", "opencode", "opencode.json"),
+		filepath.Join(workspace, "opencode.json"),
+		filepath.Join(workspace, ".opencode", "opencode.jsonc"),
+	} {
+		if !openCodeTestPathContains(targets["mcp"], want) {
+			t.Errorf("OpenCode MCP component targets=%v missing %q", targets["mcp"], want)
+		}
+	}
+	for surface, want := range map[string]string{
+		"skill":  filepath.Join(workspace, ".opencode", "skill"),
+		"rule":   filepath.Join(workspace, "AGENTS.md"),
+		"plugin": filepath.Join(home, ".config", "opencode", "plugins"),
+		"agent":  filepath.Join(workspace, ".opencode", "agents"),
+	} {
+		if !openCodeTestPathContains(targets[surface], want) {
+			t.Errorf("OpenCode %s component targets=%v missing %q", surface, targets[surface], want)
+		}
+	}
+
+	locations := ResolvedConnectorLocations(opts, conn)
+	if len(locations.Surfaces) != 5 || !locations.Surfaces["mcp"].Supported {
+		t.Fatalf("OpenCode resolved locations=%+v", locations)
+	}
+	for _, name := range []string{"skills", "rules", "plugins", "agents"} {
+		if !locations.Surfaces[name].Supported {
+			t.Errorf("OpenCode resolved %s surface is missing: %+v", name, locations.Surfaces[name])
+		}
+	}
+}
+
+func TestOpenCodeCapabilitiesMirrorWriterPrecedenceAndRefusals(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	custom := filepath.Join(t.TempDir(), "custom")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(custom, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	customJSONC := filepath.Join(custom, "opencode.jsonc")
+	if err := os.WriteFile(customJSONC, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restoreHome, err := BindUserHomeDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", custom)
+
+	conn := NewOpenCodeConnector()
+	caps := conn.Capabilities(SetupOpts{WorkspaceDir: workspace})
+	if len(caps.MCP.WritePaths) != 1 || filepath.Clean(caps.MCP.WritePaths[0]) != customJSONC {
+		t.Fatalf("custom JSONC write precedence=%v want [%s]", caps.MCP.WritePaths, customJSONC)
+	}
+	if !openCodeTestPathContains(caps.MCP.ReadPaths, customJSONC) {
+		t.Fatalf("custom config missing from OpenCode read paths: %v", caps.MCP.ReadPaths)
+	}
+
+	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"mcp":{}}`)
+	caps = conn.Capabilities(SetupOpts{WorkspaceDir: workspace})
+	if !caps.MCP.Supported || !caps.MCP.DiscoveryOnly || len(caps.MCP.WritePaths) != 0 {
+		t.Fatalf("inline OpenCode config must fail closed to discovery-only: %+v", caps.MCP)
+	}
+
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "relative-config")
+	caps = conn.Capabilities(SetupOpts{})
+	if !caps.MCP.DiscoveryOnly || len(caps.MCP.WritePaths) != 0 {
+		t.Fatalf("unresolved relative OpenCode config dir must be discovery-only: %+v", caps.MCP)
+	}
+}
+
+func TestOpenCodeCapabilitiesWalkProjectAssetsToWorktreeRoot(t *testing.T) {
+	home := t.TempDir()
+	repository := filepath.Join(t.TempDir(), "repository")
+	workspace := filepath.Join(repository, "nested", "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Git worktrees use a regular .git file rather than a directory. Both
+	// forms are authoritative stop markers for OpenCode's upward discovery.
+	if err := os.WriteFile(filepath.Join(repository, ".git"), []byte("gitdir: elsewhere\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restoreHome, err := BindUserHomeDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	targets := NewOpenCodeConnector().ComponentTargets(workspace)
+	for _, want := range []string{
+		filepath.Join(home, ".config", "opencode", "skill"),
+		filepath.Join(home, ".opencode", "skills"),
+		filepath.Join(workspace, ".opencode", "skills"),
+		filepath.Join(filepath.Dir(workspace), ".agents", "skills"),
+		filepath.Join(repository, ".claude", "skills"),
+		filepath.Join(repository, "opencode.json"),
+		filepath.Join(repository, "AGENTS.md"),
+		filepath.Join(repository, ".opencode", "plugins"),
+		filepath.Join(repository, ".opencode", "agents"),
+	} {
+		found := false
+		for _, paths := range targets {
+			if openCodeTestPathContains(paths, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("OpenCode project targets=%v missing %q", targets, want)
+		}
+	}
+	outside := filepath.Join(filepath.Dir(repository), "AGENTS.md")
+	for _, paths := range targets {
+		if openCodeTestPathContains(paths, outside) {
+			t.Fatalf("OpenCode project targets escaped worktree root to %q: %v", outside, targets)
+		}
+	}
+}
+
+func TestOpenCodeMCPInventorySignatureMatchesCapabilities(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restoreHome, err := BindUserHomeDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreHome)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(source), "..", "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, "internal", "inventory", "ai_signatures.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inventory struct {
+		Signatures []struct {
+			ID       string   `json:"id"`
+			MCPPaths []string `json:"mcp_paths"`
+		} `json:"signatures"`
+	}
+	if err := json.Unmarshal(raw, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	var signaturePaths []string
+	for _, signature := range inventory.Signatures {
+		if signature.ID == "opencode" {
+			signaturePaths = signature.MCPPaths
+			break
+		}
+	}
+	if len(signaturePaths) == 0 {
+		t.Fatal("OpenCode inventory signature has no MCP paths")
+	}
+
+	conn := NewOpenCodeConnector()
+	caps := conn.Capabilities(SetupOpts{WorkspaceDir: workspace})
+	targets := conn.ComponentTargets(workspace)["mcp"]
+	for _, rawPath := range signaturePaths {
+		path := filepath.FromSlash(rawPath)
+		if strings.HasPrefix(rawPath, "~/") {
+			path = filepath.Join(home, filepath.FromSlash(strings.TrimPrefix(rawPath, "~/")))
+		} else if !filepath.IsAbs(path) {
+			path = filepath.Join(workspace, path)
+		}
+		if !openCodeTestPathContains(caps.MCP.ConfigPaths, path) {
+			t.Errorf("OpenCode capability config paths=%v missing inventory signature %q", caps.MCP.ConfigPaths, rawPath)
+		}
+		if !openCodeTestPathContains(targets, path) {
+			t.Errorf("OpenCode component targets=%v missing inventory signature %q", targets, rawPath)
+		}
+	}
+}
+
+func openCodeTestPathContains(paths []string, want string) bool {
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if filepath.Clean(path) == want {
+			return true
+		}
+	}
+	return false
 }

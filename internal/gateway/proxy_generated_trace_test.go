@@ -80,6 +80,12 @@ func newProxyGeneratedTraceRuntime(t *testing.T) (*observabilityruntime.Runtime,
 	return newProxyGeneratedTraceRuntimeWithSampler(t, "always_on")
 }
 
+func newProxyGeneratedMetricRuntime(t *testing.T) (*observabilityruntime.Runtime, *proxyCanonicalCapture) {
+	return newProxyGeneratedRuntimeWithPolicies(
+		t, "always_on", config.ObservabilityV8BucketPolicySource{}, nil, false,
+	)
+}
+
 func newProxyGeneratedTraceRuntimeWithSampler(
 	t *testing.T,
 	sampler string,
@@ -102,6 +108,16 @@ func newProxyGeneratedTraceRuntimeWithPolicies(
 	sampler string,
 	defaults config.ObservabilityV8BucketPolicySource,
 	buckets map[observability.Bucket]config.ObservabilityV8BucketPolicySource,
+) (*observabilityruntime.Runtime, *proxyCanonicalCapture) {
+	return newProxyGeneratedRuntimeWithPolicies(t, sampler, defaults, buckets, true)
+}
+
+func newProxyGeneratedRuntimeWithPolicies(
+	t *testing.T,
+	sampler string,
+	defaults config.ObservabilityV8BucketPolicySource,
+	buckets map[observability.Bucket]config.ObservabilityV8BucketPolicySource,
+	includeSpans bool,
 ) (*observabilityruntime.Runtime, *proxyCanonicalCapture) {
 	t.Helper()
 	directory := t.TempDir()
@@ -168,16 +184,19 @@ func newProxyGeneratedTraceRuntimeWithPolicies(
 			for _, descriptor := range descriptors {
 				selectedFamilies = append(selectedFamilies, observability.EventName(descriptor.Name))
 			}
-			return telemetry.V8GenerationPipelines{
-				SpanPipelines: []telemetry.V8GenerationSpanPipeline{{
-					Destination: "capture", Canonical: capture,
-				}},
+			pipelines := telemetry.V8GenerationPipelines{
 				MetricPipelines: []telemetry.V8GenerationMetricPipeline{{
 					Destination: "capture", Projection: telemetry.V8MetricProjectionCanonical,
 					SelectedFamilies: selectedFamilies,
 					Sink:             capture,
 				}},
-			}, nil
+			}
+			if includeSpans {
+				pipelines.SpanPipelines = []telemetry.V8GenerationSpanPipeline{{
+					Destination: "capture", Canonical: capture,
+				}}
+			}
+			return pipelines, nil
 		},
 	})
 	runtime, err := observabilityruntime.New(t.Context(), runtimegraph.ConfigFromPlan(plan, false), observabilityruntime.Options{

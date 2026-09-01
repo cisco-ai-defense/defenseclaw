@@ -32,8 +32,7 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         "claudecode",
         "hermes",
         "cursor",
-        "windsurf",
-        "geminicli",
+        "devin",
         "copilot",
         "aider",
         "ai-sdks",
@@ -48,6 +47,43 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         "zia-search",
     }:
         assert expected in ids
+
+
+def test_devin_signature_tracks_canonical_connector_contract():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    devin = signatures["devin"]
+
+    assert "windsurf" not in signatures
+    assert set(devin.binary_names) == {"devin", "devin.exe"}
+    assert set(devin.process_names) == {"devin", "devin.exe"}
+    assert {
+        "$APPDATA/devin/config.json",
+        "$APPDATA/devin/mcp_config.json",
+        "~/.config/devin/config.json",
+        "~/.config/devin/mcp_config.json",
+        ".devin/hooks.v1.json",
+        ".devin/mcp_config.json",
+        ".devin/mcp_config.local.json",
+        ".devin/skills",
+        "~/.agents/skills",
+        ".devin/rules",
+        "AGENTS.md",
+        "AGENT.md",
+        "AGENTS.local.md",
+        ".agents/skills",
+    } <= set(devin.config_paths)
+    assert not any("windsurf" in path.casefold() for path in devin.config_paths)
+    assert {
+        "$APPDATA/devin/mcp_config.json",
+        "~/.config/devin/mcp_config.json",
+        ".devin/mcp_config.json",
+        ".devin/mcp_config.local.json",
+    } <= set(devin.mcp_paths)
+    assert devin.name == "Devin"
+    assert devin.vendor == "Cognition"
+    assert devin.env_var_names == ()
+    assert devin.application_names == ()
+    assert devin.domain_patterns == ()
 
 
 def test_lemonade_signature_tracks_server_surface():
@@ -98,6 +134,22 @@ def test_packaged_catalog_is_byte_identical_to_go_authority():
     assert {"perplexity-comet", "zed", "zia-search"} <= ids
 
 
+def test_claude_signature_separates_settings_mcp_and_plugin_surfaces():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    claude = signatures["claudecode"]
+
+    assert "~/.claude/settings.json" in claude.config_paths
+    assert "~/.claude/settings.local.json" not in claude.config_paths
+    assert "~/.claude.json" not in claude.config_paths
+    assert ".mcp.json" not in claude.config_paths
+    assert "~/.claude.json" in claude.mcp_paths
+    assert ".mcp.json" in claude.mcp_paths
+    assert "~/.claude/plugins/cache" in claude.config_paths
+    assert ".claude/plugins" not in claude.config_paths
+    assert "CLAUDE_CONFIG_DIR" in claude.env_var_names
+    assert "CLAUDE_CODE_PLUGIN_CACHE_DIR" in claude.env_var_names
+
+
 def test_antigravity_signature_tracks_mcp_and_customization_paths():
     signatures = {sig.id: sig for sig in load_ai_signatures()}
     antigravity = signatures["antigravity"]
@@ -110,6 +162,63 @@ def test_antigravity_signature_tracks_mcp_and_customization_paths():
     assert "~/.gemini/config/skills" in antigravity.config_paths
     assert ".agents/rules" in antigravity.config_paths
     assert "~/.gemini/config/plugins" in antigravity.config_paths
+    assert "antigravity.google" in antigravity.domain_patterns
+
+
+def test_opencode_signature_tracks_native_local_asset_layouts():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    opencode = signatures["opencode"]
+
+    assert {
+        "~/.config/opencode/agents",
+        "~/.config/opencode/commands",
+        "~/.config/opencode/plugins",
+        "~/.config/opencode/skills",
+        "~/.config/opencode/tools",
+        "~/.claude/CLAUDE.md",
+        "~/.agents/skills",
+        ".opencode/agents",
+        ".opencode/commands",
+        ".opencode/plugins",
+        ".opencode/skills",
+        ".opencode/tools",
+        "AGENTS.md",
+        "CLAUDE.md",
+    } <= set(opencode.config_paths)
+    assert {
+        "~/.config/opencode/plugin",
+        "~/.config/opencode/plugins",
+        ".opencode/plugin",
+        ".opencode/plugins",
+    } <= set(opencode.plugin_paths)
+
+
+def test_codex_signature_tracks_current_official_asset_layouts():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    codex = signatures["codex"]
+
+    assert {
+        "~/.agents/skills",
+        "~/.agents/plugins/marketplace.json",
+        "~/.codex/plugins/cache",
+        "~/.codex/agents",
+        "~/.codex/rules",
+        ".agents/skills",
+        ".agents/plugins/marketplace.json",
+        ".claude-plugin/marketplace.json",
+        ".codex/config.toml",
+        ".codex/agents",
+        ".codex/rules",
+    } <= set(codex.config_paths)
+    assert {".mcp.json", "~/.codex/skills", ".codex/skills"}.isdisjoint(codex.config_paths)
+    assert set(codex.mcp_paths) == {"~/.codex/config.toml", ".codex/config.toml"}
+    assert {
+        "~/.codex/skills",
+        "$CODEX_HOME/skills",
+        "~/.agents/skills",
+        ".codex/skills",
+        ".agents/skills",
+    } <= set(codex.skill_paths)
 
 
 def test_custom_signature_pack_loads_from_managed_dir(tmp_path):

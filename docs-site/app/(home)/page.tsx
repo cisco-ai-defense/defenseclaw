@@ -55,7 +55,7 @@ const CAPABILITIES = [
 const STORIES = [
   { href: '/docs/stories/observe-claude-code', title: 'Stop Claude Code from running a destructive command', body: 'Prove the action never reaches the disk.' },
   { href: '/docs/stories/prompt-injection-codex', title: 'Catch a prompt injection on Codex', body: 'Combine deterministic rules with an optional judge.' },
-  { href: '/docs/stories/cursor-secret-exfil', title: 'Block secret exfiltration from Cursor', body: 'Use the strongest pre-execution hook the connector exposes.' },
+  { href: '/docs/stories/cursor-secret-exfil', title: 'Review secret-exfiltration risk from Cursor', body: 'Use bounded pre-execution inspection without claiming an authoritative block.' },
   { href: '/docs/stories/hitl-approvals', title: 'Approve risky tool calls before they fire', body: 'Pause HIGH findings and return the operator’s decision.' },
   { href: '/docs/stories/local-observability', title: 'Pin local observability in under 60 seconds', body: 'Follow one event through metrics, logs, traces, and audit.' },
   { href: '/docs/stories/switch-connectors', title: 'Switch connectors without losing audit history', body: 'Keep the evidence contract stable while the agent changes.' },
@@ -144,7 +144,7 @@ export default function HomePage() {
       <section className="editorial-section" aria-labelledby="coverage-heading">
         <div className="editorial-shell">
           <SectionIntro eyebrow="Connector-aware enforcement" title="Use the strongest control each agent exposes" id="coverage-heading">
-            DefenseClaw normalizes the decision contract while preserving the difference between native ask, downgraded confirm, and pre-execution blocking.
+            DefenseClaw normalizes the decision contract while preserving the difference between native ask, review-only alerts, and pre-execution blocking.
           </SectionIntro>
           <CapabilityMatrixWrapper className="connector-preview" ariaLabel="Connector capability preview">
             <table>

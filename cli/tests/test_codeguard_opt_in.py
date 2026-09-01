@@ -124,6 +124,20 @@ def test_codeguard_skill_install_is_idempotent(tmp_path, monkeypatch):
     assert second.startswith("already installed at ")
 
 
+def test_gemini_cli_codeguard_is_cleanup_only_even_with_a_supplied_write_dir(tmp_path):
+    cfg = _cfg("geminicli", tmp_path)
+    hostile_target = tmp_path / "gemini-write-target"
+    cfg.skill_write_dirs = lambda _connector: [str(hostile_target)]
+
+    status = codeguard_status(cfg, connector="gemini-cli", target="skill")
+    result = install_codeguard_asset(cfg, connector="geminicli", target="skill")
+
+    assert status.status == "unsupported"
+    assert "Antigravity" in status.detail
+    assert "cleanup-only" in result
+    assert not hostile_target.exists()
+
+
 def test_amp_codeguard_skill_uses_pinned_workspace_write_scope(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     workspace = tmp_path / "repo"

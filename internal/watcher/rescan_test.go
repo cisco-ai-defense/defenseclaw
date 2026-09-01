@@ -17,7 +17,9 @@
 package watcher
 
 import (
+	"crypto/md5"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -416,6 +418,97 @@ func TestDriftDelta_JSONRoundtrip(t *testing.T) {
 	}
 }
 
+func TestEnumerateTargetsSkipsBundledSkillRoot(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	t.Setenv("CODEX_HOME", filepath.Dir(skillDir))
+	cfg.Guardrail.Connector = "codex"
+	systemRoot := filepath.Join(skillDir, ".system")
+	if err := os.MkdirAll(filepath.Join(systemRoot, "imagegen"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := &InstallWatcher{
+		cfg: cfg, skillDirs: []string{systemRoot}, store: store, logger: logger,
+	}
+
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallSkill {
+			t.Fatalf("bundled skill entered periodic rescan targets: %+v", target)
+		}
+	}
+}
+
+func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	home := t.TempDir()
+	t.Setenv("HERMES_HOME", home)
+	cfg.Guardrail.Connector = "hermes"
+	root := filepath.Join(home, "skills")
+	bundled := filepath.Join(root, "productivity", "vendor-docs")
+	source := filepath.Join(home, "hermes-agent", "skills", "productivity", "vendor-docs")
+	forged := filepath.Join(root, "productivity", "manifest-only")
+	user := filepath.Join(root, "operator-skill")
+	bundledMarker := []byte("---\nname: vendor-docs\n---\n")
+	for path, marker := range map[string][]byte{
+		bundled: bundledMarker,
+		source:  bundledMarker,
+		forged:  []byte("---\nname: manifest-only\n---\n"),
+		user:    []byte("---\nname: operator-skill\n---\n"),
+	} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), marker, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bundledHash := md5.Sum(append([]byte("SKILL.md"), bundledMarker...)) // #nosec G401 -- Hermes fixture.
+	forgedMarker, err := os.ReadFile(filepath.Join(forged, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedHash := md5.Sum(append([]byte("SKILL.md"), forgedMarker...)) // #nosec G401 -- Hermes fixture.
+	manifest := fmt.Sprintf("vendor-docs:%x\nmanifest-only:%x\n", bundledHash, forgedHash)
+	if err := os.WriteFile(filepath.Join(root, ".bundled_manifest"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := New(cfg, []string{root}, nil, store, logger, nil, nil, nil)
+	targets := w.enumerateTargets()
+	got := make(map[string]InstallEvent)
+	for _, target := range targets {
+		if target.Type == InstallSkill {
+			got[target.Name] = target
+		}
+	}
+	if _, ok := got["vendor-docs"]; ok {
+		t.Fatalf("proven Hermes bundle entered periodic rescan: %+v", targets)
+	}
+	if _, ok := got["productivity"]; ok {
+		t.Fatalf("Hermes category entered periodic rescan: %+v", targets)
+	}
+	for name, path := range map[string]string{"manifest-only": forged, "operator-skill": user} {
+		target, ok := got[name]
+		if !ok || !sameWatcherPath(target.Path, path) || target.Connector != "hermes" {
+			t.Fatalf("Hermes scan target %q = %+v", name, target)
+		}
+	}
+
+	events := w.pendingInstallEvents(filepath.Join(root, "productivity"))
+	byName := make(map[string]InstallEvent, len(events))
+	for _, event := range events {
+		byName[event.Name] = event
+	}
+	if _, ok := byName["productivity"]; ok {
+		t.Fatalf("category notification was not expanded: %+v", events)
+	}
+	if _, ok := byName["vendor-docs"]; !ok {
+		t.Fatalf("bundled identity missing from live expansion: %+v", events)
+	}
+	if _, ok := byName["manifest-only"]; !ok {
+		t.Fatalf("scanable forged identity missing from live expansion: %+v", events)
+	}
+}
+
 func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	t.Setenv("PATH", "")
@@ -521,29 +614,44 @@ func TestRescan_FromZeptoClawConfig(t *testing.T) {
 	}
 }
 
-// TestRescan_FromClaudeSettingsJSON — plan E1 / item 5. Drives
-// enumerateTargets through the claudecode arm: ReadMCPServers reads
-// from $HOME/.claude/settings.json's `mcpServers` section.
-func TestRescan_FromClaudeSettingsJSON(t *testing.T) {
+// TestRescan_FromClaudeMCPScopes drives enumerateTargets through Claude's
+// canonical local/project/user MCP state and pins local > project > user.
+func TestRescan_FromClaudeMCPScopes(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	tmpHome := t.TempDir()
 	testenv.SetHome(t, tmpHome)
-
-	ccDir := filepath.Join(tmpHome, ".claude")
-	if err := os.MkdirAll(ccDir, 0o755); err != nil {
+	workspace := filepath.Join(tmpHome, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ccSettings := `{
+	ccState := fmt.Sprintf(`{
+		"projects": {
+			%q: {
+				"mcpServers": {
+					"cc-shared": {"command": "local-command"},
+					"cc-local": {"command": "local-command"}
+				}
+			}
+		},
 		"mcpServers": {
-			"cc-stdio":  {"command": "node", "args": ["mcp.js"]},
-			"cc-remote": {"command": "uvx", "args": ["mcp-remote"]}
+			"cc-shared": {"command": "user-command"},
+			"cc-user": {"command": "user-command"}
 		}
-	}`
-	if err := os.WriteFile(filepath.Join(ccDir, "settings.json"), []byte(ccSettings), 0o600); err != nil {
+	}`, workspace)
+	if err := os.WriteFile(filepath.Join(tmpHome, ".claude.json"), []byte(ccState), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectMCP := `{"mcpServers":{
+		"cc-shared":{"command":"project-command"},
+		"cc-project":{"command":"project-command"}
+	}}`
+	if err := os.WriteFile(filepath.Join(workspace, ".mcp.json"), []byte(projectMCP), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Guardrail.Connector = "claudecode"
+	cfg.Claw.WorkspaceDir = workspace
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
 	targets := w.enumerateTargets()
@@ -554,16 +662,54 @@ func TestRescan_FromClaudeSettingsJSON(t *testing.T) {
 			mcpByName[t.Name] = t
 		}
 	}
-	for _, name := range []string{"cc-stdio", "cc-remote"} {
+	for _, name := range []string{"cc-shared", "cc-local", "cc-project", "cc-user"} {
 		if _, ok := mcpByName[name]; !ok {
 			t.Errorf("expected claudecode MCP %q in targets, got %+v", name, mcpByName)
 		}
 	}
+	servers, err := cfg.ReadMCPServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sharedCommand string
+	for _, server := range servers {
+		if server.Name == "cc-shared" {
+			sharedCommand = server.Command
+			break
+		}
+	}
+	if got := sharedCommand; got != "local-command" {
+		t.Errorf("cc-shared command = %q, want local-command", got)
+	}
 }
 
-// TestRescan_FromCodexConfigToml — Codex defaults to the global
-// ~/.codex/config.toml MCP table. Workspace .mcp.json overlays are only
-// included when cfg.Claw.WorkspaceDir is explicitly pinned.
+func TestEnumerateClaudeWatcherPluginsUsesManifestlessCacheVersionBoundary(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "plugins", "cache")
+	version := filepath.Join(cache, "official", "manifestless", "sha-123")
+	nestedManifest := filepath.Join(version, "node_modules", "nested", ".claude-plugin")
+	if err := os.MkdirAll(nestedManifest, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(nestedManifest, "plugin.json"),
+		[]byte(`{"name":"must-not-be-a-plugin-root"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got := enumerateClaudeWatcherPlugins(cache)
+	if len(got) != 1 || !sameWatcherPath(got[0], version) {
+		t.Fatalf("cache plugin roots = %v, want only %q", got, version)
+	}
+	if identity := claudeWatcherPluginIdentity(cache, version); identity != "manifestless@official" {
+		t.Fatalf("cache plugin identity = %q", identity)
+	}
+}
+
+// TestRescan_FromCodexConfigToml — Codex discovers MCP entries from the user
+// ~/.codex/config.toml table; pinned workspaces additionally contribute layered
+// .codex/config.toml entries, subject to the client's project trust decision.
 func TestRescan_FromCodexConfigToml(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	t.Setenv("PATH", "")

@@ -36,10 +36,11 @@ set -euo pipefail
 DC_E2E_CONNECTOR="${1:?usage: contract-smoke.sh <connector>}"
 export DC_E2E_CONNECTOR
 
-# Layer A deliberately runs with NO upstream agent installed — it feeds golden
-# stdin payloads into the installed hook entrypoint, never the real CLI. With no
-# agent on disk the cached agent version is empty, so ResolveHookContract returns
-# "unversioned". In action mode the gateway boot path
+# Layer A deliberately runs without a real upstream agent — it feeds golden
+# stdin payloads into the installed hook entrypoint, never the real CLI. The
+# macOS OpenHands cell supplies a version-only executable fixture so its
+# protected setup selection can be exercised; every other cell remains
+# agent-less and resolves an "unversioned" contract. In action mode the gateway boot path
 # (internal/gateway/sidecar.go) then refuses to run Connector.Setup() unless this
 # override is set, which would leave ~/.defenseclaw/hooks/<connector>-hook.sh
 # unwritten and make every hook invocation exit 127. This is exactly the
@@ -86,7 +87,10 @@ if [ -f "${cfg}" ]; then
 else
   rm -f "${cfg_baseline}"
 fi
-if ! dc_setup_connector "${DC_E2E_CONNECTOR}" action; then
+# Layer A has no runnable upstream agent by design. The payload assertions below
+# are its verification surface; setup readiness cannot validate an absent real
+# vendor client (the macOS OpenHands fixture supports only --version).
+if ! dc_setup_connector "${DC_E2E_CONNECTOR}" action --no-verify; then
   rm -f "${cfg_baseline}"
   exit 1
 fi
@@ -97,7 +101,11 @@ overall_rc=0
 drive_event() {
   local label="$1" payload="$2" expect="$3"
   local before after out code native_event
-  if ! native_event="$(jq -er '[.hook_event_name, .hookEventName] | map(select(type == "string" and length > 0)) | .[0] // empty' "${payload}")"; then
+  if [ "${DC_E2E_CONNECTOR}" = "antigravity" ]; then
+    # Antigravity's official stdin schema omits the event name; setup binds
+    # each installed hook command to its trusted event out-of-band.
+    native_event="PreToolUse"
+  elif ! native_event="$(jq -er '[.hook_event_name, .hookEventName] | map(select(type == "string" and length > 0)) | .[0] // empty' "${payload}")"; then
     dc_record_result "${label}:fixture" fail "missing non-empty hook event name in ${payload}"
     overall_rc=1
     return
@@ -123,9 +131,9 @@ drive_event() {
 
   case "${expect}" in
     block)
-      # Verdict shaping: the entrypoint must signal block — either a
-      # non-zero (exit 2) deny or a decision JSON carrying block/deny.
-      if [ "${code}" = "2" ] || printf '%s' "${out}" | grep -Eqi '"(decision|action|permissionDecision)"\s*:\s*"(block|deny)"|\bdeny\b|\bblock\b'; then
+      # Block-capable connectors return their documented native block shape:
+      # exit 2 or decision JSON carrying block/deny.
+      if [ "${code}" = "2" ] || printf '%s' "${out}" | grep -Eqi '"(decision|action|permission|permissionDecision)"\s*:\s*"(block|deny)"|\bdeny\b|\bblock\b'; then
         dc_record_result "${label}:verdict-shape" pass "exit=${code}"
       else
         dc_record_result "${label}:verdict-shape" fail "expected block shaping, exit=${code}"

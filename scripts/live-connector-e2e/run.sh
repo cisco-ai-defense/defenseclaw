@@ -16,14 +16,17 @@
 #   run.sh --layer contract --connector <name|all>   # Layer A entrypoint smoke
 #   run.sh --layer live     --connector <name|all>   # Layer B live agent
 #
-# Layer A targets every registry connector (golden payload -> installed hook
-# entrypoint). Layer B only targets connectors that ship a driver under
-# drivers/; contract-only connectors (hermes and windsurf) are
-# skipped with a recorded `skip` so the matrix stays honest.
+# Layer A targets connectors with an executable shell-hook contract (golden
+# payload -> installed hook entrypoint). Plugin/policy transports are covered
+# by focused tests instead. Layer B only targets connectors that ship a driver
+# under drivers/; contract-only connectors (Hermes, Devin, and Antigravity)
+# are skipped with a recorded `skip` so the matrix stays honest.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/common.sh"
+# shellcheck source=lib/setup.sh
+. "${HERE}/lib/setup.sh"
 
 LAYER=""
 CONNECTOR=""
@@ -42,8 +45,8 @@ done
 [ -n "${LAYER}" ]     || dc_die "--layer contract|live is required"
 [ -n "${CONNECTOR}" ] || dc_die "--connector <name|all> is required"
 
-# Registry connectors (Layer A covers all; Layer B covers those with drivers).
-ALL_CONNECTORS=(codex claudecode amp geminicli cursor copilot openhands hermes windsurf antigravity)
+# Executable shell-hook connectors (Layer B covers the subset with drivers).
+ALL_CONNECTORS=(codex claudecode amp cursor copilot openhands hermes devin antigravity)
 
 resolve_connectors() {
   if [ "${CONNECTOR}" = "all" ]; then
@@ -54,8 +57,64 @@ resolve_connectors() {
 }
 
 run_contract() {
-  local c="$1"
-  bash "${HERE}/contract-smoke.sh" "${c}"
+  local c="$1" fixture_dir="" fixture_bin="" fixture_trusted=0 rc=0 cleanup_rc=0
+
+  if [ "${c}" != "openhands" ] || [ "$(dc_detect_os)" != "macos" ]; then
+    bash "${HERE}/contract-smoke.sh" "${c}"
+    return
+  fi
+
+  # Darwin OpenHands setup deliberately requires a fresh protected executable
+  # selection. Layer A never runs a real agent, so provide only the deterministic
+  # version probe needed by the normal selection/receipt path. The private,
+  # non-link directory and executable still have to pass production custody,
+  # ancestry, version-contract, and digest admission unchanged.
+  fixture_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dc-contract-openhands.XXXXXX")" || return 1
+  fixture_bin="${fixture_dir}/openhands"
+  chmod 700 "${fixture_dir}" || rc=1
+  if [ "${rc}" -eq 0 ]; then
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then' \
+      '  printf "%s\\n" "OpenHands CLI 1.16.0"' \
+      '  exit 0' \
+      'fi' \
+      'printf "%s\\n" "Layer A OpenHands fixture only supports --version" >&2' \
+      'exit 64' > "${fixture_bin}" || rc=1
+  fi
+  if [ "${rc}" -eq 0 ]; then
+    chmod 700 "${fixture_bin}" || rc=1
+  fi
+
+  # Persist the run-owned directory through the supported trusted-paths API;
+  # agent_selection.py intentionally ignores ambient trust variables for this
+  # protected setup authority. Prefixing PATH lets ordinary discovery select
+  # the same exact file that the receipt and Darwin lock later seal by digest.
+  if [ "${rc}" -eq 0 ]; then
+    dc_init_defenseclaw || rc=1
+  fi
+  if [ "${rc}" -eq 0 ]; then
+    PATH="${fixture_dir}:${PATH}" \
+      defenseclaw setup trusted-paths add "${fixture_dir}" --json >/dev/null || rc=1
+    [ "${rc}" -ne 0 ] || fixture_trusted=1
+  fi
+  if [ "${rc}" -eq 0 ]; then
+    PATH="${fixture_dir}:${PATH}" bash "${HERE}/contract-smoke.sh" "${c}" || rc=$?
+  fi
+
+  if [ "${fixture_trusted}" -eq 1 ]; then
+    PATH="${fixture_dir}:${PATH}" \
+      defenseclaw setup trusted-paths remove "${fixture_dir}" --json >/dev/null || cleanup_rc=1
+  fi
+  if [ -f "${fixture_bin}" ]; then
+    rm -f "${fixture_bin}" || cleanup_rc=1
+  fi
+  rmdir "${fixture_dir}" 2>/dev/null || cleanup_rc=1
+
+  if [ "${rc}" -ne 0 ]; then
+    return "${rc}"
+  fi
+  return "${cleanup_rc}"
 }
 
 run_live() {

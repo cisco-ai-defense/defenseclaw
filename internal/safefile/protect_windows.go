@@ -551,6 +551,42 @@ func setPrivateDACL(path string, inherit bool) error {
 	)
 }
 
+// privateDACLForCurrentUser remains the process-token helper used by the
+// in-use-file protection path. Target-user impersonation uses setPrivateDACL's
+// windowsProtectionIdentity path above instead.
+func privateDACLForCurrentUser(inherit bool) (*windows.SID, *windows.ACL, error) {
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		return nil, nil, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return nil, nil, err
+	}
+	inheritance := uint32(windows.NO_INHERITANCE)
+	if inherit {
+		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
+	for _, sid := range []*windows.SID{user, system} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       inheritance,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		})
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return user, acl, nil
+}
+
 func privateDACLIsSafe(path string) (bool, error) {
 	identity, err := windowsProtectionIdentity()
 	if err != nil {

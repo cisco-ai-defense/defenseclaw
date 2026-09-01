@@ -1,0 +1,125 @@
+---
+title: Devin
+description: Native Devin CLI lifecycle hooks on Windows, macOS, and Linux, with a source-reviewed 3000.4.25 contract.
+keywords:
+  - DefenseClaw Devin connector
+  - Devin CLI hooks
+  - Devin guardrail
+  - Devin Windows
+---
+
+The `devin` connector wires DefenseClaw into the native
+[Devin CLI lifecycle-hook surface](https://docs.devin.ai/cli/extensibility/hooks/overview).
+Devin continues to contact its model provider directly; DefenseClaw does not
+proxy its model traffic.
+
+The supported hook contract is pinned to Devin CLI `3000.4.25` on Windows,
+macOS, and Linux. This is source-reviewed compatibility evidence. Authentic
+official-client validation metadata remains empty and `live=false`.
+
+## Setup
+
+```powershell title="Native Windows PowerShell"
+defenseclaw setup devin --mode observe
+```
+
+```bash title="macOS or Linux"
+defenseclaw setup devin --mode observe
+```
+
+Use `--mode action` only after reviewing observed events and policy findings.
+The connector can join an existing hook-connector roster.
+
+### Native Windows admission
+
+Native Windows Setup accepts only the current user's official CLI at
+`%LOCALAPPDATA%\devin\cli\bin\devin.exe`. The executable must be a regular,
+non-reparse file, report exactly `3000.4.25`, have a valid Authenticode chain,
+and be signed by `Exafunction, Inc.`. Setup does not trust a different
+PATH-resolved `devin.exe`.
+
+DefenseClaw registers the protected native `defenseclaw-hook.exe` command in
+Devin's hook configuration. It does not add a Bash, WSL, Docker, VM, Git Bash,
+Cygwin/MSYS, or proxy dependency.
+
+## Configuration custody
+
+DefenseClaw manages only the documented Devin-native hook locations:
+
+- Windows user hooks: `%APPDATA%\devin\config.json`, nested under `hooks`;
+- macOS/Linux user hooks: `~/.config/devin/config.json`, nested under `hooks`;
+- project hooks: `<workspace>/.devin/hooks.v1.json`, where the hook map is the
+  whole JSONC document.
+
+Existing foreign hook groups and JSONC content are preserved. DefenseClaw does
+not claim or modify Devin's Claude-compatibility hook locations.
+
+## Lifecycle and enforcement
+
+The `devin-hooks-v1` contract registers exactly eight events:
+
+| Event | DefenseClaw role |
+| --- | --- |
+| `PreToolUse` | Inspect tool input before execution; action mode can return top-level `decision: "block"`. |
+| `PostToolUse` | Inspect `tool_response`; completed work cannot be undone. Additional context may be returned. |
+| `PermissionRequest` | Action mode can return a block decision; DefenseClaw does not claim native resumable ask. |
+| `UserPromptSubmit` | Inspect the prompt before the turn; action mode can block or return additional context. |
+| `Stop` | Action mode can return a block decision through the documented hook response. |
+| `PostCompaction` | Observe the compaction summary. |
+| `SessionStart` | Observe lifecycle and optionally return additional context. |
+| `SessionEnd` | Observe lifecycle teardown. |
+
+Top-level `decision` and `reason` carry allow/block results.
+`hookSpecificOutput` is event-tagged; DefenseClaw emits `additionalContext`
+only for `UserPromptSubmit`, `SessionStart`, and `PostToolUse`. Exit `2`
+blocks, while every other hook error fails open. Restricted Mode disables
+hooks and agents entirely.
+
+Devin publishes `session_id` and per-turn `prompt_id`, but no stable per-tool
+invocation ID. Cross-event tool pairing is therefore detection-only. A
+`confirm` finding remains available in audit but cannot pause and resume in
+the DefenseClaw TUI.
+
+## Local customization surfaces
+
+Read/write MCP custody is limited to the canonical user and project
+`mcp_config.json` files. Higher-precedence local compatibility files may be
+read for effective inventory but are not rewritten. Skills and rules are
+discovered from the documented `.devin` and `.agents` roots, including
+`AGENT.md`, `AGENTS.md`, and `AGENTS.local.md` where applicable. Traversal is
+bounded and does not follow links or reparse points.
+
+Devin plugins are closed beta, so DefenseClaw does not advertise plugin setup
+or enforcement. Cloud Devin execution, ACP, proxy transport, native OTLP,
+sandboxing, egress control, and managed higher-layer policy are also outside
+this connector's support boundary.
+
+<Files>
+  <Folder name="~/.config/devin" defaultOpen>
+    <File name="config.json (user hooks)" />
+    <File name="mcp_config.json" />
+    <Folder name="skills" />
+  </Folder>
+  <Folder name="<workspace>/.devin" defaultOpen>
+    <File name="hooks.v1.json" />
+    <File name="mcp_config.json" />
+    <Folder name="skills" />
+    <Folder name="rules" />
+  </Folder>
+</Files>
+
+## Retired predecessor cleanup
+
+Windsurf/Cascade is not a setup alias, selectable connector, discovery target,
+or public hook route. A packaged upgrade from an authenticated older install
+may still recognize its old receipt and restore only the previously managed
+hook entries before publishing canonical Devin state. Full uninstall retains
+the same receipt-bound cleanup so unrelated legacy configuration is preserved.
+
+## Disable
+
+```bash
+defenseclaw guardrail disable --connector devin --yes
+```
+
+<HookEventsList connector="devin" />

@@ -316,8 +316,11 @@ class TestAlertsCommand(unittest.TestCase):
                   details="connector=claudecode y=2")
         c = Event(action="sink-failure", target="/c", severity="HIGH",
                   details="sink_kind=splunk_hec")  # no connector attribution
+        persisted = Event(action="connector-hook", target="/d", severity="HIGH",
+                          connector="cursor", details="action=block")
 
         self.assertEqual(_event_connector(a), "codex")
+        self.assertEqual(_event_connector(persisted), "cursor")
         self.assertEqual(_event_connector(c), "")
         # Substring + case-insensitive, and a no-op for empty needle.
         self.assertEqual(_filter_by_connector([a, b, c], "codex"), [a])

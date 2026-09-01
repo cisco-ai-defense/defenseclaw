@@ -19,7 +19,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "description": "DefenseClaw connector/profile name, for example codex, claudecode, cursor, geminicli, or openhands."
+      "description": "DefenseClaw connector/profile name, for example codex, claudecode, cursor, devin, or openhands."
     },
     "event": {
       "type": "string",

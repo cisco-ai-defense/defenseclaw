@@ -1,7 +1,7 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
 HOOK_LAUNCHER := defenseclaw-hook
-VERSION     := 0.8.6
+VERSION     := 0.8.10
 .DEFAULT_GOAL := help
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv

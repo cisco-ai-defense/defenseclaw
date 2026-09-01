@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v6
+# defenseclaw-managed-hook v7
 # DefenseClaw Windsurf hook — forwards Cascade hook payloads to the
 # DefenseClaw gateway. Windsurf blocks pre-hooks when this script exits 2.
 set -euo pipefail

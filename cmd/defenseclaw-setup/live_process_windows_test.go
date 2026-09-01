@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -176,6 +177,161 @@ func TestLiveProcessWithinInstallRootHelper(t *testing.T) {
 		}
 	}
 	time.Sleep(2 * time.Minute)
+}
+
+func TestDrainStableHookChildrenPreservesForeignExactAndNearMatchProcesses(t *testing.T) {
+	root := t.TempDir()
+	runtimeRoot := filepath.Join(root, "HookRuntime")
+	installBin := filepath.Join(root, "DefenseClaw", "bin")
+	if err := os.MkdirAll(runtimeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(installBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcherPath := filepath.Join(runtimeRoot, "defenseclaw-hook.exe")
+	hookPath := filepath.Join(installBin, "defenseclaw-hook.exe")
+	nearMatchPath := filepath.Join(installBin, "defenseclaw-hook-helper.exe")
+	for _, target := range []string{launcherPath, hookPath, nearMatchPath} {
+		copyExecutable(t, source, target)
+	}
+
+	startHelper := func(target string) *exec.Cmd {
+		t.Helper()
+		ready := filepath.Join(t.TempDir(), "ready")
+		cmd := exec.Command(target, "-test.run=^TestLiveProcessWithinInstallRootHelper$")
+		cmd.Env = append(os.Environ(),
+			"GO_WANT_SETUP_PROCESS_HELPER=1",
+			"GO_SETUP_PROCESS_READY="+ready,
+		)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start process helper %s: %v", target, err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		})
+		waitForSetupProcessReady(t, ready)
+		return cmd
+	}
+	startParent := func(childPath string) (*exec.Cmd, uint32) {
+		t.Helper()
+		ready := filepath.Join(t.TempDir(), "child-pid")
+		cmd := exec.Command(launcherPath, "-test.run=^TestStableHookParentHelper$")
+		cmd.Env = append(os.Environ(),
+			"GO_WANT_SETUP_HOOK_PARENT=1",
+			"GO_SETUP_HOOK_CHILD="+childPath,
+			"GO_SETUP_HOOK_CHILD_PID="+ready,
+		)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start stable hook parent: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		})
+		waitForSetupProcessReady(t, ready)
+		body, err := os.ReadFile(ready)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.ParseUint(strings.TrimSpace(string(body)), 10, 32)
+		if err != nil {
+			t.Fatalf("parse stable hook child PID: %v", err)
+		}
+		child, err := os.FindProcess(int(pid))
+		if err != nil {
+			t.Fatalf("bind stable hook child process: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = child.Kill()
+			_, _ = child.Wait()
+		})
+		return cmd, uint32(pid)
+	}
+
+	foreignExact := startHelper(hookPath)
+	_, ownedChildPID := startParent(hookPath)
+	_, nearMatchPID := startParent(nearMatchPath)
+	if err := drainStableHookChildrenAt(launcherPath, hookPath, 25*time.Millisecond, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForProcessExit(ownedChildPID, 5*time.Second); err != nil {
+		t.Fatalf("authenticated stable hook child remained running: %v", err)
+	}
+	if _, _, err := processIdentity(uint32(foreignExact.Process.Pid)); err != nil {
+		t.Fatalf("foreign exact-path process was terminated: %v", err)
+	}
+	if _, _, err := processIdentity(nearMatchPID); err != nil {
+		t.Fatalf("near-match stable child was terminated: %v", err)
+	}
+}
+
+func TestStableHookParentGenerationMustPredateChild(t *testing.T) {
+	child := managedProcessProof{StartIdentity: "200"}
+	for _, test := range []struct {
+		name   string
+		parent string
+		want   bool
+	}{
+		{name: "older exact parent", parent: "100", want: true},
+		{name: "same creation tick", parent: "200", want: true},
+		{name: "reused parent PID", parent: "300", want: false},
+		{name: "malformed identity", parent: "not-a-filetime", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parent := managedProcessProof{StartIdentity: test.parent}
+			if got := stableHookParentPrecedesChild(parent, child); got != test.want {
+				t.Fatalf("stableHookParentPrecedesChild = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestStableHookParentHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_SETUP_HOOK_PARENT") != "1" {
+		return
+	}
+	childPath := os.Getenv("GO_SETUP_HOOK_CHILD")
+	pidPath := os.Getenv("GO_SETUP_HOOK_CHILD_PID")
+	if childPath == "" || pidPath == "" {
+		os.Exit(2)
+	}
+	childReady := pidPath + ".ready"
+	cmd := exec.Command(childPath, "-test.run=^TestLiveProcessWithinInstallRootHelper$")
+	cmd.Env = append(os.Environ(),
+		"GO_WANT_SETUP_PROCESS_HELPER=1",
+		"GO_SETUP_PROCESS_READY="+childReady,
+	)
+	if err := cmd.Start(); err != nil {
+		os.Exit(3)
+	}
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		os.Exit(4)
+	}
+	_ = cmd.Wait()
+}
+
+func waitForSetupProcessReady(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("process readiness timed out: %s", path)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func TestPathWithinRoot(t *testing.T) {

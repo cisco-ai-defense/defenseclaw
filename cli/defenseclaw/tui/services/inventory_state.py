@@ -20,7 +20,7 @@ from typing import Any, Literal
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.overview_state import friendly_connector_name
 
-InventorySubTab = Literal["summary", "skills", "plugins", "mcp", "agents", "models", "memory"]
+InventorySubTab = Literal["summary", "skills", "plugins", "mcp", "agents", "tools", "models", "memory"]
 InventoryFilter = Literal["", "eligible", "warning", "blocked", "loaded", "disabled"]
 
 INVENTORY_CATEGORIES: tuple[str, ...] = ("skills", "plugins", "mcp", "agents", "tools", "models", "memory")
@@ -31,6 +31,7 @@ INVENTORY_SUBTABS: tuple[InventorySubTab, ...] = (
     "plugins",
     "mcp",
     "agents",
+    "tools",
     "models",
     "memory",
 )
@@ -40,6 +41,7 @@ INVENTORY_SUBTAB_LABELS: Mapping[InventorySubTab, str] = {
     "plugins": "Plugins",
     "mcp": "MCPs",
     "agents": "Agents",
+    "tools": "Tools",
     "models": "Models",
     "memory": "Memory",
 }
@@ -201,6 +203,30 @@ class InventoryAgent:
 
 
 @dataclass(frozen=True)
+class InventoryTool:
+    id: str
+    name: str = ""
+    kind: str = ""
+    source: str = ""
+    description: str = ""
+    connector: str = ""
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryTool:
+        return cls(
+            id=str(raw.get("id") or raw.get("name") or ""),
+            name=str(raw.get("name") or ""),
+            kind=str(raw.get("kind") or ""),
+            source=str(raw.get("source") or ""),
+            description=str(raw.get("description") or ""),
+        )
+
+    @property
+    def display_name(self) -> str:
+        return self.name or self.id
+
+
+@dataclass(frozen=True)
 class InventoryModelProvider:
     id: str
     source: str = ""
@@ -330,7 +356,7 @@ class InventorySnapshot:
     plugins: tuple[InventoryPlugin, ...] = ()
     mcps: tuple[InventoryMCP, ...] = ()
     agents: tuple[InventoryAgent, ...] = ()
-    tools: tuple[Mapping[str, Any], ...] = ()
+    tools: tuple[InventoryTool, ...] = ()
     models: tuple[InventoryModelProvider, ...] = ()
     memory: tuple[InventoryMemory, ...] = ()
     errors: tuple[Any, ...] = ()
@@ -379,7 +405,11 @@ class InventorySnapshot:
                 for item in raw.get("agents") or ()
                 if isinstance(item, Mapping)
             ),
-            tools=tuple(item for item in raw.get("tools") or () if isinstance(item, Mapping)),
+            tools=tuple(
+                InventoryTool.from_mapping(item)
+                for item in raw.get("tools") or ()
+                if isinstance(item, Mapping)
+            ),
             models=tuple(
                 InventoryModelProvider.from_mapping(item)
                 for item in raw.get("model_providers") or ()
@@ -688,6 +718,7 @@ class InventoryPanelModel:
             plugins=tuple(replace(item, connector=connector) for item in snap.plugins),
             mcps=tuple(replace(item, connector=connector) for item in snap.mcps),
             agents=tuple(replace(item, connector=connector) for item in snap.agents),
+            tools=tuple(replace(item, connector=connector) for item in snap.tools),
             models=tuple(replace(item, connector=connector) for item in snap.models),
             memory=tuple(replace(item, connector=connector) for item in snap.memory),
         )
@@ -699,17 +730,27 @@ class InventoryPanelModel:
         plugins = tuple(item for snap in snaps for item in snap.plugins)
         mcps = tuple(item for snap in snaps for item in snap.mcps)
         agents = tuple(item for snap in snaps for item in snap.agents)
+        tools = tuple(item for snap in snaps for item in snap.tools)
         models = tuple(item for snap in snaps for item in snap.models)
         memory = tuple(item for snap in snaps for item in snap.memory)
         total_errors = sum(len(snap.errors) for snap in snaps)
         limitations = tuple(item for snap in snaps for item in snap.limitations)
-        total_items = len(skills) + len(plugins) + len(mcps) + len(agents) + len(models) + len(memory)
+        total_items = (
+            len(skills)
+            + len(plugins)
+            + len(mcps)
+            + len(agents)
+            + len(tools)
+            + len(models)
+            + len(memory)
+        )
         summary = InventorySummary(
             total_items=total_items,
             skills={"count": str(len(skills))},
             plugins={"count": str(len(plugins))},
             mcp={"count": str(len(mcps))},
             agents={"count": str(len(agents))},
+            tools={"count": str(len(tools))},
             models={"count": str(len(models))},
             memory={"count": str(len(memory))},
             errors=str(total_errors),
@@ -722,6 +763,7 @@ class InventoryPanelModel:
             plugins=plugins,
             mcps=mcps,
             agents=agents,
+            tools=tools,
             models=models,
             memory=memory,
             errors=tuple(error for snap in snaps for error in snap.errors),
@@ -768,6 +810,8 @@ class InventoryPanelModel:
                 return len(self.filtered_mcps())
             case "agents":
                 return len(self.filtered_agents())
+            case "tools":
+                return len(self.filtered_tools())
             case "models":
                 return len(self.filtered_models())
             case "memory":
@@ -813,6 +857,11 @@ class InventoryPanelModel:
             return ()
         return tuple(agent for agent in self.inventory.agents if self._connector_keep(agent))
 
+    def filtered_tools(self) -> tuple[InventoryTool, ...]:
+        if self.inventory is None:
+            return ()
+        return tuple(tool for tool in self.inventory.tools if self._connector_keep(tool))
+
     def filtered_models(self) -> tuple[InventoryModelProvider, ...]:
         if self.inventory is None:
             return ()
@@ -857,6 +906,7 @@ class InventoryPanelModel:
             "plugins": _map_val(inv.summary.plugins, "count"),
             "mcp": _map_val(inv.summary.mcp, "count"),
             "agents": _map_val(inv.summary.agents, "count"),
+            "tools": _map_val(inv.summary.tools, "count"),
             "models": _map_val(inv.summary.models, "count"),
             "memory": _map_val(inv.summary.memory, "count"),
         }
@@ -901,6 +951,7 @@ class InventoryPanelModel:
             ),
             ("MCPs", summary.counts["mcp"]),
             ("Agents", summary.counts["agents"]),
+            ("Tools", summary.counts["tools"]),
             ("Models", summary.counts["models"]),
             ("Memory", summary.counts["memory"]),
         ]
@@ -990,6 +1041,20 @@ class InventoryPanelModel:
                         ("Max Concurrent", str(agent.max_concurrent)),
                     ),
                 )
+            case "tools":
+                tool_rows = self.filtered_tools()
+                if not 0 <= self.cursor < len(tool_rows):
+                    return None
+                tool = tool_rows[self.cursor]
+                return InventoryDetailInfo(
+                    f"TOOL: {tool.display_name}",
+                    (
+                        ("ID", tool.id),
+                        ("Kind", tool.kind),
+                        ("Source", tool.source),
+                        ("Description", tool.description),
+                    ),
+                )
             case "models":
                 model_rows = self.filtered_models()
                 if not 0 <= self.cursor < len(model_rows):
@@ -1037,6 +1102,8 @@ class InventoryPanelModel:
                 base = ("ID", "Source", "Transport", "Command/URL")
             case "agents":
                 base = ("ID", "Source", "Model", "Workspace", "Default")
+            case "tools":
+                base = ("ID", "Name", "Kind", "Source")
             case "models":
                 base = ("ID", "Source", "Default Model", "Status")
             case "memory":
@@ -1101,6 +1168,14 @@ class InventoryPanelModel:
                         (agent.id, agent.source, agent.model, agent.workspace, "yes" if agent.default else "no"),
                     )
                     for agent in self.filtered_agents()
+                )
+            case "tools":
+                return tuple(
+                    self._with_connector_cell(
+                        tool,
+                        (tool.id, tool.display_name, tool.kind, tool.source),
+                    )
+                    for tool in self.filtered_tools()
                 )
             case "models":
                 return tuple(
@@ -1206,6 +1281,7 @@ class InventoryPanelModel:
             "plugins": _kept(self.inventory.plugins),
             "mcp": _kept(self.inventory.mcps),
             "agents": _kept(self.inventory.agents),
+            "tools": _kept(self.inventory.tools),
             "models": _kept(self.inventory.models),
             "memory": _kept(self.inventory.memory),
         }
@@ -1284,4 +1360,5 @@ __all__ = [
     "InventorySubTabInfo",
     "InventorySummary",
     "InventorySummaryState",
+    "InventoryTool",
 ]

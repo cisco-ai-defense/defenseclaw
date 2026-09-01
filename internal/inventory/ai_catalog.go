@@ -90,7 +90,8 @@ type AISignature struct {
 	// per-user existence + non-emptiness produce SignalSkill / SignalRule /
 	// SignalPlugin signals. Semantics mirror MCPPaths (path-based detection,
 	// no content scan) but each targets a specific agent-component surface:
-	//   - Codex: ~/.codex/skills, ~/.codex/plugins, .codex/skills, .codex/rules
+	//   - Codex: $CODEX_HOME/skills, ~/.agents/skills, project skill roots,
+	//     ~/.codex/plugins, and .codex/rules
 	//   - Claude Code: ~/.claude/skills, ~/.claude/rules
 	//   - Cursor: ~/.cursor/rules, .cursor/rules
 	// Watcher-scanned skills/plugins live under the same directories, so an
@@ -133,7 +134,7 @@ type aiSignatureCatalog struct {
 // Only expand this table for signatures whose product IS an agent the
 // dashboards should treat as first-class. For signatures that already
 // carry `SupportedConnector` in ai_signatures.json (openclaw, codex,
-// claudecode, cursor, windsurf, …), the connector value flows through
+// claudecode, cursor, devin, …), the connector value flows through
 // directly and this table is not consulted.
 var promotedAgentKinds = map[string]string{
 	"aider":          "aider",

@@ -87,6 +87,18 @@ _INSTALL_STATE_OPTIONAL_FIELDS = frozenset(
         "path_value_created",
         "codex_home",
         "claude_config_dir",
+        "copilot_home",
+        "cursor_home",
+        "devin_config_dir",
+        "devin_executable",
+        "windsurf_user_home",
+        "windsurf_hooks_path",
+        "antigravity_config_dir",
+        "gemini_cli_home",
+        "gemini_config_dir",
+        "opencode_config_dir",
+        "omnigent_config_home",
+        "hermes_home",
         "transaction_id",
     }
 )
@@ -166,9 +178,7 @@ def prepare_native_windows_uninstall(
     local_app_data = _known_folder_path(_LOCAL_APP_DATA_FOLDER_ID)
     profile = _known_folder_path(_PROFILE_FOLDER_ID)
     if not local_app_data or not profile:
-        raise NativeWindowsUninstallRefusal(
-            "Windows Known Folders could not be resolved for native uninstall."
-        )
+        raise NativeWindowsUninstallRefusal("Windows Known Folders could not be resolved for native uninstall.")
 
     install_root = _exact_child(local_app_data, "Programs", "DefenseClaw")
     installer_root = _exact_child(install_root, "installer")
@@ -249,9 +259,7 @@ def execute_native_windows_uninstall(
         platform_name=request.platform_name,
     )
     if current is None or current != request:
-        raise NativeWindowsUninstallRefusal(
-            "Native installer state changed before uninstall dispatch."
-        )
+        raise NativeWindowsUninstallRefusal("Native installer state changed before uninstall dispatch.")
 
     with _open_locked_setup(request.setup_path) as stream:
         _validate_private_path(
@@ -261,23 +269,17 @@ def execute_native_windows_uninstall(
         )
         machine = _portable_executable_machine(stream)
         if machine != _IMAGE_FILE_MACHINE_AMD64:
-            raise NativeWindowsUninstallRefusal(
-                "Cached native Setup is not a Windows x64 executable."
-            )
+            raise NativeWindowsUninstallRefusal("Cached native Setup is not a Windows x64 executable.")
         before_digest, before_source = _setup_digest_and_source(stream)
         if before_source != request.source_commit:
-            raise NativeWindowsUninstallRefusal(
-                "Cached native Setup source identity differs from installer state."
-            )
+            raise NativeWindowsUninstallRefusal("Cached native Setup source identity differs from installer state.")
         _verify_setup_authenticode(
             request.setup_path,
             expected_version=request.version,
         )
         after_digest, after_source = _setup_digest_and_source(stream)
         if before_digest != after_digest or before_source != after_source:
-            raise NativeWindowsUninstallRefusal(
-                "Cached native Setup digest changed during authentication."
-            )
+            raise NativeWindowsUninstallRefusal("Cached native Setup digest changed during authentication.")
 
         try:
             completed = subprocess.run(
@@ -291,9 +293,7 @@ def execute_native_windows_uninstall(
                 shell=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise NativeWindowsUninstallRefusal(
-                f"Could not run authenticated native Setup: {exc}"
-            ) from exc
+            raise NativeWindowsUninstallRefusal(f"Could not run authenticated native Setup: {exc}") from exc
 
     return NativeWindowsUninstallOutcome(
         returncode=int(completed.returncode),
@@ -316,9 +316,7 @@ def _exact_child(root: str, *parts: str) -> str:
     except ValueError:
         contained = False
     if not contained:
-        raise NativeWindowsUninstallRefusal(
-            f"Native uninstall path escapes its Known Folder: {candidate}"
-        )
+        raise NativeWindowsUninstallRefusal(f"Native uninstall path escapes its Known Folder: {candidate}")
     return candidate
 
 
@@ -339,9 +337,7 @@ def _validate_private_path(
         reject_reparse_path(path)
         info = os.lstat(path)
     except OSError as exc:
-        raise NativeWindowsUninstallRefusal(
-            f"Could not validate {label}: {exc}"
-        ) from exc
+        raise NativeWindowsUninstallRefusal(f"Could not validate {label}: {exc}") from exc
     expected_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
     if not expected_type:
         raise NativeWindowsUninstallRefusal(
@@ -355,9 +351,7 @@ def _validate_private_path(
     try:
         required_access = _windows_acl_has_required_access(path)
     except OSError as exc:
-        raise NativeWindowsUninstallRefusal(
-            f"Could not validate {label} DACL: {exc}"
-        ) from exc
+        raise NativeWindowsUninstallRefusal(f"Could not validate {label} DACL: {exc}") from exc
     if not required_access:
         raise NativeWindowsUninstallRefusal(
             f"{label.capitalize()} does not have the required private owner/SYSTEM DACL."
@@ -429,9 +423,7 @@ def _read_private_json(
             os.close(fd)
         value = json.loads(raw.decode("utf-8", errors="strict"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise NativeWindowsUninstallRefusal(
-            f"Could not read {label} safely: {exc}"
-        ) from exc
+        raise NativeWindowsUninstallRefusal(f"Could not read {label} safely: {exc}") from exc
     if not isinstance(value, dict):
         raise NativeWindowsUninstallRefusal(f"{label.capitalize()} must be a JSON object.")
     return value, hashlib.sha256(raw).hexdigest()
@@ -461,9 +453,7 @@ def _validate_install_state(
     if not _INSTALL_STATE_REQUIRED_FIELDS.issubset(fields) or not fields.issubset(
         _INSTALL_STATE_REQUIRED_FIELDS | _INSTALL_STATE_OPTIONAL_FIELDS
     ):
-        raise NativeWindowsUninstallRefusal(
-            "Native installer state does not use the supported closed schema."
-        )
+        raise NativeWindowsUninstallRefusal("Native installer state does not use the supported closed schema.")
     schema = state.get("schema_version")
     version = state.get("version")
     source_commit = state.get("source_commit")
@@ -473,40 +463,66 @@ def _validate_install_state(
     if not isinstance(version, str) or len(version) > 192 or _VERSION.fullmatch(version) is None:
         raise NativeWindowsUninstallRefusal("Native installer state version is invalid.")
     if not isinstance(source_commit, str) or _SOURCE_COMMIT.fullmatch(source_commit) is None:
-        raise NativeWindowsUninstallRefusal(
-            "Native installer state source commit is invalid."
-        )
+        raise NativeWindowsUninstallRefusal("Native installer state source commit is invalid.")
     if transaction_id is not None and (
-        not isinstance(transaction_id, str)
-        or _TRANSACTION_ID.fullmatch(transaction_id) is None
+        not isinstance(transaction_id, str) or _TRANSACTION_ID.fullmatch(transaction_id) is None
     ):
-        raise NativeWindowsUninstallRefusal(
-            "Native installer state transaction identity is invalid."
-        )
+        raise NativeWindowsUninstallRefusal("Native installer state transaction identity is invalid.")
     if (
         state.get("distribution_flavor") != "oss"
         or state.get("install_kind") != "native-windows-exe"
         or state.get("install_scope") != "user"
-        or state.get("connector") not in {"codex", "claudecode", "amp", "none"}
+        or state.get("connector")
+        not in {
+            "amp",
+            "antigravity",
+            "codex",
+            "claudecode",
+            "copilot",
+            "cursor",
+            "devin",
+            "geminicli",
+            "hermes",
+            "omnigent",
+            "windsurf",
+            "opencode",
+            "none",
+        }
         or state.get("mode") not in {"observe", "action"}
         or state.get("unsigned_local_artifact") is not False
         or state.get("release_signing_required") is not True
         or not isinstance(state.get("toolchain"), dict)
         or not isinstance(state.get("installed_at_utc"), str)
     ):
-        raise NativeWindowsUninstallRefusal(
-            "Native installer state is not an authenticated signed user installation."
-        )
+        raise NativeWindowsUninstallRefusal("Native installer state is not an authenticated signed user installation.")
     for field, expected in expected_paths.items():
         value = state.get(field)
-        if (
-            not isinstance(value, str)
-            or os.path.normcase(os.path.abspath(value))
-            != os.path.normcase(os.path.abspath(expected))
+        if not isinstance(value, str) or os.path.normcase(os.path.abspath(value)) != os.path.normcase(
+            os.path.abspath(expected)
         ):
-            raise NativeWindowsUninstallRefusal(
-                f"Native installer state has an unexpected {field.replace('_', ' ')}."
-            )
+            raise NativeWindowsUninstallRefusal(f"Native installer state has an unexpected {field.replace('_', ' ')}.")
+    gemini_cli_home = state.get("gemini_cli_home")
+    gemini_config_dir = state.get("gemini_config_dir")
+    for field, value in (
+        ("gemini_cli_home", gemini_cli_home),
+        ("gemini_config_dir", gemini_config_dir),
+    ):
+        if field in state and (
+            not isinstance(value, str)
+            or value.strip() != value
+            or not os.path.isabs(value)
+            or os.path.normpath(value) != value
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+        ):
+            raise NativeWindowsUninstallRefusal(f"Native installer state has an invalid {field.replace('_', ' ')}.")
+    # Pre-GEMINI_CLI_HOME states can carry only gemini_config_dir. Once the
+    # vendor root exists, however, the pair is closed and must describe exactly
+    # <GEMINI_CLI_HOME>/.gemini.
+    if "gemini_cli_home" in state and (
+        "gemini_config_dir" not in state
+        or os.path.normcase(os.path.join(gemini_cli_home, ".gemini")) != os.path.normcase(gemini_config_dir)
+    ):
+        raise NativeWindowsUninstallRefusal("Native installer state has an inconsistent Gemini CLI home binding.")
     return version, source_commit
 
 
@@ -518,9 +534,7 @@ def _validate_payload_manifest(
     distribution_flavor: str,
 ) -> None:
     if set(payload) != _PAYLOAD_MANIFEST_FIELDS:
-        raise NativeWindowsUninstallRefusal(
-            "Native payload manifest does not use the supported closed schema."
-        )
+        raise NativeWindowsUninstallRefusal("Native payload manifest does not use the supported closed schema.")
     if (
         payload.get("schema_version") != 2
         or isinstance(payload.get("schema_version"), bool)
@@ -532,17 +546,13 @@ def _validate_payload_manifest(
         or not isinstance(payload.get("toolchain"), dict)
         or not isinstance(payload.get("files"), dict)
     ):
-        raise NativeWindowsUninstallRefusal(
-            "Native payload manifest does not match signed installer-state custody."
-        )
+        raise NativeWindowsUninstallRefusal("Native payload manifest does not match signed installer-state custody.")
 
 
 @contextlib.contextmanager
 def _open_locked_setup(path: str) -> Iterator[BinaryIO]:
     if os.name != "nt":
-        raise NativeWindowsUninstallRefusal(
-            "Native Windows Setup custody is unavailable on this platform."
-        )
+        raise NativeWindowsUninstallRefusal("Native Windows Setup custody is unavailable on this platform.")
     import msvcrt
     from ctypes import wintypes
 
@@ -618,23 +628,13 @@ def _open_locked_setup(path: str) -> Iterator[BinaryIO]:
         information = _ByHandleFileInformation()
         if not get_information(handle, ctypes.byref(information)):
             raise ctypes.WinError(ctypes.get_last_error())
-        if information.dwFileAttributes & (
-            file_attribute_directory | file_attribute_reparse_point
-        ):
-            raise NativeWindowsUninstallRefusal(
-                "Cached native Setup handle is not a regular non-reparse file."
-            )
+        if information.dwFileAttributes & (file_attribute_directory | file_attribute_reparse_point):
+            raise NativeWindowsUninstallRefusal("Cached native Setup handle is not a regular non-reparse file.")
         if information.nNumberOfLinks != 1:
-            raise NativeWindowsUninstallRefusal(
-                "Cached native Setup has an unexpected hard-link identity."
-            )
+            raise NativeWindowsUninstallRefusal("Cached native Setup has an unexpected hard-link identity.")
         final_path = _final_path_for_handle(handle, get_final_path)
-        if os.path.normcase(os.path.abspath(final_path)) != os.path.normcase(
-            os.path.abspath(path)
-        ):
-            raise NativeWindowsUninstallRefusal(
-                "Cached native Setup final handle path changed."
-            )
+        if os.path.normcase(os.path.abspath(final_path)) != os.path.normcase(os.path.abspath(path)):
+            raise NativeWindowsUninstallRefusal("Cached native Setup final handle path changed.")
         os.set_handle_inheritable(int(handle), False)
         fd = msvcrt.open_osfhandle(
             int(handle),
@@ -647,9 +647,7 @@ def _open_locked_setup(path: str) -> Iterator[BinaryIO]:
     except NativeWindowsUninstallRefusal:
         raise
     except OSError as exc:
-        raise NativeWindowsUninstallRefusal(
-            f"Could not validate cached native Setup handle: {exc}"
-        ) from exc
+        raise NativeWindowsUninstallRefusal(f"Could not validate cached native Setup handle: {exc}") from exc
     finally:
         if fd >= 0:
             os.close(fd)
@@ -679,22 +677,16 @@ def _final_path_for_handle(handle: object, get_final_path: object) -> str:
 def _portable_executable_machine(stream: BinaryIO) -> int:
     size = os.fstat(stream.fileno()).st_size
     if size <= 0 or size > _MAX_SETUP_BYTES:
-        raise NativeWindowsUninstallRefusal(
-            f"Cached native Setup is outside the {_MAX_SETUP_BYTES}-byte size bound."
-        )
+        raise NativeWindowsUninstallRefusal(f"Cached native Setup is outside the {_MAX_SETUP_BYTES}-byte size bound.")
     header = _read_at(stream, 0, 64)
     if len(header) != 64 or header[:2] != b"MZ":
         raise NativeWindowsUninstallRefusal("Cached native Setup lacks an MZ header.")
     pe_offset = struct.unpack_from("<I", header, 0x3C)[0]
     if pe_offset < 64 or pe_offset > size - 6:
-        raise NativeWindowsUninstallRefusal(
-            "Cached native Setup has an invalid PE header offset."
-        )
+        raise NativeWindowsUninstallRefusal("Cached native Setup has an invalid PE header offset.")
     signature = _read_at(stream, pe_offset, 6)
     if signature[:4] != b"PE\0\0":
-        raise NativeWindowsUninstallRefusal(
-            "Cached native Setup lacks a valid PE signature."
-        )
+        raise NativeWindowsUninstallRefusal("Cached native Setup lacks a valid PE signature.")
     return struct.unpack_from("<H", signature, 4)[0]
 
 
@@ -716,25 +708,18 @@ def _setup_digest_and_source(stream: BinaryIO) -> tuple[str, str]:
             break
         digest.update(chunk)
         searchable = overlap + chunk
-        sources.update(
-            match.group(1).decode("ascii")
-            for match in _SOURCE_BUILD_ID.finditer(searchable)
-        )
+        sources.update(match.group(1).decode("ascii") for match in _SOURCE_BUILD_ID.finditer(searchable))
         overlap = searchable[-128:]
     stream.seek(0)
     if len(sources) != 1:
-        raise NativeWindowsUninstallRefusal(
-            "Cached native Setup does not contain one exact source build identity."
-        )
+        raise NativeWindowsUninstallRefusal("Cached native Setup does not contain one exact source build identity.")
     return digest.hexdigest(), next(iter(sources))
 
 
 def _verify_setup_authenticode(path: str, *, expected_version: str) -> None:
     powershell = _system_powershell_path()
     if not powershell:
-        raise NativeWindowsUninstallRefusal(
-            "System Windows PowerShell is required to verify cached native Setup."
-        )
+        raise NativeWindowsUninstallRefusal("System Windows PowerShell is required to verify cached native Setup.")
     script = (
         "$path=[Console]::In.ReadToEnd();"
         "$sig=Get-AuthenticodeSignature -LiteralPath $path;"
@@ -764,9 +749,7 @@ def _verify_setup_authenticode(path: str, *, expected_version: str) -> None:
             shell=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise NativeWindowsUninstallRefusal(
-            f"Could not verify cached native Setup Authenticode: {exc}"
-        ) from exc
+        raise NativeWindowsUninstallRefusal(f"Could not verify cached native Setup Authenticode: {exc}") from exc
     if completed.returncode != 0:
         raise NativeWindowsUninstallRefusal(
             "System Windows PowerShell could not verify cached native Setup Authenticode."
@@ -774,27 +757,21 @@ def _verify_setup_authenticode(path: str, *, expected_version: str) -> None:
     try:
         value = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        raise NativeWindowsUninstallRefusal(
-            "Cached native Setup Authenticode output is malformed."
-        ) from exc
+        raise NativeWindowsUninstallRefusal("Cached native Setup Authenticode output is malformed.") from exc
     if not isinstance(value, dict) or set(value) != {
         "Status",
         "Publisher",
         "SignatureType",
         "ProductVersion",
     }:
-        raise NativeWindowsUninstallRefusal(
-            "Cached native Setup Authenticode output has an unexpected schema."
-        )
+        raise NativeWindowsUninstallRefusal("Cached native Setup Authenticode output has an unexpected schema.")
     if (
         value["Status"] != "Valid"
         or value["Publisher"] != _PRODUCT_PUBLISHER
         or value["SignatureType"] != "Authenticode"
         or value["ProductVersion"] != expected_version
     ):
-        raise NativeWindowsUninstallRefusal(
-            "Cached native Setup signer, signature type, or version is not trusted."
-        )
+        raise NativeWindowsUninstallRefusal("Cached native Setup signer, signature type, or version is not trusted.")
 
 
 def _system_powershell_path() -> str | None:

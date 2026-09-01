@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # discover_agent_version: per-connector metadata probing.
 #
-# The lib never execs agent binaries (see the security note in
-# installer_lib.sh:discover_agent_version), so all cases are driven from
-# staged tmpdirs / bundle files — no host-agent leakage possible.
+# Binary fallbacks are limited to Codex and OpenCode's exact standalone path,
+# run through the bounded target-user helper. Tests mask host PATH clients and
+# stage explicit fixtures so no installed agent leaks into expected results.
 . "${PKG_DIR}/lib/installer_lib.sh"
 
-# Wrapper that masks any host `amp` / `claude` / `codex` CLI on PATH. We used
+# Wrapper that masks any host `amp` / `claude` / `codex` / `opencode` CLI on PATH. We used
 # to need this because the lib exec'd those binaries; keeping it around
 # guards against a regression where a future CLI probe reintroduces the
 # code-exec surface.
@@ -14,7 +14,7 @@ without_host_agent_bins() {
   local fakebin
   fakebin="$(mktest_tmp)"
   local bin
-  for bin in amp claude codex; do
+  for bin in amp claude codex opencode; do
     cat > "${fakebin}/${bin}" <<'SH'
 #!/usr/bin/env bash
 exit 127
@@ -248,6 +248,185 @@ JSON
   local got
   got="$(without_host_agent_bins discover_agent_version codex "${home}")"
   assert_eq "${got}" "0.142.0" "codex version from user-npm metadata"
+}
+
+t_opencode_from_user_npm_metadata_without_executing_cli() {
+  # Skip only when a higher-priority official App/Homebrew installation is
+  # present on the host. Those sources intentionally win over npm metadata.
+  if [[ -f /Applications/OpenCode.app/Contents/Info.plist ]] \
+     || [[ -L /opt/homebrew/opt/opencode ]] \
+     || [[ -L /usr/local/opt/opencode ]]; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then
+      printf '  skip (higher-priority OpenCode metadata source on host)\n'
+    fi
+    return 0
+  fi
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/opencode-ai"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "opencode-ai", "version": "1.18.19" }
+JSON
+  local got
+  got="$(without_host_agent_bins discover_agent_version opencode "${home}")"
+  assert_eq "${got}" "1.18.19" "opencode version from package metadata without CLI execution"
+}
+
+t_opencode_package_metadata_requires_identity_and_semver() {
+  local dir; dir="$(mktest_tmp)"
+  local pkg="${dir}/package.json"
+  local got
+
+  printf '{"name":"not-opencode","version":"1.18.19"}\n' > "${pkg}"
+  got="$(_probe_opencode_json_version "${pkg}")"
+  assert_eq "${got}" "" "mismatched OpenCode package identity rejected"
+
+  local log="${dir}/errors.log"
+  : > "${log}"
+  printf '{"name":"opencode-ai","version":"not-a-version"}\n' > "${pkg}"
+  got="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
+         DC_INSTALLER_TARGET_USER="alice" \
+         _probe_opencode_json_version "${pkg}")"
+  assert_eq "${got}" "" "invalid OpenCode metadata version rejected"
+  assert_contains "$(cat "${log}")" "invalid-version" "invalid OpenCode version is reported"
+  assert_contains "$(cat "${log}")" "${pkg}" "invalid OpenCode version report names metadata path"
+}
+
+t_opencode_homebrew_metadata_uses_active_formula_without_executing_client() {
+  local prefix; prefix="$(mktest_tmp)"
+  mkdir -p "${prefix}/Cellar/opencode/1.18.20/bin" "${prefix}/opt"
+  local sentinel="${prefix}/executed"
+  cat > "${prefix}/Cellar/opencode/1.18.20/bin/opencode" <<SH
+#!/usr/bin/env bash
+touch '${sentinel}'
+exit 99
+SH
+  chmod 0700 "${prefix}/Cellar/opencode/1.18.20/bin/opencode"
+  if ! ln -s ../Cellar/opencode/1.18.20 "${prefix}/opt/opencode" 2>/dev/null \
+     || [[ ! -L "${prefix}/opt/opencode" ]]; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (symlinks unavailable)\n'; fi
+    return 0
+  fi
+  # Discovery emits a truthful future version; the guardian contract remains
+  # the authority that refuses >=1.18.20 until that runtime is reviewed.
+  local got
+  got="$(_probe_opencode_homebrew_version "${prefix}")"
+  assert_eq "${got}" "1.18.20" "active Homebrew formula metadata candidate selected"
+  if [[ -e "${sentinel}" ]]; then
+    _fail "OpenCode Homebrew binary executed during metadata discovery"
+  fi
+}
+
+t_opencode_app_metadata_requires_official_identity() {
+  if [[ ! -x /usr/libexec/PlistBuddy ]]; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (PlistBuddy unavailable)\n'; fi
+    return 0
+  fi
+  local dir; dir="$(mktest_tmp)"
+  local plist="${dir}/Info.plist"
+  cat > "${plist}" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>ai.opencode.desktop</string>
+  <key>CFBundleShortVersionString</key><string>1.18.19</string>
+</dict></plist>
+PLIST
+  local got
+  got="$(_probe_opencode_app_version "${plist}")"
+  assert_eq "${got}" "1.18.19" "official OpenCode app metadata accepted"
+
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier example.attacker.desktop' "${plist}"
+  got="$(_probe_opencode_app_version "${plist}")"
+  assert_eq "${got}" "" "lookalike OpenCode app bundle identity rejected"
+}
+
+t_bounded_agent_probe_uses_target_user_and_exact_binary() {
+  local dir; dir="$(mktest_tmp)"
+  local fakebin="${dir}/fakebin"
+  local agent="${dir}/.opencode/bin/opencode"
+  local args_log="${dir}/sudo-args"
+  mkdir -p "${fakebin}" "$(dirname "${agent}")"
+
+  cat > "${fakebin}/sudo" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "${DC_TEST_SUDO_ARGS}"
+[[ "$1" == "-n" && "$2" == "-u" && "$4" == "--" ]] || exit 90
+export DC_TEST_EFFECTIVE_USER="$3"
+shift 4
+exec "$@"
+SH
+  cat > "${agent}" <<'SH'
+#!/usr/bin/env bash
+[[ "$1" == "--version" ]] || exit 91
+printf '%s:1.18.19\n' "${DC_TEST_EFFECTIVE_USER}"
+SH
+  chmod 0700 "${fakebin}/sudo" "${agent}"
+
+  local got
+  got="$(DC_TEST_SUDO_ARGS="${args_log}" \
+          _read_agent_version_as_user alice "${agent}" "${fakebin}/sudo")"
+  assert_eq "${got}" "alice:1.18.19" "bounded probe executes through the requested target user"
+  assert_eq "$(sed -n '5p' "${args_log}")" "${agent}" "bounded probe executes the supplied exact binary path"
+  assert_eq "$(sed -n '6p' "${args_log}")" "--version" "bounded probe passes only the version argument"
+}
+
+t_opencode_standalone_uses_bounded_target_user_probe() {
+  local home; home="$(mktest_tmp)"
+  local standalone="${home}/.opencode/bin/opencode"
+  local calls="${home}/probe-calls"
+  local sentinel="${home}/executed-directly"
+  mkdir -p "$(dirname "${standalone}")"
+  cat > "${standalone}" <<SH
+#!/usr/bin/env bash
+touch '${sentinel}'
+printf '9.9.9\n'
+SH
+  chmod 0700 "${standalone}"
+
+  # Isolate this branch from any higher-priority host App/Homebrew/npm source.
+  _probe_opencode_app_version() { :; }
+  _probe_opencode_homebrew_version() { :; }
+  _probe_opencode_json_version() { :; }
+  _read_agent_version_as_user() {
+    printf '%s\t%s\n' "$1" "$2" > "${calls}"
+    printf '1.18.19'
+  }
+
+  local got
+  got="$(DC_INSTALLER_TARGET_USER=alice discover_agent_version opencode "${home}")"
+  # Restore definitions before assertions so later in-process cases are clean.
+  . "${PKG_DIR}/lib/installer_lib.sh"
+
+  assert_eq "${got}" "1.18.19" "standalone OpenCode version is discovered"
+  assert_eq "$(cat "${calls}")" $'alice\t'"${standalone}" "standalone probe receives target user and exact official path"
+  if [[ -e "${sentinel}" ]]; then
+    _fail "standalone OpenCode binary bypassed the bounded target-user helper"
+  fi
+}
+
+t_opencode_standalone_rejects_invalid_version_output() {
+  local home; home="$(mktest_tmp)"
+  local standalone="${home}/.opencode/bin/opencode"
+  local log="${home}/errors.log"
+  mkdir -p "$(dirname "${standalone}")"
+  printf '#!/usr/bin/env bash\n' > "${standalone}"
+  : > "${log}"
+  chmod 0700 "${standalone}"
+
+  _probe_opencode_app_version() { :; }
+  _probe_opencode_homebrew_version() { :; }
+  _probe_opencode_json_version() { :; }
+  _read_agent_version_as_user() { printf 'not-a-version'; }
+
+  local got
+  got="$(DC_INSTALLER_TARGET_USER=alice DC_DISCOVERY_ERRORS_LOG="${log}" \
+          discover_agent_version opencode "${home}")"
+  . "${PKG_DIR}/lib/installer_lib.sh"
+
+  assert_eq "${got}" "" "invalid standalone OpenCode version is rejected"
+  assert_contains "$(cat "${log}")" "version-probe-failed" "failed standalone version probe is reported truthfully"
+  assert_contains "$(cat "${log}")" "${standalone}" "failed standalone probe report names the exact path"
 }
 
 t_unknown_connector() {
@@ -602,6 +781,13 @@ run_case "claudecode without install"        t_claudecode_no_install_returns_emp
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm
+run_case "opencode from user npm metadata without CLI execution" t_opencode_from_user_npm_metadata_without_executing_cli
+run_case "opencode package metadata requires identity + semver" t_opencode_package_metadata_requires_identity_and_semver
+run_case "opencode Homebrew metadata uses active formula without executing it" t_opencode_homebrew_metadata_uses_active_formula_without_executing_client
+run_case "opencode app metadata requires official identity" t_opencode_app_metadata_requires_official_identity
+run_case "bounded agent probe uses target user and exact binary" t_bounded_agent_probe_uses_target_user_and_exact_binary
+run_case "opencode standalone uses bounded target-user probe" t_opencode_standalone_uses_bounded_target_user_probe
+run_case "opencode standalone rejects invalid version output" t_opencode_standalone_rejects_invalid_version_output
 run_case "unknown connector returns empty"   t_unknown_connector
 run_case "_read_json_field decodes \\uXXXX under UTF-8 locale" t_read_json_field_decodes_unicode_escape_bytes
 run_case "_read_json_field rc 0 for well-formed w/o field" t_read_json_field_rc_0_on_wellformed_missing_field

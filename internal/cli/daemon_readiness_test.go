@@ -454,6 +454,198 @@ func TestGatewaySnapshotReadyRetriesUnavailableTelemetryHealth(t *testing.T) {
 	}
 }
 
+func TestGatewaySnapshotReadyRetriesOnlyRecoverableEventHistoryContention(t *testing.T) {
+	for _, primary := range []float64{5, 6} {
+		t.Run(fmt.Sprintf("sqlite-primary-%v", primary), func(t *testing.T) {
+			snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+			snap.Telemetry = gateway.SubsystemHealth{
+				State: gateway.StateError,
+				Details: map[string]interface{}{
+					"generation":                             float64(9),
+					"event_history_failure":                  "sqlite_write_failed",
+					"event_history_last_sqlite_class":        "busy_locked",
+					"event_history_last_sqlite_primary_code": primary,
+				},
+			}
+			ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{
+				guardrailEnabled: true,
+				telemetryEnabled: true,
+			})
+			if ready || err != nil {
+				t.Fatalf("recoverable contention readiness = %v, error = %v; want retryable not-ready", ready, err)
+			}
+		})
+	}
+
+	fatalCases := []struct {
+		name      string
+		lastError string
+		details   map[string]interface{}
+	}{
+		{
+			name: "io failure",
+			details: map[string]interface{}{
+				"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+				"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+			},
+		},
+		{
+			name:      "explicit error",
+			lastError: "telemetry failed",
+			details: map[string]interface{}{
+				"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+				"event_history_last_sqlite_class": "busy_locked", "event_history_last_sqlite_primary_code": float64(5),
+			},
+		},
+		{
+			name: "concurrent retention failure",
+			details: map[string]interface{}{
+				"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+				"event_history_last_sqlite_class": "busy_locked", "event_history_last_sqlite_primary_code": float64(5),
+				"retention_state": "degraded", "retention_failure": "run_failed",
+			},
+		},
+		{
+			name: "concurrent destination failure",
+			details: map[string]interface{}{
+				"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+				"event_history_last_sqlite_class": "busy_locked", "event_history_last_sqlite_primary_code": float64(5),
+				"destinations": []interface{}{map[string]interface{}{
+					"name": "collector", "kind": "otlp", "enabled": true, "generation": float64(9),
+					"state": "degraded", "reason": "retryable_delivery", "failure": "",
+				}},
+			},
+		},
+		{
+			name: "missing sqlite diagnostic",
+			details: map[string]interface{}{
+				"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+			},
+		},
+	}
+	for _, test := range fatalCases {
+		t.Run(test.name, func(t *testing.T) {
+			snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+			snap.Telemetry = gateway.SubsystemHealth{
+				State: gateway.StateError, LastError: test.lastError, Details: test.details,
+			}
+			ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{
+				guardrailEnabled: true,
+				telemetryEnabled: true,
+			})
+			if err == nil || ready {
+				t.Fatalf("fatal telemetry readiness = %v, error = %v; want immediate failure", ready, err)
+			}
+		})
+	}
+}
+
+func telemetryReadinessFatalError(t *testing.T, details map[string]interface{}) string {
+	t.Helper()
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Telemetry = gateway.SubsystemHealth{State: gateway.StateError, Details: details}
+	ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{
+		guardrailEnabled: true,
+		telemetryEnabled: true,
+	})
+	if err == nil || ready {
+		t.Fatalf("telemetry fatal readiness = %v, error = %v; want immediate failure", ready, err)
+	}
+	return err.Error()
+}
+
+func TestGatewaySnapshotReadyReportsBoundedTelemetryFailureBranches(t *testing.T) {
+	t.Run("destinations are allowlisted sorted and capped", func(t *testing.T) {
+		details := map[string]interface{}{
+			"generation": float64(7),
+			"destinations": []interface{}{
+				map[string]interface{}{
+					"name": "zeta", "kind": "sqlite", "enabled": true,
+					"generation": float64(7), "state": "failing", "reason": "delivery_failed",
+				},
+				map[string]interface{}{
+					"name": "healthy", "kind": "console", "enabled": true,
+					"generation": float64(7), "state": "healthy", "reason": "activated", "failure": "projection_failed",
+					"endpoint": "provided by secret store", "counters": map[string]interface{}{"accepted": 99},
+				},
+				map[string]interface{}{
+					"name": "alpha", "kind": "otlp", "enabled": true,
+					"generation": float64(7), "state": "degraded", "reason": "retryable_delivery",
+				},
+			},
+		}
+		got := telemetryReadinessFatalError(t, details)
+		want := "gateway telemetry failed during startup: error (generation=7; destinations=" +
+			"alpha[otlp,degraded,retryable_delivery,generation=7]," +
+			"healthy[console,healthy,activated,failure=projection_failed,generation=7]," +
+			"zeta[sqlite,failing,delivery_failed,generation=7])"
+		if got != want {
+			t.Fatalf("telemetry destination diagnostic = %q, want %q", got, want)
+		}
+		for _, forbidden := range []string{"endpoint", "provided by secret store", "counters", "accepted", "99"} {
+			if strings.Contains(got, forbidden) {
+				t.Fatalf("telemetry destination diagnostic exposed non-allowlisted value %q: %q", forbidden, got)
+			}
+		}
+	})
+
+	t.Run("retention", func(t *testing.T) {
+		got := telemetryReadinessFatalError(t, map[string]interface{}{
+			"generation": float64(8), "retention_state": "degraded", "retention_failure": "run_failed",
+		})
+		want := "gateway telemetry failed during startup: error (generation=8; retention=degraded/run_failed)"
+		if got != want {
+			t.Fatalf("telemetry retention diagnostic = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("event history", func(t *testing.T) {
+		got := telemetryReadinessFatalError(t, map[string]interface{}{
+			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+		})
+		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed)"
+		if got != want {
+			t.Fatalf("telemetry event-history diagnostic = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestGatewaySnapshotReadyCollapsesUnsafeTelemetryFailureDetails(t *testing.T) {
+	row := func(name, reason string) map[string]interface{} {
+		return map[string]interface{}{
+			"name": name, "kind": "otlp", "enabled": true, "generation": float64(1),
+			"state": "degraded", "reason": reason,
+		}
+	}
+	oversizedRows := make([]interface{}, telemetryReadinessDestinationRowsMax+1)
+	for index := range oversizedRows {
+		oversizedRows[index] = row(fmt.Sprintf("destination-%02d", index), "retryable_delivery")
+	}
+	unsafeFailureRow := row("collector", "activated")
+	unsafeFailureRow["state"] = "healthy"
+	unsafeFailureRow["failure"] = "provided by secret store"
+
+	for _, tc := range []struct {
+		name    string
+		details map[string]interface{}
+	}{
+		{name: "malformed generation", details: map[string]interface{}{"generation": 1.5, "retention_state": "degraded"}},
+		{name: "malformed row", details: map[string]interface{}{"generation": float64(1), "destinations": []interface{}{"not-a-row"}}},
+		{name: "secret-like arbitrary reason", details: map[string]interface{}{"generation": float64(1), "destinations": []interface{}{row("collector", "provided by secret store")}}},
+		{name: "secret-like arbitrary failure", details: map[string]interface{}{"generation": float64(1), "destinations": []interface{}{unsafeFailureRow}}},
+		{name: "oversized name", details: map[string]interface{}{"generation": float64(1), "destinations": []interface{}{row(strings.Repeat("x", 65), "retryable_delivery")}}},
+		{name: "oversized row set", details: map[string]interface{}{"generation": float64(1), "destinations": oversizedRows}},
+		{name: "arbitrary retention failure", details: map[string]interface{}{"generation": float64(1), "retention_state": "degraded", "retention_failure": "C:/private/data"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := telemetryReadinessFatalError(t, tc.details); got != "gateway telemetry failed during startup: error" {
+				t.Fatalf("unsafe telemetry diagnostic = %q, want generic error", got)
+			}
+		})
+	}
+}
+
 func testClaudeRotationProbes(baseURL, credential string) []connector.ClaudeCodeNativeOTLPProbe {
 	headers := make(http.Header)
 	headers.Set("Authorization", "Bearer "+credential)
@@ -1025,6 +1217,71 @@ func TestWaitForGatewayReadinessRetriesTransientTelemetrySnapshotMiss(t *testing
 	}
 }
 
+func TestWaitForGatewayReadinessRetriesEventHistoryContentionUntilRecovery(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+		snap.Telemetry.State = gateway.StateRunning
+		if probes.Add(1) == 1 {
+			snap.Telemetry = gateway.SubsystemHealth{
+				State: gateway.StateError,
+				Details: map[string]interface{}{
+					"generation":                             float64(1),
+					"event_history_failure":                  "sqlite_write_failed",
+					"event_history_last_sqlite_class":        "busy_locked",
+					"event_history_last_sqlite_primary_code": float64(5),
+				},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	snap, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("recovering event-history contention readiness = %v, error = %v", ready, err)
+	}
+	if snap.Telemetry.State != gateway.StateRunning || probes.Load() != 2 {
+		t.Fatalf("final telemetry state = %q after %d probes, want running after 2", snap.Telemetry.State, probes.Load())
+	}
+}
+
+func TestWaitForGatewayReadinessPreservesPersistentEventHistoryContentionAtTimeout(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+		snap.Telemetry = gateway.SubsystemHealth{
+			State: gateway.StateError,
+			Details: map[string]interface{}{
+				"generation":                             float64(1),
+				"event_history_failure":                  "sqlite_write_failed",
+				"event_history_last_sqlite_class":        "busy_locked",
+				"event_history_last_sqlite_primary_code": float64(5),
+			},
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, 50*time.Millisecond, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true},
+		func() bool { return true },
+	)
+	if err == nil || !strings.Contains(err.Error(), "did not recover before the startup deadline") ||
+		!strings.Contains(err.Error(), "event_history=sqlite_write_failed") {
+		t.Fatalf("persistent event-history contention error = %v, want bounded recovery timeout", err)
+	}
+	if ready || probes.Load() < 2 {
+		t.Fatalf("persistent event-history contention readiness = %v after %d probes", ready, probes.Load())
+	}
+}
+
 func TestWaitForGatewayReadinessTimesOutOnPersistentTelemetrySnapshotMiss(t *testing.T) {
 	var probes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1191,6 +1448,48 @@ func TestWaitForStartedDaemonStopsProcessOnFatalReadinessError(t *testing.T) {
 	}
 	if process.stoppedPID != 42 {
 		t.Fatalf("StopStarted() PID = %d, want only launched PID 42", process.stoppedPID)
+	}
+}
+
+func TestWaitForStartedDaemonStopsExactPIDOnFirstFatalTelemetrySnapshot(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+		snap.Telemetry = gateway.SubsystemHealth{
+			State: gateway.StateError,
+			Details: map[string]interface{}{
+				"generation": float64(11),
+				"destinations": []interface{}{
+					map[string]interface{}{
+						"name": "issue-768-hec", "kind": "splunk_hec", "enabled": true,
+						"generation": float64(11), "state": "failing", "reason": "delivery_failed", "failure": "hec_ack_rejected",
+					},
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	process := &fakeReadinessProcess{running: true, pid: 42}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL,
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true},
+	)
+	if err == nil || ready || !strings.Contains(err.Error(), "failure=hec_ack_rejected") {
+		t.Fatalf("fatal telemetry readiness = %v, error = %v, want bounded immediate failure", ready, err)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("health probes = %d, want stop on first fatal snapshot", got)
+	}
+	if process.stopCalls != 1 || process.stoppedPID != 42 {
+		t.Fatalf("scoped cleanup = (%d calls, PID %d), want (1, exact PID 42)", process.stopCalls, process.stoppedPID)
 	}
 }
 

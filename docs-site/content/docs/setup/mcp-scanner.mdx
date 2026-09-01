@@ -50,7 +50,7 @@ The default sources include:
 - `~/.openclaw/openclaw.json` → `mcp.servers`
 - `~/Library/Application Support/Claude/claude_desktop_config.json` → `mcpServers`
 - `~/.cursor/mcp.json` → `mcpServers`
-- `~/.codeium/windsurf/mcp_config.json` → `mcpServers`
+- `~/.config/devin/mcp_config.json` and `<workspace>/.devin/mcp_config.json` → `mcpServers`
 - `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json` → `mcpServers` (Antigravity)
 - Connector-specific paths registered by `defenseclaw setup guardrail`.
 
@@ -64,7 +64,7 @@ Each server is scanned independently and findings are tagged with the connector 
 defenseclaw mcp scan --all --json | jq -s '[.[].findings[]]'
 ```
 
-CI-friendly. Walks every server discovered across **all configured connectors'** config files — not just `openclaw.json`, but every connector's MCP source (`claude_desktop_config.json`, `~/.cursor/mcp.json`, Codex, Copilot, …) — and emits **one JSON object per server** as a stream of top-level values (NDJSON-shaped, not wrapped in an array). `jq -s` slurps the stream into an array so a single pipeline can iterate findings across servers; for line-oriented tools use `--json | jq -c '.findings[]'` instead.
+CI-friendly. Walks every scan-eligible server discovered across **all configured connectors'** config files — not just `openclaw.json`, but every connector's MCP source (`claude_desktop_config.json`, `~/.cursor/mcp.json`, Codex, Copilot, …) — and emits **one JSON object per scanned server** as a stream of top-level values (NDJSON-shaped, not wrapped in an array). Codex's exact vendor-bundled, URL-only `openaiDeveloperDocs` user entry is inventory-only and skipped; same-named project or modified entries and Amp skill MCP manifests are scanned normally. `jq -s` slurps the stream into an array so a single pipeline can iterate findings across servers; for line-oriented tools use `--json | jq -c '.findings[]'` instead.
   </Tab>
   <Tab value="Specific server">
 ```bash

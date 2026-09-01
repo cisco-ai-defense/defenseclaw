@@ -40,6 +40,7 @@ import (
 
 const (
 	watchdogPIDFile         = "watchdog.pid"
+	watchdogOwnershipFile   = ".watchdog.lock"
 	watchdogLogFile         = "watchdog.log"
 	watchdogStateFile       = "watchdog.state"
 	maxWatchdogHealthBytes  = 64 << 10
@@ -59,6 +60,32 @@ type watchdogAPIRecoveryRecorder struct {
 	url    string
 	token  string
 }
+
+// watchdogPIDOwnershipInspection keeps lifetime-lock trust separate from the
+// canonical PID publication. Explicit lifecycle repair may act on the latter
+// only after the former was positively inspected without error.
+type watchdogPIDOwnershipInspection struct {
+	locked         bool
+	info           watchdogPIDInfo
+	ownershipErr   error
+	publicationErr error
+}
+
+func (inspection watchdogPIDOwnershipInspection) combinedErr() error {
+	return errors.Join(inspection.ownershipErr, inspection.publicationErr)
+}
+
+func watchdogIsLocked(path string) (bool, watchdogPIDInfo, error) {
+	inspection := inspectWatchdogPIDOwnership(path)
+	return inspection.locked, inspection.info, inspection.combinedErr()
+}
+
+var (
+	watchdogExecutablePath              = os.Executable
+	watchdogCurrentProcessStartIdentity = watchdogProcessStartIdentity
+	watchdogLoopRunner                  = runWatchdogLoop
+	watchdogStartPublicationProbe       = watchdogStartPublicationReady
+)
 
 func (recorder *watchdogAPIRecoveryRecorder) RecordWatchdogRecovery(ctx context.Context) error {
 	if recorder == nil || recorder.client == nil || ctx == nil ||
@@ -230,6 +257,23 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 
 	healthURL := watchdogHealthURL(cfg)
 	requirements := watchdogHealthRequirementsFromConfig(cfg)
+	currentPID := os.Getpid()
+	exe, exeErr := watchdogExecutablePath()
+	if exeErr != nil {
+		if watchdogRequiresStrongProcessIdentity() {
+			return fmt.Errorf("watchdog: resolve executable identity: %w", exeErr)
+		}
+		exe = ""
+	}
+	pidInfo := watchdogPIDInfo{
+		PID:           currentPID,
+		Executable:    exe,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: watchdogCurrentProcessStartIdentity(currentPID),
+	}
+	if watchdogRequiresStrongProcessIdentity() && !watchdogHasStrongProcessIdentity(pidInfo) {
+		return errors.New("watchdog: complete executable and process start identity are required on Windows")
+	}
 
 	var webhooks *gateway.WebhookDispatcher
 	// Include per-connector webhook overrides (D5b) so a global-empty install
@@ -237,9 +281,6 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	if len(cfg.Webhooks) > 0 || len(cfg.Observability.Connectors) > 0 {
 		webhooks = gateway.NewWebhookDispatcher(cfg.Webhooks, cfg.Observability)
 	}
-
-	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
-		interval, debounce, healthURL)
 
 	// S3.HIGH_BUG ("Stale watchdog PID file can stop an
 	// unrelated process"): hold an exclusive lock on the PID file for the
@@ -255,17 +296,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("watchdog: create shutdown control: %w", controlErr)
 	}
 	defer closeControl()
-	exe, exeErr := os.Executable()
-	if exeErr != nil {
-		exe = ""
-	}
-	pidInfo := watchdogPIDInfo{
-		PID:           os.Getpid(),
-		Executable:    exe,
-		StartTime:     time.Now().Unix(),
-		StartIdentity: watchdogProcessStartIdentity(os.Getpid()),
-		ControlName:   controlName,
-	}
+	pidInfo.ControlName = controlName
 	pidFile, err := acquireWatchdogPIDFile(pidPath, pidInfo)
 	if err != nil {
 		return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
@@ -274,6 +305,8 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		_ = pidFile.Close()
 		removeWatchdogPIDIfOwned(pidPath, pidInfo)
 	}()
+	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
+		interval, debounce, healthURL)
 
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), watchdogShutdownSignals()...)
 	defer stopSignals()
@@ -300,7 +333,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr, "[watchdog] warn: gateway token unavailable; recovery telemetry will not be recorded")
 	}
 
-	runWatchdogLoop(ctx, healthURL, interval, debounce, requirements, webhooks, recoveryRecorder)
+	watchdogLoopRunner(ctx, healthURL, interval, debounce, requirements, webhooks, recoveryRecorder)
 	if webhooks != nil {
 		webhooks.Close()
 	}
@@ -395,18 +428,35 @@ func saveWatchdogState(dataDir string, state watchdogState) {
 }
 
 func loadWatchdogState(dataDir string) watchdogState {
-	data, err := os.ReadFile(filepath.Join(dataDir, watchdogStateFile))
+	state, err := readWatchdogState(dataDir)
 	if err != nil {
 		return stateHealthy
 	}
+	return state
+}
+
+func readWatchdogState(dataDir string) (watchdogState, error) {
+	f, err := os.Open(filepath.Join(dataDir, watchdogStateFile))
+	if err != nil {
+		return stateHealthy, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil {
+		return stateHealthy, err
+	}
+	if len(data) > 64 {
+		return stateHealthy, errors.New("watchdog: last-known state exceeds 64 bytes")
+	}
 	switch strings.TrimSpace(string(data)) {
 	case "down":
-		return stateDown
+		return stateDown, nil
 	case "degraded":
-		return stateDegraded
-	default:
-		return stateHealthy
+		return stateDegraded, nil
+	case "healthy":
+		return stateHealthy, nil
 	}
+	return stateHealthy, errors.New("watchdog: last-known state is invalid")
 }
 
 func dispatchHealthEvent(webhooks *gateway.WebhookDispatcher, action, severity, details string) {
@@ -517,25 +567,37 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	// Probe for a running watchdog by attempting to take the PID-file
-	// lock. If the lock is held, the watchdog is alive. If the lock is
-	// free, any old PID file content is by definition stale (a live
-	// watchdog holds the lock for its whole lifetime) so we drop it
-	// before spawning the new child.
-	locked, info, lockErr := watchdogIsLocked(pidPath)
-	if lockErr != nil {
-		return fmt.Errorf("watchdog: inspect PID ownership: %w", lockErr)
+	// Probe the platform ownership lock and the canonical PID identity before
+	// spawning. Explicit start may safely repair an unlocked invalid/stale
+	// private record; read-only status never does.
+	inspection := inspectWatchdogPIDOwnership(pidPath)
+	if inspection.ownershipErr != nil {
+		return fmt.Errorf("watchdog: inspect stable PID ownership: %w", inspection.ownershipErr)
 	}
+	locked, info, lockErr := inspection.locked, inspection.info, inspection.publicationErr
 	if locked {
+		if lockErr != nil || !verifyWatchdogProcess(info) {
+			info, lockErr = watchdogOwnedRecordWait(pidPath, watchdogStartTimeout, watchdogStartInterval)
+			if lockErr != nil {
+				return fmt.Errorf("watchdog: ownership is held but its PID publication is not ready: %w", lockErr)
+			}
+		}
 		Warn(fmt.Sprintf("Watchdog is already running (PID %d)", info.PID))
 		return nil
 	}
-	if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
-		return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; refusing to start a duplicate", liveInfo.PID)
+	if lockErr == nil && watchdogUnlockedLiveProcessInfo(info) {
+		return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; refusing to start a duplicate", info.PID)
 	}
-	// Stale or absent: clear the file so the child gets a clean canvas
-	// and a name-only attacker cannot leave a fake PID for stop to signal.
-	_ = os.Remove(pidPath)
+	// Explicit start is the repair boundary for an unlocked invalid or stale
+	// record. The platform helper binds validation and deletion to the exact
+	// private, non-reparse file object; status never performs this cleanup.
+	removed, cleanupErr := removeStaleWatchdogPIDFile(pidPath)
+	if cleanupErr != nil {
+		return fmt.Errorf("watchdog: repair stale PID ownership: %w", cleanupErr)
+	}
+	if lockErr != nil && !removed {
+		return fmt.Errorf("watchdog: inspect PID ownership: %w", lockErr)
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -549,7 +611,7 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	}
 
 	cmd := &execCommand{path: exe, args: []string{"watchdog"}, logFile: logFile}
-	if err := cmd.start(); err != nil {
+	if err := watchdogStartBackground(cmd); err != nil {
 		logFile.Close()
 		return fmt.Errorf("watchdog: start background: %w", err)
 	}
@@ -563,15 +625,60 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
+func waitForWatchdogOwnedRecord(pidPath string, timeout, interval time.Duration) (watchdogPIDInfo, error) {
+	if timeout <= 0 {
+		timeout = watchdogStartTimeout
+	}
+	if interval <= 0 {
+		interval = watchdogStartInterval
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		locked, info, err := watchdogIsLocked(pidPath)
+		if err == nil && locked && verifyWatchdogProcess(info) {
+			return info, nil
+		}
+		if !locked {
+			if err != nil {
+				return watchdogPIDInfo{}, err
+			}
+			return watchdogPIDInfo{}, errors.New("ownership lock was released before PID publication")
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("published PID identity does not match its owner")
+		}
+		if !time.Now().Before(deadline) {
+			return watchdogPIDInfo{}, lastErr
+		}
+		time.Sleep(interval)
+	}
+}
+
+var watchdogOwnedRecordWait = waitForWatchdogOwnedRecord
+
 func waitForWatchdogStart(pidPath string, expectedPID int, timeout, interval time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		locked, info, err := watchdogIsLocked(pidPath)
-		if err == nil && locked {
-			if info.PID != expectedPID {
-				return fmt.Errorf("ownership lock belongs to PID %d, expected %d", info.PID, expectedPID)
+		publicationReady, err := watchdogStartPublicationProbe(pidPath, expectedPID)
+		if publicationReady {
+			locked, info, inspectionErr := watchdogIsLocked(pidPath)
+			err = inspectionErr
+			if err == nil && locked {
+				if info.PID != expectedPID {
+					// Atomic publication intentionally acquires ownership before it
+					// replaces the canonical PID record. During that short window a
+					// reader may still see the prior record; keep polling until the
+					// bounded readiness deadline instead of rejecting the child early.
+					err = fmt.Errorf("ownership lock belongs to PID %d, expected %d", info.PID, expectedPID)
+				} else if !verifyWatchdogProcess(info) {
+					err = fmt.Errorf("ownership lock PID %d lacks a verified process identity", expectedPID)
+				} else {
+					return nil
+				}
 			}
-			return nil
 		}
 		if !time.Now().Before(deadline) {
 			if err != nil {
@@ -590,6 +697,10 @@ type execCommand struct {
 	args    []string
 	logFile *os.File
 	pid     int
+}
+
+var watchdogStartBackground = func(command *execCommand) error {
+	return command.start()
 }
 
 func (c *execCommand) start() error {
@@ -615,16 +726,30 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	locked, info, lockErr := watchdogIsLocked(pidPath)
-	if lockErr != nil {
-		return fmt.Errorf("watchdog: inspect PID ownership: %w", lockErr)
+	inspection := inspectWatchdogPIDOwnership(pidPath)
+	if inspection.ownershipErr != nil {
+		return fmt.Errorf("watchdog: inspect stable PID ownership: %w", inspection.ownershipErr)
+	}
+	locked, info, lockErr := inspection.locked, inspection.info, inspection.publicationErr
+	if locked && (lockErr != nil || !verifyWatchdogProcess(info)) {
+		info, lockErr = watchdogOwnedRecordWait(pidPath, watchdogStartTimeout, watchdogStartInterval)
+		if lockErr != nil {
+			return fmt.Errorf("watchdog: ownership is held but its PID publication is not ready: %w", lockErr)
+		}
 	}
 	if !locked {
-		if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
-			return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; refusing to report a successful stop", liveInfo.PID)
+		if lockErr == nil && watchdogUnlockedLiveProcessInfo(info) {
+			return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; refusing to report a successful stop", info.PID)
 		}
-		fmt.Println(Dim("Watchdog is not running"))
-		_ = os.Remove(pidPath)
+		removed, cleanupErr := removeStaleWatchdogPIDFile(pidPath)
+		if cleanupErr != nil {
+			return fmt.Errorf("watchdog: repair stale PID ownership: %w", cleanupErr)
+		}
+		if removed {
+			fmt.Println(Dim("Watchdog is not running (stale or invalid PID file repaired)"))
+		} else {
+			fmt.Println(Dim("Watchdog is not running"))
+		}
 		return nil
 	}
 
@@ -632,24 +757,22 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	// process"): verify the recorded fingerprint BEFORE signalling. A
 	// PID-reuse race (the watchdog crashed and the kernel handed its PID
 	// to an unrelated user-owned process) used to send SIGTERM/SIGKILL to
-	// that unrelated process. The executable fingerprint / liveness check
-	// now rejects the stale PID and we just remove the file.
+	// that unrelated process. A held ownership lock with a mismatched
+	// fingerprint is not deletion or signalling authority.
 	if !verifyWatchdogProcess(info) {
-		fmt.Println(Dim("Watchdog is not running (stale PID file removed)"))
-		_ = os.Remove(pidPath)
-		return nil
+		return errors.New("watchdog: ownership lock is held by a process that does not match the recorded identity; refusing cleanup")
 	}
 
 	proc, err := os.FindProcess(info.PID)
 	if err != nil {
 		fmt.Println(Dim("Watchdog is not running"))
-		_ = os.Remove(pidPath)
+		removeWatchdogPIDIfOwned(pidPath, info)
 		return nil
 	}
 	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 
 	fmt.Printf("Stopping watchdog (PID %d)... ", info.PID)
-	if err := watchdogTerminate(info, proc); err != nil {
+	if err := watchdogRequestTerminate(info, proc); err != nil {
 		if !verifyWatchdogProcess(info) {
 			removeWatchdogPIDIfOwned(pidPath, info)
 			fmt.Println(Dim("already stopped"))
@@ -682,6 +805,8 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
+var watchdogRequestTerminate = watchdogTerminate
+
 func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
@@ -689,38 +814,56 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	cfg, cfgErr := config.LoadRuntimeV8File(config.ConfigPath())
 	enabled := cfgErr == nil && cfg.Gateway.Watchdog.Enabled
 
-	locked, info, lockErr := watchdogIsLocked(pidPath)
-	if lockErr != nil {
-		return fmt.Errorf("watchdog: inspect PID ownership: %w", lockErr)
+	inspection := inspectWatchdogPIDOwnership(pidPath)
+	if inspection.ownershipErr != nil {
+		return fmt.Errorf("watchdog: inspect stable PID ownership: %w", inspection.ownershipErr)
 	}
+	locked, info, lockErr := inspection.locked, inspection.info, inspection.publicationErr
 	if !locked {
-		if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
-			return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; status is indeterminate", liveInfo.PID)
-		}
-		if enabled {
+		if lockErr != nil {
+			Warn(fmt.Sprintf("Watchdog: not running (invalid or unsafe PID file retained: %v)", lockErr))
+		} else if watchdogUnlockedLiveProcessInfo(info) {
+			return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; status is indeterminate", info.PID)
+		} else if info.PID > 0 {
+			Warn(fmt.Sprintf("Watchdog: not running (stale PID %d record retained)", info.PID))
+		} else if enabled {
 			Warn("Watchdog: enabled but not running")
-			Subhead("Start with: defenseclaw-gateway watchdog start")
 		} else {
 			fmt.Println(Dim("Watchdog: disabled"))
+		}
+		if enabled {
+			Subhead("Start with: defenseclaw-gateway watchdog start")
+		} else if info.PID == 0 && lockErr == nil {
 			Subhead("Enable in config: gateway.watchdog.enabled = true")
 		}
-		_ = os.Remove(pidPath)
 		return nil
 	}
+	if lockErr != nil {
+		return fmt.Errorf("watchdog: ownership is held but its PID record is unreadable: %w", lockErr)
+	}
 
-	// Same fingerprint check as stop. If the recorded executable no
-	// longer matches the live process the PID was reused by an unrelated
-	// process; report not-running and clear the stale file.
+	// Same fingerprint check as stop. Status is read-only: a mismatched live
+	// owner is reported but never removed or signalled.
 	if !verifyWatchdogProcess(info) {
-		Warn(fmt.Sprintf("Watchdog: not running (PID %d does not match recorded fingerprint)", info.PID))
-		_ = os.Remove(pidPath)
+		Warn(fmt.Sprintf("Watchdog: ownership held but PID %d does not match the recorded fingerprint; PID file retained", info.PID))
 		return nil
 	}
 
 	fmt.Printf("Watchdog: %s (PID %d)\n", Style("running", "fg=green", "bold"), info.PID)
 
-	state := loadWatchdogState(dataDir)
-	fmt.Printf("  %s %s\n", Style("Last known state:", "fg=bright_black", "bold"), state.String())
+	state, stateErr := readWatchdogState(dataDir)
+	if stateErr != nil {
+		Warn(fmt.Sprintf("Watchdog last known state: unavailable (%v)", stateErr))
+		return nil
+	}
+	switch state {
+	case stateDegraded:
+		Warn("Watchdog last known state: degraded (a required downstream connector or protection subsystem did not converge; restarting the watchdog is not a repair)")
+	case stateDown:
+		Warn("Watchdog last known state: down (gateway health is unavailable and protection status cannot be verified)")
+	default:
+		fmt.Printf("  %s %s\n", Style("Last known state:", "fg=bright_black", "bold"), state.String())
+	}
 
 	return nil
 }
@@ -739,7 +882,11 @@ type watchdogPIDInfo struct {
 }
 
 func removeWatchdogPIDIfOwned(path string, stopped watchdogPIDInfo) {
-	_ = removeWatchdogPIDFileIf(path, func(current watchdogPIDInfo) bool {
+	_, _ = removeWatchdogPIDFileIf(path, func(data []byte) bool {
+		current, err := parseWatchdogPIDInfo(data)
+		if err != nil {
+			return false
+		}
 		if current.PID != stopped.PID {
 			return false
 		}
@@ -751,19 +898,37 @@ func removeWatchdogPIDIfOwned(path string, stopped watchdogPIDInfo) {
 }
 
 func watchdogUnlockedLiveProcess(path string) (bool, watchdogPIDInfo) {
-	info, err := readWatchdogPIDInfo(path)
-	if err != nil {
+	locked, info, err := watchdogIsLocked(path)
+	if err != nil || locked {
 		return false, watchdogPIDInfo{}
 	}
+	return watchdogUnlockedLiveProcessInfo(info), info
+}
+
+func watchdogUnlockedLiveProcessInfo(info watchdogPIDInfo) bool {
 	// An unlocked legacy PID record proves only that some process currently
 	// owns the numeric PID. Treating that as the watchdog would let an
 	// unrelated recycled PID block lifecycle operations indefinitely. Only
 	// preserve an unlocked record when the platform can strongly bind its
 	// fingerprint to the original process.
 	if !watchdogHasStrongProcessIdentity(info) {
-		return false, info
+		return false
 	}
-	return verifyWatchdogProcess(info), info
+	return verifyWatchdogProcess(info)
+}
+
+// removeStaleWatchdogPIDFile is used only by explicit lifecycle commands. It
+// removes the exact unlocked private PID object when it is invalid or when its
+// complete process identity no longer names a live watchdog. It never treats a
+// numeric PID alone as deletion authority and never signals a process.
+func removeStaleWatchdogPIDFile(path string) (bool, error) {
+	return removeWatchdogPIDFileIf(path, func(data []byte) bool {
+		info, err := parseWatchdogPIDInfo(data)
+		if err != nil {
+			return true
+		}
+		return !watchdogUnlockedLiveProcessInfo(info)
+	})
 }
 
 // writeWatchdogPIDInfo truncates f and writes info as JSON, flushing to
@@ -809,6 +974,10 @@ func readWatchdogPIDInfoFile(f *os.File) (watchdogPIDInfo, error) {
 			maxWatchdogPIDFileBytes,
 		)
 	}
+	return parseWatchdogPIDInfo(data)
+}
+
+func parseWatchdogPIDInfo(data []byte) (watchdogPIDInfo, error) {
 	trimmed := strings.TrimSpace(string(data))
 	if trimmed == "" {
 		return watchdogPIDInfo{}, fmt.Errorf("watchdog: empty pid file")
@@ -838,6 +1007,9 @@ func verifyWatchdogProcess(info watchdogPIDInfo) bool {
 	if info.PID <= 0 {
 		return false
 	}
+	if watchdogRequiresStrongProcessIdentity() && !watchdogHasStrongProcessIdentity(info) {
+		return false
+	}
 	proc, err := os.FindProcess(info.PID)
 	if err != nil {
 		return false
@@ -856,12 +1028,5 @@ func verifyWatchdogProcess(info watchdogPIDInfo) bool {
 		// verified above. Legacy bare-int files therefore use liveness only.
 		return true
 	}
-	// Linux exposes the running binary at /proc/<pid>/exe; on platforms
-	// without it (macOS, Windows) we conservatively trust the liveness
-	// check, matching the daemon-side limitation.
-	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
-	if err != nil || exePath == "" {
-		return true
-	}
-	return exePath == info.Executable
+	return watchdogProcessExecutableMatches(info)
 }

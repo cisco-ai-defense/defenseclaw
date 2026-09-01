@@ -49,17 +49,33 @@ t_amp_does_not_precreate_plugin() {
   fi
 }
 
+t_opencode_does_not_precreate_plugin() {
+  local home; home="$(mktest_tmp)"
+  prepare_userspace_for opencode "${home}" "$(id -u)" "$(id -g)"
+  if [[ -e "${home}/.config/opencode/plugins/defenseclaw.js" \
+     || -L "${home}/.config/opencode/plugins/defenseclaw.js" ]]; then
+    _fail "packaging precreated OpenCode's managed bridge plugin"
+  fi
+  if [[ -e "${home}/.config/opencode/plugins" ]]; then
+    _fail "packaging created OpenCode's plugin directory before connector reconciliation"
+  fi
+}
+
 t_dispatch_via_helper() {
   local home; home="$(mktest_tmp)"
   prepare_userspace_for amp        "${home}"
   prepare_userspace_for cursor     "${home}"
   prepare_userspace_for codex      "${home}"
   prepare_userspace_for claudecode "${home}"
+  prepare_userspace_for opencode   "${home}"
   assert_file_exists "${home}/.cursor/hooks.json"
   assert_file_exists "${home}/.codex/config.toml"
   assert_file_exists "${home}/.claude/settings.json"
   if [[ -e "${home}/.config/amp/plugins/defenseclaw.ts" ]]; then
     _fail "dispatch helper precreated Amp's managed plugin"
+  fi
+  if [[ -e "${home}/.config/opencode/plugins/defenseclaw.js" ]]; then
+    _fail "dispatch helper precreated OpenCode's managed plugin"
   fi
 }
 
@@ -182,6 +198,7 @@ run_case "claudecode userspace pre-create"         t_claudecode_creates
 run_case "cursor userspace pre-create"             t_cursor_creates
 run_case "amp userspace prep does not precreate plugin" t_amp_does_not_precreate_plugin
 run_case "prepare_userspace_for dispatch"          t_dispatch_via_helper
+run_case "OpenCode userspace prep leaves bridge ownership to Setup" t_opencode_does_not_precreate_plugin
 run_case "descriptor-anchored ownership"           t_descriptor_anchored_ownership
 run_case "descriptor ownership rejects hardlink"  t_descriptor_ownership_rejects_hardlinked_config
 run_case "codex rejects symlinked .codex dir"      t_codex_rejects_symlink_dir

@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -217,6 +218,10 @@ func emitEndpointInventory(
 // cfg.AIDiscovery.HomeDirs (populated by the installer's eligible-users
 // enumeration).
 func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpointInventoryComponent {
+	return perConnectorMCPEntriesForOS(cfg, reg, runtime.GOOS)
+}
+
+func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, goos string) []endpointInventoryComponent {
 	if cfg == nil {
 		return nil
 	}
@@ -229,7 +234,7 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 	var connectors []string
 	for _, name := range cfg.ActiveConnectors() {
 		key := strings.ToLower(strings.TrimSpace(name))
-		if key == "" {
+		if key == "" || !inventoryConnectorAvailableOnOS(key, goos) {
 			continue
 		}
 		if _, ok := seenConnector[key]; ok {
@@ -241,7 +246,7 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 	if reg != nil {
 		for _, info := range reg.Available() {
 			key := strings.ToLower(strings.TrimSpace(info.Name))
-			if key == "" {
+			if key == "" || !inventoryConnectorAvailableOnOS(key, goos) {
 				continue
 			}
 			if _, ok := seenConnector[key]; ok {
@@ -334,7 +339,7 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 		}
 		homeScope := endpointInventoryScopeKey(home)
 		for _, connectorName := range connectors {
-			for _, servers := range readMCPServersUnderHome(connectorName, home) {
+			for _, servers := range readMCPServersUnderHomeForOS(connectorName, home, goos) {
 				appendServers(connectorName, homeScope, servers)
 			}
 		}
@@ -355,8 +360,7 @@ func hasNativeMCPReader(connectorName string) bool {
 		"zeptoclaw",
 		"hermes",
 		"cursor",
-		"windsurf",
-		"geminicli",
+		"devin",
 		"copilot",
 		"openhands",
 		"opencode",
@@ -372,6 +376,10 @@ func hasNativeMCPReader(connectorName string) bool {
 // per-source results so callers can label each individually if desired.
 // Missing/unparseable files yield nil entries (best-effort).
 func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEntry {
+	return readMCPServersUnderHomeForOS(connectorName, home, runtime.GOOS)
+}
+
+func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.MCPServerEntry {
 	if home == "" {
 		return nil
 	}
@@ -382,9 +390,14 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 			results = append(results, entries)
 		}
 	}
+	tryHome := func(reader func(string) ([]config.MCPServerEntry, error)) {
+		if entries, err := reader(home); err == nil && len(entries) > 0 {
+			results = append(results, entries)
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "codex":
-		tryFile(config.ReadMCPFromCodexConfigTOML, ".codex/config.toml")
+		tryFile(config.ReadMCPFromCodexUserConfigTOML, ".codex/config.toml")
 	case "claudecode":
 		// Honor CLAUDE_CONFIG_DIR the same way readMCPServersClaudeCode does:
 		// when the operator has redirected Claude Code to a custom directory,
@@ -404,12 +417,14 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
 	case "cursor":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".cursor/mcp.json")
-	case "windsurf":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".codeium/windsurf/mcp_config.json")
+	case "devin":
+		if strings.EqualFold(strings.TrimSpace(goos), "windows") {
+			tryFile(config.ReadMCPFromDevinConfig, "AppData/Roaming/devin/mcp_config.json")
+		} else {
+			tryFile(config.ReadMCPFromDevinConfig, ".config/devin/mcp_config.json")
+		}
 	case "copilot":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".config/github-copilot/mcp.json")
-	case "geminicli":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/settings.json")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".copilot/mcp-config.json")
 	case "openhands":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".openhands/mcp.json")
 	case "zeptoclaw":
@@ -433,15 +448,9 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/config/mcp_config.json")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".agents/mcp_config.json")
 	case "opencode":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".config/opencode/opencode.json")
-		tryFile(config.ReadMCPFromDotMCPJSON, ".opencode/opencode.json")
+		tryHome(config.ReadMCPServersOpenCodeUnderHome)
 	case "amp":
-		// Amp's settings.json follows the Claude Code shape (top-level
-		// `mcpServers`), so the Claude Settings reader is the right
-		// dispatch; the generic DotMCPJSON reader also works but the
-		// Claude Settings one is stricter.
-		tryFile(config.ReadMCPFromClaudeSettings, ".config/amp/settings.json")
-		tryFile(config.ReadMCPFromClaudeSettings, ".amp/settings.json")
+		tryHome(config.ReadMCPServersAMPUnderHome)
 	}
 	return results
 }
@@ -479,6 +488,10 @@ func makeEndpointInventoryEmitter(
 }
 
 func endpointConnectorComponents(reg *connector.Registry) ([]endpointInventoryComponent, bool) {
+	return endpointConnectorComponentsForOS(reg, runtime.GOOS)
+}
+
+func endpointConnectorComponentsForOS(reg *connector.Registry, goos string) ([]endpointInventoryComponent, bool) {
 	if reg == nil {
 		reg = getFallbackConnectorRegistry()
 	}
@@ -488,6 +501,9 @@ func endpointConnectorComponents(reg *connector.Registry) ([]endpointInventoryCo
 	available := reg.Available()
 	components := make([]endpointInventoryComponent, 0, len(available))
 	for _, info := range available {
+		if !inventoryConnectorAvailableOnOS(info.Name, goos) {
+			continue
+		}
 		name := inventoryStableIdentifier(info.Name)
 		components = append(components, endpointInventoryComponent{
 			id:                          endpointInventoryComponentID("connector", info.Name),
@@ -503,6 +519,11 @@ func endpointConnectorComponents(reg *connector.Registry) ([]endpointInventoryCo
 		})
 	}
 	return components, false
+}
+
+func inventoryConnectorAvailableOnOS(name, goos string) bool {
+	status := connector.ConnectorSupportOnOS(strings.ToLower(strings.TrimSpace(name)), goos).Status
+	return status == connector.PlatformSupported || status == connector.PlatformPreview
 }
 
 func endpointMCPComponents(cfg *config.Config) ([]endpointInventoryComponent, bool) {

@@ -29,9 +29,14 @@ import (
 // built-in hook connectors without anyone editing the api.go switch
 // statement they replace. Plan C1 / S2.4.
 func TestHookRegister_HasBuiltinFactories(t *testing.T) {
-	for _, name := range []string{"claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
+	for _, name := range []string{"claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		if _, ok := connectorHookHandlerByName[name]; !ok {
 			t.Errorf("expected hook factory for connector %q to be registered", name)
+		}
+	}
+	for _, name := range []string{"windsurf", "geminicli"} {
+		if _, ok := connectorHookHandlerByName[name]; ok {
+			t.Errorf("retired connector %q still has an active hook factory", name)
 		}
 	}
 }
@@ -65,6 +70,29 @@ func TestRegisterConnectorHookRoutes_DataDriven(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("factory's HandlerFunc was never invoked")
+	}
+}
+
+func TestRegisterConnectorHookRoutesDoesNotExposeDeprecatedGemini(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		reg  *connector.Registry
+	}{
+		{name: "default registry", reg: connector.NewDefaultRegistry()},
+		{name: "legacy no-registry fallback", reg: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &APIServer{connectorRegistry: tc.reg}
+			mux := http.NewServeMux()
+			a.registerConnectorHookRoutes(mux)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/geminicli/hook", nil)
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("deprecated Gemini hook endpoint status=%d, want 404", rec.Code)
+			}
+		})
 	}
 }
 

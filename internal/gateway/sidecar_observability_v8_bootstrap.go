@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -45,7 +46,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
-const sidecarObservabilityV8CloseTimeout = 30 * time.Second
+const (
+	sidecarObservabilityV8CloseTimeout      = 30 * time.Second
+	sidecarDeliveryHealthPersistenceTimeout = 2 * time.Second
+	sidecarDeliveryHealthAction             = "telemetry-destination"
+)
 
 type sidecarObservabilityV8BootstrapErrorCode string
 
@@ -890,17 +895,138 @@ func sidecarObservabilityV8ManagedReloadCandidate(
 }
 
 func (s *Sidecar) observeObservabilityV8Delivery(transition delivery.HealthTransition) {
-	if s == nil || s.health == nil {
+	if s == nil {
 		return
 	}
-	if transition.Generation == 0 || transition.OccurredAt.IsZero() {
+	if transition.Generation == 0 || transition.OccurredAt.IsZero() ||
+		!observability.IsStableToken(transition.Destination) ||
+		len(transition.Destination) > 64 ||
+		!observability.IsSignal(observability.Signal(transition.Signal)) {
 		return
+	}
+	failureCode := string(transition.FailureCode)
+	if failureCode == "" {
+		failureCode = string(transition.Reason)
 	}
 	if transition.Current == delivery.HealthDegraded || transition.Current == delivery.HealthFailing {
-		s.health.observeObservabilityV8Failure(
-			transition.Destination, transition.Generation, string(transition.Reason), transition.OccurredAt,
-		)
+		if s.health != nil {
+			s.health.observeObservabilityV8Failure(
+				transition.Destination, transition.Generation, failureCode, transition.OccurredAt,
+			)
+		}
 	}
+	if transition.Current == delivery.HealthFailing ||
+		(transition.Current == delivery.HealthHealthy && transition.Reason == delivery.HealthReasonRecovered) {
+		_ = s.persistObservabilityV8DeliveryTransition(transition)
+	}
+}
+
+func (s *Sidecar) persistObservabilityV8DeliveryTransition(
+	transition delivery.HealthTransition,
+) error {
+	if s == nil || transition.Generation == 0 || transition.OccurredAt.IsZero() ||
+		!observability.IsStableToken(transition.Destination) ||
+		len(transition.Destination) > 64 ||
+		!observability.IsSignal(observability.Signal(transition.Signal)) {
+		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+	}
+	failed := transition.Current == delivery.HealthFailing
+	recovered := transition.Current == delivery.HealthHealthy &&
+		transition.Reason == delivery.HealthReasonRecovered
+	if !failed && !recovered {
+		return nil
+	}
+	emitter := s.observabilityV8LocalOnlyEmitter()
+	if emitter == nil {
+		return &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
+	}
+	eventName := observability.EventName(observability.TelemetryEventDestinationExportFailed)
+	producerKey := observability.ProducerKey("error")
+	rawSeverity := "ERROR"
+	phase := "delivery"
+	if recovered {
+		eventName = observability.EventName(observability.TelemetryEventSubsystemRestored)
+		producerKey = observability.ProducerKey("lifecycle")
+		rawSeverity = "INFO"
+		phase = "recovery"
+	}
+	classification := observability.ClassificationContext{
+		Bucket: observability.BucketPlatformHealth, EventName: eventName,
+		RawSeverity:    rawSeverity,
+		MandatoryFacts: observability.MandatoryFacts{DurableHealthTransition: true},
+	}
+	metadata, err := router.NewClassifiedLogMetadata(
+		observability.ProducerGatewayEvent,
+		producerKey,
+		classification,
+		observability.SourceGateway,
+		"",
+		observability.ProducerKey(sidecarDeliveryHealthAction),
+	)
+	if err != nil {
+		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sidecarDeliveryHealthPersistenceTimeout)
+	defer cancel()
+	result, emitErr := emitter.EmitLocalOnly(ctx, metadata, func(
+		snapshot observabilityruntime.EmitContext,
+		admission router.Admission,
+	) (observability.Record, error) {
+		if snapshot.Generation() != transition.Generation || snapshot.Generation() > math.MaxInt64 ||
+			(admission != router.AdmissionOrdinary && admission != router.AdmissionFloor) {
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		builder, buildErr := observability.NewFamilyBuilder(
+			observability.ClockFunc(func() time.Time { return transition.OccurredAt.UTC() }),
+			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		)
+		if buildErr != nil {
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		envelope := observability.FamilyEnvelopeInput{
+			Source: observability.SourceGateway, Action: sidecarDeliveryHealthAction, Phase: phase,
+			Correlation: observability.Correlation{
+				RunID: gatewaylog.ProcessRunID(), SidecarInstanceID: gatewaylog.SidecarInstanceID(),
+			},
+			Provenance: observability.FamilyProvenanceInput{
+				Producer: "defenseclaw", BinaryVersion: version.Current().BinaryVersion,
+				ConfigGeneration: int64(snapshot.Generation()), ConfigDigest: snapshot.Digest(),
+			},
+		}
+		subsystem := transition.Destination + "/" + transition.Signal
+		if recovered {
+			return builder.BuildLogSubsystemRestored(observability.LogSubsystemRestoredInput{
+				Envelope:                         envelope,
+				Severity:                         observability.Present(observability.SeverityInfo),
+				LogLevel:                         observability.Present(observability.LogLevelInfo),
+				Outcome:                          observability.OutcomeCompleted,
+				DefenseClawHealthSubsystem:       subsystem,
+				DefenseClawHealthState:           "restored",
+				MandatoryDurableHealthTransition: true,
+			})
+		}
+		failureCode := transition.FailureCode
+		if !delivery.IsFailureCode(failureCode) {
+			failureCode = delivery.FailureCodeUnspecified
+		}
+		return builder.BuildLogDestinationExportFailed(observability.LogDestinationExportFailedInput{
+			Envelope:                         envelope,
+			Severity:                         observability.Present(observability.SeverityHigh),
+			LogLevel:                         observability.Present(observability.LogLevelError),
+			Outcome:                          observability.OutcomeFailed,
+			DefenseClawHealthSubsystem:       subsystem,
+			DefenseClawHealthState:           "failed",
+			DefenseClawSchemaErrorCode:       observability.Present(string(failureCode)),
+			MandatoryDurableHealthTransition: true,
+		})
+	})
+	if emitErr != nil {
+		return &sidecarObservabilityError{code: sidecarObservabilityEmitFailed}
+	}
+	if !result.LocalPersisted() {
+		return &sidecarObservabilityError{code: sidecarObservabilityAmbiguous}
+	}
+	return nil
 }
 
 func (s *Sidecar) observeObservabilityV8Warning(warning push.Warning) {

@@ -14,7 +14,10 @@ The merge gate covers:
   CMD/PowerShell quote and executable identity, destination-bound curl
   metadata/body/file projection, and typed Windows sensitive-path
   block/advisory/quiet outcomes, followed by `go vet` and gateway/hook builds;
-- the Python suite and headless TUI checks;
+- the ordinary Python suite plus focused native Windows telemetry-registry
+  updater and headless TUI checks on pull requests; main and
+  manual/release-candidate runs retain both exhaustive telemetry-registry
+  modules and the complete TUI suite;
 - PowerShell parsing, timeout, redaction, and process-tree cleanup contracts;
 - a release-shaped Windows amd64 gateway archive and Python wheel;
 - a disposable-user fresh installation;
@@ -24,13 +27,29 @@ The merge gate covers:
 - live-gateway Doctor custody checks for the audit database and HMAC-bound
   device identity, proving the detached gateway and watchdog do not pin the
   protected data directory;
-- Setup build and native install/repair/uninstall acceptance; and
-- required PowerShell contract cells for Codex, Claude Code, and Amp covering
-  setup; exact action-mode blocks; detection-only shadow or advisory outcomes;
-  quiet controls; request, action, and audit correlation; gateway-generated
-  connector telemetry; bounded timeout handling; teardown; and cleanup. Amp
-  additionally proves all five documented plugin callbacks, the Task/subagent
-  boundary, a private managed plugin, self-heal, and tamper-recovery behavior.
+- Setup build and native install/repair/uninstall acceptance, including the
+  staged connector selection, repair, custody, and exact-restoration paths;
+- deterministic packaged connector contract tests for Codex, Claude Code,
+  Amp, Copilot, Cursor, Devin, Hermes, Antigravity, and OpenCode. OpenCode's
+  contract imports the installed JavaScript bridge, proves
+  `tool.execute.before` permits on normal return and blocks on a thrown error,
+  and treats `tool.execute.after` as observation only. Devin's cell stages the
+  digest-pinned official `3000.4.25` Windows archive solely to retain the
+  product's exact fixed-path, Authenticode-signer, and version admission; it
+  does not log in, run an interactive client session, or claim live-client
+  evidence;
+- a separate required packaged OmniGent 0.7.0 native-degraded cell that
+  exercises its official server and SDK policy path as a disposable standard
+  user without upgrading that evidence to authenticated-client or full-sandbox
+  coverage; and
+- the Amp cell covers setup, observe/action
+  allow/block behavior, audit correlation, gateway-generated connector
+  telemetry, bounded timeout handling, teardown, and cleanup. It additionally
+  proves all five documented plugin callbacks, the Task/subagent boundary, a
+  private managed plugin, self-heal, and tamper-recovery behavior.
+
+These deterministic packaged cells do not certify authenticated official-client
+behavior. Secret-bearing real-client evidence remains a separate manual layer.
 
 The packaged test artifact is built once and reused by the disposable lifecycle
 jobs. The public-bootstrap shard uses the authenticated `0.8.7` release—the

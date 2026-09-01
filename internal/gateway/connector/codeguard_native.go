@@ -18,6 +18,10 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -36,6 +40,11 @@ const (
 	nativeCodeGuardClaudeMarketplace   = "cosai-oasis/project-codeguard"
 	nativeCodeGuardClaudeMarketplaceID = "project-codeguard"
 	nativeCodeGuardClaudePlugin        = "codeguard-security@project-codeguard"
+	nativeCodeGuardCodexReceiptVersion = 1
+	nativeCodeGuardCodexReceiptName    = "codex-skill-receipt.json"
+	nativeCodeGuardReceiptMaxBytes     = 16 << 10
+	nativeCodeGuardFileMaxBytes        = 16 << 20
+	nativeCodeGuardTreeMaxBytes        = 64 << 20
 )
 
 var (
@@ -44,7 +53,17 @@ var (
 	// nativeCodeGuardRepoDirOverride lets tests exercise the Codex
 	// installer without cloning GitHub.
 	nativeCodeGuardRepoDirOverride string
+
+	nativeCodeGuardCodexReceiptWriter = writeCodexCodeGuardReceipt
 )
+
+type codexCodeGuardReceipt struct {
+	Version          int    `json:"version"`
+	Target           string `json:"target"`
+	SHA256           string `json:"sha256"`
+	CreatedSkillsDir bool   `json:"created_skills_dir,omitempty"`
+	CreatedAgentsDir bool   `json:"created_agents_dir,omitempty"`
+}
 
 func ensureClaudeCodeCodeGuardPlugin(ctx context.Context) error {
 	if ctx == nil {
@@ -82,10 +101,39 @@ func ensureCodexCodeGuardSkill(ctx context.Context, opts SetupOpts) error {
 		ctx = context.Background()
 	}
 
-	targetDir := filepath.Join(codexSkillsDir(), nativeCodeGuardCodexSkillName)
+	targetDir := filepath.Join(codexPersonalSkillsDir(), nativeCodeGuardCodexSkillName)
+	if err := atomicTransformValidateNoReparsePathPlatform(targetDir); err != nil {
+		return fmt.Errorf("validate Codex CodeGuard skill path: %w", err)
+	}
+
+	priorReceipt, receiptExists, err := loadCodexCodeGuardReceipt(opts, targetDir)
+	if err != nil {
+		return err
+	}
+	if receiptExists {
+		digest, exists, err := digestCodexCodeGuardSkill(targetDir)
+		if err != nil {
+			return fmt.Errorf("verify owned Codex CodeGuard skill: %w", err)
+		}
+		if exists {
+			if digest != priorReceipt.SHA256 {
+				return fmt.Errorf(
+					"owned Codex CodeGuard skill at %s was modified; refusing to overwrite (expected %s, got %s)",
+					targetDir,
+					priorReceipt.SHA256,
+					digest,
+				)
+			}
+			return nil
+		}
+	}
+
 	if installed, err := codexCodeGuardSkillInstalled(targetDir); err != nil {
 		return err
 	} else if installed {
+		// A valid Project CodeGuard skill without our protected receipt predates
+		// this lifecycle. Leave it operator-owned and never claim teardown
+		// authority over it.
 		return nil
 	}
 
@@ -108,8 +156,382 @@ func ensureCodexCodeGuardSkill(ctx context.Context, opts SetupOpts) error {
 	if err := validateCodeGuardSkillSource(sourceDir); err != nil {
 		return err
 	}
+
+	skillsDir := filepath.Dir(targetDir)
+	agentsDir := filepath.Dir(skillsDir)
+	createdSkillsDir := priorReceipt.CreatedSkillsDir
+	createdAgentsDir := priorReceipt.CreatedAgentsDir
+	if !receiptExists {
+		var err error
+		createdSkillsDir, err = codexCodeGuardPathMissing(skillsDir)
+		if err != nil {
+			return err
+		}
+		createdAgentsDir, err = codexCodeGuardPathMissing(agentsDir)
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := copyDirectoryAtomic(sourceDir, targetDir); err != nil {
 		return fmt.Errorf("install Codex CodeGuard skill to %s: %w", targetDir, err)
+	}
+
+	digest, exists, err := digestCodexCodeGuardSkill(targetDir)
+	if err != nil || !exists {
+		if err == nil {
+			err = errors.New("installed skill disappeared before receipt publication")
+		}
+		rollbackErr := removeOwnedCodexCodeGuardTree(
+			targetDir,
+			digest,
+			createdSkillsDir,
+			createdAgentsDir,
+		)
+		return errors.Join(
+			fmt.Errorf("verify installed Codex CodeGuard skill: %w", err),
+			rollbackErr,
+		)
+	}
+
+	receipt := codexCodeGuardReceipt{
+		Version:          nativeCodeGuardCodexReceiptVersion,
+		Target:           targetDir,
+		SHA256:           digest,
+		CreatedSkillsDir: createdSkillsDir,
+		CreatedAgentsDir: createdAgentsDir,
+	}
+	if err := nativeCodeGuardCodexReceiptWriter(codexCodeGuardReceiptPath(opts), receipt); err != nil {
+		rollbackErr := removeOwnedCodexCodeGuardTree(
+			targetDir,
+			digest,
+			createdSkillsDir,
+			createdAgentsDir,
+		)
+		return errors.Join(
+			fmt.Errorf("publish Codex CodeGuard ownership receipt: %w", err),
+			rollbackErr,
+		)
+	}
+	return nil
+}
+
+func teardownCodexCodeGuardSkill(opts SetupOpts) error {
+	targetDir := filepath.Join(codexPersonalSkillsDir(), nativeCodeGuardCodexSkillName)
+	receipt, exists, err := loadCodexCodeGuardReceipt(opts, targetDir)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if err := removeOwnedCodexCodeGuardTree(
+		targetDir,
+		receipt.SHA256,
+		receipt.CreatedSkillsDir,
+		receipt.CreatedAgentsDir,
+	); err != nil {
+		return err
+	}
+
+	receiptPath := codexCodeGuardReceiptPath(opts)
+	if err := atomicTransformValidateNoReparsePathPlatform(receiptPath); err != nil {
+		return fmt.Errorf("validate Codex CodeGuard receipt removal path: %w", err)
+	}
+	if err := os.Remove(receiptPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove Codex CodeGuard ownership receipt: %w", err)
+	}
+	return nil
+}
+
+func codexCodeGuardReceiptPath(opts SetupOpts) string {
+	return filepath.Join(opts.DataDir, "native-codeguard", nativeCodeGuardCodexReceiptName)
+}
+
+func writeCodexCodeGuardReceipt(path string, receipt codexCodeGuardReceipt) error {
+	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return fmt.Errorf("Codex CodeGuard receipt path is not absolute: %q", path)
+	}
+	if err := atomicTransformValidateNoReparsePathPlatform(path); err != nil {
+		return fmt.Errorf("validate Codex CodeGuard receipt path: %w", err)
+	}
+	if err := ensureManagedBackupDirRestricted(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("protect Codex CodeGuard receipt directory: %w", err)
+	}
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode Codex CodeGuard receipt: %w", err)
+	}
+	return atomicWriteFile(path, append(data, '\n'), 0o600)
+}
+
+func loadCodexCodeGuardReceipt(
+	opts SetupOpts,
+	expectedTarget string,
+) (codexCodeGuardReceipt, bool, error) {
+	var receipt codexCodeGuardReceipt
+	path := codexCodeGuardReceiptPath(opts)
+	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(path) {
+		return receipt, false, fmt.Errorf("Codex CodeGuard receipt requires an absolute data directory")
+	}
+	if err := atomicTransformValidateNoReparsePathPlatform(path); err != nil {
+		return receipt, false, fmt.Errorf("validate Codex CodeGuard receipt path: %w", err)
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return receipt, false, nil
+	}
+	if err != nil {
+		return receipt, false, fmt.Errorf("inspect Codex CodeGuard ownership receipt: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return receipt, false, fmt.Errorf("Codex CodeGuard ownership receipt is not a regular file")
+	}
+	data, ok := readStableNativeWindowsFile(path, nativeCodeGuardReceiptMaxBytes)
+	if !ok {
+		return receipt, false, fmt.Errorf(
+			"Codex CodeGuard ownership receipt is unsafe, changing, or exceeds %d bytes",
+			nativeCodeGuardReceiptMaxBytes,
+		)
+	}
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return receipt, false, fmt.Errorf("parse Codex CodeGuard ownership receipt: %w", err)
+	}
+	if receipt.Version != nativeCodeGuardCodexReceiptVersion {
+		return receipt, false, fmt.Errorf(
+			"unsupported Codex CodeGuard receipt version %d",
+			receipt.Version,
+		)
+	}
+	if !sameCodexInventoryPath(receipt.Target, expectedTarget) {
+		return receipt, false, fmt.Errorf(
+			"Codex CodeGuard receipt target mismatch: captured %q, expected %q",
+			receipt.Target,
+			expectedTarget,
+		)
+	}
+	if !validCodexCodeGuardDigest(receipt.SHA256) {
+		return receipt, false, fmt.Errorf("Codex CodeGuard receipt contains an invalid SHA-256 digest")
+	}
+	if receipt.CreatedAgentsDir && !receipt.CreatedSkillsDir {
+		return receipt, false, fmt.Errorf(
+			"Codex CodeGuard receipt has impossible parent-directory custody",
+		)
+	}
+	return receipt, true, nil
+}
+
+func codexCodeGuardPathMissing(path string) (bool, error) {
+	if err := atomicTransformValidateNoReparsePathPlatform(path); err != nil {
+		return false, fmt.Errorf("validate Codex CodeGuard parent path %s: %w", path, err)
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect Codex CodeGuard parent path %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("Codex CodeGuard parent path %s is not a directory", path)
+	}
+	return false, nil
+}
+
+func digestCodexCodeGuardSkill(root string) (string, bool, error) {
+	if err := atomicTransformValidateNoReparsePathPlatform(root); err != nil {
+		return "", false, err
+	}
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", true, fmt.Errorf("Codex CodeGuard skill target is not an ordinary directory")
+	}
+
+	digest := sha256.New()
+	var totalBytes int64
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := atomicTransformValidateNoReparsePathPlatform(path); err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("Codex CodeGuard skill contains a symlink: %s", path)
+		}
+		kind := byte('d')
+		if !entryInfo.IsDir() {
+			if !entryInfo.Mode().IsRegular() {
+				return fmt.Errorf("Codex CodeGuard skill contains a non-regular file: %s", path)
+			}
+			kind = 'f'
+		}
+		_, _ = fmt.Fprintf(
+			digest,
+			"%c\x00%s\x00",
+			kind,
+			filepath.ToSlash(rel),
+		)
+		if kind == 'd' {
+			return nil
+		}
+		body, ok := readStableNativeWindowsFile(path, nativeCodeGuardFileMaxBytes)
+		if !ok {
+			return fmt.Errorf(
+				"Codex CodeGuard skill file is unsafe, changing, or exceeds %d bytes: %s",
+				nativeCodeGuardFileMaxBytes,
+				path,
+			)
+		}
+		totalBytes += int64(len(body))
+		if totalBytes > nativeCodeGuardTreeMaxBytes {
+			return fmt.Errorf(
+				"Codex CodeGuard skill tree exceeds %d bytes",
+				nativeCodeGuardTreeMaxBytes,
+			)
+		}
+		_, _ = fmt.Fprintf(digest, "%d\x00", len(body))
+		_, _ = digest.Write(body)
+		_, _ = digest.Write([]byte{0})
+		return nil
+	})
+	if err != nil {
+		return "", true, err
+	}
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil)), true, nil
+}
+
+func validCodexCodeGuardDigest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	raw := strings.TrimPrefix(value, "sha256:")
+	if len(raw) != sha256.Size*2 || strings.ToLower(raw) != raw {
+		return false
+	}
+	_, err := hex.DecodeString(raw)
+	return err == nil
+}
+
+func removeOwnedCodexCodeGuardTree(
+	targetDir string,
+	expectedDigest string,
+	createdSkillsDir bool,
+	createdAgentsDir bool,
+) error {
+	digest, exists, err := digestCodexCodeGuardSkill(targetDir)
+	if err != nil {
+		return fmt.Errorf("inspect owned Codex CodeGuard skill before removal: %w", err)
+	}
+	if exists {
+		if digest != expectedDigest {
+			return fmt.Errorf(
+				"owned Codex CodeGuard skill at %s was modified; preserving it (expected %s, got %s)",
+				targetDir,
+				expectedDigest,
+				digest,
+			)
+		}
+
+		quarantine := targetDir + ".defenseclaw-remove-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		if _, err := os.Lstat(quarantine); err == nil {
+			return fmt.Errorf("Codex CodeGuard removal quarantine already exists: %s", quarantine)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect Codex CodeGuard removal quarantine: %w", err)
+		}
+		if err := os.Rename(targetDir, quarantine); err != nil {
+			return fmt.Errorf("quarantine owned Codex CodeGuard skill: %w", err)
+		}
+
+		quarantineDigest, quarantineExists, verifyErr := digestCodexCodeGuardSkill(quarantine)
+		if verifyErr != nil || !quarantineExists || quarantineDigest != expectedDigest {
+			if verifyErr == nil {
+				verifyErr = fmt.Errorf(
+					"quarantined skill digest mismatch: expected %s, got %s",
+					expectedDigest,
+					quarantineDigest,
+				)
+			}
+			restoreErr := restoreCodexCodeGuardQuarantine(quarantine, targetDir)
+			return errors.Join(
+				fmt.Errorf("verify quarantined Codex CodeGuard skill: %w", verifyErr),
+				restoreErr,
+			)
+		}
+		if err := os.RemoveAll(quarantine); err != nil {
+			restoreErr := restoreCodexCodeGuardQuarantine(quarantine, targetDir)
+			return errors.Join(
+				fmt.Errorf("remove quarantined Codex CodeGuard skill: %w", err),
+				restoreErr,
+			)
+		}
+	}
+
+	skillsDir := filepath.Dir(targetDir)
+	agentsDir := filepath.Dir(skillsDir)
+	if createdSkillsDir {
+		if err := removeEmptyCodexCodeGuardParent(skillsDir); err != nil {
+			return err
+		}
+	}
+	if createdAgentsDir {
+		if err := removeEmptyCodexCodeGuardParent(agentsDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func restoreCodexCodeGuardQuarantine(quarantine, target string) error {
+	if _, err := os.Lstat(quarantine); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect Codex CodeGuard quarantine before restore: %w", err)
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return fmt.Errorf(
+			"cannot restore Codex CodeGuard quarantine because target was recreated: %s",
+			target,
+		)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect Codex CodeGuard target before quarantine restore: %w", err)
+	}
+	if err := os.Rename(quarantine, target); err != nil {
+		return fmt.Errorf("restore Codex CodeGuard quarantine: %w", err)
+	}
+	return nil
+}
+
+func removeEmptyCodexCodeGuardParent(path string) error {
+	if err := atomicTransformValidateNoReparsePathPlatform(path); err != nil {
+		return fmt.Errorf("validate owned Codex CodeGuard parent %s: %w", path, err)
+	}
+	entries, err := os.ReadDir(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read owned Codex CodeGuard parent %s: %w", path, err)
+	}
+	if len(entries) != 0 {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove empty owned Codex CodeGuard parent %s: %w", path, err)
 	}
 	return nil
 }
@@ -139,8 +561,12 @@ func connectorEnvHomeDir(variable, defaultDir string) string {
 	return filepath.Clean(home)
 }
 
-func codexSkillsDir() string {
-	return filepath.Join(codexHomeDir(), "skills")
+func codexPersonalSkillsDir() string {
+	// Codex configuration follows CODEX_HOME, but its personal Agent Skills
+	// are discovered from $HOME/.agents/skills. Keep the install target bound
+	// to Setup's validated user-home override instead of allowing CODEX_HOME
+	// to redirect an explicit CodeGuard install into an undiscovered directory.
+	return homePath(".agents", "skills")
 }
 
 func codexCodeGuardSkillInstalled(targetDir string) (bool, error) {

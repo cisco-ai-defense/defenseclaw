@@ -91,7 +91,6 @@ first_party_allow_list:
       - ".openclaw/skills/codeguard"
       - ".zeptoclaw/skills/codeguard"
       - ".claude/skills/codeguard"
-      - ".codex/skills/codeguard"
 
 guardrail:
   block_threshold: 4

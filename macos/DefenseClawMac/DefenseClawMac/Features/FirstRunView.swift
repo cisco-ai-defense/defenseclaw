@@ -19,6 +19,11 @@ import SwiftUI
 #endif
 
 struct ConnectorDiscoverySelection: Equatable {
+    static let onboardingConnectors = [
+        "codex", "claudecode", "hermes", "cursor", "devin", "copilot",
+        "openhands", "antigravity", "opencode", "amp", "omnigent",
+    ]
+
     let registered: Set<String>
     let action: Set<String>
 
@@ -28,8 +33,9 @@ struct ConnectorDiscoverySelection: Equatable {
         registered: Set<String>,
         action: Set<String>
     ) -> ConnectorDiscoverySelection {
-        let detectedSet = Set(detected)
-        let newlyDetected = detectedSet.subtracting(previouslyDetected)
+        let allowed = Set(onboardingConnectors)
+        let detectedSet = Set(detected).intersection(allowed)
+        let newlyDetected = detectedSet.subtracting(Set(previouslyDetected).intersection(allowed))
         let reconciledRegistered = registered
             .intersection(detectedSet)
             .union(newlyDetected)
@@ -49,7 +55,6 @@ struct FirstRunView: View {
     @State private var checked = false
     @State private var connector = "codex"
     @State private var detectedConnectors: [String] = []
-    @State private var detectedProxyConnectors: [String] = []
     @State private var registeredConnectors: Set<String> = []
     @State private var actionConnectors: Set<String> = []
     @State private var discoveryRequested = false
@@ -66,10 +71,7 @@ struct FirstRunView: View {
     @State private var runID: UUID?
     @State private var exitCode: Int32?
 
-    private static let connectors = [
-        "codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor",
-        "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent",
-    ]
+    private static let connectors = ConnectorDiscoverySelection.onboardingConnectors
     private static let installerURL = URL(
         string: "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh"
     )!
@@ -169,25 +171,14 @@ struct FirstRunView: View {
                     }
                     .disabled(isCancelling || isFinishing)
                 } else if cliFound {
-                    if detectedConnectors.isEmpty, !detectedProxyConnectors.isEmpty {
-                        Button {
-                            appState.selectedPanel = .setup
-                            dismiss()
-                        } label: {
-                            Label("Open Proxy Connector Setup", systemImage: "cable.connector")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.defaultAction)
-                    } else {
-                        Button {
-                            initialize()
-                        } label: {
-                            Label(exitCode == 0 ? "Run Setup Again" : "Initialize DefenseClaw", systemImage: "play.fill")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(setupInvalid || !appState.installationMutationsAllowed)
+                    Button {
+                        initialize()
+                    } label: {
+                        Label(exitCode == 0 ? "Run Setup Again" : "Initialize DefenseClaw", systemImage: "play.fill")
                     }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(setupInvalid || !appState.installationMutationsAllowed)
                 }
             }
         }
@@ -236,11 +227,6 @@ struct FirstRunView: View {
                     Text("Detected connectors are pre-selected; uncheck any you don't want DefenseClaw hooks installed into. Observe mode never blocks; Action applies only to the checked connectors below.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if !detectedProxyConnectors.isEmpty {
-                        Text("Proxy connectors \(detectedProxyConnectors.map(friendlyConnectorName).joined(separator: ", ")) require their dedicated Setup flow and are not added to the hook roster.")
-                            .font(.caption)
-                            .foregroundStyle(Cisco.orange)
-                    }
                     if profile == "action" {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Enforce on").font(.callout.weight(.medium))
@@ -258,20 +244,10 @@ struct FirstRunView: View {
                         }
                     }
                 } else {
-                    if detectedProxyConnectors.isEmpty {
-                        Picker("Fallback hook connector", selection: $connector) {
-                            ForEach(TUIWizards.hookConnectors, id: \.self) {
-                                Text(friendlyConnectorName($0)).tag($0)
-                            }
+                    Picker("Fallback hook connector", selection: $connector) {
+                        ForEach(Self.connectors, id: \.self) {
+                            Text(friendlyConnectorName($0)).tag($0)
                         }
-                    } else {
-                        LabeledContent("Detected proxy connectors") {
-                            Text(detectedProxyConnectors.map(friendlyConnectorName).joined(separator: ", "))
-                                .multilineTextAlignment(.trailing)
-                        }
-                        Text("Proxy connectors require their dedicated Setup flow. Continue with Open Proxy Connector Setup below.")
-                            .font(.caption)
-                            .foregroundStyle(Cisco.orange)
                     }
                     HStack(spacing: 8) {
                         Button {
@@ -286,13 +262,11 @@ struct FirstRunView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    if detectedProxyConnectors.isEmpty {
-                        Text(discoveryRequested
-                             ? "No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback."
-                             : "Choose a hook connector directly, or detect the agents installed on this Mac.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(discoveryRequested
+                         ? "No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback."
+                         : "Choose a hook connector directly, or detect the agents installed on this Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     if let connectorDiscoveryError {
                         Label(connectorDiscoveryError, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
@@ -507,23 +481,21 @@ struct FirstRunView: View {
             arguments: ["agent", "discover", "--json", "--no-emit-otel", "--refresh"],
             mutation: true
         )
-        let allDetected = result.succeeded
+        let detected = result.succeeded
             ? ConnectorOnboarding.installedConnectors(from: result.output, supportedOrder: Self.connectors)
             : []
-        let detected = allDetected.filter { TUIWizards.hookConnectors.contains($0) }
         let selection = ConnectorDiscoverySelection.reconciling(
             previouslyDetected: detectedConnectors,
             detected: detected,
             registered: registeredConnectors,
             action: actionConnectors
         )
-        detectedProxyConnectors = allDetected.filter { TUIWizards.proxyConnectors.contains($0) }
         detectedConnectors = detected
         // Pre-check the first discovery and later additions, while preserving
         // explicit choices for connectors that remain installed.
         registeredConnectors = selection.registered
         actionConnectors = selection.action
-        if allDetected.isEmpty {
+        if detected.isEmpty {
             connectorDiscoveryError = result.succeeded
                 ? "Agent discovery completed but did not identify a supported connector."
                 : "Agent discovery failed (exit \(result.exitCode)); choose a fallback connector."

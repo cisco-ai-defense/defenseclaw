@@ -225,7 +225,7 @@ def _mcp_source_hint(connector: str) -> str:
         "zeptoclaw": "ZeptoClaw config and workspace MCP config",
         "hermes": "Hermes config",
         "cursor": "Cursor MCP config",
-        "windsurf": "Windsurf MCP config",
+        "devin": "Devin mcp_config.json",
         "geminicli": "Gemini CLI settings",
         "copilot": "Copilot hook MCP config",
         "openhands": "OpenHands MCP config",
@@ -263,6 +263,8 @@ def _mcp_list_json_items(
             entry["args"] = s.args
         if s.url:
             entry["url"] = s.url
+        if s.bundled:
+            entry["bundled"] = True
         if s.name in scan_map:
             entry["severity"] = scan_map[s.name]["max_severity"]
         if s.name in actions_map:
@@ -846,6 +848,13 @@ def _scan_all_mcp(
     scan_targets = []
     for s in servers:
         scan_target = s.url or s.name
+        if s.bundled:
+            if not as_json:
+                click.echo(
+                    f"BUNDLED: {s.name} — skipping vendor-managed MCP server",
+                    err=True,
+                )
+            continue
         # N2: honor a per-connector block — resolve most-specific-wins for the
         # connector being scanned (connector-scoped entry, else global), so a
         # block scoped to a different peer doesn't skip this connector's scan.
@@ -864,7 +873,7 @@ def _scan_all_mcp(
         if not as_json:
             click.echo(
                 f"No scannable MCP servers for connector={connector!r} "
-                "(all blocked or none configured)."
+                "(all bundled, blocked, or none configured)."
             )
         return []
     ctx = _scan_ui.ScanContext.for_mcp(
@@ -1053,6 +1062,20 @@ def _scan_one_resolved(
     from defenseclaw.commands import _scan_ui, hint
 
     resolved, entry = _resolve_scan_target(app, target, connector)
+
+    if entry is not None and entry.bundled:
+        if as_json:
+            click.echo(json.dumps({
+                "connector": connector,
+                "target": target,
+                "status": "skipped",
+                "reason": "vendor_bundled",
+            }, indent=2))
+        else:
+            click.echo(
+                f"BUNDLED: {entry.name} — skipping vendor-managed MCP server"
+            )
+        return "bundled-skipped"
 
     # F-0323: a server may be blocked by its NAME or by its resolved URL —
     # check both keys so neither path bypasses the block list. N2: resolve
@@ -1326,6 +1349,47 @@ _CONNECTOR_BLOCK_HELP = (
 )
 
 
+def _bundled_mcp_policy_match(
+    app: AppContext,
+    target: str,
+    connector: str = "",
+) -> tuple[str, MCPServerEntry] | None:
+    """Resolve a policy target to a provenance-marked bundled MCP entry."""
+
+    if connector:
+        connectors = [connector]
+    else:
+        cfg = getattr(app, "cfg", None)
+        try:
+            connectors = list(cfg.active_connectors()) if cfg is not None else []
+        except Exception:  # noqa: BLE001 - a failed inventory read cannot assert provenance.
+            connectors = []
+        if not connectors and cfg is not None and hasattr(cfg, "active_connector"):
+            connectors = [cfg.active_connector()]
+
+    for candidate in connectors:
+        for entry in app.cfg.mcp_servers(candidate):
+            if entry.bundled and (target == entry.name or (entry.url and target == entry.url)):
+                return candidate, entry
+    return None
+
+
+def _refuse_bundled_mcp_policy_mutation(
+    app: AppContext,
+    target: str,
+    connector: str,
+    verb: str,
+) -> None:
+    match = _bundled_mcp_policy_match(app, target, connector)
+    if match is None:
+        return
+    owner, entry = match
+    raise click.ClickException(
+        f"cannot {verb} vendor-bundled MCP server {entry.name!r} "
+        f"(connector={owner}); bundled entries are discovery-only"
+    )
+
+
 @mcp.command()
 @click.argument("target")
 @click.option("--reason", default="", help="Reason for blocking")
@@ -1343,6 +1407,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 
     pe = PolicyEngine(app.store)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
+    _refuse_bundled_mcp_policy_mutation(app, target, connector, "block")
     # Most-specific-wins guard so we never write a redundant connector row when
     # a global block already covers this peer. The bare path keeps the pre-N2
     # global calls.
@@ -1396,6 +1461,7 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 
     pe = PolicyEngine(app.store)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
+    _refuse_bundled_mcp_policy_mutation(app, target, connector, "allow")
     if connector:
         if pe.is_allowed_for_connector("mcp", target, connector):
             if app.store and app.store.has_action(
@@ -1470,6 +1536,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
 
     pe = PolicyEngine(app.store)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
+    _refuse_bundled_mcp_policy_mutation(app, target, connector, "unblock")
 
     # State check is EXACT-match on the targeted scope (global when no
     # --connector), so a connector-scoped unblock never falsely reports a

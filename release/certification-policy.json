@@ -76,6 +76,7 @@
     "scripts/test-developer-target-activation.sh",
     "scripts/test-fresh-install-release.sh",
     "scripts/test-fresh-install-release-windows.ps1",
+    "scripts/install-pinned-windows-cosign.ps1",
     "scripts/invoke-windows-setup-standard-user-ci.ps1",
     "scripts/build-windows-installer.ps1",
     "scripts/windows-native-ci.ps1",
