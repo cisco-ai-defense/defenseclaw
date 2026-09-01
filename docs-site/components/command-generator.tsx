@@ -103,7 +103,7 @@ interface GeneratorState {
   showJudgeProvider: boolean;
 }
 
-const DEFAULT_STATE: GeneratorState = {
+export const DEFAULT_STATE: GeneratorState = {
   connector: 'claudecode',
   mode: 'observe',
   scannerMode: 'local',
@@ -346,22 +346,12 @@ function appendJudgeProviderFlags(
   }
 }
 
-function buildCommand(
+export function buildCommand(
   s: GeneratorState,
   shell: ShellFlavor,
 ): { lines: string[]; preExports: string[]; warnings: string[] } {
   const connectorRow = CONNECTORS.find((c) => c.id === s.connector);
   const quote = (value: string) => shellQuote(value, shell);
-
-  if (shell === 'powershell' && connectorRow?.windowsSupport === 'unsupported') {
-    return {
-      lines: [`# ${connectorRow.label} setup is unsupported on native Windows.`],
-      preExports: [],
-      warnings: [
-        `${connectorRow.label} cannot be configured by this native Windows command. ${connectorRow.windowsNote} Choose a supported connector or switch to Bash / zsh on macOS or Linux.`,
-      ],
-    };
-  }
 
   // Teardown short-circuit. `--disable` calls _disable_guardrail and
   // returns *before* the CLI applies --connector or any other flag, so the
@@ -378,6 +368,16 @@ function buildCommand(
       preExports: [],
       warnings: [
         `Teardown mode: --disable turns the guardrail off globally and restores direct LLM access. The CLI returns before reading any other flag, so every other knob on this page — including --connector — is ignored.${scoped}`,
+      ],
+    };
+  }
+
+  if (shell === 'powershell' && connectorRow?.windowsSupport === 'unsupported') {
+    return {
+      lines: [`# ${connectorRow.label} setup is unsupported on native Windows.`],
+      preExports: [],
+      warnings: [
+        `${connectorRow.label} cannot be configured by this native Windows command. ${connectorRow.windowsNote} Choose a supported connector or switch to Bash / zsh on macOS or Linux.`,
       ],
     };
   }
@@ -570,7 +570,9 @@ export function CommandGenerator() {
 
   const selected = CONNECTORS.find((c) => c.id === state.connector);
   const unsupportedOnSelectedShell =
-    shell === 'powershell' && selected?.windowsSupport === 'unsupported';
+    !state.disableGuardrail &&
+    shell === 'powershell' &&
+    selected?.windowsSupport === 'unsupported';
 
   return (
     <div className="command-generator not-prose my-6 grid gap-6 border border-fd-border bg-fd-card/60 p-5 lg:grid-cols-[1.1fr_1fr]">

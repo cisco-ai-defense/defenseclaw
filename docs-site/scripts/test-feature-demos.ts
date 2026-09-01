@@ -9,7 +9,11 @@ import {
 } from '../components/feature-demo/reducer';
 import { scenarioConnectorMappings } from '../components/feature-demo/types';
 import type { ScenarioStep } from '../components/feature-demo/types';
-import { shellQuote } from '../components/command-generator';
+import {
+  buildCommand,
+  DEFAULT_STATE,
+  shellQuote,
+} from '../components/command-generator';
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
 const cursorStory = readFileSync(
@@ -42,6 +46,23 @@ describe('command generator shell safety', () => {
     for (const status of statuses.values()) {
       assert.match(status, /^(supported|degraded|unsupported)$/);
     }
+  });
+
+  it('keeps global teardown available for unsupported Windows connectors', () => {
+    const result = buildCommand(
+      {
+        ...DEFAULT_STATE,
+        connector: 'openclaw',
+        disableGuardrail: true,
+      },
+      'powershell',
+    );
+    assert.deepStrictEqual(result.lines, [
+      'defenseclaw setup guardrail',
+      '--disable',
+    ]);
+    assert.match(result.warnings.join(' '), /turns the guardrail off globally/i);
+    assert.doesNotMatch(result.warnings.join(' '), /unsupported on native Windows/i);
   });
 });
 
