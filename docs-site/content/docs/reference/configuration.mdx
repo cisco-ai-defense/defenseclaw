@@ -452,7 +452,7 @@ change:
 | Mode | Behavior |
 | --- | --- |
 | `hot` | Default. Reload, validate, diff, and reconcile in the running gateway. Simple guardrail settings are hot-applied; affected in-process loops are restarted only when needed. |
-| `restart` | Validate first, then use a fresh gateway process for substantive config edits. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
+| `restart` | Validate first, then use a fresh gateway process only for edits that cross a restart boundary, such as listener, topology, or storage changes. Fields that are explicitly hot-reloadable—including observability destinations—still reconcile in process so active agent sessions are not interrupted. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path when one is required; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
 
 Live reload rejects storage identity changes such as `data_dir`, audit DB path,
 judge bodies DB path, and `gateway.device_key_file` unless restart mode is

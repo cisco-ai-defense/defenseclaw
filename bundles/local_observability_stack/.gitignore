@@ -1,0 +1,4 @@
+.grafana-admin-password
+..grafana-admin-password.*.tmp
+.grafana-access-mode
+..grafana-access-mode.*.tmp

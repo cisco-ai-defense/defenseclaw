@@ -21,12 +21,16 @@ var _ scanner.ScanPersistence = (*Store)(nil)
 
 // InsertScanSummary persists a v7 scan_results row (scan_id == id).
 func (s *Store) InsertScanSummary(p scanner.ScanSummaryParams) error {
+	return insertScanSummary(s.db, p)
+}
+
+func insertScanSummary(ex dbExecer, p scanner.ScanSummaryParams) error {
 	runID := p.RunID
 	if runID == "" {
 		runID = currentRunID()
 	}
 	ts := p.Timestamp.UTC().Format(time.RFC3339Nano)
-	_, err := s.db.Exec(`
+	_, err := ex.Exec(`
 INSERT INTO scan_results (
   id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id,
   verdict, exit_code, error,
@@ -66,6 +70,10 @@ INSERT INTO scan_results (
 
 // InsertScanFindings writes one row per finding into scan_findings.
 func (s *Store) InsertScanFindings(scanID, target string, findings []scanner.Finding, meta scanner.ScanFindingMeta) error {
+	return insertScanFindings(s.db, scanID, target, findings, meta)
+}
+
+func insertScanFindings(ex dbExecer, scanID, target string, findings []scanner.Finding, meta scanner.ScanFindingMeta) error {
 	if len(findings) == 0 {
 		return nil
 	}
@@ -107,8 +115,9 @@ func (s *Store) InsertScanFindings(scanID, target string, findings []scanner.Fin
 		id := f.FindingOccurrenceID
 		if id == "" {
 			id = uuid.New().String()
+			f.FindingOccurrenceID = id
 		}
-		_, err := s.db.Exec(`
+		_, err := ex.Exec(`
 INSERT INTO scan_findings (
   id, scan_id, scanner, target, rule_id, category, severity, title, description, evidence_summary, location, line_number,
   remediation, tags, timestamp,
@@ -160,20 +169,21 @@ INSERT INTO scan_findings (
 
 // ScanFindingRow is a scan_findings table projection for tests and APIs.
 type ScanFindingRow struct {
-	ID              string
-	ScanID          string
-	Scanner         string
-	Target          string
-	RuleID          sql.NullString
-	Category        sql.NullString
-	Severity        string
-	Title           sql.NullString
-	Description     sql.NullString
-	EvidenceSummary sql.NullString
-	Location        sql.NullString
-	LineNumber      sql.NullInt64
-	Remediation     sql.NullString
-	Tags            sql.NullString
+	ID                 string
+	ScanID             string
+	Scanner            string
+	Target             string
+	RuleID             sql.NullString
+	Category           sql.NullString
+	Severity           string
+	Title              sql.NullString
+	Description        sql.NullString
+	EvidenceSummary    sql.NullString
+	Location           sql.NullString
+	LineNumber         sql.NullInt64
+	Remediation        sql.NullString
+	Tags               sql.NullString
+	FindingFingerprint sql.NullString
 	// Confidence is the per-finding model/heuristic score (0.0-1.0).
 	// Populated for runtime detections (hooks, inspect, proxy
 	// guardrail, mid-stream); zero for classic scanner CLIs that
@@ -189,7 +199,7 @@ type ScanFindingRow struct {
 func (s *Store) ListScanFindings(scanID string) ([]ScanFindingRow, error) {
 	rows, err := s.db.Query(`
 SELECT id, scan_id, scanner, target, rule_id, category, severity, title, description, evidence_summary, location, line_number,
-       remediation, tags, confidence, evaluation_id
+       remediation, tags, finding_fingerprint, confidence, evaluation_id
 FROM scan_findings WHERE scan_id = ? ORDER BY severity`, scanID)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list scan findings: %w", err)
@@ -204,6 +214,7 @@ FROM scan_findings WHERE scan_id = ? ORDER BY severity`, scanID)
 		if err := rows.Scan(
 			&r.ID, &r.ScanID, &r.Scanner, &r.Target, &r.RuleID, &r.Category,
 			&r.Severity, &r.Title, &r.Description, &r.EvidenceSummary, &r.Location, &r.LineNumber, &r.Remediation, &r.Tags,
+			&r.FindingFingerprint,
 			&confidence, &evaluationID,
 		); err != nil {
 			return nil, fmt.Errorf("audit: scan finding row: %w", err)

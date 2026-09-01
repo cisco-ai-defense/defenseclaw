@@ -1646,7 +1646,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	onlyReloadModeChange := onlyConfigReloadModeChanged(oldCfg, newCfg) &&
 		len(diff.Changed) == 1 && diff.Changed[0] == "gateway"
-	if configReloadMode(newCfg) == "restart" && !onlyReloadModeChange {
+	// restart mode authorizes a process replacement for changes that cannot be
+	// reconciled safely in-process.  Keep genuinely hot-reloadable edits hot:
+	// local-observability setup only changes the v8 destination plan and must
+	// not disrupt active hook sessions merely because an operator previously
+	// armed restart mode for topology or storage changes.
+	if configReloadMode(newCfg) == "restart" && !onlyReloadModeChange && len(diff.RestartRequired) > 0 {
 		if s == nil || s.currentConfig() == nil || newCfg == nil {
 			return nil
 		}
