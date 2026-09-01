@@ -3263,6 +3263,10 @@ connection.close()
         $setupStandardUserLauncherText,
         '(?sm)private static void SetRestrictedTokenDefaultDacl\b.*?^        \}'
     ).Value
+    $validateStandardUserTokenFunction = [regex]::Match(
+        $setupStandardUserLauncherText,
+        '(?sm)private static void ValidateStandardUserPrimaryToken\b.*?^        \}'
+    ).Value
     Assert-True ($restrictedLuaTokenFunction -match
             'WindowsIdentity\(sourceToken\)' -and
         $restrictedLuaTokenFunction -match 'GetTokenLogonSid\(sourceToken\)' -and
@@ -3284,8 +3288,10 @@ connection.close()
             'restricted LUA source token has an invalid logon SID set' -and
         $setupStandardUserLauncherText -match
             'launchToken = CreateRestrictedLuaToken\(sourceToken\)' -and
-        $setupStandardUserLauncherText -match
-            'if \(!IsTokenRestricted\(token\)\)') `
+        $validateStandardUserTokenFunction -match 'if \(IsElevated\(token\)\)' -and
+        $validateStandardUserTokenFunction -match 'if \(IsAdministrator\(token\)\)' -and
+        $validateStandardUserTokenFunction -match
+            'elevationType != TokenElevationTypeDefault') `
         'restricted-LUA fallback uses exact account, logon, and World write-restriction SIDs with fail-closed validation'
     Assert-True ($restrictedDefaultDaclFunction -match
             '(?s)allowedSids = new SecurityIdentifier\[\].*?\{\s*logonSid\s*\}' -and
@@ -3877,7 +3883,12 @@ connection.close()
         $dangerousPayloadContract -match 'turn_id = "dc-windows-contract-\$Connector-\$probeID"' -and
         $dangerousPayloadContract -match '(?s)\$Connector -eq ''codex''.*?event_id = "dc-windows-contract-\$Connector-\$probeID-event".*?tool_use_id = \$payload\.tool_call_id' -and
         $dangerousPayloadContract -match '\$path = Join-Path \$Root "\$probeID\.json"' -and
-        $harnessText -match 'New-DangerousCommandPayload \$case\.Name \$command \$payloadRoot \$Mode') `
+        $dangerousPayloadContract -match
+            '\$effectiveToolName = if \(\$Connector -eq ''opencode''\).*?\$ToolName' -and
+        $dangerousPayloadContract -match 'tool_name = \$effectiveToolName' -and
+        $harnessText -match
+            '-Name \$case\.Name -Command \$command -ToolName \$case\.Tool' -and
+        $harnessText -match '-Root \$payloadRoot -Mode \$Mode') `
         'observe/action dangerous-command fixtures use distinct exact correlation and file identities'
     $dangerousHookContract = [regex]::Match(
         $harnessText,

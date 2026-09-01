@@ -6350,7 +6350,7 @@ function New-DangerousCommandPayload(
         [IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
         return $path
     }
-    $toolName = if ($Connector -eq 'opencode') { 'bash' } else { Get-ConnectorToolName }
+    $effectiveToolName = if ($Connector -eq 'opencode') { 'bash' } else { $ToolName }
     $toolEvent = switch ($Connector) {
         'amp' { 'tool.call' }
         'copilot' { 'preToolUse' }
@@ -6372,7 +6372,7 @@ function New-DangerousCommandPayload(
         source_event_id = "$toolEvent`:dc-windows-contract-$Connector`:$probeID"
         source_sequence = $probeID
         tool_call_id = "dc-windows-contract-$Connector-$probeID"
-        tool_name = $toolName
+        tool_name = $effectiveToolName
         tool_input = [ordered]@{ command = $Command }
     }
     if ($Connector -eq 'codex') {
