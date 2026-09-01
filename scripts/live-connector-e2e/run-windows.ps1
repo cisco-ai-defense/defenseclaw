@@ -6503,7 +6503,11 @@ function Invoke-DangerousHook(
             if ([string]$decision.action -ne 'block' -or [bool]$decision.would_block -or -not [bool]$decision.enforced) {
                 throw "$Name action decision action=$($decision.action) raw=$($decision.raw_action) would_block=$($decision.would_block) enforced=$($decision.enforced)"
             }
-            if ($result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') {
+            if ($Connector -eq 'opencode' -and $result.ExitCode -ne 0) {
+                throw "$Name OpenCode block assertion exited $($result.ExitCode), expected 0"
+            }
+            if ($Connector -ne 'opencode' -and
+                $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') {
                 throw "$Name did not shape a native block decision"
             }
         }

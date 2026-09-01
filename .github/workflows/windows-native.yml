@@ -912,19 +912,8 @@ jobs:
           if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -cne $expected) {
             throw 'pinned Devin CLI archive digest mismatch'
           }
-      - name: Required setup, allow/block, audit, telemetry, timeout, and teardown contract
-        if: ${{ matrix.connector != 'devin' }}
-        run: >-
-          ./scripts/invoke-windows-setup-standard-user-ci.ps1
-          -Mode contract
-          -Connector $env:CONNECTOR
-          -StateRoot $env:DC_STATE_ROOT
-          -ArtifactRoot $env:DC_ARTIFACT_ROOT
-          -DiagnosticsRoot $env:DC_DIAGNOSTICS
-          -TimeoutSeconds 1800
-      - name: Required Devin contract with one bounded infrastructure retry
-        if: ${{ matrix.connector == 'devin' }}
-        id: devin_contract
+      - name: Required connector contract with one bounded telemetry retry
+        id: connector_contract
         run: |
           $nativeHarness = (Resolve-Path './scripts/windows-native-ci.ps1').Path
           $standardUserHarness = (Resolve-Path './scripts/invoke-windows-setup-standard-user-ci.ps1').Path
@@ -933,11 +922,11 @@ jobs:
           $artifactRoot = [IO.Path]::GetFullPath($env:DC_ARTIFACT_ROOT)
           $diagnosticsRoot = [IO.Path]::GetFullPath($env:DC_DIAGNOSTICS)
           $pwsh = Join-Path $PSHOME 'pwsh.exe'
-          function Invoke-DevinContractAttempt([int]$Attempt) {
+          function Invoke-ConnectorContractAttempt([int]$Attempt) {
             $attemptDiagnostics = Join-Path $diagnosticsRoot "attempt-$Attempt-child"
             return Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
               '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $standardUserHarness,
-              '-Mode', 'contract', '-Connector', 'devin',
+              '-Mode', 'contract', '-Connector', $env:CONNECTOR,
               '-StateRoot', $contractStateRoot, '-ArtifactRoot', $artifactRoot,
               '-DiagnosticsRoot', $attemptDiagnostics, '-TimeoutSeconds', '1800'
             ) -AllowedExitCodes @(0, 1) -TimeoutSeconds 1860 -LogPath (
@@ -945,7 +934,7 @@ jobs:
             )
           }
           # This returns only after the first wrapper exits and its output drains.
-          $first = Invoke-DevinContractAttempt 1
+          $first = Invoke-ConnectorContractAttempt 1
           if ($first.ExitCode -eq 0) {
             'retried=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             return
@@ -965,12 +954,12 @@ jobs:
             $firstOutput.Contains($_, [StringComparison]::Ordinal)
           } | Select-Object -First 1)
           if ($cleanupFailure.Count -ne 0) {
-            throw 'packaged Devin connector contract reported incomplete disposable-user cleanup'
+            throw 'packaged connector contract reported incomplete disposable-user cleanup'
           }
           if (-not $firstOutput.Contains($retrySignal, [StringComparison]::Ordinal)) {
-            throw 'packaged Devin connector contract failed without the retryable telemetry signal'
+            throw 'packaged connector contract failed without the retryable telemetry signal'
           }
-          Write-BoundedText -Path (Join-Path $diagnosticsRoot 'devin-event-history-retry.txt') `
+          Write-BoundedText -Path (Join-Path $diagnosticsRoot "$env:CONNECTOR-event-history-retry.txt") `
             -MaxBytes 4096 -Text "attempt=1`nsignal=$retrySignal"
           try {
             Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
@@ -993,12 +982,12 @@ jobs:
           ) | Out-Null
           if ((Test-Path -LiteralPath $contractStateRoot) -or
               @(Get-StateProcesses $contractStateRoot).Count -ne 0) {
-            throw 'Devin retry cleanup did not remove its exact state and rooted processes'
+            throw 'connector retry cleanup did not remove its exact state and rooted processes'
           }
           # The wrapper creates a GUID-named user/profile/sandbox on every call.
-          $second = Invoke-DevinContractAttempt 2
+          $second = Invoke-ConnectorContractAttempt 2
           if ($second.ExitCode -ne 0) {
-            throw 'packaged Devin connector contract failed on its final attempt'
+            throw 'packaged connector contract failed on its final attempt'
           }
           'retried=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Upload deterministic contract results
@@ -1012,8 +1001,8 @@ jobs:
       - name: Capture bounded redacted diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Upload diagnostics on failure or recovered Devin retry
-        if: ${{ failure() || cancelled() || steps.devin_contract.outputs.retried == 'true' }}
+      - name: Upload diagnostics on failure or recovered telemetry retry
+        if: ${{ failure() || cancelled() || steps.connector_contract.outputs.retried == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-native-contract-diagnostics-${{ matrix.connector }}

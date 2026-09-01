@@ -2992,19 +2992,18 @@ connection.close()
         $contractFunction.IndexOf('$env:APPDATA =', [StringComparison]::Ordinal) -gt
             $contractFunction.IndexOf("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D", [StringComparison]::Ordinal)) `
         'connector contract binds Profile, LocalAppData, and RoamingAppData to the current process token before hostile environment isolation'
-    Assert-True ($connectorContractJob -match '(?s)Required setup, allow/block, audit, telemetry, timeout, and teardown contract.*?matrix\.connector != ''devin''.*?invoke-windows-setup-standard-user-ci\.ps1.*?-Mode contract.*?-Connector \$env:CONNECTOR.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
-        $connectorContractJob -match '(?s)Required Devin contract with one bounded infrastructure retry.*?matrix\.connector == ''devin''.*?Invoke-DevinContractAttempt' -and
+    Assert-True ($connectorContractJob -match '(?s)Required connector contract with one bounded telemetry retry.*?Invoke-ConnectorContractAttempt.*?-Mode'', ''contract'', ''-Connector'', \$env:CONNECTOR.*?-DiagnosticsRoot'', \$attemptDiagnostics' -and
         $connectorContractJob -match "timeout-minutes: \$\{\{ matrix\.connector == 'devin' && 50 \|\| 35 \}\}" -and
         $nativeWorkflowText -notmatch '\./scripts/windows-native-ci\.ps1 -Operation contract') `
         'hosted connector contracts run as disposable real standard users and preserve the matrix connector'
-    $devinRetryStep = [regex]::Match(
+    $connectorRetryStep = [regex]::Match(
         $connectorContractJob,
-        '(?ms)^      - name: Required Devin contract with one bounded infrastructure retry.*?(?=^      - name:)'
+        '(?ms)^      - name: Required connector contract with one bounded telemetry retry.*?(?=^      - name:)'
     ).Value
-    $retryCaptureIndex = $devinRetryStep.IndexOf("'-Operation', 'capture'", [StringComparison]::Ordinal)
-    $retryCleanupIndex = $devinRetryStep.IndexOf("'-Operation', 'cleanup'", [StringComparison]::Ordinal)
-    $retrySecondAttemptIndex = $devinRetryStep.IndexOf(
-        '$second = Invoke-DevinContractAttempt 2', [StringComparison]::Ordinal
+    $retryCaptureIndex = $connectorRetryStep.IndexOf("'-Operation', 'capture'", [StringComparison]::Ordinal)
+    $retryCleanupIndex = $connectorRetryStep.IndexOf("'-Operation', 'cleanup'", [StringComparison]::Ordinal)
+    $retrySecondAttemptIndex = $connectorRetryStep.IndexOf(
+        '$second = Invoke-ConnectorContractAttempt 2', [StringComparison]::Ordinal
     )
     $retryCleanupFailurePrefixes = @(
         'disposable execution boundary:',
@@ -3015,24 +3014,24 @@ connection.close()
         'sandbox cleanup:',
         'parent-only sibling cleanup:'
     )
-    Assert-True ($devinRetryStep -match '\. \$nativeHarness -NoRun' -and
-        $devinRetryStep -match '\$first = Invoke-DevinContractAttempt 1' -and
-        $devinRetryStep -match '\$retrySignal = ''event_history=sqlite_write_failed''' -and
-        $devinRetryStep -notmatch 'rollback was incomplete' -and
+    Assert-True ($connectorRetryStep -match '\. \$nativeHarness -NoRun' -and
+        $connectorRetryStep -match '\$first = Invoke-ConnectorContractAttempt 1' -and
+        $connectorRetryStep -match '\$retrySignal = ''event_history=sqlite_write_failed''' -and
+        $connectorRetryStep -notmatch 'rollback was incomplete' -and
         @($retryCleanupFailurePrefixes | Where-Object {
-            -not $devinRetryStep.Contains("'$_'", [StringComparison]::Ordinal)
+            -not $connectorRetryStep.Contains("'$_'", [StringComparison]::Ordinal)
         }).Count -eq 0 -and
-        $devinRetryStep -match '\$firstOutput\.Contains\(\$_, \[StringComparison\]::Ordinal\)' -and
-        $devinRetryStep -match '\$cleanupFailure\.Count -ne 0' -and
-        $devinRetryStep -match '-AllowedExitCodes @\(0, 1\)' -and
+        $connectorRetryStep -match '\$firstOutput\.Contains\(\$_, \[StringComparison\]::Ordinal\)' -and
+        $connectorRetryStep -match '\$cleanupFailure\.Count -ne 0' -and
+        $connectorRetryStep -match '-AllowedExitCodes @\(0, 1\)' -and
         $retryCaptureIndex -ge 0 -and $retryCleanupIndex -gt $retryCaptureIndex -and
         $retrySecondAttemptIndex -gt $retryCleanupIndex -and
-        $devinRetryStep -match 'Test-Path -LiteralPath \$contractStateRoot' -and
-        $devinRetryStep -match 'Get-StateProcesses \$contractStateRoot' -and
-        $devinRetryStep -match 'attempt-\$Attempt-child' -and
-        $devinRetryStep -match 'Write-BoundedText.*?devin-event-history-retry\.txt' -and
-        $connectorContractJob -match 'steps\.devin_contract\.outputs\.retried == ''true''') `
-        'Devin retries only the exact SQLite telemetry transient after bounded capture and complete isolated cleanup'
+        $connectorRetryStep -match 'Test-Path -LiteralPath \$contractStateRoot' -and
+        $connectorRetryStep -match 'Get-StateProcesses \$contractStateRoot' -and
+        $connectorRetryStep -match 'attempt-\$Attempt-child' -and
+        $connectorRetryStep -match 'Write-BoundedText.*?\$env:CONNECTOR-event-history-retry\.txt' -and
+        $connectorContractJob -match 'steps\.connector_contract\.outputs\.retried == ''true''') `
+        'every connector retries only the exact SQLite telemetry transient after bounded capture and complete isolated cleanup'
     Assert-True ($omniGentJob -match '(?s)invoke-windows-setup-standard-user-ci\.ps1.*?-Mode omnigent-native-degraded.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
         $standardUserCIText -match "'omnigent-native-degraded'" -and
         $standardUserCIText -match 'test-omnigent-windows-native\.ps1' -and
@@ -3935,6 +3934,10 @@ connection.close()
     Assert-True ($harnessText -match 'Get-TreeFingerprint' -and $harnessText -match 'AllowedExitCodes @\(1\)') 'enterprise hooks elevation rejection is bounded, exit 1, and checks an unchanged tree'
     Assert-True ($harnessText -match 'Assert-DoctorWindowsHookRegistration' -and $harnessText -match 'healthy Windows-native executable registration') 'connector contract runs Doctor against the registered Windows hook executable'
     $contractRun = [regex]::Match($harnessText, '(?s)function Invoke-ContractRun\b.*?\n\}').Value
+    $dangerousHookContract = [regex]::Match(
+        $harnessText,
+        '(?s)function Invoke-DangerousHook\b.*?(?=\r?\nfunction )'
+    ).Value
     $openCodePluginContract = [regex]::Match(
         $harnessText,
         '(?s)function Assert-OpenCodePluginContract\b.*?(?=\r?\nfunction )'
@@ -3961,6 +3964,9 @@ connection.close()
         "Invoke-OpenCodePluginProbe block 'Remove-Item -Force C:\ -Recurse' 'contract-block'",
         [StringComparison]::Ordinal
     )) 'OpenCode plugin contract uses an enforceable native Windows CMD-RM-RF probe'
+    Assert-True ($dangerousHookContract.Contains("`$Connector -eq 'opencode' -and `$result.ExitCode -ne 0", [StringComparison]::Ordinal) -and
+        $dangerousHookContract.Contains("`$Connector -ne 'opencode' -and", [StringComparison]::Ordinal)) `
+        'dangerous-command contract recognizes OpenCode expected throws through its assertion helper'
     Assert-True ($contractRun -match "\`$actionBlockExpectation = 'block'" -and
         $contractRun -match "\`$requireAdvisoryBlock = \`$false" -and
         $contractRun -match "(?s)Invoke-DangerousCommandCorpus action.*?Invoke-Hook 'PreTool-block'.*?\`$actionBlockExpectation \`$requireAdvisoryBlock") `
