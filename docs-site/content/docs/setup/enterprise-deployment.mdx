@@ -86,7 +86,8 @@ The matrix is an ownership switch, not an auto-heal switch. Both rows repair hoo
 | Another unprivileged local user | Access permitted by normal UNIX permissions, macOS ACLs, or Windows DACLs | Cannot read protected runtime state or scoped service credentials; cannot repair or authorize another user's hooks. |
 | Endpoint administrator, root, MDM, or a process with equivalent privilege | Full machine administration | Can install, upgrade, disable, or remove DefenseClaw. DefenseClaw does not attempt to defend the machine from its trusted administrator. |
 | Compromised gateway process | Service identity plus the platform service boundary | Can write only its declared runtime/log paths; cannot write user homes, managed config, binaries, service definitions, or arbitrary host paths. The packaged Linux unit adds a systemd sandbox; Windows uses a dedicated virtual service account and protected DACLs. |
-| Compromised guardian or enumerator process | Root on Linux/macOS or LocalSystem on Windows | Can repair enrolled user-home footprints and guardian state. Risk is reduced through the protected target manifest, Windows interactive-SID/profile filters, trusted path checks, per-target credential changes or impersonation, narrow service arguments, and platform filesystem controls. |
+| Compromised guardian process | Root on Linux/macOS or LocalSystem on Windows | Can repair enrolled user-home footprints and guardian state. Risk is reduced through the protected target manifest, trusted path checks, per-target credential changes or impersonation, narrow service arguments, and platform filesystem controls. |
+| Compromised enumerator process | LocalSystem on Windows | Can discover eligible profiles, publish the protected target manifest, and grant the exact gateway SID bounded read/execute/traverse access on inventory directories. Its product contract does not repair hook footprints or write the authorization ledger. Risk is reduced through interactive-SID/profile filters, the managed-hook connector filter, protected atomic publication, and fixed DACL targets. |
 
 ### Security goals and non-goals
 
@@ -1687,7 +1688,7 @@ Treat this evidence as a release gate for the managed endpoint image. Run destru
 - [ ] Managed config, policy, units/plists/SCM definitions, manifest, and authorization directory have trusted path chains.
 - [ ] Gateway service runs as the dedicated service identity (or the documented root identity on macOS), not the AI user.
 - [ ] Linux gateway sandbox properties match the packaged unit or a reviewed stricter override.
-- [ ] Guardian targets are current and authorized: Linux/macOS manifests contain only explicit approved pairs; Windows enumerator output contains only expected interactive SIDs, configured connector families, and discovered supported versions.
+- [ ] Guardian targets are current and authorized: Linux/macOS manifests contain only explicit approved pairs; Windows enumerator output contains only expected interactive SIDs, configured connector families that pass the Windows managed-hook filter, and discovered supported versions.
 - [ ] First reconcile succeeds for every enabled target before action mode is enabled.
 - [ ] Watcher and periodic backstop are enabled according to OS capabilities.
 - [ ] Scoped token files are connector-specific; no automation copies a shared gateway token into user hooks.
