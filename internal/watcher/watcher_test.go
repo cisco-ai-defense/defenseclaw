@@ -699,6 +699,69 @@ func TestWatcherQuarantineRecordsConnectorHashAndRestoresWithoutRequarantine(t *
 	}
 }
 
+func TestWatcherQuarantineKeepsLogicalAssetIdentitySeparateFromPhysicalDirectory(t *testing.T) {
+	cfg, store, logger, skillDir := setupQuarantineProvenanceTestEnv(t)
+	cfg.Guardrail.Connector = "hermes"
+	physicalName := "defenseclaw-skill-scanner-test-20260901080229"
+	logicalName := "agent-security-refusals"
+	skillPath := filepath.Join(skillDir, physicalName)
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(skillPath, "SKILL.md"),
+		[]byte("---\nname: agent-security-refusals\n---\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	w := New(
+		cfg, []string{skillDir}, nil, store, logger,
+		sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir), nil, nil,
+	)
+	evt := InstallEvent{
+		Type: InstallSkill, Name: logicalName, Path: skillPath,
+		Connector: "hermes", Timestamp: time.Now().UTC(),
+	}
+	w.quarantineAsset(context.Background(), evt)
+
+	records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", logicalName, "hermes",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("quarantine records = %#v", records)
+	}
+	record := records[0]
+	wantQuarantine := filepath.Join(cfg.QuarantineDir, "skills", "hermes", physicalName)
+	if record.TargetName != logicalName || record.OriginalPath != filepath.Clean(skillPath) ||
+		record.QuarantinePath != wantQuarantine || record.State != audit.QuarantineStateActive {
+		t.Fatalf("quarantine record = %#v", record)
+	}
+	if _, err := os.Lstat(skillPath); !os.IsNotExist(err) {
+		t.Fatalf("logical-name source still exists: %v", err)
+	}
+	if matches, err := enforce.AssetContentHashMatches(wantQuarantine, record.ContentHash); err != nil || !matches {
+		t.Fatalf("quarantine hash match=%t err=%v", matches, err)
+	}
+
+	if err := w.RestoreQuarantined(
+		context.Background(), "skill", logicalName, "hermes", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if matches, err := enforce.AssetContentHashMatches(skillPath, record.ContentHash); err != nil || !matches {
+		t.Fatalf("restore hash match=%t err=%v", matches, err)
+	}
+	if records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", logicalName, "hermes",
+	); err != nil || len(records) != 0 {
+		t.Fatalf("retired records = %#v err=%v", records, err)
+	}
+}
+
 func newWatcherQuarantineRetryFixture(
 	t *testing.T,
 ) (*InstallWatcher, *audit.Store, audit.QuarantineRecord, string) {

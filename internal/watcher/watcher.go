@@ -930,9 +930,15 @@ func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) 
 		return
 	}
 	connector := w.eventConnector(evt)
+	// The admission identity is connector-defined and may come from an asset
+	// manifest (for example a Hermes SKILL.md name or a Claude plugin ID).  The
+	// quarantine planner deliberately binds filesystem mutations to the exact
+	// source basename.  Keep those identities separate so a valid manifest name
+	// cannot weaken the path check or prevent an otherwise valid quarantine.
+	physicalName := filepath.Base(filepath.Clean(evt.Path))
 	plan, err := enforce.NewAssetQuarantinePlan(
 		w.cfg.QuarantineDir, w.sourceRootsFor(evt.Type), evt.Type.String(),
-		evt.Name, connector, evt.Path,
+		physicalName, connector, evt.Path,
 	)
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt.Path, err)
@@ -1034,7 +1040,8 @@ func (w *InstallWatcher) RestoreQuarantined(
 		return fmt.Errorf("watcher: journal quarantine restore: %w", err)
 	}
 	plan := enforce.AssetRestorePlan{
-		RecordID: record.ID, TargetType: record.TargetType, TargetName: record.TargetName,
+		RecordID: record.ID, TargetType: record.TargetType,
+		TargetName:     filepath.Base(filepath.Clean(record.QuarantinePath)),
 		QuarantineRoot: w.cfg.QuarantineDir, QuarantinePath: record.QuarantinePath,
 		RestorePath: restorePath, AllowedRoots: w.sourceRootsFor(InstallType(record.TargetType)),
 		ContentHash: record.ContentHash,
