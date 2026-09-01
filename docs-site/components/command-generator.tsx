@@ -225,6 +225,15 @@ function appendEnvironmentPlaceholder(
     );
     return;
   }
+  const controlsCommandLookup = shell === 'powershell'
+    ? /^(?:path|pathext)$/i.test(name)
+    : name === 'PATH' || name === 'path';
+  if (controlsCommandLookup) {
+    warnings.push(
+      `Environment variable name ${JSON.stringify(name)} controls executable lookup in ${shell === 'powershell' ? 'PowerShell' : 'Bash/zsh'}. The placeholder assignment was omitted so the defenseclaw command remains resolvable.`,
+    );
+    return;
+  }
   preExports.push(environmentAssignment(name, placeholder, shell));
 }
 

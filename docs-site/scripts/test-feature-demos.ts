@@ -26,6 +26,18 @@ const approvedFixtureHosts = new Set([
   'registry.example.invalid',
 ]);
 
+function buildRemoteCommand(ciscoApiKeyEnv: string, shell: 'bash' | 'powershell') {
+  return buildCommand(
+    {
+      ...DEFAULT_STATE,
+      scannerMode: 'remote',
+      ciscoEndpoint: 'https://aidefense.example.com',
+      ciscoApiKeyEnv,
+    },
+    shell,
+  );
+}
+
 describe('command generator shell safety', () => {
   it('quotes every operator-provided PowerShell value literally', () => {
     assert.equal(shellQuote('@args', 'powershell'), "'@args'");
@@ -63,6 +75,43 @@ describe('command generator shell safety', () => {
     ]);
     assert.match(result.warnings.join(' '), /turns the guardrail off globally/i);
     assert.doesNotMatch(result.warnings.join(' '), /unsupported on native Windows/i);
+  });
+
+  it('omits placeholder assignments that can hide the CLI from Bash or zsh', () => {
+    for (const name of ['PATH', 'path']) {
+      const result = buildRemoteCommand(name, 'bash');
+      assert.deepStrictEqual(result.preExports, []);
+      assert.match(result.warnings.join(' '), /controls executable lookup in Bash\/zsh/i);
+      assert.ok(result.lines.includes(`--cisco-api-key-env ${name}`));
+    }
+
+    for (const name of ['Path', 'PATHEXT', 'PATH_API_KEY']) {
+      const valid = buildRemoteCommand(name, 'bash');
+      assert.deepStrictEqual(valid.preExports, [
+        `export ${name}='<your-cisco-ai-defense-api-key>'`,
+      ]);
+    }
+
+    const invalid = buildRemoteCommand('BAD-NAME', 'bash');
+    assert.deepStrictEqual(invalid.preExports, []);
+    assert.match(invalid.warnings.join(' '), /is not portable/i);
+    assert.doesNotMatch(invalid.warnings.join(' '), /controls executable lookup/i);
+  });
+
+  it('omits case-insensitive Windows command-search placeholder assignments', () => {
+    for (const name of ['PATH', 'Path', 'path', 'pAtH', 'PATHEXT', 'PathExt', 'pathext']) {
+      const result = buildRemoteCommand(name, 'powershell');
+      assert.deepStrictEqual(result.preExports, []);
+      assert.match(result.warnings.join(' '), /controls executable lookup in PowerShell/i);
+      assert.ok(result.lines.includes(`--cisco-api-key-env '${name}'`));
+    }
+
+    for (const name of ['MY_PATH_TOKEN', 'PATH_API_KEY']) {
+      const valid = buildRemoteCommand(name, 'powershell');
+      assert.deepStrictEqual(valid.preExports, [
+        `$env:${name} = '<your-cisco-ai-defense-api-key>'`,
+      ]);
+    }
   });
 });
 
