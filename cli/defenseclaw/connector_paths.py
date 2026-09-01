@@ -89,6 +89,7 @@ from defenseclaw.platform_support import DEPRECATED_CONNECTORS
 from defenseclaw.safety import is_symlink
 
 _MCP_CONFIG_MAX_BYTES = 2 * 1024 * 1024
+_WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -1155,7 +1156,7 @@ def _resolve_hermes_home(
 
 
 def _windows_current_user_local_app_data() -> str:
-    """Resolve LocalAppData for the current Windows token, not the environment."""
+    """Resolve unredirected LocalAppData for the current Windows token."""
 
     if os.name != "nt":
         return ""
@@ -1200,7 +1201,16 @@ def _windows_current_user_local_app_data() -> str:
     if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008 | 0x0004, ctypes.byref(token)):
         return ""
     try:
-        if shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, token, ctypes.byref(path)) != 0 or not path.value:
+        if (
+            shell32.SHGetKnownFolderPath(
+                ctypes.byref(guid),
+                _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION,
+                token,
+                ctypes.byref(path),
+            )
+            != 0
+            or not path.value
+        ):
             return ""
         return os.path.abspath(path.value)
     finally:

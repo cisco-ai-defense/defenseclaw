@@ -86,6 +86,7 @@ VERSION_TIMEOUT_SECONDS = 2.0
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
 _WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
+_WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 
 # Canonical install prefixes that we trust enough to exec
 # `<binary> --version` against. Anything outside this allow-list is
@@ -226,7 +227,10 @@ def _windows_current_user_known_folder(identifier: str) -> str:
     ole32.CoTaskMemFree.restype = None
 
     # Supplying the actual token prevents inherited HOME/USERPROFILE or
-    # process-level Known Folder overrides from redirecting discovery.
+    # process-level Known Folder overrides from redirecting discovery. The
+    # no-package flag is equally important: a packaged agent host such as
+    # Codex Desktop otherwise redirects LocalAppData into its package cache,
+    # which cannot identify an updater-managed connector installation.
     token_query = 0x0008
     token_impersonate = 0x0004
     if not advapi32.OpenProcessToken(
@@ -238,7 +242,7 @@ def _windows_current_user_known_folder(identifier: str) -> str:
     try:
         status = shell32.SHGetKnownFolderPath(
             ctypes.byref(guid),
-            0,
+            _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION,
             token,
             ctypes.byref(result_path),
         )

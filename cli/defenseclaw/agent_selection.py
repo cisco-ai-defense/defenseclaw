@@ -51,6 +51,7 @@ _CODEX_WINDOWS_PLATFORM_VARIANTS = (
     ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
 )
 _MAX_AGENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
+_WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 _SUPPORTED_CONNECTORS = frozenset(
     {"codex", "claudecode", "hermes", "omnigent", "opencode", "amp", "openhands"}
 )
@@ -814,7 +815,8 @@ def _windows_known_folder(identifier: str) -> str:
     shell32.SHGetKnownFolderPath.restype = ctypes.c_long
     # A null token lets Known Folder resolution consume process-level profile
     # overrides inherited from an agent. Bind setup authority to the actual
-    # current-user token, matching internal/winpath on the native Go side.
+    # current-user token, matching internal/winpath on the native Go side, and
+    # bypass package redirection inherited from packaged desktop agent hosts.
     token_query = 0x0008
     token_impersonate = 0x0004
     if not advapi32.OpenProcessToken(
@@ -824,7 +826,12 @@ def _windows_known_folder(identifier: str) -> str:
     ):
         return ""
     try:
-        result = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, token, ctypes.byref(path))
+        result = shell32.SHGetKnownFolderPath(
+            ctypes.byref(guid),
+            _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION,
+            token,
+            ctypes.byref(path),
+        )
         if result != 0:
             return ""
         return os.path.abspath(path.value or "") if path.value else ""

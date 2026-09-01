@@ -48,6 +48,7 @@ from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 _SAFE_PATHEXT = (".exe", ".cmd")
 _HOOK_RUNTIME_STATE_MAX_BYTES = 64 << 10
 _HOOK_RUNTIME_EXECUTABLE_MAX_BYTES = 256 << 20
+_WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION = 0x00010000
 _MANAGED_MARKER = re.compile(r"(?im)^\s*(?:#|rem\s+)\s*defenseclaw-managed-hook\s+v(\d+)\b")
 _EXPECTED_CONTRACTS = {
     "codex": frozenset(
@@ -364,10 +365,11 @@ def _windows_known_folder_path(folder_id: str) -> str:
     """Resolve a Known Folder for the explicit current-process token.
 
     Passing a null token to ``SHGetKnownFolderPath`` can consult process-level
-    profile overrides.  Connector test and agent processes legitimately set
+    profile overrides. Connector test and agent processes legitimately set
     ``USERPROFILE`` and ``LOCALAPPDATA``, so bind the lookup to the same token
-    that native Setup uses instead of letting those values move the trust
-    boundary.
+    that native Setup uses. ``KF_FLAG_NO_PACKAGE_REDIRECTION`` also prevents a
+    packaged desktop agent from moving that trust boundary into its package
+    cache.
     """
     if os.name != "nt" or not hasattr(ctypes, "windll"):
         return ""
@@ -413,7 +415,7 @@ def _windows_known_folder_path(folder_id: str) -> str:
             status = int(
                 shell32.SHGetKnownFolderPath(
                     ctypes.byref(guid),
-                    0,
+                    _WINDOWS_KF_FLAG_NO_PACKAGE_REDIRECTION,
                     token,
                     ctypes.byref(result),
                 )
