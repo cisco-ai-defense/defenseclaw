@@ -48,6 +48,12 @@ from defenseclaw.models import ActionEntry, Finding, ScanResult
 
 INVENTORY_VERSION = 3
 
+# Keep AIBOM scan-finding evidence within the canonical Observability v8
+# ingress contract. The complete inventory remains in the command result;
+# only its audit-telemetry projection is summarized when a category is large.
+_AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES = 65_536
+_AIBOM_TELEMETRY_SUMMARY_SCHEMA = "defenseclaw.aibom.telemetry-summary.v1"
+
 ALL_CATEGORIES: frozenset[str] = frozenset(["skills", "plugins", "mcp", "agents", "tools", "models", "memory"])
 
 _CATEGORY_ALIASES: dict[str, str] = {"model_providers": "models"}
@@ -178,6 +184,40 @@ def build_claw_aibom(
     return out
 
 
+def _aibom_telemetry_description(payload: Any) -> str:
+    """Return a lossless small payload or a bounded, verifiable summary.
+
+    Canonical Observability v8 admits at most 65,536 UTF-8 bytes per finding
+    description. AIBOM remains the source of truth and is rendered in full to
+    the caller; this helper only bounds the scan finding sent to telemetry.
+    """
+
+    rendered = json.dumps(payload, indent=2)
+    rendered_bytes = rendered.encode("utf-8")
+    if len(rendered_bytes) <= _AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES:
+        return rendered
+
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    summary = {
+        "schema": _AIBOM_TELEMETRY_SUMMARY_SCHEMA,
+        "truncated": True,
+        "item_count": len(payload) if isinstance(payload, list) else 0,
+        "source_utf8_bytes": len(rendered_bytes),
+        "sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+    bounded = json.dumps(summary, indent=2, sort_keys=True)
+    # This is a fixed-shape object, but keep the boundary assertion adjacent
+    # to its construction so future fields cannot silently break admission.
+    if len(bounded.encode("utf-8")) > _AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES:
+        raise ValueError("AIBOM telemetry summary exceeds its canonical size limit")
+    return bounded
+
+
 def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
     """One INFO finding per category so audit logging stays compact."""
     target = _aibom_target_path(inv, cfg)
@@ -200,7 +240,7 @@ def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
                 id=f"claw-aibom-{key}",
                 severity="INFO",
                 title=f"{label} ({count})",
-                description=json.dumps(payload, indent=2) if payload else "[]",
+                description=_aibom_telemetry_description(payload),
                 location=target,
                 scanner="aibom-claw",
                 tags=["claw-aibom", key],

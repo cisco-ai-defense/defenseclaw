@@ -1482,14 +1482,20 @@ def scan(
         else:
             connectors = [None]
         json_rows: list[dict[str, Any]] = []
-        enforcement_failed = False
+        batch_failed = False
         pack_cache: RulePackOverlayCache = {}
         for c in connectors:
             if len(connectors) > 1 and not as_json:
                 click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
             if remote:
                 rows = _scan_all_remote(app, as_json, connector=c)
+                if as_json and any(
+                    isinstance(row, dict) and bool(row.get("error"))
+                    for row in rows
+                ):
+                    batch_failed = True
             else:
+                scan_errors: list[int] = []
                 try:
                     scanner = _build_skill_scanner(
                         app,
@@ -1497,23 +1503,43 @@ def scan(
                         connector=c,
                         pack_cache=pack_cache,
                     )
-                    rows = _scan_all(
-                        app,
-                        scanner,
-                        as_json,
-                        enforce=action,
-                        connector=c,
-                    )
+                    scan_kwargs: dict[str, Any] = {
+                        "enforce": action,
+                        "connector": c,
+                    }
+                    if as_json:
+                        scan_kwargs["error_sink"] = scan_errors
+                    rows = _scan_all(app, scanner, as_json, **scan_kwargs)
                 except SystemExit as exc:
-                    if not action or exc.code in (None, 0):
+                    if (not action and not as_json) or exc.code in (None, 0):
                         raise
-                    enforcement_failed = True
+                    batch_failed = True
                     rows = []
+                except Exception as exc:
+                    if not as_json and len(connectors) == 1:
+                        raise
+                    batch_failed = True
+                    if as_json:
+                        rows = [
+                            _skill_scan_error_json_payload(
+                                f"connector:{c or app.cfg.active_connector()}",
+                                exc,
+                                connector=str(c or app.cfg.active_connector()),
+                            )
+                        ]
+                    else:
+                        click.echo(
+                            f"[scan] connector {c or app.cfg.active_connector()!r} failed: {exc}",
+                            err=True,
+                        )
+                        rows = []
+                if scan_errors:
+                    batch_failed = True
             if as_json:
                 json_rows.extend(rows or [])
         if as_json:
             click.echo(json.dumps(json_rows, indent=2, default=str))
-        if enforcement_failed:
+        if batch_failed:
             raise SystemExit(1)
         return
 
@@ -2135,6 +2161,7 @@ def _scan_all(
     *,
     enforce: bool = False,
     connector: str | None = None,
+    error_sink: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
@@ -2281,38 +2308,32 @@ def _scan_all(
                 _emit_captured_scan_stdout(captured_stdout.getvalue())
             else:
                 result = scanner.scan(base_dir)
-            if app.logger:
-                app.logger.log_scan(result)
-            verdicts.append({"name": name, "result": result})
-            if as_json:
-                json_rows.append(_skill_scan_result_json_payload(result, connector=connector))
-            else:
-                enforcement_blocks = False
-                if result.is_clean():
-                    _scan_ui.render_per_target_status(
-                        ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
-                    )
-                else:
-                    enforcement_blocks = (
-                        enforce
-                        and _skill_scan_would_install_block(
-                            app, pe, name, base_dir, result, connector=connector,
-                        )
-                    )
-                    _scan_ui.render_per_target_status(
-                        ctx,
-                        target=name,
-                        verdict=_skill_scan_findings_verdict(
-                            result, blocked=enforcement_blocks,
-                        ),
-                        detail=f"max severity: {result.max_severity()}",
-                        findings=len(result.findings),
-                    )
-                v = verdicts[-1]
-                v["blocked"] = bool(enforcement_blocks)
-                v["findings"] = len(result.findings)
-            if not result.is_clean() and enforce:
-                _apply_scan_enforcement(app, pe, name, base_dir, result, connector=connector)
+        except SystemExit as exc:
+            # The scanner wrapper uses SystemExit for dependency/bootstrap
+            # failures. In the normal JSON batch path that is still a
+            # per-target failure: preserve rows already collected for this
+            # connector, append a structured error row, and let the caller
+            # emit the complete array before returning non-zero. Keep the
+            # human-output and successful-exit behavior. JSON action batches
+            # also need the rows accumulated before this target failed.
+            if not as_json or exc.code in (None, 0):
+                raise
+            errors += 1
+            if captured_stdout is not None:
+                _emit_captured_scan_stdout(captured_stdout.getvalue())
+            detail = (
+                f"scanner exited with status {exc.code}"
+                if isinstance(exc.code, int)
+                else str(exc)
+            )
+            json_rows.append(
+                _skill_scan_error_json_payload(
+                    base_dir,
+                    RuntimeError(detail),
+                    connector=connector,
+                )
+            )
+            continue
         except Exception as exc:
             errors += 1
             if not as_json:
@@ -2328,6 +2349,58 @@ def _scan_all(
                 json_rows.append(
                     _skill_scan_error_json_payload(base_dir, exc, connector=connector)
                 )
+            continue
+
+        # A canonical telemetry admission failure must not erase a completed
+        # scan result or prevent its enforcement decision. Report it alongside
+        # that skill and defer the non-zero exit until after the whole batch is
+        # serialized.
+        telemetry_error: Exception | None = None
+        if app.logger:
+            try:
+                app.logger.log_scan(result)
+            except Exception as exc:
+                telemetry_error = exc
+
+        verdicts.append({"name": name, "result": result})
+        if as_json:
+            payload = _skill_scan_result_json_payload(result, connector=connector)
+            if telemetry_error is not None:
+                payload["telemetry_error"] = str(telemetry_error)
+            json_rows.append(payload)
+        else:
+            enforcement_blocks = False
+            if result.is_clean():
+                _scan_ui.render_per_target_status(
+                    ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                )
+            else:
+                enforcement_blocks = (
+                    enforce
+                    and _skill_scan_would_install_block(
+                        app, pe, name, base_dir, result, connector=connector,
+                    )
+                )
+                _scan_ui.render_per_target_status(
+                    ctx,
+                    target=name,
+                    verdict=_skill_scan_findings_verdict(
+                        result, blocked=enforcement_blocks,
+                    ),
+                    detail=f"max severity: {result.max_severity()}",
+                    findings=len(result.findings),
+                )
+            v = verdicts[-1]
+            v["blocked"] = bool(enforcement_blocks)
+            v["findings"] = len(result.findings)
+            if telemetry_error is not None:
+                click.echo(
+                    f"[scan] warning: telemetry for {name!r} was not recorded: "
+                    f"{telemetry_error}",
+                    err=True,
+                )
+        if not result.is_clean() and enforce:
+            _apply_scan_enforcement(app, pe, name, base_dir, result, connector=connector)
 
     if not as_json and verdicts:
         clean = sum(1 for v in verdicts if v["result"].is_clean())
@@ -2349,7 +2422,9 @@ def _scan_all(
         else:
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
     if errors:
-        raise SystemExit(1)
+        if error_sink is None:
+            raise SystemExit(1)
+        error_sink.append(errors)
     return json_rows
 
 
