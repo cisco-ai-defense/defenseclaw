@@ -795,6 +795,34 @@ class TestAIBOMCommand(unittest.TestCase):
         self.assertIn("read-only checkpoint", result.stderr)
         mock_commit.assert_called_once()
 
+    @patch("defenseclaw.inventory.claw_inventory.commit_claw_aibom_digest")
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_warns_when_digest_checkpoint_is_not_committed(
+        self, mock_build, mock_to_scan, mock_enrich, mock_commit
+    ):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        mock_build.return_value = self._make_inventory(skills=[{"id": "rendered"}])
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        mock_commit.return_value = False
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--json", "--connector", "openclaw"],
+            obj=self.app, catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(result.stdout)["skills"][0]["id"], "rendered")
+        self.assertIn("Warning: AIBOM telemetry checkpoint failed", result.stderr)
+        self.assertIn("telemetry will be retried", result.stderr)
+        mock_commit.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Setup command (non-interactive)

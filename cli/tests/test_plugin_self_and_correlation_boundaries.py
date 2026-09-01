@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -70,6 +71,77 @@ def _copy_runtime_payload(source: Path, destination: Path) -> None:
             dependency_destination = destination / "node_modules" / dependency
             dependency_destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(dependency_source, dependency_destination)
+
+
+def _write_bridge_publication(
+    data_dir: Path,
+    target: Path,
+    *,
+    connector: str,
+    payload: bytes,
+) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    if connector == "opencode":
+        digest_path = data_dir / "hooks" / "opencode-plugin.js"
+        digest_path.parent.mkdir(parents=True, exist_ok=True)
+        digest_path.write_bytes(payload)
+        hook_config_paths = [str(target)]
+        hook_script_paths = [str(digest_path)]
+    else:
+        digest_path = target
+        hook_config_paths = [str(target)]
+        hook_script_paths = [str(target)]
+    lock_path = data_dir / "hook_contract_lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "connectors": {
+                    connector: {
+                        "connector": connector,
+                        "hook_script_digests": {
+                            digest_path.name: "sha256:"
+                            + hashlib.sha256(digest_path.read_bytes()).hexdigest(),
+                        },
+                        "locations": {
+                            "hook_config_paths": hook_config_paths,
+                            "hook_script_paths": hook_script_paths,
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    lock_path.chmod(0o600)
+
+
+def _render_bridge_publication(
+    repository_root: Path,
+    data_dir: Path,
+    *,
+    connector: str,
+) -> bytes:
+    template_name = {
+        "amp": "amp-plugin.ts",
+        "opencode": "opencode-plugin.js",
+    }[connector]
+    template = (
+        repository_root / "internal" / "gateway" / "connector" / "hooks" / template_name
+    ).read_text(encoding="utf-8")
+    token_path = os.path.abspath(
+        os.path.join(data_dir, "hooks", f".hook-{connector}.token")
+    )
+    token_path_js = json.dumps(token_path, ensure_ascii=False)[1:-1]
+    rendered = (
+        template.replace("{{.APIAddr}}", "127.0.0.1:18970")
+        .replace("{{.TokenFileJS}}", token_path_js)
+        .replace("{{.FailMode}}", "closed")
+    )
+    assert "{{." not in rendered
+    return rendered.encode()
 
 
 def _canonical_source_extension(
@@ -304,6 +376,91 @@ def test_self_identity_reader_rejects_leaf_swap_at_descriptor_open(
 
     assert reader(str(candidate)) == expected
     assert raced
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_path", "route"),
+    [
+        (
+            "opencode",
+            Path(".config/opencode/plugins/defenseclaw.js"),
+            "/api/v1/opencode/hook",
+        ),
+        (
+            "amp",
+            Path(".config/amp/plugins/defenseclaw.ts"),
+            "/api/v1/amp/hook",
+        ),
+    ],
+)
+def test_registered_connector_bridge_requires_exact_published_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+    route: str,
+) -> None:
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    repository_root = Path(__file__).resolve().parents[2]
+    published = _render_bridge_publication(
+        repository_root,
+        data_dir,
+        connector=connector,
+    )
+    _write_bridge_publication(
+        data_dir,
+        target,
+        connector=connector,
+        payload=published,
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+
+    assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
+
+    # Product/API marker strings at the same expected path are insufficient
+    # after a third party replaces the setup-published bytes.
+    third_party = (
+        b"// third-party DefenseClaw integration\n"
+        + f"const endpoint = '{route}'\n".encode()
+        + b"eval(untrustedInput)\n"
+    )
+    target.write_bytes(third_party)
+    # Even a matching user-state lock under an environment-selected data root
+    # cannot grant self identity to bytes outside the immutable bridge template.
+    _write_bridge_publication(
+        data_dir,
+        target,
+        connector=connector,
+        payload=third_party,
+    )
+
+    assert not self_identity._looks_like_bridge_file(str(target))
+    assert first_party_self_reason(target) is None
+
+
+@pytest.mark.parametrize(
+    ("connector", "template_name"),
+    [
+        ("amp", "amp-plugin.ts"),
+        ("opencode", "opencode-plugin.js"),
+    ],
+)
+def test_bridge_template_fingerprints_match_gateway_sources(
+    connector: str,
+    template_name: str,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    payload = (
+        repository_root / "internal" / "gateway" / "connector" / "hooks" / template_name
+    ).read_bytes()
+
+    assert (
+        hashlib.sha256(payload).hexdigest()
+        == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
+    )
 
 
 def test_tampered_plugin_at_expected_install_path_is_not_exempt(

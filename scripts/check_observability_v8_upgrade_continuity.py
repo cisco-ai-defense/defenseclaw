@@ -61,6 +61,27 @@ class ContinuityError(RuntimeError):
     """A content-free release-gate failure."""
 
 
+def _grafana_password_file_for_access_mode(password_file: Path | None) -> Path | None:
+    """Return credentials only when the persisted stack mode requires them."""
+
+    if password_file is None:
+        return None
+    mode_file = password_file.with_name(".grafana-access-mode")
+    try:
+        mode = mode_file.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        # Preserve the explicit-file behavior for stacks created before the
+        # access-mode marker existed. The credential loader remains fail-closed.
+        return password_file
+    except (OSError, UnicodeError) as exc:
+        raise ContinuityError("Grafana access-mode marker is unreadable") from exc
+    if mode == "no-password":
+        return None
+    if mode == "password":
+        return password_file
+    raise ContinuityError("Grafana access-mode marker is invalid")
+
+
 def _role_stamp(body: dict[str, Any]) -> tuple[str, str] | None:
     value = body.get("gen_ai.agent.id")
     if not isinstance(value, str):
@@ -530,7 +551,7 @@ def verify(
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pre-stamp", required=True)
     parser.add_argument("--post-stamp", required=True)
@@ -538,8 +559,8 @@ def main() -> int:
     parser.add_argument("--lookback-hours", type=int, default=2)
     parser.add_argument("--wait-seconds", type=int, default=60)
     parser.add_argument("--dashboard-deadline-seconds", type=int, default=300)
-    parser.add_argument("--grafana-password-file", required=True, type=Path)
-    args = parser.parse_args()
+    parser.add_argument("--grafana-password-file", type=Path)
+    args = parser.parse_args(argv)
     for name, value in (("pre", args.pre_stamp), ("post", args.post_stamp)):
         if not value.isdigit():
             parser.error(f"--{name}-stamp must be numeric")
@@ -550,8 +571,9 @@ def main() -> int:
     if args.lookback_hours <= 0 or args.wait_seconds <= 0 or args.dashboard_deadline_seconds <= 0:
         parser.error("lookback and deadline values must be positive")
     try:
-        dashboards.configure_grafana_auth(args.grafana_password_file)
-    except dashboards.AuditError as exc:
+        password_file = _grafana_password_file_for_access_mode(args.grafana_password_file)
+        dashboards.configure_grafana_auth(password_file)
+    except (ContinuityError, dashboards.AuditError) as exc:
         parser.error(str(exc))
 
     deadline = time.monotonic() + args.wait_seconds

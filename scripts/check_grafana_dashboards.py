@@ -16,6 +16,7 @@ import argparse
 import base64
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -213,6 +214,36 @@ def configure_grafana_auth(password_file: Path | None) -> None:
     if len(password) < 32 or any(byte < 0x21 or byte > 0x7E for byte in password):
         raise AuditError(f"Grafana credential file is malformed: {password_file}")
     _GRAFANA_AUTHORIZATION = "Basic " + base64.b64encode(b"admin:" + password).decode("ascii")
+
+
+def _default_grafana_password_file(*, home: Path | None = None) -> Path | None:
+    """Find custom, normal, then source-bundle Grafana credentials."""
+
+    def normalized_root(value: str | Path, *, description: str) -> Path:
+        try:
+            rendered = os.fspath(value)
+            if not rendered or "\x00" in rendered:
+                raise ValueError("empty or NUL-containing path")
+            return Path(os.path.abspath(os.path.expanduser(rendered)))
+        except (OSError, TypeError, ValueError) as exc:
+            raise AuditError(f"{description} is invalid") from exc
+
+    candidates: list[Path] = []
+    configured_home = os.environ.get("DEFENSECLAW_HOME")
+    if configured_home:
+        candidates.append(
+            normalized_root(configured_home, description="DEFENSECLAW_HOME")
+            / "observability-stack"
+            / ".grafana-admin-password"
+        )
+    profile = normalized_root(home if home is not None else Path.home(), description="home directory")
+    candidates.extend(
+        (
+            profile / ".defenseclaw" / "observability-stack" / ".grafana-admin-password",
+            ROOT / "bundles" / "local_observability_stack" / ".grafana-admin-password",
+        )
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -3009,11 +3040,10 @@ def main() -> int:
 
     dashboards, errors = static_audit(require_packaged=args.require_packaged)
     if args.live or args.inventory or args.live_golden:
-        password_file = args.grafana_password_file
-        if password_file is None:
-            source_password = ROOT / "bundles/local_observability_stack/.grafana-admin-password"
-            password_file = source_password if source_password.is_file() else None
         try:
+            password_file = args.grafana_password_file
+            if password_file is None:
+                password_file = _default_grafana_password_file()
             configure_grafana_auth(password_file)
         except AuditError as exc:
             errors.append(str(exc))

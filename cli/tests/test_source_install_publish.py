@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -518,6 +519,88 @@ def test_repair_console_symlink_retires_stale_interpreter_launcher(tmp_path: Pat
     retired = list(custody.glob("retired-*"))
     assert len(retired) == 1
     assert retired[0].read_bytes() == stale_payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")
+def test_repair_console_symlink_retirement_recovers_after_crash_before_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    venv_bin = tmp_path / ".defenseclaw" / ".venv" / "bin"
+    install_dir = tmp_path / ".local" / "bin"
+    venv_bin.mkdir(parents=True)
+    install_dir.mkdir(parents=True)
+    interpreter = venv_bin / "python3"
+    interpreter.write_bytes(b"managed interpreter fixture\n")
+    interpreter.chmod(0o755)
+    target = venv_bin / "skill-scanner"
+    _write_skill_scanner_console_script(target, interpreter)
+    destination = install_dir / "skill-scanner"
+    stale_payload = _write_skill_scanner_console_script(
+        destination,
+        Path("/Library/Cisco/RADKit/python/bin/python3"),
+    )
+    custody = tmp_path / "custody"
+
+    real_exchange = install_publish._exchange
+    real_ensure_intent = install_publish._ensure_retirement_intent
+    exchanges = 0
+
+    def preserve_interrupted_exchange(
+        parent_fd: int,
+        source: str,
+        activated: str,
+    ) -> None:
+        nonlocal exchanges
+        exchanges += 1
+        if exchanges == 1:
+            real_exchange(parent_fd, source, activated)
+            return
+        raise install_publish.PublishError("simulated unavailable rollback")
+
+    def crash_after_intent(
+        custody_fd: int,
+        intent: str,
+        document: bytes,
+        *,
+        allow_create: bool,
+    ) -> bool:
+        created = real_ensure_intent(
+            custody_fd,
+            intent,
+            document,
+            allow_create=allow_create,
+        )
+        if created:
+            raise SystemExit("simulated process death after durable intent")
+        return created
+
+    monkeypatch.setattr(install_publish, "_exchange", preserve_interrupted_exchange)
+    monkeypatch.setattr(install_publish, "_ensure_retirement_intent", crash_after_intent)
+
+    with pytest.raises(SystemExit, match="durable intent"):
+        install_publish.repair_managed_console_symlink(
+            target,
+            destination,
+            "skill-scanner",
+            custody_root=custody,
+        )
+
+    staged = next(install_dir.glob(".skill-scanner.managed-console-*"))
+    intent = json.loads(
+        next(custody.glob("intent-*.json")).read_text(encoding="utf-8")
+    )
+    assert intent["canonical"] == str(staged)
+    assert destination.is_symlink()
+    assert staged.read_bytes() == stale_payload
+
+    monkeypatch.setattr(install_publish, "_exchange", real_exchange)
+    monkeypatch.setattr(install_publish, "_ensure_retirement_intent", real_ensure_intent)
+    install_publish.recover_custody(custody)
+
+    assert destination.is_symlink()
+    assert not staged.exists()
+    assert next(custody.glob("retired-*")).read_bytes() == stale_payload
 
 
 @pytest.mark.skipif(os.name == "nt", reason="managed console symlinks are POSIX-only")

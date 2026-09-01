@@ -1981,7 +1981,7 @@ def repair_managed_console_symlink(
             stage,
             displaced_identity,
             custody_fd,
-            str(destination),
+            str(destination.parent / stage),
             "entry",
         ):
             raise PublishError("stale managed console launcher changed and was preserved")

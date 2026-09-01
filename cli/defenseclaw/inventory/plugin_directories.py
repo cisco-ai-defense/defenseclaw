@@ -790,6 +790,15 @@ def _claude_registry_identity(
 
     registry_name, separator, _marketplace = registry_key.rpartition("@")
     fallback = registry_name if separator and registry_name else registry_key
+    if fallback.startswith("@"):
+        # Claude preserves npm-style scoped plugin names in the authoritative
+        # registry key (for example ``@compound/engineering@market``). Plugin
+        # IDs are intentionally one portable path segment, so retain the
+        # scoped package's final name rather than rejecting a manifest-less
+        # install solely because its registry identity contains ``/``.
+        _scope, scoped_separator, scoped_name = fallback[1:].partition("/")
+        if _scope and scoped_separator and scoped_name:
+            fallback = scoped_name
     try:
         safe_fallback = validate_plugin_id(fallback)
     except PluginIdentityError:

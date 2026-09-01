@@ -372,7 +372,7 @@ class TestScanAllSweep(_PluginScanUXBase):
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
-    def test_scan_all_zero_targets_is_nonzero_with_missing_or_valid_empty_diagnostics(
+    def test_scan_all_zero_targets_is_successful_with_missing_or_valid_empty_diagnostics(
         self,
         mock_scan,
         _mock_oc,
@@ -394,15 +394,15 @@ class TestScanAllSweep(_PluginScanUXBase):
                 text_result = self.invoke(
                     ["scan", "--all", "--connector", "claudecode"]
                 )
-                self.assertEqual(text_result.exit_code, 1, text_result.output)
+                self.assertEqual(text_result.exit_code, 0, text_result.output)
                 self.assertIn(registry, text_result.output)
                 self.assertIn(f"— {expected_state}; entries=0", text_result.output)
-                self.assertIn("yielded zero scan targets", text_result.output)
+                self.assertIn("No plugins found to scan", text_result.output)
 
                 json_result = self.invoke(
                     ["scan", "--all", "--connector", "claudecode", "--json"]
                 )
-                self.assertEqual(json_result.exit_code, 1, json_result.output)
+                self.assertEqual(json_result.exit_code, 0, json_result.output)
                 payload = json.loads(json_result.output)
                 self.assertEqual(payload[0]["error"], "no_plugin_targets")
                 self.assertEqual(payload[0]["discovery"][0]["source"], registry)

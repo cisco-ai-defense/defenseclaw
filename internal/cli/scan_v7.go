@@ -156,6 +156,11 @@ func findingToV7(f *scanner.Finding, scannerName string) scanFindingV7 {
 		t := append([]string(nil), f.Tags...)
 		tags = &t
 	}
+	var confidence *float64
+	if f.Confidence != 0 {
+		value := f.Confidence
+		confidence = &value
+	}
 	// Machine-output redaction is applied once to a detached ScanResult by
 	// internal/scanoutput. This conversion must not introduce a second policy:
 	// it only maps the already-projected values into the v7 wire shape.
@@ -171,7 +176,7 @@ func findingToV7(f *scanner.Finding, scannerName string) scanFindingV7 {
 		RuleID:      &rid,
 		LineNumber:  ln,
 		Category:    nil,
-		Confidence:  nil,
+		Confidence:  confidence,
 	}
 }
 

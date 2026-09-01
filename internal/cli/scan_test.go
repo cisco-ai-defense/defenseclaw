@@ -43,6 +43,7 @@ func TestMarshalScanResultV7Shape(t *testing.T) {
 				Remediation: "fix",
 				Scanner:     "codeguard",
 				Tags:        []string{"a"},
+				Confidence:  0.87,
 			},
 		},
 	}
@@ -58,6 +59,14 @@ func TestMarshalScanResultV7Shape(t *testing.T) {
 		if _, ok := top[k]; !ok {
 			t.Fatalf("missing key %q", k)
 		}
+	}
+	var output scanResultV7
+	if err := json.Unmarshal(b, &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(output.Findings) != 1 || output.Findings[0].Confidence == nil ||
+		*output.Findings[0].Confidence != 0.87 {
+		t.Fatalf("finding confidence was not preserved: %+v", output.Findings)
 	}
 }
 

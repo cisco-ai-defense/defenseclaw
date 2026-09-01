@@ -9317,7 +9317,7 @@ else
     ok "Python CLI installed"
 fi
 VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-if [[ "${BRIDGE_PHASE1}" -ne 1 ]]; then
+if [[ "${BRIDGE_PHASE1}" -ne 1 || -z "${STAGED_FINAL_VERSION}" ]]; then
     repair_skill_scanner_launcher
 fi
 

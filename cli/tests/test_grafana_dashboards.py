@@ -76,6 +76,30 @@ def test_grafana_live_auth_supports_anonymous_mode_and_rejects_bad_explicit_file
         audit.configure_grafana_auth(tmp_path / "missing-password")
 
 
+def test_default_grafana_auth_prefers_normalized_defenseclaw_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit = _load_audit_module()
+    profile = tmp_path / "profile"
+    normal = profile / ".defenseclaw" / "observability-stack" / ".grafana-admin-password"
+    normal.parent.mkdir(parents=True)
+    normal.write_bytes(b"A" * 32 + b"\n")
+    configured_root = tmp_path / "custom data"
+    configured = configured_root / "observability-stack" / ".grafana-admin-password"
+    configured.parent.mkdir(parents=True)
+    configured.write_bytes(b"B" * 32 + b"\n")
+    monkeypatch.setenv(
+        "DEFENSECLAW_HOME",
+        str(configured_root / ".." / configured_root.name),
+    )
+
+    assert audit._default_grafana_password_file(home=profile) == configured
+
+    monkeypatch.delenv("DEFENSECLAW_HOME")
+    assert audit._default_grafana_password_file(home=profile) == normal
+
+
 def test_grafana_auth_is_attached_only_to_exact_loopback_grafana_origin(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

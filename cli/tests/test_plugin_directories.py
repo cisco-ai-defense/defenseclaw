@@ -644,6 +644,43 @@ def test_claude_v2_registry_uses_registry_identity_without_manifest(
     assert entries[0].cached is True
 
 
+def test_claude_v2_registry_keeps_scoped_identity_without_manifest(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    plugin = root / "cache" / "compound-market" / "engineering" / "2026.8.1"
+    plugin.mkdir(parents=True)
+    (root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "@compound/engineering@compound-market": [
+                        {
+                            "scope": "user",
+                            "installPath": str(plugin),
+                            "version": "2026.8.1",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = discover_plugin_directories(str(root), connector="claudecode")
+    probe = probe_claude_plugin_registry(str(root))
+
+    assert [(entry.id, entry.path) for entry in entries] == [
+        ("engineering", str(plugin))
+    ]
+    assert entries[0].registry == "compound-market"
+    assert entries[0].manifest == ""
+    assert probe is not None
+    assert probe.state is PluginRegistryState.VALID
+    assert probe.entries == 1
+
+
 def test_claude_registry_malformed_manifest_cannot_hide_installed_plugin(
     tmp_path: Path,
 ) -> None:

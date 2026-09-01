@@ -271,6 +271,22 @@ func TestProjectFailsClosedForInvalidOversizeAndExhaustedFields(t *testing.T) {
 	}
 }
 
+func TestProjectPathComponentBudgetFailureReturnsWholeFieldToken(t *testing.T) {
+	t.Parallel()
+	// The complete path sees a bounded number of slash-spanning entropy
+	// candidates, while each standalone component contributes a match. The last
+	// component crosses the shared record-match limit.
+	path := "/" + strings.Repeat("Aa0_Bb1-Cc2_Dd3-Ee4_Ff5/", 4097) + "main.go"
+	projected := testRedactor(t).Project(&scanner.ScanResult{Target: path})
+	if strings.Contains(projected.Target, "Aa0_Bb1-Cc2_Dd3-Ee4_Ff5") ||
+		!strings.Contains(projected.Target, "<redacted type=field.path") {
+		t.Fatalf("component budget failure did not protect the complete path: %q", projected.Target)
+	}
+	if strings.ContainsAny(projected.Target, `/\\`) {
+		t.Fatalf("component budget failure returned a partial path: %q", projected.Target)
+	}
+}
+
 func TestProjectTreatsUntrustedPlaceholderAsInputAndFailsClosedWithoutKey(t *testing.T) {
 	t.Parallel()
 	spoof := "<redacted arbitrary> then " + scanOutputTestSecret

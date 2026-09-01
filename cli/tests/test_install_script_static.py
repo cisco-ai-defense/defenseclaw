@@ -294,6 +294,8 @@ def test_posix_install_and_upgrade_validate_cli_and_skill_scanner_before_publica
     repair_call = upgrade_text.index("repair_skill_scanner_launcher\n", launcher)
     migrations = upgrade_text.index("# ── Run migrations", launcher)
     assert launcher < repair_call < migrations
+    repair_guard = upgrade_text[launcher:repair_call]
+    assert '[[ "${BRIDGE_PHASE1}" -ne 1 || -z "${STAGED_FINAL_VERSION}" ]]' in repair_guard
 
     repair_function = upgrade_text.split("repair_skill_scanner_launcher()", 1)[1].split("\n}", 1)[0]
     assert '"${scanner}" --version' in repair_function

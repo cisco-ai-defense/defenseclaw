@@ -220,7 +220,12 @@ def _emit_aibom_telemetry_best_effort(
         # admission again rather than silently checkpointing a dropped event.
         return
     try:
-        commit_claw_aibom_digest(digest, app.cfg, connector=label)
+        if not commit_claw_aibom_digest(digest, app.cfg, connector=label):
+            click.echo(
+                "Warning: AIBOM telemetry checkpoint failed for "
+                f"connector={label}; telemetry will be retried",
+                err=True,
+            )
     except Exception as exc:  # noqa: BLE001 - checkpointing is best-effort.
         click.echo(
             f"Warning: AIBOM telemetry checkpoint failed for connector={label}: {exc}",

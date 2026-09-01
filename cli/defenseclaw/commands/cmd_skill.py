@@ -1571,7 +1571,9 @@ def scan(
                         scan_kwargs["error_sink"] = scan_errors
                     rows = _scan_all(app, scanner, as_json, **scan_kwargs)
                 except SystemExit as exc:
-                    if (not action and not as_json) or exc.code in (None, 0):
+                    if exc.code in (None, 0):
+                        raise
+                    if not as_json and len(connectors) == 1:
                         raise
                     batch_failed = True
                     rows = []

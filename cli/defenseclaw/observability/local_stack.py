@@ -102,6 +102,10 @@ class LocalStackError(RuntimeError):
     """An actionable local-stack failure."""
 
 
+class GrafanaAccessPolicyError(LocalStackError):
+    """Grafana is reachable in the opposite access mode."""
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """Bounded, explicitly decoded child-process output."""
@@ -867,11 +871,7 @@ class LocalStackController:
             # Docker renders an unlabeled volume's `.Labels` as JSON null.
             # Treat that as the empty label set so the ownership check below
             # produces the intended refusal instead of a generic parse error.
-            labels = (
-                {}
-                if raw_labels == "null"
-                else _parse_json_object(raw_labels, description="volume labels")
-            )
+            labels = {} if raw_labels == "null" else _parse_json_object(raw_labels, description="volume labels")
             if (
                 labels.get("com.docker.compose.project") != COMPOSE_PROJECT
                 or labels.get("com.docker.compose.volume") != volume
@@ -1073,10 +1073,10 @@ class LocalStackController:
         try:
             with urllib.request.urlopen(anonymous, timeout=3) as response:
                 if response.status < 400:
-                    raise LocalStackError("Grafana still permits anonymous dashboard API access")
+                    raise GrafanaAccessPolicyError("Grafana still permits anonymous dashboard API access")
         except urllib.error.HTTPError as exc:
             if exc.code != 401:
-                raise LocalStackError(f"Grafana anonymous access check returned HTTP {exc.code}") from exc
+                raise GrafanaAccessPolicyError(f"Grafana anonymous access check returned HTTP {exc.code}") from exc
         except (OSError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana anonymous access check failed") from exc
 
@@ -1089,9 +1089,9 @@ class LocalStackController:
         try:
             with urllib.request.urlopen(authenticated, timeout=3) as response:
                 if not 200 <= response.status < 300:
-                    raise LocalStackError("Grafana rejected the managed admin credential")
+                    raise GrafanaAccessPolicyError("Grafana rejected the managed admin credential")
         except urllib.error.HTTPError as exc:
-            raise LocalStackError(f"Grafana rejected the managed admin credential (HTTP {exc.code})") from exc
+            raise GrafanaAccessPolicyError(f"Grafana rejected the managed admin credential (HTTP {exc.code})") from exc
         except (OSError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana authenticated access check failed") from exc
 
@@ -1106,7 +1106,9 @@ class LocalStackController:
                     raise LocalStackError(f"Grafana no-password access returned HTTP {response.status}")
         except urllib.error.HTTPError as exc:
             if exc.code in {401, 403}:
-                raise LocalStackError(f"Grafana no-password access requires authentication (HTTP {exc.code})") from exc
+                raise GrafanaAccessPolicyError(
+                    f"Grafana no-password access requires authentication (HTTP {exc.code})"
+                ) from exc
             raise LocalStackError(f"Grafana no-password access returned HTTP {exc.code}") from exc
         except (OSError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana no-password access check failed") from exc
@@ -1136,18 +1138,10 @@ class LocalStackController:
                 else:
                     self._verify_grafana_no_password()
                 return
+            except GrafanaAccessPolicyError:
+                raise
             except LocalStackError as exc:
                 latest = exc
-                # A reachable Grafana in the opposite access mode is a policy
-                # failure, not a startup race. Do not leave it running.
-                message = str(exc)
-                if (
-                    "still permits anonymous" in message
-                    or "anonymous access check returned HTTP" in message
-                    or "rejected the managed admin credential (HTTP" in message
-                    or "no-password access requires authentication" in message
-                ):
-                    raise
             time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         detail = f": {latest}" if latest is not None else ""
         raise LocalStackError(f"Grafana {mode} access verification timed out after {timeout}s{detail}")
@@ -1177,14 +1171,28 @@ class LocalStackController:
             existing_volumes=existing_volumes,
         )
         password: str | None = None
+        password_is_current = False
         if mode == GRAFANA_ACCESS_PASSWORD:
             _password_path, password = ensure_grafana_admin_password(self.stack_dir)
+            try:
+                persisted_mode = read_grafana_access_mode(self.stack_dir)
+            except LocalStackError:
+                if grafana_access_mode is None:
+                    raise
+                persisted_mode = None
+            if persisted_mode == GRAFANA_ACCESS_PASSWORD:
+                try:
+                    self._verify_grafana_authentication(password)
+                except LocalStackError:
+                    pass
+                else:
+                    password_is_current = True
         self._verify_effective_compose_security(mode)
         # Commit the selected mode before Compose can create a new grafana-data
         # volume. Otherwise a failed first password-mode start could be
         # misclassified as an anonymous legacy stack on retry.
         persist_grafana_access_mode(self.stack_dir, mode)
-        if mode == GRAFANA_ACCESS_PASSWORD:
+        if mode == GRAFANA_ACCESS_PASSWORD and not password_is_current:
             assert password is not None
             self._migrate_grafana_admin_password(password)
         self._checked(
@@ -1438,7 +1446,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.action == "logs":
             print(controller.logs(service=args.service, follow=args.follow), end="")
         elif args.action == "url":
-            print(json.dumps(controller.contract()) if args.output == "json" else _text_urls())
+            if args.output == "json":
+                print(json.dumps(controller.contract()))
+            else:
+                mode = read_grafana_access_mode(controller.stack_dir)
+                print(
+                    _text_urls(
+                        grafana_access_mode=mode,
+                        grafana_password_file=(
+                            controller.grafana_password_file if mode == GRAFANA_ACCESS_PASSWORD else None
+                        ),
+                    )
+                )
         else:
             env = controller.environment_contract()
             if args.output == "json":
@@ -1467,6 +1486,7 @@ __all__ = [
     "GRAFANA_ACCESS_NO_PASSWORD",
     "GRAFANA_ACCESS_PASSWORD",
     "GRAFANA_PASSWORD_FILE_NAME",
+    "GrafanaAccessPolicyError",
     "CommandResult",
     "CommandRunner",
     "LocalStackController",

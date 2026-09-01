@@ -35,6 +35,7 @@ from defenseclaw.observability.local_stack import (
     CommandResult,
     CommandRunner,
     CommandTimeoutError,
+    GrafanaAccessPolicyError,
     LocalStackController,
     LocalStackError,
     ProbeResult,
@@ -42,6 +43,7 @@ from defenseclaw.observability.local_stack import (
     ensure_grafana_admin_password,
     main,
     native_command_environment,
+    persist_grafana_access_mode,
     read_grafana_access_mode,
 )
 
@@ -421,6 +423,24 @@ def test_low_level_entrypoint_propagates_no_password_as_machine_safe_output(
     )
 
 
+def test_url_reports_the_persisted_password_access_boundary(stack: Path, capsys) -> None:
+    persist_grafana_access_mode(stack, GRAFANA_ACCESS_PASSWORD)
+    controller = MagicMock()
+    controller.stack_dir = stack
+    controller.grafana_password_file = stack / GRAFANA_PASSWORD_FILE_NAME
+
+    with patch(
+        "defenseclaw.observability.local_stack.LocalStackController",
+        return_value=controller,
+    ):
+        code = main(["url", "--stack-dir", str(stack)])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "user: admin" in captured.out
+    assert str(controller.grafana_password_file) in captured.out
+
+
 def test_invalid_or_redirected_access_mode_state_fails_closed(
     controller,
     tmp_path: Path,
@@ -459,6 +479,16 @@ def test_grafana_migration_uses_stdin_and_never_argv(controller) -> None:
     assert migration[1] == (password + "\n").encode("ascii")
     assert password not in " ".join(migration[0])
     assert password not in migration[0]
+
+
+def test_repeat_password_up_skips_migration_when_managed_login_works(controller) -> None:
+    subject, runner = controller
+
+    subject.up(wait=False)
+    subject.up(wait=False)
+
+    migrations = [command for command, _input in runner.inputs if "reset-admin-password" in command]
+    assert len(migrations) == 1
 
 
 def test_grafana_migration_requires_success_marker(controller) -> None:
@@ -529,7 +559,7 @@ def test_grafana_auth_check_rejects_anonymous_success(controller) -> None:
             "defenseclaw.observability.local_stack.urllib.request.urlopen",
             return_value=anonymous,
         ),
-        pytest.raises(LocalStackError, match="still permits anonymous"),
+        pytest.raises(GrafanaAccessPolicyError, match="still permits anonymous"),
     ):
         LocalStackController._verify_grafana_authentication(subject, "A" * 40)
 
@@ -664,7 +694,7 @@ def test_no_password_mode_rejects_password_overlay_or_non_loopback_publish(
 def test_no_wait_runtime_auth_failure_stops_grafana(controller) -> None:
     subject, runner = controller
     subject._verify_grafana_authentication = MagicMock(
-        side_effect=LocalStackError("Grafana still permits anonymous dashboard API access")
+        side_effect=GrafanaAccessPolicyError("Grafana still permits anonymous dashboard API access")
     )
 
     with pytest.raises(LocalStackError, match="still permits anonymous"):
@@ -690,7 +720,7 @@ def test_runtime_auth_cleanup_failure_is_never_hidden(controller) -> None:
             returncode=2,
             stderr="cleanup denied",
         )
-        raise LocalStackError("Grafana still permits anonymous dashboard API access")
+        raise GrafanaAccessPolicyError("Grafana still permits anonymous dashboard API access")
 
     subject._verify_grafana_authentication = fail_authentication
     with pytest.raises(LocalStackError, match="cleanup also failed.*exit code 2"):
@@ -700,7 +730,7 @@ def test_runtime_auth_cleanup_failure_is_never_hidden(controller) -> None:
 def test_no_wait_no_password_mode_mismatch_stops_grafana(controller) -> None:
     subject, runner = controller
     subject._verify_grafana_no_password = MagicMock(
-        side_effect=LocalStackError("Grafana no-password access requires authentication (HTTP 401)")
+        side_effect=GrafanaAccessPolicyError("Grafana no-password access requires authentication (HTTP 401)")
     )
 
     with pytest.raises(LocalStackError, match="requires authentication"):

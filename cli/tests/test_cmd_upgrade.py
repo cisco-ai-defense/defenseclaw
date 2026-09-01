@@ -134,12 +134,15 @@ from defenseclaw.upgrade_receipt import (
 
 def test_restored_local_observability_controller_prefers_native_and_never_uses_bash_on_windows(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     data_dir = tmp_path / "data"
+    recovery_home = tmp_path / "recovery-home"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(recovery_home))
     destination = data_dir / "observability-stack"
     bridge = destination / "bin/openclaw-observability-bridge"
-    posix_native = data_dir / ".venv/bin/defenseclaw-observability"
-    windows_native = data_dir / ".venv/Scripts/defenseclaw-observability.exe"
+    posix_native = recovery_home / ".venv/bin/defenseclaw-observability"
+    windows_native = recovery_home / ".venv/Scripts/defenseclaw-observability.exe"
     bridge.parent.mkdir(parents=True)
     posix_native.parent.mkdir(parents=True)
     windows_native.parent.mkdir(parents=True)
@@ -177,12 +180,15 @@ def test_restored_local_observability_controller_prefers_native_and_never_uses_b
 )
 def test_restored_local_observability_restart_invokes_native_entrypoint(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     os_name: str,
     native_relative_path: str,
 ) -> None:
     data_dir = tmp_path / "data"
+    recovery_home = tmp_path / "recovery-home"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(recovery_home))
     destination = data_dir / "observability-stack"
-    native = data_dir / native_relative_path
+    native = recovery_home / native_relative_path
     destination.mkdir(parents=True)
     native.parent.mkdir(parents=True)
     native.write_bytes(b"native\n")

@@ -1021,11 +1021,9 @@ def _scan_all_plugins(
     if total_targets == 0:
         if not as_json:
             click.echo(
-                "error: plugin discovery yielded zero scan targets across "
+                "No plugins found to scan across "
                 f"{len(connectors)} connector(s)",
-                err=True,
             )
-        raise SystemExit(1)
 
 
 def _build_scan_options(

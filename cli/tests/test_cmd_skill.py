@@ -811,6 +811,26 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(called, {"claudecode", "codex"})
 
     @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_multi_connector_continues_after_scanner_system_exit(
+        self, mock_scanner_cls, mock_scan_all
+    ):
+        mock_scanner_cls.return_value = MagicMock()
+        mock_scan_all.side_effect = [SystemExit(23), []]
+        self.app.cfg.active_connectors = lambda: [  # type: ignore[method-assign]
+            "claudecode",
+            "codex",
+        ]
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(
+            [call.kwargs["connector"] for call in mock_scan_all.call_args_list],
+            ["claudecode", "codex"],
+        )
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.commands.cmd_skill._build_skill_scanner")
     def test_scan_all_multi_connector_reuses_rule_pack_cache(self, mock_build, _mock_scan_all):
         mock_build.return_value = MagicMock()

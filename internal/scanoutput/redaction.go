@@ -224,7 +224,9 @@ func (redactor *Redactor) detectPath(input string) string {
 				budget,
 			)
 			if componentErr != nil {
-				return component.Value
+				// A component-level detector failure must fail the complete
+				// field closed, not replace a path with one component token.
+				return redactor.whole(input, observability.FieldClassPath)
 			}
 			for _, match := range component.Matches {
 				if match.ID == highEntropyDetectorID &&

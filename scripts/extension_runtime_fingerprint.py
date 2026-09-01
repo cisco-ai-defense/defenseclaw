@@ -56,17 +56,20 @@ def _same_reference(left: dict[str, object], right: dict[str, object], *, label:
 def _write_atomic(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    published = False
     try:
         with temporary.open("xb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        published = True
     finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+        if not published:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def stage(source: Path, output: Path) -> dict[str, object]:

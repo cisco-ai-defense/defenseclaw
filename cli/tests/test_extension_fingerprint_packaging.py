@@ -89,6 +89,26 @@ def test_release_contract_binds_wheel_reference_to_exact_plugin_archive(tmp_path
     verify_contract(source, reference, archive, wheel)
 
 
+def test_atomic_write_does_not_unlink_reused_temporary_name_after_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "extension-runtime-fingerprint.json"
+    temporary = output.with_name(f".{output.name}.{extension_runtime_fingerprint.os.getpid()}.tmp")
+    real_replace = extension_runtime_fingerprint.os.replace
+
+    def replace_and_reuse(source: Path, destination: Path) -> None:
+        real_replace(source, destination)
+        temporary.write_bytes(b"unrelated")
+
+    monkeypatch.setattr(extension_runtime_fingerprint.os, "replace", replace_and_reuse)
+
+    extension_runtime_fingerprint._write_atomic(output, b"published")
+
+    assert output.read_bytes() == b"published"
+    assert temporary.read_bytes() == b"unrelated"
+
+
 def test_release_contract_rejects_plugin_bytes_changed_after_wheel_staging(tmp_path: Path) -> None:
     source = tmp_path / "source"
     _write_source_runtime(source)
@@ -252,8 +272,7 @@ def test_make_and_release_workflow_enforce_extension_artifact_contract() -> None
     assert "dist-plugin: _stage-extension-fingerprint" in makefile
     assert "scripts/extension_runtime_fingerprint.py verify-archive" in makefile
     assert "scripts/extension_runtime_fingerprint.py verify-contract" in makefile
-    assert workflow.index("make dist-cli") < workflow.index("make dist-plugin")
-    assert workflow.index("make dist-plugin") < workflow.index("make dist-extension-contract")
+    assert "make dist-cli dist-plugin dist-extension-contract" in workflow
     windows_package_job = windows_workflow[windows_workflow.index("  package-artifact:") :]
     assert "actions/setup-node@" in windows_package_job
     assert 'node-version: "24"' in windows_package_job

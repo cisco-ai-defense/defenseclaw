@@ -42,6 +42,10 @@ from defenseclaw.commands.cmd_upgrade import (
     _crash_bundle_rollback_result,
     _restore_local_observability_upgrade_backup,
 )
+from defenseclaw.observability.local_stack import (
+    GRAFANA_ACCESS_NO_PASSWORD,
+    GRAFANA_ACCESS_PASSWORD,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 REAL_BUNDLE = ROOT / "bundles" / "local_observability_stack"
@@ -761,8 +765,12 @@ def test_restart_smoke_never_uses_reset_and_reports_success(
     with (
         patch("defenseclaw.bundle_refresh.LocalStackController") as controller,
         patch("defenseclaw.bundle_refresh._live_local_observability_smoke", return_value=[]),
+        patch("defenseclaw.bundle_refresh.ensure_grafana_admin_password") as ensure_password,
     ):
-        controller.return_value.up.return_value = MagicMock(contract=contract)
+        controller.return_value.up.return_value = MagicMock(
+            contract=contract,
+            grafana_access_mode=GRAFANA_ACCESS_NO_PASSWORD,
+        )
         result = restart_upgraded_local_observability_stack(str(data_dir), timeout=5)
 
     assert result.restarted is True
@@ -770,6 +778,38 @@ def test_restart_smoke_never_uses_reset_and_reports_success(
     controller.return_value.up.assert_called_once_with(timeout=5, wait=True)
     controller.return_value.reset.assert_not_called()
     controller.return_value.down.assert_not_called()
+    ensure_password.assert_not_called()
+
+
+def test_restart_smoke_loads_the_managed_password_for_authenticated_grafana(
+    installed_bundle: tuple[Path, Path, Path],
+) -> None:
+    _source, data_dir, destination = installed_bundle
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
+    password = "A" * 40
+    with (
+        patch("defenseclaw.bundle_refresh.LocalStackController") as controller,
+        patch("defenseclaw.bundle_refresh._live_local_observability_smoke", return_value=[]) as smoke,
+        patch(
+            "defenseclaw.bundle_refresh.ensure_grafana_admin_password",
+            return_value=(destination / ".grafana-admin-password", password),
+        ) as ensure_password,
+    ):
+        controller.return_value.up.return_value = MagicMock(
+            contract=contract,
+            grafana_access_mode=GRAFANA_ACCESS_PASSWORD,
+        )
+        result = restart_upgraded_local_observability_stack(str(data_dir), timeout=5)
+
+    assert result.restarted is True
+    ensure_password.assert_called_once_with(destination)
+    smoke.assert_called_once_with(timeout=5, grafana_password=password)
 
 
 def test_live_smoke_requires_every_readiness_probe_and_dashboard_uid() -> None:

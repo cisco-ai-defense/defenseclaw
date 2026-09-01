@@ -10596,10 +10596,11 @@ def _restored_local_observability_controller(
 
     platform_name = str(os.name if os_name is None else os_name).lower()
     windows = platform_name in {"nt", "windows", "win32"}
+    managed_venv = Path(_managed_venv_path())
     if windows:
-        native = Path(data_dir) / ".venv" / "Scripts" / "defenseclaw-observability.exe"
+        native = managed_venv / "Scripts" / "defenseclaw-observability.exe"
     else:
-        native = Path(data_dir) / ".venv" / "bin" / "defenseclaw-observability"
+        native = managed_venv / "bin" / "defenseclaw-observability"
     try:
         native_info = native.lstat()
         if not stat.S_ISLNK(native_info.st_mode) and stat.S_ISREG(native_info.st_mode):
@@ -10627,9 +10628,10 @@ def _is_restored_native_local_observability_controller(
 ) -> bool:
     """Return whether rollback selected one of the restored native launchers."""
 
+    managed_venv = Path(_managed_venv_path())
     candidates = (
-        Path(data_dir) / ".venv" / "bin" / "defenseclaw-observability",
-        Path(data_dir) / ".venv" / "Scripts" / "defenseclaw-observability.exe",
+        managed_venv / "bin" / "defenseclaw-observability",
+        managed_venv / "Scripts" / "defenseclaw-observability.exe",
     )
     selected = os.path.normcase(os.path.abspath(command_path))
     return any(selected == os.path.normcase(os.path.abspath(candidate)) for candidate in candidates)
