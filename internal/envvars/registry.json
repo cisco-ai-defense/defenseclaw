@@ -1243,16 +1243,17 @@
     {
       "name": "DEFENSECLAW_IPC_SOCKET",
       "category": "runtime_path",
-      "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable; use administrator-owned managed.socket_path instead.",
-      "default": "unset (resolver picks per-mode default: <dirname(data_dir)>/ipc/defenseclaw_ipc.sock for managed_enterprise, otherwise <data_dir>/ipc/defenseclaw_ipc.sock)",
+      "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable. Linux and macOS administrators can use managed.socket_path; managed Windows fixes the socket under trusted Program Files for the Cisco Secure Client peer.",
+      "default": "unset (managed_enterprise: Windows uses <TrustedProgramFiles>\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock; Linux/macOS use <dirname(data_dir)>/ipc/defenseclaw_ipc.sock. Other modes use <data_dir>/ipc/defenseclaw_ipc.sock)",
       "accepted_values": ["any-absolute-path", "unset"],
       "security_impact": "low",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/ipc/paths.go", "description": "ResolveSocketPath consults this before falling back to the deployment-mode default"}
+        {"location": "internal/ipc/paths.go", "description": "ResolveSocketPath consults this before falling back to the deployment-mode default"},
+        {"location": "internal/ipc/paths_windows.go", "description": "Managed Windows resolves the fixed Cisco Secure Client socket path from TrustedProgramFiles"}
       ],
       "since": "0.8.4",
-      "security_note": "Local-only socket path override — managed_enterprise ignores the environment override, creates the resolved socket with a 0660 ceiling (0600 otherwise), and authenticates peers against the effective code-signing team, signing, and bundle-ID allowlists."
+      "security_note": "Local-only socket path override — managed_enterprise ignores the environment override, creates the resolved socket with a 0660 ceiling (0600 otherwise), and authenticates peers against the effective code-signing team, signing, and bundle-ID allowlists. Managed Windows also fixes the parent to the trusted Program Files DefenseClaw IPC directory."
     },
     {
       "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",

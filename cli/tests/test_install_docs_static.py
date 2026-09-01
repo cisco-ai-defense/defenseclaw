@@ -2142,9 +2142,7 @@ def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> No
 def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> None:
     redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
     setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
-    windows = (
-        ROOT / "docs-site/content/docs/get-started/windows/capabilities-commands.mdx"
-    ).read_text(encoding="utf-8")
+    cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
     windows_paths = (
         ROOT / "docs-site/content/docs/get-started/windows/paths-troubleshooting.mdx"
     ).read_text(encoding="utf-8")
@@ -2159,12 +2157,23 @@ def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> 
         assert expected in redaction
     assert "TUI → Setup → Redaction Policy" in setup
     assert "Logs → Redaction policy…" in setup
-    assert "Redaction policy CLI and TUI" in windows
     assert "config.yaml.before-redaction-*" in windows_paths
     assert (
-        "redaction status/remove-all/apply/defaults/bucket/profile/destination/route"
-        in windows
+        "`defenseclaw setup redaction "
+        "[status\\|remove-all\\|apply\\|defaults\\|bucket\\|profile\\|destination\\|route]`"
+        in cli
     )
+    for command_surface in (
+        "status --json",
+        "remove-all --dry-run",
+        "apply --scope",
+        "defaults set",
+        "bucket set",
+        "profile set",
+        "destination send",
+        "route add",
+    ):
+        assert f"defenseclaw setup redaction {command_surface}" in redaction
 
 
 def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> None:

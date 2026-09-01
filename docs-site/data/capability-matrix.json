@@ -1,11 +1,13 @@
 {
-  "_source": "Hand-curated from internal/gateway/connector setup paths and hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
-  "_lastVerified": "2026-07-30",
+  "_source": "Hand-curated from internal/gateway/connector setup paths and hook profiles, cli/defenseclaw/inventory/hook_contracts.json, and the native Windows setup contracts. Re-extract on every connector, hook-contract, or platform-support change.",
+  "_lastVerified": "2026-09-01",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
   "connectors": [
     {
       "id": "claudecode",
       "label": "Claude Code",
+      "windowsSupport": "supported",
+      "windowsNote": "Native executable hooks are supported on Windows x64; WSL is outside this connector contract.",
       "summary": "Native lifecycle hooks, native approval, and OpenTelemetry export.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -24,6 +26,8 @@
     {
       "id": "codex",
       "label": "Codex",
+      "windowsSupport": "supported",
+      "windowsNote": "Native Windows x64 uses the packaged PowerShell bridge and hook executable.",
       "summary": "Config hooks, native OpenTelemetry, and an agent-turn completion bridge.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -42,6 +46,8 @@
     {
       "id": "openclaw",
       "label": "OpenClaw",
+      "windowsSupport": "unsupported",
+      "windowsNote": "The OpenClaw integration requires the guardrail proxy, which DefenseClaw does not host on native Windows.",
       "summary": "Reference proxy with bundled fetch interception and before-tool-call enforcement.",
       "family": "proxy",
       "toolInspection": "pre-execution + response-scan",
@@ -60,6 +66,8 @@
     {
       "id": "cursor",
       "label": "Cursor",
+      "windowsSupport": "supported",
+      "windowsNote": "Native Windows x64 uses the managed PowerShell adapter and packaged hook executable.",
       "summary": "User hooks with bounded inspection and event-native deny decisions.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -78,6 +86,8 @@
     {
       "id": "hermes",
       "label": "Hermes",
+      "windowsSupport": "supported",
+      "windowsNote": "Native Windows x64 uses a direct, shell-free hook executable invocation.",
       "summary": "Native lifecycle hooks with valid-JSON pre-tool blocking and unconditional failure-open behavior.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -96,6 +106,8 @@
     {
       "id": "opencode",
       "label": "OpenCode",
+      "windowsSupport": "supported",
+      "windowsNote": "Direct native Windows x64 execution is supported for the admitted WinGet CLI.",
       "summary": "Auto-loaded bridge plugin with tool-execution blocking.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -114,6 +126,8 @@
     {
       "id": "amp",
       "label": "Amp",
+      "windowsSupport": "supported",
+      "windowsNote": "Native Windows x64 uses the owner-only TypeScript system-policy plugin.",
       "summary": "Synchronous policy plugin with five lifecycle events and native confirmation.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -132,6 +146,8 @@
     {
       "id": "omnigent",
       "label": "OmniGent",
+      "windowsSupport": "degraded",
+      "windowsNote": "Native Windows is limited to OmniGent 0.7.x server and SDK harnesses; terminal wrappers and filesystem, network, and L7 sandbox parity are unavailable.",
       "summary": "Custom policy bridge with allow, ask, and deny enforcement.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -150,6 +166,8 @@
     {
       "id": "copilot",
       "label": "GitHub Copilot CLI",
+      "windowsSupport": "supported",
+      "windowsNote": "Native Windows x64 uses Copilot CLI's PowerShell hook field.",
       "summary": "Global or workspace hooks with native approval on pre-tool-use.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -173,6 +191,8 @@
     {
       "id": "openhands",
       "label": "OpenHands",
+      "windowsSupport": "unsupported",
+      "windowsNote": "OpenHands CLI requires WSL, and DefenseClaw has no WSL connector path.",
       "summary": "Global command hooks with optional workspace-local discovery surfaces.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -191,6 +211,8 @@
     {
       "id": "antigravity",
       "label": "Antigravity",
+      "windowsSupport": "supported",
+      "windowsNote": "Native Windows x64 uses the packaged PowerShell hook launcher.",
       "summary": "Five lifecycle hooks, with documented native ask on PreToolUse.",
       "family": "hooks",
       "toolInspection": "pre-execution",
@@ -209,6 +231,8 @@
     {
       "id": "devin",
       "label": "Devin",
+      "windowsSupport": "supported",
+      "windowsNote": "Native Windows x64 supports the admitted same-user Devin CLI and system-PowerShell bridge.",
       "summary": "Native Devin CLI lifecycle hooks with a source-reviewed 3000.4.25 contract.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -232,6 +256,8 @@
     {
       "id": "zeptoclaw",
       "label": "ZeptoClaw",
+      "windowsSupport": "unsupported",
+      "windowsNote": "The ZeptoClaw integration requires the guardrail proxy, which DefenseClaw does not host on native Windows.",
       "summary": "API base redirect through the DefenseClaw proxy with response scanning.",
       "family": "proxy",
       "toolInspection": "pre-execution + response-scan",

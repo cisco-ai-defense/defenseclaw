@@ -33,7 +33,12 @@ Operators were drowning in N=4 keys for an install (judge, skill scanner, MCP sc
 defenseclaw keys set DEFENSECLAW_LLM_KEY
 ```
 
-Click prompts for the value with `hide_input=True`, then writes it to `~/.defenseclaw/.env` with `0o600` permissions. The value is masked in stdout (`abcd…wxyz`), masked in audit, and never echoed.
+Click prompts for the value with `hide_input=True`, then writes it to the
+current user's DefenseClaw dotenv file: `~/.defenseclaw/.env` on macOS/Linux
+or `%USERPROFILE%\.defenseclaw\.env` on Windows. POSIX installs enforce mode
+`0o600`; native Windows installs replace inherited access with an owner-private
+DACL. The value is masked in stdout (`abcd…wxyz`), masked in audit, and never
+echoed.
 
 </Step>
 
@@ -120,16 +125,20 @@ The wizard now sees `DEFENSECLAW_LLM_KEY` set and skips the "we will need an LLM
 
 The CLI resolves credential values from the **most specific** source down:
 
-```
-1. process environment    (export DEFENSECLAW_LLM_KEY=sk-…)
-2. ~/.defenseclaw/.env    (written by `defenseclaw keys set`)
-3. unset                  (REQUIRED → marked MISSING; OPTIONAL → tolerated)
-```
+| Priority | Source | macOS/Linux example | Windows PowerShell example |
+| --- | --- | --- | --- |
+| 1 | Process environment | `export DEFENSECLAW_LLM_KEY='sk-…'` | `$env:DEFENSECLAW_LLM_KEY = 'sk-…'` |
+| 2 | User dotenv | `~/.defenseclaw/.env` | `%USERPROFILE%\.defenseclaw\.env` |
+| 3 | Unset | Required keys are marked missing; optional keys are tolerated. | Same behavior. |
 
 This order is implemented by `cli/defenseclaw/credentials.py::resolve` and is the same code path that `defenseclaw quickstart` and `defenseclaw doctor` use, so what you see in `keys list` is exactly what the running gateway and scanners see.
 
-<Callout title="No macOS Keychain">
-DefenseClaw does **not** read or write the macOS Keychain. The `~/.defenseclaw/.env` file is the only on-disk credential store; transient overrides go through `os.environ`. Use a secret manager (1Password, Vault, AWS Secrets Manager) plus `export` in your shell init if you need to keep secrets out of `~/.defenseclaw/.env`.
+<Callout title="No operating-system keychain or external secret manager">
+DefenseClaw does **not** read or write macOS Keychain, Windows Credential
+Manager, 1Password, Vault, AWS Secrets Manager, or another external secret
+store. The user dotenv file is the only on-disk credential store. To source a
+secret elsewhere, inject it into the process environment with `export` on
+macOS/Linux or `$env:NAME = ...` in PowerShell.
 </Callout>
 
 ## Per-component overrides
@@ -164,14 +173,35 @@ defenseclaw keys check    # both REQUIRED entries should now be ✓ set
 
 ## Non-interactive (CI / scripts)
 
+<Tabs items={['macOS / Linux', 'Windows PowerShell']}>
+
+<Tab value="macOS / Linux">
+
 ```bash
 defenseclaw keys set DEFENSECLAW_LLM_KEY --value "$LLM_KEY"
 defenseclaw keys check
 ```
 
+</Tab>
+
+<Tab value="Windows PowerShell">
+
+```powershell
+defenseclaw keys set DEFENSECLAW_LLM_KEY --value $env:LLM_KEY
+defenseclaw keys check
+```
+
+</Tab>
+
+</Tabs>
+
 `--value` skips the hidden prompt entirely; `keys check` returns a non-zero exit code that fails the build cleanly.
 
 For multi-key bootstraps in CI (rare; usually a single key is enough):
+
+<Tabs items={['macOS / Linux', 'Windows PowerShell']}>
+
+<Tab value="macOS / Linux">
 
 ```bash
 for ENV in DEFENSECLAW_LLM_KEY CISCO_AI_DEFENSE_API_KEY SPLUNK_ACCESS_TOKEN; do
@@ -179,6 +209,23 @@ for ENV in DEFENSECLAW_LLM_KEY CISCO_AI_DEFENSE_API_KEY SPLUNK_ACCESS_TOKEN; do
 done
 defenseclaw keys check
 ```
+
+</Tab>
+
+<Tab value="Windows PowerShell">
+
+```powershell
+$names = 'DEFENSECLAW_LLM_KEY', 'CISCO_AI_DEFENSE_API_KEY', 'SPLUNK_ACCESS_TOKEN'
+foreach ($name in $names) {
+  $value = (Get-Item "Env:$name").Value
+  defenseclaw keys set $name --value $value
+}
+defenseclaw keys check
+```
+
+</Tab>
+
+</Tabs>
 
 ## Provider routing — Bifrost vs LiteLLM
 
@@ -251,10 +298,10 @@ You don't pick the Bifrost key directly. You pick a model — the gateway maps `
 
 | Where | What | Notes |
 | --- | --- | --- |
-| `~/.defenseclaw/.env` | Canonical credential store | `0o600`, atomic tmp+rename writes, no comments, no metadata. |
-| `~/.defenseclaw/audit.db` | Action log entry per `keys set` | Records `actor=cli:operator action=config.update target=dotenv:<ENV>` with `before/after = had_value`. The value is **never** logged. |
-| `~/.defenseclaw/config.yaml` | The `*_env` references only | The actual secret never enters `config.yaml`. |
-| `os.environ` | Highest-priority lookup | A shell `export` always wins over the dotenv copy. Useful for one-shot debugging. |
+| User-home `.defenseclaw/.env` | Canonical credential store | Atomic tmp+rename writes. POSIX uses `0o600`; Windows uses an owner-private DACL. No comments or metadata. |
+| User-home `.defenseclaw/audit.db` | Action log entry per `keys set` | Records `actor=cli:operator action=config.update target=dotenv:<ENV>` with `before/after = had_value`. The value is **never** logged. |
+| User-home `.defenseclaw/config.yaml` | The `*_env` references only | The actual secret never enters `config.yaml`. |
+| Process environment | Highest-priority lookup | `export` on macOS/Linux or `$env:NAME = ...` in PowerShell wins over the dotenv copy. Useful for one-shot debugging. |
 
 ## Hook-based vs proxy-based connectors
 

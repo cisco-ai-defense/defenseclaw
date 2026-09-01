@@ -14,26 +14,36 @@ The OpenCode connector wires DefenseClaw into [OpenCode](https://opencode.ai). O
 **No `opencode.json` edit, no shell shim.** Local plugins are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies and never triggers a `bun install`.
 </Callout>
 
-<Callout type="info" title="Native Windows support">
-The direct native Windows setup path is supported. Validation metadata remains
-empty and `live=false`; Setup and CI presence does not fabricate authentic
-official-client evidence. OpenCode 1.18.19 publishes CLI and Desktop assets for Windows x64 and
-ARM64, but DefenseClaw's current passive identity gate covers only the pinned
-CLI/npm x64 identity. It cannot yet distinguish a Desktop sidecar from the CLI
-or certify ARM64, so both surfaces remain explicitly unverified.
-</Callout>
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | The global bridge plugin is supported for the reviewed OpenCode `>=1.18.10,<1.18.20` contract. |
+| Native Windows x64 | **Supported** | DefenseClaw supports only direct native execution and admits the protected current-user `SST.opencode` WinGet executable. OpenCode recommends WSL but does not require it; mixed WSL/native paths, other package identities, Desktop sidecars, and ARM64 are outside this connector contract. Official-client validation metadata remains empty with `live=false`. |
 
 ## Setup
 
-```powershell title="Native Windows PowerShell"
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
+
+```bash
+defenseclaw setup opencode                # observe (default) - record only
+defenseclaw setup opencode --mode action  # block on policy hits by throwing
+```
+
+</Tab>
+
+<Tab value="Windows">
+
+```powershell
 defenseclaw setup opencode
 defenseclaw setup opencode --mode action
 ```
 
-```bash title="macOS or Linux"
-defenseclaw setup opencode                # observe (default) - record only
-defenseclaw setup opencode --mode action  # block on policy hits by throwing
-```
+</Tab>
+
+</Tabs>
 
 This connector is **global/user-scoped only**. DefenseClaw writes the bridge to:
 
@@ -59,13 +69,13 @@ runtime signal.
 
 OpenCode's [Windows guide](https://opencode.ai/docs/windows-wsl/) says that
 OpenCode can run directly on Windows while recommending WSL for the best
-experience. WSL is **recommended, not required**. The DefenseClaw Windows
-support covers only the direct native path: OpenCode, DefenseClaw, the gateway, the JavaScript plugin,
-and their configuration paths must all be native Windows processes and paths.
-Do not substitute WSL, Docker, a VM, Git Bash, Cygwin, or MSYS. OpenCode's
-[installation page](https://opencode.ai/docs/) documents direct Windows
-installation through Chocolatey, Scoop, npm, Mise, or the release binary; the
-Bun install path is still described there as work in progress on Windows.
+experience. WSL is **recommended, not required**. DefenseClaw's packaged
+Windows setup admits only the current user's official `SST.opencode` WinGet
+package at `%LOCALAPPDATA%\Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe`.
+OpenCode, DefenseClaw, the gateway, the JavaScript plugin, and their
+configuration paths must all remain native Windows processes and paths. Other
+upstream installation methods do not satisfy this protected admission path;
+do not substitute WSL, Docker, a VM, Git Bash, Cygwin, or MSYS.
 
 `setup opencode` is the dedicated OpenCode alias. See the
 [quick-alias reference](/docs/setup/guardrail/aliases) for its common setup
@@ -95,7 +105,7 @@ availability does not alter those evidence fields.
 | Event | When it fires | DefenseClaw role | Action verdict → behavior |
 | --- | --- | --- | --- |
 | `tool.execute.before` | Right before a tool (`bash`, `read`, `edit`, …) executes | Inspect tool args; intercept risky commands | `block` → gateway returns `{decision: "deny", reason}`; the bridge `throw`s `new Error(reason)`, aborting the tool |
-| `tool.execute.after` | Immediately after a tool returns | Capture the official `title`, `output`, and `metadata` result fields for diagnostics. **Cannot block** — tool already ran. | Best-effort observe/telemetry; the bridge does not await delivery |
+| `tool.execute.after` | Immediately after a tool returns | Capture the official `title`, `output`, and `metadata` result fields for exact-call outcome attribution. **Cannot block or undo the tool** — it already ran. | Awaited observe-only delivery; transport and fail-mode results are advisory and ignored |
 
 OpenCode 1.18.10-v1.18.19 expose `permission.ask`, `chat.params`, `chat.headers`,
 and experimental chat message/system transformation hooks. DefenseClaw
@@ -134,9 +144,11 @@ DefenseClaw writes a single managed plugin file. Its `tool.execute.before` resol
 
 When the gateway is unreachable, the bridge honors the configured fail mode:
 `FAIL_MODE=closed` throws and blocks; `FAIL_MODE=open` allows. This fail-closed
-claim applies only to the awaited `tool.execute.before` contract. Neither
-`tool.execute.after` nor non-awaited lifecycle delivery becomes enforceable
-when fail mode is closed.
+claim applies only to the awaited `tool.execute.before` contract. The bridge
+also awaits `tool.execute.after` so its result is attributed before a later
+call starts, but it ignores that delivery's advisory verdict and transport or
+fail-mode result. Generic lifecycle delivery is non-awaited. Neither path
+becomes enforceable when fail mode is closed.
 
 The plugin also emits a secret-free `defenseclaw.plugin.loaded` heartbeat from
 its awaited config hook. Doctor reports a warning when the managed file digest

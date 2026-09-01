@@ -163,7 +163,7 @@ observability:
   local:
     path: ~/.defenseclaw/audit.db
     judge_bodies_path: ~/.defenseclaw/judge_bodies.db
-    retention_days: 90
+    retention_days: 7          # default rolling window; larger values are deliberate overrides
   # Omit defaults/buckets for full-fidelity collection. List only deliberate
   # overrides; a route cannot resurrect a signal disabled at collection.
   buckets:
@@ -418,9 +418,11 @@ signal.
 
 Exactly one generated local SQLite destination is mandatory. It is configured
 only through `observability.local`, not listed under `destinations`, and cannot
-be disabled or filtered. `retention_days: 0` means retain forever and produces a
-capacity warning. `guardrail.retain_judge_bodies` independently controls whether
-new raw judge bodies are captured.
+be disabled or filtered. Omitting `retention_days` uses the seven-day rolling
+default shown above. Set a larger value only when the additional local storage
+and retention scope are intentional. `retention_days: 0` means retain forever
+and produces a capacity warning. `guardrail.retain_judge_bodies` independently
+controls whether new raw judge bodies are captured.
 
 ### Destination transport and queue limits
 

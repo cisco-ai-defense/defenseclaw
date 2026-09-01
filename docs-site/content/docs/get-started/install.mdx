@@ -87,9 +87,9 @@ retires the temporary verifier. Nothing is installed globally.
 
 The current native Windows Setup bundles its managed runtime. A packaged Windows
 install does not require Python, `uv`, Go, Node.js, Git, or a PowerShell
-installation command after the authenticated Setup artifact is downloaded. For
-native Claude Code, Git for Windows is recommended so Claude can use its Bash
-tool, but it is optional; without it Claude uses its native PowerShell tool.
+installation command after the authenticated Setup artifact is downloaded.
+Agent-specific dependencies and quirks live on the
+[connector pages](/docs/connectors#platform-support).
 
 ## What's bundled (LLM backends)
 
@@ -133,19 +133,22 @@ session, pass properties directly:
 .\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
 ```
 
-Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure
-later. The setup executable contains the offline payload required for install;
+Set `CONNECTOR` to a supported native Windows setup name from the
+[connector platform table](/docs/connectors#platform-support), or use
+`CONNECTOR=none` to configure later. The setup executable contains the offline
+payload required for install;
 after download it does not require Python, `uv`, Go, Node.js, Git, or a
 PowerShell installation command.
 
 Quiet mode does not authorize service, SYSTEM, session-zero, elevated, or
-background/batch installation. A configured Codex or Claude Code connector
-requires gateway startup; only `CONNECTOR=none STARTGATEWAY=0` is a supported
-stopped CLI-only install.
+background/batch installation. Every configured connector requires gateway
+startup; only `CONNECTOR=none STARTGATEWAY=0` is a supported stopped CLI-only
+install.
 
-Native Windows uses agent hooks rather than the OpenClaw/ZeptoClaw proxy path.
-See [Native Windows](/docs/get-started/windows) for the connector
-matrix, repair, servicing, uninstall, file locations, and troubleshooting.
+Native Windows uses connector-native hook, plugin, or awaited-policy lanes
+rather than the OpenClaw/ZeptoClaw proxy path. See
+[Native Windows](/docs/get-started/windows) for repair, servicing, uninstall,
+file locations, and troubleshooting.
 
 </Tab>
 

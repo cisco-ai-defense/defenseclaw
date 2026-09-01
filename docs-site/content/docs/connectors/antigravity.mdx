@@ -1,6 +1,6 @@
 ---
 title: Antigravity
-description: Google Antigravity (`agy`) lifecycle hook contract and supported native Windows setup path.
+description: Google Antigravity (`agy`) lifecycle hook contract and setup paths for macOS, Linux, and native Windows.
 keywords:
   - DefenseClaw Antigravity connector
   - Antigravity hooks
@@ -15,26 +15,58 @@ Antigravity model traffic.
 
 Google currently publishes Antigravity 2.0 v2.4.3. Its updater manifest and
 [official CLI releases](https://github.com/google-antigravity/antigravity-cli/releases)
-publish CLI v1.1.10. This is vendor availability metadata, not
-DefenseClaw validation or certification. The
-[official install page](https://antigravity.google/docs/cli/install) says the
-CLI runs natively on Windows, macOS, and Linux. The
-[download page](https://antigravity.google/download) provides native Windows
-x64 and ARM64 clients; DefenseClaw supports the native Windows x64 setup path.
-Validation metadata remains empty and `live=false`. Windows 10
-64-bit is the documented minimum.
+publish CLI v1.1.10. The
+[official install page](https://antigravity.google/docs/cli/install) documents
+native Windows, macOS, and Linux clients. This is vendor availability metadata,
+not DefenseClaw validation or certification.
+
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | DefenseClaw installs the portable `antigravity-hook.sh` runtime and writes the five documented handlers to `~/.gemini/config/hooks.json`. |
+| Native Windows x64 | **Supported** | DefenseClaw supports the direct native x64 client and uses a bounded Windows PowerShell launcher for the packaged hook executable. Windows 10 64-bit is the upstream minimum. Upstream ARM64 availability is not a DefenseClaw ARM64 support claim; authentication, HITL, and official-client live evidence remain unverified and `live=false`. |
 
 <Video
   src="antigravity"
   caption="Three scenarios end-to-end against the same agy session: (1) a benign command flows through with action=allow / severity=NONE; (2) a sensitive-file read produces an approval prompt under the policy used for this historical recording; (3) writing a synthetic secret to an environment file matches a CRITICAL finding → DefenseClaw returns decision=deny → agy refuses without prompting. Current builds keep an ordinary sensitive-file read as a MEDIUM detection-only advisory unless the same action proves a mutation or external egress. Each verdict appears live in the Splunk pane on the left. This demo also used an unredacted destination projection; current v8 deployments select an explicit redaction profile per destination or route."
 />
 
-## Native Windows setup
+## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
+
+Install the official `agy` client using Google's
+[installation guide](https://antigravity.google/docs/cli/install), complete its
+normal provider sign-in, and then configure DefenseClaw:
+
+```bash
+agy --version
+defenseclaw setup antigravity                 # observe (default)
+defenseclaw setup antigravity --mode action   # deny or ask at PreToolUse
+```
+
+Setup writes five DefenseClaw-owned registrations to
+`~/.gemini/config/hooks.json` and installs the portable hook runtime at
+`~/.defenseclaw/hooks/antigravity-hook.sh`. It backs up the original document,
+preserves unrelated hooks, stores the connector-scoped credential in the
+protected DefenseClaw runtime, and records the resolved contract in
+`~/.defenseclaw/hook_contract_lock.json`. Google documents no configuration-home
+override for this global hook file.
+
+</Tab>
+
+<Tab value="Windows">
 
 Install the official client from PowerShell:
 
 ```powershell
 irm https://antigravity.google/cli/install.ps1 | iex
+agy --version
+defenseclaw setup antigravity
+defenseclaw setup antigravity --mode action
 ```
 
 Google installs `agy.exe` under
@@ -74,6 +106,10 @@ path only as internal custody needed for exact restoration and migration;
 backs up the original file; preserves unrelated hooks; writes connector-scoped
 gateway credentials into the protected DefenseClaw runtime; and records the resolved contract in
 `%USERPROFILE%\.defenseclaw\hook_contract_lock.json`.
+
+</Tab>
+
+</Tabs>
 
 ## Modes and enforcement
 

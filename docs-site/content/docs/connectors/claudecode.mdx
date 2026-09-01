@@ -19,28 +19,50 @@ are advisory: they preserve findings and shadow `would_block` telemetry without
 stopping Claude's next turn. No proxy listener is involved.
 </Callout>
 
+## Platform support
+
+| Platform | Status | Connector path |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | Portable command hooks plus Claude Code's native OTel exporter. |
+| Native Windows x64 | **Supported** | Shell-free native executable hooks using Claude Code's `command` plus `args` exec form. Official-client validation metadata remains empty and `live=false`; support availability is not a certification claim. |
+
 ## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+  <Tab value="macOS / Linux">
 
 ```bash
 defenseclaw setup claude-code                # observe (default) — record only
 defenseclaw setup claude-code --mode action  # block on policy hits via PreToolUse deny
 ```
 
+DefenseClaw installs the portable Claude Code hook and configures the native
+OTel exporter in the user settings.
+
+  </Tab>
+  <Tab value="Windows">
+
+```powershell
+defenseclaw setup claude-code                # observe (default) — record only
+defenseclaw setup claude-code --mode action  # block on policy hits via PreToolUse deny
+```
+
+Install and run Claude Code directly from PowerShell or CMD using Anthropic's
+[native setup](https://code.claude.com/docs/en/setup). DefenseClaw registers
+the protected `defenseclaw-hook.exe` through Claude Code's shell-free
+`command` plus `args` exec form. Git for Windows is recommended upstream when
+Claude should use its Bash tool, but it is optional; without it Claude uses its
+native PowerShell tool. Git for Windows is not part of the DefenseClaw hook
+contract. WSL, Git Bash, Cygwin, MSYS, containers, and virtual machines are
+outside this native connector path.
+
+  </Tab>
+</Tabs>
+
 `setup claude-code` is the dedicated Claude Code setup alias. It uses the same
 setup backend as `setup guardrail`, adds or reconfigures `claudecode`, wires
 hooks + native OTel, and can join an existing hook-connector roster when you
 choose **Add**. No proxy listener binds in either mode.
-
-On native Windows, install and run Claude Code directly from PowerShell or CMD
-using Anthropic's [native setup](https://code.claude.com/docs/en/setup).
-DefenseClaw registers a native executable with Claude Code's `args` exec form;
-Git for Windows is optional and is not part of the connector contract. WSL,
-Git Bash, Cygwin, MSYS, containers, and virtual machines are not certification
-paths for this connector.
-
-Claude Code native Windows setup is supported. The hook and lifecycle contract
-is implemented, while official-client validation metadata remains empty and
-`live=false`; support availability is not a certification claim.
 
 Native OTLP uses managed loopback exporter settings with a Claude-scoped
 Authorization bearer. Logs and metrics are enabled; traces are explicitly
@@ -190,6 +212,3 @@ block, ask, or decision authority.
 ```bash
 defenseclaw guardrail disable --connector claudecode --yes
 ```
-
-For the exact native Windows event and fail-mode boundary, see
-[Connectors and enforcement](/docs/get-started/windows/connectors-enforcement#claude-code).

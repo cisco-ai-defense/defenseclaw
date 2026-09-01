@@ -10,21 +10,43 @@ keywords:
 
 The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](https://docs.github.com/copilot/) globally under `~/.copilot/hooks/` by default, with an optional workspace mode for `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI.
 
-<Callout type="info">
-Direct native Windows setup is supported. Normal GitHub provider authentication remains required; HITL and official-client live evidence are unverified and unclaimed, validation metadata remains empty, and `live=false`. WSL, Git Bash, Cygwin, MSYS, Docker, and VM workarounds are not supported.
-</Callout>
+## Platform support
+
+| Platform | Status | Connector path |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | Global or workspace command hooks using the portable DefenseClaw hook. |
+| Native Windows x64 | **Supported** | Copilot's official `powershell` hook field synchronously invokes the protected `defenseclaw-hook.exe`; `preToolUse` supports native ask. Provider authentication remains required, while authenticated official-client HITL/live evidence and validation metadata remain unrecorded with `live=false`. |
 
 ## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+  <Tab value="macOS / Linux">
 
 ```bash
 defenseclaw setup copilot
 defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-<Callout type="info">
-GitHub Copilot CLI setup is supported on native Windows x64, macOS, and Linux.
-The official client retains its normal provider login requirements.
-</Callout>
+DefenseClaw writes the global hook by default. Pass `--workspace` only when the
+repository should carry its own `.github/hooks/defenseclaw.json` file.
+
+  </Tab>
+  <Tab value="Windows">
+
+```powershell
+defenseclaw setup copilot
+defenseclaw setup copilot --workspace 'C:\path\to\repo'
+```
+
+Copilot selects the registration's official `powershell` field. That field
+starts the stable `defenseclaw-hook.exe` synchronously with inherited
+stdin/stdout, waits for completion, and propagates its exit code. DefenseClaw
+does not require Bash or WSL. Normal GitHub provider login is still required;
+WSL, Git Bash, Cygwin, MSYS, Docker, and VM workarounds are outside the native
+connector path.
+
+  </Tab>
+</Tabs>
 
 By default this is **global/user-scoped**: DefenseClaw writes hook entries into `~/.copilot/hooks/defenseclaw.json`. Pass `--workspace /path/to/repo` only when you intentionally want repo-local `<workspace>/.github/hooks/defenseclaw.json` wiring. **There is no proxy-enforcement path** for Copilot CLI — blocking happens hook-side only through the documented `preToolUse`, `permissionRequest`, `agentStop`, and `subagentStop` responses. `postToolUseFailure` is advisory-only and can add recovery context after the tool has already failed. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI for that surface.
 
@@ -187,7 +209,7 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
       <File name="copilot-hook.sh (Linux and macOS)" />
     </Folder>
   </Folder>
-  <Folder name="%LOCALAPPDATA%/DefenseClaw/HookRuntime (native Windows; certification pending)">
+  <Folder name="%LOCALAPPDATA%\DefenseClaw\HookRuntime (native Windows)">
     <File name="defenseclaw-hook.exe" />
   </Folder>
 </Files>
@@ -205,8 +227,8 @@ DefenseClaw's prepared contract invokes the stable `defenseclaw-hook.exe`
 runtime synchronously with inherited stdin/stdout, waits for completion, and
 propagates its exit code. It does not require Bash or WSL. See the
 [recorded upstream Windows contract](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/development/copilot-native-windows-contract.md)
-for source URLs, version/date evidence, event semantics, and the current
-certification blocker.
+for source URLs, version/date evidence, event semantics, and the remaining
+authentic-client validation work.
 
 Copilot upstream now documents optional OpenTelemetry traces and metrics.
 DefenseClaw does **not** configure or certify that native exporter in this

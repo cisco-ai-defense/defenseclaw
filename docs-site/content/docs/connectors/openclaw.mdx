@@ -12,27 +12,46 @@ OpenClaw is the connector DefenseClaw was designed against. It ships a
 first-party TypeScript plugin (`extensions/defenseclaw/`) that routes
 recognized LLM provider requests and their responses through the guardrail
 proxy and sends OpenClaw's `before_tool_call` lifecycle events to the
-DefenseClaw gateway. Unknown request shapes that the interceptor cannot
-classify pass through; the connector emits egress telemetry for those
-passthroughs instead of claiming they were inspected.
+DefenseClaw gateway. Coverage depends on which Node transport emitted the
+request; unclassified traffic is not claimed as inspected or uniformly
+observable.
 
 <Video
   src="openclaw-e2e"
   caption="Full OpenClaw end-to-end: prompt arrives → gateway inspects → policy decides → HITL approves → tool runs → audit row written."
 />
 
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy and installs the first-party OpenClaw plugin. Linux can use the real OpenShell sandbox; macOS resolves that preference to shell shims. |
+| Native Windows x64 | **Unsupported** | DefenseClaw is hook-only on Windows, while the OpenClaw connector requires the guardrail proxy. |
+
 ## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
 
 ```bash
 defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
-<Callout type="warning">
-OpenClaw connector setup is supported on macOS and Linux. DefenseClaw is
-hook-only on native Windows and does not host the required guardrail proxy
-there, so Windows setup is unsupported.
+</Tab>
+
+<Tab value="Windows">
+
+<Callout type="warning" title="Native Windows setup is unsupported">
+DefenseClaw does not host the guardrail proxy on Windows, so it cannot install
+or enforce the OpenClaw connector there. There is no supported WSL, Docker,
+VM, or mixed native/POSIX workaround; run the connector on macOS or Linux.
 </Callout>
+
+</Tab>
+
+</Tabs>
 
 `setup openclaw` is the dedicated OpenClaw alias. It delegates to the shared
 guardrail setup backend and exposes the proxy connector's common setup
@@ -169,6 +188,25 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 
 A hash-checked backup of `openclaw.json` is stored before edits; teardown restores or surgically removes only DefenseClaw-owned entries.
 
+## Transport coverage
+
+The plugin patches `globalThis.fetch`, Node `https.request`, `http.request` and
+`http.get`, and the global Undici dispatcher. A matching request is redirected
+through the guardrail proxy, where DefenseClaw can inspect its request and
+response. The match and passthrough boundaries are transport-specific:
+
+| Transport | Redirected through the proxy when | Unclassified request behavior |
+| --- | --- | --- |
+| `globalThis.fetch` | The destination is a known provider, or the method, path, and readable body form a recognized LLM request shape | Passes through and emits egress passthrough telemetry. |
+| `https.request` | The destination is a known provider or its path has a recognized LLM suffix | Passes through and emits egress passthrough telemetry. |
+| `http.request` / `http.get` | Its non-safe destination has a recognized LLM path, including supported known or local-provider paths | Passes through without guaranteed passthrough telemetry. |
+| Undici global dispatcher | Its non-safe destination is a known provider or has a recognized LLM path | Passes through without guaranteed passthrough telemetry. |
+
+Raw sockets, custom transports, and libraries that bypass all patched entry
+points are outside this inspection boundary. An egress event proves that the
+plugin observed a transport branch; it does not mean the request or response
+was proxied and inspected.
+
 ## What the plugin does
 
 <Sequence
@@ -200,9 +238,11 @@ chat-origin sessions.
 
 ## Subprocess policy
 
-`sandbox` — see [Sandbox setup](/docs/setup/sandbox) for the full
-openshell-sandbox workflow. The connector wires DefenseClaw into the sandbox's
-syscall and filesystem policy.
+The preferred policy is `sandbox`. On Linux, DefenseClaw installs the real
+OpenShell sandbox policy using Landlock and seccomp, with shell shims as a
+supplement. On macOS, `sandbox` resolves to shell shims only; those shims
+inspect supported command paths but do not provide Linux syscall or filesystem
+isolation. See [Sandbox setup](/docs/setup/sandbox) for the Linux workflow.
 
 ## Disable
 

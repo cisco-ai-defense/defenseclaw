@@ -21,6 +21,39 @@ use Antigravity's supported asset surfaces for new work. The legacy Gemini CLI
 home and `settings.json` paths remain resolvable only for doctor, verified
 receipt migration, teardown, and uninstall cleanup.
 
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Deprecated / unsupported** | New Gemini CLI setup is disabled. Existing receipt-bound managed state can only be inspected or removed. |
+| Native Windows x64 | **Deprecated / unsupported** | New Gemini CLI setup is disabled. Existing receipt-bound managed state can only be inspected or removed. |
+
+## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
+
+<Callout type="warning" title="Gemini CLI setup is deprecated">
+DefenseClaw refuses new Gemini CLI setup on macOS and Linux. There is no
+supported flag or compatibility workaround that re-enables it; use the
+[Antigravity connector](/docs/connectors/antigravity) instead.
+</Callout>
+
+</Tab>
+
+<Tab value="Windows">
+
+<Callout type="warning" title="Gemini CLI setup is deprecated">
+DefenseClaw refuses new Gemini CLI setup on native Windows x64. There is no
+supported PowerShell, WSL, Git Bash, or mixed-path workaround that re-enables
+it; use the [Antigravity connector](/docs/connectors/antigravity) instead.
+</Callout>
+
+</Tab>
+
+</Tabs>
+
 ## Remove an existing managed installation
 
 DefenseClaw retains the old Gemini CLI lifecycle code only so existing users

@@ -10,9 +10,14 @@ keywords:
 The Hermes connector wires DefenseClaw into the Hermes agent runtime through
 the effective default-profile `HERMES_HOME/config.yaml`
 (`%LOCALAPPDATA%\hermes\config.yaml` on native Windows when `HERMES_HOME` is
-unset) and exact approvals in `shell-hooks-allowlist.json`. Native Windows
-setup is **supported** on native Windows. Running-client state remains pending
-reload, validation metadata remains empty, and `live: false`.
+unset) and exact approvals in `shell-hooks-allowlist.json`.
+
+## Platform support
+
+| Platform | Status | Connector path |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | Default-profile configuration and the portable Hermes command hook. Reload every affected Hermes host after lifecycle changes. |
+| Native Windows x64 | **Supported** | Direct, absolute `defenseclaw-hook.exe` argv launched with `shell=False`; no DefenseClaw shell bridge. Running-client state remains pending reload, validation metadata remains empty, and `live=false`. |
 
 <Callout type="warning" title="Hermes terminal commands still use Git Bash on Windows">
 Hermes itself officially runs its terminal tool through installer-managed
@@ -30,9 +35,33 @@ or Cygwin bridge.
 
 ## Setup
 
+<Tabs items={['macOS / Linux', 'Windows']}>
+  <Tab value="macOS / Linux">
+
 ```bash
 defenseclaw setup hermes
 ```
+
+DefenseClaw stages the default-profile hook configuration and exact allowlist
+entries. Reload every affected Hermes process after setup.
+
+  </Tab>
+  <Tab value="Windows">
+
+```powershell
+defenseclaw setup hermes
+```
+
+DefenseClaw registers one directly quoted absolute `defenseclaw-hook.exe` argv.
+Hermes parses it with `shlex.split` and launches it with
+`subprocess.run(..., shell=False)`, so the command must not contain PowerShell,
+`&`, a `.ps1`, Bash, or WSL. Hermes's own terminal tool separately uses its
+installer-managed PortableGit/Git Bash; DefenseClaw does not install, locate,
+invoke, or test that upstream dependency. Reload every affected Hermes host
+after setup.
+
+  </Tab>
+</Tabs>
 
 `setup hermes` is shorthand for `setup guardrail --connector hermes`: it stages
 hooks in the resolved default-profile `config.yaml`, adds only the exact 23
@@ -48,7 +77,7 @@ Discovery keeps installation and contract compatibility distinct. A healthy
 older client such as v0.17.0 is reported as
 `detected-but-unsupported-version`, never as absent. If action mode is
 requested, Setup prints the exact installed version and the
-`hermes-hooks-v1 >=0.19.0` requirement, then saves Hermes in observe mode with
+`hermes-hooks-v1 >=0.19.0,<0.21.0` requirement, then saves Hermes in observe mode with
 upgrade guidance. The latest official release rechecked on 2026-08-04 is
 v0.20.0 (`v2026.8.3`); its source retains the identical reviewed 23-event
 shell-hook contract, but that source review is not packaged or real-client
@@ -187,8 +216,10 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
   </Folder>
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name="hooks"><File name="hermes-hook.sh (macOS/Linux portable asset)" /></Folder>
-    <Folder name="Windows HookRuntime"><File name="defenseclaw-hook.exe (native Windows configured runtime)" /></Folder>
     <Folder name="managed connector data"><File name="hermes-direct-native-state.json (pending/disabled reload state)" /></Folder>
+  </Folder>
+  <Folder name="%LOCALAPPDATA%\DefenseClaw\HookRuntime (native Windows)">
+    <File name="defenseclaw-hook.exe" />
   </Folder>
 </Files>
 

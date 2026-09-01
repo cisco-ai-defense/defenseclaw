@@ -87,6 +87,14 @@ jobs:
         # silent regressions in the policy creator can't ship to Pages.
         run: npm run test:policy-creator
 
+      - name: Unit tests (feature demos)
+        run: npm run test:feature-demos
+
+      - name: Lint docs site
+        # Next.js 16 no longer runs lint from `next build`, so keep the
+        # standalone ESLint CLI as an explicit deploy gate.
+        run: npm run lint
+
       - name: Verify generated policy assets are committed
         run: git diff --exit-code -- data/policy-presets.json data/policy-recipes.json data/policy-scenarios.json
 
