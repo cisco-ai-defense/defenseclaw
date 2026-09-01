@@ -44,6 +44,11 @@ class Finding:
     tags: list[str] = field(default_factory=list)
     rule_id: str = ""
     line_number: int | None = None
+    confidence: float | None = None
+    # Correlation findings use this for a bounded rule/location/confidence
+    # chain. Atomic source excerpts remain internal to their scanner so CLI
+    # JSON does not widen the sensitive-data surface.
+    evidence: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -60,6 +65,10 @@ class Finding:
             d["rule_id"] = self.rule_id
         if self.line_number is not None:
             d["line_number"] = self.line_number
+        if self.confidence is not None:
+            d["confidence"] = self.confidence
+        if self.evidence:
+            d["evidence"] = self.evidence
         return d
 
 

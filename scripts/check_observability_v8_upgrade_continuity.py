@@ -284,8 +284,7 @@ def _tempo_spans(stamps: tuple[str, str], lookback_seconds: int) -> list[dict[st
     trace_ids = {
         canonical
         for item in response.get("traces", [])
-        if isinstance(item, dict)
-        and (canonical := _canonical_tempo_trace_id(item.get("traceID", ""))) is not None
+        if isinstance(item, dict) and (canonical := _canonical_tempo_trace_id(item.get("traceID", ""))) is not None
     }
     return [
         span
@@ -320,9 +319,7 @@ def _assert_trace(stamp: str, spans: list[dict[str, Any]]) -> str:
         agent_id = f"golden-agent-{role}-{stamp}"
         candidates = by_agent.get(agent_id, [])
         invocation_candidates = [
-            span
-            for span in candidates
-            if span["attributes"].get("defenseclaw.span.family") == "span.agent.invoke"
+            span for span in candidates if span["attributes"].get("defenseclaw.span.family") == "span.agent.invoke"
         ]
         if len(invocation_candidates) != 1:
             raise ContinuityError(
@@ -378,10 +375,7 @@ def _assert_metrics(metric_cutover_seconds: float, lookback_hours: int) -> None:
     if not math.isfinite(metric_cutover_seconds) or metric_cutover_seconds <= 0:
         raise ContinuityError("metric cutover must be a finite positive epoch")
 
-    selector = (
-        'defenseclaw_agent_last_seen_seconds{connector="codex",'
-        'gen_ai_agent_type=~"root|direct|nested"}'
-    )
+    selector = 'defenseclaw_agent_last_seen_seconds{connector="codex",gen_ai_agent_type=~"root|direct|nested"}'
     window = f"{lookback_hours}h"
     minimum = dashboards._prometheus_vector(  # noqa: SLF001
         f"min_over_time({selector}[{window}])",
@@ -419,8 +413,7 @@ def _assert_metrics(metric_cutover_seconds: float, lookback_hours: int) -> None:
                 ) from None
             if not math.isfinite(metric_value) or metric_value <= 0:
                 raise ContinuityError(
-                    f"Prometheus {query_name} lifecycle metric for {role} "
-                    "is non-finite or non-positive",
+                    f"Prometheus {query_name} lifecycle metric for {role} is non-finite or non-positive",
                 )
             if role in observed:
                 observed[role] = aggregate(observed[role], metric_value)
@@ -545,6 +538,7 @@ def main() -> int:
     parser.add_argument("--lookback-hours", type=int, default=2)
     parser.add_argument("--wait-seconds", type=int, default=60)
     parser.add_argument("--dashboard-deadline-seconds", type=int, default=300)
+    parser.add_argument("--grafana-password-file", required=True, type=Path)
     args = parser.parse_args()
     for name, value in (("pre", args.pre_stamp), ("post", args.post_stamp)):
         if not value.isdigit():
@@ -555,6 +549,10 @@ def main() -> int:
         parser.error("--metric-cutover-seconds must be finite and positive")
     if args.lookback_hours <= 0 or args.wait_seconds <= 0 or args.dashboard_deadline_seconds <= 0:
         parser.error("lookback and deadline values must be positive")
+    try:
+        dashboards.configure_grafana_auth(args.grafana_password_file)
+    except dashboards.AuditError as exc:
+        parser.error(str(exc))
 
     deadline = time.monotonic() + args.wait_seconds
     last_error: ContinuityError | None = None

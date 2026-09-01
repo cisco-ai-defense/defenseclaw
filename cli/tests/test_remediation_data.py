@@ -36,10 +36,12 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 OBS = DATA / "local_observability_stack"
 COMPOSE = OBS / "docker-compose.yml"
+PASSWORD_COMPOSE = OBS / "docker-compose.password.yml"
 OTEL = OBS / "otel-collector" / "config.yaml"
 OBS_README = OBS / "README.md"
 SOURCE_OBS = REPO_ROOT / "bundles" / "local_observability_stack"
 SOURCE_COMPOSE = SOURCE_OBS / "docker-compose.yml"
+SOURCE_PASSWORD_COMPOSE = SOURCE_OBS / "docker-compose.password.yml"
 
 BRIDGE_DIR = DATA / "splunk_local_bridge"
 CI_COMPOSE = BRIDGE_DIR / "compose" / "docker-compose.ci.yml"
@@ -105,13 +107,10 @@ def _assert_secure_host_bind_ports(
     observed: list[tuple[int, int]] = []
     entries: list[str] = []
     for entry in ports:
-        assert isinstance(entry, str), (
-            f"Compose service {service!r} port {entry!r} must use secure short syntax"
-        )
+        assert isinstance(entry, str), f"Compose service {service!r} port {entry!r} must use secure short syntax"
         match = _SECURE_HOST_BIND_PORT.fullmatch(entry)
         assert match is not None, (
-            f"Compose service {service!r} port {entry!r} must use "
-            "${HOST_BIND:-127.0.0.1}:HOST:CONTAINER"
+            f"Compose service {service!r} port {entry!r} must use ${{HOST_BIND:-127.0.0.1}}:HOST:CONTAINER"
         )
         host_port = int(match.group("host_port"))
         container_port = int(match.group("container_port"))
@@ -151,6 +150,7 @@ def _load_module(name: str, path: Path, stubs: dict[str, types.ModuleType] | Non
 # --------------------------------------------------------------------------- #
 def test_local_observability_compose_source_matches_packaged_data() -> None:
     assert COMPOSE.read_bytes() == SOURCE_COMPOSE.read_bytes()
+    assert PASSWORD_COMPOSE.read_bytes() == SOURCE_PASSWORD_COMPOSE.read_bytes()
 
 
 @pytest.mark.parametrize(
@@ -160,9 +160,7 @@ def test_local_observability_compose_source_matches_packaged_data() -> None:
 def test_local_observability_ports_use_secure_host_bind_default(
     service: str, expected_ports: tuple[tuple[int, int], ...]
 ) -> None:
-    _assert_secure_host_bind_ports(
-        _read(COMPOSE), service=service, expected_ports=expected_ports
-    )
+    _assert_secure_host_bind_ports(_read(COMPOSE), service=service, expected_ports=expected_ports)
 
 
 @pytest.mark.parametrize(("service", "port"), (("grafana", 3000), ("prometheus", 9090)))
@@ -188,40 +186,25 @@ def test_local_observability_ports_use_secure_host_bind_default(
         "${HOST_BIND:-127.0.0.1}:PORT:OTHER",
     ),
 )
-def test_secure_host_bind_rejects_unsafe_or_malformed_mappings(
-    service: str, port: int, unsafe_template: str
-) -> None:
+def test_secure_host_bind_rejects_unsafe_or_malformed_mappings(service: str, port: int, unsafe_template: str) -> None:
     other_port = port + 1
     mapping = unsafe_template.replace("PORT", str(port)).replace("OTHER", str(other_port))
     compose = f"services:\n  {service}:\n    ports:\n      - {json.dumps(mapping)}\n"
     with pytest.raises(AssertionError):
-        _assert_secure_host_bind_ports(
-            compose, service=service, expected_ports=((port, port),)
-        )
+        _assert_secure_host_bind_ports(compose, service=service, expected_ports=((port, port),))
 
 
 @pytest.mark.parametrize(("service", "port"), (("grafana", 3000), ("prometheus", 9090)))
-def test_secure_host_bind_rejects_host_networking_and_extra_wildcard_publish(
-    service: str, port: int
-) -> None:
+def test_secure_host_bind_rejects_host_networking_and_extra_wildcard_publish(service: str, port: int) -> None:
     secure = f"${{HOST_BIND:-127.0.0.1}}:{port}:{port}"
-    host_network = (
-        f"services:\n  {service}:\n    network_mode: host\n"
-        f"    ports:\n      - {json.dumps(secure)}\n"
-    )
+    host_network = f"services:\n  {service}:\n    network_mode: host\n    ports:\n      - {json.dumps(secure)}\n"
     duplicate_wildcard = (
-        f"services:\n  {service}:\n    ports:\n"
-        f"      - {json.dumps(secure)}\n      - \"0.0.0.0:{port}:{port}\"\n"
+        f'services:\n  {service}:\n    ports:\n      - {json.dumps(secure)}\n      - "0.0.0.0:{port}:{port}"\n'
     )
-    unbound_long_syntax = (
-        f"services:\n  {service}:\n    ports:\n"
-        f"      - target: {port}\n        published: {port}\n"
-    )
+    unbound_long_syntax = f"services:\n  {service}:\n    ports:\n      - target: {port}\n        published: {port}\n"
     for compose in (host_network, duplicate_wildcard, unbound_long_syntax):
         with pytest.raises(AssertionError):
-            _assert_secure_host_bind_ports(
-                compose, service=service, expected_ports=((port, port),)
-            )
+            _assert_secure_host_bind_ports(compose, service=service, expected_ports=((port, port),))
 
 
 def test_host_bind_default_and_documented_manual_override_rendering() -> None:
@@ -230,23 +213,17 @@ def test_host_bind_default_and_documented_manual_override_rendering() -> None:
     rendered_empty: set[str] = set()
     rendered_override: set[str] = set()
     for service, expected_ports in _LOCAL_OBSERVABILITY_PORTS.items():
-        entries = _assert_secure_host_bind_ports(
-            compose, service=service, expected_ports=expected_ports
-        )
+        entries = _assert_secure_host_bind_ports(compose, service=service, expected_ports=expected_ports)
         rendered_default.update(_render_host_bind_port(entry) for entry in entries)
         rendered_empty.update(_render_host_bind_port(entry, "") for entry in entries)
-        rendered_override.update(
-            _render_host_bind_port(entry, "192.0.2.10") for entry in entries
-        )
+        rendered_override.update(_render_host_bind_port(entry, "192.0.2.10") for entry in entries)
 
     expected_default = {
         f"127.0.0.1:{host_port}:{container_port}"
         for ports in _LOCAL_OBSERVABILITY_PORTS.values()
         for host_port, container_port in ports
     }
-    expected_override = {
-        mapping.replace("127.0.0.1", "192.0.2.10") for mapping in expected_default
-    }
+    expected_override = {mapping.replace("127.0.0.1", "192.0.2.10") for mapping in expected_default}
     assert rendered_default == expected_default
     assert rendered_empty == expected_default
     assert rendered_override == expected_override
@@ -258,21 +235,29 @@ def test_host_bind_default_and_documented_manual_override_rendering() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# F-0561 — local Grafana opens without a login (loopback-only dashboard)
+# F-0561 — managed Grafana supports authenticated and explicit local modes
 # --------------------------------------------------------------------------- #
-def test_f0561_local_grafana_is_loopback_bound_and_loginless() -> None:
-    # Operator decision: a login prompt on a localhost-only dashboard is pure
-    # friction. The security boundary for this developer-laptop stack is the
-    # loopback port bind, NOT a Grafana password. So we assert the dashboard
-    # opens with no login (anonymous Admin, login form disabled) AND that the
-    # port is published on the loopback default rather than all interfaces.
-    text = _read(COMPOSE)
-    assert "GF_AUTH_ANONYMOUS_ENABLED=true" in text
-    assert "GF_AUTH_DISABLE_LOGIN_FORM=true" in text
-    # the loopback bind is what actually protects the stack
-    _assert_secure_host_bind_ports(text, service="grafana", expected_ports=((3000, 3000),))
-    # no required-password gate (the :? form) and no all-interfaces publish
-    assert "GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:?" not in text
+def test_f0561_local_grafana_is_loopback_bound_and_authenticated() -> None:
+    base = yaml.safe_load(_read(COMPOSE))
+    overlay = yaml.safe_load(_read(PASSWORD_COMPOSE))
+    base_environment = base["services"]["grafana"]["environment"]
+    password_environment = overlay["services"]["grafana"]["environment"]
+
+    assert base_environment["GF_AUTH_ANONYMOUS_ENABLED"] == "true"
+    assert base_environment["GF_AUTH_ANONYMOUS_ORG_ROLE"] == "Admin"
+    assert base_environment["GF_AUTH_DISABLE_LOGIN_FORM"] == "true"
+    assert password_environment["GF_AUTH_ANONYMOUS_ENABLED"] == "false"
+    assert password_environment["GF_AUTH_DISABLE_LOGIN_FORM"] == "false"
+    assert password_environment["GF_SECURITY_ADMIN_PASSWORD__FILE"] == ("/run/secrets/grafana_admin_password")
+    assert overlay["secrets"]["grafana_admin_password"]["environment"] == ("GRAFANA_ADMIN_PASSWORD")
+    _assert_secure_host_bind_ports(_read(COMPOSE), service="grafana", expected_ports=((3000, 3000),))
+    if "ports" in overlay["services"]["grafana"]:
+        _assert_secure_host_bind_ports(
+            _read(PASSWORD_COMPOSE),
+            service="grafana",
+            expected_ports=((3000, 3000),),
+        )
+    assert "network_mode" not in overlay["services"]["grafana"]
 
 
 # --------------------------------------------------------------------------- #
@@ -286,9 +271,7 @@ def test_f0562_local_prometheus_apis_enabled_but_loopback_bound() -> None:
     assert '"--web.enable-remote-write-receiver"' in text
     assert '"--web.enable-lifecycle"' in text
     # the loopback bind is the security boundary, not the absence of the APIs
-    _assert_secure_host_bind_ports(
-        text, service="prometheus", expected_ports=((9090, 9090),)
-    )
+    _assert_secure_host_bind_ports(text, service="prometheus", expected_ports=((9090, 9090),))
 
 
 # --------------------------------------------------------------------------- #
@@ -542,9 +525,7 @@ def test_f0805_valid_checkpoint_window(exporter_module, tmp_path) -> None:
     checkpoint = tmp_path / "checkpoint.json"
     checkpoint.write_text(json.dumps({"latest": "2026-06-01T00:00:00Z"}))
     config = _make_export_config(exporter_module, checkpoint)
-    earliest, latest = exporter_module._window_from_checkpoint(
-        config, datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
-    )
+    earliest, latest = exporter_module._window_from_checkpoint(config, datetime(2026, 6, 10, 12, 0, tzinfo=UTC))
     assert earliest == "2026-05-31T23:59:30Z"
     assert latest == "2026-06-10T12:00:00Z"
 
@@ -563,8 +544,6 @@ def test_f0603_insecure_defaults_false(export_search_module, monkeypatch) -> Non
 
 
 def test_f0603_insecure_opt_in(export_search_module, monkeypatch) -> None:
-    monkeypatch.setattr(
-        sys, "argv", ["export_search.py", "--query", "search index=defenseclaw_local", "--insecure"]
-    )
+    monkeypatch.setattr(sys, "argv", ["export_search.py", "--query", "search index=defenseclaw_local", "--insecure"])
     args = export_search_module.parse_args()
     assert args.insecure is True

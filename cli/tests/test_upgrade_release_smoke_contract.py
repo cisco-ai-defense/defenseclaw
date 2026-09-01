@@ -2235,3 +2235,20 @@ def test_v8_known_regression_marker_uses_redacted_tail() -> None:
         in marker_failure
     )
     assert 'else\n            tail_log "${SMOKE_HOME}/upgrade.log"' in marker_failure
+
+
+def test_posix_upgrade_smoke_repairs_and_executes_stale_skill_scanner_launcher() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    run_one = source[source.index("run_one_upgrade_smoke() {") : source.index("\n}\n\nmain()")]
+
+    assert run_one.index("seed_stale_skill_scanner_launcher") < run_one.index("run_upgrade")
+    assert run_one.index("run_upgrade") < run_one.index("assert_repaired_skill_scanner_launcher")
+    seed = source.split("seed_stale_skill_scanner_launcher()", 1)[1].split("\n}", 1)[0]
+    verify = source.split("assert_repaired_skill_scanner_launcher()", 1)[1].split("\n}", 1)[0]
+    assert "#!/nonexistent/defenseclaw-fixture/python3" in seed
+    assert "launcher.unlink(missing_ok=True)" in seed
+    assert '"${launcher}" --version' in seed
+    assert '[[ -L "${launcher}" ]]' in verify
+    assert 'readlink "${launcher}"' in verify
+    assert '"${launcher}" --version' in verify
+    assert 'glob("retired-*")' in verify

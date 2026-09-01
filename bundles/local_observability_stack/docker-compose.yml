@@ -19,7 +19,7 @@
 #
 # Ports (host, bound to 127.0.0.1 by default):
 #   4317 / 4318 — OTel Collector OTLP receivers
-#   3000        — Grafana UI (login: admin / admin)
+#   3000        — Grafana UI (anonymous Admin for direct Compose)
 #   3100        — Loki HTTP (scraped by Grafana)
 #   3200        — Tempo HTTP
 #   9090        — Prometheus UI
@@ -136,21 +136,16 @@ services:
     image: grafana/grafana:11.3.0
     container_name: defenseclaw-grafana
     environment:
-      # This is a developer-laptop stack: every host port is published on
-      # ${HOST_BIND:-127.0.0.1} (loopback by default), so the dashboard is only
-      # reachable from the same machine. A login prompt on a localhost-only
-      # dashboard is pure friction, so Grafana opens with no login —
-      # anonymous access with the Admin role and the login form disabled.
-      # The loopback bind is the security boundary here. If you expose this
-      # through the documented manual override, turn auth back on: set
-      # GF_AUTH_ANONYMOUS_ENABLED=false and GF_SECURITY_ADMIN_PASSWORD=<pw>.
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
-      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      # Keep the historical direct-Compose experience compatible. The managed
+      # controller applies docker-compose.password.yml for new stacks unless
+      # --no-password is selected (or a legacy stack is grandfathered).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
       # Layered Node Graph layout keeps causal agent DAGs readable. The graph
       # falls back to Grafana's force layout above its supported node limit.
-      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,nodeGraphDotLayout
-      - GF_USERS_DEFAULT_THEME=dark
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor,nodeGraphDotLayout
+      GF_USERS_DEFAULT_THEME: dark
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

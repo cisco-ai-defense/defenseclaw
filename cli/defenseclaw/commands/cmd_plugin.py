@@ -109,6 +109,11 @@ def plugin() -> None:
 @click.option("--llm-provider", default="", help="LLM provider hint (anthropic, openai, ollama, etc.)")
 @click.option("--llm-consensus-runs", default=0, type=int, help="Number of LLM consensus runs (default: 1)")
 @click.option("--enable-meta/--no-meta", default=True, help="Enable/disable meta analyzer (default: enabled)")
+@click.option(
+    "--include-self",
+    is_flag=True,
+    help="Include exact first-party DefenseClaw artifacts (excluded by default)",
+)
 @click.option("--lenient", is_flag=True, help="Suppress low-confidence findings (sets min_confidence=0.5)")
 @click.option(
     "--connector",
@@ -134,6 +139,7 @@ def scan(
     llm_provider: str,
     llm_consensus_runs: int,
     enable_meta: bool,
+    include_self: bool,
     lenient: bool,
     connector_flag: str,
 ) -> None:
@@ -154,6 +160,7 @@ def scan(
       defenseclaw plugin scan my-plugin --use-llm --llm-model gpt-4\n
       defenseclaw plugin scan my-plugin --policy ~/.defenseclaw/policies/custom.yaml\n
       defenseclaw plugin scan /path/to/plugin --profile strict --lenient
+      defenseclaw plugin scan ~/.defenseclaw/extensions/defenseclaw --include-self
     """
     from defenseclaw import ux
     from defenseclaw.scanner.plugin import PluginScannerWrapper
@@ -176,6 +183,7 @@ def scan(
             llm_provider,
             llm_consensus_runs,
             enable_meta,
+            include_self,
             lenient,
             connector_flag,
         )
@@ -191,6 +199,7 @@ def scan(
         llm_provider,
         llm_consensus_runs,
         enable_meta,
+        include_self,
         lenient,
     )
 
@@ -737,6 +746,7 @@ def _scan_all_plugins(
     llm_provider: str,
     llm_consensus_runs: int,
     enable_meta: bool,
+    include_self: bool,
     lenient: bool,
     connector_flag: str,
 ) -> None:
@@ -777,6 +787,7 @@ def _scan_all_plugins(
         llm_provider,
         llm_consensus_runs,
         enable_meta,
+        include_self,
         lenient,
     )
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
@@ -941,6 +952,7 @@ def _build_scan_options(
     llm_provider: str,
     llm_consensus_runs: int,
     enable_meta: bool,
+    include_self: bool,
     lenient: bool,
 ) -> dict:
     """Build ``PluginScannerWrapper.scan`` kwargs from CLI flags.
@@ -973,6 +985,19 @@ def _build_scan_options(
 
     if not enable_meta:
         opts["disable_meta"] = True
+
+    if include_self:
+        opts["include_self"] = True
+
+    # A configured OpenClaw home can live outside ~/.openclaw. Pass only its
+    # exact DefenseClaw leaf to the scanner's identity registry; never pass a
+    # broad plugin parent or a name pattern.
+    claw = getattr(app.cfg, "claw", None)
+    openclaw_home = str(getattr(claw, "home_dir", "") or "").strip()
+    if openclaw_home:
+        opts["trusted_self_paths"] = (
+            os.path.join(os.path.abspath(os.path.expanduser(openclaw_home)), "extensions", "defenseclaw"),
+        )
 
     if lenient:
         opts["lenient"] = True

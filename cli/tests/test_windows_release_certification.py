@@ -710,7 +710,7 @@ def test_release_documentation_matches_the_fresh_only_gate() -> None:
     assert "first native Windows release" not in release
 
 
-def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
+def test_native_wheel_stages_and_verifies_runtime_assets() -> None:
     stage = _function("Stage-PackageData")
     build = _function("Invoke-BuildArtifacts")
 
@@ -718,13 +718,23 @@ def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
         "schemas\\config\\v8\\defenseclaw-config.schema.json",
         "schemas\\config\\v8\\reference\\$name",
         "scripts/telemetry_runtime_assets.py",
+        "scripts/extension_runtime_fingerprint.py",
     ):
         assert source in stage
+
+    for build_contract in (
+        "Get-RequiredCommand 'npm.cmd'",
+        "'ci', '--include=dev', '--no-audit', '--no-fund'",
+        "'run', 'build'",
+        "-RequireExtensionFingerprint",
+    ):
+        assert build_contract in build
 
     for packaged in (
         "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
         "defenseclaw/_data/config/v8/observability.yaml",
         "defenseclaw/_data/config/v8/observability.md",
+        "defenseclaw/_data/plugin/extension-runtime-fingerprint.json",
         "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
         "defenseclaw/_data/telemetry/v8/catalog.json",
         "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",

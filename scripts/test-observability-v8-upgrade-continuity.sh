@@ -930,6 +930,7 @@ PY
         --lookback-hours 2 \
         --wait-seconds 90 \
         --dashboard-deadline-seconds 300 \
+        --grafana-password-file "${SMOKE_HOME}/.defenseclaw/observability-stack/.grafana-admin-password" \
         >"${SMOKE_HOME}/continuity-report.json" 2>&1 \
         || { tail_log "${SMOKE_HOME}/continuity-report.json"; die "history/dashboard continuity failed"; }
 }
