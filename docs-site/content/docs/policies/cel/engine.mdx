@@ -125,6 +125,12 @@ cross-engine document contract executable and regression-testable without
 importing another policy engine. Its activation remains subject to the same
 privacy boundary as typed `ActionFacts`.
 
+An opt-in process test accepts an `AGENTCEL_BIN`, loads every translated rule
+instance as its own bare `.cel` file, and checks all 26,460 rule-by-case
+outcomes through AgentCEL's public document CLI against native typed results.
+DefenseClaw does not import AgentCEL, and the binary identity remains the
+caller's responsibility for each run.
+
 ## Resource limits
 
 | Limit | Maximum |

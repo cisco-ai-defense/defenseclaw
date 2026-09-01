@@ -282,6 +282,8 @@ expression. Repository contributors should add focused Go fixtures and run
 The shipped-rule matrix also compiles the checked-AST document form and compares
 its result and error classification with native typed evaluation for every
 authoritative, projectable ActionFacts case.
+Set `AGENTCEL_BIN` when running the opt-in AgentCEL E2E test to repeat the
+complete 147-rule by 180-case matrix through AgentCEL's bare-document CLI.
 When the compiled default catalog changes, also run `make generate-guardrail-catalog` and
 `make check-guardrail-catalog`.
 </Callout>

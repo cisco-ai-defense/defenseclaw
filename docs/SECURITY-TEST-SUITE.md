@@ -9,7 +9,7 @@ in
 | --- | --- |
 | `make security-suite-test` | Deterministic trusted-tool-call, regex/rule, stubbed-judge, and severity benchmark tests |
 | `go test ./internal/gateway -run '^TestGuardrailProfilesCELActionFactsCorpusMatrix$' -v` | Every shipped profile's exact typed `f` CEL and checked-AST-translated stock `input` CEL against every authoritative, projectable CEL-targeted tool-call case, with equivalent results and error classifications |
-| `AGENTCEL_BIN=/path/to/agentcel go test ./internal/gateway -run '^TestGuardrailPortableCELAgentCELE2E$' -v` | Optional process-boundary proof through AgentCEL's public bare-document CEL CLI; DefenseClaw does not import AgentCEL |
+| `AGENTCEL_BIN=/path/to/agentcel go test ./internal/gateway -run '^TestGuardrailPortableCELAgentCELE2E$' -v` | Optional exhaustive process-boundary proof: AgentCEL loads all 147 translated `.cel` rule instances and reproduces their native results over all 180 applicable cases (26,460 evaluations); DefenseClaw does not import AgentCEL |
 | `make security-suite-eval` | Opt-in live-model evaluation; requires `DEFENSECLAW_LLM_KEY` |
 | `go test ./internal/gateway/ -run TestSecuritySuiteE2E -v` | In-process HTTP inspect and audit path; `DEFENSECLAW_GATEWAY_URL` selects an external gateway |
 

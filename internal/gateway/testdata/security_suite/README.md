@@ -26,7 +26,8 @@ go test ./internal/gateway/ -run 'TestSecuritySuite(ToolCall|Regex|Judge)' -v
 # and applicable ActionFacts case:
 go test ./internal/gateway/ -run '^TestGuardrailProfilesCELActionFactsCorpusMatrix$' -v
 
-# optional external proof through AgentCEL's bare-document CEL CLI:
+# optional exhaustive 147-rule x 180-case proof through AgentCEL's
+# bare-document CEL CLI (26,460 cross-process evaluations):
 AGENTCEL_BIN=/path/to/agentcel \
   go test ./internal/gateway/ -run '^TestGuardrailPortableCELAgentCELE2E$' -v
 
