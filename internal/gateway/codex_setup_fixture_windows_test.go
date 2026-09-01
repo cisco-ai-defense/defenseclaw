@@ -111,7 +111,14 @@ func publishCodexSetupSelectionFixture(
 	}
 	digest := sha256.Sum256(body)
 	resolution := connector.ResolveHookContract("codex", opts.AgentVersion)
-	now := time.Now().UTC().Truncate(time.Second)
+	lockedAt := ""
+	if locked := connector.LoadHookContractLockEntry(dataDir, "codex"); locked.Connector == "codex" {
+		lockedAt = locked.UpdatedAt
+	}
+	now, err := codexSetupSelectionFixtureTime(time.Now(), lockedAt)
+	if err != nil {
+		t.Fatalf("select fresh Codex setup receipt timestamp: %v", err)
+	}
 	receipt := map[string]interface{}{
 		"schema_version": 1,
 		"updated_at":     now.Format(time.RFC3339),
@@ -137,6 +144,52 @@ func publishCodexSetupSelectionFixture(
 	}
 }
 
+func codexSetupSelectionFixtureTime(now time.Time, lockedAt string) (time.Time, error) {
+	now = now.UTC().Truncate(time.Second)
+	if strings.TrimSpace(lockedAt) == "" {
+		return now, nil
+	}
+	lockedTime, err := time.Parse(time.RFC3339Nano, lockedAt)
+	if err != nil {
+		return time.Time{}, err
+	}
+	lockedReceiptTick := lockedTime.Truncate(time.Second)
+	if !now.After(lockedReceiptTick) {
+		// Setup receipts use second precision, while lock publications retain
+		// nanoseconds and deliberately replace caller-provided timestamps. Make
+		// the receipt newer than the timestamp that was actually persisted.
+		return lockedReceiptTick.Add(time.Second), nil
+	}
+	return now, nil
+}
+
+func TestCodexSetupSelectionFixtureTimeAdvancesPastPersistedLockTick(t *testing.T) {
+	lockedAt := "2026-09-01T08:47:17.1170485Z"
+	for _, test := range []struct {
+		name string
+		now  string
+		want string
+	}{
+		{name: "same tick", now: "2026-09-01T08:47:17.900Z", want: "2026-09-01T08:47:18Z"},
+		{name: "wall clock behind", now: "2026-09-01T08:47:16.900Z", want: "2026-09-01T08:47:18Z"},
+		{name: "later tick", now: "2026-09-01T08:47:18.900Z", want: "2026-09-01T08:47:18Z"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now, err := time.Parse(time.RFC3339Nano, test.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := codexSetupSelectionFixtureTime(now, lockedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Format(time.RFC3339Nano) != test.want {
+				t.Fatalf("receipt timestamp = %s, want %s", got.Format(time.RFC3339Nano), test.want)
+			}
+		})
+	}
+}
+
 func TestSinglePublicationRollbackUsesRawCodexLockBehindFreshSetupReceipt(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	artifactPath := filepath.Join(testenv.PrivateTempDir(t), "codex-registration-posture")
@@ -155,7 +208,6 @@ func TestSinglePublicationRollbackUsesRawCodexLockBehindFreshSetupReceipt(t *tes
 		HookContractID:  evidence.ContractID,
 	}
 	priorEntry := connector.NewHookContractLockEntry(priorOpts, conn, "prior-test-build")
-	priorEntry.UpdatedAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
 	if err := connector.SaveHookContractLockEntry(dataDir, priorEntry); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +292,6 @@ func TestMultiPublicationRollbackUsesRawCodexLockBehindFreshSetupReceipt(t *test
 		HookContractID:  evidence.ContractID,
 	}
 	priorEntry := connector.NewHookContractLockEntry(priorOpts, conn, "prior-test-build")
-	priorEntry.UpdatedAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
 	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, priorEntry); err != nil {
 		t.Fatal(err)
 	}
