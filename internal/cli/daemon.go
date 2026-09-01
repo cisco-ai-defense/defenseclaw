@@ -1886,6 +1886,14 @@ func waitForGatewayReadiness(
 			if lastProbeErr != nil {
 				return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout (last probe: %v)", lastProbeErr)
 			}
+			if lastSnap.Telemetry.State == gateway.StateError &&
+				strings.TrimSpace(lastSnap.Telemetry.LastError) == "" &&
+				telemetryReadinessRetryableSQLiteContention(lastSnap.Telemetry.Details) {
+				detail := telemetryReadinessFailureDetail(lastSnap.Telemetry.Details)
+				return lastSnap, false, fmt.Errorf(
+					"gateway telemetry did not recover before the startup deadline: error (%s)", detail,
+				)
+			}
 			return lastSnap, false, fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout)
 		}
 		delay := pollInterval
@@ -1955,9 +1963,21 @@ func gatewaySnapshotReady(
 		// lock is released. Keep this exact, stable health condition retryable
 		// until the existing startup deadline; every other telemetry error
 		// remains an immediate failure.
-		if subsystem.name == "telemetry" &&
-			strings.TrimSpace(subsystem.health.LastError) == telemetrySnapshotUnavailable {
-			continue
+		if subsystem.name == "telemetry" {
+			lastError := strings.TrimSpace(subsystem.health.LastError)
+			if lastError == telemetrySnapshotUnavailable {
+				continue
+			}
+			// The mandatory event-history writer reports SQLite BUSY/LOCKED
+			// contention as recoverable health and clears it after the next
+			// successful commit. Startup can overlap a setup/Doctor audit write,
+			// especially for connectors that publish a larger discovery burst.
+			// Wait only for that exact bounded condition. Explicit errors, other
+			// SQLite classes, destination failures, and retention failures remain
+			// immediate startup failures.
+			if lastError == "" && telemetryReadinessRetryableSQLiteContention(subsystem.health.Details) {
+				continue
+			}
 		}
 		detail := strings.TrimSpace(subsystem.health.LastError)
 		if detail == "" {
@@ -2074,6 +2094,26 @@ func gatewaySnapshotReady(
 		return false, nil
 	}
 	return true, nil
+}
+
+func telemetryReadinessRetryableSQLiteContention(details map[string]interface{}) bool {
+	failure, failureOK := details["event_history_failure"].(string)
+	class, classOK := details["event_history_last_sqlite_class"].(string)
+	primary, primaryOK := details["event_history_last_sqlite_primary_code"].(float64)
+	if !failureOK || failure != "sqlite_write_failed" || !classOK || class != "busy_locked" ||
+		!primaryOK || primary != float64(uint8(primary)) || (primary != 5 && primary != 6) {
+		return false
+	}
+	generation, generationOK := details["generation"].(float64)
+	const maxExactJSONInteger = float64(1<<53 - 1)
+	if !generationOK || generation < 1 || generation > maxExactJSONInteger ||
+		generation != float64(uint64(generation)) {
+		return false
+	}
+	// Reuse the closed diagnostic projection so a concurrent destination or
+	// retention failure cannot be hidden behind otherwise-retryable contention.
+	want := fmt.Sprintf("generation=%d; event_history=sqlite_write_failed", uint64(generation))
+	return telemetryReadinessFailureDetail(details) == want
 }
 
 // telemetryReadinessFailureDetail renders only closed, bounded observability
