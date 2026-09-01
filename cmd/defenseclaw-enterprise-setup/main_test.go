@@ -114,7 +114,9 @@ func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
 
 func TestPlaceholderBuildFailsClosedWithoutEnterprisePayload(t *testing.T) {
 	_, err := loadEmbeddedEnterprisePayload()
-	if err == nil || !strings.Contains(err.Error(), "build-windows-enterprise-installer.ps1") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "packaging-windows-enterprise-installer") ||
+		!strings.Contains(err.Error(), "packaging-windows-avc-buildkit") {
 		t.Fatalf("loadEmbeddedEnterprisePayload() error = %v", err)
 	}
 }

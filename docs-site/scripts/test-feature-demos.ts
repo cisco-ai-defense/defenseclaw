@@ -9,6 +9,7 @@ import {
 } from '../components/feature-demo/reducer';
 import { scenarioConnectorMappings } from '../components/feature-demo/types';
 import type { ScenarioStep } from '../components/feature-demo/types';
+import { shellQuote } from '../components/command-generator';
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
 const cursorStory = readFileSync(
@@ -20,6 +21,29 @@ const approvedFixtureHosts = new Set([
   'provider.example.invalid',
   'registry.example.invalid',
 ]);
+
+describe('command generator shell safety', () => {
+  it('quotes every operator-provided PowerShell value literally', () => {
+    assert.equal(shellQuote('@args', 'powershell'), "'@args'");
+    assert.equal(shellQuote("O'Brien", 'powershell'), "'O''Brien'");
+    assert.equal(shellQuote('$env:PATH', 'powershell'), "'$env:PATH'");
+    assert.equal(shellQuote('first; Get-ChildItem', 'powershell'), "'first; Get-ChildItem'");
+  });
+
+  it('classifies native Windows support for every active connector', () => {
+    const statuses = new Map(
+      matrix.connectors.map((connector) => [connector.id, connector.windowsSupport]),
+    );
+    assert.equal(statuses.size, matrix.connectors.length);
+    assert.equal(statuses.get('omnigent'), 'degraded');
+    assert.equal(statuses.get('openclaw'), 'unsupported');
+    assert.equal(statuses.get('openhands'), 'unsupported');
+    assert.equal(statuses.get('zeptoclaw'), 'unsupported');
+    for (const status of statuses.values()) {
+      assert.match(status, /^(supported|degraded|unsupported)$/);
+    }
+  });
+});
 
 function allStepSets(scenario: (typeof featureDemos)[number]): ScenarioStep[][] {
   return [scenario.steps, ...(scenario.variants?.map((variant) => variant.steps) ?? [])];
@@ -143,12 +167,14 @@ describe('feature demo catalog', () => {
     }
   });
 
-  it('labels the Cursor walkthrough as synthetic preview material, not live evidence', () => {
-    assert.match(cursorStory, /Synthetic preview walkthrough/);
-    assert.match(cursorStory, /not an executable fixture, official-client test/);
-    assert.match(cursorStory, /preview\/not certified/);
+  it('labels the supported Cursor walkthrough as synthetic without claiming validation evidence', () => {
+    assert.match(cursorStory, /title="Synthetic walkthrough"/);
+    assert.match(cursorStory, /not an executable fixture, official-client test,\s*or certification record/);
+    assert.match(cursorStory, /Cursor is supported, while validated evidence remains empty/);
+    assert.match(cursorStory, /separate authenticated acceptance campaign/);
     assert.match(cursorStory, /permission: \"deny\"/);
     assert.match(cursorStory, /conflict-detection\s+API/);
+    assert.match(cursorStory, /does not enable native ask\/HITL/);
     assert.doesNotMatch(cursorStory, /Keep the user hook advisory|would-block|allow \+ advisory evidence/);
   });
 });

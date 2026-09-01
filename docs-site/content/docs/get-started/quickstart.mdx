@@ -12,10 +12,10 @@ keywords:
 After the [install](/docs/get-started/install), DefenseClaw is on disk but not yet configured. You then run **one** first-run command. There are two of them — they do the same work, with different UX.
 
 <Callout>
-On native Windows, first review the [Windows connector matrix and setup
-notes](/docs/get-started/windows). Windows uses native agent hooks, excludes WSL
-agents and proxy-only connectors, and otherwise uses the same `init` and
-`quickstart` backend described here.
+On native Windows, first review the [connector platform table and setup
+notes](/docs/connectors#platform-support). Windows uses native hook, plugin, or
+awaited-policy lanes, excludes WSL agents and proxy-only connectors, and
+otherwise uses the same `init` and `quickstart` backend described here.
 </Callout>
 
 <Cards>
@@ -237,7 +237,7 @@ and redaction profile that file is allowed to receive.
 ## Next
 
 <Cards>
-  <Card title="First guardrail in 5 minutes" href="/docs/get-started/first-guardrail" description="A walkthrough that ends with a real block decision." />
+  <Card title="First guardrail in 5 minutes" href="/docs/get-started/first-guardrail" description="A macOS/Linux walkthrough that ends with a real block decision; Windows operators are directed to the native verification checklist." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface — modes, judge, rule packs, HITL — for tuning after the first run." />
   <Card title="AI Discovery" href="/docs/ai-discovery" description="See what AI is already running on the host before you start applying rules." />
 </Cards>

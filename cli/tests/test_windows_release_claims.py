@@ -9,7 +9,9 @@ from pathlib import Path
 
 import yaml
 from defenseclaw.platform_support import (
+    DEPRECATED_CONNECTORS,
     WINDOWS_CERTIFIED_ARCHITECTURES,
+    WINDOWS_CONNECTOR_SUPPORT,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_CONNECTORS,
     WINDOWS_PREVIEW_CONNECTORS,
@@ -19,6 +21,26 @@ from defenseclaw.platform_support import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _active_connector_docs() -> dict[str, Path]:
+    connectors_dir = ROOT / "docs-site/content/docs/connectors"
+    navigation = json.loads((connectors_dir / "meta.json").read_text(encoding="utf-8"))
+    return {
+        connector_id: connectors_dir / f"{connector_id}.mdx"
+        for connector_id in navigation["pages"]
+        if connector_id not in {"index", "compatibility"}
+    }
+
+
+def _platform_status(text: str, platform: str) -> str:
+    matches = re.findall(
+        rf"^\|\s*{re.escape(platform)}\s*\|\s*\*\*([^*]+)\*\*\s*\|",
+        text,
+        re.MULTILINE,
+    )
+    assert len(matches) == 1, f"expected exactly one {platform!r} platform row"
+    return matches[0].strip()
 
 
 def test_windows_release_metadata_is_exact() -> None:
@@ -54,8 +76,11 @@ def test_windows_release_metadata_is_exact() -> None:
     }
 
 
-def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
+def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples() -> None:
     guide_dir = ROOT / "docs-site/content/docs/get-started/windows"
+    enterprise_deployment = (
+        ROOT / "docs-site/content/docs/setup/enterprise-deployment.mdx"
+    ).read_text(encoding="utf-8")
     raw_text = "\n".join(
         page.read_text(encoding="utf-8") for page in sorted(guide_dir.glob("*.mdx"))
     )
@@ -63,33 +88,77 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
     assert "WSL is not supported" in text
     assert "Windows x64" in text and "`amd64`" in text
     assert "Windows ARM64" in text and "Not certified" in text
-    assert "| Codex | `codex` | **Supported**" in text
-    assert "| Claude Code | `claudecode` | **Supported**" in text
-    assert "| Devin | `devin` | **Supported**" in text
-    assert "| OpenCode | `opencode` | **Supported**" in text
-    assert "| OmniGent | `omnigent` | **Supported — native degraded**" in text
-    assert "| Copilot CLI, Antigravity | `copilot`, `antigravity` | **Supported**" in text
     assert "local observability" in text
     assert "Local Splunk" in text
     assert "Hyper-V backend" in text
     assert "per-user Docker Desktop" in text
     assert "WSL2 engines" in text
-    assert "| Hermes | `hermes` | **Supported**" in text
-    assert "Redaction policy CLI and TUI" in text
-    assert "redaction status/remove-all/apply/defaults/bucket/profile/destination/route" in text
-    assert "defenseclaw setup redaction remove-all --dry-run" in text
-    assert "Hermes remains preview" not in text
     assert "```bash" not in text and "```sh" not in text
     assert text.count("```powershell") >= 8
-    for label in (
-        "Sandbox",
-        "enterprise hooks",
-        "OpenHands",
-        "OmniGent",
-        "OpenClaw",
-        "ZeptoClaw",
+    assert "Sandbox" in text
+    assert "enterprise hooks status" in enterprise_deployment
+
+
+def test_connector_pages_are_the_canonical_cross_platform_support_source() -> None:
+    connector_docs = _active_connector_docs()
+    expected_connector_ids = set(WINDOWS_CONNECTOR_SUPPORT) - DEPRECATED_CONNECTORS
+    assert set(connector_docs) == expected_connector_ids
+
+    status_labels = {
+        "supported": "Supported",
+        "preview": "Preview",
+        "not_certified": "Not certified",
+        "unsupported": "Unsupported",
+    }
+    expected_windows_statuses: dict[str, str] = {}
+    for connector_id, page in connector_docs.items():
+        text = page.read_text(encoding="utf-8")
+        assert text.count("## Platform support") == 1, page
+        assert _platform_status(text, "macOS and Linux") == "Supported", page
+
+        source_support = WINDOWS_CONNECTOR_SUPPORT[connector_id]
+        expected_status = status_labels[source_support.status]
+        if source_support.status == "supported" and "degraded mode" in source_support.reason:
+            expected_status = "Supported — native degraded"
+        expected_windows_statuses[connector_id] = expected_status
+        assert _platform_status(text, "Native Windows x64") == expected_status, page
+
+    assert {
+        connector_id
+        for connector_id, label in expected_windows_statuses.items()
+        if label == "Supported — native degraded"
+    } == {"omnigent"}
+
+    connectors_index = (
+        ROOT / "docs-site/content/docs/connectors/index.mdx"
+    ).read_text(encoding="utf-8")
+    assert connectors_index.count("## Platform support") == 1
+    for connector_id, expected_windows_status in expected_windows_statuses.items():
+        row = re.findall(
+            rf"^\|\s*\[[^]]+\]\(/docs/connectors/{re.escape(connector_id)}\)"
+            rf"\s*\|\s*\*\*([^*]+)\*\*\s*\|\s*\*\*([^*]+)\*\*\s*\|",
+            connectors_index,
+            re.MULTILINE,
+        )
+        assert row == [("Supported", expected_windows_status)], connector_id
+
+    docs_content = ROOT / "docs-site/content"
+    public_docs = "\n".join(
+        page.read_text(encoding="utf-8") for page in sorted(docs_content.rglob("*.mdx"))
+    )
+    windows_navigation = json.loads(
+        (
+            ROOT / "docs-site/content/docs/get-started/windows/meta.json"
+        ).read_text(encoding="utf-8")
+    )["pages"]
+    for stale_page in (
+        "capabilities-commands",
+        "connectors-enforcement",
+        "managed-enterprise",
     ):
-        assert label in text
+        stale_url = f"/docs/get-started/windows/{stale_page}"
+        assert stale_page not in windows_navigation
+        assert stale_url not in public_docs
 
 
 def test_hermes_native_windows_research_matches_supported_taxonomy() -> None:
@@ -110,14 +179,11 @@ def test_hermes_native_windows_research_matches_supported_taxonomy() -> None:
         assert stale_claim not in text
 
 
-def test_windows_docs_keep_supported_taxonomy_and_optional_git_boundary() -> None:
+def test_canonical_docs_keep_cli_taxonomy_and_claude_optional_git_boundary() -> None:
     windows_docs = ROOT / "docs-site/content/docs/get-started/windows"
-    capabilities = (windows_docs / "capabilities-commands.mdx").read_text(
-        encoding="utf-8"
-    )
     lifecycle = (windows_docs / "install-lifecycle.mdx").read_text(encoding="utf-8")
-    install = (
-        ROOT / "docs-site/content/docs/get-started/install.mdx"
+    claude_connector = (
+        ROOT / "docs-site/content/docs/connectors/claudecode.mdx"
     ).read_text(encoding="utf-8")
     cli_reference = (
         ROOT / "docs-site/content/docs/reference/cli.mdx"
@@ -126,12 +192,6 @@ def test_windows_docs_keep_supported_taxonomy_and_optional_git_boundary() -> Non
         ROOT / ".github/workflows/connector-live-e2e.yml"
     ).read_text(encoding="utf-8")
 
-    assert "| Claude Code connector setup | **Supported**" in capabilities
-    assert "| Copilot CLI and Antigravity setup | **Supported**" in capabilities
-    assert "`amp`, `claude-code`, `codex`, `cursor`, `devin`, `hermes`" in capabilities
-    assert "`copilot`, and `antigravity` are supported and selectable" in capabilities
-    assert "selectable previews" not in capabilities
-    assert "`claude-code` is the certified connector alias" not in capabilities
     assert "Native Windows supports Amp plus Codex, Claude Code, Cursor" in cli_reference
     assert "remain previews or not-certified choices" not in cli_reference
     assert "Preview user-hook alias for Cursor" not in cli_reference
@@ -146,11 +206,10 @@ def test_windows_docs_keep_supported_taxonomy_and_optional_git_boundary() -> Non
         in live_workflow
     )
 
-    for text in (lifecycle, install):
-        assert "Git for Windows" in text
-        assert "it is optional; without it Claude uses its native PowerShell tool" in text
-        assert "Claude Code's Git for Windows requirement" not in text
-        assert "Claude Code retains its Git for Windows requirement" not in text
+    normalized_claude = " ".join(claude_connector.split())
+    assert re.search(r"Git for Windows\b.*\boptional\b", normalized_claude)
+    assert "Git for Windows is not part of the DefenseClaw hook contract" in normalized_claude
+    assert "Git for Windows" not in lifecycle
 
 
 def test_gemini_deprecation_is_global_and_preserves_safe_cleanup() -> None:
@@ -354,8 +413,6 @@ def test_claude_directoryadded_docs_match_packaged_v2_contract() -> None:
         "docs/reference/CLAUDE-CODE-WINDOWS.md",
         "docs-site/content/docs/connectors/claudecode.mdx",
         "docs-site/content/docs/connectors/compatibility.mdx",
-        "docs-site/content/docs/get-started/windows/connectors-enforcement.mdx",
-        "docs-site/content/docs/get-started/windows/telemetry-security.mdx",
         "docs-site/content/docs/stories/observe-claude-code.mdx",
     ):
         text = " ".join((ROOT / relative_path).read_text(encoding="utf-8").split())

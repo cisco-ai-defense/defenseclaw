@@ -22,18 +22,42 @@ writes `failClosed: true`; observe remains allow/`would_block` with
 `failClosed: false`. Native ask/HITL is not enabled. No Enterprise or Team hook
 system is implemented by this connector.
 
-<Callout type="info" title="Native Windows support">
-Cursor Agent and the managed PowerShell hook adapter are supported directly on
-Windows. Validation metadata remains empty and `live=false`; this support label
-does not fabricate certification evidence. WSL and mixed Windows/WSL paths are
-outside this native contract.
-</Callout>
+## Platform support
+
+| Platform | Status | Connector path |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | User-scoped command hooks invoke the portable DefenseClaw hook. |
+| Native Windows x64 | **Supported** | User-scoped command hooks invoke the managed `cursor-hook.ps1` pipeline adapter and protected `defenseclaw-hook.exe`. Validation metadata remains empty and `live=false`; the support label does not fabricate certification evidence. |
 
 ## Setup
 
+<Tabs items={['macOS / Linux', 'Windows']}>
+  <Tab value="macOS / Linux">
+
 ```bash
 defenseclaw setup cursor
+defenseclaw setup cursor --mode action --no-human-approval
 ```
+
+The default command installs observe-mode user hooks. Action mode returns
+event-native deny responses and deliberately leaves native HITL disabled.
+
+  </Tab>
+  <Tab value="Windows">
+
+```powershell
+defenseclaw setup cursor
+defenseclaw setup cursor --mode action --no-human-approval
+```
+
+DefenseClaw writes `%USERPROFILE%\.cursor\hooks.json` and registers the
+managed `cursor-hook.ps1` adapter. The adapter preserves Cursor's JSON pipeline
+input, synchronously invokes the protected `defenseclaw-hook.exe`, waits for
+its documented response, and returns that response to Cursor. WSL and mixed
+Windows/WSL paths are outside this native connector path.
+
+  </Tab>
+</Tabs>
 
 This defaults to the observe template. Cursor talks directly to its native
 upstream; DefenseClaw inspects and, in action mode, denies through hooks.

@@ -18,9 +18,10 @@ normal guardrail proxy path.
 <Callout title="Proxy connectors only">
 Automatic routing currently applies to **OpenClaw** and **ZeptoClaw** requests that
 reach the proxy as OpenAI-compatible `*/chat/completions` traffic. Hook-based
-connectors—including Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI,
-OpenHands, Antigravity, Hermes, OpenCode, Amp, and OmniGent—keep their existing
-provider path and are not rerouted.
+connectors—Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands,
+Antigravity, Hermes, OpenCode, Amp, and OmniGent—keep their existing provider
+path and are not rerouted. Retired Windsurf and deprecated Gemini CLI setup are
+not part of the active connector inventory.
 </Callout>
 
 ## Compatibility at a glance
@@ -40,8 +41,9 @@ open with it.
 
 ## Prerequisites
 
-- Docker Desktop or Docker Engine is installed and running.
 - OpenClaw or ZeptoClaw is configured in proxy mode.
+- For a managed router, Docker Desktop or Docker Engine is installed and
+  running Linux containers. A remote router does not require local Docker.
 - Every routed backend exposes an OpenAI-compatible Chat Completions endpoint.
 - Each `base_url` is an origin such as `https://api.openai.com`, without
   `/v1/chat/completions` appended.
@@ -52,12 +54,17 @@ open with it.
 
 | Mode | Host requirement | Runtime architecture |
 | --- | --- | --- |
-| Managed sidecar | Any supported DefenseClaw host with Docker running Linux containers (Docker Desktop or Docker Engine) | Pinned image includes `linux/amd64` and `linux/arm64` |
-| Remote router | Any supported DefenseClaw host that can reach the configured HTTPS endpoint | Router is operator-owned |
-| Windows-containers mode | Not supported | Use Docker Desktop Linux containers or remote mode |
+| Managed sidecar | macOS or Linux with Docker running Linux containers | Pinned image includes `linux/amd64` and `linux/arm64` |
+| Remote router | macOS or Linux host that can reach the configured HTTPS endpoint | Router is operator-owned |
+| Native Windows | Not supported | Docker Desktop, WSL, a VM, or a remote classifier does not add the missing native proxy-connector lifecycle |
 
-The managed flow in this change was manually exercised on Apple silicon with
-Docker Desktop. The lifecycle and configuration contract are unit-tested without
+DefenseClaw is hook-only on native Windows. The only connectors eligible for
+semantic routing—OpenClaw and ZeptoClaw—both require the guardrail proxy and are
+unsupported there. Semantic routing is therefore currently a macOS/Linux
+feature even when the classifier itself runs remotely.
+
+The managed flow has been manually exercised on Apple silicon with Docker
+Desktop. The lifecycle and configuration contract are unit-tested without
 depending on host architecture.
 
 ## Configure routing

@@ -21,6 +21,7 @@ intact when diagnosing a problem.
 | `...\bin\defenseclaw.exe` | Stable CLI/TUI launcher for the embedded managed runtime. | Do not replace or wrap. |
 | `...\bin\defenseclaw-gateway.exe` | Native gateway and lifecycle command. | Do not replace. |
 | `...\bin\defenseclaw-hook.exe` | No-console native connector hook runner. | Do not invoke with fabricated credentials or replace. |
+| `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` | Stable protected copy used by native connector registrations that require the shared hook runtime. | Do not replace or invoke directly; Setup and connector reconciliation manage it. |
 | `...\bin\defenseclaw-startup.exe` | HKCU logon helper that starts the adjacent gateway. | Do not relocate independently. |
 | `...\bin\skill-scanner.exe`, `mcp-scanner.exe` | Packaged local scanners. | Do not replace. |
 | `...\runtime\python\` | Embedded Python and installed DefenseClaw packages. | Do not use as a general Python environment or modify packages. |
@@ -46,6 +47,7 @@ intact when diagnosing a problem.
 | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` | DefenseClaw-managed Amp TypeScript system-policy plugin with a connector-scoped credential. | **Never print, copy, or hand-edit.** Use setup/remove; operator-owned sibling plugins are separate. |
 | `%GEMINI_CLI_HOME%\.gemini\settings.json` | Retired Gemini CLI integration state only. | New setup is unavailable. `defenseclaw setup remove geminicli --yes` uses the authenticated receipt to remove only DefenseClaw-owned legacy entries. |
 | `%USERPROFILE%\.gemini\config\hooks.json` | Google Antigravity's native hook configuration. | This nested Antigravity document is separate from retired Gemini CLI root settings; lifecycle operations must not cross those ownership boundaries. |
+| `%COPILOT_HOME%\hooks\defenseclaw.json` | GitHub Copilot CLI global hook registration; the default home is `%USERPROFILE%\.copilot`. | Uses Copilot's official `powershell` field. An explicitly pinned workspace instead uses `<workspace>\.github\hooks\defenseclaw.json`; keep those scopes separate. |
 | `%USERPROFILE%\.cursor\hooks.json` | Cursor user hooks plus DefenseClaw-managed entries. | Cursor has no documented configuration-home environment variable. Setup records this exact native path for repair, upgrade, and teardown. |
 | `%APPDATA%\devin\config.json` | Canonical Devin user configuration. DefenseClaw adds one managed command-hook group to each of the eight lifecycle events under `hooks` and preserves foreign JSONC content. | Do not replace individual managed entries; use setup/remove. |
 | `<workspace>\.devin\hooks.v1.json` | Canonical project hook document when an explicit workspace is selected. The hook map is the whole JSONC document. | Keep project and user custody separate; use setup/remove. |
@@ -54,6 +56,7 @@ intact when diagnosing a problem.
 | `%USERPROFILE%\.defenseclaw\connector_backups\windsurf\config.json` | Retired predecessor receipt retained only when an older authenticated install still owns cleanup work. | Do not edit or copy it. Upgrade/uninstall consumes only its receipt-bound managed entries; it is not active connector state. |
 | `%USERPROFILE%\.defenseclaw\hook_contract_lock.json` | Versioned connector readiness metadata. An active `devin` entry must identify `devin-hooks-v1` and the exact user or project hook document. | If Doctor reports a missing Devin lock, rerun `defenseclaw setup devin --yes --restart`; another connector setup is not a repair path. |
 | `%OPENCODE_CONFIG_DIR%\plugins\defenseclaw.js` | OpenCode bridge plugin. Default config root is `%USERPROFILE%\.config\opencode`. | Carries a connector-scoped token. Do not edit or copy; Doctor detects digest drift and Setup reconciles it. Restart OpenCode after lifecycle changes. |
+| `%OMNIGENT_CONFIG_HOME%\config.yaml` | OmniGent's effective custom-policy configuration; the default home is `%USERPROFILE%\.omnigent`. | Start OmniGent with the same explicit `--config` path after setup. DefenseClaw's bridge also binds the exact selected `uv tool` environment. |
 | `%HERMES_HOME%\config.yaml` | Supported Hermes native hook configuration. Default is `%LOCALAPPDATA%\hermes`. | Do not add a shell wrapper or edit DefenseClaw-owned handlers; use setup/remove. |
 
 The installer records the exact connector homes and uses them for later repair,
@@ -87,7 +90,9 @@ beneath the current `%USERPROFILE%` at
 ```powershell
 $env:CODEX_HOME = "D:\Agent Profiles\Codex"
 $env:CLAUDE_CONFIG_DIR = "D:\Agent Profiles\Claude"
+$env:COPILOT_HOME = "D:\Agent Profiles\Copilot"
 $env:OPENCODE_CONFIG_DIR = "D:\Agent Profiles\OpenCode"
+$env:OMNIGENT_CONFIG_HOME = "D:\Agent Profiles\OmniGent"
 $env:HERMES_HOME = "D:\Agent Profiles\Hermes"
 ```
 
@@ -97,7 +102,9 @@ $env:HERMES_HOME = "D:\Agent Profiles\Hermes"
 ```cmd
 set "CODEX_HOME=D:\Agent Profiles\Codex"
 set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
+set "COPILOT_HOME=D:\Agent Profiles\Copilot"
 set "OPENCODE_CONFIG_DIR=D:\Agent Profiles\OpenCode"
+set "OMNIGENT_CONFIG_HOME=D:\Agent Profiles\OmniGent"
 set "HERMES_HOME=D:\Agent Profiles\Hermes"
 ```
 

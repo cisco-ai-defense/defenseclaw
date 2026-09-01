@@ -9,21 +9,19 @@ keywords:
   - DefenseClaw WSL
 ---
 
-DefenseClaw has a native, per-user Windows x64 (`amd64`) distribution. It installs a
-local gateway, native hook launcher, CLI, TUI, scanners, and managed Python
-runtime. **Amp** is supported through its owner-only TypeScript system-policy
-plugin. **Claude Code**, **Codex**, **Cursor**, **Devin**,
-**Hermes**, **OpenCode**, **Copilot**, and **Antigravity** are supported through
-ordinary Setup. **Gemini CLI** setup is deprecated on every platform; legacy
-managed state remains removable. **OmniGent 0.7.0** is
-supported on the narrower native-degraded awaited server/SDK policy surface. A
-supported availability label does not populate validation evidence or certify
-an official-client run.
+DefenseClaw has a native, per-user Windows x64 (`amd64`) distribution. It
+installs a local gateway, native hook launcher, CLI, TUI, scanners, and managed
+Python runtime. Connector availability, setup, paths, and platform-specific
+quirks live on the [connector pages](/docs/connectors#platform-support), next
+to the equivalent macOS/Linux guidance. A supported availability label does
+not populate validation evidence or certify an official-client run.
 
 For centrally managed endpoints, the separate
-[managed-enterprise lifecycle](/docs/get-started/windows/managed-enterprise)
-installs administrator-owned Windows services. It is explicitly opt-in and
-does not change this per-user package or its existing auto-heal behavior.
+[managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout)
+installs four administrator-owned Windows services: `DefenseClawGateway`,
+`DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and
+`DefenseClawHookEnumerator`. It is explicitly opt-in and does not change this
+per-user package or its existing auto-heal behavior.
 
 <Callout type="warning" title="WSL is not supported">
 This guide is for DefenseClaw, the agent, and its configuration running in the
@@ -40,33 +38,25 @@ native agent at a WSL installation, or mix native and WSL connector homes.
 | **Unsupported** | Rejected, unavailable, or outside the native Windows product contract. |
 | **Not applicable** | A platform-specific concept is intentionally absent from the Windows design. |
 
-## Connector scope
+## Choose a connector
 
-| Connector | Setup name | Native Windows x64 | Enforcement topology |
-| --- | --- | --- | --- |
-| Codex | `codex` | **Supported** | Native hooks to the loopback gateway; native OTLP is observation-only. Authentic official-client validation metadata remains empty and `live=false`. |
-| Claude Code | `claudecode` | **Supported** | Native hooks to the loopback gateway; native OTLP is observation-only. Authentic official-client validation metadata remains empty and `live=false`. |
-| Amp | `amp` | **Supported** | Owner-only TypeScript system-policy plugin to the loopback gateway; `tool.call` gates execution and `tool.result` gates model-bound output. Amp has no documented native OTLP. |
-| Cursor | `cursor` | **Supported** | Native command hooks use a managed PowerShell adapter and the loopback gateway; validation metadata remains empty and `live=false`. |
-| Devin | `devin` | **Supported** | Exact 3000.4.25 CLI with native lifecycle hooks to the loopback gateway. Cloud Devin, proxy/ACP, native OTLP, and managed higher layers are excluded; validation metadata remains empty and `live=false`. |
-| Hermes | `hermes` | **Supported** | Direct absolute native hook executable; synchronous JSON block only; all hook failures open; no ask. Running-client state remains pending reload and `live=false`. |
-| OpenCode | `opencode` | **Supported** | Auto-loaded in-process JavaScript plugin; only awaited `tool.execute.before` can block. Validation metadata remains empty and `live=false`. |
-| OmniGent | `omnigent` | **Supported — native degraded** | OmniGent 0.7.0 server/SDK harness policy calls only; no terminal wrapper or filesystem/network/L7 sandbox parity; `live=false`. |
-| Copilot CLI, Antigravity | `copilot`, `antigravity` | **Supported** | Ordinary Setup is available. Provider authentication is still required; HITL and official-client live evidence are unverified and unclaimed, validation metadata remains empty, and `live=false`. |
-| Gemini CLI | — | **Deprecated** | New setup is unavailable. Remove existing managed state with `defenseclaw setup remove geminicli --yes`, then use Antigravity. |
-| OpenHands, OpenClaw, ZeptoClaw | — | **Unsupported** | Their required WSL or proxy topology is not hosted by native Windows DefenseClaw. |
+The [connector platform table](/docs/connectors#platform-support) is the
+canonical Windows support matrix. Each linked connector page contains both
+platform setup paths and calls out native Windows dependencies, unsupported
+topologies, reload behavior, and event-specific enforcement limits.
 
-All supported connectors remain connected directly to their normal upstream
-service. DefenseClaw does **not** insert a model proxy on Windows. It can only
-protect and observe events the installed agent emits through its documented
-hook, awaited policy, and native telemetry surfaces.
+Supported native Windows connectors remain connected directly to their normal
+upstream service. DefenseClaw does **not** insert a model proxy on Windows. It
+can protect and observe only events the installed agent emits through a
+documented hook, awaited policy, or native telemetry surface.
 
 <Cards>
   <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, authenticated release Setup, repair, upgrade qualification, recovery, and uninstall." />
-  <Card title="Managed enterprise" href="/docs/get-started/windows/managed-enterprise" description="Protected Windows services, guardian auto-heal, non-admin guarantees, and the enterprise CLI lifecycle." />
-  <Card title="Connectors and enforcement" href="/docs/get-started/windows/connectors-enforcement" description="Exact supported connector events, observe/action behavior, fail modes, and enable/disable controls." />
-  <Card title="Capabilities and commands" href="/docs/get-started/windows/capabilities-commands" description="Windows-specific capability and complete public command-family matrices." />
-  <Card title="Telemetry and security" href="/docs/get-started/windows/telemetry-security" description="Native OTLP, local audit, scoped credentials, loopback boundaries, release provenance, and recovery guarantees." />
+  <Card title="Choose a connector" href="/docs/connectors#platform-support" description="Compare macOS/Linux and native Windows support, then open one connector's setup and quirks." />
+  <Card title="Managed enterprise" href="/docs/setup/enterprise-deployment#windows-system-service-layout" description="Gateway, credential broker, hook guardian, profile enumerator, non-admin guarantees, and the enterprise CLI lifecycle." />
+  <Card title="Capabilities" href="/docs/capability-matrix" description="Connector enforcement, native ask, fail-closed, and subprocess capabilities." />
+  <Card title="CLI commands" href="/docs/reference/cli" description="Canonical command reference with platform-specific availability notes." />
+  <Card title="Windows security model" href="/docs/get-started/windows/telemetry-security" description="Loopback authentication, local audit, scoped credentials, release provenance, and recovery guarantees." />
   <Card title="Paths and troubleshooting" href="/docs/get-started/windows/paths-troubleshooting" description="Filesystem reference, safe diagnostics, terminal guidance, and verification checklists." />
 </Cards>
 
@@ -76,13 +66,10 @@ The normal installation is one current-user application:
 
 1. `DefenseClawSetup-x64.exe` installs product-owned files and an embedded
    runtime below the current user's Programs directory.
-2. Connector setup registers `defenseclaw-hook.exe` directly for Codex,
-   Claude Code, Devin, and Hermes. Hermes receives a direct absolute forward-slash
-   executable argv with no shell wrapper. Amp loads an owner-only TypeScript
-   system-policy plugin. Cursor receives a managed native PowerShell adapter
-   that synchronously launches that exact packaged executable. OpenCode setup
-   installs `%OPENCODE_CONFIG_DIR%\plugins\defenseclaw.js`. OmniGent setup
-   installs its import bridge into the selected native `uv tool` environment.
+2. Connector setup installs the exact native hook, adapter, or in-process
+   policy bridge documented on that connector's Windows tab. Use the
+   [connector platform table](/docs/connectors#platform-support) as the
+   canonical source for process, path, dependency, and enforcement details.
 3. The native hook, adapter, or in-process bridge sends declared events to an
    authenticated gateway API on loopback. Action mode can return a decision
    only where that agent event or awaited policy phase supports one.
@@ -103,11 +90,11 @@ the authentication, redaction, and local-storage boundaries.
 | Windows ARM64, including x64 emulation | **Not certified** | Setup rejects it rather than relying on emulation. |
 | Machine-wide Setup or MSI | **Unsupported** | The public package accepts `INSTALLSCOPE=user` only. |
 | Elevated, service, session-zero, or background Setup | **Unsupported** | State-changing Setup actions require the signed-in, non-elevated interactive user. |
-| Windows model-proxy connectors | **Unsupported** | The native Windows gateway is hook/plugin-only. |
+| Windows model-proxy connectors | **Unsupported** | The native Windows gateway supports connector hook, plugin, and awaited-policy lanes, not the guardrail-proxy lifecycle. |
 | A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
 | OpenShell sandbox and `sandbox` commands | **Unsupported** | The Windows release does not host the Linux sandbox lifecycle. |
-| `systemd`, `launchd`, Unix sockets, and POSIX hook shells | **Not applicable** | Windows uses native processes and Windows process identity. Native connectors use the packaged hook executable, a managed adapter, an in-process plugin, or the connector's documented native plugin surface without a POSIX shell or WSL. |
-| Machine services from the public per-user Setup | **Unsupported** | The current-user Setup never elevates or installs services. Use the separate [managed-enterprise lifecycle](/docs/get-started/windows/managed-enterprise) for the supported SCM gateway and guardian. |
+| `systemd`, `launchd`, Unix sockets, and DefenseClaw-provided POSIX hook shells | **Not applicable** | Windows uses native processes and Windows process identity. DefenseClaw uses the packaged hook executable, a managed adapter, or an in-process bridge and does not add WSL or a POSIX shell. A connector page calls out any separate upstream runtime dependency, such as Devin's own Windows hook runner. |
+| Machine services from the public per-user Setup | **Unsupported** | The current-user Setup never elevates or installs services. The separate [managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout) installs `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. |
 | Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
 
 No roadmap is implied by these classifications.
@@ -116,17 +103,14 @@ No roadmap is implied by these classifications.
 
 For a normal-mode migration from macOS or Linux, expect a per-user Setup EXE instead of a shell installer,
 HKCU `PATH` and Run registration instead of a service manager, native process
-identity instead of PID-only signaling, and a native hook executable or Amp
-system plugin instead of Bash hooks. Sandbox and proxy connector features do
-not move with you.
+identity instead of PID-only signaling, and the selected connector's native
+hook, adapter, plugin, or awaited-policy lane instead of a DefenseClaw POSIX
+hook script. Sandbox and proxy connector features do not move with you.
 
-From WSL, perform a fresh native install. Install Amp, Codex, Claude Code, or
-the selected supported connector natively for the same Windows user, then run
-native connector setup.
-OpenCode upstream recommends WSL for best experience but explicitly supports
-direct Windows execution; DefenseClaw supports only that direct native path.
-Do not copy a WSL
-data directory, hook scripts, tokens, virtual environment, gateway binary, or
+From WSL, perform a fresh native install. Install the selected
+[supported connector](/docs/connectors#platform-support) natively for the same
+Windows user, follow its Windows setup tab, and do not copy a WSL data
+directory, hook scripts, tokens, virtual environment, gateway binary, or
 connector configuration into the Windows profile.
 
 Continue with [Install and maintain](/docs/get-started/windows/install-lifecycle),

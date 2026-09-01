@@ -21,7 +21,18 @@ The other three events provide lifecycle telemetry.
 Amp continues to talk directly to its own model provider. DefenseClaw does not
 proxy Amp's model traffic.
 
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | DefenseClaw installs Amp's user-scoped system policy plugin under `~/.config/amp/plugins`. |
+| Native Windows x64 | **Supported** | Packaged Setup installs the same plugin contract under `%USERPROFILE%\.config\amp\plugins`, protects it with a user-only ACL, and exercises it in the deterministic Windows release gate. |
+
 ## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
 
 ```bash
 defenseclaw setup amp                                      # global observe/inventory
@@ -29,6 +40,21 @@ defenseclaw setup amp --mode action                        # execution + model-b
 defenseclaw setup amp --workspace /path/to/repo            # include project surfaces
 defenseclaw setup amp --workspace /path/to/repo --mode action
 ```
+
+</Tab>
+
+<Tab value="Windows">
+
+```powershell
+defenseclaw setup amp
+defenseclaw setup amp --mode action
+defenseclaw setup amp --workspace 'C:\path\to\repo'
+defenseclaw setup amp --workspace 'C:\path\to\repo' --mode action
+```
+
+</Tab>
+
+</Tabs>
 
 The system policy plugin is user-scoped in every case. Pass `--workspace`
 when DefenseClaw must also inventory that repository's `.amp/settings.json`
@@ -43,9 +69,6 @@ Setup writes one owner-only managed file:
 | macOS and Linux | `~/.config/amp/plugins/defenseclaw.ts` |
 | Native Windows | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` |
 
-macOS and Linux are supported. Native Windows support uses the same contract
-through the packaged setup lifecycle and `%USERPROFILE%`-scoped Amp config
-home; its deterministic Windows CI gate must pass for each release artifact.
 The managed plugin contains a connector-scoped gateway token and is installed
 with private file permissions or the Windows user-only ACL. Setup preserves an
 existing file, teardown restores it, and a user-modified managed file is never

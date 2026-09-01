@@ -22,8 +22,8 @@ Gemini CLI setup is deprecated on every platform; existing managed state remains
 removable; use `defenseclaw setup antigravity` for new Google agent setup.
 OpenHands, OpenClaw, and ZeptoClaw remain unavailable there. Some
 commands require optional configuration or are unavailable there. Use the
-[native Windows command matrix](/docs/get-started/windows/capabilities-commands)
-for the Windows classification and safe examples.
+[connector platform table](/docs/connectors#platform-support) for availability
+and each connector page for native Windows setup and quirks.
 </Callout>
 
 DefenseClaw ships **two** binaries:
@@ -94,7 +94,7 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage the `~/.defenseclaw/custom-providers.json` overlay used to route LLM traffic through internal or self-hosted endpoints. `add` accepts `--base-url`, `--domain` (repeatable; required alongside `--base-url` so the gateway can match inbound URLs back to this overlay entry — `defenseclaw doctor` warns when the `base_url` host is not covered), `--base-provider-type`, `--env-key`, `--allowed-request`, `--available-model`, `--request-path-override`, TLS knobs (`--ca-cert-file`, `--insecure-skip-verify`), and provider-typed regional flags: Bedrock — `--bedrock-region`, `--bedrock-auth-mode`, `--bedrock-access-key-env`, `--bedrock-secret-key-env`, `--bedrock-session-token-env`, `--bedrock-profile-name`, `--bedrock-inference-profile`, `--bedrock-deployment alias=model-id` (repeatable); Vertex AI — `--vertex-project-id`, `--vertex-region`, `--vertex-auth-mode`, `--vertex-service-account-json-env`; Azure OpenAI — `--azure-endpoint`, `--azure-api-version`, `--azure-auth-mode`, `--azure-deployment-alias model=deployment` (repeatable). Each family is rejected against a mismatched `--base-provider-type`. Omit `--name` interactively for the wizard. |
 | `defenseclaw setup claude-code` | Hook setup alias for Claude Code; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup codex` | Hook setup alias for Codex; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup cursor` | Native Windows user-hook alias for Cursor; defaults to observe, while `--mode action` uses event-native deny with `failClosed: true`. Native human approval is not enabled. |
+| `defenseclaw setup cursor` | User-hook alias for Cursor; defaults to observe, while `--mode action` uses event-native deny with `failClosed: true`. Native human approval is not enabled. |
 | `defenseclaw setup devin` | Native Devin CLI hook alias; defaults to observe, while `--mode action` can block only on the four documented block-capable events. |
 | `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
@@ -165,13 +165,15 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
 | `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set behavior for hook delivery, authentication, and invalid-response failures. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. |
-| `defenseclaw guardrail block-message "<text>" [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. |
+| `defenseclaw guardrail block-message ["<text>"] [--clear] [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. `--clear --connector X` removes that connector's override so it inherits the global message, or the built-in default when the global value is empty. Unscoped `--clear` also clears active connector overrides, returning the active roster to the built-in default. Do not pass text and `--clear` together. |
 
 ```bash
 defenseclaw guardrail status                              # full per-connector roster
 defenseclaw guardrail status --connector codex            # one connector's resolved posture
 defenseclaw guardrail fail-mode closed --connector codex  # scope to one connector
 defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail block-message --clear --connector codex # inherit global / built-in
+defenseclaw guardrail block-message --clear                # clear global + active overrides
 defenseclaw guardrail disable --connector codex           # then `enable --connector codex` to restore
 ```
 
@@ -283,7 +285,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw upgrade [--version X] [--yes]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. The immutable `0.8.4` built-in command cannot parse the truthful `0.8.5` manifest because that manifest has an empty Windows bridge matrix; a `0.8.3`-or-older built-in command also cannot learn the two-process bridge handoff retroactively. To cross into `0.8.5`, use the authenticated target-release POSIX resolver in latest mode without a version override. That resolver, and built-in controllers from `0.8.5` onward for later compatible manifests, can authenticate a temporary pinned Cosign when no system Cosign exists. `--allow-unverified` cannot bypass provenance. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw upgrade [--version X] [--yes] [--recover-corrupt-audit]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. The immutable `0.8.4` built-in command cannot parse the truthful `0.8.5` manifest because that manifest has an empty Windows bridge matrix; a `0.8.3`-or-older built-in command also cannot learn the two-process bridge handoff retroactively. To cross into `0.8.5`, use the authenticated target-release POSIX resolver in latest mode without a version override. That resolver, and built-in controllers from `0.8.5` onward for later compatible manifests, can authenticate a temporary pinned Cosign when no system Cosign exists. On macOS/Linux, `--recover-corrupt-audit` delegates to the authenticated resolver, which requires an explicit post-stop SQLite corruption result before preserving the exact database/WAL set in private same-filesystem custody and activating a fresh store. Native Windows rejects that option before mutation. `--allow-unverified` cannot bypass provenance. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
 | `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
 | `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
 | `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |
