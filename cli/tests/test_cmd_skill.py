@@ -839,6 +839,54 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_remote.assert_called_once_with(self.app, False, connector="codex")
 
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    @patch("defenseclaw.commands.cmd_skill._sidecar_client")
+    def test_scan_all_remote_json_mixed_multi_connector_failure_is_nonzero(
+        self, mock_client_factory, mock_list,
+    ):
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        skill_paths = {
+            "claudecode": ["/remote/claudecode/alpha"],
+            "codex": ["/remote/codex/beta", "/remote/codex/gamma"],
+        }
+
+        def list_skills(_app, connector=None):
+            return {
+                "skills": [
+                    {"name": os.path.basename(path), "baseDir": path}
+                    for path in skill_paths[connector]
+                ]
+            }
+
+        def scan_skill(*, target, name):
+            if name == "beta":
+                raise RuntimeError("codex sidecar unavailable")
+            return {
+                "scanner": "skill-scanner",
+                "target": target,
+                "findings": [],
+            }
+
+        mock_list.side_effect = list_skills
+        mock_client_factory.return_value.scan_skill.side_effect = scan_skill
+
+        result = self.invoke(["scan", "--all", "--remote", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(
+            [(row["connector"], row["target"]) for row in payload],
+            [
+                ("claudecode", "/remote/claudecode/alpha"),
+                ("codex", "/remote/codex/beta"),
+                ("codex", "/remote/codex/gamma"),
+            ],
+        )
+        self.assertIn("codex sidecar unavailable", payload[1]["error"])
+        self.assertEqual(mock_client_factory.return_value.scan_skill.call_count, 3)
+
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
     def test_info_connector_flag_threads_connector(self, mock_info):
         # D4 parity: `skill info --connector X` must inspect X's skill.

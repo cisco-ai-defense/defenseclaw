@@ -62,6 +62,55 @@ def test_grafana_dashboard_catalog_requires_generated_mirror() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_grafana_live_auth_supports_anonymous_mode_and_rejects_bad_explicit_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit = _load_audit_module()
+    audit._GRAFANA_AUTHORIZATION = "stale credential"
+
+    audit.configure_grafana_auth(None)
+
+    assert audit._GRAFANA_AUTHORIZATION is None
+    with pytest.raises(audit.AuditError, match="unavailable or unsafe"):
+        audit.configure_grafana_auth(tmp_path / "missing-password")
+
+
+def test_grafana_auth_is_attached_only_to_exact_loopback_grafana_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    audit = _load_audit_module()
+    password = tmp_path / "grafana-password"
+    # Match the production credential writer exactly. Text-mode writes turn
+    # ``\n`` into CRLF on Windows, which this parser intentionally rejects.
+    password.write_bytes(b"A" * 32 + b"\n")
+    audit.configure_grafana_auth(password)
+    requests: list[object] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(audit.urllib.request, "urlopen", fake_urlopen)
+
+    assert audit.request_json("http://127.0.0.1:3000/api/search") == {}
+    assert audit.request_json("http://localhost:3000/api/search") == {}
+    assert isinstance(requests[0], audit.urllib.request.Request)
+    assert requests[0].get_header("Authorization", "").startswith("Basic ")
+    assert requests[1] == "http://localhost:3000/api/search"
+
+
 def test_prometheus_label_inventory_includes_unchanged_canonical_v8_fields() -> None:
     audit = _load_audit_module()
     labels = audit.compatibility_errors.__globals__["prometheus_label_inputs"]()

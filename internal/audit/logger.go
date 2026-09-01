@@ -90,9 +90,11 @@ func stampAuditEventEnvelope(e *Event) {
 }
 
 // Logger is the audit choke point for generated v8 records and metrics.
-// SQLite persistence and destination fanout are owned by the bound v8 runtime;
-// the removed v7 sink, gateway.jsonl, and structured-emitter bridges cannot be
-// re-enabled by configuration or by temporarily detaching the runtime.
+// Destination fanout is owned by the bound v8 runtime; the removed v7 sink,
+// gateway.jsonl, and structured-emitter bridges cannot be re-enabled by
+// configuration or by temporarily detaching the runtime. Short-lived operator
+// commands that intentionally do not start that runtime use
+// PersistStandaloneScan to commit only the canonical forensic scan state.
 type Logger struct {
 	store *Store
 
@@ -121,6 +123,9 @@ func (l *Logger) SetRuntimeV8Emitter(emitter RuntimeV8Emitter) {
 	l.mu.Lock()
 	l.runtimeV8 = emitter
 	l.mu.Unlock()
+	if l.store != nil {
+		l.store.resetFindingGaugeBaselines()
+	}
 }
 
 func (l *Logger) runtimeV8Snapshot() RuntimeV8Emitter {
@@ -214,6 +219,28 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 	return l.LogScanWithCorrelation(context.Background(), result, verdict, ScanCorrelation{})
 }
 
+// PersistStandaloneScan commits the canonical forensic rows and finding
+// lifecycle for a short-lived operator scan without requiring or invoking the
+// observability runtime. The caller supplies the installation-keyed
+// fingerprinter used to sanitize sensitive finding identities. A nil
+// fingerprinter is accepted for compatibility, but sensitive findings then use
+// a redacted.<kind>.unknown rule identity without a content fingerprint, which
+// weakens lifecycle identity and correlation. Long-lived runtime producers
+// must use LogScanWithCorrelation so generated logs and metrics cannot be
+// silently omitted after a runtime detach.
+func (l *Logger) PersistStandaloneScan(
+	result *scanner.ScanResult,
+	fingerprinter RuntimeV8FindingContentFingerprinter,
+) error {
+	if l == nil || l.store == nil {
+		return fmt.Errorf("audit: standalone scan store is unavailable")
+	}
+	_, err := l.persistScanWithCorrelation(
+		context.Background(), result, "", ScanCorrelation{}, fingerprinter,
+	)
+	return err
+}
+
 // LogScanWithCorrelation is the canonical scan emission entry point with
 // explicit correlation + identity. It threads run_id / request_id /
 // session_id / trace_id and the three-tier agent identity onto the forensic
@@ -233,8 +260,30 @@ func (l *Logger) LogScanWithCorrelation(
 	if binding.logBatch == nil {
 		return fmt.Errorf("audit: v8 scan log batch runtime is unavailable")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	scanID, err := l.persistScanWithCorrelation(
+		ctx, result, verdict, corr, binding.findingContentFingerprinter,
+	)
+	if err != nil {
+		return err
+	}
+	return l.emitScanV8(ctx, binding, result, scanID, verdict, corr)
+}
+
+func (l *Logger) persistScanWithCorrelation(
+	ctx context.Context,
+	result *scanner.ScanResult,
+	verdict string,
+	corr ScanCorrelation,
+	fingerprinter RuntimeV8FindingContentFingerprinter,
+) (string, error) {
+	if l == nil {
+		return "", fmt.Errorf("audit: scan logger is unavailable")
+	}
 	if result == nil {
-		return fmt.Errorf("audit: cannot log a nil scan result")
+		return "", fmt.Errorf("audit: cannot log a nil scan result")
 	}
 
 	if verdict != "" {
@@ -255,7 +304,7 @@ func (l *Logger) LogScanWithCorrelation(
 				finding.EvidenceSummary = summary
 			}
 		}
-		fingerprintPersistedFindingEvidence(finding, binding.findingContentFingerprinter)
+		fingerprintPersistedFindingEvidence(finding, fingerprinter)
 		// This is the final in-memory boundary before forensic persistence
 		// and generated audit projection. Literal credentials and executable
 		// trust directives never cross it in cleartext, even when a producer
@@ -271,7 +320,7 @@ func (l *Logger) LogScanWithCorrelation(
 				finding,
 				result.Scanner,
 				sensitiveFindingKindSecret,
-				binding.findingContentFingerprinter,
+				fingerprinter,
 			)
 			redactPersistedCredentialFinding(finding)
 		} else if isPIIFinding(*finding) {
@@ -279,7 +328,7 @@ func (l *Logger) LogScanWithCorrelation(
 				finding,
 				result.Scanner,
 				sensitiveFindingKindPII,
-				binding.findingContentFingerprinter,
+				fingerprinter,
 			)
 			redactPersistedPIIFinding(finding)
 		} else if isTrustExploitFinding(*finding) {
@@ -287,7 +336,7 @@ func (l *Logger) LogScanWithCorrelation(
 				finding,
 				result.Scanner,
 				sensitiveFindingKindTrust,
-				binding.findingContentFingerprinter,
+				fingerprinter,
 			)
 			redactPersistedTrustExploitFinding(finding)
 		}
@@ -318,9 +367,9 @@ func (l *Logger) LogScanWithCorrelation(
 	// being revived by configuration or a concurrent reload.
 	scanID, err := scanner.EmitScanResult(ctx, l.store, result, agent)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return l.emitScanV8(ctx, binding, result, scanID, verdict, corr)
+	return scanID, nil
 }
 
 // fingerprintPersistedFindingEvidence replaces every producer-supplied
@@ -504,6 +553,7 @@ func isTrustExploitFinding(finding scanner.Finding) bool {
 	}
 	if hasFindingIDPrefix(finding.RuleID, "TRUST-") || hasFindingIDPrefix(finding.ID, "TRUST-") ||
 		hasFindingIDPrefix(finding.RuleID, "LP-INJ-") || hasFindingIDPrefix(finding.ID, "LP-INJ-") ||
+		hasFindingIDPrefix(finding.RuleID, "CS-INJ-") || hasFindingIDPrefix(finding.ID, "CS-INJ-") ||
 		hasFindingIDPrefix(finding.RuleID, "JUDGE-ADJ-INJECTION") || hasFindingIDPrefix(finding.ID, "JUDGE-ADJ-INJECTION") ||
 		isTrustExploitLabel(finding.Category) {
 		return true
@@ -522,7 +572,7 @@ func hasFindingIDPrefix(value, prefix string) bool {
 
 func isTrustExploitLabel(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
-	return value == "prompt-injection" || value == "trust-exploit"
+	return value == "injection" || value == "prompt-injection" || value == "trust-exploit"
 }
 
 func stableRedactedTrustTags(tags []string) []string {

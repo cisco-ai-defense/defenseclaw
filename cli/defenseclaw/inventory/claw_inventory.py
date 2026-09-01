@@ -40,16 +40,19 @@ from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.inventory.plugin_directories import (
+    PluginInstallClaims,
     discover_plugin_directories,
     read_amp_plugin_source,
-)
-from defenseclaw.inventory.plugin_identity import (
-    AmbiguousPluginIdentityError,
-    filesystem_identity_key,
 )
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
 INVENTORY_VERSION = 3
+
+# Keep AIBOM scan-finding evidence within the canonical Observability v8
+# ingress contract. The complete inventory remains in the command result;
+# only its audit-telemetry projection is summarized when a category is large.
+_AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES = 65_536
+_AIBOM_TELEMETRY_SUMMARY_SCHEMA = "defenseclaw.aibom.telemetry-summary.v1"
 
 ALL_CATEGORIES: frozenset[str] = frozenset(["skills", "plugins", "mcp", "agents", "tools", "models", "memory"])
 
@@ -181,6 +184,40 @@ def build_claw_aibom(
     return out
 
 
+def _aibom_telemetry_description(payload: Any) -> str:
+    """Return a lossless small payload or a bounded, verifiable summary.
+
+    Canonical Observability v8 admits at most 65,536 UTF-8 bytes per finding
+    description. AIBOM remains the source of truth and is rendered in full to
+    the caller; this helper only bounds the scan finding sent to telemetry.
+    """
+
+    rendered = json.dumps(payload, indent=2)
+    rendered_bytes = rendered.encode("utf-8")
+    if len(rendered_bytes) <= _AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES:
+        return rendered
+
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    summary = {
+        "schema": _AIBOM_TELEMETRY_SUMMARY_SCHEMA,
+        "truncated": True,
+        "item_count": len(payload) if isinstance(payload, list) else 0,
+        "source_utf8_bytes": len(rendered_bytes),
+        "sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+    bounded = json.dumps(summary, indent=2, sort_keys=True)
+    # This is a fixed-shape object, but keep the boundary assertion adjacent
+    # to its construction so future fields cannot silently break admission.
+    if len(bounded.encode("utf-8")) > _AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES:
+        raise ValueError("AIBOM telemetry summary exceeds its canonical size limit")
+    return bounded
+
+
 def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
     """One INFO finding per category so audit logging stays compact."""
     target = _aibom_target_path(inv, cfg)
@@ -203,7 +240,7 @@ def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
                 id=f"claw-aibom-{key}",
                 severity="INFO",
                 title=f"{label} ({count})",
-                description=json.dumps(payload, indent=2) if payload else "[]",
+                description=_aibom_telemetry_description(payload),
                 location=target,
                 scanner="aibom-claw",
                 tags=["claw-aibom", key],
@@ -2723,37 +2760,39 @@ def _enumerate_plugins_filesystem(
 ) -> list[dict[str, Any]]:
     """One row per logical plugin under ``cfg.plugin_dirs(connector)``.
 
-    A plugin is treated as a directory containing one of the
-    documented manifest names (matches plugin_scanner._MANIFEST_CANDIDATES
-    after S2.3): package.json, manifest.json, plugin.json,
-    openclaw.plugin.json, .codex-plugin/plugin.json,
-    .claude-plugin/plugin.json. Codex cache registry buckets are expanded to
-    their exact manifest roots and logical names are deduplicated using Codex's
-    active-plugin metadata. ``connector`` scopes the walk for multi-connector
-    focus (defaults to active).
+    A plugin is normally a directory containing one of the documented
+    manifest names (matches plugin_scanner._MANIFEST_CANDIDATES after S2.3):
+    package.json, manifest.json, plugin.json, openclaw.plugin.json,
+    .codex-plugin/plugin.json, .claude-plugin/plugin.json. Authoritative
+    connector registries may also identify a manifestless installed bundle.
+    Codex and Claude cache containers are expanded to their exact plugin roots.
+    ``connector`` scopes the walk for multi-connector focus (defaults to
+    active).
     """
     rows: list[dict[str, Any]] = []
-    seen: dict[str, str] = {}
+    claimed = PluginInstallClaims()
     resolved_connector = connector or cfg.active_connector()
     for plugin_dir in cfg.plugin_dirs(connector):
         for discovered in discover_plugin_directories(plugin_dir, connector=resolved_connector):
             entry = discovered.id
-            entry_key = filesystem_identity_key(entry, plugin_dir)
             full = discovered.path
-            if entry_key in seen and os.path.realpath(seen[entry_key]) != os.path.realpath(full):
-                raise AmbiguousPluginIdentityError(
-                    f"ambiguous plugin identity {entry!r}: {seen[entry_key]}, {full}; "
-                    "remove or rename duplicate directories"
-                )
-            seen[entry_key] = full
+            if not claimed.add_directory(discovered, plugin_dir):
+                continue
             manifest = discovered.manifest or _detect_plugin_manifest(full)
+            installed = bool(manifest or discovered.cached)
             row: dict[str, Any] = {
                 "id": entry,
                 "name": discovered.name or entry,
                 "version": discovered.version,
                 "origin": discovered.origin or plugin_dir,
                 "enabled": discovered.enabled,
-                "status": ("loaded" if manifest and discovered.enabled else "disabled" if manifest else "no-manifest"),
+                "status": (
+                    "loaded"
+                    if installed and discovered.enabled
+                    else "disabled"
+                    if installed
+                    else "no-manifest"
+                ),
                 "path": full,
             }
             if manifest:
@@ -2764,6 +2803,12 @@ def _enumerate_plugins_filesystem(
                 row["registry"] = discovered.registry
             if discovered.cached:
                 row["cached"] = True
+            if discovered.scope:
+                row["scope"] = discovered.scope
+            if discovered.project_path:
+                row["project_path"] = discovered.project_path
+            if discovered.registry_source:
+                row["registry_source"] = discovered.registry_source
             rows.append(row)
     return rows
 

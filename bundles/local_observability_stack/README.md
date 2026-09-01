@@ -23,10 +23,24 @@ All published host ports are loopback-bound by default in
 bind address, so it is not equivalent to the managed CLI's loopback safety
 checks.
 
+Direct `docker compose up` retains the historical anonymous Admin experience.
+The managed controller has two explicit modes:
+
+- `--password` applies [`docker-compose.password.yml`](docker-compose.password.yml),
+  creates a private `.grafana-admin-password`, and supplies it as a Compose
+  secret. New managed stacks use this mode by default.
+- `--no-password` keeps anonymous Admin access and prints a warning. An
+  existing managed stack with a legacy Grafana container or data volume is
+  grandfathered into this mode so an upgrade does not change its login flow.
+
+The selected managed mode is stored in the private `.grafana-access-mode`
+file. Both runtime files are ignored by Git, excluded from packages, and never
+printed or placed in the Grafana container environment.
+
 ## Direct Compose bind override
 
-The managed controller enforces loopback-only access. Contributors who run the
-Compose bundle directly can set `HOST_BIND` before startup:
+The managed controller enforces loopback-only access. Direct Compose keeps the
+compatible no-password mode. Contributors can intentionally change its bind:
 
 ```powershell
 $env:HOST_BIND = "192.0.2.10"
@@ -39,7 +53,9 @@ HOST_BIND=192.0.2.10 docker compose up -d
 
 That override bypasses the managed controller's loopback enforcement and
 exposes every published bundle port on the selected interface. Use it only in
-an explicitly secured development environment.
+an explicitly secured development environment. Prometheus, Loki, and Tempo do
+not gain authentication from the Grafana login and require their own external
+access-control boundary when exposed beyond loopback.
 
 ## Source ownership
 
