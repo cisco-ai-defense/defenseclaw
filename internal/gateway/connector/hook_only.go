@@ -5112,6 +5112,15 @@ func marshalTopLevelYAMLFieldPreservingOtherBytes(
 		return nil, fmt.Errorf("parse YAML %s for byte-preserving update: root is not a mapping", path)
 	}
 	root := document.Content[0]
+	// Hermes bootstraps a fresh config.yaml as the compact flow mapping `{}`.
+	// Appending a block-style `hooks:` field after that token produces two YAML
+	// roots. yaml.v3 decodes only the first empty mapping, so Setup appears to
+	// succeed while the effective-registration verifier cannot see any hook.
+	// There are no operator fields to preserve in this exact minimal document;
+	// replace it with the rendered mapping instead.
+	if len(root.Content) == 0 && bytes.Equal(bytes.TrimSpace(original), []byte("{}")) {
+		return rendered, nil
+	}
 	offsets := yamlLineOffsets(original)
 	for index := 0; index+1 < len(root.Content); index += 2 {
 		key := root.Content[index]

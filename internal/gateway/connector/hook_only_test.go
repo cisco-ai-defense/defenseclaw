@@ -1377,6 +1377,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if err := conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
+			if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+				t.Fatalf("OwnedHooksPresent after Setup = %t, %v; want true, nil", present, err)
+			}
 			data, err := os.ReadFile(cfgPath)
 			if err != nil {
 				t.Fatalf("read config after setup: %v", err)
@@ -1539,6 +1542,73 @@ func TestHermesSetup_WritesFullLifecycleAndScopedAllowlist(t *testing.T) {
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("VerifyClean: %v", err)
+	}
+}
+
+func TestHermesHookPatchReplacesMinimalEmptyFlowMapping(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantHooks := map[string]interface{}{
+		"pre_tool_call": []interface{}{map[string]interface{}{"command": "managed-hook"}},
+	}
+	patched, err := marshalTopLevelYAMLFieldPreservingOtherBytes(path, "hooks", wantHooks)
+	if err != nil {
+		t.Fatalf("patch minimal Hermes config: %v", err)
+	}
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(patched, &config); err != nil {
+		t.Fatalf("parse patched minimal Hermes config: %v\n%s", err, patched)
+	}
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok || len(hooks) != len(wantHooks) {
+		t.Fatalf("patched hooks = %#v, want %#v", config["hooks"], wantHooks)
+	}
+}
+
+func TestHermesSetupFromMinimalConfigPublishesEffectiveRegistration(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	hermesHome := filepath.Join(root, "hermes")
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(hermesHome, "config.yaml")
+	pristine := []byte("{}\n")
+	if err := os.WriteFile(configPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = configPath
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	conn := NewHermesConnector()
+	opts := SetupOpts{DataDir: filepath.Join(root, "state"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	opts = prepareHermesSetupAdmissionFixture(t, opts)
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("OwnedHooksPresent after Setup = %t, %v; want true, nil", present, err)
+	}
+	config, err := readYAMLObject(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok || len(hooks) != len(hermesRequiredHooks) {
+		t.Fatalf("published hooks = %#v, want %d lifecycle events", config["hooks"], len(hermesRequiredHooks))
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restored, pristine) {
+		t.Fatalf("restored config = %q, want exact pristine bytes %q", restored, pristine)
 	}
 }
 
