@@ -491,6 +491,7 @@ prerequisite for the target-release resolver, and has no second apply protocol.
 
 ```bash
 defenseclaw --version
+skill-scanner --version
 defenseclaw migrations status
 defenseclaw config validate
 defenseclaw config show --effective --section observability
@@ -498,6 +499,12 @@ defenseclaw observability plan
 defenseclaw doctor
 defenseclaw-gateway status
 ```
+
+On macOS and Linux, every authenticated upgrade also reconciles
+`~/.local/bin/skill-scanner` with the entry point inside
+`~/.defenseclaw/.venv/bin/`. A recognized legacy console script with a stale
+shebang is retired into private installer custody and replaced atomically;
+unrelated files or symlinks at that path are preserved and stop the repair.
 
 For the local stack:
 
