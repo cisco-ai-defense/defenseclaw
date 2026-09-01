@@ -401,6 +401,13 @@ try {
     Assert-True ([string]$copilotWindowsBlockFixture.tool_name -ceq 'powershell' -and
         [string]$copilotWindowsBlockFixture.tool_input.command -ceq 'Remove-Item -Force C:\ -Recurse') `
         'Copilot native Windows block fixture uses PowerShell syntax'
+    $openCodeWindowsBlockFixture = [IO.File]::ReadAllText(
+        (Join-Path $PSScriptRoot 'golden\opencode\pre_tool_block_windows.json')
+    ) | ConvertFrom-Json -ErrorAction Stop
+    Assert-True ([string]$openCodeWindowsBlockFixture.hook_event_name -ceq 'tool.execute.before' -and
+        [string]$openCodeWindowsBlockFixture.tool_name -ceq 'bash' -and
+        [string]$openCodeWindowsBlockFixture.tool_input.command -ceq 'Remove-Item -Force C:\ -Recurse') `
+        'OpenCode native Windows block fixture preserves the official tool label with PowerShell syntax'
     $subagentFixture = [IO.File]::ReadAllText(
         (Join-Path $ampGoldenRoot 'subagent_tool_call.json')
     ) | ConvertFrom-Json -ErrorAction Stop
@@ -3091,7 +3098,7 @@ connection.close()
         $standardUserCIText -match "ValidateSet\('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'devin', 'hermes', 'antigravity', 'opencode'\)" -and
         $standardUserCIText.Contains('live-connector-e2e\golden\$Connector\pre_tool_allow.json') -and
         $standardUserCIText.Contains('live-connector-e2e\golden\$Connector\pre_tool_block.json') -and
-        $standardUserCIText.Contains('live-connector-e2e\golden\copilot\pre_tool_block_windows.json') -and
+        $standardUserCIText.Contains('live-connector-e2e\golden\$Connector\pre_tool_block_windows.json') -and
         $standardUserCIText.Contains('live-connector-e2e\golden\$Connector\session_start.json') -and
         $standardUserCIText.Contains('live-connector-e2e\golden\amp\agent_start.json') -and
         $standardUserCIText.Contains('live-connector-e2e\golden\amp\tool_result.json') -and
@@ -3941,11 +3948,11 @@ connection.close()
         $contractRun -match "'tool\.call'.*?'subagent_tool_call\.json'" -and
         $ampFiveEventContract -match 'Invoke-Hook \$spec\.Event \$payloadPath allow') `
         'Amp Windows contract exercises all five native callbacks plus the subagent delegation boundary'
-    Assert-True ($contractRun.Contains("`$Connector -eq 'copilot'", [StringComparison]::Ordinal) -and
+    Assert-True ($contractRun.Contains('Test-Path -LiteralPath $windowsBlockFixture -PathType Leaf', [StringComparison]::Ordinal) -and
         $contractRun.Contains("Join-Path `$golden 'pre_tool_block_windows.json'", [StringComparison]::Ordinal) -and
         $contractRun.Contains('Invoke-Hook $blockEvent $blockFixture allow $true', [StringComparison]::Ordinal) -and
         $contractRun.Contains("Invoke-Hook 'PreTool-block' `$blockFixture", [StringComparison]::Ordinal)) `
-        'Copilot contract uses the native PowerShell block fixture in observe and action modes'
+        'connector contracts use native Windows block fixtures in observe and action modes when present'
     Assert-True ($contractRun -match "\`$actionBlockExpectation = 'block'" -and
         $contractRun -match "\`$requireAdvisoryBlock = \`$false" -and
         $contractRun -match "(?s)Invoke-DangerousCommandCorpus action.*?Invoke-Hook 'PreTool-block'.*?\`$actionBlockExpectation \`$requireAdvisoryBlock") `

@@ -1124,8 +1124,9 @@ try {
                 'live-connector-e2e\golden\amp\agent_end.json'
             )
         }
-        if ($Connector -eq 'copilot') {
-            $harnessFiles += 'live-connector-e2e\golden\copilot\pre_tool_block_windows.json'
+        $optionalWindowsBlockGolden = "live-connector-e2e\golden\$Connector\pre_tool_block_windows.json"
+        if (Test-Path -LiteralPath (Join-Path $PSScriptRoot $optionalWindowsBlockGolden) -PathType Leaf) {
+            $harnessFiles += $optionalWindowsBlockGolden
         }
     } elseif ($Mode -eq 'bootstrap-acceptance') {
         $harnessFiles += @(

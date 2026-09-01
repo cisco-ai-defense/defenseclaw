@@ -9364,8 +9364,9 @@ function Assert-TimeoutHandling {
 
 function Invoke-ContractRun {
     $golden = Join-Path $WorkspaceRoot "scripts\live-connector-e2e\golden\$Connector"
-    $blockFixture = if ($Connector -eq 'copilot') {
-        Join-Path $golden 'pre_tool_block_windows.json'
+    $windowsBlockFixture = Join-Path $golden 'pre_tool_block_windows.json'
+    $blockFixture = if (Test-Path -LiteralPath $windowsBlockFixture -PathType Leaf) {
+        $windowsBlockFixture
     } else {
         Join-Path $golden 'pre_tool_block.json'
     }
