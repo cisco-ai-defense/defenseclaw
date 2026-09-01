@@ -70,11 +70,11 @@ Bash-hosted kit:
 ```bash
 export SOURCE_COMMIT=0123456789abcdef0123456789abcdef01234567
 export SOURCE_DATE_EPOCH=1787097600
-export DEFENSECLAW_VERSION=0.9.0-rc1
+export RELEASE_VERSION=0.9.0-rc1
 export CMID_PSEUDO_VERSION=v0.0.0-20260819000000-0123456789ab
 ./assemble.sh \
   --source-commit "$SOURCE_COMMIT" \
-  --version "$DEFENSECLAW_VERSION" \
+  --version "$RELEASE_VERSION" \
   --cmid-pseudo-version "$CMID_PSEUDO_VERSION"
 ```
 
