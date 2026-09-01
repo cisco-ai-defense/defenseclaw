@@ -211,8 +211,12 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 		empty := "  "
 		opts.AuthenticatedManagedToken = &empty
 	})
-	if result.code != blockExit {
-		t.Fatalf("Run code = %d, want fail-closed %d; stderr=%s", result.code, blockExit, result.stderr)
+	if result.code != 0 {
+		t.Fatalf("Run code = %d, want structured fail-closed exit 0; stderr=%s", result.code, result.stderr)
+	}
+	wantStdout := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}` + "\n"
+	if result.stdout != wantStdout {
+		t.Fatalf("stdout = %q, want structured fail-closed output %q", result.stdout, wantStdout)
 	}
 	if result.rt.requests != 0 {
 		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
