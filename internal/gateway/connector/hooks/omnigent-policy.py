@@ -11,11 +11,16 @@ DefenseClaw connector.
 from __future__ import annotations
 
 import base64
+import getpass
 import json
 import math
+import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any
+
+_SAFE_ACCOUNT_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def _decoded(value: str) -> str:
@@ -338,6 +343,34 @@ def _trace_headers() -> dict[str, str]:
         return {}
 
 
+def _identity_headers() -> dict[str, str]:
+    """Report which end user this policy module runs as.
+
+    Under a managed install the gateway runs as a service account, so it cannot
+    see whose session a request belongs to; this module is in-session and can.
+    A value that is not a safe header field is dropped rather than sanitized,
+    so a hostile account name cannot smuggle a second header into every call.
+    """
+    headers: dict[str, str] = {}
+    try:
+        # os.getuid is absent on Windows, where no POSIX uid exists.
+        uid = os.getuid()  # type: ignore[attr-defined]
+    except AttributeError:
+        uid = -1
+    if uid >= 0:
+        headers["X-DefenseClaw-User-Id"] = str(uid)
+    try:
+        name = getpass.getuser()
+    except Exception:
+        # No identity is a supported outcome: the record is emitted
+        # unattributed rather than wrongly attributed.
+        return headers
+    # Mirrors the account-name allowlist the shell hooks apply in _hardening.sh.
+    if name and len(name) <= 256 and _SAFE_ACCOUNT_NAME.fullmatch(name):
+        headers["X-DefenseClaw-User-Name"] = name
+    return headers
+
+
 def _scoped_hook_token() -> str:
     """Load one strict credential without exposing path, bytes, or read errors."""
     with open(_TOKEN_FILE, "rb") as stream:
@@ -372,6 +405,7 @@ def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:
             separators=(",", ":"),
         ).encode("utf-8")
         headers = _trace_headers()
+        headers.update(_identity_headers())
         headers.update({
             "Content-Type": "application/json",
             "X-DefenseClaw-Client": "omnigent-policy/1.0",

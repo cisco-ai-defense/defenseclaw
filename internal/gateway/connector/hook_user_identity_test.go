@@ -5,6 +5,7 @@
 package connector
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,12 +16,27 @@ import (
 	"testing"
 )
 
-// identityHookScripts are the connector hooks that report the end user to the
-// gateway. Anything added here must read the helper the same way.
-var identityHookScripts = []string{
-	"hooks/codex-hook.sh",
-	"hooks/claude-code-hook.sh",
-	"hooks/cursor-hook.sh",
+// identityHookScripts is every shipped connector hook, discovered rather than
+// listed.
+//
+// A hand-maintained list is what allowed seven of these hooks to ship with no
+// identity reader at all: the three that had one passed, and the omission was
+// invisible because a hook that reports nothing behaves exactly like one that
+// reports correctly. Globbing means a newly added connector is covered the day
+// it lands, and dropping the reader from an existing one fails here.
+//
+// The glob deliberately excludes hooks/inspect-*.sh, which are proxy
+// inspection entry points rather than per-user connector hooks.
+func identityHookScripts(t *testing.T) []string {
+	t.Helper()
+	scripts, err := fs.Glob(hookFS, "hooks/*-hook.sh")
+	if err != nil {
+		t.Fatalf("glob hooks: %v", err)
+	}
+	if len(scripts) < 10 {
+		t.Fatalf("found only %d connector hooks (%q); the glob is no longer matching them", len(scripts), scripts)
+	}
+	return scripts
 }
 
 // TestUserIdentityArgsEmitBothHeadersUnderTheSystemShell runs the helper under
@@ -89,7 +105,7 @@ func TestIdentityHeadersSurviveTheSystemShellsReader(t *testing.T) {
 		`(?s)IDENTITY_HEADER_ARGS=\(\).*?defenseclaw_user_identity_args\).*?\nfi\n`,
 	)
 
-	for _, script := range identityHookScripts {
+	for _, script := range identityHookScripts(t) {
 		t.Run(filepath.Base(script), func(t *testing.T) {
 			body, err := hookFS.ReadFile(script)
 			if err != nil {
@@ -97,7 +113,11 @@ func TestIdentityHeadersSurviveTheSystemShellsReader(t *testing.T) {
 			}
 			reader := readerPattern.Find(body)
 			if reader == nil {
-				t.Fatalf("%s no longer contains a recognizable identity reader block", script)
+				t.Fatalf(
+					"%s has no identity reader block, so every event from this "+
+						"connector reaches AI Defense with no user attribution",
+					script,
+				)
 			}
 
 			program := `set -euo pipefail
@@ -120,6 +140,48 @@ printf '%s\n' "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"
 			}
 			if !strings.Contains(string(out), "X-DefenseClaw-User-Id: "+strconv.Itoa(os.Geteuid())) {
 				t.Fatalf("%s did not carry the caller's uid: %q", script, string(out))
+			}
+
+			// Collecting the arguments and never passing them to curl fails
+			// exactly as quietly as not collecting them.
+			if !strings.Contains(string(body), `"${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"`) {
+				t.Fatalf(
+					"%s builds IDENTITY_HEADER_ARGS but never expands it into its request",
+					script,
+				)
+			}
+		})
+	}
+}
+
+// TestPluginTransportsReportIdentityToo covers the connectors that do not go
+// through a shell hook at all.
+//
+// amp, opencode, and omnigent POST to the gateway from inside the agent's own
+// runtime, so they bypass both _hardening.sh and hookexec. They were the other
+// half of the same gap: three connectors whose events reached AI Defense with
+// no user on them, for the same reason and with the same silence.
+func TestPluginTransportsReportIdentityToo(t *testing.T) {
+	for _, asset := range []string{
+		"hooks/amp-plugin.ts",
+		"hooks/opencode-plugin.js",
+		"hooks/omnigent-policy.py",
+	} {
+		t.Run(filepath.Base(asset), func(t *testing.T) {
+			body, err := hookFS.ReadFile(asset)
+			if err != nil {
+				t.Fatalf("read embed: %v", err)
+			}
+			for _, header := range []string{"X-DefenseClaw-User-Id", "X-DefenseClaw-User-Name"} {
+				if !strings.Contains(string(body), header) {
+					t.Errorf("%s never sets %s, so its events carry no user", asset, header)
+				}
+			}
+			// Each of these runs on Windows too, where there is no POSIX uid.
+			// Reporting the -1 that the runtime returns there would place a
+			// value in user.id belonging to neither identifier namespace.
+			if !strings.Contains(string(body), ">= 0") && !strings.Contains(string(body), "uid >= 0") {
+				t.Errorf("%s does not guard against a negative uid on Windows", asset)
 			}
 		})
 	}

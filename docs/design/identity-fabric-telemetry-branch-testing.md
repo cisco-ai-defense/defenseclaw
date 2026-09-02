@@ -37,10 +37,23 @@ agent. The prior code did exactly this; fixing it is part of the branch.
 Only the hook runs inside the real user's session, so the hook reports the
 identity and the gateway consumes it:
 
-| Platform | Hook shape | How identity travels |
+| Transport | Used by | How identity travels |
 | --- | --- | --- |
-| macOS / Linux | bundled `.sh` that `curl`s the gateway | `defenseclaw_user_identity_args` in `_hardening.sh` emits `X-DefenseClaw-User-Id` / `X-DefenseClaw-User-Name` curl arguments |
-| Windows | native `<exe> hook --connector <name>` | `hookexec.setUserIdentityHeaders` reads the thread/process token SID |
+| bundled `.sh` that `curl`s the gateway | all ten `hooks/*-hook.sh` | `defenseclaw_user_identity_args` in `_hardening.sh` emits `X-DefenseClaw-User-Id` / `X-DefenseClaw-User-Name` curl arguments |
+| native `<exe> hook --connector <name>` | Windows, and the `.ps1` hooks | `hookexec.setUserIdentityHeaders` reads the thread/process token SID |
+| in-process plugin POST | `amp-plugin.ts`, `opencode-plugin.js`, `omnigent-policy.py` | each sets the same two headers from its own runtime (`os.userInfo()`, `getpass.getuser()`) |
+
+Every connector transport reports identity. That is worth stating explicitly
+because the first cut covered only codex, claude-code, and cursor, and the
+seven other shell hooks plus the three plugin transports shipped with no
+identity at all — which, like the bash 3.2 bug below, looked identical to
+working correctly from the outside. The gateway side needed no change for any
+of them: `CorrelationMiddleware` reads these headers on every loopback route,
+not per connector.
+
+The plugin transports guard against a negative uid, because `os.userInfo().uid`
+and `os.getuid()` do not exist on Windows and the `-1` the runtime reports
+there belongs to neither identifier namespace.
 
 Precedence in the gateway is deliberate. Headers come from the hook process and
 are preferred. The hook *payload* is agent-controlled and is consulted only as a
@@ -281,14 +294,25 @@ user — so the records looked correct. The bug would only have surfaced in
 managed enterprise, where that fallback is deliberately disabled, which is the
 one deployment the feature exists for.
 
-The hooks now use a `while IFS= read -r` loop. Two tests pin it, and both run
-against `/bin/bash` explicitly rather than the first bash on `PATH`, since on a
-Homebrew machine those are different versions and the PATH one would pass.
+The hooks now use a `while IFS= read -r` loop. Three tests pin it, and the two
+shell ones run against `/bin/bash` explicitly rather than the first bash on
+`PATH`, since on a Homebrew machine those are different versions and the PATH
+one would pass.
+
+`TestIdentityHeadersSurviveTheSystemShellsReader` discovers its subjects by
+globbing `hooks/*-hook.sh` rather than reading a list. The hand-maintained list
+is what let seven hooks ship with no reader at all: the three that had one
+passed, and a hook that reports nothing is indistinguishable from a hook that
+reports correctly. It also asserts each hook actually expands
+`IDENTITY_HEADER_ARGS` into its request, since collecting the arguments and
+never passing them to `curl` fails just as quietly.
 
 Note the same `mapfile` guard still wraps W3C **trace** header propagation in
-all three hooks (`TRACE_HEADER_ARGS`). That is pre-existing on `main`, not
+all ten hooks (`TRACE_HEADER_ARGS`). That is pre-existing on `main`, not
 introduced here, and it means `traceparent` / `tracestate` are also not
-propagated from macOS hooks. Worth a separate fix.
+propagated from macOS hooks. It is the identical mechanical fix — replace
+`mapfile -t` with the same read loop — but it changes trace behavior rather
+than adding a field, so it is deliberately left out of this branch.
 
 ---
 
@@ -391,6 +415,17 @@ Cursor's Windows transport uses the generated PowerShell adapter and
   `sensitive`, preserved by the `managedaid` projection. Needs privacy sign-off.
 - **The email is attribution evidence, not attestation.** Any process running as
   the user can write the connector config it is read from.
+- **Only three connectors have an email source at all.** `codex` reads the
+  `email` claim from `~/.codex/auth.json`, `claude-code` reads
+  `oauthAccount.emailAddress` from `~/.claude.json`, and `cursor` forwards
+  `user_email` from its payload. Every other connector reaches the `default`
+  branch of `EmailForConnector` and resolves nothing, and the three that are
+  wired can still legitimately resolve nothing — Codex keeping credentials only
+  in the OS keychain, or a Claude Code install on API-key rather than OAuth
+  auth, both yield no address. The attribute is omitted in that case and the
+  record is still emitted; the uid or SID and the account name carry the
+  attribution. Cursor's payload-only source also means its email is absent from
+  the periodic inventory, which has no payload to read.
 - **`emitEndpointInventory` is managed-enterprise-only**, so the inventory half
   of this branch cannot be exercised on an unmanaged macOS install. It is
   covered by unit tests instead
