@@ -263,6 +263,109 @@ func TestCaptureHookEventStaleReceivedAtStillDiscovers(t *testing.T) {
 	}
 }
 
+// TestParseHookPayloadToleratesFieldTypeChanges pins per-field decoding. An
+// agent that changes one field's shape must cost at most that field: a
+// whole-payload decode failure would drop hook_event_name and silently stop
+// telemetry for the connector.
+func TestParseHookPayloadToleratesFieldTypeChanges(t *testing.T) {
+	tests := []struct {
+		name      string
+		payload   string
+		wantModel string
+	}{
+		{
+			name:      "model as string",
+			payload:   `{"hook_event_name":"SessionStart","session_id":"s-1","cwd":"/w","model":"claude-sonnet-4-6"}`,
+			wantModel: "claude-sonnet-4-6",
+		},
+		{
+			name:      "model as object",
+			payload:   `{"hook_event_name":"SessionStart","session_id":"s-1","cwd":"/w","model":{"id":"claude-sonnet-4-6","display_name":"Sonnet"}}`,
+			wantModel: "claude-sonnet-4-6",
+		},
+		{
+			name:      "model object without id falls back to display name",
+			payload:   `{"hook_event_name":"SessionStart","session_id":"s-1","cwd":"/w","model":{"display_name":"Sonnet"}}`,
+			wantModel: "Sonnet",
+		},
+		{
+			name:    "model of an unusable type costs only the model",
+			payload: `{"hook_event_name":"SessionStart","session_id":"s-1","cwd":"/w","model":["a","b"]}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := parseHookPayload([]byte(tc.payload))
+			if fields.hookEventName != "SessionStart" {
+				t.Errorf("hookEventName = %q, want %q", fields.hookEventName, "SessionStart")
+			}
+			if fields.sessionID != "s-1" {
+				t.Errorf("sessionID = %q, want %q", fields.sessionID, "s-1")
+			}
+			if fields.cwd != "/w" {
+				t.Errorf("cwd = %q, want %q", fields.cwd, "/w")
+			}
+			if fields.model != tc.wantModel {
+				t.Errorf("model = %q, want %q", fields.model, tc.wantModel)
+			}
+		})
+	}
+}
+
+// TestCaptureHookEventObjectModelStillRecordsEvent covers the end-to-end
+// consequence: the record must still be produced and still carry its session.
+func TestCaptureHookEventObjectModelStillRecordsEvent(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	t.Setenv(SpoolDirEnv, filepath.Join(home, "spool"))
+	t.Setenv(EnableEnv, "1")
+
+	// Event is empty so the record type must come from the payload, which is
+	// how Claude Code invokes the hook.
+	written, err := CaptureHookEvent(HookContext{
+		Connector: "claudecode",
+		Payload:   []byte(`{"hook_event_name":"SessionStart","session_id":"cc-object-model","model":{"id":"claude-sonnet-4-6"}}`),
+		Home:      home,
+	})
+	if err != nil {
+		t.Fatalf("CaptureHookEvent: %v", err)
+	}
+	if len(written) == 0 {
+		t.Fatal("no records written; an object-valued model dropped the event")
+	}
+
+	var found bool
+	for _, path := range written {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		var event struct {
+			SessionStart struct {
+				SessionID string `json:"session_id"`
+				Model     string `json:"model"`
+			} `json:"session_start"`
+		}
+		if err := json.Unmarshal(data, &event); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if event.SessionStart.SessionID == "" {
+			continue
+		}
+		found = true
+		if event.SessionStart.SessionID != "cc-object-model" {
+			t.Errorf("session_id = %q, want %q", event.SessionStart.SessionID, "cc-object-model")
+		}
+		if event.SessionStart.Model != "claude-sonnet-4-6" {
+			t.Errorf("model = %q, want %q", event.SessionStart.Model, "claude-sonnet-4-6")
+		}
+	}
+	if !found {
+		t.Error("no session_start record carried a session id")
+	}
+}
+
 func TestCollectDeviceOmitsIDWhenNoDeviceKeyExists(t *testing.T) {
 	home := t.TempDir()
 	setHome(t, home)

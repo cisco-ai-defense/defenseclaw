@@ -318,36 +318,67 @@ type hookPayloadFields struct {
 // parseHookPayload reads only the fields the projection needs. A malformed
 // payload yields zero values; the guardrail, not this code, is responsible for
 // rejecting bad input.
+//
+// Fields are decoded one at a time rather than into a single struct. Agents
+// change payload shapes between releases, and Claude Code already sends model
+// as an object on some versions. A whole-struct decode fails on the first type
+// it does not expect and discards every remaining field with it, including the
+// hook_event_name that selects the record type - so one cosmetic upstream
+// change would silently stop telemetry instead of dropping one attribute.
 func parseHookPayload(payload []byte) hookPayloadFields {
 	var out hookPayloadFields
 	if len(payload) == 0 {
 		return out
 	}
-	var doc struct {
-		SessionID      string `json:"session_id"`
-		ConversationID string `json:"conversation_id"`
-		Model          string `json:"model"`
-		ModelName      string `json:"model_name"`
-		CWD            string `json:"cwd"`
-		ToolName       string `json:"tool_name"`
-		ToolNameCamel  string `json:"toolName"`
-		CursorVersion  string `json:"cursor_version"`
-		Timestamp      string `json:"timestamp"`
-		MCPServerName  string `json:"mcp_server_name"`
-		HookEventName  string `json:"hook_event_name"`
-	}
+	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &doc); err != nil {
 		return out
 	}
-	out.sessionID = firstNonBlank(doc.SessionID, doc.ConversationID)
-	out.model = firstNonBlank(doc.Model, doc.ModelName)
-	out.cwd = strings.TrimSpace(doc.CWD)
-	out.toolName = firstNonBlank(doc.ToolName, doc.ToolNameCamel)
-	out.cursorVersion = strings.TrimSpace(doc.CursorVersion)
-	out.timestamp = strings.TrimSpace(doc.Timestamp)
-	out.mcpServer = strings.TrimSpace(doc.MCPServerName)
-	out.hookEventName = strings.TrimSpace(doc.HookEventName)
+	out.sessionID = firstNonBlank(payloadString(doc, "session_id"), payloadString(doc, "conversation_id"))
+	out.model = firstNonBlank(payloadModel(doc, "model"), payloadModel(doc, "model_name"))
+	out.cwd = payloadString(doc, "cwd")
+	out.toolName = firstNonBlank(payloadString(doc, "tool_name"), payloadString(doc, "toolName"))
+	out.cursorVersion = payloadString(doc, "cursor_version")
+	out.timestamp = payloadString(doc, "timestamp")
+	out.mcpServer = payloadString(doc, "mcp_server_name")
+	out.hookEventName = payloadString(doc, "hook_event_name")
 	return out
+}
+
+// payloadString reads one string field. A value of any other type is reported
+// absent, which keeps a single unexpected type local to its own field.
+func payloadString(doc map[string]json.RawMessage, key string) string {
+	raw, ok := doc[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+// payloadModel reads a model identifier that agents send either as a string or
+// as an object describing the model. The stable id is preferred over the
+// human-facing display name.
+func payloadModel(doc map[string]json.RawMessage, key string) string {
+	if value := payloadString(doc, key); value != "" {
+		return value
+	}
+	raw, ok := doc[key]
+	if !ok {
+		return ""
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return ""
+	}
+	return firstNonBlank(
+		payloadString(object, "id"),
+		payloadString(object, "model"),
+		payloadString(object, "display_name"),
+	)
 }
 
 // platformVersion reports a version only where the payload carries one that
