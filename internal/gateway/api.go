@@ -4100,8 +4100,7 @@ func (a *APIServer) handleNetworkEgressIngest(w http.ResponseWriter, r *http.Req
 	evt.Connector = firstNonEmpty(env.Connector, evt.Connector)
 	evt.AgentID = firstNonEmpty(identity.AgentID, env.AgentID, evt.AgentID)
 	evt.ToolID = firstNonEmpty(env.ToolID, evt.ToolID)
-	userID, _ := userFromHTTPRequest(r, nil)
-	evt.UserID = firstNonEmpty(userID, evt.UserID)
+	evt.UserID = firstNonEmpty(resolveHTTPUserIdentity(r, nil).ID, evt.UserID)
 	if evt.AgentLifecycleID == "" && evt.Connector != "" && evt.SessionID != "" && evt.AgentID != "" {
 		evt.AgentLifecycleID = stableLLMEventID("lifecycle", evt.Connector, evt.SessionID, evt.AgentID)
 	}

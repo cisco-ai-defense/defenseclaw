@@ -341,7 +341,7 @@ func (a *APIServer) effectiveRulePackDir(connector string) string {
 // cannot drift. connectorName is threaded explicitly from the request
 // entry point; StepIdx comes from the per-turn populator; Enforced
 // reflects an actual block; RulePackDir from the effective resolver.
-func (a *APIServer) stampHookEnvelopeIdentity(connectorName string, env *HookAuditEnvelope, req agentHookRequest, resp agentHookResponse) {
+func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName string, env *HookAuditEnvelope, req agentHookRequest, resp agentHookResponse) {
 	if env == nil {
 		return
 	}
@@ -353,6 +353,7 @@ func (a *APIServer) stampHookEnvelopeIdentity(connectorName string, env *HookAud
 	env.RulePackDir = a.effectiveRulePackDir(connectorName)
 
 	meta := hookLLMEventMeta(
+		ctx,
 		connectorName,
 		req.SessionID,
 		req.TurnID,
