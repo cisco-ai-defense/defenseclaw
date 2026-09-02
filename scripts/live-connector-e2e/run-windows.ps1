@@ -5455,7 +5455,8 @@ function Assert-CopilotSynchronousWindowsHookConfig([string]$Config, [string]$Co
         'RedirectStandardError = $true',
         '[Console]::InputEncoding = $utf8NoBom',
         '[Console]::OutputEncoding = $utf8NoBom',
-        '$process.StandardInput.WriteAsync($payload)',
+        '$process.StandardInput.AutoFlush = $true',
+        '[System.Threading.Tasks.TaskCreationOptions]::LongRunning',
         'WaitForExit',
         '[System.Environment]::Exit(0)'
     )) {

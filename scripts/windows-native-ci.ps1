@@ -4847,7 +4847,8 @@ function Assert-WizardHookRegistration(
             'RedirectStandardError = $true',
             '[Console]::InputEncoding = $utf8NoBom',
             '[Console]::OutputEncoding = $utf8NoBom',
-            '$process.StandardInput.WriteAsync($payload)',
+            '$process.StandardInput.AutoFlush = $true',
+            '[System.Threading.Tasks.TaskCreationOptions]::LongRunning',
             '$process.WaitForExit($remainingMS)',
             '[System.Environment]::Exit(0)'
         )) {

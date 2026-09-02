@@ -60,7 +60,25 @@ try {
     $started = $true
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    $stdinTask = $process.StandardInput.WriteAsync($payload)
+    # StreamWriter.WriteAsync may depend on a shared worker under Windows
+    # PowerShell 5.1. A busy host can starve that worker while the child waits
+    # for EOF, turning a tiny payload into a false timeout. Bind TextWriter's
+    # native method directly to a dedicated long-running task so no PowerShell
+    # script block crosses threads and exceptions remain observable here.
+    $process.StandardInput.AutoFlush = $true
+    $writeMethod = [System.IO.TextWriter].GetMethod('Write', [Type[]]@([object]))
+    $writeAction = [System.Delegate]::CreateDelegate(
+        [System.Action[object]],
+        $process.StandardInput,
+        $writeMethod
+    )
+    $stdinTask = [System.Threading.Tasks.Task]::Factory.StartNew(
+        [System.Action[object]]$writeAction,
+        [object]$payload,
+        [System.Threading.CancellationToken]::None,
+        [System.Threading.Tasks.TaskCreationOptions]::LongRunning,
+        [System.Threading.Tasks.TaskScheduler]::Default
+    )
 
     $remainingMS = $timeoutMS - [int]$deadline.ElapsedMilliseconds
     if ($remainingMS -le 0 -or -not $stdinTask.Wait($remainingMS)) {

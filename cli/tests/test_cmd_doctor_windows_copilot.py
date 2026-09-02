@@ -36,7 +36,8 @@ $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
 [Console]::InputEncoding = $utf8NoBom
 [Console]::OutputEncoding = $utf8NoBom
-$stdinTask = $process.StandardInput.WriteAsync($payload)
+$process.StandardInput.AutoFlush = $true
+[System.Threading.Tasks.TaskCreationOptions]::LongRunning
 $process.WaitForExit($remainingMS)
 $startInfo.Arguments = 'hook --connector copilot --event ' + $Event
 [System.Environment]::Exit(0)

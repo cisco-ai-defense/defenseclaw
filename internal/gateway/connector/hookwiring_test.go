@@ -2491,7 +2491,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					"[Console]::InputEncoding = $utf8NoBom",
 					"[Console]::OutputEncoding = $utf8NoBom",
 					fmt.Sprintf("$timeoutMS = %d", copilotWindowsHookAdapterTimeoutMS),
-					"$process.StandardInput.WriteAsync($payload)",
+					"$process.StandardInput.AutoFlush = $true",
+					"[System.Threading.Tasks.TaskCreationOptions]::LongRunning",
 					"hook --connector copilot --event ",
 					"[System.Environment]::Exit(0)",
 				} {
