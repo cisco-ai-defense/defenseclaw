@@ -3951,7 +3951,7 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 	}
 	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, hookBinary)
-	current := windowsCopilotPowerShellHookCommandForBinary(hookBinary)
+	current := windowsCopilotPowerShellAdapterCommand(filepath.Join(t.TempDir(), "copilot-hook.sh"))
 	legacy := legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary)
 	duplicated := legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary)
 	legacyEvent := legacyWindowsCopilotPowerShellHookCommandForEvent("preToolUse", hookBinary)
@@ -3991,7 +3991,7 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 	for event, raw := range hooks {
 		entries := raw.([]interface{})
 		managed := 0
-		wantEventCommand := windowsCopilotPowerShellHookCommandForEvent(event, hookBinary)
+		wantEventCommand := copilotHookInvocationCommandForEvent("windows", event, current)
 		for _, rawEntry := range entries {
 			entry := rawEntry.(map[string]interface{})
 			command, _ := entry["powershell"].(string)
@@ -4037,7 +4037,7 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 	after := string(afterData)
 	ownedCommands := []string{current, legacy, duplicated, historic, legacyEvent}
 	for _, event := range copilotCurrentHookEvents {
-		ownedCommands = append(ownedCommands, windowsCopilotPowerShellHookCommandForEvent(event, hookBinary))
+		ownedCommands = append(ownedCommands, copilotHookInvocationCommandForEvent("windows", event, current))
 	}
 	for _, owned := range ownedCommands {
 		if strings.Contains(after, owned) {

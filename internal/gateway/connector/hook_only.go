@@ -536,6 +536,8 @@ func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string {
 		switch c.name {
 		case "cursor":
 			return []string{c.scriptName, "cursor-hook.ps1"}
+		case "copilot":
+			return []string{c.scriptName, "copilot-hook.ps1"}
 		case "windsurf":
 			return []string{c.scriptName, "windsurf-hook.ps1"}
 		}
@@ -1852,8 +1854,8 @@ func validatePluginArtifactDestination(path string) error {
 
 // hookCommand returns the command an agent runs for this connector's hook. On
 // Unix it is the bundled .sh path. Most Windows connectors use the native
-// DefenseClaw `hook` subcommand; Cursor and retired Cascade cleanup use PowerShell adapters
-// for their documented Windows transports. The same value is used at setup,
+// DefenseClaw `hook` subcommand; Cursor, Copilot, and retired Cascade cleanup
+// use PowerShell adapters for their documented Windows transports. The same value is used at setup,
 // teardown, and VerifyClean so the JSON/YAML hook removers (which match on the
 // exact command string) recognize the entries DefenseClaw added.
 func (c *hookOnlyConnector) hookCommand(opts SetupOpts) string {
@@ -5791,7 +5793,7 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 
 func copilotHookInvocationCommandForEvent(goos, event, hookScript string) string {
 	if goos == "windows" {
-		return windowsCopilotPowerShellHookCommandForEvent(event, defenseclawHookBinary())
+		return windowsCopilotPowerShellAdapterCommand(hookScript) + " -Event " + powershellQuoteLiteral(event)
 	}
 	return shellWord(hookScript) + " --event " + shellWord(event)
 }
@@ -6359,11 +6361,25 @@ func managedHookCommandEntry(raw interface{}, hookScript string) bool {
 		if isCopilotNativeHookCommand(hookScript) && isCopilotNativeHookCommand(command) {
 			return true
 		}
+		if isCopilotPowerShellAdapterCommand(hookScript) && isCopilotNativeHookCommand(command) {
+			return true
+		}
+		for _, event := range copilotCurrentHookEvents {
+			if command == copilotHookInvocationCommandForEvent("windows", event, hookScript) {
+				return true
+			}
+		}
 		if isCopilotShellHookScript(hookScript) && isCopilotEventBoundShellCommand(command, hookScript) {
 			return true
 		}
 	}
 	return false
+}
+
+func isCopilotPowerShellAdapterCommand(command string) bool {
+	command = strings.TrimSpace(command)
+	return strings.HasPrefix(command, "& '") &&
+		strings.HasSuffix(strings.ToLower(command), "copilot-hook.ps1'")
 }
 
 func isCopilotNativeHookCommand(command string) bool {

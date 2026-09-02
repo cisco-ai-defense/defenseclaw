@@ -201,9 +201,11 @@ Copilot CLI supports native ask on documented `preToolUse` hooks. The approval p
 </Callout>
 
 On native Windows, Copilot selects the hook's official `powershell` field.
-DefenseClaw's prepared contract invokes the stable `defenseclaw-hook.exe`
-runtime synchronously with inherited stdin/stdout, waits for completion, and
-propagates its exit code. It does not require Bash or WSL. See the
+DefenseClaw's prepared contract invokes a managed `copilot-hook.ps1`
+byte-stream adapter. The adapter reads Copilot's JSON from console stdin,
+launches the stable `defenseclaw-hook.exe` runtime without a console and with
+explicitly redirected standard handles, waits for completion, and writes the
+runtime's decision back to Copilot unchanged. It does not require Bash or WSL. See the
 [recorded upstream Windows contract](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/development/copilot-native-windows-contract.md)
 for source URLs, version/date evidence, event semantics, and the current
 certification blocker.

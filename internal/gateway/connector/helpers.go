@@ -180,12 +180,12 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	if connector == "antigravity" {
 		return windowsAntigravityHookCommand()
 	}
-	// Copilot selects the powershell field itself on Windows. Give that vendor
-	// boundary a PowerShell program rather than nesting another powershell.exe.
-	// The packaged launcher uses the GUI subsystem, so Start-Process must wait,
-	// inherit stdin/stdout, and propagate the exact exit code synchronously.
+	// Copilot selects the powershell field itself on Windows. Its hook JSON is
+	// delivered through redirected standard input, while the packaged launcher
+	// uses the GUI subsystem. Start-Process does not preserve those redirected
+	// handles reliably, so route Copilot through the managed byte-stream adapter.
 	if connector == "copilot" {
-		return windowsCopilotPowerShellHookCommand()
+		return windowsCopilotPowerShellAdapterCommand(unixCommand)
 	}
 	// Cursor requires an adapter for its object-pipeline transport. Retired Cascade
 	// documents a `powershell` command field and JSON stdin; its adapter uses
@@ -672,6 +672,15 @@ func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractI
 
 func windowsCopilotPowerShellHookCommand() string {
 	return windowsCopilotPowerShellHookCommandForBinary(defenseclawHookBinary())
+}
+
+func windowsCopilotPowerShellAdapterCommand(hookScript string) string {
+	trimmed := strings.TrimSpace(hookScript)
+	if strings.HasPrefix(trimmed, "& '") && strings.HasSuffix(trimmed, "'") {
+		return trimmed
+	}
+	adapter := strings.TrimSuffix(trimmed, ".sh") + ".ps1"
+	return "& " + powershellQuoteLiteral(adapter)
 }
 
 func windowsCopilotPowerShellHookCommandForBinary(hookBinary string) string {

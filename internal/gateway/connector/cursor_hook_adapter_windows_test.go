@@ -38,10 +38,24 @@ import (
 
 const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
 const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
+const copilotAdapterHelperMode = "TEST_COPILOT_ADAPTER_MODE"
 const windsurfAdapterHelperMode = "TEST_WINDSURF_ADAPTER_MODE"
 const windsurfAdapterExitCodeEnv = "TEST_WINDSURF_ADAPTER_EXIT_CODE"
 
 func TestMain(m *testing.M) {
+	if os.Getenv(copilotAdapterHelperMode) == "result" {
+		payload, err := io.ReadAll(os.Stdin)
+		if err != nil || !bytes.Contains(payload, []byte("copilot-adapter-probe")) {
+			fmt.Fprintln(os.Stderr, "Copilot adapter helper did not receive the expected stdin payload")
+			os.Exit(6)
+		}
+		if strings.Join(os.Args[1:], "|") != "hook|--connector|copilot|--event|preToolUse" {
+			fmt.Fprintln(os.Stderr, "Copilot adapter helper received unexpected arguments")
+			os.Exit(5)
+		}
+		fmt.Print(`{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}`)
+		os.Exit(0)
+	}
 	switch os.Getenv(cursorAdapterHelperMode) {
 	case "success":
 		payload, err := io.ReadAll(os.Stdin)
@@ -95,6 +109,90 @@ func TestMain(m *testing.M) {
 			return codexEffectivePolicy{Source: "connector unit-test policy fixture"}, nil
 		}
 		os.Exit(m.Run())
+	}
+}
+
+func renderCopilotAdapterForTest(t *testing.T, hookPath string, timeoutMS int) string {
+	t.Helper()
+	tmpl, err := hookFS.ReadFile("hooks/copilot-hook.ps1")
+	if err != nil {
+		t.Fatalf("read Copilot adapter: %v", err)
+	}
+	rendered, err := renderTemplate(string(tmpl), templateData{
+		HookBinaryPS:         strings.ReplaceAll(hookPath, "'", "''"),
+		CopilotHookTimeoutMS: timeoutMS,
+	})
+	if err != nil {
+		t.Fatalf("render Copilot adapter: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "copilot-hook.ps1")
+	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+		t.Fatalf("write Copilot adapter: %v", err)
+	}
+	return path
+}
+
+func runCopilotAdapterTest(
+	t *testing.T,
+	adapterPath string,
+	payload string,
+) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	quoted := strings.ReplaceAll(adapterPath, "'", "''")
+	cmd := exec.Command(
+		"powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+		"& '"+quoted+"' -Event 'preToolUse'",
+	)
+	cmd.Stdin = strings.NewReader(payload)
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err := cmd.Run()
+	if err == nil {
+		return out.String(), errOut.String(), 0
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("run Copilot adapter: %v", err)
+	}
+	return out.String(), errOut.String(), exitErr.ExitCode()
+}
+
+func TestCopilotAdapterPreservesJSONInputAndDenyResponse(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(copilotAdapterHelperMode, "result")
+	adapter := renderCopilotAdapterForTest(t, executable, 10_000)
+	stdout, stderr, code := runCopilotAdapterTest(
+		t, adapter, `{"source":"copilot-adapter-probe"}`,
+	)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != `{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}` {
+		t.Fatalf("stdout = %q, want exact Copilot deny JSON", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestCopilotAdapterFailureUsesDocumentedFailOpenContract(t *testing.T) {
+	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
+	adapter := renderCopilotAdapterForTest(t, missingHook, 10_000)
+	stdout, stderr, code := runCopilotAdapterTest(
+		t, adapter, `{"source":"copilot-adapter-probe"}`,
+	)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty fail-open response", stdout)
+	}
+	if !strings.Contains(stderr, "Copilot hook adapter failed open") {
+		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
 	}
 }
 
