@@ -10,7 +10,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,10 +22,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
-//go:embed payload/*
-var embeddedPayload embed.FS
+// The signed inner payload used to be embedded at compile time via
+// //go:embed payload/*. The Windows AVC handoff moved to a runtime
+// trailer append so AVC's Windows CI no longer needs Go: DefenseClaw
+// prebuilds the outer EXE (this binary) with NO payload, then a
+// native Windows DefenseClawAssembler.exe appends the AVC-signed
+// payload to the tail as a deterministic trailer.
+// loadEmbeddedEnterprisePayload below reads the trailer off the
+// running EXE at startup and hands the same fs.FS shape
+// ("payload/manifest.json" + "payload/<name>") the existing
+// loadEnterprisePayload validator consumes — so nothing downstream
+// of the loader had to change.
 
 const (
 	enterpriseSetupArtifactName     = "DefenseClawSetup-Enterprise-x64.exe"
@@ -111,6 +121,12 @@ type enterprisePayloadManifestFile struct {
 type enterprisePayload struct {
 	Manifest enterprisePayloadManifest
 	Files    map[string]enterprisePayloadManifestFile
+	// PayloadFS is the fs.FS the platform-specific stage step opens
+	// per-file readers against. Before spec 003 this was a package-
+	// level embed.FS held in `embeddedPayload`; the trailer refactor
+	// carries the FS alongside the validated manifest so the loader
+	// stays the single boundary that decides what's trusted.
+	PayloadFS fs.FS
 }
 
 type enterpriseSetupFailure struct {
@@ -341,8 +357,43 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 	return normalized, false, nil
 }
 
+// loadEmbeddedEnterprisePayload reads the setuppayload trailer off the
+// tail of the running EXE, hands an in-memory fs.FS (the same shape
+// the old //go:embed produced — "payload/manifest.json" +
+// "payload/<name>") to loadEnterprisePayload, and returns the
+// validated result.
+//
+// Failure modes are surfaced as they were before the refactor:
+//   - No trailer at all → "enterprise payload missing; assemble with
+//     DefenseClawAssembler.exe" so the operator sees an actionable
+//     diagnostic instead of a low-level IO error.
+//   - Trailer present but corrupt (CRC / hash mismatch) → the
+//     setuppayload package's ErrTrailerCorrupt is passed through.
+//   - Manifest content wrong shape → the existing loadEnterprisePayload
+//     validator surfaces the same errors it always did (unknown file,
+//     size mismatch, invalid SHA-256, wrong flavor).
 func loadEmbeddedEnterprisePayload() (enterprisePayload, error) {
-	return loadEnterprisePayload(embeddedPayload)
+	// os.Executable resolves the running binary's path even when
+	// invoked via a relative name, a symlink, or from a directory that
+	// is not $PWD. On a runtime install (`DefenseClawSetup-Enterprise-x64.exe /install`)
+	// this resolves to the signed outer EXE the trailer was appended
+	// to. Under `go test` it resolves to the test binary, which has
+	// no trailer — the trailer-missing test in main_test.go pins
+	// that failure mode.
+	exePath, err := os.Executable()
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("resolve running EXE for trailer read: %w", err)
+	}
+	result, err := setuppayload.ReadFile(exePath)
+	if err != nil {
+		if errors.Is(err, setuppayload.ErrTrailerMissing) {
+			return enterprisePayload{}, errors.New(
+				"enterprise payload missing; assemble with DefenseClawAssembler.exe",
+			)
+		}
+		return enterprisePayload{}, fmt.Errorf("read enterprise payload trailer: %w", err)
+	}
+	return loadEnterprisePayload(result.AsPayloadFS())
 }
 
 func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
@@ -411,7 +462,7 @@ func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
 			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest is missing required file %s", name)
 		}
 	}
-	return enterprisePayload{Manifest: manifest, Files: files}, nil
+	return enterprisePayload{Manifest: manifest, Files: files, PayloadFS: payloadFS}, nil
 }
 
 func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupOptions, err error) {
