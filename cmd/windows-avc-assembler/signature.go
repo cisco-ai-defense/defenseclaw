@@ -179,7 +179,16 @@ func readSignerSubjectCN(path string) (string, error) {
 	// error branch below still gets the diagnostic.
 	out, err := cmd.Output()
 	if err == nil {
-		cn := strings.TrimSpace(string(out))
+		// Strip ONLY the transport terminator (a trailing CRLF that
+		// PowerShell's stdio may append when running under a console
+		// host); do NOT use strings.TrimSpace here — .NET's
+		// X509Certificate2.GetNameInfo(SimpleName) preserves whitespace
+		// verbatim, so a cert with a padded CN like " Cisco Systems, Inc. "
+		// would otherwise be silently normalized to the pinned string
+		// and pass the exact-equality check downstream, defeating the
+		// gap-closing purpose of that check (signtool's /n substring
+		// match already accepts padded look-alikes).
+		cn := strings.TrimRight(string(out), "\r\n")
 		if cn == "" {
 			return "", &signatureError{msg: fmt.Sprintf(
 				"%s: empty signer Subject CN — cert has no SimpleName",
