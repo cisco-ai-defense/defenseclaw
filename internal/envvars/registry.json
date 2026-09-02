@@ -3361,7 +3361,7 @@
     {
       "name": "DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH",
       "category": "runtime_path",
-      "purpose": "Internal IPC channel: the standalone Windows AVC assembler (cmd/windows-avc-assembler) sets this before spawning powershell.exe so the child PS script can locate the payload file to inspect via `$env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH`. Used because PowerShell's `-Command <script>` does not populate `$args` with trailing argv; env-var passing is the safe channel that also keeps the payload path out of the script literal (removes any shell-injection surface on pathological file names). Set exclusively by the assembler process for the lifetime of a single Get-AuthenticodeSignature call — never set by users or documented externally.",
+      "purpose": "Internal IPC channel: the standalone Windows AVC assembler (cmd/windows-avc-assembler) sets this before spawning powershell.exe so the child PS script can locate the payload file to inspect via `$env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH`. Used because PowerShell's `-Command <script>` does not populate `$args` with trailing argv; env-var passing is the safe channel that also keeps the payload path out of the script literal (removes any shell-injection surface on pathological file names). Set exclusively by the assembler process for the lifetime of a single Get-AuthenticodeSignature call — internal variable, not intended for user configuration; the entry appears in the generated env-vars catalog for completeness only.",
       "default": "unset (set only by DefenseClawAssembler.exe)",
       "accepted_values": ["<absolute path to Authenticode-signed payload file>", "unset"],
       "security_impact": "none",
