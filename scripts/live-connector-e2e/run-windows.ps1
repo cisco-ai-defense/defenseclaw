@@ -6887,7 +6887,7 @@ function Assert-DoctorWindowsHookRegistration {
     $check = $checks[0]
     $expectedHealthyDetail = switch ($Connector) {
         'amp' { 'plugin-ready-timeout 30' }
-        'copilot' { 'healthy Windows-native Copilot PowerShell registration' }
+        'copilot' { 'healthy Windows-native Copilot PowerShell byte-stream registration' }
         'cursor' { 'configured runtime=' }
         'hermes' { 'on-disk Windows-native executable registration is valid' }
         'geminicli' { 'reachable at' }
@@ -6986,6 +6986,19 @@ function Assert-DoctorWindowsHookRegistration {
             }
         }
         $tamperedConfig = $cursorSettings | ConvertTo-Json -Depth 12
+    } elseif ($Connector -eq 'copilot') {
+        $missingCopilotAdapter = Join-Path $StateRoot 'doctor-tamper\copilot-hook.ps1'
+        $copilotSettings = $config | ConvertFrom-Json -ErrorAction Stop
+        foreach ($eventProperty in @($copilotSettings.hooks.PSObject.Properties)) {
+            foreach ($handler in @($eventProperty.Value)) {
+                if ([string]$handler.powershell -match '(?i)copilot-hook\.ps1') {
+                    $adapterLiteral = $missingCopilotAdapter.Replace("'", "''")
+                    $eventLiteral = ([string]$eventProperty.Name).Replace("'", "''")
+                    $handler.powershell = "& '$adapterLiteral' -Event '$eventLiteral'"
+                }
+            }
+        }
+        $tamperedConfig = $copilotSettings | ConvertTo-Json -Depth 12
     } elseif ($Connector -eq 'antigravity') {
         $encoded = [regex]::Match($config, '(?i)-EncodedCommand\s+(?<value>[A-Za-z0-9+/=]+)')
         if (-not $encoded.Success) { throw 'Antigravity tamper contract found no EncodedCommand' }
@@ -7021,12 +7034,7 @@ function Assert-DoctorWindowsHookRegistration {
             }
             'amp' { 'does not reference DefenseClaw' }
             'copilot' {
-                $missingGatewayLauncher = [regex]::Replace(
-                    (Get-StableHookRuntimeExecutable),
-                    '(?i)defenseclaw-hook\.exe$',
-                    'defenseclaw-gateway.exe'
-                )
-                "registered hook target cannot be resolved with PATHEXT: $missingGatewayLauncher"
+                "registered Copilot adapter cannot be resolved: $missingCopilotAdapter"
             }
             'cursor' { 'configured file has no DefenseClaw Cursor command entries' }
             'hermes' { 'does not use the direct native DefenseClaw executable' }

@@ -4189,10 +4189,10 @@ function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserP
             DoctorRuntimePattern = 'plugin-ready-timeout 30'
         }
         copilot = @{
-            HookScript = 'copilot-hook.sh'
+            HookScript = 'copilot-hook.ps1'
             ConfigPath = Join-Path $UserProfile '.copilot\hooks\defenseclaw.json'
             DoctorLabel = 'Copilot hooks'
-            DoctorRuntimePattern = 'healthy Windows-native Copilot PowerShell registration'
+            DoctorRuntimePattern = 'healthy Windows-native Copilot PowerShell byte-stream registration'
         }
         cursor = @{
             HookScript = 'cursor-hook.ps1'
@@ -4810,12 +4810,8 @@ function Assert-WizardHookRegistration(
         if (($registeredEvents -join "`0") -cne (($requiredEvents | Sort-Object) -join "`0")) {
             throw 'wizard-selected Copilot registration does not contain the exact required hook event set'
         }
-        $commandPattern = '^\$ErrorActionPreference=''Stop''; ' +
-            '\$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
-            '\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process ' +
-            '-FilePath ''(?<path>(?:[^'']|'''')+)'' ' +
-            '-ArgumentList @\(''hook'',''--connector'',''copilot'',''--event'',''(?<event>[^'']+)''\) ' +
-            '-NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode$'
+        $commandPattern = '(?i)^& ''(?<path>(?:''''|[^''])+copilot-hook\.ps1)'' ' +
+            '-Event ''(?<event>[a-zA-Z]+)''$'
         foreach ($eventName in $requiredEvents) {
             $entries = @($hookDocument.hooks.$eventName)
             if ($entries.Count -ne 1 -or [string]$entries[0].type -cne 'command' -or
@@ -4833,13 +4829,45 @@ function Assert-WizardHookRegistration(
                 $entries[0].PSObject.Properties.Name -contains 'command') {
                 throw "wizard-selected Copilot $eventName hook is not PowerShell-only"
             }
-            $runtimePath = $match.Groups['path'].Value.Replace("''", "'")
-            if (-not [IO.Path]::GetFullPath($runtimePath).Equals(
-                [IO.Path]::GetFullPath((Get-StableHookRuntimeExecutable)),
+            $adapterPath = $match.Groups['path'].Value.Replace("''", "'")
+            if (-not [IO.Path]::GetFullPath($adapterPath).Equals(
+                [IO.Path]::GetFullPath($expectedHook),
                 [StringComparison]::OrdinalIgnoreCase
             )) {
-                throw "wizard-selected Copilot $eventName hook targets an unexpected runtime"
+                throw "wizard-selected Copilot $eventName hook targets an unexpected adapter"
             }
+        }
+        $adapterText = [IO.File]::ReadAllText($expectedHook)
+        foreach ($marker in @(
+            'defenseclaw-managed-hook v7',
+            '[Console]::In.ReadToEnd()',
+            '$payload[0] -eq [char]0xFEFF',
+            'RedirectStandardInput = $true',
+            'RedirectStandardOutput = $true',
+            'RedirectStandardError = $true',
+            '[Console]::InputEncoding = $utf8NoBom',
+            '[Console]::OutputEncoding = $utf8NoBom',
+            '$process.StandardInput.WriteAsync($payload)',
+            '$process.WaitForExit($remainingMS)',
+            '[System.Environment]::Exit(0)'
+        )) {
+            if ($adapterText.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
+                throw "wizard-selected Copilot adapter is missing byte-stream marker: $marker"
+            }
+        }
+        $hookMatch = [regex]::Match(
+            $adapterText,
+            '(?m)^\$hook = ''(?<path>(?:''''|[^''])+)''\r?$'
+        )
+        if (-not $hookMatch.Success) {
+            throw 'wizard-selected Copilot adapter has no bound hook executable'
+        }
+        $runtimePath = $hookMatch.Groups['path'].Value.Replace("''", "'")
+        if (-not [IO.Path]::GetFullPath($runtimePath).Equals(
+            [IO.Path]::GetFullPath((Get-StableHookRuntimeExecutable)),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'wizard-selected Copilot adapter targets an unexpected runtime'
         }
     } elseif ($Specification.Connector -eq 'cursor') {
         try { $hooksDocument = $registration | ConvertFrom-Json -ErrorAction Stop }

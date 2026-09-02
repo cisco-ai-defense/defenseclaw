@@ -980,14 +980,23 @@ $payload = [ordered]@{
         'postToolUseFailure', 'permissionRequest', 'agentStop', 'subagentStart',
         'subagentStop', 'errorOccurred', 'preCompact', 'notification'
     )
+    $copilotAdapterSource = [IO.File]::ReadAllText(
+        (Join-Path $root 'internal\gateway\connector\hooks\copilot-hook.ps1')
+    )
+    $copilotAdapter = Join-Path $temp 'copilot-hook.ps1'
+    $renderedCopilotAdapter = $copilotAdapterSource.Replace(
+        '{{.HookBinaryPS}}',
+        'C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe'
+    ).Replace('{{.CopilotHookTimeoutMS}}', '29500')
+    [IO.File]::WriteAllText(
+        $copilotAdapter,
+        $renderedCopilotAdapter,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $copilotAdapterLiteral = $copilotAdapter.Replace("'", "''")
     $copilotHooks = [ordered]@{}
     foreach ($event in $copilotEvents) {
-        $powershell = "`$ErrorActionPreference='Stop'; " +
-            "`$env:NoDefaultCurrentDirectoryInExePath='1'; " +
-            "`$hookProcess=Microsoft.PowerShell.Management\Start-Process " +
-            "-FilePath 'C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe' " +
-            "-ArgumentList @('hook','--connector','copilot','--event','$event') " +
-            "-NoNewWindow -Wait -PassThru; exit `$hookProcess.ExitCode"
+        $powershell = "& '$copilotAdapterLiteral' -Event '$event'"
         $copilotHooks[$event] = @([ordered]@{
             type = 'command'
             powershell = $powershell
@@ -1001,8 +1010,8 @@ $payload = [ordered]@{
     $copilotWrongEvent = $copilotFixture | ConvertFrom-Json
     $copilotWrongEvent.hooks.preToolUse[0].powershell =
         ([string]$copilotWrongEvent.hooks.preToolUse[0].powershell).Replace(
-            ",'preToolUse')",
-            ",'postToolUse')"
+            "-Event 'preToolUse'",
+            "-Event 'postToolUse'"
         )
     $wrongEventRejected = $false
     try {
@@ -4913,7 +4922,7 @@ connection.close()
         $harnessText -match 'cannot be resolved' -and
         $harnessText -match 'does not use the native hook runtime' -and
         $harnessText.Contains("'copilot' {") -and
-        $harnessText.Contains('"registered hook target cannot be resolved with PATHEXT: $missingGatewayLauncher"') -and
+        $harnessText.Contains('"registered Copilot adapter cannot be resolved: $missingCopilotAdapter"') -and
         $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) `
         'Doctor connector contract rejects connector-specific tampered hook commands with exit 1'
     Assert-True ($doctorContract -match "(?s)'devin'\s*\{.*?registered hook uses the obsolete gateway launcher.*?registered hook target cannot be resolved with PATHEXT: \`$missingGatewayLauncher") `

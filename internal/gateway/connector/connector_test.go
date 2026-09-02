@@ -10785,6 +10785,10 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
 	}
+	copilotScripts := withVendor("copilot-hook.sh")
+	if runtime.GOOS == "windows" {
+		copilotScripts = append(copilotScripts, "copilot-hook.ps1")
+	}
 
 	cases := []struct {
 		ctor func() Connector
@@ -10798,7 +10802,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
 		{func() Connector { return NewCursorConnector() }, "cursor", cursorScripts},
 		{func() Connector { return NewDevinConnector() }, "devin", withVendor("devin-hook.sh")},
-		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
+		{func() Connector { return NewCopilotConnector() }, "copilot", copilotScripts},
 		{func() Connector { return NewOpenHandsConnector() }, "openhands", withVendor("openhands-hook.sh")},
 		{func() Connector { return NewAntigravityConnector() }, "antigravity", withVendor("antigravity-hook.sh")},
 	}
