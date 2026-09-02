@@ -112,11 +112,15 @@ func TestParseEnterpriseSetupShorthandRejectsBadGrammar(t *testing.T) {
 	}
 }
 
+// TestPlaceholderBuildFailsClosedWithoutEnterprisePayload asserts the
+// runtime refuses to install when the outer EXE has no
+// setuppayload trailer at its tail. Under `go test` the running
+// binary is the test executable, which has no trailer — so the
+// setuppayload.ErrTrailerMissing path is exercised. The failure
+// message points the operator at DefenseClawAssembler.exe.
 func TestPlaceholderBuildFailsClosedWithoutEnterprisePayload(t *testing.T) {
 	_, err := loadEmbeddedEnterprisePayload()
-	if err == nil ||
-		!strings.Contains(err.Error(), "packaging-windows-enterprise-installer") ||
-		!strings.Contains(err.Error(), "packaging-windows-avc-buildkit") {
+	if err == nil || !strings.Contains(err.Error(), "DefenseClawAssembler.exe") {
 		t.Fatalf("loadEmbeddedEnterprisePayload() error = %v", err)
 	}
 }

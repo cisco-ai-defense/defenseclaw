@@ -203,7 +203,7 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 		if err != nil {
 			return "", nil, errors.Join(fmt.Errorf("create staged enterprise payload %s: %w", name, err), cleanup())
 		}
-		source, sourceErr := embeddedPayload.Open("payload/" + name)
+		source, sourceErr := payload.PayloadFS.Open("payload/" + name)
 		if sourceErr != nil {
 			_ = file.Close()
 			return "", nil, errors.Join(fmt.Errorf("open embedded enterprise payload %s: %w", name, sourceErr), cleanup())
