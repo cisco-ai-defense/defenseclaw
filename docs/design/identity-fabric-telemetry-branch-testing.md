@@ -50,11 +50,22 @@ any of these hold:
 - `DEFENSECLAW_IDFABRIC_SPOOL=1` — test-only override, not a supported
   configuration surface
 
-Only the first of those reaches an installed hook today, and only on Windows:
-managed hooks are registered with `--enterprise-managed`, while the deployment
-mode is pinned into the *service* environment that an agent-spawned hook does
-not inherit. See the first entry under Known gaps for why macOS captures
-nothing in production.
+Only the first of those reaches an installed hook today: managed hooks are
+registered with `--enterprise-managed`, while the deployment mode is pinned
+into the *service* environment that an agent-spawned hook does not inherit.
+
+Two different code paths deliver that flag, because the two platforms invoke
+hooks differently:
+
+| Platform | Hook invocation | Where capture happens |
+| --- | --- | --- |
+| Windows | native `<exe> hook --connector <name>` | inline, in the hook process |
+| macOS / Linux | bundled `.sh` script that `curl`s the gateway | `defenseclaw idfabric capture`, backgrounded by the script |
+
+The Unix path needs the separate subcommand because the shell hooks never run
+the native `hook` command, and capture cannot move to the gateway: the gateway
+is a LaunchDaemon running as root with its own home, so it would attribute
+every session on the machine to that one identity.
 
 While disabled the code path costs one environment lookup and does not touch
 stdin, so a non-enterprise endpoint behaves exactly as it does on `main`.
@@ -109,8 +120,8 @@ git checkout feature/identity-fabric-telemetry
 go test ./internal/idfabric/ ./internal/cli/ -run 'TestCapture|TestDiscover|TestValidateEmail|TestSpool'
 go build -o /tmp/defenseclaw ./cmd/defenseclaw
 
-export DEFENSECLAW_HOME=/tmp/dc-idfabric && mkdir -p "$DEFENSECLAW_HOME"
 export DEFENSECLAW_IDFABRIC_SPOOL=1
+export DEFENSECLAW_IDFABRIC_SPOOL_DIR=/tmp/dc-idfabric-spool
 
 echo '{"session_id":"smoke-1","model":"gpt-5-codex","cwd":"'"$PWD"'"}' \
   | /tmp/defenseclaw hook --connector codex --event session_start --api-addr 127.0.0.1:1
@@ -118,16 +129,28 @@ echo '{"session_id":"smoke-1","model":"gpt-5-codex","cwd":"'"$PWD"'"}' \
 echo '{"session_id":"smoke-1","tool_name":"mcp__github__create_issue","tool_input":{"title":"x"}}' \
   | /tmp/defenseclaw hook --connector codex --event pre_tool_use --api-addr 127.0.0.1:1
 
-ls -l "$DEFENSECLAW_HOME/aid-spool"
+ls -l "$DEFENSECLAW_IDFABRIC_SPOOL_DIR"
 ```
 
 An unreachable `--api-addr` is intentional: capture happens before the gateway
 request, so records are written even when the guardrail fails open. Expect
 `user.uid` to be your effective UID and `user.sid` to be absent.
 
-To exercise the real connectors instead of synthetic payloads, run an actual
-Codex, Claude Code, or Cursor session against an installed DefenseClaw hook
-with `DEFENSECLAW_IDFABRIC_SPOOL=1` in the agent's environment.
+Leaving `DEFENSECLAW_IDFABRIC_SPOOL_DIR` unset writes to the real per-user
+location in the table above instead, which is what an installed hook uses.
+
+Two things to know before reading the output. This run discovers MCP servers
+from *your* real `~/.codex`, `~/.claude.json`, and `~/.cursor`, so the
+`mcp_servers` list is a live inventory rather than a fixture — useful for
+checking sanitization against genuine config. And `--connector` selects which
+config layers are consulted, so the same command run for `codex`, `claudecode`,
+and `cursor` should produce three different inventories.
+
+To exercise a real agent session rather than synthetic payloads, the install
+must be managed: the capture call is rendered into the `.sh` hooks only under
+`{{if .Managed}}`, so an unmanaged macOS install captures nothing regardless of
+`DEFENSECLAW_IDFABRIC_SPOOL`. For an unmanaged endpoint, drive the subcommand
+directly as shown under "Verifying the macOS capture path".
 
 ---
 
@@ -289,25 +312,58 @@ mapping in `eventKind`. Watch for this specifically.
 
 ## Known gaps
 
-- **macOS and Linux never capture in production.** Capture is wired into the
-  `hook` subcommand, and that subcommand is Windows-only: `hookInvocationCommand`
-  returns the native `<exe> hook --connector <name>` invocation on Windows but
-  the bundled `.sh` script path everywhere else, and those scripts `curl` the
-  gateway directly. The macOS results in this document were produced by
-  invoking the subcommand by hand, which no installed macOS hook does.
+- The device fingerprint is unreadable in managed mode on Windows. `device.key`
+  sits under the machine state root, which grants `Users` no traverse right, so
+  managed Windows records omit `device.id`. Unlike the spool location, the hook
+  cannot fix this from its own side. macOS records carry `device.id` because the
+  key is in the user's own `~/.defenseclaw`.
+- One short-lived process per hook event on macOS and Linux. The capture child
+  is detached with its streams closed, so it adds no latency to the tool call
+  and cannot hold the hook's stdout open, but it is a real process and shows up
+  in process accounting.
+- Records accumulate until something drains them. The spool caps its own total
+  size, but nothing consumes these files yet — that is the transport this branch
+  exists to specify.
 
-  This is not a gating problem — the code path does not run. Closing it means
-  something must execute in the user's context after the payload is available,
-  because that is the only place the real UID, home directory, and workspace
-  exist. Moving capture into the gateway would attribute every macOS managed
-  session to the LaunchDaemon's root identity, which the projection forbids.
-  The realistic fix is for the three Unix hook templates to invoke a capture
-  subcommand as a backgrounded child, which needs a shell-escaped binary path
-  in `templateData` and costs one short-lived process per hook event.
-- The device fingerprint is unreadable in managed mode. `device.key` sits under
-  the machine state root, which grants `Users` no traverse right, so managed
-  records omit `device.id`. Unlike the spool location, the hook cannot fix this
-  from its own side.
+## Verifying the macOS capture path
+
+The Unix path has an interaction worth re-checking after any change to
+`_hardening.sh`: `defenseclaw_harden_env` repoints `HOME` at an empty per-hook
+sandbox and deletes it on exit. Capture reads the user's connector config,
+account email, and device key out of the real profile, so it is invoked with
+`HOME` restored. Getting this wrong does not fail loudly — it spools a
+well-formed record claiming the user has no MCP servers and no email.
+
+`TestIdentityFabricCaptureRunsWithTheUsersRealHome` pins it by running the real
+helper against a stub CLI and asserting which `HOME` arrived. To confirm the
+whole chain against your own config:
+
+```bash
+go build -o /tmp/defenseclaw ./cmd/defenseclaw
+mkdir -p /tmp/idfabric-e2e/spool
+cp internal/gateway/connector/hooks/_hardening.sh /tmp/idfabric-e2e/
+
+cat > /tmp/idfabric-e2e/driver.sh <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+. /tmp/idfabric-e2e/_hardening.sh
+defenseclaw_harden_env
+PAYLOAD="{\"hook_event_name\":\"sessionStart\",\"cursor_version\":\"3.10.17\",\"session_id\":\"e2e-1\",\"cwd\":\"$REPO\"}"
+defenseclaw_capture_identity_fabric /tmp/defenseclaw cursor sessionStart "$PAYLOAD"
+wait
+SCRIPT
+chmod +x /tmp/idfabric-e2e/driver.sh
+
+REPO="$PWD" DEFENSECLAW_IDFABRIC_SPOOL=1 \
+  DEFENSECLAW_IDFABRIC_SPOOL_DIR=/tmp/idfabric-e2e/spool \
+  /tmp/idfabric-e2e/driver.sh
+
+ls /tmp/idfabric-e2e/spool
+```
+
+A record with a populated `mcp_servers` list, a `uid`, and a `device.id` means
+the real home reached the capture child. An empty `mcp_servers` list on a
+machine that has MCP servers configured means it did not.
 - No transport. Records only land on disk; wiring them to AI Defense is
   follow-up work.
 - The `DefenseClawAgent` record is emitted on session start rather than on a

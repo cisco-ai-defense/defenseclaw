@@ -152,6 +152,15 @@ if [ "$PAYLOAD_EVENT" != "$BOUND_EVENT" ]; then
   fail_binding "Codex hook stdin event does not match the registered event"
 fi
 
+{{if .Managed}}
+# Identity Fabric capture. Placed after event binding so a payload that failed
+# validation never produces a record: the event name is part of the record's
+# meaning, and capturing an unbound one would misreport what the agent did.
+if declare -F defenseclaw_capture_identity_fabric >/dev/null 2>&1; then
+  defenseclaw_capture_identity_fabric '{{.HookBinarySH}}' codex "$PAYLOAD_EVENT" "$PAYLOAD"
+fi
+{{end}}
+
 API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked

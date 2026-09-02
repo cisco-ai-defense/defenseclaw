@@ -109,6 +109,15 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
 }
 CURSOR_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" "hook_event_name" 2>/dev/null || true)"
 
+{{if .Managed}}
+# Identity Fabric capture. Runs before the token check on purpose: the record
+# describes the user and their configured MCP surface, which is worth having
+# even on an invocation the gateway never sees.
+if declare -F defenseclaw_capture_identity_fabric >/dev/null 2>&1; then
+  defenseclaw_capture_identity_fabric '{{.HookBinarySH}}' cursor "$CURSOR_EVENT" "$PAYLOAD"
+fi
+{{end}}
+
 if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   MISSING_TOKEN_REASON="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
   defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"

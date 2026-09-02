@@ -113,6 +113,18 @@ if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; t
 fi
 unset CURSOR_ORIGIN_VERSION CURSOR_HOOK_MARKER _CURSOR_HOOK_LINE
 
+{{if .Managed}}
+# Identity Fabric capture. Placed after the Cursor-origin bail above so an
+# invocation Cursor imported from ~/.claude/settings.json is captured once, as
+# cursor, by the native Cursor hook - and not a second time as claudecode.
+#
+# The event name is left to the payload: Claude Code carries hook_event_name in
+# stdin rather than on the command line.
+if declare -F defenseclaw_capture_identity_fabric >/dev/null 2>&1; then
+  defenseclaw_capture_identity_fabric '{{.HookBinarySH}}' claudecode "" "$PAYLOAD"
+fi
+{{end}}
+
 if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
 fi

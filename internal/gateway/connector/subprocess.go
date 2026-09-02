@@ -56,6 +56,7 @@ type templateData struct {
 	ScopedToken   bool
 	ConnectorName string
 	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookBinarySH  string // absolute CLI path, escaped for a POSIX shell single-quoted literal
 	HookTimeoutMS int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
@@ -501,6 +502,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		ScopedToken:         scopedToken,
 		ConnectorName:       strings.ToLower(strings.TrimSpace(connectorName)),
 		HookBinaryPS:        strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookBinarySH:        shellSingleQuoteBody(defenseclawCLIBinary()),
 		HookTimeoutMS:       windowsHookAdapterTimeoutMS,
 		CursorHookTimeoutMS: cursorWindowsHookAdapterTimeoutMS,
 	}

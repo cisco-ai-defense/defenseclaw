@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v6
+# defenseclaw-managed-hook v7
 # Shell-side hook hardening helpers.
 DEFENSECLAW_BAKED_HOOK_PATH=""
 #
@@ -38,6 +38,14 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        directories could re-admit an agent-planted binary. Windows no
 #        longer uses these bash hooks (it runs the hook natively in the Go
 #        binary), so the Git Bash /mingw64 workaround is no longer needed.
+#   v7 — adds defenseclaw_capture_identity_fabric, which the managed
+#        connector hooks call to spool Identity Fabric telemetry. Call
+#        sites guard on the function being defined, so a hook rendered
+#        by this build against an older helper loses the record rather
+#        than failing the hook. The bump still matters for diagnosis:
+#        it is how an operator tells "telemetry absent because the
+#        helper predates it" from "telemetry absent because capture
+#        failed".
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -137,6 +145,12 @@ defenseclaw_harden_env() {
     DEFENSECLAW_HOOK_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/hook-tmp.$$"
     mkdir -p "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
   fi
+  # Remember the home being replaced. The sandbox below is correct for tools
+  # the hook shells out to, but anything that has to answer "who is this user
+  # and what have they configured" needs the real profile: the sandbox is
+  # empty and is deleted by the EXIT trap. Deliberately not exported, so a
+  # child sees it only when a caller passes it explicitly.
+  DEFENSECLAW_REAL_HOME="${HOME}"
   export HOME="$DEFENSECLAW_HOOK_HOME"
   trap '_defenseclaw_hook_cleanup' EXIT
 
@@ -1013,4 +1027,51 @@ defenseclaw_extract_trace_context() {
         response "${FAIL_MODE:-open}"
     fi
   fi
+}
+
+# defenseclaw_capture_identity_fabric BINARY CONNECTOR EVENT PAYLOAD
+#
+# Spools the Identity Fabric records for one hook event.
+#
+# Capture has to happen in this process. These hooks reach the gateway over
+# HTTP, and the gateway runs as a service account with its own token, home
+# directory, and working directory; asking it who the user is would attribute
+# every event on the machine to that single service identity. Only the hook
+# runs as the real user, in the real workspace.
+#
+# The child is detached with its streams closed, for two reasons. A telemetry
+# record is never worth adding latency to a tool call the user is waiting on.
+# And a connector that reads the hook's stdout until EOF - Cursor does - would
+# otherwise block until the capture child released the inherited descriptor,
+# turning a background record into user-visible delay.
+#
+# Every failure path is silent and returns success: this is called from a
+# guardrail hook under errexit, where a nonzero return would convert a missing
+# telemetry record into a blocked or allowed tool call.
+defenseclaw_capture_identity_fabric() {
+  local binary="${1:-}"
+  local connector="${2:-}"
+  local event="${3:-}"
+  local payload="${4:-}"
+
+  [ -n "$binary" ] || return 0
+  [ -n "$connector" ] || return 0
+  [ -x "$binary" ] || return 0
+
+  # Undo the hardened HOME for this child only. defenseclaw_harden_env points
+  # HOME at an empty per-hook sandbox that the EXIT trap removes; capture reads
+  # the user's connector config and device identity out of the real profile, so
+  # inheriting the sandbox would spool a record with no MCP servers, no
+  # account email, and no device id - present, and wrong.
+  local home="${DEFENSECLAW_REAL_HOME:-$HOME}"
+
+  # printf is a builtin, so the payload never becomes an argv entry and
+  # cannot hit ARG_MAX at the 1MB stdin cap.
+  {
+    printf '%s' "$payload" | HOME="$home" "$binary" idfabric capture \
+      --connector "$connector" \
+      --event "$event" \
+      --enterprise-managed
+  } </dev/null >/dev/null 2>&1 &
+  return 0
 }
