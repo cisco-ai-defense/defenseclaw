@@ -340,6 +340,7 @@ _LOCAL_OBSERVABILITY_DASHBOARD_UIDS: tuple[str, ...] = (
     "defenseclaw-scanners",
     "defenseclaw-security",
     "defenseclaw-traffic",
+    "shadowclaw-shadow-ai",
 )
 
 

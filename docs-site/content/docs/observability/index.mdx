@@ -46,6 +46,12 @@ For Codex, setup writes a connector-scoped bearer and
 [Codex connector guide](/docs/connectors/codex) for credential, permission, and
 teardown behavior.
 
+External producers can also send directly to the bundled Collector. Those
+records share the local backends but do not enter DefenseClaw's canonical v8
+pipeline or inherit its redaction policy. The
+[ShadowClaw integration](/docs/observability/shadowclaw) uses this boundary for
+endpoint detections while preserving the producer's own service namespace.
+
 ## Full-fidelity defaults
 
 The minimal configuration is:

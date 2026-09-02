@@ -8,10 +8,11 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions a focused catalog of 14 Grafana dashboards. Each board
-has one job: start broad, select a connector, agent, rule, or execution, and
-then move to the detail surface that owns that question. The catalog avoids
-duplicating the same analysis across several boards.
+DefenseClaw provisions 14 native Grafana dashboards plus one optional external
+producer view for ShadowClaw. Each native board has one job: start broad,
+select a connector, agent, rule, or execution, and then move to the detail
+surface that owns that question. The catalog avoids duplicating the same
+analysis across several boards.
 
 ## Start here
 
@@ -40,11 +41,15 @@ duplicating the same analysis across several boards.
 | **Scanners (Ops)** (`defenseclaw-scanners`) | Are scanner executions healthy and producing expected findings? | Detection engineer, SRE | Prometheus | Sparse-safe rolling scan counts, duration, errors, quarantine actions, and operational finding trends. Queue depth is omitted because scanners currently execute synchronously and do not emit a durable queue series. |
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | What is happening on proxy/router deployments? | Proxy operator, SRE | Prometheus, Loki, Tempo | HTTP, tool, guardrail, GenAI, and trace telemetry that only exists when proxy/router mode is active. |
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Is the local process, database, exporter, or audit pipeline unhealthy? | SRE, operator | Prometheus, Loki | One truthful operations board for runtime, SQLite, exporter freshness/errors, audit delivery, and gateway errors. |
+| **ShadowClaw — Shadow AI Detections** (`shadowclaw-shadow-ai`) | What AI-provider and agent activity did the independent endpoint sensor observe? | SOC, endpoint security | Loki | Optional ShadowClaw view over its own OTLP records, including process, provider, risk, and host-plane evidence beside DefenseClaw discovery and findings. |
 
 ## Retain, consolidate, and remove decisions
 
-- **Retain the 14 boards above.** Each owns a distinct operator question or a
+- **Retain the 14 native boards above.** Each owns a distinct operator question or a
   deliberate overview → detail drill-down; none is a renamed duplicate.
+- **The ShadowClaw board is an external producer view.** It is empty unless a
+  ShadowClaw sensor exports to the local Collector, and its fields are not part
+  of DefenseClaw's canonical v8 telemetry contract.
 - **Runtime and Reliability stay consolidated.** The former standalone
   Reliability dashboard duplicated process/exporter panels and has been
   retired from both fresh installs and upgrades.

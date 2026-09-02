@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "local-observability",
+    "shadowclaw",
     "grafana-dashboards",
     "agent360",
     "galileo",
