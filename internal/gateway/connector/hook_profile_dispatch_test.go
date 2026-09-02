@@ -96,6 +96,16 @@ func TestCopilotProfileDecodeUsesDocumentedToolArgsAuthority(t *testing.T) {
 		t.Fatalf("Copilot tool args = %s authoritative=%v", got.ToolArgs, got.ToolArgsAuthoritative)
 	}
 
+	encoded := copilotProfileDecode(map[string]interface{}{
+		"cwd":      `C:\workspace`,
+		"toolName": "powershell",
+		"toolArgs": ` {"command":"az keyvault secret show --name fixture"} `,
+	})
+	if !encoded.ToolArgsAuthoritative ||
+		string(encoded.ToolArgs) != `{"command":"az keyvault secret show --name fixture"}` {
+		t.Fatalf("Copilot JSON-string tool args = %s authoritative=%v", encoded.ToolArgs, encoded.ToolArgsAuthoritative)
+	}
+
 	malformed := copilotProfileDecode(map[string]interface{}{
 		"toolName": "powershell",
 		"toolArgs": "opaque",

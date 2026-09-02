@@ -20,13 +20,44 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+func TestAgentHookTrustedActionToolSelectsWindowsHostShellGrammar(t *testing.T) {
+	tests := []struct {
+		connector string
+		tool      string
+		platform  string
+		want      string
+	}{
+		{connector: "opencode", tool: "bash", platform: "windows", want: "shell"},
+		{connector: "copilot", tool: "powershell", platform: "windows", want: "shell"},
+		{connector: "copilot", tool: "powershell", platform: "linux", want: "powershell"},
+		{connector: "copilot", tool: "edit", platform: "windows", want: "edit"},
+	}
+	for _, test := range tests {
+		if got := agentHookTrustedActionTool(test.connector, test.tool, test.platform); got != test.want {
+			t.Errorf("agentHookTrustedActionTool(%q, %q, %q)=%q want %q", test.connector, test.tool, test.platform, got, test.want)
+		}
+	}
+
+	args := json.RawMessage(`{"command":"az keyvault secret show --vault-name defenseclaw-nonexistent --name fixture"}`)
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool: agentHookTrustedActionTool("copilot", "powershell", "windows"),
+		Args: args,
+	})
+	if !facts.EnforcementEligible() || len(facts.Commands) != 1 ||
+		!slices.Contains(facts.Commands[0].Operations, actionfacts.OperationCredentialRead) {
+		t.Fatalf("Copilot Windows native command facts are not enforceable: %+v", facts)
+	}
+}
 
 func TestMapHookAction_ConfirmRequiresNativeAskSurface(t *testing.T) {
 	copilot := connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
