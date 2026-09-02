@@ -5449,9 +5449,13 @@ function Assert-CopilotSynchronousWindowsHookConfig([string]$Config, [string]$Co
         'defenseclaw-managed-hook v7',
         'defenseclaw-hook.exe',
         '[Console]::In.ReadToEnd()',
+        '$payload[0] -eq [char]0xFEFF',
         'RedirectStandardInput = $true',
         'RedirectStandardOutput = $true',
         'RedirectStandardError = $true',
+        '[Console]::InputEncoding = $utf8NoBom',
+        '[Console]::OutputEncoding = $utf8NoBom',
+        '$process.StandardInput.WriteAsync($payload)',
         'WaitForExit',
         '[System.Environment]::Exit(0)'
     )) {

@@ -29,8 +29,19 @@ try {
         throw "DefenseClaw hook launcher is missing: $hook"
     }
     $payload = [Console]::In.ReadToEnd()
+    # Windows PowerShell 5.1 materializes the redirected-stream encoding marker
+    # as U+FEFF even when the original Copilot JSON bytes had no BOM. JSON must
+    # begin with the object itself, so remove exactly one leading marker while
+    # preserving every byte of the event body after it.
+    if ($payload.Length -gt 0 -and $payload[0] -eq [char]0xFEFF) {
+        $payload = $payload.Substring(1)
+    }
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $payloadBytes = $utf8NoBom.GetBytes($payload)
+    # Windows PowerShell's .NET Framework Process API has no
+    # ProcessStartInfo.StandardInputEncoding property. Process instead builds
+    # its redirected readers/writer from these console encodings.
+    [Console]::InputEncoding = $utf8NoBom
+    [Console]::OutputEncoding = $utf8NoBom
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $hook
@@ -49,7 +60,7 @@ try {
     $started = $true
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    $stdinTask = $process.StandardInput.BaseStream.WriteAsync($payloadBytes, 0, $payloadBytes.Length)
+    $stdinTask = $process.StandardInput.WriteAsync($payload)
 
     $remainingMS = $timeoutMS - [int]$deadline.ElapsedMilliseconds
     if ($remainingMS -le 0 -or -not $stdinTask.Wait($remainingMS)) {

@@ -1373,7 +1373,7 @@ func main() {
 		os.Exit(9)
 	}
 	if string(payload) != "{\"tool\":\"win-aud-069\"}" {
-		fmt.Fprintln(os.Stderr, "probe received wrong stdin")
+		fmt.Fprintf(os.Stderr, "probe received wrong stdin: %q\n", string(payload))
 		os.Exit(8)
 	}
 	exitCode, err := strconv.Atoi(os.Getenv("DC_TEST_EXIT_CODE"))
@@ -1458,7 +1458,7 @@ func main() {
 					got, wantExitCode, command, stdout.String(), stderr.String())
 			}
 			if got, want := strings.TrimSpace(stdout.String()), "probe stdout "+testCase.connector; got != want {
-				t.Fatalf("generated command stdout = %q, want %q", got, want)
+				t.Fatalf("generated command stdout = %q, want %q; stderr=%q", got, want, stderr.String())
 			}
 			if got, want := stderr.String(), "probe stderr "+testCase.connector; !strings.Contains(got, want) {
 				t.Fatalf("generated command stderr = %q, want marker %q", got, want)
@@ -1552,7 +1552,7 @@ func windowsNativePowerShellTestProcess(ctx context.Context, connector, command 
 	if connector == "copilot" {
 		return exec.CommandContext(
 			ctx,
-			"pwsh.exe",
+			"powershell.exe",
 			"-NoLogo",
 			"-NoProfile",
 			"-NonInteractive",
@@ -2484,10 +2484,14 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				for _, marker := range []string{
 					windowsHookBinaryName,
 					"[Console]::In.ReadToEnd()",
+					"$payload[0] -eq [char]0xFEFF",
 					"RedirectStandardInput = $true",
 					"RedirectStandardOutput = $true",
 					"RedirectStandardError = $true",
+					"[Console]::InputEncoding = $utf8NoBom",
+					"[Console]::OutputEncoding = $utf8NoBom",
 					fmt.Sprintf("$timeoutMS = %d", copilotWindowsHookAdapterTimeoutMS),
+					"$process.StandardInput.WriteAsync($payload)",
 					"hook --connector copilot --event ",
 					"[System.Environment]::Exit(0)",
 				} {
