@@ -11,14 +11,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-// SpoolDirName is the directory, under the DefenseClaw home, holding records
-// that would have been sent to AI Defense.
+// SpoolDirName is the leaf directory holding records that would have been sent
+// to AI Defense.
 const SpoolDirName = "aid-spool"
 
 // SpoolDirEnv overrides the spool location for testing.
@@ -41,21 +42,87 @@ type Spool struct {
 	dir string
 }
 
-// NewSpool resolves the spool directory for a DefenseClaw home and creates it
-// with owner-only access.
-func NewSpool(home string) (*Spool, error) {
-	dir := strings.TrimSpace(os.Getenv(SpoolDirEnv))
-	if dir == "" {
-		home = strings.TrimSpace(home)
-		if home == "" {
-			return nil, errors.New("idfabric: DefenseClaw home is empty")
+// SpoolDir resolves the directory records are written to.
+//
+// The spool lives in the invoking user's own state directory rather than under
+// the DefenseClaw home, for two reasons.
+//
+// It has to. In managed enterprise mode the home is the machine state root,
+// whose DACL grants SYSTEM, Administrators, and the gateway service account
+// only - nothing to Users, with inheritance protected. A hook running as the
+// interactive user cannot create a directory there, so resolving the spool
+// from the home made capture fail in precisely the mode it is gated to.
+//
+// It also belongs there. These are per-user records produced by a user-context
+// process, and each user's spool is independently collectable per profile.
+//
+// The tradeoff is that a user can delete their own pending records. That is
+// acceptable for a pre-ingest staging buffer that disappears once AI Defense
+// ingest exists and the hook forwards directly; tamper-evident retention is
+// the audit store's responsibility, not this sink's.
+func SpoolDir() (string, error) {
+	if override := strings.TrimSpace(os.Getenv(SpoolDirEnv)); override != "" {
+		return override, nil
+	}
+	root, err := userStateRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, SpoolDirName), nil
+}
+
+// userStateRoot reports the per-user DefenseClaw state directory, following
+// each platform's own convention.
+//
+// It deliberately avoids ~/.defenseclaw. That path is the unmanaged home, and
+// the Unix hook scripts read its existence as "an unmanaged install is
+// present" - creating it on a managed endpoint, where it is otherwise absent,
+// would change how a stray unmanaged hook behaves.
+func userStateRoot() (string, error) {
+	switch runtime.GOOS {
+	case "windows":
+		if dir := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); dir != "" {
+			return filepath.Join(dir, "DefenseClaw"), nil
 		}
-		dir = filepath.Join(home, SpoolDirName)
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, "AppData", "Local", "DefenseClaw"), nil
+	case "darwin":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, "Library", "Application Support", "DefenseClaw"), nil
+	default:
+		if dir := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); dir != "" {
+			return filepath.Join(dir, "DefenseClaw"), nil
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, ".local", "state", "DefenseClaw"), nil
+	}
+}
+
+// NewSpool resolves the spool directory and creates it with owner-only access.
+func NewSpool() (*Spool, error) {
+	dir, err := SpoolDir()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(dir) == "" {
+		return nil, errors.New("idfabric: spool directory is empty")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	// Owner-only on POSIX; owner + SYSTEM + Administrators DACL on Windows.
+	// The directory is inside the user's own profile, so this sole-owner
+	// contract is satisfiable here in a way it never was under the
+	// Administrators-owned managed state root.
 	if err := safefile.ProtectDirectory(dir); err != nil {
 		return nil, err
 	}

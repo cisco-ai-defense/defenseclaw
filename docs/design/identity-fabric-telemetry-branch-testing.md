@@ -50,13 +50,43 @@ any of these hold:
 - `DEFENSECLAW_IDFABRIC_SPOOL=1` — test-only override, not a supported
   configuration surface
 
+Only the first of those reaches an installed hook today, and only on Windows:
+managed hooks are registered with `--enterprise-managed`, while the deployment
+mode is pinned into the *service* environment that an agent-spawned hook does
+not inherit. See the first entry under Known gaps for why macOS captures
+nothing in production.
+
 While disabled the code path costs one environment lookup and does not touch
 stdin, so a non-enterprise endpoint behaves exactly as it does on `main`.
 
 ## Output location
 
-`$DEFENSECLAW_HOME/aid-spool/` (default `~/.defenseclaw/aid-spool/`), or
-`DEFENSECLAW_IDFABRIC_SPOOL_DIR` when set. Files are mode 0600, owner-only
+Per-user state, following each platform's convention, or
+`DEFENSECLAW_IDFABRIC_SPOOL_DIR` when set:
+
+| Platform | Directory |
+| --- | --- |
+| macOS | `~/Library/Application Support/DefenseClaw/aid-spool/` |
+| Windows | `%LOCALAPPDATA%\DefenseClaw\aid-spool\` |
+| Linux | `${XDG_STATE_HOME:-~/.local/state}/DefenseClaw/aid-spool/` |
+
+This is deliberately **not** derived from the DefenseClaw home. In managed
+enterprise mode the home is the machine state root under `ProgramData`, whose
+DACL grants SYSTEM, Administrators, and the gateway service account only —
+nothing to `Users`, with inheritance protected. A hook running as the
+interactive user cannot create a directory there, so a home-derived spool
+failed in exactly the mode capture is gated to. Per-user state is also where
+per-user records belong, and it stays collectable per profile.
+
+It is not `~/.defenseclaw`: the Unix hook scripts read that path's existence as
+"an unmanaged install is present", so creating it on a managed endpoint would
+change how a stray unmanaged hook behaves.
+
+The tradeoff is that a user can delete their own pending records. That is
+acceptable for a pre-ingest staging buffer that disappears once AI Defense
+ingest exists; tamper-evident retention belongs to the audit store.
+
+Files are mode 0600, owner-only
 directory, written through an atomic replace so a partial JSON document is
 never observable. The spool stops writing at 5000 files rather than evicting
 evidence.
@@ -190,17 +220,26 @@ This is the only path that exercises the real gate rather than the env
 override, and the only one where `is_policy_enforceable` should be `true`.
 
 Install per the enterprise flow (`packaging/windows/install-enterprise.ps1`),
-then drive real agent sessions as `dcstd` with the installed hooks. Records
-land in that user's `C:\Users\dcstd\.defenseclaw\aid-spool\`.
+then drive real agent sessions as `dcstd` with the installed hooks and **no**
+`DEFENSECLAW_IDFABRIC_SPOOL` set. Records land in
+`C:\Users\dcstd\AppData\Local\DefenseClaw\aid-spool\`.
 
 Check specifically that:
 
-- capture happens with **no** `DEFENSECLAW_IDFABRIC_SPOOL` set, proving the
-  managed gate works on its own
+- capture happens with no env override, proving the managed gate works alone
 - `is_policy_enforceable` is `true` (it is `false` under the env override,
   because an ordinary user-scope hook can be removed by the user)
-- the spool is created under the invoking user's profile, not under
-  `ProgramData` or the service account's profile
+- the spool is under the invoking user's `LOCALAPPDATA`, not under
+  `ProgramData` and not under the service account's profile
+- `device.id` is **expected to be absent**. The device key lives under the
+  DefenseClaw home, which in managed mode is the machine state root the user
+  cannot even traverse. Same root cause as the spool relocation, but this half
+  cannot be fixed from the hook side — it needs either an ACL that lets users
+  read the key, or the gateway supplying the fingerprint.
+
+If capture produces nothing, collect `icacls "%LOCALAPPDATA%\DefenseClaw"` and
+the stderr line `defenseclaw: identity fabric capture skipped (...)`, whose
+reason names the stage that failed.
 
 ## Step 5 — Cursor on Windows
 
@@ -250,6 +289,25 @@ mapping in `eventKind`. Watch for this specifically.
 
 ## Known gaps
 
+- **macOS and Linux never capture in production.** Capture is wired into the
+  `hook` subcommand, and that subcommand is Windows-only: `hookInvocationCommand`
+  returns the native `<exe> hook --connector <name>` invocation on Windows but
+  the bundled `.sh` script path everywhere else, and those scripts `curl` the
+  gateway directly. The macOS results in this document were produced by
+  invoking the subcommand by hand, which no installed macOS hook does.
+
+  This is not a gating problem — the code path does not run. Closing it means
+  something must execute in the user's context after the payload is available,
+  because that is the only place the real UID, home directory, and workspace
+  exist. Moving capture into the gateway would attribute every macOS managed
+  session to the LaunchDaemon's root identity, which the projection forbids.
+  The realistic fix is for the three Unix hook templates to invoke a capture
+  subcommand as a backgrounded child, which needs a shell-escaped binary path
+  in `templateData` and costs one short-lived process per hook event.
+- The device fingerprint is unreadable in managed mode. `device.key` sits under
+  the machine state root, which grants `Users` no traverse right, so managed
+  records omit `device.id`. Unlike the spool location, the hook cannot fix this
+  from its own side.
 - No transport. Records only land on disk; wiring them to AI Defense is
   follow-up work.
 - The `DefenseClawAgent` record is emitted on session start rather than on a

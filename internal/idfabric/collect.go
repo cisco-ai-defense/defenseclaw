@@ -108,7 +108,7 @@ func CaptureHookEvent(hc HookContext) ([]string, error) {
 	}
 	common.EventTime, common.TimeSource = resolveEventTime(fields.timestamp, receivedAt)
 
-	spool, err := NewSpool(hc.Home)
+	spool, err := NewSpool()
 	if err != nil {
 		return nil, err
 	}

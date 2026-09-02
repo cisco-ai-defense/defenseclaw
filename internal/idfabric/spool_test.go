@@ -82,11 +82,53 @@ func TestSpoolFileNameRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+// TestSpoolDirIsPerUserNotTheDefenseClawHome pins the fix for capture failing
+// in managed enterprise mode. The managed home is an Administrators-owned
+// machine root with no ACE for Users, so a spool resolved from it is
+// uncreatable by the hook's own user. Resolution must depend only on per-user
+// state, never on a caller-supplied home.
+func TestSpoolDirIsPerUserNotTheDefenseClawHome(t *testing.T) {
+	t.Setenv(SpoolDirEnv, "")
+	userHome := t.TempDir()
+	setHome(t, userHome)
+	if runtime.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", filepath.Join(userHome, "AppData", "Local"))
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+
+	dir, err := SpoolDir()
+	if err != nil {
+		t.Fatalf("SpoolDir: %v", err)
+	}
+	if !strings.HasPrefix(dir, userHome) {
+		t.Errorf("SpoolDir = %q, want a path under the user home %q", dir, userHome)
+	}
+	if filepath.Base(dir) != SpoolDirName {
+		t.Errorf("SpoolDir leaf = %q, want %q", filepath.Base(dir), SpoolDirName)
+	}
+	// ~/.defenseclaw is the unmanaged home, and the Unix hook scripts branch
+	// on its existence. The spool must not create it.
+	if strings.Contains(dir, ".defenseclaw") {
+		t.Errorf("SpoolDir = %q, must not live under the unmanaged home", dir)
+	}
+
+	spool, err := NewSpool()
+	if err != nil {
+		t.Fatalf("NewSpool: %v", err)
+	}
+	if spool.Dir() != dir {
+		t.Errorf("NewSpool dir = %q, want %q", spool.Dir(), dir)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("spool directory was not created: %v", err)
+	}
+}
+
 func TestSpoolWriteIsPrivateAndAtomic(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(SpoolDirEnv, filepath.Join(dir, "spool"))
 
-	spool, err := NewSpool("")
+	spool, err := NewSpool()
 	if err != nil {
 		t.Fatalf("NewSpool: %v", err)
 	}
