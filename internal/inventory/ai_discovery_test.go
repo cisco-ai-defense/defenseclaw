@@ -2575,11 +2575,12 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 	}{
 		{"unmanaged_default_stays_60s", false, 60 * time.Second, 60 * time.Second},
 		{"unmanaged_zero_falls_back_to_60s", false, 0, 60 * time.Second},
-		{"managed_default_60s_promoted_to_5m", true, 60 * time.Second, 5 * time.Minute},
-		{"managed_zero_promoted_to_5m", true, 0, 5 * time.Minute},
-		{"managed_below_floor_promoted", true, 90 * time.Second, 5 * time.Minute},
-		{"managed_at_floor_preserved", true, 5 * time.Minute, 5 * time.Minute},
-		{"managed_above_floor_preserved", true, 10 * time.Minute, 10 * time.Minute},
+		{"managed_default_60s_promoted_to_30m", true, 60 * time.Second, 30 * time.Minute},
+		{"managed_zero_promoted_to_30m", true, 0, 30 * time.Minute},
+		{"managed_below_floor_promoted", true, 90 * time.Second, 30 * time.Minute},
+		{"managed_previous_5m_floor_promoted", true, 5 * time.Minute, 30 * time.Minute},
+		{"managed_at_floor_preserved", true, 30 * time.Minute, 30 * time.Minute},
+		{"managed_above_floor_preserved", true, 45 * time.Minute, 45 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2595,4 +2596,155 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor pins the 30 min
+// managed_enterprise floor on the FULL-scan cadence — the field that
+// gates every AI Defense publish through fanoutReport. Non-managed
+// installs preserve the historical 5-min default so local dev / OSS
+// behavior does not shift.
+func TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor(t *testing.T) {
+	cases := []struct {
+		name    string
+		managed bool
+		input   time.Duration
+		want    time.Duration
+	}{
+		{"unmanaged_default_zero_falls_back_to_5m", false, 0, 5 * time.Minute},
+		{"unmanaged_configured_preserved", false, 5 * time.Minute, 5 * time.Minute},
+		{"managed_zero_promoted_to_30m", true, 0, 30 * time.Minute},
+		{"managed_previous_5m_default_promoted", true, 5 * time.Minute, 30 * time.Minute},
+		{"managed_below_floor_promoted", true, 15 * time.Minute, 30 * time.Minute},
+		{"managed_at_floor_preserved", true, 30 * time.Minute, 30 * time.Minute},
+		{"managed_above_floor_preserved", true, 60 * time.Minute, 60 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+				DataDir:           t.TempDir(),
+				HomeDir:           t.TempDir(),
+				ScanInterval:      tc.input,
+				ManagedEnterprise: tc.managed,
+			})
+			if opts.ScanInterval != tc.want {
+				t.Fatalf("ScanInterval = %s, want %s (managed=%t, input=%s)",
+					opts.ScanInterval, tc.want, tc.managed, tc.input)
+			}
+		})
+	}
+}
+
+// TestNormalizeAIDiscoveryOptionsPublishJitter pins the fleet-wide jitter
+// default and the non-managed opt-out. In managed_enterprise the jitter
+// defaults to 10 % of ScanInterval so a fleet-wide reboot or AI Defense
+// outage recovery never translates into a synchronized ingest spike.
+// Non-managed installs get zero jitter and keep the fixed-cadence tick.
+func TestNormalizeAIDiscoveryOptionsPublishJitter(t *testing.T) {
+	cases := []struct {
+		name    string
+		managed bool
+		scan    time.Duration
+		input   time.Duration
+		want    time.Duration
+	}{
+		{"unmanaged_default_zero", false, 5 * time.Minute, 0, 0},
+		{"unmanaged_configured_preserved", false, 5 * time.Minute, 15 * time.Second, 15 * time.Second},
+		{"unmanaged_negative_clamped_to_zero", false, 5 * time.Minute, -1 * time.Second, 0},
+		{"managed_default_ten_percent_of_scan", true, 30 * time.Minute, 0, 3 * time.Minute},
+		{"managed_default_tracks_promoted_scan", true, 5 * time.Minute, 0, 3 * time.Minute},
+		{"managed_configured_preserved", true, 30 * time.Minute, 45 * time.Second, 45 * time.Second},
+		{"managed_negative_falls_back_to_default", true, 30 * time.Minute, -5 * time.Second, 3 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+				DataDir:           t.TempDir(),
+				HomeDir:           t.TempDir(),
+				ScanInterval:      tc.scan,
+				PublishJitter:     tc.input,
+				ManagedEnterprise: tc.managed,
+			})
+			if opts.PublishJitter != tc.want {
+				t.Fatalf("PublishJitter = %s, want %s (managed=%t, scan=%s, input=%s)",
+					opts.PublishJitter, tc.want, tc.managed, tc.scan, tc.input)
+			}
+		})
+	}
+}
+
+// TestNextScheduledDelayJitterBounds pins the [interval, interval+jitter)
+// range on the timer-reset helper. Verifies the non-managed path (zero
+// jitter) collapses to the configured interval — that is the "legacy
+// fixed-cadence ticker behavior" contract non-managed installs rely on.
+func TestNextScheduledDelayJitterBounds(t *testing.T) {
+	base := 30 * time.Minute
+	t.Run("no_jitter_collapses_to_interval", func(t *testing.T) {
+		svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{PublishJitter: 0}}
+		for i := 0; i < 200; i++ {
+			if got := svc.nextScheduledDelay(base); got != base {
+				t.Fatalf("nextScheduledDelay = %s, want exact %s (i=%d)", got, base, i)
+			}
+		}
+	})
+	t.Run("nonpositive_interval_returns_zero", func(t *testing.T) {
+		svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{PublishJitter: 3 * time.Minute}}
+		if got := svc.nextScheduledDelay(0); got != 0 {
+			t.Fatalf("nextScheduledDelay(0) = %s, want 0", got)
+		}
+	})
+	jitterCases := []struct {
+		name   string
+		jitter time.Duration
+	}{
+		{"managed_default_ten_percent_bounded", 3 * time.Minute},
+		{"tight_jitter_bounded", 1 * time.Second},
+	}
+	for _, tc := range jitterCases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{PublishJitter: tc.jitter}}
+			min, max := base, base+tc.jitter
+			for i := 0; i < 500; i++ {
+				got := svc.nextScheduledDelay(base)
+				if got < min || got >= max {
+					t.Fatalf("nextScheduledDelay = %s, want [%s, %s) (i=%d)", got, min, max, i)
+				}
+			}
+		})
+	}
+}
+
+// TestSleepWithJitterCancellation pins the two shutdown-facing contracts on
+// the startup-jitter helper: a cancelled context short-circuits the sleep
+// (returns false), and a zero total delay never touches the timer path
+// (returns true immediately even with a live ctx). Regression guard for
+// runClaimed's `if !s.sleepWithJitter(ctx, 0, PublishJitter) { return }`
+// early-return — a false result from a live ctx would swallow the startup
+// scan across every managed_enterprise sidecar.
+func TestSleepWithJitterCancellation(t *testing.T) {
+	svc := &ContinuousDiscoveryService{}
+	t.Run("zero_delay_returns_true_without_blocking", func(t *testing.T) {
+		start := time.Now()
+		if !svc.sleepWithJitter(context.Background(), 0, 0) {
+			t.Fatalf("sleepWithJitter(0,0) = false, want true")
+		}
+		if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+			t.Fatalf("sleepWithJitter(0,0) blocked for %s, want ~0", elapsed)
+		}
+	})
+	t.Run("cancelled_ctx_short_circuits", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		start := time.Now()
+		if svc.sleepWithJitter(ctx, 500*time.Millisecond, 500*time.Millisecond) {
+			t.Fatalf("sleepWithJitter with cancelled ctx = true, want false")
+		}
+		if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+			t.Fatalf("sleepWithJitter with cancelled ctx blocked %s, want ~0", elapsed)
+		}
+	})
+	t.Run("live_ctx_returns_true_after_sleep", func(t *testing.T) {
+		if !svc.sleepWithJitter(context.Background(), 5*time.Millisecond, 0) {
+			t.Fatalf("sleepWithJitter with live ctx = false, want true")
+		}
+	})
 }

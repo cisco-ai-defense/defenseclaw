@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -75,6 +76,15 @@ const (
 	maxIndeterminateModelAPIMisses   = 1
 	maxPersistedLocalModelAPISignals = 2 * maxLocalModelAPIItems
 )
+
+// managedEnterpriseScanInterval is the minimum full-scan cadence in
+// managed_enterprise mode. Every full-scan tick fans out through
+// managedInventoryEmit to AI Defense, so this doubles as the AI Defense
+// publish cadence — the ingest cost of a fleet-wide 30-min beat is well
+// below the 5-min baseline while still keeping inventory drift bounded.
+// The value is also the floor applied to ProcessIntervalSec in the same
+// mode so the two tickers never diverge onto a faster wall-clock.
+const managedEnterpriseScanInterval = 30 * time.Minute
 
 // aiDiscoveryStateVersion is the schema version of the on-disk state file
 // (`ai_discovery_state.json`). v2 introduced per-signal `evidence_hash`,
@@ -165,6 +175,18 @@ type AIDiscoveryOptions struct {
 	// scan-trace telemetry (StartScan / detector traces / End) remains owned
 	// by the bound observability runtime and fires on every tick.
 	ManagedEnterprise bool
+	// PublishJitter is the maximum wall-clock perturbation applied to the
+	// startup scan and to each scheduled full/process tick when running in
+	// managed_enterprise mode. Non-managed installs default this to zero and
+	// retain the fixed-cadence ticker behavior. In managed_enterprise the
+	// normalization layer defaults it to ScanInterval / 10 (10 %) so a
+	// fleet-wide reboot, an AI Defense outage, or a co-scheduled config
+	// reload does not cause every endpoint to hit the ingest endpoint at the
+	// same wall-clock second. Retry-backoff jitter in the delivery
+	// dispatcher (full jitter, capped at MaxBackoff) already spreads
+	// post-failure retries; this field spreads the first attempt of each
+	// cycle across the fleet so the initial thundering herd never forms.
+	PublishJitter time.Duration
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -704,11 +726,33 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	// a 60s connector/MCP snapshot push to AI Defense. Push volume, not
 	// process-detection cost, dominates the operational spend on managed
 	// installs — align the process cadence with the full-scan cadence so
-	// the two tickers produce one push per 5 min instead of six. Operators
-	// can still configure a longer interval; the floor only lifts values
-	// below the full-scan default.
-	if opts.ManagedEnterprise && opts.ProcessInterval < 5*time.Minute {
-		opts.ProcessInterval = 5 * time.Minute
+	// the two tickers produce one push per full-scan cycle instead of
+	// several. The full-scan cadence is itself lifted to 30 min in
+	// managed_enterprise; the process-interval floor tracks it so both
+	// tickers fire on the same 30-min beat. Operators can still configure
+	// a longer interval; the floor only lifts values below the managed
+	// default.
+	if opts.ManagedEnterprise && opts.ScanInterval < managedEnterpriseScanInterval {
+		opts.ScanInterval = managedEnterpriseScanInterval
+	}
+	if opts.ManagedEnterprise && opts.ProcessInterval < managedEnterpriseScanInterval {
+		opts.ProcessInterval = managedEnterpriseScanInterval
+	}
+	// Default the fleet-wide publish jitter to 10 % of the full-scan
+	// cadence in managed_enterprise. At the 30-min managed default this
+	// is a 3-min window; each endpoint's startup scan and each scheduled
+	// tick land at a uniformly random offset inside that window, so a
+	// synchronized fleet event (reboot, config reload, AI Defense outage
+	// recovery) does not translate into a synchronized ingest spike.
+	// Non-managed installs keep the historical fixed-cadence tick.
+	// A negative operator override is treated as "invalid, use default"
+	// — clamp to zero first so the managed default branch takes over,
+	// then the final clamp handles a non-managed negative.
+	if opts.PublishJitter < 0 {
+		opts.PublishJitter = 0
+	}
+	if opts.ManagedEnterprise && opts.PublishJitter <= 0 {
+		opts.PublishJitter = opts.ScanInterval / 10
 	}
 	if opts.MaxFilesPerScan <= 0 {
 		opts.MaxFilesPerScan = 1000
@@ -896,25 +940,78 @@ func (s *ContinuousDiscoveryService) runClaimed(ctx context.Context) (runErr err
 			}
 		}
 	}()
+	// Startup jitter — sleep for a uniformly random offset in
+	// [0, PublishJitter) before the first scan so a fleet-wide reboot
+	// does not translate into a fleet-wide first-tick spike against
+	// AI Defense. Zero in non-managed installs, so the loop still fires
+	// immediately outside managed_enterprise.
+	if !s.sleepWithJitter(ctx, 0, s.opts.PublishJitter) {
+		return ctx.Err()
+	}
 	_, _ = s.runScan(ctx, true, "startup")
 
-	fullTicker := time.NewTicker(s.opts.ScanInterval)
-	defer fullTicker.Stop()
-	processTicker := time.NewTicker(s.opts.ProcessInterval)
-	defer processTicker.Stop()
+	// Use one-shot timers instead of fixed tickers so each scheduled
+	// interval carries its own jitter draw. The full and process schedules
+	// are independent — a jittered full tick does not delay the next
+	// process tick and vice versa. In non-managed installs PublishJitter
+	// is zero, so nextScheduledDelay collapses to the configured interval
+	// and the two timers behave identically to the previous ticker-based
+	// loop.
+	fullTimer := time.NewTimer(s.nextScheduledDelay(s.opts.ScanInterval))
+	defer fullTimer.Stop()
+	processTimer := time.NewTimer(s.nextScheduledDelay(s.opts.ProcessInterval))
+	defer processTimer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-fullTicker.C:
+		case <-fullTimer.C:
 			_, _ = s.runScan(ctx, true, "scheduled")
-		case <-processTicker.C:
+			fullTimer.Reset(s.nextScheduledDelay(s.opts.ScanInterval))
+		case <-processTimer.C:
 			_, _ = s.runScan(ctx, false, "process")
+			processTimer.Reset(s.nextScheduledDelay(s.opts.ProcessInterval))
 		case resp := <-s.triggers:
 			report, err := s.runScan(ctx, true, "api")
 			resp <- scanResponse{report: report, err: err}
 		}
+	}
+}
+
+// nextScheduledDelay returns interval + a uniformly random offset in
+// [0, PublishJitter). A non-positive PublishJitter returns the raw interval,
+// preserving the legacy fixed-cadence behavior for non-managed installs.
+func (s *ContinuousDiscoveryService) nextScheduledDelay(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 0
+	}
+	jitter := s.opts.PublishJitter
+	if jitter <= 0 {
+		return interval
+	}
+	return interval + time.Duration(mrand.Int64N(int64(jitter)))
+}
+
+// sleepWithJitter blocks for base + a uniformly random offset in
+// [0, jitter). Returns false only when ctx is cancelled during the sleep;
+// callers should treat that as a shutdown signal. A zero total delay
+// returns immediately with ctx.Err() == nil.
+func (s *ContinuousDiscoveryService) sleepWithJitter(ctx context.Context, base, jitter time.Duration) bool {
+	delay := base
+	if jitter > 0 {
+		delay += time.Duration(mrand.Int64N(int64(jitter)))
+	}
+	if delay <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
