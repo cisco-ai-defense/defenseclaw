@@ -1401,7 +1401,7 @@ func main() {
 	}
 	copilotAdapter, err := renderTemplate(string(copilotTemplate), templateData{
 		HookBinaryPS:         strings.ReplaceAll(helper, "'", "''"),
-		CopilotHookTimeoutMS: 10_000,
+		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
 	})
 	if err != nil {
 		t.Fatalf("render Copilot adapter: %v", err)
