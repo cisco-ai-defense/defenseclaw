@@ -7,11 +7,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
 )
+
+// payloadPathEnvVar is the environment variable readSignerSubjectCN
+// uses to pass the target file path into its PowerShell script.
+// Environment is the safe channel here: PowerShell's `-Command <string>`
+// does NOT populate $args with trailing argv (that's `-File` behavior),
+// so a naive `$args[0]` reference resolves to $null and
+// Get-AuthenticodeSignature -FilePath $null crashes on every call.
+// Env-var passing also removes the last shell-injection concern — the
+// path never enters the script literal.
+const payloadPathEnvVar = "DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH"
 
 // ciscoPublisherCN pins the Subject Common Name the payload's
 // Authenticode signature MUST resolve to. Matches the exact string the
@@ -131,12 +142,22 @@ func runSigntoolVerify(path string) error {
 // distinguishes exec-launch failures (ioError) from a PS-reported
 // invalid signature status (signatureError).
 func readSignerSubjectCN(path string) (string, error) {
-	// $args[0] receives the path so it does not need to be escaped
-	// into the script body (which would open a shell-injection gap on
-	// unusual file names). ErrorActionPreference=Stop makes any
-	// underlying failure surface as a non-zero exit.
+	// Path passed via env var, not $args[0]: PowerShell's
+	// `-Command <string>` does not populate $args (that behavior is
+	// exclusive to `-File`), so a naive $args[0] read resolves to
+	// $null and Get-AuthenticodeSignature -FilePath $null crashes on
+	// every invocation. Env-var passing also keeps the path out of
+	// the script literal, eliminating any shell-injection surface for
+	// pathological file names.
+	//
+	// ErrorActionPreference=Stop makes any underlying failure surface
+	// as a non-zero exit. Writing the CN via [Console]::Out.Write
+	// (rather than the default pipeline) avoids Powershell's
+	// terminal-width truncation and the trailing CRLF Write-Host adds.
 	script := `$ErrorActionPreference='Stop';` +
-		`$sig = Get-AuthenticodeSignature -FilePath $args[0];` +
+		`$p = $env:` + payloadPathEnvVar + `;` +
+		`if ([string]::IsNullOrEmpty($p)) { throw "` + payloadPathEnvVar + ` not set" };` +
+		`$sig = Get-AuthenticodeSignature -FilePath $p;` +
 		`if ($sig.Status -ne 'Valid') { throw "signature status is $($sig.Status)" };` +
 		`[System.Console]::Out.Write(` +
 		`  $sig.SignerCertificate.GetNameInfo(` +
@@ -144,8 +165,19 @@ func readSignerSubjectCN(path string) (string, error) {
 		`    $false))`
 	ctx, cancel := context.WithTimeout(context.Background(), signtoolVerifyTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, path)
-	out, err := cmd.CombinedOutput()
+	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+	// Inherit the parent environment and layer the payload path on top —
+	// os/exec's default is os.Environ() only when cmd.Env is nil, so an
+	// explicit slice is required.
+	cmd.Env = append(os.Environ(), payloadPathEnvVar+"="+path)
+	// Use Output(), NOT CombinedOutput(): a PowerShell warning on
+	// stderr (e.g. verbose module load, deprecated cmdlet notices)
+	// would otherwise be concatenated into stdout and would
+	// contaminate the CN string, causing exact-equality with
+	// ciscoPublisherCN to fail on a correctly signed payload. On
+	// failure, os/exec.Cmd.Output populates *ExitError.Stderr so the
+	// error branch below still gets the diagnostic.
+	out, err := cmd.Output()
 	if err == nil {
 		cn := strings.TrimSpace(string(out))
 		if cn == "" {
@@ -156,17 +188,24 @@ func readSignerSubjectCN(path string) (string, error) {
 		}
 		return cn, nil
 	}
+	// Recover stderr from *ExitError for a useful diagnostic — on
+	// non-*ExitError failures (exec launch problems) stderr is
+	// unavailable so we fall back to err.Error() alone.
+	var exitErr *exec.ExitError
+	stderr := ""
+	if errors.As(err, &exitErr) {
+		stderr = strings.TrimSpace(string(exitErr.Stderr))
+	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "", &ioError{msg: fmt.Sprintf(
 			"read signer CN timed out after %s for %s: %s",
-			signtoolVerifyTimeout, path, strings.TrimSpace(string(out)),
+			signtoolVerifyTimeout, path, stderr,
 		)}
 	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
+	if exitErr == nil {
 		return "", &ioError{msg: fmt.Sprintf(
-			"powershell.exe failed to launch while reading signer CN for %s: %s\n%s",
-			path, err, strings.TrimSpace(string(out)),
+			"powershell.exe failed to launch while reading signer CN for %s: %s",
+			path, err,
 		)}
 	}
 	// PowerShell exited non-zero — Get-AuthenticodeSignature reported
@@ -174,7 +213,7 @@ func readSignerSubjectCN(path string) (string, error) {
 	// rejection.
 	return "", &signatureError{msg: fmt.Sprintf(
 		"read signer CN failed for %s: %s\n%s",
-		path, err, strings.TrimSpace(string(out)),
+		path, err, stderr,
 	)}
 }
 
