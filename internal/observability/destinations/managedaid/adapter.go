@@ -358,7 +358,8 @@ func (adapter *Adapter) post(ctx context.Context, body []byte, token string) (in
 		// Transport-level failure info line so an operator tailing
 		// gateway.err.log / gateway.log can see when the AI Defense POST
 		// couldn't complete at all (DNS, TCP, TLS, cancel, deadline).
-		// One line per attempt; low-frequency at the 5 min publish cadence.
+		// One line per attempt; low-frequency at the managed_enterprise
+		// 30-min publish cadence.
 		// The endpoint URL is deliberately redacted to "AI DEFENSE" — the
 		// configured host is release-owned and static across a deployment
 		// so operators don't need it in every log line, and omitting it
