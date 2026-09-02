@@ -109,15 +109,6 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
 }
 CURSOR_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" "hook_event_name" 2>/dev/null || true)"
 
-{{if .Managed}}
-# Identity Fabric capture. Runs before the token check on purpose: the record
-# describes the user and their configured MCP surface, which is worth having
-# even on an invocation the gateway never sees.
-if declare -F defenseclaw_capture_identity_fabric >/dev/null 2>&1; then
-  defenseclaw_capture_identity_fabric '{{.HookBinarySH}}' cursor "$CURSOR_EVENT" "$PAYLOAD"
-fi
-{{end}}
-
 if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   MISSING_TOKEN_REASON="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
   defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
@@ -176,11 +167,24 @@ if command -v mapfile >/dev/null 2>&1; then
   mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
 fi
 
+# Per-user attribution: the gateway cannot read the real user's identity from
+# its own service-account process, so the hook reports it.
+# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+# no mapfile, and there the array would stay empty and the endpoint would send
+# no identity at all.
+IDENTITY_HEADER_ARGS=()
+if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+  while IFS= read -r identity_header_arg; do
+    IDENTITY_HEADER_ARGS+=("$identity_header_arg")
+  done < <(defenseclaw_user_identity_args)
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/cursor/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: cursor-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {

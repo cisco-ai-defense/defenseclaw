@@ -38,13 +38,13 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        directories could re-admit an agent-planted binary. Windows no
 #        longer uses these bash hooks (it runs the hook natively in the Go
 #        binary), so the Git Bash /mingw64 workaround is no longer needed.
-#   v7 — adds defenseclaw_capture_identity_fabric, which the managed
-#        connector hooks call to spool Identity Fabric telemetry. Call
-#        sites guard on the function being defined, so a hook rendered
-#        by this build against an older helper loses the record rather
-#        than failing the hook. The bump still matters for diagnosis:
-#        it is how an operator tells "telemetry absent because the
-#        helper predates it" from "telemetry absent because capture
+#   v7 — adds defenseclaw_user_identity_args, which the connector hooks
+#        call to attach the real user's OS identity to the gateway
+#        request. Call sites guard on the function being defined, so a
+#        hook rendered by this build against an older helper loses the
+#        per-user attribution rather than failing the hook. The bump is
+#        how an operator tells "telemetry unattributed because the
+#        helper predates it" from "unattributed because the lookup
 #        failed".
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
@@ -145,12 +145,6 @@ defenseclaw_harden_env() {
     DEFENSECLAW_HOOK_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/hook-tmp.$$"
     mkdir -p "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
   fi
-  # Remember the home being replaced. The sandbox below is correct for tools
-  # the hook shells out to, but anything that has to answer "who is this user
-  # and what have they configured" needs the real profile: the sandbox is
-  # empty and is deleted by the EXIT trap. Deliberately not exported, so a
-  # child sees it only when a caller passes it explicitly.
-  DEFENSECLAW_REAL_HOME="${HOME}"
   export HOME="$DEFENSECLAW_HOOK_HOME"
   trap '_defenseclaw_hook_cleanup' EXIT
 
@@ -1029,49 +1023,53 @@ defenseclaw_extract_trace_context() {
   fi
 }
 
-# defenseclaw_capture_identity_fabric BINARY CONNECTOR EVENT PAYLOAD
+# defenseclaw_user_identity_args
 #
-# Spools the Identity Fabric records for one hook event.
+# Emits curl arguments carrying the OS identity of the user this hook is
+# running as, one argument per line, in the same shape as
+# defenseclaw_extract_trace_context.
 #
-# Capture has to happen in this process. These hooks reach the gateway over
-# HTTP, and the gateway runs as a service account with its own token, home
-# directory, and working directory; asking it who the user is would attribute
-# every event on the machine to that single service identity. Only the hook
-# runs as the real user, in the real workspace.
+# Callers must read this with a `while IFS= read -r` loop rather than
+# `mapfile`. macOS ships bash 3.2, where mapfile does not exist, so a mapfile
+# reader leaves the argument array empty and the endpoint silently sends no
+# identity at all — on every stock macOS host, which is most of them.
 #
-# The child is detached with its streams closed, for two reasons. A telemetry
-# record is never worth adding latency to a tool call the user is waiting on.
-# And a connector that reads the hook's stdout until EOF - Cursor does - would
-# otherwise block until the capture child released the inherited descriptor,
-# turning a background record into user-visible delay.
+# Identity has to be read here. These hooks reach the gateway over HTTP, and
+# under a managed install the gateway runs as a service account with its own
+# token and home directory; asking it who the user is would attribute every
+# event on the endpoint to that one service identity. Only the hook runs as
+# the real user.
+#
+# The gateway accepts these headers from loopback only, and treats them as
+# attribution evidence rather than an authenticated assertion: any local
+# process can reach the loopback listener and claim any value. Never use them
+# for an authorization decision.
+#
+# Both values are rejected unless they match a conservative character class.
+# A header value carrying CR or LF would let an account name append a second
+# header or a request line to every hook call this endpoint makes.
 #
 # Every failure path is silent and returns success: this is called from a
 # guardrail hook under errexit, where a nonzero return would convert a missing
-# telemetry record into a blocked or allowed tool call.
-defenseclaw_capture_identity_fabric() {
-  local binary="${1:-}"
-  local connector="${2:-}"
-  local event="${3:-}"
-  local payload="${4:-}"
+# telemetry field into a blocked or allowed tool call.
+defenseclaw_user_identity_args() {
+  command -v id >/dev/null 2>&1 || return 0
 
-  [ -n "$binary" ] || return 0
-  [ -n "$connector" ] || return 0
-  [ -x "$binary" ] || return 0
+  local uid name
+  uid="$(id -u 2>/dev/null)" || uid=""
+  case "$uid" in
+    '' | *[!0-9]*) ;;
+    *)
+      printf '%s\n' "-H"
+      printf '%s\n' "X-DefenseClaw-User-Id: $uid"
+      ;;
+  esac
 
-  # Undo the hardened HOME for this child only. defenseclaw_harden_env points
-  # HOME at an empty per-hook sandbox that the EXIT trap removes; capture reads
-  # the user's connector config and device identity out of the real profile, so
-  # inheriting the sandbox would spool a record with no MCP servers, no
-  # account email, and no device id - present, and wrong.
-  local home="${DEFENSECLAW_REAL_HOME:-$HOME}"
-
-  # printf is a builtin, so the payload never becomes an argv entry and
-  # cannot hit ARG_MAX at the 1MB stdin cap.
-  {
-    printf '%s' "$payload" | HOME="$home" "$binary" idfabric capture \
-      --connector "$connector" \
-      --event "$event" \
-      --enterprise-managed
-  } </dev/null >/dev/null 2>&1 &
+  name="$(id -un 2>/dev/null)" || name=""
+  case "$name" in
+    '' | *[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  printf '%s\n' "-H"
+  printf '%s\n' "X-DefenseClaw-User-Name: $name"
   return 0
 }

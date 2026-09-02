@@ -152,15 +152,6 @@ if [ "$PAYLOAD_EVENT" != "$BOUND_EVENT" ]; then
   fail_binding "Codex hook stdin event does not match the registered event"
 fi
 
-{{if .Managed}}
-# Identity Fabric capture. Placed after event binding so a payload that failed
-# validation never produces a record: the event name is part of the record's
-# meaning, and capturing an unbound one would misreport what the agent did.
-if declare -F defenseclaw_capture_identity_fabric >/dev/null 2>&1; then
-  defenseclaw_capture_identity_fabric '{{.HookBinarySH}}' codex "$PAYLOAD_EVENT" "$PAYLOAD"
-fi
-{{end}}
-
 API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
@@ -220,6 +211,18 @@ if command -v mapfile >/dev/null 2>&1; then
   mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
 fi
 
+# Per-user attribution: the gateway cannot read the real user's identity from
+# its own service-account process, so the hook reports it.
+# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+# no mapfile, and there the array would stay empty and the endpoint would send
+# no identity at all.
+IDENTITY_HEADER_ARGS=()
+if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+  while IFS= read -r identity_header_arg; do
+    IDENTITY_HEADER_ARGS+=("$identity_header_arg")
+  done < <(defenseclaw_user_identity_args)
+fi
+
 HOOK_MAX_TIME=10
 if [ "$BOUND_EVENT" = "SessionEnd" ]; then
   # Codex's host maximum is three seconds. Leave one second for response
@@ -267,6 +270,7 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/
   -H "X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time "$HOOK_MAX_TIME" \
   --data-binary "@/dev/fd/9" 2>/dev/null) || CURL_STATUS=$?

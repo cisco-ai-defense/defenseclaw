@@ -310,30 +310,6 @@ func defenseclawHookBinary() string {
 	return "defenseclaw-gateway"
 }
 
-// defenseclawCLIBinary returns the path to the multi-command DefenseClaw CLI.
-//
-// This is deliberately not defenseclawHookBinary: on Windows that resolves to
-// the packaged defenseclaw-hook launcher, which exposes only the hook
-// entrypoint. Shell hooks that need a different subcommand must run the CLI
-// itself, which is the binary hosting the gateway that renders them.
-func defenseclawCLIBinary() string {
-	if exe, err := os.Executable(); err == nil && strings.TrimSpace(exe) != "" {
-		return exe
-	}
-	// A bare name resolves through the hook's hardened PATH. The call sites
-	// require an executable absolute path, so this only ever degrades to
-	// skipping the work, never to running something unexpected.
-	return "defenseclaw"
-}
-
-// shellSingleQuoteBody escapes a value for interpolation inside a POSIX shell
-// single-quoted literal, where the surrounding quotes are supplied by the
-// template. A single quote is the only character with meaning there: it is
-// closed, escaped, and reopened.
-func shellSingleQuoteBody(value string) string {
-	return strings.ReplaceAll(value, "'", `'\''`)
-}
-
 // NativeHookExecutable returns the exact launcher path connector setup will
 // persist on the current host. The enterprise guardian compares this path to
 // its separately trusted sibling executable before allowing an impersonated
