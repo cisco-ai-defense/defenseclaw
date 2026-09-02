@@ -53,6 +53,45 @@ func TestSessionNoise_RuleNameListingIsNotACommand(t *testing.T) {
 	}
 }
 
+// TestSessionNoise_Issue787ExactRuleDescription pins the reporter's complete
+// 62-byte reproduction. A Read result that names CMD-MKFS is documentation,
+// not authoritative evidence that a format command was invoked.
+func TestSessionNoise_Issue787ExactRuleDescription(t *testing.T) {
+	api := newNoiseAPI()
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolName:      "Read",
+		ToolInput:     map[string]interface{}{"file_path": "benign_prose.txt"},
+		ToolResponse: map[string]interface{}{
+			"content": "The rule CMD-MKFS is documented in the DefenseClaw rule pack.\n",
+		},
+	})
+	if resp.Action != "allow" || resp.RawAction != "allow" || resp.WouldBlock {
+		t.Fatalf("exact #787 reproduction action=%q raw=%q would_block=%v findings=%v",
+			resp.Action, resp.RawAction, resp.WouldBlock, resp.Findings)
+	}
+	for _, finding := range resp.Findings {
+		if strings.Contains(finding, "CMD-MKFS") {
+			t.Fatalf("exact #787 prose produced command finding: %v", resp.Findings)
+		}
+	}
+}
+
+func TestSessionNoise_ReadingClaudeMDIsNotAnInstructionMutation(t *testing.T) {
+	api := newNoiseAPI()
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolName:      "Read",
+		ToolInput:     map[string]interface{}{"file_path": "/repo/CLAUDE.md"},
+		ToolResponse:  map[string]interface{}{"content": "Project build instructions."},
+	})
+	for _, finding := range resp.Findings {
+		if strings.Contains(finding, "COG-CLAUDE-MD") {
+			t.Fatalf("ordinary CLAUDE.md read produced cognitive-mutation finding: %v", resp.Findings)
+		}
+	}
+}
+
 // Secret detection is deliberately RETAINED on untrusted content by #750/#755.
 // This test documents that boundary rather than asserting silence.
 func TestSessionNoise_SecretInResultStillDetected(t *testing.T) {

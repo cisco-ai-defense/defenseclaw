@@ -1534,15 +1534,71 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
     ]
     for name, binary in bins:
         path = resolve_scanner_binary(binary)
-        if path:
-            _emit("pass", f"Scanner: {name}", path, r=r)
-        else:
+        if not path:
             _emit(
                 "fail",
                 f"Scanner: {name}",
                 f"'{binary}' not found in the managed environment or on PATH",
                 r=r,
             )
+            continue
+        if name != "skill-scanner":
+            _emit("pass", f"Scanner: {name}", path, r=r)
+            continue
+        probe_path = path
+        if os.name != "nt" and str(binary or "").strip() == "skill-scanner":
+            installed_launcher = os.path.abspath(os.path.expanduser("~/.local/bin/skill-scanner"))
+            if os.path.lexists(installed_launcher):
+                # Scanner resolution intentionally prefers the managed venv so
+                # internal calls cannot be shadowed by PATH. Doctor additionally
+                # exercises the documented POSIX launcher when it exists; that
+                # is where legacy pip-generated shebangs became stale.
+                probe_path = installed_launcher
+        try:
+            probe = subprocess.run(
+                [probe_path, "--version"],
+                capture_output=True,
+                text=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                env=trusted_system_subprocess_env(),
+                timeout=10.0,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            _emit(
+                "fail",
+                f"Scanner: {name}",
+                f"{probe_path} timed out during --version; run the authenticated upgrade/repair path",
+                r=r,
+            )
+            continue
+        except OSError as exc:
+            _emit(
+                "fail",
+                f"Scanner: {name}",
+                f"{probe_path} could not start: {exc}; run the authenticated upgrade/repair path",
+                r=r,
+            )
+            continue
+        output = " ".join(
+            line.strip()
+            for line in ((probe.stdout or "") + "\n" + (probe.stderr or "")).splitlines()
+            if line.strip()
+        )[:300]
+        if probe.returncode != 0:
+            detail = f"{probe_path} failed --version (exit {probe.returncode})"
+            if output:
+                detail += f": {output}"
+            detail += "; run the authenticated upgrade/repair path"
+            _emit("fail", f"Scanner: {name}", detail, r=r)
+            continue
+        _emit(
+            "pass",
+            f"Scanner: {name}",
+            f"{probe_path} ({output or 'launcher executed successfully'})",
+            r=r,
+        )
 
 
 def _gateway_fleet_expected_enabled(cfg) -> bool:

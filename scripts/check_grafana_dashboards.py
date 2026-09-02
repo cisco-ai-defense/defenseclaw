@@ -16,6 +16,7 @@ import argparse
 import base64
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -42,6 +43,7 @@ PACKAGED_DATASOURCES = (
     ROOT / "cli/defenseclaw/_data/local_observability_stack/grafana/provisioning/datasources/datasources.yml"
 )
 DEFAULT_METRIC_EXPORT_INTERVAL_SECONDS = 60
+_GRAFANA_AUTHORIZATION: str | None = None
 
 # Prometheus label contracts for the security-sensitive metrics most likely to
 # produce plausible-looking zeroes when a dashboard filters on a nonexistent
@@ -188,6 +190,60 @@ INVENTORY_VARIABLES = {
 
 class AuditError(RuntimeError):
     pass
+
+
+def configure_grafana_auth(password_file: Path | None) -> None:
+    """Select anonymous access or load bounded loopback Grafana credentials."""
+
+    global _GRAFANA_AUTHORIZATION
+    _GRAFANA_AUTHORIZATION = None
+    if password_file is None:
+        return
+    try:
+        metadata = password_file.lstat()
+        if password_file.is_symlink() or not password_file.is_file():
+            raise OSError("not a regular file")
+        if metadata.st_size <= 1 or metadata.st_size > 512:
+            raise OSError("invalid size")
+        raw = password_file.read_bytes()
+    except OSError as exc:
+        raise AuditError(f"Grafana credential file is unavailable or unsafe: {password_file}: {exc}") from exc
+    if len(raw) != metadata.st_size or not raw.endswith(b"\n") or b"\n" in raw[:-1] or b"\r" in raw:
+        raise AuditError(f"Grafana credential file must contain one newline-terminated password: {password_file}")
+    password = raw[:-1]
+    if len(password) < 32 or any(byte < 0x21 or byte > 0x7E for byte in password):
+        raise AuditError(f"Grafana credential file is malformed: {password_file}")
+    _GRAFANA_AUTHORIZATION = "Basic " + base64.b64encode(b"admin:" + password).decode("ascii")
+
+
+def _default_grafana_password_file(*, home: Path | None = None) -> Path | None:
+    """Find custom, normal, then source-bundle Grafana credentials."""
+
+    def normalized_root(value: str | Path, *, description: str) -> Path:
+        try:
+            rendered = os.fspath(value)
+            if not rendered or "\x00" in rendered:
+                raise ValueError("empty or NUL-containing path")
+            return Path(os.path.abspath(os.path.expanduser(rendered)))
+        except (OSError, TypeError, ValueError) as exc:
+            raise AuditError(f"{description} is invalid") from exc
+
+    candidates: list[Path] = []
+    configured_home = os.environ.get("DEFENSECLAW_HOME")
+    if configured_home:
+        candidates.append(
+            normalized_root(configured_home, description="DEFENSECLAW_HOME")
+            / "observability-stack"
+            / ".grafana-admin-password"
+        )
+    profile = normalized_root(home if home is not None else Path.home(), description="home directory")
+    candidates.extend(
+        (
+            profile / ".defenseclaw" / "observability-stack" / ".grafana-admin-password",
+            ROOT / "bundles" / "local_observability_stack" / ".grafana-admin-password",
+        )
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -482,7 +538,7 @@ def static_audit(
                                 "must use logs, traces, or correlation queries instead of metric labels",
                             )
                 if re.search(
-                    r'\b(?:body_)?gen_ai_agent_name\s*(?:=~|!~|=|!=)\s*'
+                    r"\b(?:body_)?gen_ai_agent_name\s*(?:=~|!~|=|!=)\s*"
                     r'"\$(?:connector|\{connector:(?:regex|pipe)\})"',
                     expression,
                 ):
@@ -508,17 +564,13 @@ def static_audit(
                         f"{uid}/{title}: dashboards must use upstream-reported cost, not hard-coded prices",
                     )
                 invocation_volume_title = any(
-                    token in str(title).lower()
-                    for token in ("hook events", "events by", "tool calls")
+                    token in str(title).lower() for token in ("hook events", "events by", "tool calls")
                 )
                 if (
                     datasource == "prometheus"
                     and invocation_volume_title
                     and "defenseclaw_connector_hook_outcome_total" in expression
-                    and not any(
-                        token in str(title).lower()
-                        for token in ("shadow", "outcome", "decision")
-                    )
+                    and not any(token in str(title).lower() for token in ("shadow", "outcome", "decision"))
                 ):
                     errors.append(
                         f"{uid}/{title}: invocation-volume panels must use "
@@ -572,8 +624,7 @@ def static_audit(
                             f"not call rate({token_counter}) directly",
                         )
                     if "increase(" in expression and not all(
-                        marker in expression
-                        for marker in ("last_over_time(", " unless ", " offset ")
+                        marker in expression for marker in ("last_over_time(", " unless ", " offset ")
                     ):
                         errors.append(
                             f"{uid}/{title}: {token_counter} deltas must preserve a new series' "
@@ -581,14 +632,10 @@ def static_audit(
                         )
                     if "$__rate_interval" in expression and "$__rate_interval_ms" not in expression:
                         errors.append(
-                            f"{uid}/{title}: first-sample-aware token rates must divide by "
-                            "$__rate_interval_ms / 1000",
+                            f"{uid}/{title}: first-sample-aware token rates must divide by $__rate_interval_ms / 1000",
                         )
                 if datasource == "loki" and expression:
-                    if (
-                        'body_$scope_label=~"$agent"' in expression
-                        and '|= "$agent" | json' not in expression
-                    ):
+                    if 'body_$scope_label=~"$agent"' in expression and '|= "$agent" | json' not in expression:
                         errors.append(
                             f"{uid}/{title}: agent-scoped Loki queries must prefilter the literal "
                             'agent ID before JSON parsing with `|= "$agent" | json`',
@@ -721,9 +768,7 @@ def static_audit(
             if variable.get("type") != "custom" or not variable.get("options"):
                 continue
             query_values = [
-                item.rsplit(" : ", 1)[-1].strip()
-                for item in str(variable.get("query", "")).split(",")
-                if item.strip()
+                item.rsplit(" : ", 1)[-1].strip() for item in str(variable.get("query", "")).split(",") if item.strip()
             ]
             option_values = [
                 str(option.get("value", "")).strip()
@@ -735,11 +780,7 @@ def static_audit(
                     f"{uid}: custom variable {variable.get('name', '<unnamed>')} persisted options "
                     "must match its query values",
                 )
-        variable_positions = {
-            item.get("name"): index
-            for index, item in enumerate(variables)
-            if item.get("name")
-        }
+        variable_positions = {item.get("name"): index for index, item in enumerate(variables) if item.get("name")}
         if "scope_label" in variable_positions and "agent" in variable_positions:
             if variable_positions["scope_label"] > variable_positions["agent"]:
                 errors.append(f"{uid}: scope_label must be defined before the dependent agent variable")
@@ -784,8 +825,15 @@ def request_json(
 ) -> dict[str, Any]:
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
+    request: str | urllib.request.Request = url
+    if _GRAFANA_AUTHORIZATION is not None and url.startswith("http://127.0.0.1:3000/"):
+        request = urllib.request.Request(
+            url,
+            headers={"Authorization": _GRAFANA_AUTHORIZATION},
+            method="GET",
+        )
     try:
-        with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
@@ -1555,9 +1603,7 @@ def _golden_identity_problems(record: dict[str, Any], agent: GoldenAgent, stamp:
             actual = _golden_int(actual)
         if actual != expected:
             problems.append(key)
-    if not agent.parent_id and (
-        body.get("defenseclaw.agent.parent.id") or body.get("defenseclaw.session.parent.id")
-    ):
+    if not agent.parent_id and (body.get("defenseclaw.agent.parent.id") or body.get("defenseclaw.session.parent.id")):
         problems.append("root parent identity")
     expected_correlation = {
         "run_id": f"golden-run-{stamp}",
@@ -1602,15 +1648,9 @@ def _golden_log_errors(
 
     roots = [agent for agent in agents.values() if not agent.parent_id]
     root = roots[0] if len(roots) == 1 else None
-    model_agents = {
-        agent_id for agent_id, event_name in selected if event_name == "model.response"
-    }
-    tool_agents = {
-        agent_id for agent_id, event_name in selected if event_name == "tool.invocation.completed"
-    }
-    approval_agents = {
-        agent_id for agent_id, event_name in selected if event_name == "approval.resolved"
-    }
+    model_agents = {agent_id for agent_id, event_name in selected if event_name == "model.response"}
+    tool_agents = {agent_id for agent_id, event_name in selected if event_name == "tool.invocation.completed"}
+    approval_agents = {agent_id for agent_id, event_name in selected if event_name == "approval.resolved"}
     conversation_prompt_records = [
         record
         for record in selected_records
@@ -1625,9 +1665,7 @@ def _golden_log_errors(
             default=-1,
         )
         deepest_tool_agents = {
-            agent_id
-            for agent_id in tool_agents
-            if agent_id in agents and agents[agent_id].depth == deepest_tool_depth
+            agent_id for agent_id in tool_agents if agent_id in agents and agents[agent_id].depth == deepest_tool_depth
         }
         if len(deepest_tool_agents) == 1:
             approval_tool_agent_id = next(iter(deepest_tool_agents))
@@ -1670,9 +1708,7 @@ def _golden_log_errors(
                     "Loki golden UserPromptSubmit decision is not a truthful allowed depth-zero root prompt",
                 )
         non_root_non_leaf_agents = {
-            agent.parent_id
-            for agent in agents.values()
-            if agent.parent_id and agent.parent_id != root.agent_id
+            agent.parent_id for agent in agents.values() if agent.parent_id and agent.parent_id != root.agent_id
         }
         if not non_root_non_leaf_agents.intersection(model_agents | tool_agents):
             errors.append("Loki golden tree has no non-leaf subagent with model or tool work")
@@ -1714,10 +1750,17 @@ def _golden_log_errors(
         for event_name in sorted(event_names):
             count = len(selected.get((agent_id, event_name), []))
             if count == 0:
-                label = "root initial prompt/turn" if root and agent_id == root.agent_id and event_name in {
-                    "turn_start",
-                    "model.request",
-                } else event_name
+                label = (
+                    "root initial prompt/turn"
+                    if root
+                    and agent_id == root.agent_id
+                    and event_name
+                    in {
+                        "turn_start",
+                        "model.request",
+                    }
+                    else event_name
+                )
                 errors.append(f"Loki is missing {agent_id} {label} for golden run {stamp}")
             elif count != 1:
                 errors.append(f"Loki {agent_id} {event_name} occurrences={count}, want exactly one")
@@ -1741,8 +1784,7 @@ def _golden_log_errors(
         problems = _golden_identity_problems(record, agent, stamp)
         serialized_body = json.dumps(body, sort_keys=True)
         if event_name.startswith(("model.", "tool.invocation.")) and not any(
-            marker in serialized_body
-            for marker in ("local-observability golden", "local-observability-golden")
+            marker in serialized_body for marker in ("local-observability golden", "local-observability-golden")
         ):
             problems.append("unredacted golden content")
         if event_name in {"model.response", "model.call.failed"} and (
@@ -1806,14 +1848,9 @@ def _golden_log_errors(
             )
     for agent_id, agent_records in lifecycle_by_agent.items():
         agent_records.sort(key=lambda record: str(record.get("timestamp") or ""))
-        sequences = [
-            _golden_int(record.get("body", {}).get("defenseclaw.agent.sequence"))
-            for record in agent_records
-        ]
+        sequences = [_golden_int(record.get("body", {}).get("defenseclaw.agent.sequence")) for record in agent_records]
         if any(sequence is None for sequence in sequences) or any(
-            right <= left
-            for left, right in zip(sequences, sequences[1:])
-            if left is not None and right is not None
+            right <= left for left, right in zip(sequences, sequences[1:]) if left is not None and right is not None
         ):
             errors.append(f"Loki {agent_id} lifecycle sequence is not strictly monotonic: {sequences}")
 
@@ -1852,8 +1889,7 @@ def _golden_log_errors(
                 errors.append(f"Loki child {agent.agent_id} terminates after parent {parent.agent_id}")
     for model_agent_id in sorted(model_agents):
         model_positions = [
-            positions.get((model_agent_id, event))
-            for event in ("model.request", "model.response", "turn_end")
+            positions.get((model_agent_id, event)) for event in ("model.request", "model.response", "turn_end")
         ]
         if all(position is not None for position in model_positions) and model_positions != sorted(model_positions):
             errors.append(f"Loki {model_agent_id} model request/response/terminal ordering is invalid")
@@ -1862,18 +1898,14 @@ def _golden_log_errors(
         if tool_agent_id == approval_tool_agent_id:
             tool_events.extend(["approval.requested", "approval.resolved"])
         tool_events.extend(["tool.invocation.completed", "tool_end"])
-        tool_positions = [
-            positions.get((tool_agent_id, event))
-            for event in tool_events
-        ]
+        tool_positions = [positions.get((tool_agent_id, event)) for event in tool_events]
         if all(position is not None for position in tool_positions) and any(
             right <= left
             for left, right in zip(tool_positions, tool_positions[1:])
             if left is not None and right is not None
         ):
             errors.append(
-                f"Loki {tool_agent_id} tool/approval causal order is invalid; want "
-                + " < ".join(tool_events),
+                f"Loki {tool_agent_id} tool/approval causal order is invalid; want " + " < ".join(tool_events),
             )
     return errors, model_agents, tool_agents, approval_tool_agent_id, terminal_records
 
@@ -2006,8 +2038,7 @@ def _golden_metric_errors(
     expected_agent_types = {
         str(record.get("body", {}).get("defenseclaw.agent.type") or "")
         for record in selected_records
-        if isinstance(record.get("body"), dict)
-        and record.get("body", {}).get("defenseclaw.agent.type")
+        if isinstance(record.get("body"), dict) and record.get("body", {}).get("defenseclaw.agent.type")
     }
     observed_agent_types = {
         str(series.get("metric", {}).get("gen_ai_agent_type") or "")
@@ -2086,12 +2117,7 @@ def _golden_topology(
     approval_tool_agent_id: str,
 ) -> tuple[str, list[dict[str, Any]]] | None:
     roots = [agent for agent in agents.values() if not agent.parent_id]
-    if (
-        len(roots) != 1
-        or not model_agent_ids
-        or not tool_agent_ids
-        or approval_tool_agent_id not in tool_agent_ids
-    ):
+    if len(roots) != 1 or not model_agent_ids or not tool_agent_ids or approval_tool_agent_id not in tool_agent_ids:
         return None
     by_trace: dict[str, list[dict[str, Any]]] = {}
     for span in spans:
@@ -2200,8 +2226,7 @@ def _golden_trace_errors(
                 f"{span['attributes'].get('gen_ai.agent.id', '?')}"
                 for span in spans
                 if span["trace_id"] == trace_id
-                and (_golden_agent_role_stamp(span["attributes"].get("gen_ai.agent.id")) or ("", ""))[1]
-                == stamp
+                and (_golden_agent_role_stamp(span["attributes"].get("gen_ai.agent.id")) or ("", ""))[1] == stamp
             )
             if names:
                 summaries.append(f"{trace_id}=[{', '.join(names)}]")
@@ -2227,10 +2252,7 @@ def _golden_trace_errors(
         parent = spans_by_id.get(span["parent_span_id"])
         if parent is None:
             continue
-        if (
-            started_at < parent["start_time_unix_nano"]
-            or finished_at > parent["end_time_unix_nano"]
-        ):
+        if started_at < parent["start_time_unix_nano"] or finished_at > parent["end_time_unix_nano"]:
             if span["attributes"].get("defenseclaw.span.family") == "span.approval.resolve":
                 errors.append("Tempo golden approval span falls outside its parent tool span")
             else:
@@ -2457,22 +2479,15 @@ def _golden_agent360_errors(
         )
 
     topology_targets = _agent360_targets(AGENT360_TOPOLOGY_PANEL)
-    edge_targets = [
-        target for target in topology_targets if str(target.get("refId", "")).startswith("edges")
-    ]
-    node_targets = [
-        target for target in topology_targets if str(target.get("refId", "")).startswith("nodes")
-    ]
+    edge_targets = [target for target in topology_targets if str(target.get("refId", "")).startswith("edges")]
+    node_targets = [target for target in topology_targets if str(target.get("refId", "")).startswith("nodes")]
     anchor_node_refs = {"nodesRootAnchor", "nodesSpawnParent"}
     if len(edge_targets) != 8 or len(node_targets) != 10:
         errors.append(
             "Agent360 topology must retain exactly 8 edge and 10 node query components; "
             f"got edges={len(edge_targets)}, nodes={len(node_targets)}",
         )
-    missing_anchor_refs = sorted(
-        anchor_node_refs
-        - {str(target.get("refId", "")) for target in node_targets}
-    )
+    missing_anchor_refs = sorted(anchor_node_refs - {str(target.get("refId", "")) for target in node_targets})
     if missing_anchor_refs:
         errors.append(
             f"Agent360 topology is missing endpoint-anchor node queries: {missing_anchor_refs}",
@@ -2504,16 +2519,9 @@ def _golden_agent360_errors(
         )
         for series in topology_edges
     }
-    observed_nodes = {
-        str(series["metric"].get("id") or "")
-        for series in topology_nodes
-    }
+    observed_nodes = {str(series["metric"].get("id") or "") for series in topology_nodes}
     expected_edges = {
-        *(
-            (f"agent:{agent.parent_id}", f"agent:{agent.agent_id}")
-            for agent in agents.values()
-            if agent.parent_id
-        ),
+        *((f"agent:{agent.parent_id}", f"agent:{agent.agent_id}") for agent in agents.values() if agent.parent_id),
         (f"session:{root.agent_id}", f"agent:{root.agent_id}"),
     }
     selected_records = _golden_records_for_stamp(records, stamp)
@@ -2528,9 +2536,13 @@ def _golden_agent360_errors(
             continue
         provider = str(body.get("gen_ai.provider.name") or "")
         model = str(body.get("gen_ai.response.model") or body.get("gen_ai.request.model") or "")
-        if event_name == "model.request" and _golden_int(
-            body.get("defenseclaw.agent.depth"),
-        ) == 0:
+        if (
+            event_name == "model.request"
+            and _golden_int(
+                body.get("defenseclaw.agent.depth"),
+            )
+            == 0
+        ):
             expected_edges.add(
                 (f"prompts:{agent.agent_id}", f"agent:{agent.agent_id}"),
             )
@@ -2569,9 +2581,7 @@ def _golden_agent360_errors(
             outcome_suffix = agent.execution_id
             if event_name == "turn_end":
                 outcome_suffix = (
-                    "turns:"
-                    f"{body.get('defenseclaw.agent.lifecycle.state', '')}:"
-                    f"{record.get('outcome', '')}"
+                    f"turns:{body.get('defenseclaw.agent.lifecycle.state', '')}:{record.get('outcome', '')}"
                 )
             expected_edges.add(
                 (
@@ -2598,11 +2608,7 @@ def _golden_agent360_errors(
     for ref_id, series in topology_node_rows:
         node_id = str(series["metric"].get("id") or "")
         node_id_refs.setdefault(node_id, []).append(ref_id)
-    invalid_nodes = sorted(
-        node_id
-        for node_id, ref_ids in node_id_refs.items()
-        if not node_id or len(ref_ids) > 1
-    )
+    invalid_nodes = sorted(node_id for node_id, ref_ids in node_id_refs.items() if not node_id or len(ref_ids) > 1)
     if invalid_nodes:
         errors.append(f"Agent360 topology has blank or duplicate node IDs: {invalid_nodes}")
 
@@ -2615,9 +2621,7 @@ def _golden_agent360_errors(
         edge_id_counts[edge_id] = edge_id_counts.get(edge_id, 0) + 1
         if not source or not target:
             errors.append(f"Agent360 topology edge {edge_id or '<blank>'} has a blank endpoint")
-    duplicate_edges = sorted(
-        edge_id for edge_id, count in edge_id_counts.items() if not edge_id or count != 1
-    )
+    duplicate_edges = sorted(edge_id for edge_id, count in edge_id_counts.items() if not edge_id or count != 1)
     if duplicate_edges:
         errors.append(f"Agent360 topology has blank or duplicate edge IDs: {duplicate_edges}")
 
@@ -2671,10 +2675,10 @@ def _golden_agent360_errors(
             "detail__event_name": "prompt submission",
             "detail__connector": "codex",
         }
-        if any(
-            prompt_metric.get(key) != value
-            for key, value in expected_prompt_details.items()
-        ) or float(prompt_edges[0]["value"][-1]) != 1:
+        if (
+            any(prompt_metric.get(key) != value for key, value in expected_prompt_details.items())
+            or float(prompt_edges[0]["value"][-1]) != 1
+        ):
             errors.append(
                 "Agent360 conversation prompt edge lost its clickable identity/details or exact count",
             )
@@ -2711,8 +2715,7 @@ def _golden_agent360_errors(
     }
     for phase_from, phase_to in sorted(expected_phase_edges - observed_phase_edges):
         errors.append(
-            "Agent360 authored directed phase edge is missing golden transition "
-            f"{phase_from} -> {phase_to}",
+            f"Agent360 authored directed phase edge is missing golden transition {phase_from} -> {phase_to}",
         )
 
     start_ns = int((now_seconds - range_seconds) * 1_000_000_000)
@@ -2785,21 +2788,15 @@ def _live_golden_once(
     now_seconds = time.time()
     prometheus_lookback = f"{max(1, int(range_seconds))}s"
     last_seen = _prometheus_vector(
-        'max_over_time(defenseclaw_agent_last_seen_seconds{'
-        'connector="codex"}'
-        f'[{prometheus_lookback}])',
+        f'max_over_time(defenseclaw_agent_last_seen_seconds{{connector="codex"}}[{prometheus_lookback}])',
         timeout_seconds=query_timeout_seconds,
     )
     lifecycle_transitions = _prometheus_vector(
-        'max_over_time(defenseclaw_agent_lifecycle_transitions_total{'
-        'connector="codex"}'
-        f'[{prometheus_lookback}])',
+        f'max_over_time(defenseclaw_agent_lifecycle_transitions_total{{connector="codex"}}[{prometheus_lookback}])',
         timeout_seconds=query_timeout_seconds,
     )
     transitions = _prometheus_vector(
-        'max_over_time(defenseclaw_agent_phase_transitions_total{'
-        'connector="codex"}'
-        f'[{prometheus_lookback}])',
+        f'max_over_time(defenseclaw_agent_phase_transitions_total{{connector="codex"}}[{prometheus_lookback}])',
         timeout_seconds=query_timeout_seconds,
     )
     records = _loki_golden_records(
@@ -2823,10 +2820,7 @@ def _live_golden_once(
     search = request_json(
         "http://127.0.0.1:3200/api/search",
         {
-            "q": (
-                '{ span.gen_ai.agent.id =~ "golden-agent-[a-z][a-z0-9-]*-'
-                f'{stamp}" }}'
-            ),
+            "q": (f'{{ span.gen_ai.agent.id =~ "golden-agent-[a-z][a-z0-9-]*-{stamp}" }}'),
             "limit": "100",
             "start": str(int(now_seconds - range_seconds)),
             "end": str(int(now_seconds)),
@@ -3023,6 +3017,14 @@ def main() -> int:
         default=30,
         help="maximum wait for golden data to finish ingesting (default: 30 seconds)",
     )
+    parser.add_argument(
+        "--grafana-password-file",
+        type=Path,
+        help=(
+            "private password file generated by the local-observability "
+            "controller (omit for an explicitly anonymous local stack)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.inventory_hours <= 0:
@@ -3037,6 +3039,14 @@ def main() -> int:
         parser.error("--golden-wait-seconds must be greater than zero")
 
     dashboards, errors = static_audit(require_packaged=args.require_packaged)
+    if args.live or args.inventory or args.live_golden:
+        try:
+            password_file = args.grafana_password_file
+            if password_file is None:
+                password_file = _default_grafana_password_file()
+            configure_grafana_auth(password_file)
+        except AuditError as exc:
+            errors.append(str(exc))
     live_deadline = time.monotonic() + args.live_timeout_seconds
     if (args.live or args.inventory or args.live_golden) and not errors:
         errors.extend(backend_readiness_errors())

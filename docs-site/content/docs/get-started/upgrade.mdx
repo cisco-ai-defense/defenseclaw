@@ -265,6 +265,37 @@ The migration cursor records success only after the atomic write. Retrying an
 interrupted upgrade is idempotent: it does not duplicate destinations, routes,
 comments, environment entries, or schema work.
 
+### Recover a proven-corrupt audit store (POSIX only)
+
+The authenticated macOS/Linux release resolver has an opt-in recovery path for
+a corrupt local SQLite audit set:
+
+```bash
+bash defenseclaw-upgrade.sh --yes --recover-corrupt-audit
+```
+
+On a supported POSIX installation, the public
+`defenseclaw upgrade --yes --recover-corrupt-audit` command authenticates and
+delegates to that release-owned resolver. The installed Python controller does
+not move the database itself. Native Windows has no equivalent recovery path;
+its upgrader rejects this option with exit code 2 before mutation.
+
+The flag is not permission to discard an unhealthy or busy database. A live,
+read-only preflight can only mark corruption as suspected. After the gateway is
+stopped, the resolver makes a bounded private copy of the main database and any
+WAL/SHM/journal companions, runs a WAL-aware SQLite integrity probe, and moves
+the exact set into owner-only, same-filesystem upgrade custody only when SQLite
+explicitly proves corruption. The target gateway then initializes and
+health-checks a fresh local audit store.
+
+An inconclusive probe, unsafe path or ownership, insufficient space, or absence
+of same-filesystem custody fails closed without installing target artifacts. If
+recovery was interrupted after its durable marker was written, rerun the same
+authenticated resolver with `--recover-corrupt-audit`; a normal upgrade refuses
+to bypass or discard that custody marker. Without the flag, suspected corruption
+is reported as a warning and the normal upgrade continues without moving audit
+data.
+
 ## Historical audit-evidence cutoff (breaking)
 
 The first upgrade carrying this migration deliberately discards all rows that
@@ -491,6 +522,7 @@ prerequisite for the target-release resolver, and has no second apply protocol.
 
 ```bash
 defenseclaw --version
+skill-scanner --version
 defenseclaw migrations status
 defenseclaw config validate
 defenseclaw config show --effective --section observability
@@ -498,6 +530,12 @@ defenseclaw observability plan
 defenseclaw doctor
 defenseclaw-gateway status
 ```
+
+On macOS and Linux, every authenticated upgrade also reconciles
+`~/.local/bin/skill-scanner` with the entry point inside
+`~/.defenseclaw/.venv/bin/`. A recognized legacy console script with a stale
+shebang is retired into private installer custody and replaced atomically;
+unrelated files or symlinks at that path are preserved and stop the repair.
 
 For the local stack:
 

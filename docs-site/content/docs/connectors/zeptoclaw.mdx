@@ -8,18 +8,38 @@ keywords:
 
 ZeptoClaw is the second proxy connector. DefenseClaw rewrites `~/.zeptoclaw/config.json` providers to point at the local guardrail proxy; every request is inspected on its way out and every response on its way back.
 
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy. Linux can use the real OpenShell sandbox; macOS resolves that preference to shell shims. |
+| Native Windows x64 | **Unsupported** | ZeptoClaw publishes macOS/Linux builds, and its DefenseClaw integration requires the guardrail proxy that DefenseClaw does not host on Windows. |
+
 ## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
 
 ```bash
 defenseclaw setup zeptoclaw --mode observe --restart
 defenseclaw setup zeptoclaw --mode action --rule-pack default --restart
 ```
 
-<Callout type="warning">
-ZeptoClaw connector setup is supported on macOS and Linux. ZeptoClaw publishes
-macOS/Linux builds and its DefenseClaw integration requires the guardrail
-proxy, so native Windows setup is unsupported.
+</Tab>
+
+<Tab value="Windows">
+
+<Callout type="warning" title="Native Windows setup is unsupported">
+DefenseClaw does not host the guardrail proxy on Windows, and ZeptoClaw does
+not publish a native Windows build for this integration. There is no supported
+WSL, Docker, VM, or mixed native/POSIX workaround; run the connector on macOS
+or Linux.
 </Callout>
+
+</Tab>
+
+</Tabs>
 
 `setup zeptoclaw` is the dedicated ZeptoClaw alias. It delegates to the shared
 guardrail setup backend and exposes the proxy connector's common setup
@@ -179,8 +199,11 @@ ZeptoClaw has no native ask surface. Confirm verdicts take an immediate fallback
 
 ## Subprocess policy
 
-`sandbox` — see [Sandbox setup](/docs/setup/sandbox) for the
-openshell-sandbox workflow.
+The preferred policy is `sandbox`. On Linux, DefenseClaw installs the real
+OpenShell sandbox policy using Landlock and seccomp, with shell shims as a
+supplement. On macOS, `sandbox` resolves to shell shims only; those shims
+inspect supported command paths but do not provide Linux syscall or filesystem
+isolation. See [Sandbox setup](/docs/setup/sandbox) for the Linux workflow.
 
 ## Disable
 

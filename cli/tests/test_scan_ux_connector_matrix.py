@@ -240,7 +240,7 @@ class TestMCPScanConnectorMatrix(_MatrixBase):
         mock_scan,
     ) -> None:
         servers = [MCPServerEntry(name="alpha", url="http://a.example/mcp")]
-        self.app.cfg.mcp_servers = lambda connector=None: servers
+        self.app.cfg.mcp_servers = lambda connector=None, **_: servers
         mock_scan.return_value = self._clean_result("http://a.example/mcp")
 
         for connector in ACTIVE_SCAN_CONNECTORS:

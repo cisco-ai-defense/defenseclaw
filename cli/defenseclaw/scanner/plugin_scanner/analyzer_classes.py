@@ -22,6 +22,7 @@ Analyzer interface.
 
 from __future__ import annotations
 
+import math
 import os
 
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
@@ -42,7 +43,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     make_finding,
     resolve_entrypoint_files,
 )
-from defenseclaw.scanner.plugin_scanner.types import Finding
+from defenseclaw.scanner.plugin_scanner.types import Finding, compare_severity, max_severity
 
 # ---------------------------------------------------------------------------
 # Manifest analyzers
@@ -207,6 +208,111 @@ class LockfileAnalyzer:
 # ---------------------------------------------------------------------------
 
 
+_META_MIN_INPUT_CONFIDENCE = 0.65
+_META_EXCLUDED_PATH_COMPONENTS = frozenset(
+    {
+        "benchmark",
+        "benchmarks",
+        "doc",
+        "docs",
+        "documentation",
+        "example",
+        "examples",
+        "fixture",
+        "fixtures",
+        "test",
+        "tests",
+        "__tests__",
+    }
+)
+_META_DOCUMENT_EXTENSIONS = (".md", ".mdx", ".rst")
+_META_TEST_FILE_MARKERS = (".test.", ".spec.")
+_META_DIRECT_ACTION_RULES = frozenset(
+    {
+        "CLAW-HOOK-DANGEROUS",
+        "COG-TAMPER",
+        "DYN-IMPORT",
+        "DYN-REQUIRE",
+        "DYN-SPAWN-VAR",
+        "EXFIL-DNS",
+        "GW-ENV-WRITE",
+        "GW-GLOBAL-MOD",
+        "GW-MODULE-LOAD",
+        "GW-PROCESS-EXIT",
+        "GW-PROTO-ACCESS",
+        "GW-PROTO-DEFINE",
+        "SCRIPT-INSTALL-HOOK",
+        "SRC-BUN-SPAWN",
+        "SRC-DENO-RUN",
+        "SRC-EVAL",
+        "SRC-EXEC",
+        "SRC-HTTP-SERVER",
+        "SRC-NET-SERVER",
+        "SRC-NEW-FUNC",
+    }
+)
+
+
+def _meta_location_is_documentation_or_test(location: str | None) -> bool:
+    if not location:
+        return False
+    path = location.split(" → ", 1)[0].replace("\\", "/").strip()
+    head, separator, tail = path.rpartition(":")
+    if separator and tail.isdigit():
+        path = head
+    folded = path.casefold()
+    if folded.endswith(_META_DOCUMENT_EXTENSIONS):
+        return True
+    if any(marker in os.path.basename(folded) for marker in _META_TEST_FILE_MARKERS):
+        return True
+    components = {part for part in folded.split("/") if part not in ("", ".", "..")}
+    return bool(components & _META_EXCLUDED_PATH_COMPONENTS)
+
+
+def _eligible_meta_input(finding: Finding) -> bool:
+    if finding.suppressed or (finding.rule_id or "").startswith("META-"):
+        return False
+    confidence = finding.confidence
+    if (
+        confidence is None
+        or not math.isfinite(confidence)
+        or confidence < _META_MIN_INPUT_CONFIDENCE
+        or confidence > 1.0
+    ):
+        return False
+    return not _meta_location_is_documentation_or_test(finding.location)
+
+
+def _meta_candidates(
+    findings: list[Finding],
+    *,
+    rule_ids: frozenset[str] = frozenset(),
+    tags: frozenset[str] = frozenset(),
+) -> list[Finding]:
+    matches = [
+        finding for finding in findings if (finding.rule_id or "") in rule_ids or bool(set(finding.tags or []) & tags)
+    ]
+    return sorted(matches, key=lambda finding: finding.confidence or 0.0, reverse=True)
+
+
+def _choose_distinct_meta_inputs(groups: list[list[Finding]]) -> list[Finding] | None:
+    """Choose one distinct finding for every correlation leg."""
+
+    def choose(index: int, selected: list[Finding], used: set[int]) -> list[Finding] | None:
+        if index == len(groups):
+            return selected
+        for candidate in groups[index]:
+            identity = id(candidate)
+            if identity in used:
+                continue
+            result = choose(index + 1, [*selected, candidate], {*used, identity})
+            if result is not None:
+                return result
+        return None
+
+    return choose(0, [], set())
+
+
 class MetaAnalyzer:
     name = "meta"
 
@@ -214,252 +320,211 @@ class MetaAnalyzer:
         self._llm_policy = llm_policy
 
     def analyze(self, ctx: ScanContext) -> list[Finding]:
-        prev = ctx.previous_findings
+        # Documentation, examples, benchmarks, tests, low-confidence matches,
+        # and already-suppressed findings remain visible as atomic findings but
+        # cannot serve as correlation legs. This prevents prose/test fixtures
+        # from being amplified into a synthetic CRITICAL alert.
+        prev = [finding for finding in ctx.previous_findings if _eligible_meta_input(finding)]
         if not prev:
             return []
 
         findings: list[Finding] = []
 
-        def has_rule(rid: str) -> bool:
-            return any(f.rule_id == rid for f in prev)
+        def leg(*, rules: tuple[str, ...] = (), tags: tuple[str, ...] = ()) -> list[Finding]:
+            return _meta_candidates(prev, rule_ids=frozenset(rules), tags=frozenset(tags))
 
-        def has_tag(tag: str) -> bool:
-            return any(tag in (f.tags or []) for f in prev)
+        def correlate(
+            *,
+            rule_id: str,
+            requested_severity: str,
+            confidence_cap: float,
+            title: str,
+            description: str,
+            remediation: str,
+            tags: list[str],
+            legs: list[list[Finding]],
+        ) -> None:
+            selected = _choose_distinct_meta_inputs(legs)
+            if selected is None:
+                return
 
-        # Chain: eval/exec + network + credential access = exfiltration chain
-        has_code_exec = (
-            has_rule("SRC-EVAL") or has_rule("SRC-NEW-FUNC") or has_rule("SRC-CHILD-PROC") or has_rule("SRC-EXEC")
+            confidence = min(confidence_cap, *(finding.confidence or 0.0 for finding in selected))
+            if confidence < _META_MIN_INPUT_CONFIDENCE:
+                return
+
+            severity = requested_severity
+            evidence_ceiling = max_severity([finding.severity for finding in selected])
+            if compare_severity(severity, evidence_ceiling) > 0:
+                severity = evidence_ceiling
+            if requested_severity == "CRITICAL":
+                high_signal_count = sum(finding.severity in ("HIGH", "CRITICAL") for finding in selected)
+                has_direct_action = any((finding.rule_id or "") in _META_DIRECT_ACTION_RULES for finding in selected)
+                if severity == "CRITICAL" and (
+                    confidence < 0.9 or high_signal_count < 2 or not has_direct_action
+                ):
+                    severity = "HIGH"
+
+            evidence_parts = [
+                f"{finding.rule_id}@{finding.location or '(manifest)'} (confidence={finding.confidence:.2f})"
+                for finding in selected
+            ]
+            evidence = "; ".join(evidence_parts)
+            findings.append(
+                make_finding(
+                    ctx.finding_counter[0],
+                    rule_id=rule_id,
+                    severity=severity,
+                    confidence=round(confidence, 3),
+                    title=f"{title} (correlated, {len(selected)} signals)",
+                    description=(
+                        f"{description} This is a static correlation, not proof that execution occurred. "
+                        f"Evidence chain: {evidence}."
+                    ),
+                    evidence=evidence,
+                    location=selected[0].location,
+                    remediation=remediation,
+                    tags=[*tags, "correlation", "static-analysis"],
+                )
+            )
+            ctx.finding_counter[0] += 1
+
+        code_exec = leg(rules=("SRC-EVAL", "SRC-NEW-FUNC", "SRC-CHILD-PROC", "SRC-EXEC"))
+        network = leg(
+            rules=("SRC-FETCH", "EXFIL-C2-DOMAIN", "EXFIL-DNS"),
+            tags=("exfiltration", "network-access"),
         )
-        has_network = has_tag("exfiltration") or has_tag("network-access") or has_rule("SRC-FETCH")
-        has_creds = has_tag("credential-theft") or has_rule("CRED-OPENCLAW-DIR") or has_rule("CRED-OPENCLAW-ENV")
-
-        if has_code_exec and has_network and has_creds:
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-EXFIL-CHAIN",
-                    severity="CRITICAL",
-                    confidence=0.95,
-                    title="Likely credential exfiltration chain detected",
-                    description=(
-                        "Plugin combines code execution, network access, and credential file reads. "
-                        "This multi-signal pattern is a strong indicator of data theft."
-                    ),
-                    remediation="Investigate the plugin immediately. This pattern is rarely legitimate.",
-                    tags=["exfiltration", "credential-theft"],
-                )
+        credentials = leg(
+            rules=(
+                "CRED-OPENCLAW-DIR",
+                "CRED-OPENCLAW-ENV",
+                "CRED-OPENCLAW-AGENTS",
+                "CRED-CODEX-AUTH",
+                "CRED-CODEX-CONFIG",
+                "CRED-CLAUDE-JSON",
+                "CRED-CLAUDE-SETTINGS",
+                "CRED-CLAUDE-CONFIG",
+                "CRED-READFILE-SECRETS",
             )
-            ctx.finding_counter[0] += 1
-
-        # Chain: obfuscation + gateway manipulation = evasive attack
-        if has_tag("obfuscation") and has_tag("gateway-manipulation"):
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-EVASIVE-ATTACK",
-                    severity="CRITICAL",
-                    confidence=0.9,
-                    title="Obfuscated gateway manipulation detected",
-                    description=(
-                        "Plugin uses code obfuscation combined with gateway manipulation patterns. "
-                        "This suggests intentional evasion of security scanning."
-                    ),
-                    remediation="Block this plugin immediately and investigate its source.",
-                    tags=["obfuscation", "gateway-manipulation"],
-                )
-            )
-            ctx.finding_counter[0] += 1
-
-        # Chain: install scripts + risky deps + no lockfile = supply chain surface
-        if has_rule("SCRIPT-INSTALL-HOOK") and has_rule("DEP-RISKY") and has_rule("STRUCT-NO-LOCKFILE"):
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-SUPPLY-CHAIN",
-                    severity="HIGH",
-                    confidence=0.85,
-                    title="Supply chain attack surface: install hooks + risky deps + no lockfile",
-                    description=(
-                        "Plugin has install scripts that run automatically, depends on packages that can execute "
-                        "arbitrary code, and lacks a lockfile to pin dependency versions. This combination "
-                        "creates a broad supply chain attack surface."
-                    ),
-                    remediation="Remove install scripts, pin dependencies to specific versions, and add a lockfile.",
-                    tags=["supply-chain"],
-                )
-            )
-            ctx.finding_counter[0] += 1
-
-        # Chain: cognitive tampering + obfuscation = persistent agent compromise
-        if has_tag("cognitive-tampering") and has_tag("obfuscation"):
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-PERSISTENT-COMPROMISE",
-                    severity="CRITICAL",
-                    confidence=0.9,
-                    title="Obfuscated cognitive file tampering detected",
-                    description=(
-                        "Plugin uses obfuscation techniques alongside cognitive file modification. "
-                        "This suggests an attempt to covertly alter agent identity or behaviour for "
-                        "persistent compromise (T4 threat class)."
-                    ),
-                    remediation="Block this plugin. Inspect cognitive files for unauthorized changes.",
-                    tags=["cognitive-tampering", "obfuscation"],
-                )
-            )
-            ctx.finding_counter[0] += 1
-
-        # Chain: SSRF/metadata + credential access = cloud credential theft
-        has_ssrf = has_rule("SSRF-AWS-META") or has_rule("SSRF-GCP-META") or has_rule("SSRF-AZURE-META")
-        if has_ssrf and has_creds:
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-CLOUD-CRED-THEFT",
-                    severity="CRITICAL",
-                    confidence=0.9,
-                    title="Cloud credential theft pattern: SSRF + credential access",
-                    description=(
-                        "Plugin accesses cloud metadata endpoints and reads credential files. "
-                        "This pattern enables stealing IAM tokens and API keys from cloud instances."
-                    ),
-                    remediation="Block this plugin. Review for lateral movement attempts.",
-                    tags=["exfiltration", "credential-theft"],
-                )
-            )
-            ctx.finding_counter[0] += 1
-
-        # Chain: child_process/spawn + server creation + obfuscation = reverse shell / backdoor
-        has_spawn = (
-            has_rule("SRC-CHILD-PROC")
-            or has_rule("SRC-EXEC")
-            or has_rule("SRC-DENO-RUN")
-            or has_rule("SRC-BUN-SPAWN")
-            or has_rule("DYN-SPAWN-VAR")
         )
-        has_server = has_rule("SRC-NET-SERVER") or has_rule("SRC-HTTP-SERVER")
-        if has_spawn and has_server and has_tag("obfuscation"):
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-REVERSE-SHELL",
-                    severity="CRITICAL",
-                    confidence=0.95,
-                    title="Likely reverse shell or backdoor: server + exec + obfuscation",
-                    description=(
-                        "Plugin opens a network server, spawns processes, and uses obfuscation. "
-                        "This combination is the hallmark of a reverse shell or backdoor implant."
-                    ),
-                    remediation="Block this plugin immediately. Report to the plugin registry.",
-                    tags=["code-execution", "network-access", "obfuscation"],
-                )
-            )
-            ctx.finding_counter[0] += 1
 
-        # Chain: env read + C2/exfil network = environment secret exfiltration
-        has_env_read = has_rule("SRC-ENV-READ") or has_rule("GW-ENV-WRITE")
-        has_exfil = has_tag("exfiltration") or has_rule("EXFIL-C2-DOMAIN") or has_rule("EXFIL-DNS")
-        if has_env_read and has_exfil:
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-ENV-EXFIL",
-                    severity="CRITICAL",
-                    confidence=0.9,
-                    title="Environment secret exfiltration: env access + exfil channel",
-                    description=(
-                        "Plugin reads environment variables and has an exfiltration channel "
-                        "(C2 domain, DNS exfil). Environment variables commonly hold API keys, "
-                        "database passwords, and cloud credentials."
-                    ),
-                    remediation="Block this plugin. Rotate any secrets stored in environment variables.",
-                    tags=["exfiltration", "credential-theft"],
-                )
-            )
-            ctx.finding_counter[0] += 1
-
-        # Chain: dynamic import/require + network = remote code execution
-        has_dynamic = has_rule("DYN-IMPORT") or has_rule("DYN-REQUIRE") or has_rule("DYN-SPAWN-VAR")
-        if has_dynamic and has_network:
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-REMOTE-CODE-EXEC",
-                    severity="CRITICAL",
-                    confidence=0.9,
-                    title="Remote code execution: dynamic import + network access",
-                    description=(
-                        "Plugin uses dynamic import/require with non-literal arguments and has network access. "
-                        "This enables loading and executing arbitrary code from remote sources at runtime, "
-                        "completely bypassing static analysis."
-                    ),
-                    remediation="Block this plugin. Dynamic imports from network sources must never be allowed.",
-                    tags=["code-execution", "supply-chain"],
-                )
-            )
-            ctx.finding_counter[0] += 1
-
-        # Chain: binary executable + install hooks = unauditable auto-execution
-        if has_rule("STRUCT-BINARY") and has_rule("SCRIPT-INSTALL-HOOK"):
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-DROP-AND-EXEC",
-                    severity="CRITICAL",
-                    confidence=0.95,
-                    title="Unauditable auto-execution: binary + install hook",
-                    description=(
-                        "Plugin ships a binary executable and runs it automatically via install hooks. "
-                        "Binary payloads cannot be statically audited and install hooks execute without "
-                        "user confirmation -- this is the 'drop and execute' attack pattern."
-                    ),
-                    remediation="Block this plugin. Binaries must never be auto-executed via install scripts.",
-                    tags=["supply-chain", "code-execution"],
-                )
-            )
-            ctx.finding_counter[0] += 1
-
-        # Chain: cognitive tampering + credential theft = full agent takeover
-        if has_tag("cognitive-tampering") and has_creds:
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-AGENT-TAKEOVER",
-                    severity="CRITICAL",
-                    confidence=0.95,
-                    title="Full agent takeover: cognitive tampering + credential theft",
-                    description=(
-                        "Plugin modifies agent identity/behaviour files AND accesses credentials. "
-                        "This enables an attacker to rewrite the agent's instructions to trust "
-                        "the attacker, then exfiltrate credentials through the compromised agent."
-                    ),
-                    remediation="Block this plugin. Audit all cognitive files for unauthorized modifications.",
-                    tags=["cognitive-tampering", "credential-theft"],
-                )
-            )
-            ctx.finding_counter[0] += 1
-
-        # Chain: prototype pollution + code execution = privilege escalation to RCE
-        has_proto = has_rule("GW-PROTO-DEFINE") or has_rule("GW-PROTO-ACCESS")
-        if has_proto and has_code_exec:
-            findings.append(
-                make_finding(
-                    ctx.finding_counter[0],
-                    rule_id="META-PROTO-RCE",
-                    severity="CRITICAL",
-                    confidence=0.9,
-                    title="Prototype pollution escalation to code execution",
-                    description=(
-                        "Plugin pollutes JavaScript prototypes and executes dynamic code. "
-                        "Prototype pollution can intercept any function call in the runtime, "
-                        "and combined with code execution enables full remote code execution."
-                    ),
-                    remediation="Block this plugin. Prototype pollution combined with eval/exec is always malicious.",
-                    tags=["gateway-manipulation", "code-execution"],
-                )
-            )
-            ctx.finding_counter[0] += 1
+        correlate(
+            rule_id="META-EXFIL-CHAIN",
+            requested_severity="CRITICAL",
+            confidence_cap=0.95,
+            title="Credential-exfiltration pattern",
+            description="Plugin source combines code execution, network access, and credential-file access.",
+            remediation="Investigate the referenced source locations and confirm data flow before blocking.",
+            tags=["exfiltration", "credential-theft"],
+            legs=[code_exec, network, credentials],
+        )
+        correlate(
+            rule_id="META-EVASIVE-ATTACK",
+            requested_severity="CRITICAL",
+            confidence_cap=0.9,
+            title="Evasive gateway-manipulation pattern",
+            description="Plugin source combines obfuscation with gateway manipulation.",
+            remediation="Inspect the referenced transformations and gateway mutations.",
+            tags=["obfuscation", "gateway-manipulation"],
+            legs=[leg(tags=("obfuscation",)), leg(tags=("gateway-manipulation",))],
+        )
+        correlate(
+            rule_id="META-SUPPLY-CHAIN",
+            requested_severity="HIGH",
+            confidence_cap=0.85,
+            title="Supply-chain execution pattern",
+            description="The manifest combines install-time execution, a risky dependency, and no lockfile.",
+            remediation="Remove install scripts, pin dependencies, and add a reviewed lockfile.",
+            tags=["supply-chain"],
+            legs=[
+                leg(rules=("SCRIPT-INSTALL-HOOK",)),
+                leg(rules=("DEP-RISKY",)),
+                leg(rules=("STRUCT-NO-LOCKFILE",)),
+            ],
+        )
+        correlate(
+            rule_id="META-PERSISTENT-COMPROMISE",
+            requested_severity="CRITICAL",
+            confidence_cap=0.9,
+            title="Persistent agent-compromise pattern",
+            description="Plugin source combines cognitive-file writes with code obfuscation.",
+            remediation="Inspect the referenced writes and restore affected cognitive files if unauthorized.",
+            tags=["cognitive-tampering", "obfuscation"],
+            legs=[leg(rules=("COG-TAMPER",)), leg(tags=("obfuscation",))],
+        )
+        correlate(
+            rule_id="META-CLOUD-CRED-THEFT",
+            requested_severity="CRITICAL",
+            confidence_cap=0.9,
+            title="Cloud credential-theft pattern",
+            description="Plugin source combines a cloud metadata endpoint with credential-file access.",
+            remediation="Confirm the referenced request and credential read, then rotate exposed credentials.",
+            tags=["exfiltration", "credential-theft"],
+            legs=[leg(rules=("SSRF-AWS-META", "SSRF-GCP-META", "SSRF-AZURE-META")), credentials],
+        )
+        correlate(
+            rule_id="META-REVERSE-SHELL",
+            requested_severity="CRITICAL",
+            confidence_cap=0.95,
+            title="Reverse-shell/backdoor pattern",
+            description="Plugin source combines process spawning, a listening server, and obfuscation.",
+            remediation="Trace the referenced server and process arguments before enabling the plugin.",
+            tags=["code-execution", "network-access", "obfuscation"],
+            legs=[
+                leg(rules=("SRC-CHILD-PROC", "SRC-EXEC", "SRC-DENO-RUN", "SRC-BUN-SPAWN", "DYN-SPAWN-VAR")),
+                leg(rules=("SRC-NET-SERVER", "SRC-HTTP-SERVER")),
+                leg(tags=("obfuscation",)),
+            ],
+        )
+        correlate(
+            rule_id="META-ENV-EXFIL",
+            requested_severity="CRITICAL",
+            confidence_cap=0.9,
+            title="Environment-secret exfiltration pattern",
+            description="Plugin source combines environment access with a specific exfiltration channel.",
+            remediation="Trace the referenced data flow and rotate any secrets shown to leave the process.",
+            tags=["exfiltration", "credential-theft"],
+            legs=[leg(rules=("SRC-ENV-READ", "GW-ENV-WRITE")), leg(rules=("EXFIL-C2-DOMAIN", "EXFIL-DNS"))],
+        )
+        correlate(
+            rule_id="META-REMOTE-CODE-EXEC",
+            requested_severity="CRITICAL",
+            confidence_cap=0.9,
+            title="Remote-code-loading pattern",
+            description="Plugin source combines a non-literal module/process target with network access.",
+            remediation="Constrain the dynamic target to a reviewed allowlist and trace its network source.",
+            tags=["code-execution", "supply-chain"],
+            legs=[leg(rules=("DYN-IMPORT", "DYN-REQUIRE", "DYN-SPAWN-VAR")), network],
+        )
+        correlate(
+            rule_id="META-DROP-AND-EXEC",
+            requested_severity="CRITICAL",
+            confidence_cap=0.95,
+            title="Binary auto-execution pattern",
+            description="The package combines a native executable with an automatic install hook.",
+            remediation="Remove automatic execution and independently verify the native payload.",
+            tags=["supply-chain", "code-execution"],
+            legs=[leg(rules=("STRUCT-BINARY",)), leg(rules=("SCRIPT-INSTALL-HOOK",))],
+        )
+        correlate(
+            rule_id="META-AGENT-TAKEOVER",
+            requested_severity="CRITICAL",
+            confidence_cap=0.95,
+            title="Agent-takeover pattern",
+            description="Plugin source combines cognitive-file modification with credential-file access.",
+            remediation="Review both referenced operations and restore cognitive files if unauthorized.",
+            tags=["cognitive-tampering", "credential-theft"],
+            legs=[leg(rules=("COG-TAMPER",)), credentials],
+        )
+        correlate(
+            rule_id="META-PROTO-RCE",
+            requested_severity="CRITICAL",
+            confidence_cap=0.9,
+            title="Prototype-pollution/code-execution pattern",
+            description="Plugin source combines prototype mutation with dynamic code execution.",
+            remediation="Remove prototype mutation and constrain the referenced execution primitive.",
+            tags=["gateway-manipulation", "code-execution"],
+            legs=[leg(rules=("GW-PROTO-DEFINE", "GW-PROTO-ACCESS")), code_exec],
+        )
 
         # LLM-powered meta analysis (when configured).
         #
@@ -487,7 +552,31 @@ class MetaAnalyzer:
                     "python_binary": self._llm_policy.get("python_binary") or None,
                 }
 
-                result = run_meta_llm(llm_config, ctx)
+                # The LLM correlator receives the same confidence/provenance
+                # gated inputs as the deterministic correlator. Source prose
+                # in documentation/test paths is also excluded from its
+                # correlation context.
+                original_previous = ctx.previous_findings
+                original_source_files = ctx.source_files
+                ctx.previous_findings = prev
+                eligible_source_files = [
+                    source_file
+                    for source_file in original_source_files
+                    if not _meta_location_is_documentation_or_test(source_file.rel_path)
+                ]
+                # An intentionally excluded docs/tests-only tree is not the
+                # scanner coverage failure represented by SCAN-LLM-NO-SOURCE.
+                # Skip LLM correlation in that case; retain the warning only
+                # when the source analyzer genuinely collected nothing.
+                if original_source_files and not eligible_source_files:
+                    ctx.previous_findings = original_previous
+                    return findings
+                ctx.source_files = eligible_source_files
+                try:
+                    result = run_meta_llm(llm_config, ctx)
+                finally:
+                    ctx.previous_findings = original_previous
+                    ctx.source_files = original_source_files
                 if result.get("no_source_files_warning") is not None:
                     findings.append(result["no_source_files_warning"])
                 findings.extend(result["new_findings"])

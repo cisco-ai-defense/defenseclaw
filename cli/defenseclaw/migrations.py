@@ -1064,8 +1064,7 @@ def _validate_observability_v8_candidate(
             suffix=".yaml",
             dir=candidate_directory or data_dir,
         )
-        if os.name != "nt":
-            os.fchmod(descriptor, 0o600)
+        set_file_mode(descriptor, candidate_path, 0o600, set_owner=True)
         with os.fdopen(descriptor, "wb", closefd=True) as candidate_file:
             descriptor = -1
             candidate_file.write(candidate)

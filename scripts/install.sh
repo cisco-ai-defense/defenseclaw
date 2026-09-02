@@ -413,6 +413,17 @@ cleanup_install_attempt() {
     set +e
 
     if [[ "${INSTALL_SUCCEEDED:-false}" != true ]]; then
+        if [[ -n "${SKILL_SCANNER_PUBLISHED_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" unlink-exact \
+                    "${INSTALL_DIR}/skill-scanner" \
+                    "${SKILL_SCANNER_PUBLISHED_ID}" \
+                    --custody-root "${INSTALL_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy skill-scanner launcher rollback residue was preserved because exact retirement is unavailable"
+            fi
+        fi
         if [[ -n "${CLI_PUBLISHED_ID:-}" ]]; then
             if [[ "${MODERN_RELEASE:-false}" == true \
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
@@ -1507,6 +1518,8 @@ install_python_cli() {
 
     "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null \
         || die "CLI validation failed before launcher publication"
+    "${DEFENSECLAW_VENV}/bin/skill-scanner" --version &>/dev/null \
+        || die "Skill scanner validation failed before launcher publication"
 
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
         CLI_PUBLISHED_ID="$(
@@ -1514,16 +1527,29 @@ install_python_cli() {
                 "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw" \
                 --custody-root "${INSTALL_CUSTODY_ROOT}"
         )" || die "A DefenseClaw CLI appeared during installation; it was preserved and this installation was not activated"
+        SKILL_SCANNER_PUBLISHED_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-symlink \
+                "${DEFENSECLAW_VENV}/bin/skill-scanner" "${INSTALL_DIR}/skill-scanner" \
+                --custody-root "${INSTALL_CUSTODY_ROOT}"
+        )" || die "A skill-scanner launcher appeared during installation; it was preserved and this installation was not activated"
     else
         mkdir -p "${INSTALL_DIR}"
         ln -s "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw" \
             || die "A DefenseClaw CLI appeared during installation; it was preserved and this installation was not activated"
         CLI_PUBLISHED_ID="$(path_identity "${INSTALL_DIR}/defenseclaw")" \
             || die "Could not bind the installed DefenseClaw CLI identity"
+        ln -s "${DEFENSECLAW_VENV}/bin/skill-scanner" "${INSTALL_DIR}/skill-scanner" \
+            || die "A skill-scanner launcher appeared during installation; it was preserved and this installation was not activated"
+        SKILL_SCANNER_PUBLISHED_ID="$(path_identity "${INSTALL_DIR}/skill-scanner")" \
+            || die "Could not bind the installed skill-scanner launcher identity"
     fi
     [[ "${CLI_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Installed DefenseClaw CLI returned an invalid identity"
-    ok "CLI installed"
+    [[ "${SKILL_SCANNER_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
+        || die "Installed skill-scanner launcher returned an invalid identity"
+    "${INSTALL_DIR}/skill-scanner" --version &>/dev/null \
+        || die "Published skill-scanner launcher does not use the managed environment"
+    ok "CLI and skill-scanner launcher installed"
 }
 
 # ── Install: OpenClaw Plugin (from tarball) ───────────────────────────────────
@@ -1831,6 +1857,7 @@ PICKED_CONNECTOR_ACTIVATION_ID=""
 CONNECTOR_MARKER_ROLLBACK_TOKEN=""
 CONNECTOR_MARKER_ID=""
 CLI_PUBLISHED_ID=""
+SKILL_SCANNER_PUBLISHED_ID=""
 INSTALL_SANDBOX=false
 RUN_QUICKSTART=false
 QUICKSTART_MODE=""

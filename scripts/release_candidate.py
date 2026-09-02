@@ -3041,7 +3041,9 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
 
     upgrade = one_function("upgrade_local_observability_stack")
     prepare_calls = calls(upgrade, "_prepare_local_observability_backup_custody")
-    stop_calls = calls(upgrade, "subprocess.run")
+    # Legacy bundles stop through the bridge subprocess. The native controller
+    # has the same reviewed ordering contract but performs the stop directly.
+    stop_calls = calls(upgrade, "subprocess.run") + calls(upgrade, "controller.down")
     activation_calls = calls(upgrade, "_activate_local_observability_manifest")
     if not (
         len(prepare_calls) == len(stop_calls) == len(activation_calls) == 1

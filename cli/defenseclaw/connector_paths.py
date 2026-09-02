@@ -257,6 +257,70 @@ class CopilotSettingsResolution:
     managed_policy_verified: bool = False
 
 
+@dataclass(frozen=True)
+class MCPSourceDiagnostic:
+    """One MCP discovery source that existed but could not be consumed."""
+
+    source: str
+    problem: str
+
+
+def _record_mcp_source_diagnostic(
+    sink: list[MCPSourceDiagnostic] | None,
+    source: str,
+    problem: str,
+) -> None:
+    """Append one stable, de-duplicated source diagnostic when requested."""
+
+    if sink is None:
+        return
+    diagnostic = MCPSourceDiagnostic(source=source, problem=problem)
+    if diagnostic not in sink:
+        sink.append(diagnostic)
+
+
+# Names Claude Code reserves for servers hardcoded into the app bundle.
+# Claude Code itself skips a user config that reuses one of these names
+# (docs: reserved names include workspace, claude-in-chrome, computer-use,
+# Claude Preview, Claude Browser). Scanning them produces false positives
+# — filesystem/browser tools look like exfil — and blocking them would
+# disable vendor-managed features the operator did not install.
+_CLAUDECODE_BUNDLED_MCP_NAMES = frozenset(
+    {
+        "workspace",
+        "claude-in-chrome",
+        "computer-use",
+        "claude preview",
+        "claude browser",
+    }
+)
+
+
+def is_bundled_mcp_server(
+    entry: MCPServerEntry | str,
+    *,
+    connector: str | None = None,
+) -> bool:
+    """True for Claude Code's vendor-managed MCP servers.
+
+    Built-in servers live in the Claude Code binary, not in
+    ``~/.claude.json``. They are identified by reserved name (and by the
+    ``claude.ai `` / ``claude_ai_`` prefixes Claude Code uses for its own
+    connectors). The check is scoped to the claudecode connector so a
+    same-named server on Cursor or Codex is still scanned.
+    """
+
+    name = entry.name if isinstance(entry, MCPServerEntry) else entry
+    normalized = str(name or "").strip().casefold()
+    if not normalized:
+        return False
+    if connector not in (None, "") and normalize(connector) != "claudecode":
+        return False
+    if normalized in _CLAUDECODE_BUNDLED_MCP_NAMES:
+        return True
+    return normalized.startswith("claude.ai ") or normalized.startswith("claude_ai_")
+
+
 def infer_mcp_transport(
     transport: Any = "",
     *,
@@ -379,6 +443,62 @@ def _workspace_path(workspace_dir: str | None, *parts: str) -> str:
     return os.path.join(root, *parts)
 
 
+def _discovery_workspace_dir(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+) -> str:
+    """Resolve the workspace for *read* surfaces.
+
+    ``_workspace_dir`` returns ``""`` when nothing is pinned, so every
+    ``_workspace_path`` built from it collapses to ``""`` and the
+    project-local config is skipped entirely. For an operator running
+    ``defenseclaw mcp list`` inside their project that is a silent miss:
+    the servers are configured, the connector loads them, and inventory
+    reports zero.
+
+    The fix cannot simply be "always fall back to the cwd", because the
+    cwd means different things to different callers:
+
+    * A human at a shell is standing in the project they mean.
+    * A daemon is standing wherever it was launched — possibly ``/``.
+      ``_opencode_config_paths`` already documents this exact hazard.
+    * A *writer* must never infer a target. ``defenseclaw mcp set``
+      writing into whichever directory the operator happens to be in,
+      least of all a repo they just cloned, is worse than any missed read.
+
+    So the fallback is opt-in and off by default: every existing caller
+    keeps byte-identical behaviour, and the CLI command layer — the one
+    caller that knows a human typed the command — turns it on.
+
+    ``inventory/agent_discovery.py`` already probes the relative
+    ``.claude/settings.json`` with no pinned workspace, so this makes MCP
+    discovery consistent with a surface that shipped years ago.
+    """
+
+    explicit = _workspace_dir(workspace_dir)
+    if explicit:
+        return explicit
+    if not infer_from_cwd:
+        return ""
+    try:
+        return os.path.abspath(os.getcwd())
+    except OSError:
+        # The cwd can be unlinked out from under a long-running process.
+        return ""
+
+
+def _discovery_path(
+    workspace_dir: str | None,
+    *parts: str,
+    infer_from_cwd: bool = False,
+) -> str:
+    root = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd)
+    if not root:
+        return ""
+    return os.path.join(root, *parts)
+
+
 def _omnigent_config_home() -> str:
     config_home = (os.environ.get("OMNIGENT_CONFIG_HOME") or "").strip()
     if config_home:
@@ -399,6 +519,35 @@ def claude_config_dir() -> str:
     """Return Claude Code's effective user configuration directory."""
 
     return _connector_env_home("CLAUDE_CONFIG_DIR", ".claude")
+
+
+def claude_user_config_paths() -> list[str]:
+    """Return Claude Code's user-scope ``.claude.json`` candidates.
+
+    This file is a *sibling* of ``~/.claude/``, not a member of it, and it
+    is where ``claude mcp add`` lands by default — both at the document
+    root (``mcpServers``) and per project
+    (``projects.<abs-path>.mcpServers``). ``~/.claude/settings.json``
+    holds a different MCP block, so reading only settings.json misses the
+    servers most operators actually have.
+
+    The rest of the codebase already knows this file:
+    ``inventory/ai_signatures.json`` and ``inventory/agent_discovery.py``
+    both list ``~/.claude.json``, and ``scanner/plugin_scanner/rules.py``
+    raises a finding when a plugin reads its credentials. MCP discovery
+    was the one place that did not.
+
+    Two candidates, not one: ``~/.claude.json`` always, plus
+    ``$CLAUDE_CONFIG_DIR/.claude.json`` when that variable is set. I could
+    not confirm from the outside whether Claude Code relocates this file
+    along with the directory, and probing a path that does not exist costs
+    one failed ``open`` — guessing wrong costs another silent zero.
+    """
+
+    paths = [os.path.join(os.path.abspath(str(Path.home())), ".claude.json")]
+    if (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip():
+        paths.append(os.path.join(claude_config_dir(), ".claude.json"))
+    return _dedup(paths)
 
 
 def claude_mcp_state_path() -> str:
@@ -1945,15 +2094,25 @@ def mcp_servers(
     workspace_dir: str | None = None,
     openclaw_bin_resolver: Any = None,
     openclaw_cmd_prefix: list[str] | None = None,
+    infer_workspace_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     """Return the MCP server registrations for *connector*.
 
+    Set *infer_workspace_from_cwd* when the caller knows its cwd is a
+    project — an interactive CLI command does, a daemon does not. It is
+    off by default so no existing caller changes behaviour; see
+    ``_discovery_workspace_dir`` for why this is the caller's decision.
+
     Reads each framework's canonical config:
 
-    * Claude Code: local/user ``~/.claude.json`` plus explicit workspace
-                   ``.mcp.json``, in local → project → user precedence
+    * Claude Code: ``~/.claude/settings.json``, ``~/.claude.json`` (document-root
+                    ``mcpServers`` and this project's ``projects`` entry),
+                    workspace ``.mcp.json`` and workspace
+                    ``.claude/settings{,.local}.json``
     * Codex:       project ``.codex/config.toml`` layers (closest first), then
-                   user ``~/.codex/config.toml``
+                   user ``~/.codex/config.toml``, then explicit workspace
+                   ``.mcp.json``
     * ZeptoClaw:   ``~/.zeptoclaw/config.json`` then explicit workspace ``.mcp.json``
     * Antigravity: ``~/.gemini/config/mcp_config.json`` then explicit workspace
                     ``.agents/mcp_config.json``
@@ -1966,41 +2125,191 @@ def mcp_servers(
     prefix.
     """
     name = normalize(connector)
+    infer = infer_workspace_from_cwd
     if is_cleanup_only(name):
         return []
     if name == "claudecode":
-        return _claudecode_mcp_servers(workspace_dir)
+        return _claudecode_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     if name == "codex":
-        return _codex_mcp_servers(workspace_dir)
+        return _codex_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     if name == "amp":
-        return _amp_mcp_servers(workspace_dir)
+        return _amp_mcp_servers(workspace_dir, diagnostic_sink=diagnostic_sink)
     if name == "zeptoclaw":
-        return _zeptoclaw_mcp_servers(workspace_dir)
+        return _zeptoclaw_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     if name == "hermes":
-        return _hermes_mcp_servers()
+        return _hermes_mcp_servers(diagnostic_sink=diagnostic_sink)
     if name == "cursor":
-        return _cursor_mcp_servers(workspace_dir)
+        return _cursor_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     if name == "devin":
-        return _devin_mcp_servers(workspace_dir)
+        return _devin_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     if name == "copilot":
-        return _copilot_mcp_servers(workspace_dir)
+        return _copilot_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     if name == "openhands":
-        return _openhands_mcp_servers()
+        return _openhands_mcp_servers(diagnostic_sink=diagnostic_sink)
     if name == "antigravity":
-        return _antigravity_mcp_servers(workspace_dir)
+        return _antigravity_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     if name == "opencode":
         # opencode manages MCP servers in its own opencode.json (full
         # read/write parity with codex/claudecode — mcp.md M2/M5), under
         # a top-level ``mcp`` map rather than the ``mcpServers`` shape the
         # other connectors use. Read its config, never OpenClaw's.
-        return _opencode_mcp_servers(workspace_dir)
+        return _opencode_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     if name == "omnigent":
         return []
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
         openclaw_cmd_prefix=openclaw_cmd_prefix,
+        diagnostic_sink=diagnostic_sink,
     )
+
+
+def mcp_source_locations(
+    connector: str | None,
+    *,
+    openclaw_config: str | None = None,
+    workspace_dir: str | None = None,
+    infer_workspace_from_cwd: bool = False,
+) -> list[str]:
+    """Return the locations ``mcp_servers`` would consult, in read order.
+
+    This deliberately does *not* reuse ``connector_config_files``. That
+    function answers "where does this connector keep configuration",
+    which is a different question and, today, a different answer: for
+    claudecode it lists ``<ws>/.claude/settings.json`` but not
+    ``<ws>/.mcp.json``, and for copilot its three entries and the reader's
+    three entries do not overlap at all. It is also the input to
+    ``snapshot_fail_mode_transaction``, so widening it would widen a
+    rollback set. Printing it as "checked:" would replace a vague hint
+    with a precise falsehood.
+
+    Locations are mostly file paths. OpenClaw's preferred source is a
+    command, and omnigent has no MCP registry at all; both are rendered as
+    a parenthesised phrase so a caller can still print and count them. An
+    empty list therefore means one thing only — *we do not know where to
+    look for this connector* — which is the condition worth an error.
+
+    Paths are listed whether or not they exist: the operator wants to see
+    where the tool looked, and "checked here, nothing there" is the
+    finding.
+    """
+
+    name = normalize(connector)
+    infer = infer_workspace_from_cwd
+    home = str(Path.home())
+    if is_cleanup_only(name):
+        return []
+
+    def ws(*parts: str) -> str:
+        return _discovery_path(workspace_dir, *parts, infer_from_cwd=infer)
+
+    workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer) or None
+
+    if name == "claudecode":
+        return _dedup(
+            [
+                os.path.join(claude_config_dir(), "settings.json"),
+                ws(".mcp.json"),
+                *claude_user_config_paths(),
+                ws(".claude", "settings.json"),
+                ws(".claude", "settings.local.json"),
+            ]
+        )
+    if name == "codex":
+        return _dedup(
+            [
+                *_codex_project_config_paths(workspace),
+                os.path.join(codex_home(), "config.toml"),
+                ws(".mcp.json"),
+            ]
+        )
+    if name == "amp":
+        return _dedup(
+            [
+                *_amp_settings_paths(workspace_dir),
+                *(
+                    path
+                    for root in _amp_skill_dirs(workspace_dir)
+                    for path in _amp_skill_mcp_paths(root)
+                ),
+            ]
+        )
+    if name == "zeptoclaw":
+        zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
+        return _dedup([os.path.join(zepto_home, "config.json"), ws(".mcp.json")])
+    if name == "hermes":
+        return _dedup([hermes_config_path()])
+    if name == "cursor":
+        return _dedup(
+            [ws(".cursor", "mcp.json"), os.path.join(home, ".cursor", "mcp.json")]
+        )
+    if name == "devin":
+        return _dedup(_devin_mcp_read_paths(workspace))
+    if name == "copilot":
+        return _dedup(copilot_mcp_config_files(workspace))
+    if name == "openhands":
+        return _dedup([os.path.join(home, ".openhands", "mcp.json")])
+    if name == "antigravity":
+        return _dedup(
+            [
+                _antigravity_global_mcp_path(),
+                _antigravity_workspace_mcp_path(workspace_dir, infer_from_cwd=infer),
+            ]
+        )
+    if name == "opencode":
+        return _dedup(_opencode_config_paths(workspace_dir, infer_from_cwd=infer))
+    if name == "omnigent":
+        return ["(omnigent exposes no MCP registry)"]
+    if name == "openclaw":
+        return _dedup(
+            [
+                "(openclaw config get mcp.servers)",
+                _expand(openclaw_config or "~/.openclaw/openclaw.json"),
+            ]
+        )
+
+    # Deliberately NOT mirroring mcp_servers here. That function ends in an
+    # unconditional `return _openclaw_mcp_servers(...)`, so an unrecognised
+    # --connector reads OpenClaw's config and reports "no servers for
+    # <name>" — a silent read of the wrong file, which is the failure this
+    # whole change is about. Returning [] lets the caller say so.
+    #
+    # It also catches the realistic regression: a connector added to
+    # KNOWN_CONNECTORS and to mcp_servers but not here shows up as zero
+    # locations on its first run, rather than after months of clean reports.
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -2258,7 +2567,11 @@ def _amp_settings_paths(workspace_dir: str | None = None) -> list[str]:
     )
 
 
-def _amp_settings_documents(workspace_dir: str | None = None) -> list[dict[str, Any]]:
+def _amp_settings_documents(
+    workspace_dir: str | None = None,
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[dict[str, Any]]:
     """Load at most one settings document per Amp scope.
 
     Amp documents ``settings.json`` and ``settings.jsonc`` as alternative
@@ -2286,7 +2599,10 @@ def _amp_settings_documents(workspace_dir: str | None = None) -> list[dict[str, 
         )
         if not selected:
             continue
-        document = _load_amp_settings_document(selected)
+        document = _load_amp_settings_document(
+            selected,
+            diagnostic_sink=diagnostic_sink,
+        )
         if isinstance(document, dict):
             documents.append(document)
     return documents
@@ -2295,18 +2611,26 @@ def _amp_settings_documents(workspace_dir: str | None = None) -> list[dict[str, 
 _AMP_SETTINGS_MAX_BYTES = 2 * 1024 * 1024
 
 
-def _load_amp_settings_document(path: str) -> Any:
+def _load_amp_settings_document(
+    path: str,
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> Any:
     """Parse one bounded, stable, non-symlink Amp settings document."""
 
     try:
         before = os.lstat(path)
+    except FileNotFoundError:
+        return None
     except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
         return None
     if (
         stat.S_ISLNK(before.st_mode)
         or not stat.S_ISREG(before.st_mode)
         or before.st_size > _AMP_SETTINGS_MAX_BYTES
     ):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
         return None
 
     flags = (
@@ -2330,6 +2654,7 @@ def _load_amp_settings_document(path: str) -> Any:
             raw = stream.read(_AMP_SETTINGS_MAX_BYTES + 1)
             opened_after = os.fstat(stream.fileno())
     except (OSError, ValueError):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
         return None
     finally:
         if descriptor >= 0:
@@ -2344,10 +2669,12 @@ def _load_amp_settings_document(path: str) -> Any:
         or (opened_before.st_size, opened_before.st_mtime_ns, opened_before.st_mode)
         != (opened_after.st_size, opened_after.st_mtime_ns, opened_after.st_mode)
     ):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
         return None
     try:
         named_after = os.lstat(path)
     except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
         return None
     if (
         stat.S_ISLNK(named_after.st_mode)
@@ -2356,11 +2683,18 @@ def _load_amp_settings_document(path: str) -> Any:
         or (before.st_size, before.st_mtime_ns, before.st_mode)
         != (named_after.st_size, named_after.st_mtime_ns, named_after.st_mode)
     ):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
         return None
     try:
-        return _parse_json_or_jsonc(raw.decode("utf-8"))
+        decoded = raw.decode("utf-8")
     except UnicodeDecodeError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return None
+    parsed, valid = _parse_json_or_jsonc_result(decoded)
+    if not valid:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return None
+    return parsed
 
 
 _MISSING = object()
@@ -3210,21 +3544,72 @@ def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
 # --- MCP readers -----------------------------------------------------------
 
 
-def _claudecode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _claudecode_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
+    """Return Claude Code's MCP registrations across all five read surfaces.
+
+    Order is additive on purpose. ``_dedup_mcp_entries`` is first-wins, so
+    the two pre-existing sources stay in front and any name that resolved
+    before resolves to the same entry now; the sources added below can only
+    contribute names that were previously invisible. Making
+    ``~/.claude.json`` *win* over settings.json would match Claude Code's
+    own precedence more closely, but that is a behaviour change for
+    existing installs and belongs in its own commit.
+    """
+
     entries: list[MCPServerEntry] = []
-    # Claude's documented precedence is local, project, then user. Local and
-    # user entries share one state document, so parse it once and select only
-    # the local entry whose project key resolves to the explicitly pinned
-    # workspace. Never infer a project from DefenseClaw's daemon cwd.
-    local_entries, user_entries = _read_claude_mcp_state(
-        claude_mcp_state_path(),
-        workspace_dir=workspace_dir,
+    # settings.json stays first so names that resolved before this change
+    # still resolve to the same entry. Claude's own local → project → user
+    # order then applies to ~/.claude.json and workspace .mcp.json.
+    entries.extend(
+        _read_mcp_settings_block(
+            os.path.join(claude_config_dir(), "settings.json"),
+            keys=("mcpServers",),
+            diagnostic_sink=diagnostic_sink,
+        )
     )
+
+    workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd) or None
+    local_entries: list[MCPServerEntry] = []
+    user_entries: list[MCPServerEntry] = []
+    for path in claude_user_config_paths():
+        local, user = _read_claude_mcp_state(
+            path,
+            workspace_dir=workspace,
+            diagnostic_sink=diagnostic_sink,
+        )
+        local_entries.extend(local)
+        user_entries.extend(user)
     entries.extend(local_entries)
-    project_mcp = _workspace_path(workspace_dir, ".mcp.json")
+
+    project_mcp = _discovery_path(
+        workspace_dir, ".mcp.json", infer_from_cwd=infer_from_cwd,
+    )
     if project_mcp:
-        entries.extend(_read_dotmcp_json(project_mcp))
+        entries.extend(
+            _read_dotmcp_json(project_mcp, diagnostic_sink=diagnostic_sink)
+        )
     entries.extend(user_entries)
+
+    # Workspace settings, which agent_discovery already probes but MCP
+    # discovery never did. `.local.` is the git-ignored personal override.
+    for name in ("settings.json", "settings.local.json"):
+        path = _discovery_path(
+            workspace_dir, ".claude", name, infer_from_cwd=infer_from_cwd,
+        )
+        if path:
+            entries.extend(
+                _read_mcp_settings_block(
+                    path,
+                    keys=("mcpServers",),
+                    diagnostic_sink=diagnostic_sink,
+                )
+            )
+
     return _dedup_mcp_entries(entries)
 
 
@@ -3232,6 +3617,7 @@ def _read_claude_mcp_state(
     path: str,
     *,
     workspace_dir: str | None = None,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> tuple[list[MCPServerEntry], list[MCPServerEntry]]:
     """Return Claude Code ``(local, user)`` MCP entries from one state file.
 
@@ -3244,7 +3630,13 @@ def _read_claude_mcp_state(
     try:
         with open(path) as handle:
             data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
+        return [], []
+    except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return [], []
+    except (UnicodeError, json.JSONDecodeError):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return [], []
     if not isinstance(data, dict):
         return [], []
@@ -3271,7 +3663,12 @@ def _read_claude_mcp_state(
     return local_entries, user_entries
 
 
-def _codex_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _codex_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     """Return the merged Codex MCP server list.
 
     Codex stores both user and project MCP registries in ``config.toml``
@@ -3284,28 +3681,50 @@ def _codex_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]
     the client's private trust decision from filesystem presence.
     """
     entries: list[MCPServerEntry] = []
-    for project_config in _codex_project_config_paths(workspace_dir):
+    workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd)
+    for project_config in _codex_project_config_paths(workspace or None):
         entries.extend(
             _read_codex_config_toml(
                 project_config,
                 source_scope="project",
                 trust_required=True,
+                diagnostic_sink=diagnostic_sink,
             )
         )
     entries.extend(
         _read_codex_config_toml(
             os.path.join(codex_home(), "config.toml"),
             source_scope="user",
+            diagnostic_sink=diagnostic_sink,
         )
     )
+    project_mcp = _discovery_path(
+        workspace_dir, ".mcp.json", infer_from_cwd=infer_from_cwd,
+    )
+    if project_mcp:
+        entries.extend(
+            _read_dotmcp_json(project_mcp, diagnostic_sink=diagnostic_sink)
+        )
     return _dedup_mcp_entries(entries)
 
 
-def _amp_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
-    """Return Amp MCP registrations using its documented precedence."""
+def _amp_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
+    """Return Amp MCP registrations using its documented precedence.
+
+    Workspace settings override user settings, and both override a skill's
+    bundled ``mcp.json``. ``--mcp-config`` is intentionally absent because it
+    is an invocation-scoped CLI override rather than durable inventory.
+    """
 
     entries: list[MCPServerEntry] = []
-    documents = _amp_settings_documents(workspace_dir)
+    documents = _amp_settings_documents(
+        workspace_dir,
+        diagnostic_sink=diagnostic_sink,
+    )
     for document in reversed(documents):
         servers = _amp_setting_value(document, "amp.mcpServers")
         if servers is _MISSING:
@@ -3314,7 +3733,9 @@ def _amp_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
 
     for root in _amp_skill_dirs(workspace_dir):
         for path in _amp_skill_mcp_paths(root):
-            entries.extend(_read_dotmcp_json(path))
+            entries.extend(
+                _read_dotmcp_json(path, diagnostic_sink=diagnostic_sink)
+            )
     return _dedup_mcp_entries(entries)
 
 
@@ -3345,6 +3766,7 @@ def _read_codex_config_toml(
     *,
     source_scope: str = "",
     trust_required: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     """Parse the ``[mcp_servers]`` table out of Codex's config.toml.
 
@@ -3367,7 +3789,13 @@ def _read_codex_config_toml(
     try:
         payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
         data = tomllib.loads(payload.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+    except FileNotFoundError:
+        return []
+    except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return []
+    except (UnicodeError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return []
     servers = data.get("mcp_servers")
     if not isinstance(servers, dict):
@@ -3425,13 +3853,27 @@ def _is_codex_bundled_mcp_entry(
     return config == {"url": "https://developers.openai.com/mcp"}
 
 
-def _zeptoclaw_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _zeptoclaw_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(str(Path.home()), ".zeptoclaw")
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_zepto_config(os.path.join(zepto_home, "config.json")))
-    project_mcp = _workspace_path(workspace_dir, ".mcp.json")
+    entries.extend(
+        _read_zepto_config(
+            os.path.join(zepto_home, "config.json"),
+            diagnostic_sink=diagnostic_sink,
+        )
+    )
+    project_mcp = _discovery_path(
+        workspace_dir, ".mcp.json", infer_from_cwd=infer_from_cwd,
+    )
     if project_mcp:
-        entries.extend(_read_dotmcp_json(project_mcp))
+        entries.extend(
+            _read_dotmcp_json(project_mcp, diagnostic_sink=diagnostic_sink)
+        )
     return _dedup_mcp_entries(entries)
 
 
@@ -3440,35 +3882,56 @@ def _openclaw_mcp_servers(
     *,
     openclaw_bin_resolver: Any = None,
     openclaw_cmd_prefix: list[str] | None = None,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     cli_entries = _read_mcp_servers_via_openclaw_cli(
         openclaw_bin_resolver=openclaw_bin_resolver,
         openclaw_cmd_prefix=openclaw_cmd_prefix,
+        diagnostic_sink=diagnostic_sink,
     )
     if cli_entries is not None:
         return cli_entries
     return _read_mcp_servers_from_openclaw_json(
         _expand(openclaw_config or "~/.openclaw/openclaw.json"),
+        diagnostic_sink=diagnostic_sink,
     )
 
 
-def _hermes_mcp_servers() -> list[MCPServerEntry]:
+def _hermes_mcp_servers(
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     return _read_yaml_mcp_servers(
         hermes_config_path(),
         key_paths=(("mcp", "servers"), ("mcpServers",)),
+        diagnostic_sink=diagnostic_sink,
     )
 
 
-def _cursor_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _cursor_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     home = str(Path.home())
     entries: list[MCPServerEntry] = []
-    project_mcp = _workspace_path(workspace_dir, ".cursor", "mcp.json")
+    project_mcp = _discovery_path(
+        workspace_dir, ".cursor", "mcp.json", infer_from_cwd=infer_from_cwd,
+    )
     if project_mcp:
-        entries.extend(_read_dotmcp_json(project_mcp, source_scope="project"))
+        entries.extend(
+            _read_dotmcp_json(
+                project_mcp,
+                source_scope="project",
+                diagnostic_sink=diagnostic_sink,
+            )
+        )
     entries.extend(
         _read_dotmcp_json(
             os.path.join(home, ".cursor", "mcp.json"),
             source_scope="user",
+            diagnostic_sink=diagnostic_sink,
         )
     )
     # Cursor documents both scopes but not a same-name winner, and extension
@@ -3477,55 +3940,98 @@ def _cursor_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry
     return entries
 
 
-def _devin_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _devin_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
+    workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd)
     entries: list[MCPServerEntry] = []
-    for path in _devin_mcp_read_paths(workspace_dir):
-        entries.extend(_read_dotmcp_json(path))
+    for path in _devin_mcp_read_paths(workspace or None):
+        entries.extend(_read_dotmcp_json(path, diagnostic_sink=diagnostic_sink))
     return _dedup_mcp_entries(entries)
 
 
-def _gemini_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _gemini_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     entries: list[MCPServerEntry] = []
     # Gemini's project settings override user settings. Only consult the
-    # project layer when DefenseClaw has an explicitly pinned workspace; never
-    # infer it from the gateway process's current working directory.
-    project_settings = _workspace_path(workspace_dir, ".gemini", "settings.json")
+    # project layer when a workspace is pinned or the caller opts into cwd
+    # inference; never infer it from a daemon's current working directory.
+    project_settings = _discovery_path(
+        workspace_dir, ".gemini", "settings.json", infer_from_cwd=infer_from_cwd,
+    )
     if project_settings:
         entries.extend(
-            _read_mcp_settings_block(project_settings, keys=("mcpServers",))
+            _read_mcp_settings_block(
+                project_settings,
+                keys=("mcpServers",),
+                diagnostic_sink=diagnostic_sink,
+            )
         )
     entries.extend(
         _read_mcp_settings_block(
             os.path.join(gemini_config_home(), "settings.json"),
             keys=("mcpServers",),
+            diagnostic_sink=diagnostic_sink,
         )
     )
     return _dedup_mcp_entries(entries)
 
 
-def _copilot_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _copilot_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     entries: list[MCPServerEntry] = []
     # Copilot loads both workspace forms at every ancestor through the Git
     # root. Deeper entries are visited first so name deduplication below
     # preserves the documented higher-priority registration.
-    for path in copilot_mcp_config_files(workspace_dir):
-        entries.extend(_read_dotmcp_json(path))
+    workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd)
+    for path in copilot_mcp_config_files(workspace or None):
+        entries.extend(_read_dotmcp_json(path, diagnostic_sink=diagnostic_sink))
     return _dedup_mcp_entries(entries)
 
 
-def _openhands_mcp_servers() -> list[MCPServerEntry]:
-    return _read_dotmcp_json(os.path.join(str(Path.home()), ".openhands", "mcp.json"))
+def _openhands_mcp_servers(
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
+    return _read_dotmcp_json(
+        os.path.join(str(Path.home()), ".openhands", "mcp.json"),
+        diagnostic_sink=diagnostic_sink,
+    )
 
 
 def _antigravity_global_mcp_path() -> str:
     return os.path.join(str(Path.home()), ".gemini", "config", "mcp_config.json")
 
 
-def _antigravity_workspace_mcp_path(workspace_dir: str | None) -> str:
-    return _workspace_path(workspace_dir, ".agents", "mcp_config.json")
+def _antigravity_workspace_mcp_path(
+    workspace_dir: str | None,
+    *,
+    infer_from_cwd: bool = False,
+) -> str:
+    # Read surface only; the write path is _antigravity_mcp_write_path, which
+    # stays on _workspace_dir so `mcp set` never targets a cwd nobody pinned.
+    return _discovery_path(
+        workspace_dir, ".agents", "mcp_config.json", infer_from_cwd=infer_from_cwd,
+    )
 
 
-def _antigravity_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _antigravity_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     """Return Antigravity MCP registrations from native mcp_config.json files.
 
     The contract pins the global path to ``~/.gemini/config/mcp_config.json``.
@@ -3535,15 +4041,35 @@ def _antigravity_mcp_servers(workspace_dir: str | None = None) -> list[MCPServer
     canonical ``serverUrl`` or compatibility alias ``url``.
     """
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_antigravity_mcp_config(_antigravity_global_mcp_path()))
-    workspace_mcp = _antigravity_workspace_mcp_path(workspace_dir)
+    entries.extend(
+        _read_antigravity_mcp_config(
+            _antigravity_global_mcp_path(),
+            diagnostic_sink=diagnostic_sink,
+        )
+    )
+    workspace_mcp = _antigravity_workspace_mcp_path(
+        workspace_dir, infer_from_cwd=infer_from_cwd,
+    )
     if workspace_mcp:
-        entries.extend(_read_antigravity_mcp_config(workspace_mcp))
+        entries.extend(
+            _read_antigravity_mcp_config(
+                workspace_mcp,
+                diagnostic_sink=diagnostic_sink,
+            )
+        )
     return _dedup_mcp_entries(entries)
 
 
-def _read_antigravity_mcp_config(path: str) -> list[MCPServerEntry]:
-    return _read_mcp_settings_block(path, keys=("mcpServers",))
+def _read_antigravity_mcp_config(
+    path: str,
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
+    return _read_mcp_settings_block(
+        path,
+        keys=("mcpServers",),
+        diagnostic_sink=diagnostic_sink,
+    )
 
 
 def _opencode_env_path(value: str, workspace_dir: str | None) -> str:
@@ -3557,8 +4083,13 @@ def _opencode_env_path(value: str, workspace_dir: str | None) -> str:
     return os.path.abspath(os.path.join(root, value)) if root else ""
 
 
-def _opencode_layer(path: str, scope: str) -> OpenCodeConfigLayer:
-    data = _load_json_or_jsonc(path)
+def _opencode_layer(
+    path: str,
+    scope: str,
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> OpenCodeConfigLayer:
+    data = _load_json_or_jsonc(path, diagnostic_sink=diagnostic_sink)
     return OpenCodeConfigLayer(
         source=os.path.abspath(path),
         source_scope=scope,
@@ -3567,7 +4098,12 @@ def _opencode_layer(path: str, scope: str) -> OpenCodeConfigLayer:
     )
 
 
-def _resolve_opencode_config(workspace_dir: str | None = None) -> OpenCodeConfigResolution:
+def _resolve_opencode_config(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> OpenCodeConfigResolution:
     """Resolve non-enterprise OpenCode v1.18.10-v1.18.19 config precedence.
 
     Remote authenticated ``.well-known`` config and Windows ProgramData
@@ -3576,8 +4112,9 @@ def _resolve_opencode_config(workspace_dir: str | None = None) -> OpenCodeConfig
     opened here. Relative env paths require an explicit workspace so this
     process never substitutes its own cwd for the OpenCode client's cwd.
     """
+    workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd) or None
     home = str(Path.home())
-    project_dirs = _opencode_project_dirs(workspace_dir)
+    project_dirs = _opencode_project_dirs(workspace)
     candidates: list[tuple[str, str]] = [
         (os.path.join(home, ".config", "opencode", "config.json"), "global"),
         (os.path.join(home, ".config", "opencode", "opencode.json"), "global"),
@@ -3593,7 +4130,7 @@ def _resolve_opencode_config(workspace_dir: str | None = None) -> OpenCodeConfig
 
     explicit_raw = os.environ.get("OPENCODE_CONFIG", "")
     if explicit_raw:
-        explicit = _opencode_env_path(explicit_raw, workspace_dir)
+        explicit = _opencode_env_path(explicit_raw, workspace)
         if explicit:
             candidates.append((explicit, "custom-file"))
         else:
@@ -3621,7 +4158,7 @@ def _resolve_opencode_config(workspace_dir: str | None = None) -> OpenCodeConfig
     )
     custom_raw = os.environ.get("OPENCODE_CONFIG_DIR", "")
     if custom_raw:
-        custom = _opencode_env_path(custom_raw, workspace_dir)
+        custom = _opencode_env_path(custom_raw, workspace)
         if custom:
             candidates.extend(
                 [
@@ -3645,7 +4182,7 @@ def _resolve_opencode_config(workspace_dir: str | None = None) -> OpenCodeConfig
         if key in seen:
             continue
         seen.add(key)
-        layers.append(_opencode_layer(path, scope))
+        layers.append(_opencode_layer(path, scope, diagnostic_sink=diagnostic_sink))
 
     content = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
     if content:
@@ -3668,12 +4205,27 @@ def _resolve_opencode_config(workspace_dir: str | None = None) -> OpenCodeConfig
     return OpenCodeConfigResolution(tuple(layers), tuple(unverified))
 
 
-def _opencode_config_paths(workspace_dir: str | None) -> list[str]:
+def _opencode_config_paths(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+) -> list[str]:
     """Return locally representable file layers in v1.18.10 merge order."""
-    return [layer.path for layer in _resolve_opencode_config(workspace_dir).layers if layer.path]
+    return [
+        layer.path
+        for layer in _resolve_opencode_config(
+            workspace_dir, infer_from_cwd=infer_from_cwd,
+        ).layers
+        if layer.path
+    ]
 
 
-def _opencode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+def _opencode_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     """Return opencode's MCP server registrations.
 
     opencode stores MCP servers under a top-level ``mcp`` map in its
@@ -3685,7 +4237,11 @@ def _opencode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEnt
     order: list[str] = []
     entries: dict[str, dict[str, Any]] = {}
     provenance: dict[str, tuple[str, str]] = {}
-    for layer in _resolve_opencode_config(workspace_dir).layers:
+    for layer in _resolve_opencode_config(
+        workspace_dir,
+        infer_from_cwd=infer_from_cwd,
+        diagnostic_sink=diagnostic_sink,
+    ).layers:
         data = layer.data
         servers = data.get("mcp") if isinstance(data, dict) else None
         if not isinstance(servers, dict):
@@ -3815,7 +4371,11 @@ def _load_json_or_jsonc_content(raw: str) -> Any:
             return None
 
 
-def _load_json_or_jsonc(path: str) -> Any:
+def _load_json_or_jsonc(
+    path: str,
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> Any:
     """Read *path* as JSON, falling back to JSON5 for JSONC comments.
 
     Returns the parsed value, or ``None`` when the file is missing or
@@ -3827,21 +4387,38 @@ def _load_json_or_jsonc(path: str) -> Any:
             path,
             max_bytes=_MCP_CONFIG_MAX_BYTES,
         ).decode("utf-8")
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
         return None
-    return _load_json_or_jsonc_content(raw)
+    except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return None
+    except UnicodeDecodeError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return None
+    parsed, valid = _parse_json_or_jsonc_result(raw)
+    if not valid:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return None
+    return parsed
 
 
 def _parse_json_or_jsonc(raw: str) -> Any:
     """Parse already-read JSON/JSONC text without changing read policy."""
 
+    parsed, valid = _parse_json_or_jsonc_result(raw)
+    return parsed if valid else None
+
+
+def _parse_json_or_jsonc_result(raw: str) -> tuple[Any, bool]:
+    """Return parsed JSON/JSONC plus whether parsing succeeded."""
+
     parsed = _load_json_or_jsonc_content(raw)
     if parsed is not None:
-        return parsed
+        return parsed, True
     try:
-        return json.loads(_strip_jsonc(raw))
+        return json.loads(_strip_jsonc(raw)), True
     except json.JSONDecodeError:
-        return None
+        return None, False
 
 
 def _strip_jsonc(raw: str) -> str:
@@ -3931,6 +4508,7 @@ def _read_mcp_settings_block(
     path: str,
     *,
     keys: tuple[str, ...],
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     """Read an MCP servers block out of a JSON settings file.
 
@@ -3943,7 +4521,13 @@ def _read_mcp_settings_block(
     try:
         with open(path) as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
+        return []
+    except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return []
+    except (UnicodeError, json.JSONDecodeError):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return []
     if not isinstance(data, dict):
         return []
@@ -3961,14 +4545,22 @@ def _read_yaml_mcp_servers(
     path: str,
     *,
     key_paths: tuple[tuple[str, ...], ...],
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     try:
         with open(path, "rb") as f:
             raw = f.read(_MCP_CONFIG_MAX_BYTES + 1)
         if len(raw) > _MCP_CONFIG_MAX_BYTES:
+            _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
             return []
         data = yaml.safe_load(raw.decode("utf-8-sig", errors="strict")) or {}
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+    except FileNotFoundError:
+        return []
+    except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return []
+    except (UnicodeDecodeError, yaml.YAMLError):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return []
     if not isinstance(data, dict):
         return []
@@ -3989,6 +4581,7 @@ def _read_dotmcp_json(
     path: str,
     *,
     source_scope: str = "",
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     """Parse a project-local ``.mcp.json``.
 
@@ -3999,7 +4592,13 @@ def _read_dotmcp_json(
     try:
         with open(path) as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
+        return []
+    except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return []
+    except (UnicodeError, json.JSONDecodeError):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return []
     if not isinstance(data, dict):
         return []
@@ -4016,8 +4615,16 @@ def _read_dotmcp_json(
     return entries
 
 
-def _read_zepto_config(path: str) -> list[MCPServerEntry]:
-    return _read_mcp_settings_block(path, keys=("mcp", "servers"))
+def _read_zepto_config(
+    path: str,
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
+    return _read_mcp_settings_block(
+        path,
+        keys=("mcp", "servers"),
+        diagnostic_sink=diagnostic_sink,
+    )
 
 
 def _devin_workspace_legacy_config_paths(workspace_dir: str | None = None) -> list[str]:
@@ -4083,6 +4690,7 @@ def _read_mcp_servers_via_openclaw_cli(
     *,
     openclaw_bin_resolver: Any = None,
     openclaw_cmd_prefix: list[str] | None = None,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry] | None:
     """Run ``openclaw config get mcp.servers`` and parse the JSON.
 
@@ -4106,16 +4714,38 @@ def _read_mcp_servers_via_openclaw_cli(
         )
         if result.returncode != 0:
             return None
-        return _parse_mcp_servers_text(result.stdout)
+        raw = result.stdout.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            _record_mcp_source_diagnostic(
+                diagnostic_sink,
+                "(openclaw config get mcp.servers)",
+                "malformed",
+            )
+            return None
+        return _parse_mcp_servers_value(parsed)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
 
 
-def _read_mcp_servers_from_openclaw_json(path: str) -> list[MCPServerEntry]:
+def _read_mcp_servers_from_openclaw_json(
+    path: str,
+    *,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
     try:
         with open(path) as f:
             raw = f.read()
+    except FileNotFoundError:
+        return []
     except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return []
+    except UnicodeError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return []
     data: dict[str, Any] | None = None
     try:
@@ -4126,6 +4756,7 @@ def _read_mcp_servers_from_openclaw_json(path: str) -> list[MCPServerEntry]:
 
             data = json5.loads(raw)
         except Exception:
+            _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
             return []
     if not isinstance(data, dict):
         return []

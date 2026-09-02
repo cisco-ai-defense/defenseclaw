@@ -28,16 +28,19 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import defenseclaw.inventory.plugin_directories as plugin_directories_module
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_plugin import (
     _build_plugin_actions_map,
     _build_plugin_scan_map,
+    _plugin_registry_probes,
     _resolve_openclaw_plugin_id,
     _resolve_plugin_dir,
     plugin,
 )
 from defenseclaw.enforce import PolicyEngine
 from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+from defenseclaw.inventory.plugin_directories import discover_plugin_directories
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -303,6 +306,35 @@ class TestPluginInstallConnectorHelp(unittest.TestCase):
 
 
 class TestPluginList(PluginCommandTestBase):
+    def test_claude_probe_and_discovery_share_command_cache(self):
+        plugin_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        registry = os.path.join(plugin_root, "installed_plugins.json")
+        os.makedirs(os.path.join(plugin_root, "manual-plugin"), exist_ok=True)
+        with open(registry, "w", encoding="utf-8") as handle:
+            json.dump({"version": 2, "plugins": {}}, handle)
+        self.app.cfg.plugin_dirs = lambda connector=None: [plugin_root]  # type: ignore[method-assign]
+        registry_cache = {}
+
+        with patch(
+            "defenseclaw.inventory.plugin_directories._discover_claude_registry",
+            wraps=plugin_directories_module._discover_claude_registry,
+        ) as mock_discover:
+            diagnostics = _plugin_registry_probes(
+                self.app,
+                ["claudecode", "claude-code"],
+                registry_cache=registry_cache,
+            )
+            entries = discover_plugin_directories(
+                plugin_root,
+                connector="claudecode",
+                registry_cache=registry_cache,
+            )
+
+        mock_discover.assert_called_once_with(plugin_root)
+        self.assertEqual(diagnostics["claudecode"], diagnostics["claude-code"])
+        self.assertEqual(diagnostics["claudecode"][0].source_path, registry)
+        self.assertEqual([entry.id for entry in entries], ["manual-plugin"])
+
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_list_empty(self, _mock_oc):
         result = self.invoke(["list"])
@@ -329,6 +361,211 @@ class TestPluginList(PluginCommandTestBase):
         result = self.invoke(["list"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=openclaw", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_claudecode_list_reads_v2_installed_plugin_registry(self, _mock_oc):
+        plugin_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        cached = os.path.join(
+            plugin_root,
+            "cache",
+            "compound-market",
+            "compound-engineering",
+            "1.2.3",
+        )
+        os.makedirs(os.path.join(cached, ".claude-plugin"), exist_ok=True)
+        with open(
+            os.path.join(cached, ".claude-plugin", "plugin.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "name": "compound-engineering",
+                    "displayName": "Compound Engineering",
+                    "version": "1.2.3",
+                },
+                handle,
+            )
+        with open(
+            os.path.join(plugin_root, "installed_plugins.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "compound-engineering@compound-market": [
+                            {
+                                "scope": "user",
+                                "installPath": cached,
+                                "version": "1.2.3",
+                            }
+                        ]
+                    },
+                },
+                handle,
+            )
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [plugin_root]  # type: ignore[method-assign]
+
+        text_result = self.invoke(["list", "--connector", "claudecode"])
+        self.assertEqual(text_result.exit_code, 0, text_result.output)
+        self.assertIn("Plugins (connector=claudecode) (1/1 enabled)", text_result.output)
+
+        result = self.invoke(["list", "--connector", "claudecode", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["id"], "compound-engineering")
+        self.assertEqual(payload[0]["name"], "Compound Engineering")
+        self.assertEqual(payload[0]["version"], "1.2.3")
+        self.assertEqual(payload[0]["origin"], "user:compound-market")
+        self.assertEqual(payload[0]["source"], "host:claudecode")
+        self.assertTrue(payload[0]["enabled"])
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_claudecode_list_preserves_scope_specific_installations(self, _mock_oc):
+        plugin_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        user = os.path.join(plugin_root, "cache", "market", "shared", "1.0.0")
+        project = os.path.join(plugin_root, "cache", "market", "shared", "2.0.0")
+        os.makedirs(user)
+        os.makedirs(project)
+        project_root = os.path.join(self.tmp_dir, "workspace", "alpha")
+        with open(
+            os.path.join(plugin_root, "installed_plugins.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "version": 2,
+                    "plugins": {
+                        "shared@market": [
+                            {"scope": "user", "installPath": user},
+                            {
+                                "scope": "project",
+                                "projectPath": project_root,
+                                "installPath": project,
+                            },
+                        ]
+                    },
+                },
+                handle,
+            )
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [plugin_root]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "claudecode", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(len(payload), 2)
+        self.assertEqual({row["scope"] for row in payload}, {"user", "project"})
+        project_row = next(row for row in payload if row["scope"] == "project")
+        self.assertEqual(project_row["project_path"], project_root)
+        self.assertEqual({row["host_path"] for row in payload}, {user, project})
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_claudecode_registry_parse_failures_are_text_and_json_errors(self, _mock_oc):
+        cases = {
+            "malformed": "{not-json",
+            "unsupported": json.dumps({"version": 3, "plugins": {}}),
+        }
+        for expected_state, raw in cases.items():
+            with self.subTest(state=expected_state):
+                plugin_root = os.path.join(self.tmp_dir, expected_state, "plugins")
+                os.makedirs(plugin_root)
+                registry = os.path.join(plugin_root, "installed_plugins.json")
+                with open(registry, "w", encoding="utf-8") as handle:
+                    handle.write(raw)
+                self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+                self.app.cfg.plugin_dirs = lambda connector=None, root=plugin_root: [root]  # type: ignore[method-assign]
+
+                text_result = self.invoke(["list", "--connector", "claudecode"])
+                self.assertEqual(text_result.exit_code, 1, text_result.output)
+                self.assertIn(registry, text_result.output)
+                self.assertIn(
+                    f"— {expected_state}; entries=0",
+                    text_result.output,
+                )
+
+                json_result = self.invoke(
+                    ["list", "--connector", "claudecode", "--json"]
+                )
+                self.assertEqual(json_result.exit_code, 1, json_result.output)
+                self.assertEqual(json.loads(json_result.stdout), [])
+                diagnostic = json.loads(json_result.stderr)
+                self.assertEqual(diagnostic["error"], "plugin_discovery_failed")
+                self.assertEqual(diagnostic["discovery"][0]["source"], registry)
+                self.assertEqual(
+                    diagnostic["discovery"][0]["state"],
+                    expected_state,
+                )
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_claudecode_linked_registry_is_text_and_json_error(self, _mock_oc):
+        plugin_root = os.path.join(self.tmp_dir, "linked", "plugins")
+        os.makedirs(plugin_root)
+        physical = os.path.join(self.tmp_dir, "installed-physical.json")
+        with open(physical, "w", encoding="utf-8") as handle:
+            json.dump({"version": 2, "plugins": {}}, handle)
+        registry = os.path.join(plugin_root, "installed_plugins.json")
+        try:
+            os.symlink(physical, registry)
+        except OSError:
+            self.skipTest("file symlinks are unavailable on this host")
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [plugin_root]  # type: ignore[method-assign]
+
+        text_result = self.invoke(["list", "--connector", "claudecode"])
+        self.assertEqual(text_result.exit_code, 1, text_result.output)
+        self.assertIn(registry, text_result.output)
+        self.assertIn("unsafe/unreadable", text_result.output)
+
+        json_result = self.invoke(["list", "--connector", "claudecode", "--json"])
+        self.assertEqual(json_result.exit_code, 1, json_result.output)
+        self.assertEqual(json.loads(json_result.stdout), [])
+        diagnostic = json.loads(json_result.stderr)
+        self.assertEqual(diagnostic["discovery"][0]["source"], registry)
+        self.assertEqual(
+            diagnostic["discovery"][0]["state"],
+            "unsafe/unreadable",
+        )
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_claudecode_missing_and_valid_empty_registry_remain_valid_list_states(
+        self,
+        _mock_oc,
+    ):
+        for expected_state in ("missing", "valid"):
+            with self.subTest(state=expected_state):
+                plugin_root = os.path.join(self.tmp_dir, expected_state, "plugins")
+                os.makedirs(plugin_root)
+                registry = os.path.join(plugin_root, "installed_plugins.json")
+                if expected_state == "valid":
+                    with open(registry, "w", encoding="utf-8") as handle:
+                        json.dump({"version": 2, "plugins": {}}, handle)
+                self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+                self.app.cfg.plugin_dirs = lambda connector=None, root=plugin_root: [root]  # type: ignore[method-assign]
+
+                text_result = self.invoke(["list", "--connector", "claudecode"])
+                self.assertEqual(text_result.exit_code, 0, text_result.output)
+                self.assertIn(registry, text_result.output)
+                self.assertIn(f"— {expected_state}; entries=0", text_result.output)
+                self.assertIn("No plugins found", text_result.output)
+
+                json_result = self.invoke(
+                    ["list", "--connector", "claudecode", "--json"]
+                )
+                self.assertEqual(json_result.exit_code, 0, json_result.output)
+                self.assertEqual(json.loads(json_result.stdout), [])
+                self.assertIn(registry, json_result.stderr)
+                self.assertIn(
+                    f"— {expected_state}; entries=0",
+                    json_result.stderr,
+                )
 
 
 class TestPluginListMultiConnectorDefault(PluginCommandTestBase):

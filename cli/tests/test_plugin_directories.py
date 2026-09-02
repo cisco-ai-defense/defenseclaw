@@ -30,9 +30,11 @@ from unittest.mock import patch
 import defenseclaw.inventory.plugin_directories as plugin_directories_module
 import pytest
 from defenseclaw.inventory.plugin_directories import (
+    PluginRegistryState,
     discover_exact_plugin_directory,
     discover_plugin_directories,
     plugin_directory_entries,
+    probe_claude_plugin_registry,
     read_amp_plugin_source,
 )
 from defenseclaw.inventory.plugin_identity import AmbiguousPluginIdentityError
@@ -443,6 +445,447 @@ def test_regular_plugin_root_still_returns_immediate_plugins(tmp_path: Path) -> 
     ]
 
 
+def test_claude_v2_registry_discovers_exact_cached_plugin_roots(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    plugin = root / "cache" / "compound-market" / "compound-engineering" / "1.2.3"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "name": "compound-engineering",
+                "displayName": "Compound Engineering",
+                "version": "1.2.3",
+                "description": "Engineering workflows",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "marketplaces" / "compound-market").mkdir(parents=True)
+    (root / "flat-plugin").mkdir()
+    (root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "@compound/engineering@compound-market": [
+                        {
+                            "scope": "user",
+                            "installPath": str(plugin),
+                            "version": "registry-fallback",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = discover_plugin_directories(str(root), connector="claudecode")
+
+    assert [entry.id for entry in entries] == ["compound-engineering", "flat-plugin"]
+    cached = entries[0]
+    assert cached.path == str(plugin)
+    assert cached.name == "Compound Engineering"
+    assert cached.version == "1.2.3"
+    assert cached.description == "Engineering workflows"
+    assert cached.origin == "user:compound-market"
+    assert cached.manifest == ".claude-plugin/plugin.json"
+    assert cached.registry == "compound-market"
+    assert cached.cached is True
+    assert cached.enabled is True
+
+
+def test_claude_registry_probe_reports_missing_malformed_unsupported_and_empty(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    root.mkdir(parents=True)
+    registry = root / "installed_plugins.json"
+
+    missing = probe_claude_plugin_registry(str(root))
+    assert missing is not None
+    assert missing.source_path == str(registry)
+    assert missing.state is PluginRegistryState.MISSING
+    assert missing.entries == 0
+    assert missing.failed is False
+
+    registry.write_text("{not-json", encoding="utf-8")
+    malformed = probe_claude_plugin_registry(str(root))
+    assert malformed is not None
+    assert malformed.state is PluginRegistryState.MALFORMED
+    assert malformed.failed is True
+
+    registry.write_text(json.dumps({"version": 3, "plugins": {}}), encoding="utf-8")
+    unsupported = probe_claude_plugin_registry(str(root))
+    assert unsupported is not None
+    assert unsupported.state is PluginRegistryState.UNSUPPORTED
+    assert unsupported.failed is True
+
+    registry.write_text(json.dumps({"version": 2, "plugins": {}}), encoding="utf-8")
+    valid_empty = probe_claude_plugin_registry(str(root))
+    assert valid_empty is not None
+    assert valid_empty.state is PluginRegistryState.VALID
+    assert valid_empty.entries == 0
+    assert valid_empty.failed is False
+
+
+def test_claude_registry_probe_reports_linked_and_unreadable_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    linked_root = tmp_path / "linked" / "plugins"
+    linked_root.mkdir(parents=True)
+    physical = tmp_path / "physical.json"
+    physical.write_text(json.dumps({"version": 2, "plugins": {}}), encoding="utf-8")
+    registry = linked_root / "installed_plugins.json"
+    try:
+        registry.symlink_to(physical)
+    except OSError:
+        pytest.skip("file symlinks are unavailable on this host")
+
+    linked = probe_claude_plugin_registry(str(linked_root))
+    assert linked is not None
+    assert linked.source_path == str(registry)
+    assert linked.state is PluginRegistryState.UNSAFE_OR_UNREADABLE
+    assert linked.failed is True
+
+    unreadable_root = tmp_path / "unreadable" / "plugins"
+    unreadable_root.mkdir(parents=True)
+    unreadable_registry = unreadable_root / "installed_plugins.json"
+    unreadable_registry.write_text(
+        json.dumps({"version": 2, "plugins": {}}),
+        encoding="utf-8",
+    )
+    real_open = plugin_directories_module.os.open
+
+    def deny_registry(
+        path: str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if path == str(unreadable_registry):
+            raise PermissionError("denied for test")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(plugin_directories_module.os, "open", deny_registry)
+    unreadable = probe_claude_plugin_registry(str(unreadable_root))
+    assert unreadable is not None
+    assert unreadable.source_path == str(unreadable_registry)
+    assert unreadable.state is PluginRegistryState.UNSAFE_OR_UNREADABLE
+    assert unreadable.failed is True
+
+
+def test_claude_registry_probe_reports_successful_v2_entry_count(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    plugin = root / "cache" / "market" / "visible-plugin" / "1.0.0"
+    plugin.mkdir(parents=True)
+    registry = root / "installed_plugins.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "visible-plugin@market": [
+                        {"scope": "user", "installPath": str(plugin)}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    probe = probe_claude_plugin_registry(str(root))
+
+    assert probe is not None
+    assert probe.source_path == str(registry)
+    assert probe.state is PluginRegistryState.VALID
+    assert probe.entries == 1
+    assert probe.failed is False
+
+
+def test_claude_v2_registry_uses_registry_identity_without_manifest(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    plugin = root / "cache" / "ponytail-market" / "ponytail" / "2026.8.1"
+    plugin.mkdir(parents=True)
+    (root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "ponytail@ponytail-market": [
+                        {
+                            "scope": "user",
+                            "installPath": str(plugin),
+                            "version": "2026.8.1",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = discover_plugin_directories(str(root), connector="claudecode")
+
+    assert len(entries) == 1
+    assert entries[0].id == "ponytail"
+    assert entries[0].path == str(plugin)
+    assert entries[0].version == "2026.8.1"
+    assert entries[0].manifest == ""
+    assert entries[0].cached is True
+
+
+def test_claude_v2_registry_keeps_scoped_identity_without_manifest(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    plugin = root / "cache" / "compound-market" / "engineering" / "2026.8.1"
+    plugin.mkdir(parents=True)
+    (root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "@compound/engineering@compound-market": [
+                        {
+                            "scope": "user",
+                            "installPath": str(plugin),
+                            "version": "2026.8.1",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = discover_plugin_directories(str(root), connector="claudecode")
+    probe = probe_claude_plugin_registry(str(root))
+
+    assert [(entry.id, entry.path) for entry in entries] == [
+        ("engineering", str(plugin))
+    ]
+    assert entries[0].registry == "compound-market"
+    assert entries[0].manifest == ""
+    assert probe is not None
+    assert probe.state is PluginRegistryState.VALID
+    assert probe.entries == 1
+
+
+def test_claude_registry_malformed_manifest_cannot_hide_installed_plugin(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    plugin = root / "cache" / "market" / "visible-plugin" / "1.0.0"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{not-json", encoding="utf-8")
+    (root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "visible-plugin@market": [
+                        {"scope": "user", "installPath": str(plugin)}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = discover_plugin_directories(str(root), connector="claudecode")
+
+    assert [(entry.id, entry.path) for entry in entries] == [
+        ("visible-plugin", str(plugin))
+    ]
+    assert entries[0].manifest == ""
+
+
+def test_claude_registry_ignores_malformed_unsupported_and_escaping_records(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    outside = tmp_path / "outside-plugin"
+    outside.mkdir()
+    (root / "flat-plugin").mkdir(parents=True)
+    cache = root / "cache"
+    cache.mkdir()
+    registry = root / "installed_plugins.json"
+
+    registry.write_text("{not-json", encoding="utf-8")
+    assert [
+        entry.id
+        for entry in discover_plugin_directories(str(root), connector="claudecode")
+    ] == ["flat-plugin"]
+
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "plugins": {
+                    "outside@market": [
+                        {"scope": "user", "installPath": str(outside)}
+                    ],
+                    "cache-container@market": [
+                        {"scope": "user", "installPath": str(cache)}
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert [
+        entry.id
+        for entry in discover_plugin_directories(str(root), connector="claudecode")
+    ] == ["flat-plugin"]
+
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "outside@market": [
+                        {"scope": "user", "installPath": str(outside)}
+                    ],
+                    "cache-container@market": [
+                        {"scope": "user", "installPath": str(cache)}
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert [
+        entry.id
+        for entry in discover_plugin_directories(str(root), connector="claudecode")
+    ] == ["flat-plugin"]
+
+
+def test_claude_registry_rejects_linked_cache_components(tmp_path: Path) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    physical = tmp_path / "physical-cache"
+    plugin = physical / "market" / "linked-plugin" / "1.0.0"
+    plugin.mkdir(parents=True)
+    cache = root / "cache"
+    root.mkdir(parents=True)
+    try:
+        cache.symlink_to(physical, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this host")
+    (root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "linked-plugin@market": [
+                        {
+                            "scope": "user",
+                            "installPath": str(
+                                cache / "market" / "linked-plugin" / "1.0.0"
+                            ),
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert discover_plugin_directories(str(root), connector="claudecode") == []
+
+
+def test_claude_registry_preserves_user_and_project_install_instances(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    user = root / "cache" / "market" / "duplicate" / "1.0.0"
+    project_a = root / "cache" / "market" / "duplicate" / "2.0.0"
+    project_b = root / "cache" / "market" / "duplicate" / "3.0.0"
+    for plugin in (user, project_a, project_b):
+        plugin.mkdir(parents=True)
+    (root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "duplicate@market": [
+                        {"scope": "user", "installPath": str(user)},
+                        {
+                            "scope": "project",
+                            "projectPath": "/workspace/alpha",
+                            "installPath": str(project_a),
+                        },
+                        {
+                            "scope": "project",
+                            "projectPath": "/workspace/beta",
+                            "installPath": str(project_b),
+                        },
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = discover_plugin_directories(str(root), connector="claudecode")
+
+    assert [(entry.scope, entry.project_path, entry.path) for entry in entries] == [
+        ("project", "/workspace/alpha", str(project_a)),
+        ("project", "/workspace/beta", str(project_b)),
+        ("user", "", str(user)),
+    ]
+    assert all(entry.registry_source == str(root / "installed_plugins.json") for entry in entries)
+    assert probe_claude_plugin_registry(str(root)).entries == 3  # type: ignore[union-attr]
+
+
+def test_claude_registry_same_scope_project_identity_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".claude" / "plugins"
+    first = root / "cache" / "market" / "duplicate" / "1.0.0"
+    second = root / "cache" / "market" / "duplicate" / "2.0.0"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (root / "installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "duplicate@market": [
+                        {
+                            "scope": "project",
+                            "projectPath": "/workspace/alpha",
+                            "installPath": str(first),
+                        },
+                        {
+                            "scope": "project",
+                            "projectPath": "/workspace/alpha/.",
+                            "installPath": str(second),
+                        },
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        AmbiguousPluginIdentityError,
+        match="ambiguous Claude plugin identity",
+    ):
+        discover_plugin_directories(str(root), connector="claudecode")
+
+
 def test_claude_cache_discovers_versions_and_resolves_scoped_enablement(
     tmp_path: Path,
     monkeypatch,
@@ -646,6 +1089,8 @@ def test_claude_managed_plugin_state_overrides_local_and_policy_helper_is_unveri
     assert len(entries) == 1
     assert entries[0].enabled is False
     assert entries[0].activation_verified is False
+
+
 
 
 def test_amp_discovers_bounded_direct_typescript_plugins_without_links(

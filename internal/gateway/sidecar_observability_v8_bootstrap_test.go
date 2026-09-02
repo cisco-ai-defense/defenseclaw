@@ -1515,7 +1515,7 @@ func TestSidecarConfigManagerV8SamePrometheusBindingRequiresRestartBeforeReplace
 	assertMetricsListenerBound()
 }
 
-func TestSidecarConfigManagerV8RestartModeDoesNotHotApplyPlan(t *testing.T) {
+func TestSidecarConfigManagerV8RestartModeHotAppliesObservabilityPlan(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	initialRaw := []byte(fmt.Sprintf(
 		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  config_reload:\n    mode: restart\nobservability: {}\n",
@@ -1567,15 +1567,16 @@ func TestSidecarConfigManagerV8RestartModeDoesNotHotApplyPlan(t *testing.T) {
 	fixture.sidecar.observabilityV8Mu.Lock()
 	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
 	fixture.sidecar.observabilityV8Mu.Unlock()
-	if !helperCalled || owner.runtime.Active().Generation() != 1 ||
-		fixture.sidecar.currentConfig().Environment != "original" {
+	if helperCalled || owner.runtime.Active().Generation() != 2 ||
+		owner.runtime.Active().RetentionDays() != 30 ||
+		fixture.sidecar.currentConfig().Environment != "original" || mgr.gen.Load() != 1 {
 		t.Fatalf("restart helper/generation/environment = %t/%d/%q",
 			helperCalled, owner.runtime.Active().Generation(), fixture.sidecar.currentConfig().Environment)
 	}
 	select {
 	case <-runCtx.Done():
+		t.Fatal("restart-mode observability-only change requested a process restart")
 	default:
-		t.Fatal("restart-mode v8 change did not request process restart")
 	}
 }
 
@@ -1660,7 +1661,7 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 	}
 }
 
-func TestSidecarConfigManagerV8RestartHelperFailureIsAtomic(t *testing.T) {
+func TestSidecarConfigManagerV8RestartRequiredChangeHelperFailureIsAtomic(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
 	initialRaw := []byte(fmt.Sprintf(
 		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  config_reload:\n    mode: restart\nobservability: {}\n",
@@ -1691,7 +1692,7 @@ func TestSidecarConfigManagerV8RestartHelperFailureIsAtomic(t *testing.T) {
 		fixture.sidecar.applyConfigReloadSnapshot,
 	)
 	nextRaw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  config_reload:\n    mode: restart\nobservability:\n  local:\n    retention_days: 30\n",
+		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  api_port: 18971\n  config_reload:\n    mode: restart\nobservability: {}\n",
 		fixture.dataDir,
 	))
 	if err := os.WriteFile(fixture.configPath, nextRaw, 0o600); err != nil {

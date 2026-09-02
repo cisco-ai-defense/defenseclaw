@@ -30,9 +30,10 @@ import (
 )
 
 type PluginScanner struct {
-	BinaryPath string
-	Policy     string
-	Profile    string
+	BinaryPath  string
+	Policy      string
+	Profile     string
+	IncludeSelf bool
 }
 
 func NewPluginScanner(binaryPath string) *PluginScanner {
@@ -64,6 +65,9 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 	}
 	if s.Profile != "" {
 		args = append(args, "--profile", s.Profile)
+	}
+	if s.IncludeSelf {
+		args = append(args, "--include-self")
 	}
 	return binaryPath, args
 }
@@ -176,17 +180,19 @@ func parsePluginOutput(data []byte) ([]Finding, error) {
 			ln = &v
 		}
 		findings = append(findings, Finding{
-			ID:          f.ID,
-			Severity:    Severity(f.Severity),
-			Title:       f.Title,
-			Description: f.Description,
-			Location:    f.Location,
-			Remediation: f.Remediation,
-			Scanner:     "plugin-scanner",
-			Tags:        f.Tags,
-			RuleID:      f.RuleID,
-			Category:    f.Category,
-			LineNumber:  ln,
+			ID:              f.ID,
+			Severity:        Severity(f.Severity),
+			Title:           f.Title,
+			Description:     f.Description,
+			EvidenceSummary: f.Evidence,
+			Location:        f.Location,
+			Remediation:     f.Remediation,
+			Scanner:         "plugin-scanner",
+			Tags:            f.Tags,
+			RuleID:          f.RuleID,
+			Category:        f.Category,
+			LineNumber:      ln,
+			Confidence:      f.Confidence,
 		})
 	}
 	return findings, nil

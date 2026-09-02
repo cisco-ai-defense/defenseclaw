@@ -132,6 +132,125 @@ from defenseclaw.upgrade_receipt import (
 )
 
 
+def test_restored_local_observability_controller_prefers_native_and_never_uses_bash_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    recovery_home = tmp_path / "recovery-home"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(recovery_home))
+    destination = data_dir / "observability-stack"
+    bridge = destination / "bin/openclaw-observability-bridge"
+    posix_native = recovery_home / ".venv/bin/defenseclaw-observability"
+    windows_native = recovery_home / ".venv/Scripts/defenseclaw-observability.exe"
+    bridge.parent.mkdir(parents=True)
+    posix_native.parent.mkdir(parents=True)
+    windows_native.parent.mkdir(parents=True)
+    bridge.write_bytes(b"#!/usr/bin/env bash\n")
+    posix_native.write_bytes(b"native-posix\n")
+    windows_native.write_bytes(b"native-windows\r\n")
+
+    assert (
+        cmd_upgrade_module._restored_local_observability_controller(
+            str(data_dir), destination, os_name="posix"
+        )
+        == posix_native
+    )
+    assert (
+        cmd_upgrade_module._restored_local_observability_controller(
+            str(data_dir), destination, os_name="nt"
+        )
+        == windows_native
+    )
+
+    windows_native.unlink()
+    with pytest.raises(OSError, match="native local observability controller"):
+        cmd_upgrade_module._restored_local_observability_controller(
+            str(data_dir), destination, os_name="nt"
+        )
+
+
+@pytest.mark.parametrize(
+    ("os_name", "native_relative_path"),
+    [
+        ("posix", ".venv/bin/defenseclaw-observability"),
+        ("nt", ".venv/Scripts/defenseclaw-observability.exe"),
+        ("windows", ".venv/Scripts/defenseclaw-observability.exe"),
+    ],
+)
+def test_restored_local_observability_restart_invokes_native_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    os_name: str,
+    native_relative_path: str,
+) -> None:
+    data_dir = tmp_path / "data"
+    recovery_home = tmp_path / "recovery-home"
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(recovery_home))
+    destination = data_dir / "observability-stack"
+    native = recovery_home / native_relative_path
+    destination.mkdir(parents=True)
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"native\n")
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
+    completed = Mock(returncode=0, stdout=json.dumps(contract) + "\n")
+
+    with patch(
+        "defenseclaw.commands.cmd_upgrade._run_phase_two_mutator",
+        return_value=completed,
+    ) as run:
+        result = cmd_upgrade_module._restart_restored_local_observability_stack(
+            str(data_dir),
+            health_timeout=3,
+            os_name=os_name,
+        )
+
+    assert result == {"restarted": True, "degraded_errors": []}
+    command = run.call_args.args[0]
+    assert command[0] == str(native)
+    assert command[1:3] == ["--stack-dir", str(destination)]
+    assert "openclaw-observability-bridge" not in " ".join(command)
+
+
+def test_restored_local_observability_restart_keeps_legacy_bridge_arguments_compatible(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    destination = data_dir / "observability-stack"
+    bridge = destination / "bin/openclaw-observability-bridge"
+    bridge.parent.mkdir(parents=True)
+    bridge.write_bytes(b"#!/usr/bin/env bash\n")
+    contract = {
+        "otlp_endpoint": "127.0.0.1:4317",
+        "grafana_url": "http://localhost:3000",
+        "prometheus_url": "http://localhost:9090",
+        "tempo_url": "http://localhost:3200",
+        "loki_url": "http://localhost:3100",
+    }
+    completed = Mock(returncode=0, stdout=json.dumps(contract) + "\n")
+
+    with patch(
+        "defenseclaw.commands.cmd_upgrade._run_phase_two_mutator",
+        return_value=completed,
+    ) as run:
+        result = cmd_upgrade_module._restart_restored_local_observability_stack(
+            str(data_dir),
+            health_timeout=3,
+            os_name="posix",
+        )
+
+    assert result == {"restarted": True, "degraded_errors": []}
+    command = run.call_args.args[0]
+    assert command[0] == str(bridge)
+    assert "--stack-dir" not in command
+
+
 def _hard_cut_provenance_payload(
     bridge_checksums_sha256: str,
     *,
@@ -1820,6 +1939,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
 
     def test_crash_restart_failure_cannot_report_rollback_success(self):
@@ -1878,6 +1998,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
             receipt = load_upgrade_receipt(receipt_path)
             self.assertEqual(receipt.status, "failed")
@@ -1929,6 +2050,7 @@ class TestHardCutRollbackTransaction(unittest.TestCase):
             restart_stack.assert_called_once_with(
                 app.cfg.data_dir,
                 health_timeout=3,
+                os_name=plan.os_name,
             )
 
     def test_rollback_discards_target_dotenv_value_before_loading_restored_bridge(self):

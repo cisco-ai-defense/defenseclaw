@@ -10,29 +10,42 @@ keywords:
 
 The OmniGent connector uses OmniGent's documented custom Python policy API. It does not proxy OmniGent's model traffic. A small in-process policy bridge sends each policy event to the local DefenseClaw gateway, then maps the result back to OmniGent `ALLOW`, `ASK`, or `DENY`.
 
-On Windows this is **supported with native-degraded limitations** for the reviewed OmniGent
-0.7.x range (`>=0.7.0,<0.8.0`).
-Only `omnigent server` and SDK-based harnesses are in scope. Native
-tmux/PTY terminal wrappers, filesystem/network sandboxing, and the L7 egress
-proxy are unavailable; DefenseClaw does not emulate them with WSL or a shell
-compatibility layer.
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | The reviewed OmniGent 0.7.x (`>=0.7.0,<0.8.0`) custom-policy bridge maps all six awaited phases to DefenseClaw decisions; native OTLP remains an explicit launch-time opt-in. |
+| Native Windows x64 | **Supported — native degraded** | Support is limited to OmniGent 0.7.x `server` and SDK-based harnesses using the official same-user `uv tool` layout. Native terminal wrappers, filesystem/network sandboxing, and L7 egress proxy parity are unavailable; DefenseClaw does not emulate them through WSL or a shell compatibility layer. |
 
 ## Setup
 
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
+
 ```bash
+uv tool install --python 3.12 omnigent==0.7.0
+export OMNIGENT_CONFIG_HOME="${HOME}/.omnigent"
 defenseclaw setup omnigent                # observe (default)
 defenseclaw setup omnigent --mode action  # enforce ALLOW / ASK / DENY
-omnigent server --config ~/.omnigent/config.yaml
+omnigent server --config "${OMNIGENT_CONFIG_HOME}/config.yaml"
 ```
 
-Native Windows PowerShell:
+</Tab>
+
+<Tab value="Windows">
 
 ```powershell
 uv tool install --python 3.12 omnigent==0.7.0
 $env:OMNIGENT_CONFIG_HOME = Join-Path $HOME '.omnigent'
-defenseclaw setup omnigent --mode action
+defenseclaw setup omnigent                # observe (default)
+defenseclaw setup omnigent --mode action  # enforce ALLOW / ASK / DENY
 omnigent server --config (Join-Path $env:OMNIGENT_CONFIG_HOME 'config.yaml')
 ```
+
+</Tab>
+
+</Tabs>
 
 Restart OmniGent after setup so it reloads the policy registry. DefenseClaw:
 

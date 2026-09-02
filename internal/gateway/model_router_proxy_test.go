@@ -951,7 +951,7 @@ func TestSemanticRouterRawStreamingCancellationAlignsV8TerminalSignals(t *testin
 
 	proxy.rawForwardChatCompletionStream(
 		rec, httpReq, response, &chatReq, "action", "", llmCtx, "",
-		"ollama", modelTrace, &traceResult, time.Now(),
+		"ollama", modelTrace, &traceResult, time.Now().Add(-time.Millisecond),
 	)
 	modelTrace.Finish(traceResult)
 	requestTrace.Finish(traceResult)

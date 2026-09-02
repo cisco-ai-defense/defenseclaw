@@ -143,10 +143,17 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     allow_legacy_plain_scans = len(all_connectors) == 1
 
     if as_json:
+        undiscoverable: list[str] = []
+        source_diagnostics: list[
+            tuple[str, connector_paths.MCPSourceDiagnostic]
+        ] = []
         if len(connectors) > 1:
             groups = []
             for c in connectors:
-                servers = _collect_mcps_for_connector(app, c)
+                locations, servers, diagnostics = _collect_mcp_discovery(app, c)
+                if not locations:
+                    undiscoverable.append(c)
+                source_diagnostics.extend((c, diagnostic) for diagnostic in diagnostics)
                 scan_map = _build_mcp_scan_map(
                     app.store, servers, c,
                     allow_legacy_plain=allow_legacy_plain_scans,
@@ -160,7 +167,14 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 })
             click.echo(json.dumps(groups, indent=2, default=str))
         else:
-            servers = _collect_mcps_for_connector(app, connectors[0])
+            locations, servers, diagnostics = _collect_mcp_discovery(
+                app, connectors[0],
+            )
+            if not locations:
+                undiscoverable.append(connectors[0])
+            source_diagnostics.extend(
+                (connectors[0], diagnostic) for diagnostic in diagnostics
+            )
             scan_map = _build_mcp_scan_map(
                 app.store, servers, connectors[0],
                 allow_legacy_plain=allow_legacy_plain_scans,
@@ -179,20 +193,40 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 else items
             )
             click.echo(json.dumps(payload, indent=2))
+        _emit_mcp_source_diagnostics(source_diagnostics)
+        if undiscoverable or source_diagnostics:
+            raise SystemExit(1)
         return
 
     shown_any = False
+    undiscoverable: list[str] = []
+    source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
     for connector in connectors:
-        servers = _collect_mcps_for_connector(app, connector)
+        locations, servers, diagnostics = _collect_mcp_discovery(app, connector)
+        source_diagnostics.extend((connector, diagnostic) for diagnostic in diagnostics)
+        _emit_mcp_source_diagnostics(
+            [(connector, diagnostic) for diagnostic in diagnostics]
+        )
         scan_map = _build_mcp_scan_map(
             app.store, servers, connector,
             allow_legacy_plain=allow_legacy_plain_scans,
         )
         actions_map = _build_mcp_actions_map(app.store, connector)
         if not servers:
+            if not locations:
+                # Nowhere to look is not the same as looked and found
+                # nothing. Reporting the first as a clean zero is how a
+                # scanner ends up quietly clean for months.
+                undiscoverable.append(connector)
+                ux.err(
+                    f"No MCP config location is known for "
+                    f"connector={connector!r}; nothing was checked. "
+                    f"This is a gap in DefenseClaw, not a clean result.",
+                )
+                continue
             ux.warn(
                 f"No MCP servers configured for connector={connector!r} "
-                f"(checked: {_mcp_source_hint(connector)}).",
+                f"(checked: {_mcp_source_hint(app, connector)}).",
             )
             continue
         _print_mcp_list_table(servers, scan_map, actions_map, connector)
@@ -202,37 +236,113 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         from defenseclaw.commands import hint
         hint("Scan all servers:  defenseclaw mcp scan --all")
 
+    if undiscoverable or source_diagnostics:
+        raise SystemExit(1)
+
 
 def _collect_mcps_for_connector(
-    app: AppContext, connector: str,
+    app: AppContext,
+    connector: str,
+    *,
+    diagnostic_sink: list[connector_paths.MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     """Return the per-connector MCP server list.
+
+    A connector with no known MCP source must never fall through to the
+    registry reader's OpenClaw default.  Keep that invariant here because
+    named-target resolution and ownership checks also use this helper.
 
     The connector-aware ``cfg.mcp_servers(connector)`` reads the peer's
     own MCP config, so each configured connector resolves its own catalog when
     ``mcp list`` fans out.
+
+    ``infer_workspace_from_cwd`` is set because this path is only reached
+    from an interactive command, where the operator's cwd is the project
+    they mean. Daemon callers of ``cfg.mcp_servers`` leave it off.
     """
-    return app.cfg.mcp_servers(connector)
+    if not _mcp_source_locations(app, connector):
+        return []
+    return app.cfg.mcp_servers(
+        connector,
+        infer_workspace_from_cwd=True,
+        diagnostic_sink=diagnostic_sink,
+    )
 
 
-def _mcp_source_hint(connector: str) -> str:
-    """Human label for the connector-specific MCP source used by list/scan."""
-    name = connector_paths.normalize(connector)
-    hints = {
-        "openclaw": "OpenClaw MCP config",
-        "claudecode": "Claude Code settings and workspace MCP config",
-        "codex": "Codex config and workspace MCP config",
-        "zeptoclaw": "ZeptoClaw config and workspace MCP config",
-        "hermes": "Hermes config",
-        "cursor": "Cursor MCP config",
-        "devin": "Devin mcp_config.json",
-        "geminicli": "Gemini CLI settings",
-        "copilot": "Copilot hook MCP config",
-        "openhands": "OpenHands MCP config",
-        "antigravity": "Antigravity MCP config",
-        "opencode": "OpenCode MCP config",
-    }
-    return hints.get(name, "connector-specific MCP config")
+def _mcp_source_locations(app: AppContext, connector: str) -> list[str]:
+    """Return the locations list/scan actually consult for *connector*."""
+    return app.cfg.mcp_source_locations(connector, infer_workspace_from_cwd=True)
+
+
+def _collect_mcp_discovery(
+    app: AppContext,
+    connector: str,
+) -> tuple[
+    list[str],
+    list[MCPServerEntry],
+    list[connector_paths.MCPSourceDiagnostic],
+]:
+    """Resolve source locations before reading any connector registry."""
+
+    locations = _mcp_source_locations(app, connector)
+    if not locations:
+        return [], [], []
+    diagnostics: list[connector_paths.MCPSourceDiagnostic] = []
+    servers = _collect_mcps_for_connector(
+        app,
+        connector,
+        diagnostic_sink=diagnostics,
+    )
+    return locations, servers, diagnostics
+
+
+def _emit_mcp_source_diagnostics(
+    diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]],
+) -> None:
+    """Name every unreadable/malformed MCP source on stderr."""
+
+    for connector, diagnostic in diagnostics:
+        click.echo(
+            f"error: MCP discovery source is {diagnostic.problem} "
+            f"for connector={connector!r}: {diagnostic.source}",
+            err=True,
+        )
+
+
+def _mcp_source_hint(app: AppContext, connector: str) -> str:
+    """Render the locations checked for *connector*, newest-caller-first.
+
+    This used to be a hand-written label per connector — "Claude Code
+    settings and workspace MCP config". The trouble with a label is that
+    it cannot be wrong in a way anyone notices: it stayed accurate-sounding
+    the whole time ``~/.claude.json`` went unread, because "Claude Code
+    settings" describes a file that was in fact being read, just not the
+    one holding the operator's servers.
+
+    Printing resolved paths makes the gap self-evident at the moment of
+    failure. An operator whose servers live in ``~/.claude.json``, reading
+    ``checked: ~/.claude/settings.json, ./.mcp.json``, does not need to
+    read our source or file an issue to know what went wrong.
+    """
+    locations = _mcp_source_locations(app, connector)
+    if not locations:
+        return "no known MCP config location"
+    home = os.path.abspath(os.path.expanduser("~"))
+    shown = [
+        ("~" + p[len(home):]) if p.startswith(home + os.sep) else p
+        for p in locations
+    ]
+    rendered = ", ".join(shown)
+    if not app.cfg.connector_workspace_dir():
+        # Only say we inferred project scope when the inferred location
+        # set actually gained a path. Global-only connectors (hermes,
+        # openhands) ignore cwd inference; claiming otherwise is a lie.
+        pinned = app.cfg.mcp_source_locations(
+            connector, infer_workspace_from_cwd=False,
+        )
+        if any(path and path not in pinned for path in locations):
+            rendered += "; workspace not pinned (project scope inferred from cwd)"
+    return rendered
 
 
 def _mcp_list_json_items(
@@ -274,6 +384,9 @@ def _mcp_list_json_items(
         verdict_label, _ = _compute_verdict(
             actions_map.get(s.name), scan_map.get(s.name),
         )
+        if connector_paths.is_bundled_mcp_server(s, connector=connector):
+            entry["bundled"] = True
+            verdict_label = "bundled"
         entry["verdict"] = verdict_label
         out.append(entry)
     return out
@@ -291,7 +404,7 @@ def _print_mcp_list_table(
 
     console = Console()
     table = Table(title=f"MCP Servers (connector={connector})")
-    table.add_column("Name", style="bold")
+    table.add_column("Name", style="bold", no_wrap=True)
     table.add_column("Transport")
     table.add_column("Command")
     table.add_column("URL")
@@ -321,6 +434,8 @@ def _print_mcp_list_table(
         verdict_label, verdict_style = _compute_verdict(
             actions_map.get(s.name), scan_map.get(s.name),
         )
+        if connector_paths.is_bundled_mcp_server(s, connector=connector):
+            verdict_label, verdict_style = "bundled", "cyan"
 
         table.add_row(
             s.name,
@@ -506,7 +621,12 @@ def _resolve_scan_target(
     if "://" in target:
         return target, None
 
-    servers = app.cfg.mcp_servers(connector)
+    searched = connector or (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+    servers = _collect_mcps_for_connector(app, searched)
     by_name = {s.name: s for s in servers}
     server = by_name.get(target)
     if server is None:
@@ -517,11 +637,6 @@ def _resolve_scan_target(
         # connector-specific config (e.g. claudecode → .claude/settings.json),
         # so the legacy filename was misleading. ``connector`` may be None
         # (single-connector default), in which case resolve the active one.
-        searched = connector or (
-            app.cfg.active_connector()
-            if hasattr(app.cfg, "active_connector")
-            else "openclaw"
-        )
         raise click.ClickException(
             f"MCP server {target!r} not found for connector {searched!r}.\n{hint}"
         )
@@ -833,11 +948,50 @@ def _scan_all_mcp(
     if pack_cache is None:
         pack_cache = {}
 
-    servers = app.cfg.mcp_servers(connector)
+    locations = _mcp_source_locations(app, connector)
+    if not locations:
+        if not as_json:
+            ux.err(
+                f"No MCP config location is known for "
+                f"connector={connector!r}; nothing was checked. "
+                f"This is a gap in DefenseClaw, not a clean result.",
+            )
+        if error_count_sink is not None:
+            error_count_sink.append(1)
+        return []
+
+    diagnostics: list[connector_paths.MCPSourceDiagnostic] = []
+    servers = _collect_mcps_for_connector(
+        app,
+        connector,
+        diagnostic_sink=diagnostics,
+    )
+    source_error_rows = [
+        {
+            "scanner": "mcp-discovery",
+            "connector": connector,
+            "target": diagnostic.source,
+            "error": f"{diagnostic.problem} MCP config source",
+            "findings": [],
+        }
+        for diagnostic in diagnostics
+    ]
+    if diagnostics and not as_json:
+        _emit_mcp_source_diagnostics(
+            [(connector, diagnostic) for diagnostic in diagnostics]
+        )
     if not servers:
         if not as_json:
-            click.echo(f"No MCP servers configured for connector={connector!r}.")
-        return []
+            # A scanner that scanned nothing must say where it looked. The
+            # bare version of this line was indistinguishable from a clean
+            # result, which is the worse of the two failures.
+            click.echo(
+                f"No MCP servers configured for connector={connector!r} "
+                f"(checked: {_mcp_source_hint(app, connector)}).",
+            )
+        if diagnostics and error_count_sink is not None:
+            error_count_sink.append(len(diagnostics))
+        return source_error_rows
 
     # F-0324: ``--all`` previously scanned every configured server with
     # no policy check, so a server an operator had explicitly blocked
@@ -848,7 +1002,7 @@ def _scan_all_mcp(
     scan_targets = []
     for s in servers:
         scan_target = s.url or s.name
-        if s.bundled:
+        if s.bundled or connector_paths.is_bundled_mcp_server(s, connector=connector):
             if not as_json:
                 click.echo(
                     f"BUNDLED: {s.name} — skipping vendor-managed MCP server",
@@ -875,7 +1029,9 @@ def _scan_all_mcp(
                 f"No scannable MCP servers for connector={connector!r} "
                 "(all bundled, blocked, or none configured)."
             )
-        return []
+        if diagnostics and error_count_sink is not None:
+            error_count_sink.append(len(diagnostics))
+        return source_error_rows
     ctx = _scan_ui.ScanContext.for_mcp(
         connector=connector,
         paths=sorted({t for _, t in scan_targets}),
@@ -884,7 +1040,7 @@ def _scan_all_mcp(
     _scan_ui.render_preamble(ctx, target_count=len(scan_targets))
 
     clean = blocked = errored = 0
-    json_rows: list[dict] = []
+    json_rows: list[dict] = list(source_error_rows)
     started = time.monotonic()
 
     for s, scan_target in scan_targets:
@@ -942,20 +1098,20 @@ def _scan_all_mcp(
         if blocked:
             hint("View alerts:  defenseclaw alerts")
     if error_count_sink is not None:
-        error_count_sink.append(errored)
+        error_count_sink.append(errored + len(diagnostics))
     return json_rows
 
 
 def _connector_has_server(app: AppContext, connector: str, name: str) -> bool:
     """True when *connector*'s MCP config registers a server called *name*."""
-    return any(s.name == name for s in app.cfg.mcp_servers(connector))
+    return any(s.name == name for s in _collect_mcps_for_connector(app, connector))
 
 
 def _connector_owns_mcp_target(app: AppContext, connector: str, target: str) -> bool:
     """True when *connector* registers *target* as an MCP name or URL."""
     return any(
         s.name == target or (s.url and s.url == target)
-        for s in app.cfg.mcp_servers(connector)
+        for s in _collect_mcps_for_connector(app, connector)
     )
 
 
@@ -1020,7 +1176,7 @@ def _scan_name_not_found_msg(
     'openclaw.json' mental model.
     """
     available = sorted({
-        s.name for c in connectors for s in app.cfg.mcp_servers(c)
+        s.name for c in connectors for s in _collect_mcps_for_connector(app, c)
     })
     avail = (
         f"  Available: {', '.join(available)}"
@@ -1062,8 +1218,10 @@ def _scan_one_resolved(
     from defenseclaw.commands import _scan_ui, hint
 
     resolved, entry = _resolve_scan_target(app, target, connector)
-
-    if entry is not None and entry.bundled:
+    if entry is not None and (
+        entry.bundled
+        or connector_paths.is_bundled_mcp_server(entry, connector=connector)
+    ):
         if as_json:
             click.echo(json.dumps({
                 "connector": connector,
@@ -1407,6 +1565,13 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 
     pe = PolicyEngine(app.store)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
+    if connector_paths.is_bundled_mcp_server(target, connector=connector):
+        raise click.ClickException(
+            f"Refusing to block vendor-managed Claude Code server {target!r}. "
+            "Built-in servers (workspace, claude-in-chrome, computer-use, "
+            "Claude Preview, Claude Browser, claude.ai connectors) are not "
+            "operator-installed and must not be disabled by DefenseClaw."
+        )
     _refuse_bundled_mcp_policy_mutation(app, target, connector, "block")
     # Most-specific-wins guard so we never write a redundant connector row when
     # a global block already covers this peer. The bare path keeps the pre-N2

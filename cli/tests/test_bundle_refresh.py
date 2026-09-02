@@ -449,6 +449,44 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         self.assertTrue(os.access(bridge_bin, os.X_OK))
 
     @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
+    def test_every_refresh_mode_preserves_private_grafana_password(
+        self,
+        mock_bundle: MagicMock,
+    ) -> None:
+        from defenseclaw.bundle_refresh import refresh_local_observability_stack
+        from defenseclaw.file_permissions import atomic_write_private_bytes
+
+        mock_bundle.return_value = Path(self.bundle)
+        refresh_local_observability_stack(self.tmp)
+        credential = Path(self._dest()) / ".grafana-admin-password"
+        access_mode = Path(self._dest()) / ".grafana-access-mode"
+        expected = b"stable-private-password-value-1234567890\n"
+        atomic_write_private_bytes(
+            credential,
+            expected,
+            protect_parent=False,
+            allow_windows_system_controllers_in_parent=True,
+        )
+        atomic_write_private_bytes(
+            access_mode,
+            b"no-password\n",
+            protect_parent=False,
+            allow_windows_system_controllers_in_parent=True,
+        )
+
+        for refresh_config in (False, True):
+            result = refresh_local_observability_stack(
+                self.tmp,
+                refresh_config=refresh_config,
+            )
+            self.assertEqual(result.errors, [])
+            self.assertEqual(credential.read_bytes(), expected)
+            self.assertEqual(access_mode.read_bytes(), b"no-password\n")
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(credential.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(access_mode.stat().st_mode), 0o600)
+
+    @patch("defenseclaw.bundle_refresh.bundled_local_observability_dir")
     def test_refresh_config_overwrites_operator_surfaces(
         self,
         mock_bundle: MagicMock,

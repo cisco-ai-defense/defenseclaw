@@ -30,9 +30,11 @@ func TestLogScanNeutralizesTrustExploitValuesBeforePersistence(t *testing.T) {
 	cases := []trustCase{
 		{ruleID: "TRUST-CUSTOM", sourceID: "trust-by-rule", tags: []string{"source-code", "detection-only"}},
 		{ruleID: "JUDGE-ADJ-INJECTION", sourceID: "trust-by-adjudication-rule"},
+		{ruleID: "CS-INJ-role_override", sourceID: "trust-by-clawshield-rule"},
 		{ruleID: "CUSTOM-CATEGORY", sourceID: "trust-by-category", category: "trust-exploit"},
 		{ruleID: "CUSTOM-PROMPT-TAG", sourceID: "trust-by-prompt-tag", tags: []string{"prompt-injection"}},
 		{ruleID: "CUSTOM-TRUST-TAG", sourceID: "trust-by-trust-tag", tags: []string{"trust-exploit"}},
+		{ruleID: "CUSTOM-INJECTION-TAG", sourceID: "trust-by-injection-tag", tags: []string{"injection"}},
 	}
 
 	findings := make([]scanner.Finding, 0, len(cases))

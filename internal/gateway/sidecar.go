@@ -53,6 +53,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
@@ -135,6 +136,14 @@ type Sidecar struct {
 	exporterHealthMetricMu         sync.Mutex
 	exporterHealthMetricGeneration uint64
 	exporterHealthMetricCounters   map[exporterHealthMetricKey]uint64
+	// destinationCircuit* retains only the last-observed circuit state per
+	// destination for the active graph generation. It exists so a durable
+	// health log is emitted exactly once per state transition instead of once
+	// per 15s poll, and so a fresh config generation cannot inherit a stale
+	// "closed" baseline that would suppress a real reopen as a no-op.
+	destinationCircuitMu         sync.Mutex
+	destinationCircuitGeneration uint64
+	destinationCircuitState      map[string]delivery.CircuitState
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -1647,7 +1656,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	onlyReloadModeChange := onlyConfigReloadModeChanged(oldCfg, newCfg) &&
 		len(diff.Changed) == 1 && diff.Changed[0] == "gateway"
-	if configReloadMode(newCfg) == "restart" && !onlyReloadModeChange {
+	// restart mode authorizes a process replacement for changes that cannot be
+	// reconciled safely in-process.  Keep genuinely hot-reloadable edits hot:
+	// local-observability setup only changes the v8 destination plan and must
+	// not disrupt active hook sessions merely because an operator previously
+	// armed restart mode for topology or storage changes.
+	if configReloadMode(newCfg) == "restart" && !onlyReloadModeChange && len(diff.RestartRequired) > 0 {
 		if s == nil || s.currentConfig() == nil || newCfg == nil {
 			return nil
 		}

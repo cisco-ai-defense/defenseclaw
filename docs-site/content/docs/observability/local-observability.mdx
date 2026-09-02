@@ -17,7 +17,7 @@ path requires native x64 Windows Pro, Enterprise, or Education; Hyper-V;
 machine-installed Docker Desktop using Linux containers; Compose v2; and a
 real absolute `docker.exe`. WSL2/per-user Docker engines, Windows containers,
 and `.cmd`/`.bat`/shell shims are not certified. See
-[Windows capabilities](/docs/get-started/windows/capabilities-commands#capability-matrix).
+[Windows install requirements](/docs/get-started/windows/install-lifecycle#system-requirements).
 </Callout>
 
 <Video
@@ -50,9 +50,21 @@ All five run under one Compose project (`defenseclaw-observability`). They share
     ```
 
     The `openclaw-observability-bridge` binary (shipped in `bundles/local_observability_stack/bin/`) drives Compose, waits for healthchecks, and writes one `kind: otlp` destination under `observability.destinations` in `~/.defenseclaw/config.yaml`.
+
+    A running gateway hot-reloads that destination in process without changing
+    its PID or interrupting active agent sessions. This remains true when
+    `gateway.config_reload.mode` is `restart`; that mode is reserved for edits
+    that actually cross a restart boundary. If the gateway is stopped, the
+    destination is used on its next normal start.
   </Step>
   <Step>
-    **Open Grafana.** [http://localhost:3000](http://localhost:3000) — anonymous viewer access is enabled by default for the demo dashboards. Follow your local stack's access policy before enabling edits; do not place credentials in terminal transcripts or support output.
+    **Open Grafana.** [http://localhost:3000](http://localhost:3000). A new
+    managed stack requires the `admin` login and stores its generated password
+    at `~/.defenseclaw/observability-stack/.grafana-admin-password`. Existing
+    anonymous stacks keep their current no-password behavior across upgrade;
+    the setup summary always reports the effective mode. Use `--password` to
+    move a legacy stack to login mode or `--no-password` to opt a loopback-only
+    local stack into anonymous Admin access. The selected mode persists.
   </Step>
   <Step>
     **Verify the destination handshake.** Probe the named destination without
@@ -98,6 +110,7 @@ defenseclaw setup local-observability up \
 | `--signals` | Comma-separated subset of `traces,metrics,logs`. Omitting it selects all three, which is required for complete bundled-dashboard coverage. |
 | `--service-name` | Resource attribute set on every emitted span. Defaults to `defenseclaw`. |
 | `--no-config` | Bring containers up but do **not** modify `config.yaml`. Useful when you manage gateway config out-of-band. |
+| `--password` / `--no-password` | Require the managed Grafana admin credential, or explicitly allow anonymous Admin access on the managed loopback bind. New stacks default to password; previously used anonymous stacks are grandfathered until you pass `--password`. |
 | `--refresh-config` / `--no-refresh-config` | Refresh bundled Grafana dashboards, Prometheus rules, Loki, Tempo, and OTel Collector config by default; opt out to preserve local edits. |
 | `--no-wait` | Don't block on healthchecks — fire-and-forget. |
 | `--timeout` | Seconds to wait for healthchecks. Default 180. |
@@ -109,6 +122,15 @@ Older releases exposed `--with-audit-sink/--no-audit-sink` because logs and OTel
 signals used separate `audit_sinks` and `otel` blocks. Config v8 has one
 destination capable of logs, traces, and metrics, so new configuration does not
 need or write a second audit sink.
+</Callout>
+
+<Callout title="No-password mode is local trust, not authentication">
+`--no-password` gives every process on the workstation anonymous Grafana Admin
+access. The managed controller still rejects any effective Grafana port bind
+other than `127.0.0.1`, verifies the selected runtime mode, and prints a warning.
+Raw `docker compose up` retains the historical anonymous behavior for
+compatibility and can bypass that managed bind check; do not expose it with
+`HOST_BIND` without an external access-control boundary.
 </Callout>
 
 ## What ends up in `config.yaml`

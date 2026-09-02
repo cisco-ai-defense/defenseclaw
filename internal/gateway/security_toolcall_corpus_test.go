@@ -43,6 +43,35 @@ type toolCallCorpusCase struct {
 	NoOtherFinding   bool                `json:"no_other_finding,omitempty"`
 }
 
+func toolCallCorpusActionFactsInput(test toolCallCorpusCase) actionfacts.Input {
+	tool := strings.TrimSpace(test.Tool)
+	if tool == "" {
+		tool = "shell"
+	}
+	cwd := test.CWD
+	if cwd == "" {
+		cwd = "/repo"
+	}
+	activeHome := test.ActiveHome
+	if activeHome == "" {
+		activeHome = "/home/alice"
+	}
+	input := actionfacts.Input{
+		Tool:             tool,
+		Args:             append(json.RawMessage(nil), test.Args...),
+		Command:          test.Command,
+		Argv:             append([]string(nil), test.Argv...),
+		CWD:              cwd,
+		ActiveHome:       activeHome,
+		ActiveAgentFiles: append([]string(nil), test.ActiveAgentFiles...),
+		DialectHint:      test.Dialect,
+	}
+	if test.ArgsRaw != "" {
+		input.Args = json.RawMessage(test.ArgsRaw)
+	}
+	return input
+}
+
 // TestSecuritySuiteToolCall is the compact TP/FP corpus for the trusted
 // structured-action lane. Parser grammar edge cases stay with ActionFacts;
 // focused dispatcher tests keep special fallback and mixed-action invariants.
@@ -95,35 +124,11 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 				t.Fatalf("unsupported expect_route %q", test.ExpectRoute)
 			}
 
-			tool := strings.TrimSpace(test.Tool)
-			if tool == "" {
-				tool = "shell"
-			}
-			cwd := test.CWD
-			if cwd == "" {
-				cwd = "/repo"
-			}
-			activeHome := test.ActiveHome
-			if activeHome == "" {
-				activeHome = "/home/alice"
-			}
 			legacyText := test.LegacyText
 			if legacyText == "" {
 				legacyText = test.Command
 			}
-			input := actionfacts.Input{
-				Tool:             tool,
-				Args:             append(json.RawMessage(nil), test.Args...),
-				Command:          test.Command,
-				Argv:             append([]string(nil), test.Argv...),
-				CWD:              cwd,
-				ActiveHome:       activeHome,
-				ActiveAgentFiles: append([]string(nil), test.ActiveAgentFiles...),
-				DialectHint:      test.Dialect,
-			}
-			if test.ArgsRaw != "" {
-				input.Args = json.RawMessage(test.ArgsRaw)
-			}
+			input := toolCallCorpusActionFactsInput(test)
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input:              input,
 				LegacyText:         legacyText,

@@ -73,7 +73,13 @@ func (s *Sidecar) recordCapacityObservabilityV8(ctx context.Context, observedAt 
 	}
 	_, _ = runtimeOwner.RecordGeneratedMetricBatch(ctx, s.capacityMetricBatch(ctx, observedAt))
 	if healthRuntime, ok := lifecycle.(exporterHealthMetricV8Runtime); ok {
-		s.recordExporterHealthMetricsV8(ctx, observedAt, healthRuntime)
+		// Fetch the destination-health snapshot once per tick and share it
+		// across both consumers, instead of each polling independently.
+		health, err := healthRuntime.DestinationHealthSnapshot(ctx)
+		if err == nil && health.Generation != 0 && health.PlanDigest != "" {
+			s.recordExporterHealthMetricsV8(ctx, observedAt, healthRuntime, health)
+			s.recordDestinationCircuitHealthLogsV8(ctx, observedAt, health)
+		}
 	}
 }
 
@@ -81,21 +87,19 @@ func (s *Sidecar) recordExporterHealthMetricsV8(
 	ctx context.Context,
 	observedAt time.Time,
 	runtime exporterHealthMetricV8Runtime,
+	health observabilityruntime.DestinationHealthSnapshot,
 ) {
 	if s == nil || ctx == nil || observedAt.IsZero() || runtime == nil {
 		return
 	}
-	// Exporter health has dynamic cardinality. Consult the exact family gate
-	// before taking a destination snapshot so disabling platform.health metrics
-	// avoids this work entirely.
+	// Exporter health has dynamic cardinality. Consult the exact family gate.
+	// The destination snapshot itself is shared with the sibling circuit-
+	// health log recorder so both consumers observe the same tick's data
+	// instead of racing two independent polls.
 	enabled, err := runtime.GeneratedMetricFamilyEnabled(
 		ctx, observability.EventName(observability.TelemetryInstrumentDefenseClawTelemetryExporterErrors),
 	)
 	if err != nil || !enabled {
-		return
-	}
-	health, err := runtime.DestinationHealthSnapshot(ctx)
-	if err != nil || health.Generation == 0 || health.PlanDigest == "" {
 		return
 	}
 

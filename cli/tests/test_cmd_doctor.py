@@ -107,7 +107,7 @@ class DoctorMultiConnectorInventoryTests(unittest.TestCase):
         cfg = SimpleNamespace(
             skill_dirs=lambda connector=None: seen["skill"].append(connector) or [],
             plugin_dirs=lambda connector=None: seen["plugin"].append(connector) or [],
-            mcp_servers=lambda connector=None: seen["mcp"].append(connector) or [],
+            mcp_servers=lambda connector=None, **_: seen["mcp"].append(connector) or [],
         )
         r = _DoctorResult()
 

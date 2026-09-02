@@ -60,11 +60,15 @@ type Finding struct {
 	// deterministic summary used by the canonical observability record. It is
 	// intentionally excluded from the legacy scanner JSON shape: v8 route
 	// projection, not a second scanner wire contract, owns its redaction.
-	EvidenceSummary string   `json:"-"`
-	Location        string   `json:"location"`
-	Remediation     string   `json:"remediation"`
-	Scanner         string   `json:"scanner"`
-	Tags            []string `json:"tags"`
+	EvidenceSummary string `json:"-"`
+	Location        string `json:"location"`
+	// File is the structured source path for machine-readable scan output.
+	// Scanners continue to own Location; output projectors populate File on a
+	// detached copy so persistence and scanner-owned evidence stay unchanged.
+	File        string   `json:"file,omitempty"`
+	Remediation string   `json:"remediation"`
+	Scanner     string   `json:"scanner"`
+	Tags        []string `json:"tags"`
 	// RuleID is the stable detection id (from upstream JSON or synthesized).
 	RuleID string `json:"rule_id,omitempty"`
 	// Category groups findings for synthesis when RuleID is absent.
@@ -152,6 +156,9 @@ type ScanResult struct {
 	Verdict    string        `json:"verdict,omitempty"`
 	ExitCode   int           `json:"exit_code,omitempty"`
 	ScanError  string        `json:"error,omitempty"`
+	// FindingLifecycle is populated by the canonical audit persistence path.
+	// It is process-local projection metadata, never part of scanner JSON.
+	FindingLifecycle *FindingLifecycleDelta `json:"-"`
 }
 
 // EffectiveTargetType returns TargetType when set, otherwise InferTargetType(Scanner).

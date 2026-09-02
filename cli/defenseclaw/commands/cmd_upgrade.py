@@ -10542,6 +10542,7 @@ def _execute_hard_cut_rollback(
             restored_bundle = _restart_restored_local_observability_stack(
                 plan.data_dir,
                 health_timeout=max(health_timeout, 1),
+                os_name=plan.os_name,
             )
             errors = restored_bundle.get("degraded_errors", [])
             if restored_bundle.get("restarted") is not True or errors:
@@ -10585,37 +10586,93 @@ def _execute_hard_cut_rollback(
     return True
 
 
+def _restored_local_observability_controller(
+    data_dir: str,
+    destination: Path,
+    *,
+    os_name: str | None = None,
+) -> Path:
+    """Select the restored native entry point, with POSIX legacy fallback."""
+
+    platform_name = str(os.name if os_name is None else os_name).lower()
+    windows = platform_name in {"nt", "windows", "win32"}
+    managed_venv = Path(_managed_venv_path())
+    if windows:
+        native = managed_venv / "Scripts" / "defenseclaw-observability.exe"
+    else:
+        native = managed_venv / "bin" / "defenseclaw-observability"
+    try:
+        native_info = native.lstat()
+        if not stat.S_ISLNK(native_info.st_mode) and stat.S_ISREG(native_info.st_mode):
+            return native
+    except OSError:
+        pass
+
+    # Pre-native POSIX releases may only have the historical bridge. Windows
+    # must never select it because it is a Bash program.
+    if windows:
+        raise OSError("restored native local observability controller is unavailable")
+    bridge = destination / "bin" / "openclaw-observability-bridge"
+    try:
+        bridge_info = bridge.lstat()
+    except OSError as exc:
+        raise OSError("restored local observability controller is unavailable") from exc
+    if stat.S_ISLNK(bridge_info.st_mode) or not stat.S_ISREG(bridge_info.st_mode):
+        raise OSError("restored local observability controller path is unsafe")
+    return bridge
+
+
+def _is_restored_native_local_observability_controller(
+    data_dir: str,
+    command_path: Path,
+) -> bool:
+    """Return whether rollback selected one of the restored native launchers."""
+
+    managed_venv = Path(_managed_venv_path())
+    candidates = (
+        managed_venv / "bin" / "defenseclaw-observability",
+        managed_venv / "Scripts" / "defenseclaw-observability.exe",
+    )
+    selected = os.path.normcase(os.path.abspath(command_path))
+    return any(selected == os.path.normcase(os.path.abspath(candidate)) for candidate in candidates)
+
+
 def _restart_restored_local_observability_stack(
     data_dir: str,
     *,
     health_timeout: int,
+    os_name: str | None = None,
 ) -> dict[str, object]:
-    """Restart the restored stack without importing code from either wheel."""
+    """Restart the restored stack through its native installed controller."""
 
     destination = Path(data_dir) / "observability-stack"
-    bridge = destination / "bin" / "openclaw-observability-bridge"
     try:
         destination_info = destination.lstat()
-        bridge_info = bridge.lstat()
     except OSError as exc:
-        raise OSError("restored local observability bridge is unavailable") from exc
-    if (
-        stat.S_ISLNK(destination_info.st_mode)
-        or not stat.S_ISDIR(destination_info.st_mode)
-        or stat.S_ISLNK(bridge_info.st_mode)
-        or not stat.S_ISREG(bridge_info.st_mode)
-    ):
-        raise OSError("restored local observability bridge path is unsafe")
+        raise OSError("restored local observability stack is unavailable") from exc
+    if stat.S_ISLNK(destination_info.st_mode) or not stat.S_ISDIR(destination_info.st_mode):
+        raise OSError("restored local observability stack path is unsafe")
+
+    command_path = _restored_local_observability_controller(
+        data_dir,
+        destination,
+        os_name=os_name,
+    )
+    command = [str(command_path)]
+    if _is_restored_native_local_observability_controller(data_dir, command_path):
+        command.extend(("--stack-dir", str(destination)))
+    command.extend(
+        (
+            "up",
+            "--output",
+            "json",
+            "--timeout",
+            str(health_timeout),
+        )
+    )
     try:
         completed = _run_phase_two_mutator(
-            [
-                str(bridge),
-                "up",
-                "--output",
-                "json",
-                "--timeout",
-                str(health_timeout),
-            ],
+            command,
             capture_output=True,
             text=True,
             timeout=max(health_timeout + 30, 60),

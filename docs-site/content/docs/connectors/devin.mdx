@@ -17,15 +17,36 @@ The supported hook contract is pinned to Devin CLI `3000.4.25` on Windows,
 macOS, and Linux. This is source-reviewed compatibility evidence. Authentic
 official-client validation metadata remains empty and `live=false`.
 
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | The native `devin-hooks-v1` contract manages user hooks under `~/.config/devin` or an explicitly pinned project hook document. |
+| Native Windows x64 | **Supported** | Setup admits only the current user's exact Devin CLI `3000.4.25` executable at its official LocalAppData path with a valid `Exafunction, Inc.` Authenticode signer. DefenseClaw adds no Bash or WSL dependency; Devin's own Windows hook runner evaluates the registered Bash-safe system-PowerShell bridge. |
+
 ## Setup
 
-```powershell title="Native Windows PowerShell"
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
+
+```bash
 defenseclaw setup devin --mode observe
+defenseclaw setup devin --mode action
 ```
 
-```bash title="macOS or Linux"
+</Tab>
+
+<Tab value="Windows">
+
+```powershell
 defenseclaw setup devin --mode observe
+defenseclaw setup devin --mode action
 ```
+
+</Tab>
+
+</Tabs>
 
 Use `--mode action` only after reviewing observed events and policy findings.
 The connector can join an existing hook-connector roster.
@@ -38,9 +59,11 @@ non-reparse file, report exactly `3000.4.25`, have a valid Authenticode chain,
 and be signed by `Exafunction, Inc.`. Setup does not trust a different
 PATH-resolved `devin.exe`.
 
-DefenseClaw registers the protected native `defenseclaw-hook.exe` command in
-Devin's hook configuration. It does not add a Bash, WSL, Docker, VM, Git Bash,
-Cygwin/MSYS, or proxy dependency.
+Devin evaluates hook commands through its own Bash execution path on Windows.
+DefenseClaw therefore registers a Bash-safe outer command that invokes system
+Windows PowerShell 5.1 `Start-Process -Wait`, which in turn runs the protected
+`defenseclaw-hook.exe`. DefenseClaw does not install or add Bash, WSL, Docker,
+a VM, Git Bash, Cygwin/MSYS, or a proxy dependency.
 
 ## Configuration custody
 

@@ -32,19 +32,27 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw.scanner.plugin_scanner import llm_analyzer
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext, SourceFile
 from defenseclaw.scanner.plugin_scanner.analyzer_classes import MetaAnalyzer
-from defenseclaw.scanner.plugin_scanner import llm_analyzer, llm_client
 from defenseclaw.scanner.plugin_scanner.types import Finding, PluginManifest
 
 
-def _make_finding(rule_id: str, *, severity: str = "HIGH", evidence: str = "") -> Finding:
+def _make_finding(
+    rule_id: str,
+    *,
+    severity: str = "HIGH",
+    evidence: str = "",
+    location: str = "src/index.ts:1",
+) -> Finding:
     return Finding(
         id=f"F-{rule_id}",
         severity=severity,
         title=f"Test finding {rule_id}",
         rule_id=rule_id,
+        confidence=0.9,
         evidence=evidence,
+        location=location,
     )
 
 
@@ -197,6 +205,95 @@ class TestRunMetaLLMReturnContract(unittest.TestCase):
             "false_positive_rule_ids", result,
             "Old contract removed -- callers must not silently re-suppress findings",
         )
+
+    def test_correlation_requires_real_referenced_inputs_and_carries_evidence(self):
+        ctx = ScanContext(plugin_dir="/tmp/x", manifest=None)
+        ctx.previous_findings = [
+            _make_finding("SRC-EVAL"),
+            _make_finding("CRED-OPENCLAW-DIR"),
+        ]
+        original_call = llm_analyzer.call_llm
+        llm_analyzer.call_llm = lambda *_a, **_kw: _StubResponse(
+            '{"false_positives":[],"missed_threats":[],'
+            '"correlations":[{"name":"Takeover","finding_ids":'
+            '["F-SRC-EVAL","F-CRED-OPENCLAW-DIR"],"severity":"CRITICAL",'
+            '"description":"combined pattern"}],"priority_order":[]}'
+        )
+        try:
+            result = llm_analyzer.run_meta_llm({"model": "test"}, ctx)
+        finally:
+            llm_analyzer.call_llm = original_call
+
+        correlation = next(f for f in result["new_findings"] if f.rule_id == "META-LLM-CORR")
+        self.assertEqual(correlation.severity, "HIGH")
+        self.assertEqual(correlation.confidence, 0.85)
+        self.assertIn("Takeover pattern (correlated, 2 signals)", correlation.title)
+        self.assertIn("SRC-EVAL@src/index.ts:1", correlation.evidence or "")
+        self.assertIn("not proof that execution occurred", correlation.description)
+
+    def test_correlation_with_hallucinated_input_is_ignored(self):
+        ctx = ScanContext(plugin_dir="/tmp/x", manifest=None)
+        ctx.previous_findings = [_make_finding("SRC-EVAL")]
+        original_call = llm_analyzer.call_llm
+        llm_analyzer.call_llm = lambda *_a, **_kw: _StubResponse(
+            '{"false_positives":[],"missed_threats":[],'
+            '"correlations":[{"name":"Invented","finding_ids":'
+            '["F-SRC-EVAL","does-not-exist"],"severity":"CRITICAL"}]}'
+        )
+        try:
+            result = llm_analyzer.run_meta_llm({"model": "test"}, ctx)
+        finally:
+            llm_analyzer.call_llm = original_call
+
+        self.assertFalse([f for f in result["new_findings"] if f.rule_id == "META-LLM-CORR"])
+
+    def test_correlation_severity_is_capped_by_atomic_evidence(self):
+        ctx = ScanContext(plugin_dir="/tmp/x", manifest=None)
+        ctx.previous_findings = [
+            _make_finding("SRC-EVAL", severity="MEDIUM"),
+            _make_finding("CRED-OPENCLAW-DIR", severity="MEDIUM"),
+        ]
+        original_call = llm_analyzer.call_llm
+        llm_analyzer.call_llm = lambda *_a, **_kw: _StubResponse(
+            '{"false_positives":[],"missed_threats":[],'
+            '"correlations":[{"name":"Takeover","finding_ids":'
+            '["F-SRC-EVAL","F-CRED-OPENCLAW-DIR"],"severity":"CRITICAL"}]}'
+        )
+        try:
+            result = llm_analyzer.run_meta_llm({"model": "test"}, ctx)
+        finally:
+            llm_analyzer.call_llm = original_call
+
+        correlation = next(f for f in result["new_findings"] if f.rule_id == "META-LLM-CORR")
+        self.assertEqual(correlation.severity, "MEDIUM")
+
+    def test_correlation_description_is_terminal_safe_and_keeps_host_context(self):
+        ctx = ScanContext(plugin_dir="/tmp/x", manifest=None)
+        ctx.previous_findings = [
+            _make_finding("SRC-EVAL", location="src/\x1b[35mindex\x1b[0m\n.ts:1"),
+            _make_finding("CRED-OPENCLAW-DIR"),
+        ]
+        original_call = llm_analyzer.call_llm
+        llm_analyzer.call_llm = lambda *_a, **_kw: _StubResponse(
+            '{"false_positives":[],"missed_threats":[],'
+            '"correlations":[{"name":"Takeover","finding_ids":'
+            '["F-SRC-EVAL","F-CRED-OPENCLAW-DIR"],"severity":"HIGH",'
+            '"description":"\\u001b[31mforged alert\\u001b[0m\\nsecond line\\u0007"}]}'
+        )
+        try:
+            result = llm_analyzer.run_meta_llm({"model": "test"}, ctx)
+        finally:
+            llm_analyzer.call_llm = original_call
+
+        correlation = next(f for f in result["new_findings"] if f.rule_id == "META-LLM-CORR")
+        self.assertNotIn("\x1b", correlation.description)
+        self.assertNotIn("\n", correlation.description)
+        self.assertNotIn("\x07", correlation.description)
+        self.assertNotIn("\x1b", correlation.evidence or "")
+        self.assertNotIn("\n", correlation.evidence or "")
+        self.assertIn("forged alert second line", correlation.description)
+        self.assertIn("not proof that execution occurred", correlation.description)
+        self.assertIn("Evidence chain: SRC-EVAL@src/index .ts:1", correlation.description)
 
 
 if __name__ == "__main__":

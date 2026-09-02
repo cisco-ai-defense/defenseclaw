@@ -98,8 +98,8 @@ def test_amp_skill_mcp_never_inherits_codex_bundled_identity(
         json.dumps({_DOCS_NAME: {"url": _DOCS_URL}}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(connector_paths, "_amp_settings_documents", lambda _workspace: [])
-    monkeypatch.setattr(connector_paths, "_amp_skill_dirs", lambda _workspace: [str(skill_root)])
+    monkeypatch.setattr(connector_paths, "_amp_settings_documents", lambda _workspace, **_: [])
+    monkeypatch.setattr(connector_paths, "_amp_skill_dirs", lambda _workspace, **_: [str(skill_root)])
 
     entries = connector_paths._amp_mcp_servers()
 
@@ -120,7 +120,7 @@ def _clean_result(target: str) -> ScanResult:
 def test_scan_all_skips_bundled_entry_but_scans_user_entry() -> None:
     app, tmp_dir, db_path = make_app_context()
     try:
-        app.cfg.mcp_servers = lambda connector=None: [  # type: ignore[method-assign]
+        app.cfg.mcp_servers = lambda connector=None, **_: [  # type: ignore[method-assign]
             MCPServerEntry(name=_DOCS_NAME, url=_DOCS_URL, bundled=True),
             MCPServerEntry(name="operator", url="https://example.test/mcp"),
         ]
@@ -141,7 +141,7 @@ def test_scan_all_skips_bundled_entry_but_scans_user_entry() -> None:
 def test_named_bundled_entry_is_discovery_only() -> None:
     app, tmp_dir, db_path = make_app_context()
     try:
-        app.cfg.mcp_servers = lambda connector=None: [  # type: ignore[method-assign]
+        app.cfg.mcp_servers = lambda connector=None, **_: [  # type: ignore[method-assign]
             MCPServerEntry(name=_DOCS_NAME, url=_DOCS_URL, bundled=True)
         ]
         with patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan") as scan:
@@ -162,10 +162,39 @@ def test_named_bundled_entry_is_discovery_only() -> None:
         cleanup_app(app, db_path, tmp_dir)
 
 
+def test_named_claude_bundled_scan_emits_json_payload() -> None:
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        app.cfg.mcp_source_locations = lambda *_, **__: ["claude-settings.json"]  # type: ignore[method-assign]
+        app.cfg.mcp_servers = lambda connector=None, **_: [  # type: ignore[method-assign]
+            MCPServerEntry(name="computer-use", command="claude-builtin")
+        ]
+        with patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan") as scan:
+            result = CliRunner().invoke(
+                mcp,
+                ["scan", "computer-use", "--connector", "claudecode", "--json"],
+                obj=app,
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        scan.assert_not_called()
+        assert json.loads(result.output) == {
+            "connector": "claudecode",
+            "target": "computer-use",
+            "status": "skipped",
+            "reason": "vendor_bundled",
+        }
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
 def test_mcp_list_json_exposes_bundled_provenance() -> None:
     app, tmp_dir, db_path = make_app_context()
     try:
-        app.cfg.mcp_servers = lambda connector=None: [  # type: ignore[method-assign]
+        app.cfg.mcp_servers = lambda connector=None, **_: [  # type: ignore[method-assign]
             MCPServerEntry(name=_DOCS_NAME, url=_DOCS_URL, bundled=True)
         ]
         result = CliRunner().invoke(

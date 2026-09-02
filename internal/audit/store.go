@@ -215,6 +215,13 @@ type Store struct {
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
+
+	// findingLifecycleMu serializes the one mutable state projection and its
+	// process-local up/down-counter baselines. SQLite serializes these writers
+	// too, but owning the boundary here also keeps concurrent first scans from
+	// publishing two current-state baselines after a runtime restart/reload.
+	findingLifecycleMu      sync.Mutex
+	findingGaugeInitialized map[string]struct{}
 }
 
 // SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
@@ -1754,6 +1761,10 @@ var migrations = []migration{
 		description: historicalEvidencePurgeMigrationDescription,
 		apply:       purgeHistoricalEvidence,
 	},
+	{
+		description: "scan findings: add compact distinct lifecycle projection",
+		apply:       migrateFindingLifecycleState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1868,6 +1879,8 @@ func (s *Store) Init() error {
 		"guardrail_chain_pending_boundaries",
 		"guardrail_chain_terminal_resets",
 		"guardrail_chain_cutoff_barriers",
+		"finding_scopes",
+		"finding_states",
 	} {
 		present, err := tableExists(s.db, table)
 		if err != nil {
@@ -1876,6 +1889,11 @@ func (s *Store) Init() error {
 		if !present {
 			return fmt.Errorf("audit: mandatory SQLite table %s is missing", table)
 		}
+	}
+	if present, err := s.hasColumn("scan_findings", "finding_fingerprint"); err != nil {
+		return fmt.Errorf("audit: verify mandatory finding lifecycle identity: %w", err)
+	} else if !present {
+		return fmt.Errorf("audit: mandatory finding lifecycle identity is missing")
 	}
 	if err := s.verifyMandatoryPragmas(context.Background()); err != nil {
 		return err
@@ -2061,6 +2079,8 @@ var knownTables = map[string]bool{
 	"schema_version":        true,
 	// v7 additions
 	"scan_findings":   true,
+	"finding_states":  true,
+	"finding_scopes":  true,
 	"activity_events": true,
 	"sink_health":     true,
 	// Observability v8 alert acknowledgement protected state.

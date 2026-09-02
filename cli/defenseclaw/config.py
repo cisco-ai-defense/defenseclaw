@@ -2536,7 +2536,13 @@ class Config:
             workspace_dir=self.connector_workspace_dir(),
         )
 
-    def mcp_servers(self, connector: str | None = None) -> list[MCPServerEntry]:
+    def mcp_servers(
+        self,
+        connector: str | None = None,
+        *,
+        infer_workspace_from_cwd: bool = False,
+        diagnostic_sink: list[connector_paths.MCPSourceDiagnostic] | None = None,
+    ) -> list[MCPServerEntry]:
         """Return MCP server registrations for a connector.
 
         For OpenClaw the lookup prefers ``openclaw config get
@@ -2547,6 +2553,11 @@ class Config:
         ``connector`` overrides the resolved connector (used by
         ``mcp list --connector <name>`` for multi-connector focus);
         defaults to :meth:`active_connector`.
+
+        ``infer_workspace_from_cwd`` lets an interactive command treat its
+        cwd as the project when ``claw.workspace_dir`` is unpinned. Off by
+        default so gateway/daemon callers keep reading only what an
+        operator explicitly pinned.
         """
         return connector_paths.mcp_servers(
             connector or self.active_connector(),
@@ -2554,6 +2565,23 @@ class Config:
             workspace_dir=self.connector_workspace_dir(),
             openclaw_bin_resolver=openclaw_bin,
             openclaw_cmd_prefix=openclaw_cmd_prefix(),
+            infer_workspace_from_cwd=infer_workspace_from_cwd,
+            diagnostic_sink=diagnostic_sink,
+        )
+
+    def mcp_source_locations(
+        self,
+        connector: str | None = None,
+        *,
+        infer_workspace_from_cwd: bool = False,
+    ) -> list[str]:
+        """Return the locations :meth:`mcp_servers` would consult."""
+
+        return connector_paths.mcp_source_locations(
+            connector or self.active_connector(),
+            openclaw_config=self.claw.config_file,
+            workspace_dir=self.connector_workspace_dir(),
+            infer_workspace_from_cwd=infer_workspace_from_cwd,
         )
 
     def installed_skill_candidates(self, skill_name: str) -> list[str]:

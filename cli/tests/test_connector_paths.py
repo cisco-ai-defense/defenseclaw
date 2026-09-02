@@ -24,6 +24,7 @@ documented paths.
 
 from __future__ import annotations
 
+import builtins
 import json
 import ntpath
 import os
@@ -2735,3 +2736,413 @@ class TestMCPServerEntryReExport:
         from defenseclaw.config import MCPServerEntry as MCPFromConfig
 
         assert MCPFromConfig is MCPServerEntry
+
+
+# ---------------------------------------------------------------------------
+# MCP discovery surface -- regression fixtures for the silent-zero class of
+# bug reported in the connector-discovery thread. Each test below fails on
+# the pre-fix tree.
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeUserConfigDiscovery:
+    """``~/.claude.json`` is where ``claude mcp add`` actually writes."""
+
+    def _home_with_claude_json(self, tmp_path, monkeypatch, document):
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".claude").mkdir()
+        (home / ".claude" / "settings.json").write_text(json.dumps({}))
+        (home / ".claude.json").write_text(json.dumps(document))
+        monkeypatch.setenv("HOME", str(home))
+        return home
+
+    def test_reads_document_root_mcp_servers(self, tmp_path, monkeypatch):
+        # `claude mcp add --scope user` lands here. Before the fix this
+        # file was never opened, so `mcp list` reported zero while the
+        # connector happily loaded the server.
+        self._home_with_claude_json(
+            tmp_path,
+            monkeypatch,
+            {"mcpServers": {"user-scope": {"command": "srv"}}},
+        )
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        entries = connector_paths.mcp_servers(
+            "claudecode", workspace_dir=str(project),
+        )
+        assert [e.name for e in entries] == ["user-scope"]
+
+    def test_reads_project_scoped_mcp_servers(self, tmp_path, monkeypatch):
+        # The default scope. Keyed by absolute workspace path.
+        project = tmp_path / "proj"
+        project.mkdir()
+        self._home_with_claude_json(
+            tmp_path,
+            monkeypatch,
+            {
+                "projects": {
+                    str(project): {
+                        "mcpServers": {"local-scope": {"command": "srv"}},
+                    },
+                },
+            },
+        )
+        monkeypatch.chdir(project)
+
+        entries = connector_paths.mcp_servers(
+            "claudecode", workspace_dir=str(project),
+        )
+        assert [e.name for e in entries] == ["local-scope"]
+
+    def test_project_key_tolerates_trailing_separator(self, tmp_path, monkeypatch):
+        # A key written with a trailing slash must still match a workspace
+        # resolved without one; string equality alone would miss it.
+        project = tmp_path / "proj"
+        project.mkdir()
+        self._home_with_claude_json(
+            tmp_path,
+            monkeypatch,
+            {
+                "projects": {
+                    str(project) + os.sep: {
+                        "mcpServers": {"trailing": {"command": "srv"}},
+                    },
+                },
+            },
+        )
+        monkeypatch.chdir(project)
+
+        entries = connector_paths.mcp_servers(
+            "claudecode", workspace_dir=str(project),
+        )
+        assert [e.name for e in entries] == ["trailing"]
+
+    def test_other_projects_do_not_leak(self, tmp_path, monkeypatch):
+        # Servers registered against a different project must not appear.
+        project = tmp_path / "proj"
+        other = tmp_path / "other"
+        project.mkdir()
+        other.mkdir()
+        self._home_with_claude_json(
+            tmp_path,
+            monkeypatch,
+            {
+                "projects": {
+                    str(other): {"mcpServers": {"elsewhere": {"command": "s"}}},
+                },
+            },
+        )
+        monkeypatch.chdir(project)
+
+        entries = connector_paths.mcp_servers(
+            "claudecode", workspace_dir=str(project),
+        )
+        assert entries == []
+
+    def test_settings_json_still_wins_on_name_collision(self, tmp_path, monkeypatch):
+        # The new sources are strictly additive: any name that resolved
+        # before the fix must resolve to the same entry after it.
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".claude").mkdir()
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "from-settings"}}})
+        )
+        (home / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"shared": {"command": "from-claude-json"}}})
+        )
+        monkeypatch.setenv("HOME", str(home))
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        entries = connector_paths.mcp_servers(
+            "claudecode", workspace_dir=str(project),
+        )
+        assert [e.command for e in entries] == ["from-settings"]
+
+    def test_reads_workspace_settings_local(self, tmp_path, monkeypatch):
+        # agent_discovery has probed .claude/settings.local.json for ages;
+        # MCP discovery never did.
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        project = tmp_path / "proj"
+        (project / ".claude").mkdir(parents=True)
+        (project / ".claude" / "settings.local.json").write_text(
+            json.dumps({"mcpServers": {"personal": {"command": "srv"}}})
+        )
+        monkeypatch.chdir(project)
+
+        entries = connector_paths.mcp_servers(
+            "claudecode", workspace_dir=str(project),
+        )
+        assert [e.name for e in entries] == ["personal"]
+
+    def test_malformed_claude_json_is_not_fatal(self, tmp_path, monkeypatch):
+        # An operator hand-editing this file must not break `mcp list`.
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".claude.json").write_text("{ not json")
+        monkeypatch.setenv("HOME", str(home))
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        assert connector_paths.mcp_servers(
+            "claudecode", workspace_dir=str(project),
+        ) == []
+
+    def test_malformed_optional_source_is_diagnosed_without_hiding_valid_server(
+        self, tmp_path, monkeypatch,
+    ):
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".claude.json").write_text("{ not json")
+        monkeypatch.setenv("HOME", str(home))
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"healthy": {"command": "srv"}}})
+        )
+        diagnostics: list[connector_paths.MCPSourceDiagnostic] = []
+
+        entries = connector_paths.mcp_servers(
+            "claudecode",
+            workspace_dir=str(project),
+            diagnostic_sink=diagnostics,
+        )
+
+        assert [entry.name for entry in entries] == ["healthy"]
+        assert diagnostics == [
+            connector_paths.MCPSourceDiagnostic(
+                source=str(home / ".claude.json"),
+                problem="malformed",
+            )
+        ]
+
+    def test_unreadable_source_is_named_without_hiding_valid_server(
+        self, tmp_path, monkeypatch,
+    ):
+        home = tmp_path / "home"
+        broken = home / ".claude" / "settings.json"
+        broken.parent.mkdir(parents=True)
+        broken.write_text("{}")
+        monkeypatch.setenv("HOME", str(home))
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"healthy": {"command": "srv"}}})
+        )
+        real_open = builtins.open
+
+        def guarded_open(file, *args, **kwargs):
+            if os.path.abspath(os.fspath(file)) == os.path.abspath(str(broken)):
+                raise PermissionError("denied")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", guarded_open)
+        diagnostics: list[connector_paths.MCPSourceDiagnostic] = []
+
+        entries = connector_paths.mcp_servers(
+            "claudecode",
+            workspace_dir=str(project),
+            diagnostic_sink=diagnostics,
+        )
+
+        assert [entry.name for entry in entries] == ["healthy"]
+        assert diagnostics == [
+            connector_paths.MCPSourceDiagnostic(
+                source=str(broken),
+                problem="unreadable",
+            )
+        ]
+
+
+class TestWorkspaceInference:
+    """The cwd fallback is opt-in, so daemons keep their guarantee."""
+
+    def _project_with_dotmcp(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"project-srv": {"command": "srv"}}})
+        )
+        monkeypatch.chdir(project)
+        return project
+
+    def test_unpinned_workspace_is_ignored_by_default(self, tmp_path, monkeypatch):
+        # A daemon launched in an arbitrary directory must not infer a
+        # project file from it. _opencode_config_paths documents exactly
+        # this hazard; the default preserves it for every connector.
+        self._project_with_dotmcp(tmp_path, monkeypatch)
+        assert connector_paths.mcp_servers("claudecode") == []
+
+    def test_unpinned_workspace_is_used_when_caller_opts_in(
+        self, tmp_path, monkeypatch,
+    ):
+        # An interactive command knows its cwd is the operator's project.
+        self._project_with_dotmcp(tmp_path, monkeypatch)
+        entries = connector_paths.mcp_servers(
+            "claudecode", infer_workspace_from_cwd=True,
+        )
+        assert [e.name for e in entries] == ["project-srv"]
+
+    def test_explicit_workspace_beats_cwd(self, tmp_path, monkeypatch):
+        # Opting in must never override a pinned workspace.
+        self._project_with_dotmcp(tmp_path, monkeypatch)
+        pinned = tmp_path / "pinned"
+        pinned.mkdir()
+        (pinned / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"pinned-srv": {"command": "srv"}}})
+        )
+        entries = connector_paths.mcp_servers(
+            "claudecode",
+            workspace_dir=str(pinned),
+            infer_workspace_from_cwd=True,
+        )
+        assert [e.name for e in entries] == ["pinned-srv"]
+
+    @pytest.mark.parametrize("connector", ["codex", "zeptoclaw", "copilot"])
+    def test_opt_in_applies_across_connectors(
+        self, tmp_path, monkeypatch, connector,
+    ):
+        # The silent miss was never claudecode-specific.
+        self._project_with_dotmcp(tmp_path, monkeypatch)
+        assert connector_paths.mcp_servers(connector) == []
+        entries = connector_paths.mcp_servers(
+            connector, infer_workspace_from_cwd=True,
+        )
+        assert [e.name for e in entries] == ["project-srv"]
+
+
+class TestMCPSourceLocations:
+    """What the tool reports it checked must be what it opened."""
+
+    def test_claudecode_lists_every_read_surface(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        locations = connector_paths.mcp_source_locations(
+            "claudecode", infer_workspace_from_cwd=True,
+        )
+        names = [os.path.basename(p) for p in locations]
+        assert ".claude.json" in names
+        assert ".mcp.json" in names
+        assert "settings.local.json" in names
+
+    def test_unknown_connector_reports_no_locations(self):
+        # mcp_servers() falls through to the OpenClaw reader for an
+        # unrecognised name, which is a silent read of the wrong file.
+        # An empty location list is what lets the CLI say so and exit 1.
+        assert connector_paths.mcp_source_locations("not-a-connector") == []
+
+    def test_omnigent_is_not_an_empty_location_list(self):
+        # Omnigent genuinely has no MCP registry. That is a real answer,
+        # not a discovery failure, so it must not trip the exit-1 path.
+        assert connector_paths.mcp_source_locations("omnigent") != []
+
+    def test_openclaw_names_the_command_it_prefers(self):
+        locations = connector_paths.mcp_source_locations("openclaw")
+        assert any("openclaw config get" in loc for loc in locations)
+
+    @pytest.mark.parametrize(
+        "connector",
+        [
+            "claudecode",
+            "codex",
+            "zeptoclaw",
+            "cursor",
+            "copilot",
+            "antigravity",
+            "opencode",
+            "geminicli",
+            "openhands",
+            "hermes",
+            "windsurf",
+        ],
+    )
+    def test_every_file_opened_was_declared(
+        self, tmp_path, monkeypatch, connector,
+    ):
+        """The property that makes the ``checked:`` line trustworthy.
+
+        The old ``_mcp_source_hint`` was a hand-written label, so it could
+        not go stale in any way a human would notice -- "Claude Code
+        settings and workspace MCP config" stayed accurate-sounding for
+        the entire time ``~/.claude.json`` went unread. This test asserts
+        the report against the syscalls instead of against a docstring.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        opened: list[str] = []
+        real_open = builtins.open
+
+        def recording_open(file, *args, **kwargs):
+            try:
+                opened.append(os.path.abspath(os.fspath(file)))
+            except TypeError:
+                pass
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", recording_open)
+        connector_paths.mcp_servers(connector, infer_workspace_from_cwd=True)
+        monkeypatch.setattr(builtins, "open", real_open)
+
+        declared = {
+            os.path.abspath(p)
+            for p in connector_paths.mcp_source_locations(
+                connector, infer_workspace_from_cwd=True,
+            )
+        }
+        undeclared = [p for p in opened if p not in declared]
+        assert not undeclared, (
+            f"{connector} read files it did not report checking: {undeclared}"
+        )
+
+    def test_amp_skill_bundled_mcp_json_is_declared(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        skill_mcp = home / ".agents" / "skills" / "bundled-demo" / "mcp.json"
+        skill_mcp.parent.mkdir(parents=True)
+        skill_mcp.write_text(
+            json.dumps({"mcpServers": {"bundled": {"command": "npx", "args": ["demo"]}}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(tmp_path)
+
+        declared = {
+            os.path.abspath(p)
+            for p in connector_paths.mcp_source_locations("amp")
+        }
+        assert os.path.abspath(str(skill_mcp)) in declared
+
+
+def test_bundled_mcp_names_are_claude_code_only():
+    assert connector_paths.is_bundled_mcp_server("computer-use")
+    assert connector_paths.is_bundled_mcp_server("Claude Browser")
+    assert connector_paths.is_bundled_mcp_server("claude.ai Slack")
+    assert connector_paths.is_bundled_mcp_server("claude_ai_Gmail")
+    assert connector_paths.is_bundled_mcp_server(
+        "computer-use", connector="claudecode",
+    )
+    assert not connector_paths.is_bundled_mcp_server(
+        "computer-use", connector="cursor",
+    )
+    assert not connector_paths.is_bundled_mcp_server("github")
+    assert not connector_paths.is_bundled_mcp_server("")
