@@ -128,6 +128,14 @@ Bash, WSL, or another PowerShell process inside Copilot's own `powershell`
 boundary. Adapter failures and timeouts produce empty stdout and exit 0, as
 required by the connector's fail-open integration contract.
 
+Copilot's hook reference permits `toolArgs` to be any JSON value, while its
+official CLI hook tutorial documents that field as a JSON-encoded string. The
+gateway accepts both the object and JSON-string forms, preserves the inner
+argument object for bounded validation, and maps Copilot's Windows
+`powershell` terminal label to host-shell grammar only inside the private
+ActionFacts boundary. The original connector tool identity remains unchanged
+in audit and telemetry.
+
 The current documented events are `sessionStart`, `sessionEnd`,
 `userPromptSubmitted`, `userPromptTransformed`, `preToolUse`, `postToolUse`,
 `postToolUseFailure`, `permissionRequest`, `agentStop`, `subagentStart`,

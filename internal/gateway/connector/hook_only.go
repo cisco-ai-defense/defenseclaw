@@ -641,13 +641,21 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		return req
 	}
 	req.ToolArgsAuthoritative = true
-	object, ok := args.(map[string]interface{})
-	if !ok {
-		return req
-	}
-	raw, err := json.Marshal(object)
-	if err == nil {
-		req.ToolArgs = raw
+	switch value := args.(type) {
+	case map[string]interface{}:
+		raw, err := json.Marshal(value)
+		if err == nil {
+			req.ToolArgs = raw
+		}
+	case string:
+		// Copilot's hook reference types toolArgs as unknown, while the
+		// official CLI hook tutorial documents and emits it as a JSON string.
+		// Preserve that inner object for the strict ActionFacts parser instead
+		// of treating a valid native command as an empty argument projection.
+		raw := bytes.TrimSpace([]byte(value))
+		if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' && json.Valid(raw) {
+			req.ToolArgs = append(json.RawMessage(nil), raw...)
+		}
 	}
 	return req
 }
