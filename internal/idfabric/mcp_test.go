@@ -79,7 +79,10 @@ func TestClassifyAuthMethod(t *testing.T) {
 		clientCert   bool
 		want         AuthMethod
 	}{
-		{"no config is none", "", nil, "", false, AuthMethodNone},
+		// Silence is not evidence of an unauthenticated server: the grant may
+		// live in the agent's own storage rather than the MCP config.
+		{"no config is unknown", "", nil, "", false, AuthMethodUnknown},
+		{"declared none is none", "none", nil, "", false, AuthMethodNone},
 		{"client cert wins", "oauth", []string{"authorization"}, "bearer", true, AuthMethodMTLS},
 		{"declared oauth", "oauth", nil, "", false, AuthMethodOAuth},
 		{"bearer scheme", "", []string{"authorization"}, "Bearer", false, AuthMethodBearerToken},

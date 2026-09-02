@@ -33,16 +33,6 @@ type DiscoveryResult struct {
 type mcpLayer struct {
 	path string
 	read func(string) ([]config.MCPServerEntry, error)
-
-	// authObservable records whether this layer's parser surfaces the auth
-	// fields (headers, authProviderType, oauth) at all.
-	//
-	// Several parsers deliberately project only command/args/env/url, so an
-	// entry from them carries no auth evidence either way. Reporting
-	// auth_method "none" for those would assert that a server is
-	// unauthenticated when nothing was ever observed, so they report
-	// "unknown" instead.
-	authObservable bool
 }
 
 // DiscoverMCPServers reads the MCP servers configured for one connector, for
@@ -99,7 +89,7 @@ func DiscoverMCPServers(platform Platform, workspaceDir string, deadline time.Ti
 				result.SkippedDisabled++
 				continue
 			}
-			result.Servers = append(result.Servers, projectMCPEntry(entry, layer.authObservable))
+			result.Servers = append(result.Servers, projectMCPEntry(entry))
 		}
 	}
 
@@ -132,9 +122,8 @@ func mcpLayersFor(platform Platform, workspaceDir string) []mcpLayer {
 		var layers []mcpLayer
 		if workspace != "" {
 			layers = append(layers, mcpLayer{
-				path:           filepath.Join(workspace, ".mcp.json"),
-				read:           config.ReadMCPFromDotMCPJSON,
-				authObservable: true,
+				path: filepath.Join(workspace, ".mcp.json"),
+				read: config.ReadMCPFromDotMCPJSON,
 			})
 		}
 		claudeDir := envDir("CLAUDE_CONFIG_DIR", home, ".claude")
@@ -144,8 +133,7 @@ func mcpLayersFor(platform Platform, workspaceDir string) []mcpLayer {
 		}
 		layers = append(layers,
 			// BothScopes covers the user-level map and every project scope
-			// recorded in the state file. Neither it nor the settings reader
-			// projects auth fields, so both are auth-opaque.
+			// recorded in the state file.
 			mcpLayer{path: statePath, read: config.ReadMCPFromClaudeJSONBothScopes},
 			mcpLayer{path: filepath.Join(claudeDir, "settings.json"), read: config.ReadMCPFromClaudeSettings},
 		)
@@ -172,16 +160,14 @@ func mcpLayersFor(platform Platform, workspaceDir string) []mcpLayer {
 			// Cursor resolves the user scope ahead of the workspace scope, so
 			// a user entry wins a name collision.
 			layers = append(layers, mcpLayer{
-				path:           filepath.Join(home, ".cursor", "mcp.json"),
-				read:           config.ReadMCPFromDotMCPJSON,
-				authObservable: true,
+				path: filepath.Join(home, ".cursor", "mcp.json"),
+				read: config.ReadMCPFromDotMCPJSON,
 			})
 		}
 		if workspace != "" {
 			layers = append(layers, mcpLayer{
-				path:           filepath.Join(workspace, ".cursor", "mcp.json"),
-				read:           config.ReadMCPFromDotMCPJSON,
-				authObservable: true,
+				path: filepath.Join(workspace, ".cursor", "mcp.json"),
+				read: config.ReadMCPFromDotMCPJSON,
 			})
 		}
 		return layers
@@ -210,7 +196,7 @@ func envDir(variable, home, defaultDir string) string {
 //
 // Env, Args, Headers, OAuth blobs, CWD, and full URLs are read here but never
 // carried forward: only the classification they imply is kept.
-func projectMCPEntry(entry config.MCPServerEntry, authObservable bool) MCPServer {
+func projectMCPEntry(entry config.MCPServerEntry) MCPServer {
 	out := MCPServer{ServerName: strings.TrimSpace(entry.Name)}
 
 	if strings.TrimSpace(entry.URL) != "" {
@@ -228,14 +214,12 @@ func projectMCPEntry(entry config.MCPServerEntry, authObservable bool) MCPServer
 			authorizationScheme(entry.Headers),
 			false,
 		)
-		if out.AuthMethod == AuthMethodNone {
+		if out.AuthMethod == AuthMethodUnknown {
 			// The sanitized URL dropped user-info and any query string; recover
-			// what they implied so a token carried in the URL is not reported
-			// as an unauthenticated endpoint.
-			if hint := AuthHintFromURL(entry.URL); hint != "" {
+			// the classification they implied so a credential carried in the
+			// URL is named rather than left unidentified.
+			if hint := AuthHintFromURL(entry.URL); hint != "" && hint != AuthMethodUnknown {
 				out.AuthMethod = hint
-			} else if !authObservable {
-				out.AuthMethod = AuthMethodUnknown
 			}
 		}
 		return out

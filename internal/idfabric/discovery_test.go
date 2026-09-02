@@ -230,8 +230,37 @@ func TestDiscoverMCPServersDoesNotReportURLCredentialAsUnauthenticated(t *testin
 	if byName["query-key"].AuthMethod != AuthMethodUnknown {
 		t.Errorf("query-key AuthMethod = %q, want %q", byName["query-key"].AuthMethod, AuthMethodUnknown)
 	}
-	if byName["no-auth"].AuthMethod != AuthMethodNone {
-		t.Errorf("no-auth AuthMethod = %q, want %q", byName["no-auth"].AuthMethod, AuthMethodNone)
+	if byName["no-auth"].AuthMethod != AuthMethodUnknown {
+		t.Errorf("no-auth AuthMethod = %q, want %q", byName["no-auth"].AuthMethod, AuthMethodUnknown)
+	}
+}
+
+// TestDiscoverMCPServersDoesNotClaimNoneForBareRemoteURL pins the rule that
+// silence in the config is not evidence of an unauthenticated server.
+//
+// A Cursor entry that is nothing but a url is the common shape for an
+// OAuth-authenticated remote server: Cursor holds the grant in its own
+// storage, so mcp.json carries no auth field at all. Reporting "none" here
+// told an operator the endpoint was open when it was not.
+func TestDiscoverMCPServersDoesNotClaimNoneForBareRemoteURL(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+
+	writeJSON(t, filepath.Join(home, ".cursor", "mcp.json"), map[string]any{
+		"mcpServers": map[string]any{
+			"atlassian-rovo": map[string]any{"url": "https://mcp.atlassian.com/v1/sse"},
+		},
+	})
+
+	got := DiscoverMCPServers(PlatformCursor, "", time.Now().Add(5*time.Second))
+	if len(got.Servers) != 1 {
+		t.Fatalf("len(Servers) = %d, want 1", len(got.Servers))
+	}
+	if got.Servers[0].AuthMethod == AuthMethodNone {
+		t.Error("AuthMethod = none for a bare remote URL, which asserts an unauthenticated endpoint that was never observed")
+	}
+	if got.Servers[0].AuthMethod != AuthMethodUnknown {
+		t.Errorf("AuthMethod = %q, want %q", got.Servers[0].AuthMethod, AuthMethodUnknown)
 	}
 }
 

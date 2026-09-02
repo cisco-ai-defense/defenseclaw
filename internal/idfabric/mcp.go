@@ -102,6 +102,13 @@ func AuthHintFromURL(raw string) AuthMethod {
 // retained beyond reading an Authorization scheme token. declaredType is the
 // connector's own transport/auth type field when present. The result describes
 // configuration, not a successful authentication.
+//
+// AuthMethodNone requires the configuration to say so. Absence of auth fields
+// is not evidence of an unauthenticated server: agents hold OAuth grants
+// outside the MCP config entirely - Cursor keeps its grant in its own storage,
+// so a plain {"url": ...} entry is routinely a fully authenticated server.
+// Treating that silence as "none" invented unauthenticated remote endpoints
+// that an operator would then go hunting for.
 func ClassifyAuthMethod(declaredType string, headerNames []string, authSchemeToken string, hasClientCert bool) AuthMethod {
 	if hasClientCert {
 		return AuthMethodMTLS
@@ -109,6 +116,8 @@ func ClassifyAuthMethod(declaredType string, headerNames []string, authSchemeTok
 	switch strings.ToLower(strings.TrimSpace(declaredType)) {
 	case "oauth", "oauth2":
 		return AuthMethodOAuth
+	case "none", "unauthenticated":
+		return AuthMethodNone
 	}
 	switch strings.ToLower(strings.TrimSpace(authSchemeToken)) {
 	case "bearer":
@@ -124,9 +133,6 @@ func ClassifyAuthMethod(declaredType string, headerNames []string, authSchemeTok
 		case "x-api-key", "api-key", "apikey", "x-goog-api-key":
 			return AuthMethodAPIKeyHeader
 		}
-	}
-	if len(headerNames) == 0 && declaredType == "" {
-		return AuthMethodNone
 	}
 	return AuthMethodUnknown
 }
