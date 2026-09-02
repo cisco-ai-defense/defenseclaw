@@ -330,13 +330,13 @@ func TestAssertCNIsCisco(t *testing.T) {
 		t.Errorf("exact CN unexpectedly rejected: %v", err)
 	}
 	rejects := []string{
-		"Cisco Systems, Inc. (Test Root)",  // suffix — trailing junk
-		"Not Cisco Systems, Inc.",          // prefix — masquerading
-		"Cisco Systems, Inc",               // missing period — near-match
-		"cisco systems, inc.",              // case difference — /n is case-insensitive but our contract is exact
-		"Cisco Systems Inc.",               // missing comma
-		"",                                 // empty
-		" Cisco Systems, Inc. ",            // whitespace-padded
+		"Cisco Systems, Inc. (Test Root)", // suffix — trailing junk
+		"Not Cisco Systems, Inc.",         // prefix — masquerading
+		"Cisco Systems, Inc",              // missing period — near-match
+		"cisco systems, inc.",             // case difference — /n is case-insensitive but our contract is exact
+		"Cisco Systems Inc.",              // missing comma
+		"",                                // empty
+		" Cisco Systems, Inc. ",           // whitespace-padded
 	}
 	for _, cn := range rejects {
 		err := assertCNIsCisco("payload/x.exe", cn)
