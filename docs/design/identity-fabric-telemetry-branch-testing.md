@@ -1,379 +1,405 @@
-# Identity Fabric telemetry: branch testing plan
+# End-user identity in v8 telemetry: branch testing plan
 
 Branch: `feature/identity-fabric-telemetry` (not for merge)
 Base: `origin/main` at `74fddaee`
 
-AI Defense has no ingest endpoint for these records yet, so this branch writes
-each record to disk exactly as it would have been sent. The purpose of the
-branch is to inspect that output on macOS and Windows before any transport is
-built.
+## What this branch does
 
-## What gets captured
+DefenseClaw already reports *what* happened on an endpoint — which agent ran,
+which tool it called, which MCP servers are configured. It does not report *who
+did it*. On a multi-user endpoint every record is attributed to the machine, so
+an operator can see that an agent exfiltrated a file but not whose account was
+driving it.
 
-Two Astrix-shaped models, defined in `internal/idfabric/schema.go`:
+This branch adds the end user as a first-class attribute on v8 telemetry:
 
-| Model | Written on | Filename prefix |
-|---|---|---|
-| `DefenseClawAgentEvent` (`session_start`) | agent session start | `agentevent-<connector>-session_start-` |
-| `DefenseClawAgentEvent` (`pre_tool_use`) | every tool call | `agentevent-<connector>-pre_tool_use-` |
-| `DefenseClawAgent` (inventory) | agent session start | `agent-<connector>-inventory-` |
-
-The inventory record reuses the same discovery pass as its `session_start`
-sibling rather than reading the config tree twice.
-
-Connectors in scope: `codex`, `claudecode`, `cursor`. Any other connector, and
-any event other than the two above, is skipped silently.
-
-Nine reference records — every connector and event, both models — are committed
-under `internal/idfabric/testdata/samples/`. Read those first; they are what a
-correct run looks like, with host-specific values replaced by placeholders.
-
-## Where capture runs, and why it matters
-
-Capture runs **in the hook process**, from `internal/cli/hook.go`, not in the
-sidecar. Only the hook has the real user's token, home directory, and the
-agent's workspace. In managed enterprise the sidecar runs as LocalSystem, so
-collecting there would report the service account as the user and would look
-for MCP config in the wrong home.
-
-The consequence to keep in mind while testing: `user.sid` / `user.uid` describe
-whoever ran the agent, which is the intended join key.
-
-## Enabling it
-
-Capture is a managed-enterprise feature and is off by default. It turns on when
-any of these hold:
-
-- the hook was invoked with `--enterprise-managed`
-- `deployment_mode` is `managed_enterprise`
-- `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise`
-- `DEFENSECLAW_IDFABRIC_SPOOL=1` — test-only override, not a supported
-  configuration surface
-
-Only the first of those reaches an installed hook today: managed hooks are
-registered with `--enterprise-managed`, while the deployment mode is pinned
-into the *service* environment that an agent-spawned hook does not inherit.
-
-Two different code paths deliver that flag, because the two platforms invoke
-hooks differently:
-
-| Platform | Hook invocation | Where capture happens |
-| --- | --- | --- |
-| Windows | native `<exe> hook --connector <name>` | inline, in the hook process |
-| macOS / Linux | bundled `.sh` script that `curl`s the gateway | `defenseclaw idfabric capture`, backgrounded by the script |
-
-The Unix path needs the separate subcommand because the shell hooks never run
-the native `hook` command, and capture cannot move to the gateway: the gateway
-is a LaunchDaemon running as root with its own home, so it would attribute
-every session on the machine to that one identity.
-
-While disabled the code path costs one environment lookup and does not touch
-stdin, so a non-enterprise endpoint behaves exactly as it does on `main`.
-
-## Output location
-
-Per-user state, following each platform's convention, or
-`DEFENSECLAW_IDFABRIC_SPOOL_DIR` when set:
-
-| Platform | Directory |
+| Attribute | Meaning |
 | --- | --- |
-| macOS | `~/Library/Application Support/DefenseClaw/aid-spool/` |
-| Windows | `%LOCALAPPDATA%\DefenseClaw\aid-spool\` |
-| Linux | `${XDG_STATE_HOME:-~/.local/state}/DefenseClaw/aid-spool/` |
+| `user.id` | Windows SID, or POSIX uid |
+| `defenseclaw.user.id_kind` | `windows_sid` or `posix_uid`, so a consumer never has to infer which from the shape |
+| `defenseclaw.user.name` | bare OS account name, never `DOMAIN\user` |
+| `defenseclaw.user.email` | the account the agent is signed into, when the agent stores one locally |
 
-This is deliberately **not** derived from the DefenseClaw home. In managed
-enterprise mode the home is the machine state root under `ProgramData`, whose
-DACL grants SYSTEM, Administrators, and the gateway service account only —
-nothing to `Users`, with inheritance protected. A hook running as the
-interactive user cannot create a directory there, so a home-derived spool
-failed in exactly the mode capture is gated to. Per-user state is also where
-per-user records belong, and it stays collectable per profile.
+An earlier revision of this branch wrote Astrix-shaped records to a per-user
+disk spool, because AI Defense had no ingest for them. That is gone. The
+records now travel on the existing v8 contract, which already reaches AI
+Defense through the `managedaid` destination, so there is no new transport to
+build and no staging buffer to drain.
 
-It is not `~/.defenseclaw`: the Unix hook scripts read that path's existence as
-"an unmanaged install is present", so creating it on a managed endpoint would
-change how a stray unmanaged hook behaves.
+## Where identity comes from, and why it can't come from the gateway
 
-The tradeoff is that a user can delete their own pending records. That is
-acceptable for a pre-ingest staging buffer that disappears once AI Defense
-ingest exists; tamper-evident retention belongs to the audit store.
+The gateway cannot ask the OS who the user is. Under a managed install it runs
+as a service account — LocalSystem on Windows, a daemon account on macOS — so
+`os/user.Current()` returns the service principal, and every event on a
+multi-user endpoint would be attributed to one identity that never touched an
+agent. The prior code did exactly this; fixing it is part of the branch.
 
-Files are mode 0600, owner-only
-directory, written through an atomic replace so a partial JSON document is
-never observable. The spool stops writing at 5000 files rather than evicting
-evidence.
+Only the hook runs inside the real user's session, so the hook reports the
+identity and the gateway consumes it:
 
-Filenames are `<model>-<connector>-<event>-<UTC timestamp>-<nonce>.json`. The
-connector and event components are sanitized to `[a-z0-9_-]`: the event name
-can originate in agent-controlled hook JSON, so it is never trusted as a path
-component.
+| Platform | Hook shape | How identity travels |
+| --- | --- | --- |
+| macOS / Linux | bundled `.sh` that `curl`s the gateway | `defenseclaw_user_identity_args` in `_hardening.sh` emits `X-DefenseClaw-User-Id` / `X-DefenseClaw-User-Name` curl arguments |
+| Windows | native `<exe> hook --connector <name>` | `hookexec.setUserIdentityHeaders` reads the thread/process token SID |
+
+Precedence in the gateway is deliberate. Headers come from the hook process and
+are preferred. The hook *payload* is agent-controlled and is consulted only as a
+fallback, for connectors that report a user natively (Cursor). Under an
+unmanaged install — and only then — the gateway falls back to its own OS
+identity, because there it really is running as the person using it.
+
+None of this is authentication. The gateway's loopback listener is reachable by
+any local process, so these are attribution join keys, not authenticated
+assertions. They must never drive an authorization decision.
+
+### The email
+
+`internal/useridentity` reads the signed-in account from each connector's own
+local state:
+
+| Connector | Source |
+| --- | --- |
+| Claude Code | `oauthAccount.emailAddress` in `~/.claude.json` |
+| Codex | the `email` claim in the ID token in `~/.codex/auth.json` (signature deliberately unverified — we hold no issuer key, and this is evidence, not an assertion) |
+| Cursor | `user_email` in the hook payload; Cursor keeps no local account file |
+
+Absent is a normal outcome and is preferred over a guess. The address is never
+synthesized from `username@domain`, git config, environment variables, or a
+Windows UPN. On a host where Codex keeps credentials only in the OS credential
+store, there is nothing to read and the field is simply omitted.
+
+For inventory, the gateway resolves the address **per profile directory**, not
+for itself, so a scan of five user profiles reports five different accounts.
+When an explicit home is supplied, `CODEX_HOME` / `CLAUDE_CONFIG_DIR` from the
+reader's own environment are ignored — honoring them would attribute the
+gateway operator's account to every profile it scanned.
+
+## Where the records go
+
+Two families carry identity, and they have different delivery guarantees.
+
+**Hook lifecycle** (`agent.lifecycle`, `tool.activity`, `guardrail.evaluation`)
+— near-real-time, one record set per session start and per tool call. These
+buckets are *not* force-collected under `managedaid`, so whether they reach AI
+Defense depends on operator collection config.
+
+**Inventory** (`ai.discovery`) — the existing 5-minute sidecar discovery scan,
+now attributing each MCP row to the profile it was read from. `ai.discovery` is
+force-collected in managed enterprise, so per-user MCP attribution reaches AI
+Defense without operator action. Note that `emitEndpointInventory` is gated on
+managed enterprise and does not run on an unmanaged install.
+
+`defenseclaw.user.email` is classified `identifier` / `sensitive` and is
+preserved in plaintext by the `managedaid` projection. **This needs privacy
+sign-off before the branch is merged.**
 
 ---
 
 # Part 1 — macOS
 
-Already exercised on macOS; these steps reproduce it.
+## Step 1 — Unit tests
 
 ```bash
-git fetch origin
-git checkout feature/identity-fabric-telemetry
+git fetch origin && git checkout feature/identity-fabric-telemetry
 
-go test ./internal/idfabric/ ./internal/cli/ -run 'TestCapture|TestDiscover|TestValidateEmail|TestSpool'
-go build -o /tmp/defenseclaw ./cmd/defenseclaw
-
-export DEFENSECLAW_IDFABRIC_SPOOL=1
-export DEFENSECLAW_IDFABRIC_SPOOL_DIR=/tmp/dc-idfabric-spool
-
-echo '{"session_id":"smoke-1","model":"gpt-5-codex","cwd":"'"$PWD"'"}' \
-  | /tmp/defenseclaw hook --connector codex --event session_start --api-addr 127.0.0.1:1
-
-echo '{"session_id":"smoke-1","tool_name":"mcp__github__create_issue","tool_input":{"title":"x"}}' \
-  | /tmp/defenseclaw hook --connector codex --event pre_tool_use --api-addr 127.0.0.1:1
-
-ls -l "$DEFENSECLAW_IDFABRIC_SPOOL_DIR"
+go test ./internal/useridentity/...
+go test ./internal/gateway/ -run 'Identity|UserEmail|InventoryHomeOwner|AttributeEachHome|DaemonsOwnProfile'
+go test ./internal/gateway/connector/ -run 'IdentityHeaders|UserIdentityArgs'
 ```
 
-An unreachable `--api-addr` is intentional: capture happens before the gateway
-request, so records are written even when the guardrail fails open. Expect
-`user.uid` to be your effective UID and `user.sid` to be absent.
+`TestIdentityHeadersSurviveTheSystemShellsReader` is the one to watch. It runs
+each shipped hook's own reader block against the helper under `/bin/bash`
+specifically, not whatever bash is first on `PATH`. See "the bash 3.2 trap"
+below for why that distinction is the whole test.
 
-Leaving `DEFENSECLAW_IDFABRIC_SPOOL_DIR` unset writes to the real per-user
-location in the table above instead, which is what an installed hook uses.
+## Step 2 — A live gateway with a file sink
 
-Two things to know before reading the output. This run discovers MCP servers
-from *your* real `~/.codex`, `~/.claude.json`, and `~/.cursor`, so the
-`mcp_servers` list is a live inventory rather than a fixture — useful for
-checking sanitization against genuine config. And `--connector` selects which
-config layers are consulted, so the same command run for `codex`, `claudecode`,
-and `cursor` should produce three different inventories.
+There is no environment variable that turns on file output in v8; it is a
+config destination. Use an isolated home so nothing touches your real install.
 
-To exercise a real agent session rather than synthetic payloads, the install
-must be managed: the capture call is rendered into the `.sh` hooks only under
-`{{if .Managed}}`, so an unmanaged macOS install captures nothing regardless of
-`DEFENSECLAW_IDFABRIC_SPOOL`. For an unmanaged endpoint, drive the subcommand
-directly as shown under "Verifying the macOS capture path".
+```bash
+go build -o /private/tmp/dc-idfab/defenseclaw ./cmd/defenseclaw
+mkdir -p /private/tmp/dc-idfab/home /private/tmp/dc-idfab/confighome
+cp -R policies /private/tmp/dc-idfab/home/policies
+
+cat > /private/tmp/dc-idfab/config.yaml <<'YAML'
+config_version: 8
+gateway:
+  host: 127.0.0.1
+  port: 18899
+observability:
+  destinations:
+    - name: local-jsonl
+      kind: jsonl
+      path: /private/tmp/dc-idfab/home/telemetry.jsonl
+YAML
+
+export DEFENSECLAW_HOME=/private/tmp/dc-idfab/home
+export DEFENSECLAW_CONFIG=/private/tmp/dc-idfab/config.yaml
+/private/tmp/dc-idfab/defenseclaw &
+```
+
+Use `/private/tmp`, not `/tmp`: `/tmp` is a symlink on macOS and the device
+identity loader refuses an indirect data directory.
+
+First boot synthesizes a gateway token into `$DEFENSECLAW_HOME/.env` and then
+exits with `config reload requires gateway restart for: gateway`. Copy that
+token into `gateway.token` in the config and start it again; after that it
+stays up. The `ws://127.0.0.1:18899` connect failures in the log are expected —
+there is no OpenClaw gateway — and do not affect hook events.
+
+Confirm the sink is live:
+
+```bash
+curl -s http://127.0.0.1:18970/health \
+  | python3 -c 'import json,sys; print([d["name"] for d in json.load(sys.stdin)["telemetry"]["details"]["destinations"]])'
+```
+
+## Step 3 — Render the real hooks
+
+Hook endpoints reject any request whose contract does not match the installed
+runtime lock, so you cannot hand-craft one with `curl`. Render the real hooks
+into a sandbox config home instead:
+
+```bash
+for c in codex claudecode cursor; do
+  /private/tmp/dc-idfab/defenseclaw connector reconcile \
+    --connector "$c" --config-home /private/tmp/dc-idfab/confighome --json
+done
+```
+
+`--config-home` is hidden but supported, and it is what keeps this off your
+real `~/.codex`, `~/.claude.json`, and `~/.cursor`.
+
+## Step 4 — Drive the hooks
+
+Invoke them exactly as the agent does — the argument form is in the rendered
+`confighome/config.toml` (Codex) and `confighome/hooks.json` (Cursor).
+
+```bash
+H=/private/tmp/dc-idfab/home/hooks
+
+echo '{"hook_event_name":"SessionStart","session_id":"mac-codex-1","model":"gpt-5-codex","cwd":"'"$PWD"'","source":"startup"}' \
+  | "$H/codex-hook.sh" --event SessionStart --hook-contract codex-hooks-v4
+
+echo '{"hook_event_name":"PreToolUse","session_id":"mac-codex-1","tool_name":"mcp__github__create_issue","tool_input":{"title":"demo"}}' \
+  | "$H/codex-hook.sh" --event PreToolUse --hook-contract codex-hooks-v4
+
+echo '{"hook_event_name":"SessionStart","session_id":"mac-claude-1","cwd":"'"$PWD"'","source":"startup","model":"claude-sonnet-4-6"}' \
+  | "$H/claude-code-hook.sh"
+
+echo '{"hook_event_name":"sessionStart","session_id":"mac-cursor-1","cursor_version":"3.10.17","user_email":"you@example.com"}' \
+  | "$H/cursor-hook.sh"
+
+echo '{"hook_event_name":"beforeShellExecution","conversation_id":"mac-cursor-1","command":"git status","user_email":"you@example.com"}' \
+  | "$H/cursor-hook.sh"
+```
+
+Then read the identity columns:
+
+```bash
+python3 - <<'PY'
+import json
+for line in open('/private/tmp/dc-idfab/home/telemetry.jsonl'):
+    line = line.strip()
+    if not line:
+        continue
+    d = json.loads(line)
+    b = d.get('body', {})
+    if not b.get('user.id'):
+        continue
+    print(d['bucket'], d['event_name'], b.get('user.id'),
+          b.get('defenseclaw.user.id_kind'), b.get('defenseclaw.user.name'),
+          b.get('defenseclaw.user.email'))
+PY
+```
+
+## Observed output on macOS
+
+Captured from the run above on macOS 15 (arm64), uid 501. Five records carry
+identity per session-start-plus-one-tool-call sequence.
+
+```
+bucket                 event                        user.id  id_kind    name     email
+agent.lifecycle        session_start                501      posix_uid  ihabler  ihabler@cisco.com
+guardrail.evaluation   hook_decision                501      posix_uid  ihabler  ihabler@cisco.com
+tool.activity          tool_start                   501      posix_uid  ihabler  ihabler@cisco.com
+tool.activity          tool.invocation.requested    501      posix_uid  ihabler  ihabler@cisco.com
+guardrail.evaluation   hook_decision                501      posix_uid  ihabler  ihabler@cisco.com
+```
+
+A full `agent.lifecycle` / `session_start` body from Codex:
+
+```json
+{
+  "defenseclaw.agent.lifecycle.event": "session_start",
+  "defenseclaw.agent.lifecycle.state": "active",
+  "defenseclaw.agent.root.id": "agent-c7a0b1646aac54a8",
+  "defenseclaw.agent.type": "codex",
+  "defenseclaw.session.root.id": "mac-codex-1",
+  "defenseclaw.session.source": "startup",
+  "defenseclaw.user.email": "ihabler@cisco.com",
+  "defenseclaw.user.id_kind": "posix_uid",
+  "defenseclaw.user.name": "ihabler",
+  "gen_ai.agent.name": "codex",
+  "gen_ai.conversation.id": "mac-codex-1",
+  "gen_ai.provider.name": "openai",
+  "gen_ai.request.model": "gpt-5-codex",
+  "user.id": "501"
+}
+```
+
+Per connector, the identity fields observed were:
+
+| Connector | `user.id` | `id_kind` | `name` | `email` |
+| --- | --- | --- | --- | --- |
+| codex | `501` | `posix_uid` | `ihabler` | `ihabler@cisco.com` (from the `auth.json` ID token) |
+| claudecode | `501` | `posix_uid` | `ihabler` | *absent* |
+| cursor | `501` | `posix_uid` | `ihabler` | `ihabler@cisco.com` (from the payload) |
+
+The absent Claude Code address is correct behavior, not a defect: this host's
+`~/.claude.json` has no `oauthAccount` block, so there is nothing to read and
+the field is omitted rather than guessed.
+
+The Cursor row is the useful one to check, because it proves the precedence
+rule. Cursor's payload carries `user_email`, and without the headers the
+gateway derives a pseudonymous `user-<hash>` id from it. Seeing `501` /
+`posix_uid` / `ihabler` there means the hook's headers arrived and won, while
+the payload still supplied the address the OS cannot know.
+
+## The bash 3.2 trap
+
+The first implementation read the helper's output with `mapfile`. `mapfile` is
+bash 4; macOS ships bash 3.2 as `/bin/bash`, which is what the hooks' shebang
+resolves to. On every stock macOS endpoint the array stayed empty, no identity
+headers were sent, and nothing failed: hooks ran, tool calls were allowed, the
+gateway answered normally. The feature was simply absent.
+
+It was invisible in testing for a second reason. On an unmanaged install the
+gateway falls back to its own OS identity, which on a dev machine *is* the right
+user — so the records looked correct. The bug would only have surfaced in
+managed enterprise, where that fallback is deliberately disabled, which is the
+one deployment the feature exists for.
+
+The hooks now use a `while IFS= read -r` loop. Two tests pin it, and both run
+against `/bin/bash` explicitly rather than the first bash on `PATH`, since on a
+Homebrew machine those are different versions and the PATH one would pass.
+
+Note the same `mapfile` guard still wraps W3C **trace** header propagation in
+all three hooks (`TRACE_HEADER_ARGS`). That is pre-existing on `main`, not
+introduced here, and it means `traceparent` / `tracestate` are also not
+propagated from macOS hooks. Worth a separate fix.
 
 ---
 
 # Part 2 — Windows
 
-The Windows SID path is the only surface with no runtime coverage. It compiles
-and is vet-clean for `windows/amd64`, but `OSIdentity()`'s thread-token lookup
-has never executed. That is the main thing this run proves.
+The Windows SID path is the surface with no runtime coverage. It compiles and
+is vet-clean for `windows/amd64`, but the token lookup in
+`useridentity.currentIdentity` and the ProfileList lookups in
+`identityForHome` / `homeForID` have never executed.
 
-## Step 1 — Get the branch onto the VM
-
-Connect over the Bastion tunnel, then in the repo clone:
+## Step 1 — Prove the platform code runs
 
 ```powershell
 git fetch origin
 git checkout feature/identity-fabric-telemetry
-git log --oneline -1   # expect e6ad81c4
+
+go test ./internal/useridentity/... -v
 ```
 
-If the VM has no clone yet:
+`TestCurrentReportsAClassifiableIdentity` is the gate: it asserts the reported
+id classifies as the kind it claims. On Windows expect a `S-1-5-21-…` SID and
+`windows_sid`. If this fails, the token lookup is wrong and nothing else is
+worth running.
 
-```powershell
-git clone https://github.com/cisco-ai-defense/defenseclaw.git
-cd defenseclaw
-git checkout feature/identity-fabric-telemetry
-```
+`TestForHomeAndHomeForIDRoundTrip` exercises the ProfileList mapping in both
+directions — SID to profile directory and back. It skips rather than fails when
+no profile resolves, so read the output, not just the exit code.
 
-## Step 2 — Confirm the platform code runs at all
+## Step 2 — Standalone hook run as `dcstd`
 
-This is the cheapest possible signal that the SID path works, and it needs no
-installer:
+Build as the admin account, then run as the standard user so the SID belongs to
+a non-admin. Repeat Part 1 steps 2–4 with Windows paths; the Windows hook is
+the native executable rather than a shell script, so identity comes from
+`hookexec` and there is no `_hardening.sh` involved.
 
-```powershell
-go test ./internal/idfabric/ -run TestOSIdentityUsesPlatformJoinKey -v
-```
-
-The test asserts a non-empty `S-1-` prefixed SID and an absent UID. A failure
-here means the token lookup is wrong and nothing else is worth running.
-
-Then the rest of the suite plus the reference samples:
-
-```powershell
-go test ./internal/idfabric/ ./internal/cli/
-$env:IDFABRIC_WRITE_SAMPLES = "1"
-go test ./internal/idfabric/ -run TestCaptureHookEventSamples
-git diff --stat internal/idfabric/testdata/samples
-```
-
-That diff is the useful artifact: it shows exactly how Windows records differ
-from the committed macOS ones. Expect `sid` to replace `uid` and
-`operating_system` to become `windows`; anything else differing is worth a
-look. Discard the diff afterwards with
-`git checkout -- internal/idfabric/testdata/samples`.
-
-## Step 3 — Standalone hook run as `dcstd`
-
-Build once as the admin account, then run the hook as the standard user so the
-SID belongs to a non-admin:
-
-```powershell
-go build -o C:\Temp\defenseclaw.exe .\cmd\defenseclaw
-```
-
-As `dcstd`:
-
-```powershell
-$env:DEFENSECLAW_HOME = "$env:USERPROFILE\.defenseclaw"
-New-Item -ItemType Directory -Force -Path $env:DEFENSECLAW_HOME | Out-Null
-$env:DEFENSECLAW_IDFABRIC_SPOOL = "1"
-
-'{"session_id":"win-1","model":"gpt-5-codex","cwd":"C:\\Users\\dcstd\\proj"}' |
-  C:\Temp\defenseclaw.exe hook --connector codex --event session_start --api-addr 127.0.0.1:1
-
-'{"hook_event_name":"PreToolUse","session_id":"win-1","tool_name":"mcp__github__create_issue"}' |
-  C:\Temp\defenseclaw.exe hook --connector claudecode --api-addr 127.0.0.1:1
-
-Get-ChildItem "$env:DEFENSECLAW_HOME\aid-spool"
-Get-Content "$env:DEFENSECLAW_HOME\aid-spool\*session_start*.json"
-```
-
-Confirm `user.sid` matches `dcstd`:
+Confirm the SID the records carry matches the account:
 
 ```powershell
 [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 ```
 
+Expect `user.id` to be that SID, `defenseclaw.user.id_kind` to be
+`windows_sid`, and `defenseclaw.user.name` to be the bare account name with no
+`DOMAIN\` prefix.
+
+## Step 3 — Two users, one endpoint
+
+This is the case the feature exists for and the one macOS cannot exercise well.
+Drive agent sessions as two different accounts and confirm each record carries
+that account's SID — not the installing admin's, and not the service account's.
+
 ## Step 4 — Enterprise-managed run
 
-This is the only path that exercises the real gate rather than the env
-override, and the only one where `is_policy_enforceable` should be `true`.
-
 Install per the enterprise flow (`packaging/windows/install-enterprise.ps1`),
-then drive real agent sessions as `dcstd` with the installed hooks and **no**
-`DEFENSECLAW_IDFABRIC_SPOOL` set. Records land in
-`C:\Users\dcstd\AppData\Local\DefenseClaw\aid-spool\`.
+then drive real sessions as `dcstd` with the installed hooks.
 
-Check specifically that:
+Check specifically:
 
-- capture happens with no env override, proving the managed gate works alone
-- `is_policy_enforceable` is `true` (it is `false` under the env override,
-  because an ordinary user-scope hook can be removed by the user)
-- the spool is under the invoking user's `LOCALAPPDATA`, not under
-  `ProgramData` and not under the service account's profile
-- `device.id` is **expected to be absent**. The device key lives under the
-  DefenseClaw home, which in managed mode is the machine state root the user
-  cannot even traverse. Same root cause as the spool relocation, but this half
-  cannot be fixed from the hook side — it needs either an ACL that lets users
-  read the key, or the gateway supplying the fingerprint.
-
-If capture produces nothing, collect `icacls "%LOCALAPPDATA%\DefenseClaw"` and
-the stderr line `defenseclaw: identity fabric capture skipped (...)`, whose
-reason names the stage that failed.
+- Hook records carry the invoking user's SID even though the gateway runs as
+  LocalSystem. This is the misattribution fix; if records carry
+  `S-1-5-18`, the header path is not working and the gateway fell back to its
+  own token.
+- `ai.discovery` inventory rows attribute each MCP server to the profile it was
+  read from. On a two-user endpoint the same server name configured by both
+  users must appear twice with different `user.id` values.
+- No inventory row is attributed to the service account. The first inventory
+  pass reads the daemon's own home and is deliberately skipped under managed
+  enterprise; a row naming the service principal means that gate failed.
 
 ## Step 5 — Cursor on Windows
 
 Cursor's Windows transport uses the generated PowerShell adapter and
-`--input-file` rather than native stdin, which is a different code path through
-capture. Run a real Cursor session and confirm records still appear.
+`--input-file` rather than native stdin, which is a different path into
+`hookexec`. Confirm identity headers are still set.
+
+---
 
 ## What to check in every record
 
-- `user.sid` on Windows / `user.uid` elsewhere, never both
-- `authenticated_user_email` present only when the connector's own account file
-  supplies it. Claude Code reads `oauthAccount.emailAddress`; Codex reads the
-  `email` claim from the ID token in `auth.json`; Cursor reads `user_email`
-  from its payload. It is absent when Codex keeps credentials only in the OS
-  credential store. This is attribution evidence, not identity attestation.
-- `device.id` is the existing Ed25519 fingerprint. The hook never mints one, so
-  an endpoint with no `device.key` omits the field rather than publishing a
-  second, competing identity.
-- `mcp_discovery_status` — `complete` only when every config layer was read or
-  authoritatively absent. An unreadable layer yields `partial`/`error` so an
-  incomplete scan is never mistaken for an empty inventory.
-- `mcp_servers[].url` is reduced to `scheme://host[:port]`. Paths, queries, and
-  user-info are dropped. A credential in the URL still shows up as
-  `auth_method: basic` or `unknown` rather than `none`.
-- `auth_method: unknown` is expected for servers read from Claude Code's
-  `.claude.json` and from Codex `config.toml`: those parsers drop `headers` and
-  `authProviderType`, so no auth evidence exists either way and claiming `none`
-  would assert something never observed.
-- Absent by design: prompt text, tool inputs, `cwd`, `env`, header values,
-  OAuth blobs, and transcript paths. The workspace directory is used to locate
-  MCP config and is never emitted.
-
-Servers the agent has disabled are omitted and counted separately, because the
-`mcp_server` shape has no disabled field and emitting them would overstate the
-active surface.
-
-## Open question to settle during the Cursor run
-
-Cursor registers `preToolUse` **and** granular pre-action events
-(`beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`). Capture maps
-only `preToolUse`, on the assumption that both fire for the same call and
-mapping the granular ones too would double-count every tool use.
-
-If a real Cursor session produces `session_start` records but no
-`pre_tool_use` records, that assumption is wrong and the granular events need
-mapping in `eventKind`. Watch for this specifically.
+- `user.id` present with an `id_kind` that matches its shape. An id the gateway
+  cannot classify is emitted without a kind rather than being labelled
+  `posix_uid` — a consumer that joined an arbitrary string as a uid would
+  silently merge unrelated users.
+- `defenseclaw.user.name` is the bare account name. A `DOMAIN\user` value means
+  the Windows lookup stopped stripping the qualifier.
+- `defenseclaw.user.email` absent is fine and expected on many hosts. Present
+  but wrong is not: it must match the account the connector is actually signed
+  into.
+- No record carries the service account under a managed install.
+- MCP inventory rows are attributed per profile, and two users' same-named
+  servers stay distinct.
 
 ## Known gaps
 
-- The device fingerprint is unreadable in managed mode on Windows. `device.key`
-  sits under the machine state root, which grants `Users` no traverse right, so
-  managed Windows records omit `device.id`. Unlike the spool location, the hook
-  cannot fix this from its own side. macOS records carry `device.id` because the
-  key is in the user's own `~/.defenseclaw`.
-- One short-lived process per hook event on macOS and Linux. The capture child
-  is detached with its streams closed, so it adds no latency to the tool call
-  and cannot hold the hook's stdout open, but it is a real process and shows up
-  in process accounting.
-- Records accumulate until something drains them. The spool caps its own total
-  size, but nothing consumes these files yet — that is the transport this branch
-  exists to specify.
-
-## Verifying the macOS capture path
-
-The Unix path has an interaction worth re-checking after any change to
-`_hardening.sh`: `defenseclaw_harden_env` repoints `HOME` at an empty per-hook
-sandbox and deletes it on exit. Capture reads the user's connector config,
-account email, and device key out of the real profile, so it is invoked with
-`HOME` restored. Getting this wrong does not fail loudly — it spools a
-well-formed record claiming the user has no MCP servers and no email.
-
-`TestIdentityFabricCaptureRunsWithTheUsersRealHome` pins it by running the real
-helper against a stub CLI and asserting which `HOME` arrived. To confirm the
-whole chain against your own config:
-
-```bash
-go build -o /tmp/defenseclaw ./cmd/defenseclaw
-mkdir -p /tmp/idfabric-e2e/spool
-cp internal/gateway/connector/hooks/_hardening.sh /tmp/idfabric-e2e/
-
-cat > /tmp/idfabric-e2e/driver.sh <<'SCRIPT'
-#!/bin/bash
-set -euo pipefail
-. /tmp/idfabric-e2e/_hardening.sh
-defenseclaw_harden_env
-PAYLOAD="{\"hook_event_name\":\"sessionStart\",\"cursor_version\":\"3.10.17\",\"session_id\":\"e2e-1\",\"cwd\":\"$REPO\"}"
-defenseclaw_capture_identity_fabric /tmp/defenseclaw cursor sessionStart "$PAYLOAD"
-wait
-SCRIPT
-chmod +x /tmp/idfabric-e2e/driver.sh
-
-REPO="$PWD" DEFENSECLAW_IDFABRIC_SPOOL=1 \
-  DEFENSECLAW_IDFABRIC_SPOOL_DIR=/tmp/idfabric-e2e/spool \
-  /tmp/idfabric-e2e/driver.sh
-
-ls /tmp/idfabric-e2e/spool
-```
-
-A record with a populated `mcp_servers` list, a `uid`, and a `device.id` means
-the real home reached the capture child. An empty `mcp_servers` list on a
-machine that has MCP servers configured means it did not.
-- No transport. Records only land on disk; wiring them to AI Defense is
-  follow-up work.
-- The `DefenseClawAgent` record is emitted on session start rather than on a
-  periodic timer, so `first_seen`/`last_seen` aggregation is not exercised.
-  Per the proposal those fields, along with `created_at`, `updated_at`,
-  `presence_status`, `agent.id`, and `models`, are AI Defense's to compute and
-  are deliberately not sent.
-- `is_policy_enforceable` cannot see whether the active policy mode permits
-  intervention, so a managed hook in observe-only mode still reports `true`.
-  Deciding that accurately needs the sidecar's policy view.
-- Capture happens before the gateway request, so an event the guardrail later
-  refuses (for example a hook missing its installer-bound contract) is still
-  recorded.
+- **`agent.lifecycle` is not force-collected by `managedaid`.** Hook lifecycle
+  identity reaches AI Defense only if the operator's collection config includes
+  that bucket. `ai.discovery` is force-collected, so inventory attribution is
+  unconditional. Worth deciding whether hook identity should be promoted.
+- **The email is plaintext at the AI Defense sink.** Classified `identifier` /
+  `sensitive`, preserved by the `managedaid` projection. Needs privacy sign-off.
+- **The email is attribution evidence, not attestation.** Any process running as
+  the user can write the connector config it is read from.
+- **`emitEndpointInventory` is managed-enterprise-only**, so the inventory half
+  of this branch cannot be exercised on an unmanaged macOS install. It is
+  covered by unit tests instead
+  (`TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner`).
+- **Windows profile ownership comes from ProfileList**, so
+  `TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner` skips there — a temp
+  directory has no registry entry. The Windows path needs the step 4 run to be
+  considered covered.
+- **Pre-existing, not from this branch:** the `mapfile` guard on trace headers
+  (above), and a regex in `schemas/telemetry/v8/registry.yaml` for
+  `url_host` under `defenseclaw.inventory.mcp_identifier` whose double-escaped
+  backslash rejects bracketed IPv6 hosts that the Go producer accepts.

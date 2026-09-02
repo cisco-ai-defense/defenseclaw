@@ -84,10 +84,6 @@ func newHookCmd() *cobra.Command {
 				}
 				opts.Stdin = input
 			}
-			// Identity Fabric capture is a side effect only: it may replace
-			// opts.Stdin with an equivalent reader but never alters the
-			// guardrail decision or the exit code below.
-			captureIdentityFabricTelemetry(&opts, connector, event, enterpriseManaged)
 			// hookexec returns the connector-native process status after writing
 			// any structured decision. os.Exit is required because cobra
 			// collapses RunE outcomes to 0/1.
