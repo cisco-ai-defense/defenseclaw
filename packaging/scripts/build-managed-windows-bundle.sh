@@ -88,6 +88,12 @@ KEEP="false"
 VERSION=""
 DIST_DIR="dist"
 SCRIPT_HOST="bash"
+# SCRIPT_HOST_EXPLICIT tracks whether the caller actually passed
+# --script-host, so the deprecation warning below can fire on any
+# explicit value — including `bash` (previously the default) and `pwsh`
+# (the case CI is most likely still passing to pick up the PowerShell
+# shell assembler that spec 003 retired).
+SCRIPT_HOST_EXPLICIT="false"
 ALLOW_UNSIGNED="false"
 
 usage() {
@@ -104,7 +110,7 @@ while [[ $# -gt 0 ]]; do
     --keep)            KEEP="true"; shift;;
     --version)         VERSION="${2:?}"; shift 2;;
     --dist-dir)        DIST_DIR="${2:?}"; shift 2;;
-    --script-host)     SCRIPT_HOST="${2:?}"; shift 2;;
+    --script-host)     SCRIPT_HOST="${2:?}"; SCRIPT_HOST_EXPLICIT="true"; shift 2;;
     --allow-unsigned)  ALLOW_UNSIGNED="true"; shift;;
     -h|--help)         usage 0;;
     *) echo "unknown flag: $1" >&2; usage 64;;
@@ -418,8 +424,8 @@ done
 # ---- kit root: prebuilt outer Setup EXE + assembler EXE ---------------
 #
 # The kit ships the two prebuilt EXEs at its root so the AVC runbook
-# is a two-line invocation (assembler → signtool). No source/, no
-# vendor/, no shell assembler.
+# is a four-verb flow (signtool → assembler → signtool → finalize).
+# No source/, no vendor/, no shell assembler.
 echo "==> staging prebuilt outer Setup EXE + DefenseClawAssembler.exe into kit"
 cp "${SETUP_EXE_UNSIGNED}" "${KIT_DIR}/DefenseClawSetup-Enterprise-x64.exe.unsigned"
 cp "${ASSEMBLER_EXE}"      "${KIT_DIR}/DefenseClawAssembler.exe"
@@ -439,10 +445,12 @@ cp "${LIB_SRC}/finalize.ps1"                  "${LIB_DST}/finalize.ps1"
 
 # Deprecated flag: --script-host was used to pick between bash and
 # PowerShell shell assemblers. The standalone assembler EXE is the
-# only assembler AVC runs now. Accept the flag for one release so
-# existing CI invocations do not break; warn if a caller still passes
-# something other than the (now-unused) default.
-if [[ "${SCRIPT_HOST}" != "bash" && "${SCRIPT_HOST}" != "pwsh" ]]; then
+# only assembler AVC runs now. `SCRIPT_HOST_EXPLICIT` is set by the
+# CLI parser only when the caller actually passed --script-host, so
+# we warn on any explicit value (`bash` was the previous default;
+# `pwsh` was the case CI most likely to be passing to pick up the
+# PowerShell assembler that no longer ships in the kit).
+if [[ "${SCRIPT_HOST_EXPLICIT}" == "true" ]]; then
   echo "build-managed-windows-bundle: --script-host $SCRIPT_HOST ignored (deprecated; assembler EXE is used unconditionally)" >&2
 fi
 
@@ -472,7 +480,7 @@ trap 'restore_overlay; rm -rf "${STAGE_DIR}" "${EMITTER_TMP}"' EXIT
   --expected-filenames "$(IFS=,; echo "${EXPECTED_PAYLOAD_NAMES[*]}")" \
   --out "${KIT_DIR}/payload-metadata.json"
 
-# ---- kit/README-AVC.md — three-verb runbook ---------------------------
+# ---- kit/README-AVC.md — four-verb runbook (signtool → assembler → signtool → finalize)
 cat > "${KIT_DIR}/README-AVC.md" <<EOF
 # DefenseClaw Windows managed-enterprise Setup — AVC build kit ${VERSION}
 

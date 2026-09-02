@@ -87,8 +87,20 @@ func TestAssembleHappyPath(t *testing.T) {
 		t.Fatalf("entry count: got %d want %d", len(res.Entries), len(requiredPayloadFiles))
 	}
 	// Every declared payload file should extract byte-identical from
-	// both the trailer archive and the input directory.
+	// both the trailer archive and the input directory. Track which
+	// required names have matched so a duplicate returned entry
+	// (whose bytes happen to match) can't paper over a missing name
+	// somewhere else in the set.
+	remaining := make(map[string]struct{}, len(requiredPayloadFiles))
+	for _, name := range requiredPayloadFiles {
+		remaining[name] = struct{}{}
+	}
 	for _, e := range res.Entries {
+		if _, expected := remaining[e.Name]; !expected {
+			t.Errorf("trailer entry %q is not in requiredPayloadFiles (unexpected or duplicate)", e.Name)
+			continue
+		}
+		delete(remaining, e.Name)
 		disk, err := os.ReadFile(filepath.Join(opts.PayloadDir, e.Name))
 		if err != nil {
 			t.Errorf("read source %s: %v", e.Name, err)
@@ -97,6 +109,9 @@ func TestAssembleHappyPath(t *testing.T) {
 		if !bytes.Equal(disk, e.Contents) {
 			t.Errorf("trailer contents for %s diverged from source", e.Name)
 		}
+	}
+	if len(remaining) != 0 {
+		t.Errorf("trailer missing required entries: %v", remaining)
 	}
 
 	// Manifest bytes inside the trailer must parse and carry the
@@ -154,9 +169,17 @@ func TestReproducibilityByteIdentical(t *testing.T) {
 		t.Fatalf("assembler not reproducible:\n  sha256(A) = %s\n  sha256(B) = %s", shaA, shaB)
 	}
 	// And provenance.json must also be byte-identical — same
-	// deterministic marshaller.
-	provA, _ := os.ReadFile(filepath.Join(optsA.Out, artifactName+provenanceSuffix))
-	provB, _ := os.ReadFile(filepath.Join(optsB.Out, artifactName+provenanceSuffix))
+	// deterministic marshaller. Check the read errors before comparing:
+	// if the assembler failed to emit provenance in either run,
+	// bytes.Equal(nil, nil) would trivially pass and swallow the bug.
+	provA, err := os.ReadFile(filepath.Join(optsA.Out, artifactName+provenanceSuffix))
+	if err != nil {
+		t.Fatalf("read provenance A: %v", err)
+	}
+	provB, err := os.ReadFile(filepath.Join(optsB.Out, artifactName+provenanceSuffix))
+	if err != nil {
+		t.Fatalf("read provenance B: %v", err)
+	}
 	if !bytes.Equal(provA, provB) {
 		t.Errorf("provenance.json diverged between runs")
 	}
@@ -247,15 +270,18 @@ func TestDoubleAppendRefused(t *testing.T) {
 func TestSignatureVerifySkippedOnAllowUnsigned(t *testing.T) {
 	// The happy-path test already runs with AllowUnsigned=true — this
 	// case pins the inverse: WITHOUT AllowUnsigned, on non-Windows,
-	// verify must fail with a signatureError.
+	// verify must fail with an ioError (the environment can't run
+	// signtool). A signature rejection is a payload-side fault; a
+	// missing runtime is an environment fault. Exit-code 4 is
+	// reserved for the former, so this path returns ioError.
 	if os.Getenv("GOOS") == "windows" {
 		t.Skip("Windows host: signtool likely available; test asserts non-Windows behavior")
 	}
 	opts := baseOpts(t)
 	opts.AllowUnsigned = false
 	err := assemble(opts, &bytes.Buffer{})
-	if _, ok := err.(*signatureError); !ok {
-		t.Fatalf("expected *signatureError on non-Windows without -AllowUnsigned, got %T: %v", err, err)
+	if _, ok := err.(*ioError); !ok {
+		t.Fatalf("expected *ioError on non-Windows without -AllowUnsigned, got %T: %v", err, err)
 	}
 }
 

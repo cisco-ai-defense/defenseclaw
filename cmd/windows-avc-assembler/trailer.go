@@ -4,7 +4,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,7 +22,16 @@ import (
 // leaves a partial dst file which the caller's os.MkdirAll(-Out) can
 // overwrite on the next run; we do not attempt an atomic-rename dance
 // because AVC's runner re-invokes the assembler on a fresh working dir.
-func appendTrailer(srcPath, dstPath string, entries []setuppayload.Entry, manifestJSON []byte) error {
+//
+// The named `retErr` return + the deferred close block is how a
+// dst.Close() failure surfaces to the caller. Without a named return,
+// the deferred func would only mutate a local — the actual returned
+// value is set at each `return` line and cannot be modified from a
+// defer that runs afterward. Fsync followed by a failing Close on
+// some filesystems is the only signal that the flush did not reach
+// disk, so swallowing it would silently ship a truncated Setup EXE
+// past the reproducibility gate.
+func appendTrailer(srcPath, dstPath string, entries []setuppayload.Entry, manifestJSON []byte) (retErr error) {
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return &ioError{msg: fmt.Sprintf("open prebuilt setup EXE: %s", err)}
@@ -51,12 +59,14 @@ func appendTrailer(srcPath, dstPath string, entries []setuppayload.Entry, manife
 	if err != nil {
 		return &ioError{msg: fmt.Sprintf("create dst setup EXE: %s", err)}
 	}
-	// Track close errors so we surface a fsync/close failure instead
-	// of returning nil on a truncated write.
-	closeErr := errors.New("dst not yet closed")
+	// Route Close() through the named retErr so a flush/close failure
+	// after a "clean" write path still surfaces to the caller. We only
+	// overwrite retErr when it would otherwise be nil — an earlier
+	// write/fsync error keeps priority over a subsequent close error
+	// (the write error is the causal one).
 	defer func() {
-		if cerr := dst.Close(); cerr != nil && closeErr == nil {
-			closeErr = cerr
+		if cerr := dst.Close(); cerr != nil && retErr == nil {
+			retErr = &ioError{msg: fmt.Sprintf("close dst setup EXE: %s", cerr)}
 		}
 	}()
 
@@ -69,6 +79,5 @@ func appendTrailer(srcPath, dstPath string, entries []setuppayload.Entry, manife
 	if err := dst.Sync(); err != nil {
 		return &ioError{msg: fmt.Sprintf("fsync dst setup EXE: %s", err)}
 	}
-	closeErr = nil
 	return nil
 }

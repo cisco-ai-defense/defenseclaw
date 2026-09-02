@@ -43,7 +43,10 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("entry count: got %d want %d", len(got.Entries), len(entries))
 	}
 	// Verify by name; on-disk order is alphabetical regardless of
-	// caller order, so build a map keyed by name.
+	// caller order, so build a map keyed by name. Delete each match
+	// as we go and assert the map empties out — otherwise a duplicate
+	// returned name whose contents happen to match could paper over
+	// a missing name elsewhere in the set.
 	wantByName := map[string][]byte{}
 	for _, e := range entries {
 		wantByName[e.Name] = e.Contents
@@ -51,12 +54,20 @@ func TestRoundTrip(t *testing.T) {
 	for _, got := range got.Entries {
 		want, ok := wantByName[got.Name]
 		if !ok {
-			t.Errorf("unexpected entry %q", got.Name)
+			t.Errorf("unexpected or duplicate entry %q", got.Name)
 			continue
 		}
 		if !bytes.Equal(got.Contents, want) {
 			t.Errorf("entry %q content mismatch", got.Name)
 		}
+		delete(wantByName, got.Name)
+	}
+	if len(wantByName) != 0 {
+		names := make([]string, 0, len(wantByName))
+		for n := range wantByName {
+			names = append(names, n)
+		}
+		t.Errorf("expected entries not returned: %v", names)
 	}
 }
 
