@@ -895,12 +895,9 @@ func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
 }
 
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
-// path; Windows Cursor uses the PowerShell object-pipeline adapter, Copilot
-// receives a synchronous program in its native powershell field, and other
-// connectors invoke the native Go `hook` subcommand directly.
-// path; Windows Cursor and Windsurf use PowerShell adapters while other
-// connectors invoke the native Go `hook` subcommand directly. PowerShell
-// shell-string connectors include its call operator.
+// path; Windows Cursor, Windsurf, and Copilot use PowerShell adapters while
+// other connectors invoke the native Go `hook` subcommand directly.
+// PowerShell shell-string connectors include its call operator.
 func TestHookInvocationCommand(t *testing.T) {
 	const unix = "/home/u/.defenseclaw/hooks/codex-hook.sh"
 	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
@@ -957,28 +954,20 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 
 	copilot := hookInvocationCommandFor("windows", "copilot", unix)
-	wantCopilot := windowsCopilotPowerShellHookCommandForBinary(windowsExe)
+	wantCopilot := "& " + powershellQuoteLiteral(strings.TrimSuffix(unix, ".sh")+".ps1")
 	if copilot != wantCopilot {
 		t.Errorf("copilot command = %q, want %q", copilot, wantCopilot)
 	}
-	for _, marker := range []string{
-		"Microsoft.PowerShell.Management\\Start-Process",
-		"-NoNewWindow -Wait -PassThru",
-		"exit $hookProcess.ExitCode",
-		powershellQuoteLiteral(windowsExe),
-	} {
-		if !strings.Contains(copilot, marker) {
-			t.Errorf("copilot command missing synchronous marker %q: %q", marker, copilot)
-		}
-	}
-	if strings.HasPrefix(copilot, "& ") || strings.Contains(copilot, "powershell.exe") ||
-		strings.Contains(copilot, ".sh") || strings.Contains(copilot, "bash") {
+	if !strings.HasPrefix(copilot, "& ") || strings.Contains(copilot, "powershell.exe") ||
+		strings.Contains(copilot, ".sh") || strings.Contains(copilot, "bash") ||
+		strings.Contains(copilot, "Start-Process") {
 		t.Errorf("copilot command nests an invalid vendor boundary: %q", copilot)
 	}
-	if !isNativeHookCommand(copilot) {
-		t.Errorf("isNativeHookCommand(%q) = false, want true", copilot)
+	if isNativeHookCommand(copilot) {
+		t.Errorf("isNativeHookCommand(%q) = true, want adapter registration", copilot)
 	}
 	for _, legacy := range []string{
+		windowsCopilotPowerShellHookCommandForBinary(windowsExe),
 		legacyWindowsCopilotPowerShellHookCommandForBinary(windowsExe),
 		legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(windowsExe),
 	} {
@@ -1374,7 +1363,12 @@ import (
 func main() {
 	payload, _ := io.ReadAll(os.Stdin)
 	connector := os.Getenv("DC_TEST_CONNECTOR")
-	if len(os.Args) != 4 || os.Args[1] != "hook" || os.Args[2] != "--connector" || os.Args[3] != connector {
+	validArgs := len(os.Args) == 4 && os.Args[1] == "hook" && os.Args[2] == "--connector" && os.Args[3] == connector
+	if connector == "copilot" {
+		validArgs = len(os.Args) == 6 && os.Args[1] == "hook" && os.Args[2] == "--connector" &&
+			os.Args[3] == connector && os.Args[4] == "--event" && os.Args[5] == "preToolUse"
+	}
+	if !validArgs {
 		fmt.Fprintln(os.Stderr, "probe received wrong hook arguments")
 		os.Exit(9)
 	}
@@ -1401,6 +1395,21 @@ func main() {
 		t.Fatalf("build GUI hook probe: %v\n%s", err, output)
 	}
 	setHookBinaryOverride(t, helper)
+	copilotTemplate, err := hookFS.ReadFile("hooks/copilot-hook.ps1")
+	if err != nil {
+		t.Fatalf("read Copilot adapter template: %v", err)
+	}
+	copilotAdapter, err := renderTemplate(string(copilotTemplate), templateData{
+		HookBinaryPS:         strings.ReplaceAll(helper, "'", "''"),
+		CopilotHookTimeoutMS: 10_000,
+	})
+	if err != nil {
+		t.Fatalf("render Copilot adapter: %v", err)
+	}
+	copilotAdapterPath := filepath.Join(root, "copilot-hook.ps1")
+	if err := os.WriteFile(copilotAdapterPath, []byte(copilotAdapter), 0o600); err != nil {
+		t.Fatalf("write Copilot adapter: %v", err)
+	}
 
 	cases := []struct {
 		connector string
@@ -1421,7 +1430,9 @@ func main() {
 			defer cancel()
 			command := windowsNativePowerShellHookCommand(testCase.connector)
 			if testCase.connector == "copilot" {
-				command = windowsCopilotPowerShellHookCommand()
+				command = copilotHookInvocationCommandForEvent(
+					"windows", "preToolUse", filepath.Join(root, "copilot-hook.sh"),
+				)
 			}
 			cmd := windowsNativePowerShellTestProcess(ctx, testCase.connector, command)
 			cmd.Env = minimalWindowsHookTestEnvironment(
@@ -1438,9 +1449,13 @@ func main() {
 				t.Fatalf("generated command exceeded %s: %v\ncommand: %s\nstdout: %s\nstderr: %s",
 					windowsNativePowerShellTestTimeout, ctx.Err(), command, stdout.String(), stderr.String())
 			}
-			if got := windowsProcessExitCodeForTest(t, err); got != testCase.exitCode {
+			wantExitCode := testCase.exitCode
+			if testCase.connector == "copilot" {
+				wantExitCode = 0
+			}
+			if got := windowsProcessExitCodeForTest(t, err); got != wantExitCode {
 				t.Fatalf("generated command exit = %d, want %d\ncommand: %s\nstdout: %s\nstderr: %s",
-					got, testCase.exitCode, command, stdout.String(), stderr.String())
+					got, wantExitCode, command, stdout.String(), stderr.String())
 			}
 			if got, want := strings.TrimSpace(stdout.String()), "probe stdout "+testCase.connector; got != want {
 				t.Fatalf("generated command stdout = %q, want %q", got, want)
@@ -2461,8 +2476,24 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
 				}
 			} else if connectorName == "copilot" {
-				if !strings.Contains(text, "Microsoft.PowerShell.Management\\\\Start-Process") {
-					t.Errorf("config missing synchronous Copilot PowerShell command:\n%s", text)
+				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "copilot-hook.ps1"))
+				if err != nil {
+					t.Fatalf("read Copilot Windows adapter: %v", err)
+				}
+				adapterText := string(adapter)
+				for _, marker := range []string{
+					windowsHookBinaryName,
+					"[Console]::In.ReadToEnd()",
+					"RedirectStandardInput = $true",
+					"RedirectStandardOutput = $true",
+					"RedirectStandardError = $true",
+					fmt.Sprintf("$timeoutMS = %d", copilotWindowsHookAdapterTimeoutMS),
+					"hook --connector copilot --event ",
+					"[System.Environment]::Exit(0)",
+				} {
+					if !strings.Contains(adapterText, marker) {
+						t.Errorf("Copilot adapter missing byte-stream marker %q:\n%s", marker, adapterText)
+					}
 				}
 			} else {
 				if !strings.Contains(text, windowsHookBinaryName) {
@@ -2491,7 +2522,11 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 						t.Fatalf("Copilot %s hook has no entries", event)
 					}
 					entry, _ := entries[0].(map[string]interface{})
-					want := copilotHookInvocationCommandForEvent("windows", event, "")
+					want := copilotHookInvocationCommandForEvent(
+						"windows",
+						event,
+						filepath.Join(dataDir, "hooks", "copilot-hook.sh"),
+					)
 					if got, _ := entry["powershell"].(string); got != want {
 						t.Errorf("Copilot %s powershell command = %q, want %q", event, got, want)
 					}

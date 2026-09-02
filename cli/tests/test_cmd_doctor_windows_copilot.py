@@ -20,16 +20,24 @@ from defenseclaw.doctor_hooks import (
 )
 
 
-def _powershell_command(runtime: Path, event: str) -> str:
+def _powershell_command(adapter: Path, event: str) -> str:
+    literal = str(adapter).replace("'", "''")
+    return f"& '{literal}' -Event '{event}'"
+
+
+def _adapter_body(runtime: Path) -> str:
     literal = str(runtime).replace("'", "''")
-    return (
-        "$ErrorActionPreference='Stop'; "
-        "$env:NoDefaultCurrentDirectoryInExePath='1'; "
-        r"$hookProcess=Microsoft.PowerShell.Management\Start-Process "
-        f"-FilePath '{literal}' "
-        f"-ArgumentList @('hook','--connector','copilot','--event','{event}') "
-        "-NoNewWindow -Wait -PassThru; exit $hookProcess.ExitCode"
-    )
+    return f"""# defenseclaw-managed-hook v7
+$hook = '{literal}'
+$payload = [Console]::In.ReadToEnd()
+$startInfo.RedirectStandardInput = $true
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+$stdinTask = $process.StandardInput.BaseStream.WriteAsync($payloadBytes, 0, $payloadBytes.Length)
+$process.WaitForExit($remainingMS)
+$startInfo.Arguments = 'hook --connector copilot --event ' + $Event
+[System.Environment]::Exit(0)
+"""
 
 
 def _fixture(
@@ -51,12 +59,15 @@ def _fixture(
     config.parent.mkdir(parents=True)
     runtime = install / "defenseclaw-hook.exe"
     runtime.write_bytes(b"MZfixture")
+    adapter = data / "hooks" / "copilot-hook.ps1"
+    adapter.parent.mkdir()
+    adapter.write_text(_adapter_body(runtime), encoding="utf-8")
     required_hooks = _COPILOT_CONTRACT_EVENTS[contract_id]
     hooks = {
         event: [
             {
                 "type": "command",
-                "powershell": _powershell_command(runtime, event),
+                "powershell": _powershell_command(adapter, event),
                 "timeoutSec": 30,
             }
         ]
@@ -250,7 +261,7 @@ def test_windows_copilot_workspace_uses_native_repository_registration(
     ("mutation", "expected"),
     [
         ("duplicated-call-operator", "duplicated call operator"),
-        ("legacy-unbound-command", "synchronous wait/stdin/stdout/exit contract"),
+        ("legacy-unbound-command", "drops redirected stdin/stdout"),
         ("missing-event", "is missing"),
         ("wrong-event-binding", "handler is bound to"),
         ("wrong-timeout", "expected 30"),
@@ -283,7 +294,7 @@ def test_windows_copilot_doctor_classifies_tamper(
         document["hooks"].pop("permissionRequest")
     elif mutation == "wrong-event-binding":
         document["hooks"]["preToolUse"][0]["powershell"] = _powershell_command(
-            install / "defenseclaw-hook.exe",
+            data / "hooks" / "copilot-hook.ps1",
             "postToolUse",
         )
     elif mutation == "wrong-timeout":
@@ -293,9 +304,9 @@ def test_windows_copilot_doctor_classifies_tamper(
     elif mutation == "disabled":
         document["disableAllHooks"] = True
     elif mutation == "split-target":
-        alternate = install / "alternate" / "defenseclaw-hook.exe"
+        alternate = data / "alternate" / "copilot-hook.ps1"
         alternate.parent.mkdir()
-        alternate.write_bytes(b"MZfixture")
+        alternate.write_text(_adapter_body(install / "defenseclaw-hook.exe"), encoding="utf-8")
         document["hooks"]["preToolUse"][0]["powershell"] = _powershell_command(
             alternate,
             "preToolUse",

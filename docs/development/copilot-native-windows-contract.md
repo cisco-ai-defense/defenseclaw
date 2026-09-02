@@ -119,10 +119,13 @@ JSON on stdin. The official PowerShell tutorial consumes it with
 
 Decision hooks are synchronous: stdout is processed after the command exits.
 Progress JSON lines may precede the one final decision object. DefenseClaw's
-PowerShell command starts its no-console launcher with inherited standard
-handles, `-NoNewWindow -Wait -PassThru`, and exits with the launcher's exact
-exit code. It never nests Bash, WSL, or another PowerShell process inside
-Copilot's own `powershell` boundary.
+PowerShell command calls the managed `copilot-hook.ps1` byte-stream adapter.
+The adapter reads the complete JSON event through `[Console]::In`, transfers
+the UTF-8 bytes to the no-console launcher through explicitly redirected
+standard handles, and returns the launcher's stdout unchanged. It never nests
+Bash, WSL, or another PowerShell process inside Copilot's own `powershell`
+boundary. Adapter failures and timeouts produce empty stdout and exit 0, as
+required by the connector's fail-open integration contract.
 
 The current documented events are `sessionStart`, `sessionEnd`,
 `userPromptSubmitted`, `userPromptTransformed`, `preToolUse`, `postToolUse`,

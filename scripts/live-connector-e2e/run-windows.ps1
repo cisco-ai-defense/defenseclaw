@@ -5410,14 +5410,15 @@ function Assert-CopilotSynchronousWindowsHookConfig([string]$Config, [string]$Co
         throw "$Context does not contain the exact 14-event Copilot hook set"
     }
     $commands = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $pattern = '(?i)^\$ErrorActionPreference=''Stop'';\s+\$env:NoDefaultCurrentDirectoryInExePath=''1'';\s+\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+''(?:''''|[^''])*defenseclaw-hook\.exe''\s+-ArgumentList\s+@\(''hook'',''--connector'',''copilot'',''--event'',''(?<event>[a-zA-Z]+)''\)\s+-NoNewWindow\s+-Wait\s+-PassThru;\s+exit\s+\$hookProcess\.ExitCode$'
+    $adapters = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $pattern = '(?i)^&\s+''(?<adapter>(?:''''|[^''])+copilot-hook\.ps1)''\s+-Event\s+''(?<event>[a-zA-Z]+)''$'
     foreach ($event in $events) {
         $property = $document.hooks.PSObject.Properties[$event]
         if ($null -eq $property) { throw "$Context is missing Copilot event $event" }
         $owned = @($property.Value | Where-Object {
-            $_.type -ceq 'command' -and [string]$_.powershell -match 'defenseclaw-hook\.exe'
+            $_.type -ceq 'command' -and [string]$_.powershell -match 'copilot-hook\.ps1'
         })
-        if ($owned.Count -ne 1) { throw "$Context event $event has $($owned.Count) native DefenseClaw handlers" }
+        if ($owned.Count -ne 1) { throw "$Context event $event has $($owned.Count) DefenseClaw adapter handlers" }
         $entry = $owned[0]
         if ([int]$entry.timeoutSec -ne 30 -or
             $null -ne $entry.PSObject.Properties['bash'] -or
@@ -5428,13 +5429,35 @@ function Assert-CopilotSynchronousWindowsHookConfig([string]$Config, [string]$Co
         $match = [regex]::Match($command, $pattern)
         if (-not $match.Success -or
             $match.Groups['event'].Value -cne $event -or
-            $command -match '(?i)&\s+&|\$LASTEXITCODE') {
+            $command -match '(?i)&\s+&|\$LASTEXITCODE|Start-Process') {
             throw "$Context event $event does not use the exact synchronous Copilot PowerShell command"
         }
         [void]$commands.Add($command)
+        [void]$adapters.Add($match.Groups['adapter'].Value.Replace("''", "'"))
     }
     if ($commands.Count -ne $events.Count) {
         throw "$Context does not use one exact event-bound Copilot PowerShell command per event"
+    }
+    if ($adapters.Count -ne 1) { throw "$Context uses inconsistent Copilot adapters" }
+    $adapter = @($adapters)[0]
+    if (-not [IO.Path]::IsPathFullyQualified($adapter) -or
+        -not (Test-Path -LiteralPath $adapter -PathType Leaf)) {
+        throw "$Context Copilot adapter is missing: $adapter"
+    }
+    $adapterText = [IO.File]::ReadAllText($adapter)
+    foreach ($marker in @(
+        'defenseclaw-managed-hook v7',
+        'defenseclaw-hook.exe',
+        '[Console]::In.ReadToEnd()',
+        'RedirectStandardInput = $true',
+        'RedirectStandardOutput = $true',
+        'RedirectStandardError = $true',
+        'WaitForExit',
+        '[System.Environment]::Exit(0)'
+    )) {
+        if ($adapterText.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
+            throw "$Context Copilot adapter is missing marker $marker"
+        }
     }
 }
 
