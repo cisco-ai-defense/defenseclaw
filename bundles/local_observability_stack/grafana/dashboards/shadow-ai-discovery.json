@@ -2,13 +2,13 @@
   "__comment_product": "ShadowClaw -- Universal Shadow AI Detector",
   "__comment_author": "Mike Storm, Distinguished Engineer, CCIE Security 13847",
   "__comment_copyright": "Copyright (c) 2026 Mike Storm. All rights reserved.",
-  "__comment_purpose": "Reads ShadowClaw findings from Loki after ShadowClaw exports OTLP logs to DefenseClaw's bundled local collector. The final row places DefenseClaw's AI component discoveries beside ShadowClaw's endpoint detections; each producer keeps its own service namespace.",
+  "__comment_purpose": "Reads external endpoint findings from Loki after a compatible sensor exports OTLP logs to DefenseClaw's bundled local collector. The final row places DefenseClaw's AI component discoveries beside endpoint detections; each producer keeps its own service namespace.",
   "__comment_attribution": "Adapted for DefenseClaw's fixed Loki datasource from the ShadowClaw dashboard by Mike Storm. Redistributed under the ShadowClaw BSD 3-Clause License with Attribution Requirement; see SHADOWCLAW_LICENSE.md in this bundle.",
-  "uid": "shadowclaw-shadow-ai",
-  "title": "ShadowClaw \u2014 Shadow AI Detections",
+  "uid": "shadow-ai-discovery",
+  "title": "Shadow AI Discovery Board",
   "description": "Unsanctioned AI use detected on this endpoint by correlating process compute behaviour with per-process network egress. Author: Mike Storm, Distinguished Engineer, CCIE Security 13847. Includes the host plane: credential access, identity creation, privilege escalation, persistence and exfiltration performed by local AI agents, gated on agent process lineage.",
   "tags": [
-    "shadowclaw",
+    "external-telemetry",
     "shadow-ai",
     "detection",
     "security",
@@ -97,7 +97,7 @@
     {
       "type": "stat",
       "title": "Findings",
-      "description": "Total findings ShadowClaw reported in the selected window.",
+      "description": "Total findings the endpoint sensor reported in the selected window.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -158,7 +158,7 @@
     {
       "type": "stat",
       "title": "Critical",
-      "description": "Findings ShadowClaw scored as critical risk.",
+      "description": "Findings the endpoint sensor scored as critical risk.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -329,7 +329,7 @@
     {
       "type": "stat",
       "title": "Peak risk score",
-      "description": "Highest risk score reached in the window. ShadowClaw scores 0-100; 30 is the default reporting floor.",
+      "description": "Highest risk score reached in the window. The endpoint sensor scores 0-100; 30 is the default reporting floor.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -400,7 +400,7 @@
     {
       "type": "stat",
       "title": "Sensor reporting",
-      "description": "Findings in the last 5 minutes. Zero means either a quiet endpoint or a sensor that is not running \u2014 check the ShadowClaw ledger to tell the two apart.",
+      "description": "Findings in the last 5 minutes. Zero means either a quiet endpoint or a sensor that is not running \u2014 check the sensor ledger to tell the two apart.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -726,7 +726,7 @@
     },
     {
       "type": "logs",
-      "title": "ShadowClaw findings",
+      "title": "Endpoint findings",
       "description": "The findings themselves. Expand a line to see every field: process identity, the endpoint reached, the signals that fired, and the attribution confidence behind the provider name.",
       "datasource": {
         "type": "loki",
@@ -775,7 +775,7 @@
     {
       "type": "logs",
       "title": "DefenseClaw \u2014 AI discovery scans",
-      "description": "DefenseClaw's own continuous AI-discovery scans, read-only, for correlation. One line per completed scan with its source and the new / changed / gone signal counts. Discovery establishes what AI is present on this host; it does not claim any of it is active -- which is the question the ShadowClaw rows above answer.",
+      "description": "DefenseClaw's own continuous AI-discovery scans, read-only, for correlation. One line per completed scan with its source and the new / changed / gone signal counts. Discovery establishes what AI is present on this host; it does not claim any of it is active -- which is the question the endpoint-observation rows above answer.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -2240,7 +2240,7 @@
     {
       "type": "stat",
       "title": "Corroboration unavailable",
-      "description": "Findings where DefenseClaw's inventory could not be relied on -- absent, stale, or unparseable. Read this first. These findings were neither attenuated nor escalated, so the two panels to the right are silent about them rather than clearing them. A high number here means ShadowClaw is scoring alone, not that the host is quiet.",
+      "description": "Findings where DefenseClaw's inventory could not be relied on -- absent, stale, or unparseable. Read this first. These findings were neither attenuated nor escalated, so the two panels to the right are silent about them rather than clearing them. A high number here means the endpoint sensor is scoring alone, not that the host is quiet.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -2458,7 +2458,7 @@
     {
       "type": "logs",
       "title": "DefenseClaw has never seen these",
-      "description": "The queue to actually work. Local AI that ShadowClaw observed running and a current DefenseClaw scan cannot explain.",
+      "description": "The queue to actually work. Local AI that the endpoint sensor observed running and a current DefenseClaw scan cannot explain.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"

@@ -1,4 +1,4 @@
-"""Contracts for the bundled ShadowClaw local-observability integration."""
+"""Contracts for the bundled Shadow AI Discovery Board."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts import check_shadowclaw_otel_integration as integration
+from scripts import check_shadow_ai_discovery as integration
 from scripts import local_observability_v1 as compat
 
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = ROOT / "bundles/local_observability_stack"
-DASHBOARD_PATH = BUNDLE / "grafana/dashboards/shadowclaw-shadow-ai.json"
+DASHBOARD_PATH = BUNDLE / "grafana/dashboards/shadow-ai-discovery.json"
 
 
 def _dashboards() -> list[tuple[Path, dict]]:
@@ -42,11 +42,18 @@ def _resource_values(collector: dict, supplied: dict[str, str]) -> dict[str, str
     return result
 
 
-def test_shadowclaw_dashboard_is_attributed_and_redistributable() -> None:
+def test_shadow_ai_discovery_board_has_generic_display_name_and_attribution() -> None:
     dashboard = json.loads(DASHBOARD_PATH.read_text(encoding="utf-8"))
     license_text = (BUNDLE / "SHADOWCLAW_LICENSE.md").read_text(encoding="utf-8")
     notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
+    displayed_text = [dashboard["title"], dashboard["description"]]
+    for panel in _panels(dashboard):
+        displayed_text.extend(str(panel.get(field, "")) for field in ("title", "description"))
 
+    assert dashboard["uid"] == "shadow-ai-discovery"
+    assert dashboard["title"] == "Shadow AI Discovery Board"
+    assert "shadowclaw" not in dashboard["tags"]
+    assert all("ShadowClaw" not in value for value in displayed_text)
     assert dashboard["__comment_product"] == "ShadowClaw -- Universal Shadow AI Detector"
     assert "Mike Storm" in dashboard["__comment_author"]
     assert "SHADOWCLAW_LICENSE.md" in dashboard["__comment_attribution"]
@@ -55,7 +62,7 @@ def test_shadowclaw_dashboard_is_attributed_and_redistributable() -> None:
     assert "SHADOWCLAW_LICENSE.md" in notice
 
 
-def test_shadowclaw_dashboard_uses_the_provisioned_loki_datasource() -> None:
+def test_shadow_ai_discovery_board_uses_the_provisioned_loki_datasource() -> None:
     dashboard = json.loads(DASHBOARD_PATH.read_text(encoding="utf-8"))
     serialized = json.dumps(dashboard)
     targets = [target for panel in _panels(dashboard) for target in panel.get("targets", [])]
@@ -82,7 +89,7 @@ def test_external_dashboard_does_not_expand_the_native_v8_query_contract() -> No
     native_uids = {dashboard["uid"] for _, dashboard in native}
 
     assert native_uids == compat.NATIVE_DASHBOARD_UIDS
-    assert compat.EXTERNAL_DASHBOARD_UIDS == {"shadowclaw-shadow-ai"}
+    assert compat.EXTERNAL_DASHBOARD_UIDS == {"shadow-ai-discovery"}
     assert compat.EXTERNAL_DASHBOARD_UIDS.isdisjoint(native_uids)
 
     expected = compat.build_inventory(native)
@@ -90,12 +97,12 @@ def test_external_dashboard_does_not_expand_the_native_v8_query_contract() -> No
     assert errors == []
     assert actual == expected
 
-    without_shadowclaw = [item for item in dashboards if item[1].get("uid") != "shadowclaw-shadow-ai"]
+    without_discovery_board = [item for item in dashboards if item[1].get("uid") != "shadow-ai-discovery"]
     _inventory, errors = compat.compatibility_errors(
-        without_shadowclaw,
+        without_discovery_board,
         require_packaged=False,
     )
-    assert any("shadowclaw-shadow-ai" in error and "missing" in error for error in errors)
+    assert any("shadow-ai-discovery" in error and "missing" in error for error in errors)
 
 
 def test_collector_preserves_shadowclaw_service_identity() -> None:

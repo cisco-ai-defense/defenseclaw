@@ -15,11 +15,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The bundled local observability stack includes the optional ShadowClaw Grafana
-dashboard, Copyright (c) 2026 Mike Storm, Distinguished Engineer, CCIE Security
-13847. It is not covered by the Apache License above. It is redistributed under
-the ShadowClaw BSD 3-Clause License with Attribution Requirement. The complete
-terms are shipped at bundles/local_observability_stack/SHADOWCLAW_LICENSE.md.
+The bundled local observability stack includes the optional Shadow AI Discovery
+Board, derived from the ShadowClaw Grafana dashboard, Copyright (c) 2026 Mike
+Storm, Distinguished Engineer, CCIE Security 13847. It is not covered by the
+Apache License above. It is redistributed under the ShadowClaw BSD 3-Clause
+License with Attribution Requirement. The complete terms are shipped at
+bundles/local_observability_stack/SHADOWCLAW_LICENSE.md.
 
 Declared third-party dependencies are listed in go.mod/go.sum (Go) and
 pyproject.toml/uv.lock (Python). The shipped OpenClaw TypeScript plugin is built

@@ -1098,7 +1098,7 @@ jobs:
           DEFENSECLAW_LOCAL_OBSERVABILITY_OTLP_ENDPOINT: http://127.0.0.1:4318
         run: |
           go test ./internal/gateway -run TestLocalObservabilityGoldenProducerScenario -count=1
-          .venv/bin/python scripts/check_shadowclaw_otel_integration.py
+          .venv/bin/python scripts/check_shadow_ai_discovery.py
           .venv/bin/python scripts/check_grafana_dashboards.py \
             --require-packaged \
             --live \

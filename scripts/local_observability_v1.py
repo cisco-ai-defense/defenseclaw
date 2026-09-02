@@ -68,7 +68,7 @@ NATIVE_DASHBOARD_UIDS = {
     "defenseclaw-security",
     "defenseclaw-traffic",
 }
-EXTERNAL_DASHBOARD_UIDS = {"shadowclaw-shadow-ai"}
+EXTERNAL_DASHBOARD_UIDS = {"shadow-ai-discovery"}
 EXPECTED_DASHBOARD_UIDS = NATIVE_DASHBOARD_UIDS | EXTERNAL_DASHBOARD_UIDS
 EXPECTED_DATASOURCE_UIDS = {
     "prometheus": "defenseclaw-prometheus",

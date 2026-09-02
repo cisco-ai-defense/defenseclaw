@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify ShadowClaw log ingestion through the local observability stack."""
+"""Verify endpoint findings for the Shadow AI Discovery Board."""
 
 from __future__ import annotations
 
@@ -224,7 +224,7 @@ def wait_for_record(
             last_error = exc
         if time.monotonic() >= deadline:
             detail = f": {last_error}" if last_error is not None else ""
-            raise IntegrationError(f"ShadowClaw record did not reach Loki within {wait_seconds:g}s{detail}")
+            raise IntegrationError(f"Endpoint finding did not reach Loki within {wait_seconds:g}s{detail}")
         time.sleep(1)
 
 
@@ -239,7 +239,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    marker = f"shadowclaw-phase1-{uuid.uuid4().hex}"
+    marker = f"shadow-ai-discovery-{uuid.uuid4().hex}"
     try:
         post_payload(
             args.otlp_endpoint,
@@ -253,9 +253,9 @@ def main() -> int:
             timeout_seconds=args.request_timeout_seconds,
         )
     except IntegrationError as exc:
-        print(f"ShadowClaw OTLP integration check failed: {exc}")
+        print(f"Shadow AI discovery check failed: {exc}")
         return 1
-    print("ShadowClaw OTLP integration check passed: namespace and finding metadata preserved")
+    print("Shadow AI discovery check passed: namespace and finding metadata preserved")
     return 0
 
 
