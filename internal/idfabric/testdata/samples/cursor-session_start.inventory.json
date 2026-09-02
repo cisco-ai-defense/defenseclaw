@@ -1,0 +1,39 @@
+{
+  "agent": {
+    "platform": "cursor",
+    "platform_version": "3.10.17",
+    "process_type": "ide_extension"
+  },
+  "data_source": "defenseclaw",
+  "device": {
+    "hostname": "<hostname>",
+    "id": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+    "operating_system": "mac",
+    "username": "<os-username>"
+  },
+  "emitted_at": "<timestamp>",
+  "is_policy_enforceable": false,
+  "mcp_servers": [
+    {
+      "auth_method": "oauth",
+      "server_name": "figma",
+      "server_type": "remote",
+      "url": "https://mcp.figma.com"
+    },
+    {
+      "package": "grafana/mcp-grafana",
+      "package_version": "1.4.0",
+      "runner": "docker",
+      "server_name": "grafana",
+      "server_type": "local"
+    }
+  ],
+  "producer_version": "v1.0.0",
+  "runtime_status": "RUNNING",
+  "schema_model": "DefenseClawAgent",
+  "schema_version": "1",
+  "user": {
+    "authenticated_user_email": "cursor.user@example.com",
+    "uid": "<effective-uid>"
+  }
+}

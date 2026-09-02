@@ -1,0 +1,29 @@
+{
+  "data_source": "defenseclaw",
+  "emitted_at": "<timestamp>",
+  "pre_tool_use": {
+    "agent": {
+      "platform": "cursor",
+      "platform_version": "3.10.17",
+      "process_type": "ide_extension"
+    },
+    "device": {
+      "hostname": "<hostname>",
+      "id": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+      "operating_system": "mac",
+      "username": "<os-username>"
+    },
+    "event_time": "2026-09-02T12:00:00Z",
+    "event_time_source": "hook_receipt",
+    "event_type": "pre_tool_use",
+    "session_id": "cur-sess-01",
+    "tool_name": "Shell",
+    "user": {
+      "authenticated_user_email": "cursor.user@example.com",
+      "uid": "<effective-uid>"
+    }
+  },
+  "producer_version": "v1.0.0",
+  "schema_model": "DefenseClawAgentEvent",
+  "schema_version": "1"
+}

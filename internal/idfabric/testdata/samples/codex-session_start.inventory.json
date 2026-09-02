@@ -1,0 +1,38 @@
+{
+  "agent": {
+    "platform": "codex",
+    "process_type": "cli"
+  },
+  "data_source": "defenseclaw",
+  "device": {
+    "hostname": "<hostname>",
+    "id": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+    "operating_system": "mac",
+    "username": "<os-username>"
+  },
+  "emitted_at": "<timestamp>",
+  "is_policy_enforceable": false,
+  "mcp_servers": [
+    {
+      "package": "@modelcontextprotocol/server-github",
+      "package_version": "2.0.1",
+      "runner": "npx",
+      "server_name": "github",
+      "server_type": "local"
+    },
+    {
+      "auth_method": "unknown",
+      "server_name": "internal_docs",
+      "server_type": "remote",
+      "url": "https://docs.internal.example.com"
+    }
+  ],
+  "producer_version": "v1.0.0",
+  "runtime_status": "RUNNING",
+  "schema_model": "DefenseClawAgent",
+  "schema_version": "1",
+  "user": {
+    "authenticated_user_email": "codex.user@example.com",
+    "uid": "<effective-uid>"
+  }
+}

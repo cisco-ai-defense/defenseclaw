@@ -1,0 +1,38 @@
+{
+  "agent": {
+    "platform": "claude_code",
+    "process_type": "cli"
+  },
+  "data_source": "defenseclaw",
+  "device": {
+    "hostname": "<hostname>",
+    "id": "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+    "operating_system": "mac",
+    "username": "<os-username>"
+  },
+  "emitted_at": "<timestamp>",
+  "is_policy_enforceable": false,
+  "mcp_servers": [
+    {
+      "package": "mcp-server-postgres",
+      "package_version": "0.7.1",
+      "runner": "uvx",
+      "server_name": "db-tools",
+      "server_type": "local"
+    },
+    {
+      "auth_method": "unknown",
+      "server_name": "sentry",
+      "server_type": "remote",
+      "url": "https://mcp.sentry.dev"
+    }
+  ],
+  "producer_version": "v1.0.0",
+  "runtime_status": "RUNNING",
+  "schema_model": "DefenseClawAgent",
+  "schema_version": "1",
+  "user": {
+    "authenticated_user_email": "claude.user@example.com",
+    "uid": "<effective-uid>"
+  }
+}
