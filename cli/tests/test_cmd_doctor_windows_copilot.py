@@ -30,10 +30,13 @@ def _adapter_body(runtime: Path) -> str:
     return f"""# defenseclaw-managed-hook v7
 $hook = '{literal}'
 $payload = [Console]::In.ReadToEnd()
+$payload[0] -eq [char]0xFEFF
 $startInfo.RedirectStandardInput = $true
 $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
-$stdinTask = $process.StandardInput.BaseStream.WriteAsync($payloadBytes, 0, $payloadBytes.Length)
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$stdinTask = $process.StandardInput.WriteAsync($payload)
 $process.WaitForExit($remainingMS)
 $startInfo.Arguments = 'hook --connector copilot --event ' + $Event
 [System.Environment]::Exit(0)

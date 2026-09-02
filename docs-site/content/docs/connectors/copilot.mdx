@@ -227,7 +227,9 @@ DefenseClaw's prepared contract invokes a managed `copilot-hook.ps1`
 byte-stream adapter. The adapter reads Copilot's JSON from console stdin,
 launches the stable `defenseclaw-hook.exe` runtime without a console and with
 explicitly redirected standard handles, waits for completion, and writes the
-runtime's decision back to Copilot unchanged. It does not require Bash or WSL. See the
+runtime's decision back to Copilot unchanged. It normalizes Windows
+PowerShell 5.1's leading encoding marker and uses UTF-8 without a BOM for the
+child streams. It does not require Bash or WSL. See the
 [recorded upstream Windows contract](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/development/copilot-native-windows-contract.md)
 for source URLs, version/date evidence, event semantics, and the remaining
 authentic-client validation work.

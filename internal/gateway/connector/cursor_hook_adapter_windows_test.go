@@ -45,8 +45,8 @@ const windsurfAdapterExitCodeEnv = "TEST_WINDSURF_ADAPTER_EXIT_CODE"
 func TestMain(m *testing.M) {
 	if os.Getenv(copilotAdapterHelperMode) == "result" {
 		payload, err := io.ReadAll(os.Stdin)
-		if err != nil || !bytes.Contains(payload, []byte("copilot-adapter-probe")) {
-			fmt.Fprintln(os.Stderr, "Copilot adapter helper did not receive the expected stdin payload")
+		if err != nil || string(payload) != `{"source":"copilot-adapter-probe"}` {
+			fmt.Fprintf(os.Stderr, "Copilot adapter helper received wrong stdin: %q\n", string(payload))
 			os.Exit(6)
 		}
 		if strings.Join(os.Args[1:], "|") != "hook|--connector|copilot|--event|preToolUse" {
@@ -172,7 +172,7 @@ func TestCopilotAdapterPreservesJSONInputAndDenyResponse(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
 	}
 	if strings.TrimSpace(stdout) != `{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}` {
-		t.Fatalf("stdout = %q, want exact Copilot deny JSON", stdout)
+		t.Fatalf("stdout = %q, want exact Copilot deny JSON; stderr=%q", stdout, stderr)
 	}
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
