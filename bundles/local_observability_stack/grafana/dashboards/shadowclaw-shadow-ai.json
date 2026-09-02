@@ -348,7 +348,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "instant",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.finding.recorded\" | json | __error__=\"\" | severity =~ \"$severity\" |~ \"$search\" | unwrap risk_score [$__range]) by ())"
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.finding.recorded\" | json | __error__=\"\" | severity =~ \"$severity\" |~ \"$search\" | unwrap risk_score [$__range]))"
         }
       ],
       "options": {
@@ -492,7 +492,7 @@
           },
           "queryType": "range",
           "legendFormat": "unattributed egress",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.finding.recorded\" | json | __error__=\"\" | provider = \"\" | severity =~ \"$severity\" |~ \"$search\" | unwrap risk_score [$__interval]) by ())"
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.finding.recorded\" | json | __error__=\"\" | provider = \"\" | severity =~ \"$severity\" |~ \"$search\" | unwrap risk_score [$__interval]))"
         }
       ],
       "options": {
@@ -1485,7 +1485,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "instant",
-          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap degraded_count [$__range]) by ())"
+          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap degraded_count [$__range]))"
         }
       ],
       "options": {
@@ -1553,7 +1553,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "instant",
-          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap feed_coverage [$__range]) by ())"
+          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap feed_coverage [$__range]))"
         }
       ],
       "options": {
@@ -1624,7 +1624,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "instant",
-          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | degraded_inputs !~ \".*adversarial_pressure.*\" | unwrap adversarial_pressure [$__range]) by ())"
+          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | degraded_inputs !~ \".*adversarial_pressure.*\" | unwrap adversarial_pressure [$__range]))"
         }
       ],
       "options": {
@@ -1697,7 +1697,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "instant",
-          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | degraded_inputs !~ \".*evidence_density.*\" | unwrap evidence_density [$__range]) by ())"
+          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | degraded_inputs !~ \".*evidence_density.*\" | unwrap evidence_density [$__range]))"
         }
       ],
       "options": {
@@ -1770,7 +1770,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "instant",
-          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | degraded_inputs !~ \".*trust_trend.*\" | unwrap trust_trend [$__range]) by ())"
+          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | degraded_inputs !~ \".*trust_trend.*\" | unwrap trust_trend [$__range]))"
         }
       ],
       "options": {
@@ -1843,7 +1843,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "instant",
-          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | degraded_inputs !~ \".*update_resistance.*\" | unwrap update_resistance [$__range]) by ())"
+          "expr": "max(last_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | degraded_inputs !~ \".*update_resistance.*\" | unwrap update_resistance [$__range]))"
         }
       ],
       "options": {
@@ -1916,7 +1916,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "range",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap adversarial_pressure [$__interval]) by ())",
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap adversarial_pressure [$__interval]))",
           "legendFormat": "Adversarial pressure"
         },
         {
@@ -1926,7 +1926,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "range",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap evidence_density [$__interval]) by ())",
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap evidence_density [$__interval]))",
           "legendFormat": "Evidence density"
         },
         {
@@ -1936,7 +1936,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "range",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap trust_trend [$__interval]) by ())",
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap trust_trend [$__interval]))",
           "legendFormat": "Trust trend"
         },
         {
@@ -1946,7 +1946,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "range",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap update_resistance [$__interval]) by ())",
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap update_resistance [$__interval]))",
           "legendFormat": "Update resistance"
         }
       ],
@@ -2061,7 +2061,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "range",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap feed_coverage [$__interval]) by ())",
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap feed_coverage [$__interval]))",
           "legendFormat": "Feed coverage"
         },
         {
@@ -2071,7 +2071,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "range",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap degraded_count [$__interval]) by ())",
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap degraded_count [$__interval]))",
           "legendFormat": "Inputs unobserved"
         },
         {
@@ -2081,7 +2081,7 @@
             "uid": "defenseclaw-loki"
           },
           "queryType": "range",
-          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap silent_processes [$__interval]) by ())",
+          "expr": "max(max_over_time({service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.ktp.risk_factors\" | json | __error__=\"\" | unwrap silent_processes [$__interval]))",
           "legendFormat": "Silent processes"
         }
       ],

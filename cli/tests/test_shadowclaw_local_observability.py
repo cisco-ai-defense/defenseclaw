@@ -62,6 +62,7 @@ def test_shadowclaw_dashboard_uses_the_provisioned_loki_datasource() -> None:
 
     assert len(targets) >= 40
     assert "${DS_LOKI}" not in serialized
+    assert "by ()" not in serialized
     assert all(target.get("datasource") == {"type": "loki", "uid": "defenseclaw-loki"} for target in targets)
 
     finding_queries = [
