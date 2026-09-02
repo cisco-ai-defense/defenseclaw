@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -274,7 +275,13 @@ func TestSignatureVerifySkippedOnAllowUnsigned(t *testing.T) {
 	// signtool). A signature rejection is a payload-side fault; a
 	// missing runtime is an environment fault. Exit-code 4 is
 	// reserved for the former, so this path returns ioError.
-	if os.Getenv("GOOS") == "windows" {
+	//
+	// runtime.GOOS is the correct host check — os.Getenv("GOOS") reads
+	// only an env var that is unset by default, so a Windows CI runner
+	// would fall through and try to run signtool on an unsigned test
+	// fixture, tripping a signatureError that the assertion here would
+	// misreport.
+	if runtime.GOOS == "windows" {
 		t.Skip("Windows host: signtool likely available; test asserts non-Windows behavior")
 	}
 	opts := baseOpts(t)
@@ -310,4 +317,35 @@ func sha256File(t *testing.T, path string) string {
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
+}
+
+// TestAssertCNIsCisco pins the exact-equality contract that closes
+// signtool's /n substring-match gap. A subject that CONTAINS the
+// pinned CN but does not EQUAL it (e.g. an internal test cert) must
+// be rejected — /n alone would let it through, so the follow-up
+// exact check in verifyAuthenticode is the load-bearing gate.
+func TestAssertCNIsCisco(t *testing.T) {
+	exact := "Cisco Systems, Inc."
+	if err := assertCNIsCisco("payload/x.exe", exact); err != nil {
+		t.Errorf("exact CN unexpectedly rejected: %v", err)
+	}
+	rejects := []string{
+		"Cisco Systems, Inc. (Test Root)",  // suffix — trailing junk
+		"Not Cisco Systems, Inc.",          // prefix — masquerading
+		"Cisco Systems, Inc",               // missing period — near-match
+		"cisco systems, inc.",              // case difference — /n is case-insensitive but our contract is exact
+		"Cisco Systems Inc.",               // missing comma
+		"",                                 // empty
+		" Cisco Systems, Inc. ",            // whitespace-padded
+	}
+	for _, cn := range rejects {
+		err := assertCNIsCisco("payload/x.exe", cn)
+		if err == nil {
+			t.Errorf("subject %q was accepted, expected signatureError", cn)
+			continue
+		}
+		if _, ok := err.(*signatureError); !ok {
+			t.Errorf("subject %q rejected with %T; expected *signatureError", cn, err)
+		}
+	}
 }

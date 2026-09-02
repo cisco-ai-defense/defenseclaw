@@ -329,8 +329,16 @@ echo "==> stamping defenseclaw-cmid-broker.exe VERSIONINFO / icon"
 # binaries; the assembler EXE follows the same layout.
 SETUP_EXE_UNSIGNED="${STAGE_DIR}/DefenseClawSetup-Enterprise-x64.exe.unsigned"
 ASSEMBLER_EXE="${STAGE_DIR}/DefenseClawAssembler.exe"
-LDFLAGS_SETUP="-s -w -buildid=defenseclaw-enterprise-setup-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
-LDFLAGS_ASSEMBLER="-s -w -buildid=defenseclaw-assembler-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
+# Neither cmd/defenseclaw-enterprise-setup nor cmd/windows-avc-assembler
+# declares main.version or main.commit — go's linker silently ignores
+# a -X targeting a nonexistent variable, so the payload EXEs' pattern
+# (LDFLAGS_GATEWAY / _HOOK / _BROKER above) doesn't transfer here.
+# The setup EXE gets its stamp from the windowsresources tool run
+# directly below; the assembler receives version/commit through its
+# -Version / -SourceCommit CLI flags. Leaving -buildid so the Go
+# reproducibility recipe still pins output identity.
+LDFLAGS_SETUP="-s -w -buildid=defenseclaw-enterprise-setup-${VERSION}-windows-amd64"
+LDFLAGS_ASSEMBLER="-s -w -buildid=defenseclaw-assembler-${VERSION}-windows-amd64"
 
 # SOURCE_DATE_EPOCH must be set BEFORE the go build so -trimpath's
 # stripped build-time paths + the toolchain's own timestamp emissions
