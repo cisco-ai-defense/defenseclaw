@@ -80,7 +80,7 @@ def test_external_dashboard_does_not_expand_the_native_v8_query_contract() -> No
     native = compat.defenseclaw_dashboards(dashboards)
     native_uids = {dashboard["uid"] for _, dashboard in native}
 
-    assert native_uids == compat.DEFENSECLAW_DASHBOARD_UIDS
+    assert native_uids == compat.NATIVE_DASHBOARD_UIDS
     assert compat.EXTERNAL_DASHBOARD_UIDS == {"shadowclaw-shadow-ai"}
     assert compat.EXTERNAL_DASHBOARD_UIDS.isdisjoint(native_uids)
 

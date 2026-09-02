@@ -52,7 +52,7 @@ def _is_runtime_source_file(relative: Path) -> bool:
         for runtime_name in _LOCAL_OBSERVABILITY_RUNTIME_SOURCE_FILES
     )
 
-DEFENSECLAW_DASHBOARD_UIDS = {
+NATIVE_DASHBOARD_UIDS = {
     "defenseclaw-activity",
     "defenseclaw-agent-360",
     "defenseclaw-agent-identity",
@@ -69,7 +69,7 @@ DEFENSECLAW_DASHBOARD_UIDS = {
     "defenseclaw-traffic",
 }
 EXTERNAL_DASHBOARD_UIDS = {"shadowclaw-shadow-ai"}
-EXPECTED_DASHBOARD_UIDS = DEFENSECLAW_DASHBOARD_UIDS | EXTERNAL_DASHBOARD_UIDS
+EXPECTED_DASHBOARD_UIDS = NATIVE_DASHBOARD_UIDS | EXTERNAL_DASHBOARD_UIDS
 EXPECTED_DATASOURCE_UIDS = {
     "prometheus": "defenseclaw-prometheus",
     "loki": "defenseclaw-loki",
@@ -757,7 +757,7 @@ def defenseclaw_dashboards(
     return [
         item
         for item in dashboards
-        if str(item[1].get("uid", "")) in DEFENSECLAW_DASHBOARD_UIDS
+        if str(item[1].get("uid", "")) in NATIVE_DASHBOARD_UIDS
     ]
 
 
