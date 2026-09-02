@@ -245,6 +245,12 @@ type AIDiscoveryConfig struct {
 	Mode               string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
 	ScanIntervalMin    int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
 	ProcessIntervalSec int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	// PublishJitterMs bounds the fleet-wide startup/tick jitter applied to
+	// the discovery scan schedule when a run publishes to AI Defense
+	// (managed_enterprise). Zero means "use the mode default" — 10 % of
+	// ScanIntervalMin in managed_enterprise, disabled elsewhere. Set
+	// explicitly to override; a negative value falls back to the default.
+	PublishJitterMs int `mapstructure:"publish_jitter_ms" yaml:"publish_jitter_ms,omitempty"`
 	ScanRoots          []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
 	// HomeDirs is the list of user home directories the detectors that
 	// walk per-user dotfiles (editor extensions, MCP configs, shell

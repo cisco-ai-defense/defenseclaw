@@ -2748,3 +2748,142 @@ func TestSleepWithJitterCancellation(t *testing.T) {
 		}
 	})
 }
+
+// TestAIDiscoveryOptionsFromConfigPublishJitter pins the config → options
+// bridge for the new PublishJitter field. An operator override
+// (`ai_discovery.publish_jitter_ms: 45000`) must survive normalization
+// verbatim in managed_enterprise; a zero value must still fall back to the
+// 10 % managed default.
+func TestAIDiscoveryOptionsFromConfigPublishJitter(t *testing.T) {
+	cases := []struct {
+		name     string
+		mode     string
+		scanMin  int
+		jitterMs int
+		want     time.Duration
+	}{
+		{"managed_default_zero_uses_ten_percent", "managed_enterprise", 30, 0, 3 * time.Minute},
+		{"managed_operator_override_preserved", "managed_enterprise", 30, 45_000, 45 * time.Second},
+		{"managed_operator_override_below_normalize_floor_preserved", "managed_enterprise", 30, 500, 500 * time.Millisecond},
+		{"unmanaged_default_zero_stays_zero", "", 5, 0, 0},
+		{"unmanaged_operator_override_preserved", "", 5, 15_000, 15 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				DataDir:        t.TempDir(),
+				DeploymentMode: tc.mode,
+				AIDiscovery: config.AIDiscoveryConfig{
+					Enabled:         true,
+					ScanIntervalMin: tc.scanMin,
+					PublishJitterMs: tc.jitterMs,
+				},
+			}
+			opts := AIDiscoveryOptionsFromConfig(cfg)
+			if opts.PublishJitter != tc.want {
+				t.Fatalf("PublishJitter = %s, want %s (mode=%q, scan_min=%d, jitter_ms=%d)",
+					opts.PublishJitter, tc.want, tc.mode, tc.scanMin, tc.jitterMs)
+			}
+		})
+	}
+}
+
+// TestRunClaimedResetsTimerBeforeScan is a regression guard for the
+// CodeRabbit finding on PR #820 — the scheduled/process timers must be
+// Reset BEFORE the synchronous runScan call so the next interval is
+// measured from scan START, not from scan END. A slow scan therefore
+// does not stretch the effective cadence.
+//
+// The test drives one full-scan tick with an artificially slow scan
+// (a report observer that sleeps for a substantial fraction of the
+// scan interval) and verifies the NEXT scheduled tick still fires
+// within a window measured from the FIRST tick's start, not its end.
+func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	// 200 ms base interval, 0 jitter — tight window so a stretched
+	// cadence is obviously outside it. Scan duration is 120 ms —
+	// >50 % of the interval, so the "reset after" bug (period ≈ 320 ms)
+	// is clearly separable from the "reset before" contract (period
+	// ≈ 200 ms).
+	scanInterval := 200 * time.Millisecond
+	scanDuration := 120 * time.Millisecond
+
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		DataDir:         dataDir,
+		HomeDir:         homeDir,
+		ScanRoots:       []string{homeDir},
+		ScanInterval:    scanInterval,
+		ProcessInterval: 10 * time.Second, // silence the process timer for this test
+		PublishJitter:   0,
+	}, nil)
+	t.Cleanup(func() {
+		if svc.InventoryStore() != nil {
+			_ = svc.InventoryStore().Close()
+		}
+	})
+
+	// Observer records the wall-clock arrival of each scan report and
+	// sleeps to make the scan slow. Only slow the SCHEDULED ticks —
+	// let the startup scan return promptly so we're measuring the
+	// tick-to-tick period, not startup + tick.
+	var (
+		mu       sync.Mutex
+		arrivals []time.Time
+	)
+	svc.AddReportObserver(func(_ context.Context, _ AIDiscoveryReport) {
+		mu.Lock()
+		arrivals = append(arrivals, time.Now())
+		count := len(arrivals)
+		mu.Unlock()
+		if count >= 2 { // slow only scheduled ticks, not the initial startup scan
+			time.Sleep(scanDuration)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- svc.Run(ctx) }()
+
+	// Wait for the startup scan + at least three scheduled ticks so the
+	// tick-to-tick period is measured on scans #2 → #3 (both were slow).
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		got := len(arrivals)
+		mu.Unlock()
+		if got >= 4 {
+			break
+		}
+		select {
+		case <-deadline:
+			cancel()
+			<-runDone
+			t.Fatalf("only observed %d scan(s) in 3 s; want ≥ 4", got)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-runDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+
+	// arrivals[0] = startup, arrivals[1..] = scheduled. Measure
+	// scan #2 start → scan #3 start (both are slow scheduled ticks).
+	mu.Lock()
+	defer mu.Unlock()
+	if len(arrivals) < 4 {
+		t.Fatalf("arrivals = %d, want ≥ 4", len(arrivals))
+	}
+	period := arrivals[3].Sub(arrivals[2])
+	// Reset-before contract: period ≈ scanInterval (200 ms).
+	// Reset-after bug: period ≈ scanDuration + scanInterval (320 ms).
+	// Fail with generous margin either way — 250 ms is above the
+	// contract but below the bug regime.
+	if period > scanInterval+50*time.Millisecond {
+		t.Fatalf("period between slow ticks = %s, want ≤ %s "+
+			"(reset-after regression — cadence is stretching with scan duration; arrivals=%v)",
+			period, scanInterval+50*time.Millisecond, arrivals)
+	}
+}

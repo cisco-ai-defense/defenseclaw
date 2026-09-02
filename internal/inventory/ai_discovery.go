@@ -683,6 +683,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		Mode:                        ad.Mode,
 		ScanInterval:                time.Duration(ad.ScanIntervalMin) * time.Minute,
 		ProcessInterval:             time.Duration(ad.ProcessIntervalSec) * time.Second,
+		PublishJitter:               time.Duration(ad.PublishJitterMs) * time.Millisecond,
 		ScanRoots:                   append([]string{}, ad.ScanRoots...),
 		SignaturePacks:              append([]string{}, ad.SignaturePacks...),
 		AllowWorkspaceSignatures:    ad.AllowWorkspaceSignatures,
@@ -967,11 +968,16 @@ func (s *ContinuousDiscoveryService) runClaimed(ctx context.Context) (runErr err
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-fullTimer.C:
-			_, _ = s.runScan(ctx, true, "scheduled")
+			// Reset BEFORE runScan so the next interval is measured
+			// from scan start, not scan end — long scans do not stretch
+			// the effective cadence. runScan is serialized by scanMu so
+			// a Reset-then-scan that outlasts the interval simply queues
+			// the next fire; the timer channel remains a single slot.
 			fullTimer.Reset(s.nextScheduledDelay(s.opts.ScanInterval))
+			_, _ = s.runScan(ctx, true, "scheduled")
 		case <-processTimer.C:
-			_, _ = s.runScan(ctx, false, "process")
 			processTimer.Reset(s.nextScheduledDelay(s.opts.ProcessInterval))
+			_, _ = s.runScan(ctx, false, "process")
 		case resp := <-s.triggers:
 			report, err := s.runScan(ctx, true, "api")
 			resp <- scanResponse{report: report, err: err}
