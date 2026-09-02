@@ -269,7 +269,7 @@ _COPILOT_POWERSHELL_COMMAND = re.compile(
     r"^& '((?:[^']|'')+copilot-hook\.ps1)' -Event '([^']+)'$",
     re.IGNORECASE,
 )
-_COPILOT_ADAPTER_HOOK_BINARY = re.compile(r"(?m)^\$hook = '((?:[^']|'')+)'$")
+_COPILOT_ADAPTER_HOOK_BINARY = re.compile(r"(?m)^\$hook = '((?:[^']|'')+)'\r?$")
 _COPILOT_ADAPTER_MAX_BYTES = 128 * 1024
 
 _ANTIGRAVITY_REQUIRED_HOOKS: dict[str, bool] = {
