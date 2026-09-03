@@ -4282,16 +4282,41 @@ type managedGuardianAuthorization struct {
 	FailureCount     int                                  `json:"failure_count"`
 	PendingCount     int                                  `json:"pending_count,omitempty"`
 	ProtectedTargets []managedGuardianAuthorizationTarget `json:"protected_targets"`
+	Current          *managedGuardianCurrentReadiness     `json:"current,omitempty"`
 }
 
 type managedGuardianAuthorizationTarget struct {
-	User      string                         `json:"user,omitempty"`
-	UserHome  string                         `json:"user_home,omitempty"`
-	SID       string                         `json:"sid,omitempty"`
-	Connector string                         `json:"connector"`
-	OK        bool                           `json:"ok"`
-	Error     string                         `json:"error,omitempty"`
-	Result    *enterprisehooks.InstallResult `json:"result,omitempty"`
+	User             string                         `json:"user,omitempty"`
+	UserHome         string                         `json:"user_home,omitempty"`
+	SID              string                         `json:"sid,omitempty"`
+	Connector        string                         `json:"connector"`
+	OK               bool                           `json:"ok"`
+	Error            string                         `json:"error,omitempty"`
+	Result           *enterprisehooks.InstallResult `json:"result,omitempty"`
+	TokenFingerprint string                         `json:"token_fingerprint,omitempty"`
+}
+
+type managedGuardianCurrentReadiness struct {
+	Version        int                                `json:"version"`
+	ReconcileID    string                             `json:"reconcile_id"`
+	ManifestSHA256 string                             `json:"manifest_sha256"`
+	Generation     string                             `json:"generation"`
+	OK             bool                               `json:"ok"`
+	TargetCount    int                                `json:"target_count"`
+	SuccessCount   int                                `json:"success_count"`
+	FailureCount   int                                `json:"failure_count"`
+	Attestations   []managedGuardianCurrentAttestation `json:"attestations"`
+}
+
+type managedGuardianCurrentAttestation struct {
+	User             string `json:"user,omitempty"`
+	UserHome         string `json:"user_home,omitempty"`
+	SID              string `json:"sid,omitempty"`
+	Connector        string `json:"connector"`
+	OK               bool   `json:"ok"`
+	Generation       string `json:"generation"`
+	TokenFingerprint string `json:"token_fingerprint"`
+	ManifestSHA256   string `json:"manifest_sha256"`
 }
 
 const managedGuardianAuthorizationMaxBytes int64 = 4 << 20
@@ -4347,7 +4372,7 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 	//
 	// This resolves the asymmetry Vineeth flagged in the PR-767 review while
 	// keeping the same-version schema check green.
-	const currentGuardianAuthorizationVersion = 1
+	const currentGuardianAuthorizationVersion = 2
 	var versionProbe struct {
 		Version int `json:"version"`
 	}
@@ -4368,8 +4393,8 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 	// higher version the lenient decode above already ensured we only
 	// consumed the fields we know. Negative versions are the only
 	// unsupported case (malformed producer).
-	if authorization.Version < 0 {
-		return false, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
+	if authorization.Version < 2 {
+		return false, "hook guardian authorization lacks current per-target attestations"
 	}
 	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
 		return false, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
@@ -4381,8 +4406,7 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		authorization.PendingCount < 0 ||
 		authorization.FailureCount != 0 ||
 		authorization.SuccessCount > authorization.TargetCount ||
-		authorization.PendingCount != authorization.TargetCount-authorization.SuccessCount ||
-		authorization.SuccessCount != len(authorization.ProtectedTargets) {
+		authorization.PendingCount != authorization.TargetCount-authorization.SuccessCount {
 		return false, fmt.Sprintf(
 			"hook guardian authorization is incomplete (%d/%d targets succeeded, %d pending, %d failed)",
 			authorization.SuccessCount,
@@ -4391,32 +4415,56 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 			authorization.FailureCount,
 		)
 	}
-	covered := make(map[string]struct{}, len(authorization.ProtectedTargets))
-	targets := make(map[string]struct{}, len(authorization.ProtectedTargets))
-	for _, target := range authorization.ProtectedTargets {
-		if !target.OK || strings.TrimSpace(target.Error) != "" {
-			return false, "hook guardian authorization contains an unsuccessful protected target"
+	current := authorization.Current
+	if current == nil || !current.OK ||
+		current.Version != 2 ||
+		current.FailureCount != 0 ||
+		current.SuccessCount != len(current.Attestations) ||
+		current.SuccessCount == 0 ||
+		current.Generation == "" ||
+		current.Generation != current.ReconcileID {
+		return false, "hook guardian current attestations are missing or not ready"
+	}
+	if current.ManifestSHA256 == "" || current.ReconcileID == "" {
+		return false, "hook guardian current attestations omit generation or manifest identity"
+	}
+	covered := make(map[string]struct{}, len(current.Attestations))
+	targets := make(map[string]struct{}, len(current.Attestations))
+	generation := strings.TrimSpace(current.Generation)
+	manifest := strings.TrimSpace(current.ManifestSHA256)
+	for _, target := range current.Attestations {
+		if !target.OK || !managed.ValidScopedTokenFingerprint(target.TokenFingerprint) {
+			return false, "hook guardian current attestations contain an unsuccessful or unfingerprinted target"
+		}
+		if target.Generation != generation || target.ManifestSHA256 != manifest {
+			return false, "hook guardian current attestations mix generations"
 		}
 		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-		if connectorName == "" && target.Result != nil {
-			connectorName = strings.ToLower(strings.TrimSpace(target.Result.Connector))
-		}
-		key := managedGuardianTargetKey(target, connectorName)
+		key := managedGuardianCurrentTargetKey(target, connectorName)
 		if connectorName == "" || key == "" {
-			return false, "hook guardian authorization contains an incomplete protected target"
+			return false, "hook guardian current attestations contain an incomplete target"
 		}
 		if _, duplicate := targets[key]; duplicate {
-			return false, fmt.Sprintf("hook guardian authorization contains duplicate protected target %q", key)
+			return false, fmt.Sprintf("hook guardian current attestations contain duplicate target %q", key)
 		}
 		targets[key] = struct{}{}
 		covered[connectorName] = struct{}{}
 	}
 	for _, name := range connectorNames {
 		if _, ok := covered[strings.ToLower(strings.TrimSpace(name))]; !ok {
-			return false, fmt.Sprintf("hook guardian has not authorized connector %s", name)
+			return false, fmt.Sprintf("hook guardian has not attested connector %s in the current generation", name)
 		}
 	}
 	return true, ""
+}
+
+func managedGuardianCurrentTargetKey(target managedGuardianCurrentAttestation, connectorName string) string {
+	return managedGuardianTargetKey(managedGuardianAuthorizationTarget{
+		User:      target.User,
+		UserHome:  target.UserHome,
+		SID:       target.SID,
+		Connector: connectorName,
+	}, connectorName)
 }
 
 func managedGuardianTargetKey(target managedGuardianAuthorizationTarget, connectorName string) string {
