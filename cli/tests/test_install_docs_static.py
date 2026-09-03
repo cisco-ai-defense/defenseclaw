@@ -2247,3 +2247,14 @@ def test_readme_delegates_observability_operations_to_the_website() -> None:
     assert "make telemetry-generate" in implementation
     assert "make telemetry-check" in implementation
     assert "defenseclaw-gateway restart" not in readme
+
+
+def test_policy_overview_matches_atomic_invalid_regex_rejection() -> None:
+    overview = (ROOT / "docs-site/content/docs/policies/index.mdx").read_text()
+    validation = (ROOT / "docs-site/content/docs/policies/rulepack-validation.mdx").read_text()
+
+    assert "logged and dropped" not in overview
+    assert "rejects the complete candidate" in overview
+    assert "/docs/policies/rulepack-validation" in overview
+    assert "invalid Go regular expression" in validation
+    assert "silently discard the bad file" in validation
