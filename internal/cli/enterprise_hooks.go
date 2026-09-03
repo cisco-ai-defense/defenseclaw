@@ -129,13 +129,13 @@ const hookGuardianActivationFile = "activation.json"
 const hookGuardianAuthorizationDirEnv = managed.HookGuardianAuthorizationDirEnv
 
 const (
-	enterpriseHookGuardianStateMaxBytes         int64 = 1 << 20
-	enterpriseHookGuardianAuthorizationMaxBytes int64 = 4 << 20
-	enterpriseHookGuardianActivationVersion           = 1
-	enterpriseHookGuardianAuthorizationVersionV1      = 1
-	enterpriseHookGuardianAuthorizationVersionV2      = 2
-	enterpriseHookWatchRepairRetryMin                 = time.Second
-	enterpriseHookWatchRepairRetryMax                 = 15 * time.Second
+	enterpriseHookGuardianStateMaxBytes          int64 = 1 << 20
+	enterpriseHookGuardianAuthorizationMaxBytes  int64 = 4 << 20
+	enterpriseHookGuardianActivationVersion            = 1
+	enterpriseHookGuardianAuthorizationVersionV1       = 1
+	enterpriseHookGuardianAuthorizationVersionV2       = 2
+	enterpriseHookWatchRepairRetryMin                  = time.Second
+	enterpriseHookWatchRepairRetryMax                  = 15 * time.Second
 )
 
 var enterpriseCmd = &cobra.Command{
@@ -506,14 +506,14 @@ type enterpriseHookCurrentAttestation struct {
 // enterpriseHookCurrentReadiness is published atomically with authorization.
 // Service-writable status must never be treated as this record.
 type enterpriseHookCurrentReadiness struct {
-	Version        int                               `json:"version"`
-	ReconcileID    string                            `json:"reconcile_id"`
-	ManifestSHA256 string                            `json:"manifest_sha256"`
-	Generation     string                            `json:"generation"`
-	OK             bool                              `json:"ok"`
-	TargetCount    int                               `json:"target_count"`
-	SuccessCount   int                               `json:"success_count"`
-	FailureCount   int                               `json:"failure_count"`
+	Version        int                                `json:"version"`
+	ReconcileID    string                             `json:"reconcile_id"`
+	ManifestSHA256 string                             `json:"manifest_sha256"`
+	Generation     string                             `json:"generation"`
+	OK             bool                               `json:"ok"`
+	TargetCount    int                                `json:"target_count"`
+	SuccessCount   int                                `json:"success_count"`
+	FailureCount   int                                `json:"failure_count"`
 	Attestations   []enterpriseHookCurrentAttestation `json:"attestations"`
 }
 
@@ -2573,14 +2573,14 @@ type enterpriseHookGuardianState struct {
 }
 
 type enterpriseHookGuardianAuthorization struct {
-	Version          int                            `json:"version"`
-	UpdatedAt        string                         `json:"updated_at"`
-	OK               bool                           `json:"ok"`
-	TargetCount      int                            `json:"target_count"`
-	SuccessCount     int                            `json:"success_count"`
-	FailureCount     int                            `json:"failure_count"`
-	PendingCount     int                            `json:"pending_count,omitempty"`
-	ProtectedTargets []enterpriseHookReconcileRow   `json:"protected_targets"`
+	Version          int                             `json:"version"`
+	UpdatedAt        string                          `json:"updated_at"`
+	OK               bool                            `json:"ok"`
+	TargetCount      int                             `json:"target_count"`
+	SuccessCount     int                             `json:"success_count"`
+	FailureCount     int                             `json:"failure_count"`
+	PendingCount     int                             `json:"pending_count,omitempty"`
+	ProtectedTargets []enterpriseHookReconcileRow    `json:"protected_targets"`
 	Current          *enterpriseHookCurrentReadiness `json:"current,omitempty"`
 }
 
@@ -2589,17 +2589,17 @@ type enterpriseHookGuardianAuthorization struct {
 // pair lets a failed servicing transaction restart the prior strict v1 binary;
 // normal activation still requires this exact-manifest receipt.
 type enterpriseHookGuardianActivation struct {
-	Version          int                          `json:"version"`
-	UpdatedAt        string                       `json:"updated_at"`
-	ReconcileID      string                       `json:"reconcile_id"`
-	Manifest         string                       `json:"manifest"`
-	ManifestSHA256   string                       `json:"manifest_sha256"`
-	OK               bool                         `json:"ok"`
-	TargetCount      int                          `json:"target_count"`
-	SuccessCount     int                          `json:"success_count"`
-	FailureCount     int                          `json:"failure_count"`
-	PendingCount     int                            `json:"pending_count,omitempty"`
-	ProtectedTargets []enterpriseHookReconcileRow   `json:"protected_targets"`
+	Version          int                             `json:"version"`
+	UpdatedAt        string                          `json:"updated_at"`
+	ReconcileID      string                          `json:"reconcile_id"`
+	Manifest         string                          `json:"manifest"`
+	ManifestSHA256   string                          `json:"manifest_sha256"`
+	OK               bool                            `json:"ok"`
+	TargetCount      int                             `json:"target_count"`
+	SuccessCount     int                             `json:"success_count"`
+	FailureCount     int                             `json:"failure_count"`
+	PendingCount     int                             `json:"pending_count,omitempty"`
+	ProtectedTargets []enterpriseHookReconcileRow    `json:"protected_targets"`
 	Current          *enterpriseHookCurrentReadiness `json:"current,omitempty"`
 }
 
