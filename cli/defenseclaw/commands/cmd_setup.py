@@ -112,6 +112,10 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
+from defenseclaw.platform_support import (
+    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
+    local_shell_stacks_supported,
+)
 from defenseclaw.rotate_token_guardian import (
     GuardianRotationPlan,
     assert_current_attestations,
@@ -121,10 +125,6 @@ from defenseclaw.rotate_token_guardian import (
     guardian_manifest_path,
     parse_guardian_rotate_response,
     require_guardian_participant,
-)
-from defenseclaw.platform_support import (
-    LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
-    local_shell_stacks_supported,
 )
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
