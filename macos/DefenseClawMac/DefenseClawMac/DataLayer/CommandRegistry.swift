@@ -195,25 +195,6 @@ enum CommandInvocationError: LocalizedError, Equatable {
     }
 }
 
-struct CommandExecutionPlan: Equatable, Sendable {
-    enum Error: LocalizedError {
-        case invalidCredentialName
-        case missingSecret
-
-        var errorDescription: String? {
-            switch self {
-            case .invalidCredentialName:
-                "Enter one environment name using letters, digits, and underscores."
-            case .missingSecret:
-                "Enter the secret value."
-            }
-        }
-    }
-
-    let arguments: [String]
-    let standardInput: String?
-}
-
 enum CommandRegistry {
     static let sourceCount = 232
     static let all: [CommandDefinition] = [
@@ -373,7 +354,7 @@ enum CommandRegistry {
         CommandDefinition(id: 154, title: "sandbox exec", binary: "defenseclaw-gateway", arguments: ["sandbox", "exec"], summary: "Run command in sandbox", category: "sandbox", requiresInput: true, usage: "<command>"),
         CommandDefinition(id: 155, title: "sandbox shell", binary: "defenseclaw-gateway", arguments: ["sandbox", "shell"], summary: "Open sandbox shell", category: "sandbox", requiresInput: false, usage: ""),
         CommandDefinition(id: 156, title: "sandbox policy diff", binary: "defenseclaw-gateway", arguments: ["sandbox", "policy", "diff"], summary: "Compare policy vs endpoints", category: "sandbox", requiresInput: false, usage: ""),
-        CommandDefinition(id: 157, title: "upgrade", binary: "defenseclaw", arguments: ["upgrade", "--yes"], summary: "Upgrade DefenseClaw", category: "other", requiresInput: false, usage: ""),
+        CommandDefinition(id: 157, title: "upgrade", binary: "defenseclaw", arguments: ["upgrade", "--yes"], summary: "Run CLI upgrade preflight; hard cuts require the release-owned resolver", category: "other", requiresInput: false, usage: ""),
         CommandDefinition(id: 158, title: "uninstall dry-run", binary: "defenseclaw", arguments: ["uninstall", "--dry-run"], summary: "Preview uninstall changes without modifying the system", category: "other", requiresInput: false, usage: ""),
         CommandDefinition(id: 159, title: "uninstall --yes", binary: "defenseclaw", arguments: ["uninstall", "--yes"], summary: "Uninstall DefenseClaw after showing the plan", category: "other", requiresInput: false, usage: ""),
         CommandDefinition(id: 160, title: "uninstall --all --yes", binary: "defenseclaw", arguments: ["uninstall", "--all", "--yes"], summary: "Uninstall DefenseClaw and wipe local data", category: "other", requiresInput: false, usage: ""),
@@ -479,61 +460,6 @@ enum CommandRegistry {
             commands.insert(command)
         }
         return commands
-    }
-}
-
-enum CommandArgumentParser {
-    struct ParseError: LocalizedError {
-        let message: String
-        var errorDescription: String? { message }
-    }
-
-    static func parse(_ input: String) throws -> [String] {
-        var result: [String] = []
-        var current = ""
-        var quote: Character?
-        var escaped = false
-        var tokenStarted = false
-
-        for character in input {
-            if escaped {
-                current.append(character)
-                escaped = false
-                tokenStarted = true
-                continue
-            }
-            if character == "\\" && quote != "'" {
-                escaped = true
-                tokenStarted = true
-                continue
-            }
-            if let activeQuote = quote {
-                if character == activeQuote { quote = nil }
-                else {
-                    current.append(character)
-                    tokenStarted = true
-                }
-                continue
-            }
-            if character == "'" || character == "\"" {
-                quote = character
-                tokenStarted = true
-            } else if character.isWhitespace {
-                if tokenStarted {
-                    result.append(current)
-                    current = ""
-                    tokenStarted = false
-                }
-            } else {
-                current.append(character)
-                tokenStarted = true
-            }
-        }
-
-        if escaped { throw ParseError(message: "The final backslash does not escape a character.") }
-        if quote != nil { throw ParseError(message: "A quoted argument is not closed.") }
-        if tokenStarted { result.append(current) }
-        return result
     }
 }
 

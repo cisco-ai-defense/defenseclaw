@@ -1125,7 +1125,7 @@ final class AppState {
         // binary — never present overlapping runtime actions.
         guard !runtimeInstallState.isRunning else { return false }
         guard let runtimeUpdate = availableRuntimeUpdate else { return true }
-        guard let resolverCommand = RuntimeUpgradeResolverCommand.authenticated(
+        guard let resolverCommand = Self.authenticatedRuntimeUpgradeResolverCommand(
             releaseTag: runtimeUpdate.tag
         ) else {
             let failure = """
