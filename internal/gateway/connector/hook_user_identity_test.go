@@ -39,6 +39,39 @@ func identityHookScripts(t *testing.T) []string {
 	return scripts
 }
 
+// hookAccountNamePattern mirrors the allowlist _hardening.sh applies to the
+// account name before it will put it in a header.
+var hookAccountNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// Line counts the helper produces: a -H and a value for the uid, plus the same
+// pair for the account name when the name is reportable.
+const (
+	identityHeaderLinesIDOnly   = 2
+	identityHeaderLinesWithName = 4
+)
+
+// identityHeaderLineCountForHost reports how many lines the helper should emit
+// on the machine running the test.
+//
+// The helper withholds the name header whenever `id -un` falls outside its
+// allowlist. That is a supported outcome rather than a defect — the record is
+// still attributed by uid, just less legibly — so an account named in a way
+// the helper is right to refuse must not read as a regression. Deriving the
+// count from the same allowlist keeps the assertion exact on the accounts CI
+// and developers actually run as, which is where the silent-failure mode this
+// test exists to catch would show up.
+func identityHeaderLineCountForHost(t *testing.T) int {
+	t.Helper()
+	out, err := exec.Command("id", "-un").Output()
+	if err != nil {
+		t.Fatalf("id -un: %v", err)
+	}
+	if !hookAccountNamePattern.MatchString(strings.TrimSpace(string(out))) {
+		return identityHeaderLinesIDOnly
+	}
+	return identityHeaderLinesWithName
+}
+
 // TestUserIdentityArgsEmitBothHeadersUnderTheSystemShell runs the helper under
 // the shell the endpoint actually has.
 //
@@ -63,17 +96,21 @@ func TestUserIdentityArgsEmitBothHeadersUnderTheSystemShell(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-	wantID := "X-DefenseClaw-User-Id: " + strconv.Itoa(os.Geteuid())
-	want := []string{"-H", wantID, "-H"}
-	if len(lines) != 4 {
-		t.Fatalf("helper emitted %d lines, want 4 (a -H and a value per header): %q", len(lines), lines)
+	wantLines := identityHeaderLineCountForHost(t)
+	want := []string{"-H", "X-DefenseClaw-User-Id: " + strconv.Itoa(os.Geteuid())}
+	if wantLines == identityHeaderLinesWithName {
+		want = append(want, "-H")
+	}
+	if len(lines) != wantLines {
+		t.Fatalf("helper emitted %d lines, want %d (a -H and a value per header): %q", len(lines), wantLines, lines)
 	}
 	for i, expected := range want {
 		if lines[i] != expected {
 			t.Fatalf("line %d = %q, want %q (all lines: %q)", i, lines[i], expected, lines)
 		}
 	}
-	if !strings.HasPrefix(lines[3], "X-DefenseClaw-User-Name: ") {
+	if wantLines == identityHeaderLinesWithName &&
+		!strings.HasPrefix(lines[3], "X-DefenseClaw-User-Name: ") {
 		t.Fatalf("line 3 = %q, want an account-name header", lines[3])
 	}
 	for _, line := range lines {
@@ -131,11 +168,12 @@ printf '%s\n' "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"
 				t.Fatalf("reader failed under %s: %v\n%s", shell, err, out)
 			}
 			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
-			if lines[0] != "4" {
+			wantArgs := strconv.Itoa(identityHeaderLineCountForHost(t))
+			if lines[0] != wantArgs {
 				t.Fatalf(
-					"%s collected %s identity arguments under %s, want 4 — "+
+					"%s collected %s identity arguments under %s, want %s — "+
 						"the endpoint would send no user identity at all\noutput: %q",
-					script, lines[0], shell, string(out),
+					script, lines[0], shell, wantArgs, string(out),
 				)
 			}
 			if !strings.Contains(string(out), "X-DefenseClaw-User-Id: "+strconv.Itoa(os.Geteuid())) {

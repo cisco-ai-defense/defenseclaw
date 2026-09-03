@@ -71,11 +71,16 @@ func resolveHookUserIdentity(ctx context.Context, connector string, payload map[
 // wasted work on a path that has nowhere to put the result.
 func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEventUser {
 	fromHeaders := AgentIdentityFromContext(ctx)
+	// The two sources are ranked as pairs rather than field by field. The hook
+	// helper omits the name header on its own whenever the account name fails
+	// its allowlist, so merging per field would pair that hook's OS account id
+	// with a name the agent supplied — a record naming one account and
+	// identifying another.
+	if fromHeaders.UserID != "" || fromHeaders.UserName != "" {
+		return newLLMEventUser(fromHeaders.UserID, fromHeaders.UserName)
+	}
 	payloadID, payloadName := userFieldsFromHookPayload(payload)
-	return newLLMEventUser(
-		firstNonEmpty(fromHeaders.UserID, payloadID),
-		firstNonEmpty(fromHeaders.UserName, payloadName),
-	)
+	return newLLMEventUser(payloadID, payloadName)
 }
 
 // resolveHTTPUserIdentity determines the end user behind a proxied or ingested

@@ -131,8 +131,8 @@ There is no environment variable that turns on file output in v8; it is a
 config destination. Use an isolated home so nothing touches your real install.
 
 ```bash
-go build -o /private/tmp/dc-idfab/defenseclaw ./cmd/defenseclaw
 mkdir -p /private/tmp/dc-idfab/home /private/tmp/dc-idfab/confighome
+go build -o /private/tmp/dc-idfab/defenseclaw ./cmd/defenseclaw
 cp -R policies /private/tmp/dc-idfab/home/policies
 
 cat > /private/tmp/dc-idfab/config.yaml <<'YAML'
@@ -230,15 +230,17 @@ PY
 ## Observed output on macOS
 
 Captured from the run above on macOS 15 (arm64), uid 501. Five records carry
-identity per session-start-plus-one-tool-call sequence.
+identity per session-start-plus-one-tool-call sequence. The account name and
+address throughout this section are fixtures standing in for whatever the
+capturing account was; the uid and the field structure are as observed.
 
-```
-bucket                 event                        user.id  id_kind    name     email
-agent.lifecycle        session_start                501      posix_uid  ihabler  ihabler@cisco.com
-guardrail.evaluation   hook_decision                501      posix_uid  ihabler  ihabler@cisco.com
-tool.activity          tool_start                   501      posix_uid  ihabler  ihabler@cisco.com
-tool.activity          tool.invocation.requested    501      posix_uid  ihabler  ihabler@cisco.com
-guardrail.evaluation   hook_decision                501      posix_uid  ihabler  ihabler@cisco.com
+```text
+bucket                 event                        user.id  id_kind    name    email
+agent.lifecycle        session_start                501      posix_uid  dcuser  dcuser@example.com
+guardrail.evaluation   hook_decision                501      posix_uid  dcuser  dcuser@example.com
+tool.activity          tool_start                   501      posix_uid  dcuser  dcuser@example.com
+tool.activity          tool.invocation.requested    501      posix_uid  dcuser  dcuser@example.com
+guardrail.evaluation   hook_decision                501      posix_uid  dcuser  dcuser@example.com
 ```
 
 A full `agent.lifecycle` / `session_start` body from Codex:
@@ -251,9 +253,9 @@ A full `agent.lifecycle` / `session_start` body from Codex:
   "defenseclaw.agent.type": "codex",
   "defenseclaw.session.root.id": "mac-codex-1",
   "defenseclaw.session.source": "startup",
-  "defenseclaw.user.email": "ihabler@cisco.com",
+  "defenseclaw.user.email": "dcuser@example.com",
   "defenseclaw.user.id_kind": "posix_uid",
-  "defenseclaw.user.name": "ihabler",
+  "defenseclaw.user.name": "dcuser",
   "gen_ai.agent.name": "codex",
   "gen_ai.conversation.id": "mac-codex-1",
   "gen_ai.provider.name": "openai",
@@ -266,9 +268,9 @@ Per connector, the identity fields observed were:
 
 | Connector | `user.id` | `id_kind` | `name` | `email` |
 | --- | --- | --- | --- | --- |
-| codex | `501` | `posix_uid` | `ihabler` | `ihabler@cisco.com` (from the `auth.json` ID token) |
-| claudecode | `501` | `posix_uid` | `ihabler` | *absent* |
-| cursor | `501` | `posix_uid` | `ihabler` | `ihabler@cisco.com` (from the payload) |
+| codex | `501` | `posix_uid` | `dcuser` | `dcuser@example.com` (from the `auth.json` ID token) |
+| claudecode | `501` | `posix_uid` | `dcuser` | *absent* |
+| cursor | `501` | `posix_uid` | `dcuser` | `dcuser@example.com` (from the payload) |
 
 The absent Claude Code address is correct behavior, not a defect: this host's
 `~/.claude.json` has no `oauthAccount` block, so there is nothing to read and
@@ -277,7 +279,7 @@ the field is omitted rather than guessed.
 The Cursor row is the useful one to check, because it proves the precedence
 rule. Cursor's payload carries `user_email`, and without the headers the
 gateway derives a pseudonymous `user-<hash>` id from it. Seeing `501` /
-`posix_uid` / `ihabler` there means the hook's headers arrived and won, while
+`posix_uid` / `dcuser` there means the hook's headers arrived and won, while
 the payload still supplied the address the OS cannot know.
 
 ## The bash 3.2 trap
@@ -372,9 +374,12 @@ then drive real sessions as `dcstd` with the installed hooks.
 Check specifically:
 
 - Hook records carry the invoking user's SID even though the gateway runs as
-  LocalSystem. This is the misattribution fix; if records carry
-  `S-1-5-18`, the header path is not working and the gateway fell back to its
-  own token.
+  LocalSystem. This is the misattribution fix. Treat `S-1-5-18` in any record
+  as a failure and stop to investigate rather than recording it as the
+  fallback: the OS-identity fallback is disabled under a managed install, so
+  the service principal cannot arrive that way. Its presence means the header
+  path did not work *and* something else put the gateway's own identity on the
+  record — the attribution path itself is wrong, not just less precise.
 - `ai.discovery` inventory rows attribute each MCP server to the profile it was
   read from. On a two-user endpoint the same server name configured by both
   users must appear twice with different `user.id` values.

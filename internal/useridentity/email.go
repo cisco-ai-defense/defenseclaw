@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // maxCredentialFileBytes bounds every credential-adjacent file this package
@@ -207,21 +209,17 @@ func emailFromUnverifiedJWT(token string) (string, bool) {
 }
 
 // readBoundedFile reads a regular, non-symlinked file up to the size cap.
+//
+// Every path this reaches lives inside a user profile, so the account that
+// owns the credential can replace it between any two operations. Checking the
+// pathname and then reading it separately would let that account swap a
+// verified small regular file for a symlink and have the gateway — which runs
+// as a service account under a managed install — read a file the account
+// cannot open itself. safefile validates the opened handle instead: it opens
+// without following links, confirms the handle is the same object it stat'ed,
+// and stops at the limit.
 func readBoundedFile(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("useridentity: refusing to read symlinked file")
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("useridentity: not a regular file")
-	}
-	if info.Size() > maxCredentialFileBytes {
-		return nil, errors.New("useridentity: file exceeds size cap")
-	}
-	return os.ReadFile(path)
+	return safefile.ReadRegularFileBounded(path, maxCredentialFileBytes)
 }
 
 // validateEmail accepts only a structurally sound, JSON-safe address. It does
