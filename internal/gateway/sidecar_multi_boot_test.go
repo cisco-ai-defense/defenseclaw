@@ -2298,15 +2298,21 @@ func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t 
 	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
 	path := managed.HookGuardianAuthorizationPath(t.TempDir())
 	fresh := time.Now().UTC().Format(time.RFC3339)
-	data := []byte(fmt.Sprintf(`{
-		"version":1,
-		"updated_at":%q,
-		"ok":true,
-		"target_count":1,
-		"success_count":1,
-		"failure_count":0,
-		"protected_targets":[{"sid":"S-1-5-21-1-2-3-1001","user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
-	}`, fresh))
+	current, _ := testManagedGuardianCurrentReady("codex", "S-1-5-21-1-2-3-1001", "alice", "/home/alice")
+	data, err := json.Marshal(managedGuardianAuthorization{
+		Version:      2,
+		UpdatedAt:    fresh,
+		OK:           true,
+		TargetCount:  1,
+		SuccessCount: 1,
+		ProtectedTargets: []managedGuardianAuthorizationTarget{{
+			SID: "S-1-5-21-1-2-3-1001", User: "alice", UserHome: "/home/alice", Connector: "codex", OK: true,
+		}},
+		Current: &current,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write authorization: %v", err)
 	}
@@ -2343,16 +2349,23 @@ func TestManagedGuardianCoverageAcceptsDeferredTargets(t *testing.T) {
 	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
 	path := managed.HookGuardianAuthorizationPath(t.TempDir())
 	fresh := time.Now().UTC().Format(time.RFC3339)
-	data := []byte(fmt.Sprintf(`{
-		"version":1,
-		"updated_at":%q,
-		"ok":true,
-		"target_count":2,
-		"success_count":1,
-		"pending_count":1,
-		"failure_count":0,
-		"protected_targets":[{"sid":"S-1-5-21-1-2-3-1001","user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
-	}`, fresh))
+	current, _ := testManagedGuardianCurrentReady("codex", "S-1-5-21-1-2-3-1001", "alice", "/home/alice")
+	current.TargetCount = 2
+	data, err := json.Marshal(managedGuardianAuthorization{
+		Version:      2,
+		UpdatedAt:    fresh,
+		OK:           true,
+		TargetCount:  2,
+		SuccessCount: 1,
+		PendingCount: 1,
+		ProtectedTargets: []managedGuardianAuthorizationTarget{{
+			SID: "S-1-5-21-1-2-3-1001", User: "alice", UserHome: "/home/alice", Connector: "codex", OK: true,
+		}},
+		Current: &current,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write authorization: %v", err)
 	}
@@ -2370,8 +2383,9 @@ func TestManagedGuardianCoverageAcceptsSerializedInstallResultContract(t *testin
 	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
 	path := managed.HookGuardianAuthorizationPath(t.TempDir())
 
+	current, _ := testManagedGuardianCurrentReady("codex", "S-1-5-21-1-2-3-1001", "alice", "/home/alice")
 	authorization := managedGuardianAuthorization{
-		Version:      1,
+		Version:      2,
 		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 		OK:           true,
 		TargetCount:  1,
@@ -2391,6 +2405,7 @@ func TestManagedGuardianCoverageAcceptsSerializedInstallResultContract(t *testin
 				HookContractEntryUpdatedAt: "2026-08-21T12:34:55Z",
 			},
 		}},
+		Current: &current,
 	}
 	data, err := json.Marshal(authorization)
 	if err != nil {
@@ -2541,6 +2556,125 @@ func TestManagedGuardianCoverageRejectsOversizedAuthorizationLedger(t *testing.T
 	} else if !strings.Contains(reason, "exceeds") {
 		t.Fatalf("oversized authorization reason = %q, want bounded refusal", reason)
 	}
+}
+
+func TestManagedGuardianCoverageRejectsLegacyV1AndHistoricalSuccess(t *testing.T) {
+	authorizationDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
+	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+	fresh := time.Now().UTC().Format(time.RFC3339)
+
+	legacy := []byte(fmt.Sprintf(`{
+		"version":1,
+		"updated_at":%q,
+		"ok":true,
+		"target_count":1,
+		"success_count":1,
+		"failure_count":0,
+		"protected_targets":[{"sid":"S-1-5-21-1-2-3-1001","user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
+	}`, fresh))
+	if err := os.WriteFile(path, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
+		t.Fatal("legacy v1 authorization satisfied v2 readiness")
+	} else if !strings.Contains(reason, "current") {
+		t.Fatalf("legacy refusal = %q, want current-attestation reason", reason)
+	}
+
+	current, _ := testManagedGuardianCurrentReady("codex", "S-1-5-21-1-2-3-1001", "alice", "/home/alice")
+	current.OK = false
+	current.FailureCount = 1
+	current.SuccessCount = 0
+	current.Attestations = nil
+	historical := managedGuardianAuthorization{
+		Version:      2,
+		UpdatedAt:    fresh,
+		OK:           false,
+		TargetCount:  1,
+		SuccessCount: 0,
+		FailureCount: 1,
+		ProtectedTargets: []managedGuardianAuthorizationTarget{{
+			SID: "S-1-5-21-1-2-3-1001", User: "alice", UserHome: "/home/alice", Connector: "codex", OK: true,
+		}},
+		Current: &current,
+	}
+	data, err := json.Marshal(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
+		t.Fatal("historical protected-target success satisfied current readiness")
+	}
+}
+
+func TestManagedGuardianCoverageRejectsAliceSuccessBobFailureSameConnector(t *testing.T) {
+	authorizationDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
+	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+	alice, _ := testManagedGuardianCurrentReady("codex", "S-1-5-21-1-2-3-1001", "alice", "/home/alice")
+	alice.OK = false
+	alice.TargetCount = 2
+	alice.FailureCount = 1
+	auth := managedGuardianAuthorization{
+		Version:      2,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+		OK:           false,
+		TargetCount:  2,
+		SuccessCount: 1,
+		FailureCount: 1,
+		ProtectedTargets: []managedGuardianAuthorizationTarget{
+			{SID: "S-1-5-21-1-2-3-1001", User: "alice", Connector: "codex", OK: true},
+			{SID: "S-1-5-21-1-2-3-1002", User: "bob", Connector: "codex", OK: true},
+		},
+		Current: &alice,
+	}
+	data, err := json.Marshal(auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
+		t.Fatal("Alice success + Bob failure reported aggregate connector readiness")
+	}
+}
+
+func testManagedGuardianCurrentReady(
+	connectorName, sid, user, home string,
+) (managedGuardianCurrentReadiness, string) {
+	fingerprint := managed.ScopedTokenFingerprint("test-scoped-token-" + user)
+	generation := strings.Repeat("ab", 16)
+	manifest := strings.Repeat("cd", 32)
+	return managedGuardianCurrentReadiness{
+		Version:        2,
+		ReconcileID:    generation,
+		ManifestSHA256: manifest,
+		Generation:     generation,
+		OK:             true,
+		TargetCount:    1,
+		SuccessCount:   1,
+		Attestations: []managedGuardianCurrentAttestation{{
+			User:             user,
+			UserHome:         home,
+			SID:              sid,
+			Connector:        connectorName,
+			OK:               true,
+			Generation:       generation,
+			TokenFingerprint: fingerprint,
+			ManifestSHA256:   manifest,
+		}},
+	}, fingerprint
 }
 
 func assertPathMissing(t *testing.T, path string) {

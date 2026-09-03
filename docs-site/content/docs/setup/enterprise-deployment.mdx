@@ -1299,7 +1299,9 @@ A successful privileged reconcile writes two different records:
 | `<data_dir>/hook_guardian_state.json` | Service/runtime status | Last run, manifest, target counts, and per-target errors displayed by `defenseclaw status`. |
 | `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR/protected_targets.json` | Root-owned authorization | Durable list of successfully protected targets trusted by managed readiness. |
 
-The gateway does not treat the service-writable status file as authorization. Managed hook enforcement is reported ready only when the trusted authorization record covers every configured target. Partial coverage remains starting/non-enforcing and includes an actionable health hint.
+The gateway does not treat the service-writable status file as authorization. `protected_targets.json` may retain historical successful rows so a later reconcile can authorize bounded repair. That ledger is not current readiness.
+
+Managed hook enforcement is ready only when the same trusted file publishes a v2 `current` attestation set: every enabled target is present exactly once, this reconcile succeeded, and each row is bound to the reconcile generation plus the canonical non-secret scoped-token fingerprint. Legacy v1 files, merged old successes, missing or extra targets, mixed generations, and Alice-success/Bob-failure for the same connector stay unready.
 
 The guardian units set `NoNewPrivileges=false` deliberately. Each reconcile
 temporarily adopts the target user's effective UID/GID so connector files are
