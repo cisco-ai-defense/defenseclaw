@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -1378,11 +1379,7 @@ func validateRotationHookTokenFingerprint(name, fingerprint string) error {
 	if _, err := connector.HookTokenFilePath("rotation-state", name); err != nil {
 		return errors.New("hook token fingerprints contain an invalid connector identity")
 	}
-	if len(fingerprint) != sha256.Size*2 || strings.ToLower(fingerprint) != fingerprint {
-		return fmt.Errorf("connector %s has an invalid hook token fingerprint", name)
-	}
-	decoded, err := hex.DecodeString(fingerprint)
-	if err != nil || len(decoded) != sha256.Size {
+	if !managed.ValidScopedTokenFingerprint(fingerprint) {
 		return fmt.Errorf("connector %s has an invalid hook token fingerprint", name)
 	}
 	return nil
@@ -1518,8 +1515,7 @@ var loadRotationClaudeNativeOTLPProbes = connector.LoadClaudeCodeNativeOTLPProbe
 var loadRotationHookAPIToken = connector.LoadHookAPIToken
 
 func rotationHookTokenFingerprint(token string) string {
-	digest := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(digest[:])
+	return managed.ScopedTokenFingerprint(token)
 }
 
 func verifyRotationConnectorHookAuthentication(
