@@ -28,10 +28,24 @@ enum CatalogCLIError: LocalizedError {
     }
 }
 
+struct CatalogListing<Item: Sendable>: Sendable {
+    var items: [Item]
+    var auditHistoryUnavailable: Bool
+    var selectedBinaryPath: String?
+}
+
+private struct CatalogRows {
+    var values: [(String, [String: Any])]
+    var auditHistoryUnavailable: Bool
+    var selectedBinaryPath: String?
+}
+
 enum CatalogCLI {
-    static func skills(using cli: CLIRunner) async throws -> [SkillItem] {
+    static let auditHistoryUnavailableMessage = "Audit history is unavailable. Showing a read-only host catalog; repair the DefenseClaw audit store before running catalog actions."
+
+    static func skills(using cli: CLIRunner) async throws -> CatalogListing<SkillItem> {
         let groups = try await rows(resource: "skill", collection: "skills", using: cli)
-        return groups.map { group, row in
+        let items = groups.values.map { group, row in
             let connector = string(row["connector"]).nonEmpty ?? group
             let name = string(row["name"])
             let status = effectiveStatus(
@@ -52,11 +66,16 @@ enum CatalogCLI {
                 scan: scan(row["scan"])
             )
         }
+        return CatalogListing(
+            items: items,
+            auditHistoryUnavailable: groups.auditHistoryUnavailable,
+            selectedBinaryPath: groups.selectedBinaryPath
+        )
     }
 
-    static func mcps(using cli: CLIRunner) async throws -> [MCPItem] {
+    static func mcps(using cli: CLIRunner) async throws -> CatalogListing<MCPItem> {
         let groups = try await rows(resource: "mcp", collection: "mcp_servers", using: cli)
-        return groups.map { group, row in
+        let items = groups.values.map { group, row in
             let connector = string(row["connector"]).nonEmpty ?? group
             let endpoint = string(row["server_url"]).nonEmpty
                 ?? string(row["url"]).nonEmpty
@@ -81,11 +100,16 @@ enum CatalogCLI {
                 scan: scan(row["scan"])
             )
         }
+        return CatalogListing(
+            items: items,
+            auditHistoryUnavailable: groups.auditHistoryUnavailable,
+            selectedBinaryPath: groups.selectedBinaryPath
+        )
     }
 
-    static func plugins(using cli: CLIRunner) async throws -> [PluginItem] {
+    static func plugins(using cli: CLIRunner) async throws -> CatalogListing<PluginItem> {
         let groups = try await rows(resource: "plugin", collection: "plugins", using: cli)
-        return groups.map { group, row in
+        let items = groups.values.map { group, row in
             let connector = string(row["connector"]).nonEmpty ?? group
             let commandID = string(row["id"]).nonEmpty ?? string(row["name"])
             return PluginItem(
@@ -101,11 +125,21 @@ enum CatalogCLI {
                 scan: scan(row["scan"])
             )
         }
+        return CatalogListing(
+            items: items,
+            auditHistoryUnavailable: groups.auditHistoryUnavailable,
+            selectedBinaryPath: groups.selectedBinaryPath
+        )
     }
 
     static func tools(using cli: CLIRunner) async throws -> [ToolItem] {
-        let groups = try await rows(resource: "tool", collection: "tools", using: cli)
-        return groups.map { group, row in
+        let groups = try await rows(
+            resource: "tool",
+            collection: "tools",
+            permitIsolatedAuditFallback: false,
+            using: cli
+        )
+        return groups.values.map { group, row in
             let connector = string(row["connector"]).nonEmpty ?? group
             let status = string(row["status"]).nonEmpty ?? "active"
             let name = string(row["name"]).nonEmpty ?? string(row["target_name"])
@@ -125,9 +159,17 @@ enum CatalogCLI {
     private static func rows(
         resource: String,
         collection: String,
+        permitIsolatedAuditFallback: Bool = true,
         using cli: CLIRunner
-    ) async throws -> [(String, [String: Any])] {
-        let result = await cli.run(arguments: [resource, "list", "--json"], mutation: false)
+    ) async throws -> CatalogRows {
+        let command = permitIsolatedAuditFallback
+            ? await cli.runReadOnlyCatalogList(resource: resource)
+            : CatalogListCLIResult(
+                result: await cli.run(arguments: [resource, "list", "--json"], mutation: false),
+                usedIsolatedAuditStore: false,
+                selectedBinaryPath: nil
+            )
+        let result = command.result
         guard result.succeeded else {
             throw CatalogCLIError.commandFailed(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
@@ -145,7 +187,11 @@ enum CatalogCLI {
                 flattened.append((connector, group))
             }
         }
-        return flattened
+        return CatalogRows(
+            values: flattened,
+            auditHistoryUnavailable: command.usedIsolatedAuditStore,
+            selectedBinaryPath: command.selectedBinaryPath
+        )
     }
 
     private static func jsonData(from output: String) throws -> Data {
@@ -223,6 +269,10 @@ struct CatalogResourceAction: Identifiable, Hashable {
     var detail: String
     var systemImage: String
     var readOnly: Bool = false
+    /// Whether running this action can change installation-owned state. This
+    /// is intentionally independent from confirmation: scans are one-click
+    /// operations, but they still refresh on-disk catalog caches.
+    var changesState: Bool = true
     var destructive: Bool = false
     var id: String { verb }
 }
@@ -233,6 +283,7 @@ struct CatalogInvocation: Identifiable {
     var arguments: [String]
     var detail: String
     var requiresConfirmation: Bool
+    var changesState: Bool = true
     var destructive: Bool
 
     var displayCommand: String {
@@ -248,7 +299,7 @@ enum CatalogActions {
             ]
         }
         var actions = [
-            action("scan", "Scan", "Run the skill security scan", "shield.lefthalf.filled", readOnly: true),
+            action("scan", "Scan", "Run the skill security scan", "shield.lefthalf.filled", readOnly: true, changesState: true),
             action("info", "Info", "Show full skill details", "info.circle", readOnly: true),
         ]
         switch item.status.lowercased() {
@@ -282,7 +333,7 @@ enum CatalogActions {
             ]
         }
         var actions = [
-            action("scan", "Scan", "Run the MCP security scan", "shield.lefthalf.filled", readOnly: true),
+            action("scan", "Scan", "Run the MCP security scan", "shield.lefthalf.filled", readOnly: true, changesState: true),
             action("info", "Info", "Show MCP list details", "info.circle", readOnly: true),
         ]
         switch item.status.lowercased() {
@@ -301,7 +352,7 @@ enum CatalogActions {
 
     static func plugins(_ item: PluginItem) -> [CatalogResourceAction] {
         var actions = [
-            action("scan", "Scan", "Run the plugin security scan", "shield.lefthalf.filled", readOnly: true),
+            action("scan", "Scan", "Run the plugin security scan", "shield.lefthalf.filled", readOnly: true, changesState: true),
             action("info", "Info", "Show full plugin details", "info.circle", readOnly: true),
         ]
         if item.verdict.lowercased() == "blocked" {
@@ -390,6 +441,7 @@ enum CatalogActions {
             arguments: arguments,
             detail: action.detail,
             requiresConfirmation: !action.readOnly,
+            changesState: action.changesState,
             destructive: action.destructive
         )
     }
@@ -400,9 +452,11 @@ enum CatalogActions {
         _ detail: String,
         _ image: String,
         readOnly: Bool = false,
+        changesState: Bool? = nil,
         destructive: Bool = false
     ) -> CatalogResourceAction {
         CatalogResourceAction(verb: verb, label: label, detail: detail, systemImage: image,
-                              readOnly: readOnly, destructive: destructive)
+                              readOnly: readOnly, changesState: changesState ?? !readOnly,
+                              destructive: destructive)
     }
 }

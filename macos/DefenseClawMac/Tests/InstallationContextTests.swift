@@ -22,13 +22,17 @@ struct InstallationContextTests {
     private static let currentDirectory = URL(fileURLWithPath: "/work", isDirectory: true)
 
     static func main() async {
+        CLIProcessGroupLauncher.execIfRequested()
         sourcePrecedenceMatchesRuntime()
         managedLayoutAndCapabilitiesAreExact()
         explicitUnreadableAndRelativePathsFailClosed()
         configPathsAndVenvResolveIndependently()
+        emptyFlowCollectionsMatchRuntimeGeneratedConfig()
+        populatedFlowCollectionsMatchRuntimeGeneratedConfig()
         managedEvidenceMonotonicallyRemovesMutation()
         nestedAuditPathIsReadCorrectly()
         protectedEnvironmentCannotBeOverridden()
+        await redactionDefaultProfileMatchesRuntimeSchema()
         await configStoreRebindDropsThePreviousInstallation()
         await lowerLevelMutationGateSurvivesRebind()
         await gatewayPOSTGateFailsBeforeNetwork()
@@ -202,6 +206,231 @@ struct InstallationContextTests {
         )
     }
 
+    private static func emptyFlowCollectionsMatchRuntimeGeneratedConfig() {
+        let path = "/chosen/generated-empty-collections.yaml"
+        var context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": path],
+            texts: [path: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: { } # no custom destinations
+            registries: [ ] # no external registries
+            """]
+        )
+        expect(!isInvalid(context), "runtime-generated empty mappings remain valid")
+        expect(
+            MiniYAML.parse("observability: {}\n")["observability"]?.mapping?.isEmpty == true,
+            "empty flow mapping retains its YAML type"
+        )
+        expect(
+            MiniYAML.parse("registries: []\n")["registries"]?.sequence?.isEmpty == true,
+            "empty flow sequence retains its YAML type"
+        )
+
+        let quotedPath = "/chosen/quoted-empty-mapping.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": quotedPath],
+            texts: [quotedPath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: "{}"
+            """]
+        )
+        expect(isInvalid(context), "quoted braces remain a scalar and fail closed")
+
+        let sequencePath = "/chosen/observability-sequence.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": sequencePath],
+            texts: [sequencePath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: []
+            """]
+        )
+        expect(isInvalid(context), "an observability sequence remains invalid")
+    }
+
+    private static func populatedFlowCollectionsMatchRuntimeGeneratedConfig() {
+        let path = "/chosen/generated-splunk-observability.yaml"
+        let generatedConfig = """
+        config_version: 8
+        deployment_mode: unmanaged_byod
+        observability: {destinations: [{enabled: true, endpoint: 'https://127.0.0.1:8088/services/collector/event', kind: splunk-hec, name: 'splunk, local', network_safety: {allow_private_networks: true}, tls: {insecure_skip_verify: true}, token_env: SPLUNK_HEC_TOKEN}]}
+        """
+        var context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": path],
+            texts: [path: generatedConfig]
+        )
+        expect(!isInvalid(context), "runtime-generated Splunk flow mapping remains valid")
+
+        let observability = MiniYAML.parse(generatedConfig)["observability"]?.mapping
+        let destination = observability?["destinations"]?.sequence?.first?.mapping
+        expect(destination?["kind"]?.string == "splunk-hec", "flow destination kind is parsed")
+        expect(destination?["name"]?.string == "splunk, local", "quoted flow scalar preserves commas")
+        expect(
+            destination?["network_safety"]?.mapping?["allow_private_networks"]?.bool == true,
+            "nested flow mapping is parsed"
+        )
+        expect(
+            destination?["tls"]?.mapping?["insecure_skip_verify"]?.bool == true,
+            "second nested flow mapping is parsed"
+        )
+
+        let stringHeaders = MiniYAML.parse(
+            "observability: {headers: {inf: value, nan: value, Infinity: value, 1e2: value}}\n"
+        )["observability"]?.mapping?["headers"]?.mapping
+        expect(
+            stringHeaders?.count == 4,
+            "PyYAML string-like numeric header keys remain valid strings"
+        )
+
+        let localPath = "/chosen/generated-local-observability.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": localPath],
+            texts: [localPath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: {local: {path: /runtime/audit/compact.db}, destinations: []}
+            """]
+        )
+        expect(!isInvalid(context), "populated observability flow mapping remains valid")
+        expect(context.auditDBURL.path == "/runtime/audit/compact.db", "flow mapping audit path is read")
+
+        let wrappedPath = "/chosen/generated-wrapped-observability.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": wrappedPath],
+            texts: [wrappedPath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: {destinations: [{enabled: true,
+                kind: splunk-hec, name: splunk-local,
+                network_safety: {allow_private_networks: true}}],
+              local: {path: /runtime/audit/wrapped.db}}
+            """]
+        )
+        expect(!isInvalid(context), "wrapped runtime flow mapping remains valid")
+        expect(context.auditDBURL.path == "/runtime/audit/wrapped.db", "wrapped flow audit path is read")
+
+        let escapedPath = "/chosen/generated-escaped-observability.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": escapedPath],
+            texts: [escapedPath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: {"local":{"path":"/runtime/a\\u0075dit/escaped.db"}}
+            """]
+        )
+        expect(!isInvalid(context), "JSON-compatible flow mapping remains valid")
+        expect(context.auditDBURL.path == "/runtime/audit/escaped.db", "flow scalar escapes are decoded")
+
+        let embeddedHashPath = "/chosen/generated-embedded-hash-observability.yaml"
+        let embeddedHashConfig = """
+        config_version: 8
+        deployment_mode: unmanaged_byod
+        observability: {label: "a\\t \\\" # b", local: {path: /runtime/audit/hash.db}}
+        """
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": embeddedHashPath],
+            texts: [embeddedHashPath: embeddedHashConfig]
+        )
+        expect(!isInvalid(context), "hash inside an escaped flow scalar is not treated as a comment")
+        expect(context.auditDBURL.path == "/runtime/audit/hash.db", "content after escaped quote is retained")
+        expect(
+            MiniYAML.parse(embeddedHashConfig)["observability"]?.mapping?["label"]?.string == "a\t \" # b",
+            "escaped quote and hash decode like the runtime loader"
+        )
+
+        let missingSeparatorPath = "/chosen/missing-flow-separator.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": missingSeparatorPath],
+            texts: [missingSeparatorPath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: {local: {path:/runtime/wrong.db}}
+            """]
+        )
+        expect(isInvalid(context), "plain flow keys require a YAML value separator")
+
+        let duplicatePath = "/chosen/duplicate-flow-key.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": duplicatePath],
+            texts: [duplicatePath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: {local: {path: /runtime/first.db, path: /runtime/second.db}}
+            """]
+        )
+        expect(isInvalid(context), "duplicate flow keys fail closed like the runtime loader")
+
+        for invalidKey in ["true", "123", "2026-08-20", "<<"] {
+            let invalidKeyPath = "/chosen/non-string-flow-key-\(invalidKey).yaml"
+            context = resolve(
+                environment: ["DEFENSECLAW_CONFIG": invalidKeyPath],
+                texts: [invalidKeyPath: """
+                config_version: 8
+                deployment_mode: unmanaged_byod
+                observability: {\(invalidKey): ignored, local: {path: /runtime/audit.db}}
+                """]
+            )
+            expect(isInvalid(context), "non-string or merge flow key \(invalidKey) fails closed")
+        }
+
+        let quotedMergePath = "/chosen/quoted-merge-flow-key.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": quotedMergePath],
+            texts: [quotedMergePath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: {"<<": ignored, local: {path: /runtime/audit.db}}
+            """]
+        )
+        expect(isInvalid(context), "quoted merge keys fail closed like the runtime loader")
+
+        let multilineQuotedPath = "/chosen/multiline-quoted-flow-value.yaml"
+        let longLabel = String(repeating: "a", count: 4_100)
+        let multilineQuotedConfig = """
+        config_version: 8
+        deployment_mode: unmanaged_byod
+        observability: {label: "\(longLabel)\\
+          # retained inside the quoted value", local: {path: /runtime/audit/multiline.db}}
+        """
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": multilineQuotedPath],
+            texts: [multilineQuotedPath: multilineQuotedConfig]
+        )
+        expect(!isInvalid(context), "wrapped quoted flow scalars retain YAML line-continuation semantics")
+        expect(
+            context.auditDBURL.path == "/runtime/audit/multiline.db",
+            "content following a wrapped quoted scalar remains visible"
+        )
+        expect(
+            MiniYAML.parse(multilineQuotedConfig)["observability"]?.mapping?["label"]?.string
+                == longLabel + "# retained inside the quoted value",
+            "escaped quoted line breaks decode exactly like the runtime loader"
+        )
+
+        let oversizedPath = "/chosen/oversized-config.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": oversizedPath],
+            texts: [
+                oversizedPath: "config_version: 8\n#"
+                    + String(repeating: "\u{00E9}", count: 2 * 1024 * 1024 + 1),
+            ]
+        )
+        expect(isInvalid(context), "multibyte configs over the runtime byte limit fail closed")
+
+        let malformedPath = "/chosen/malformed-flow-observability.yaml"
+        context = resolve(
+            environment: ["DEFENSECLAW_CONFIG": malformedPath],
+            texts: [malformedPath: """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability: {destinations: [{name: splunk-local}]
+            """]
+        )
+        expect(isInvalid(context), "truncated flow mapping still fails closed")
+    }
+
     private static func managedEvidenceMonotonicallyRemovesMutation() {
         let appPath = "/chosen/app.yaml"
         var context = resolve(
@@ -258,6 +487,60 @@ struct InstallationContextTests {
         expect(environment["DEFENSECLAW_CONFIG"] == context.configURL.path, "config env is pinned")
         expect(environment["DEFENSECLAW_HOME"] == context.homeRoot.path, "home env is pinned")
         expect(environment["PATH"]?.hasPrefix("/custom/bin") == true, "normal PATH inheritance remains")
+    }
+
+    private static func redactionDefaultProfileMatchesRuntimeSchema() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-redaction-profile-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: directory) }
+
+            let configURL = directory.appendingPathComponent("config.yaml", isDirectory: false)
+            let context = InstallationContext.resolve(
+                environment: ["DEFENSECLAW_CONFIG": configURL.path],
+                appConfigOverride: nil,
+                userHome: directory
+            )
+            let store = ConfigStore(context: context)
+
+            try """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            privacy:
+              disable_redaction: true
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+            var config = await store.reload()
+            expect(
+                config.redactionDefaultProfile.isEmpty,
+                "legacy privacy.disable_redaction no longer defines the v8 redaction profile"
+            )
+
+            try """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability:
+              defaults:
+                redaction_profile: none
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+            config = await store.reload()
+            expect(
+                config.redactionDefaultProfile == "none",
+                "the permissive none profile remains distinct from an absent profile"
+            )
+
+            try """
+            config_version: 8
+            deployment_mode: unmanaged_byod
+            observability:
+              defaults:
+                redaction_profile: strict
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+            config = await store.reload()
+            expect(config.redactionDefaultProfile == "strict", "v8 redaction profile is loaded")
+        } catch {
+            fail("redaction profile fixture failed: \(error)")
+        }
     }
 
     private static func lowerLevelMutationGateSurvivesRebind() async {

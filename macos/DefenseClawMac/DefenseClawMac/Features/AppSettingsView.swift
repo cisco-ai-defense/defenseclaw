@@ -20,20 +20,27 @@ import SwiftUI
 import ServiceManagement
 
 struct AppSettingsView: View {
+    @Environment(AppState.self) private var appState
+
     var body: some View {
-        TabView {
+        @Bindable var state = appState
+        TabView(selection: $state.selectedSettingsTab) {
             GeneralSettings()
                 .frame(width: 560, height: 620)
                 .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(AppSettingsTab.general)
             MonitoringSettings()
                 .frame(width: 560, height: 350)
                 .tabItem { Label("Monitoring", systemImage: "waveform.path.ecg") }
+                .tag(AppSettingsTab.monitoring)
             NotificationSettings()
                 .frame(width: 560, height: 300)
                 .tabItem { Label("Notifications", systemImage: "bell.badge") }
+                .tag(AppSettingsTab.notifications)
             ConnectionSettings()
                 .frame(width: 560, height: 540)
                 .tabItem { Label("Connection", systemImage: "network") }
+                .tag(AppSettingsTab.connection)
         }
     }
 }
