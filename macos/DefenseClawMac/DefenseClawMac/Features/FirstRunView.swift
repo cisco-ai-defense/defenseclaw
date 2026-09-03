@@ -194,9 +194,6 @@ struct FirstRunView: View {
                         .keyboardShortcut(.defaultAction)
                         .disabled(setupInvalid || !appState.installationMutationsAllowed)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(setupInvalid || !appState.installationMutationsAllowed)
                 }
             }
         }

@@ -682,31 +682,6 @@ struct AIUsageSnapshot: Sendable {
         return "The scan did not complete, so results may be incomplete."
     }
 
-    var isPartial: Bool {
-        result.trimmingCharacters(in: .whitespacesAndNewlines)
-            .caseInsensitiveCompare("partial") == .orderedSame
-            || errors > 0
-            || !detectorErrors.isEmpty
-    }
-
-    var reportedDiscoveryErrorCount: Int {
-        max(errors, detectorErrors.count)
-    }
-
-    var discoveryIssueLabel: String {
-        let count = reportedDiscoveryErrorCount
-        if count > 0 { return "\(count) error\(count == 1 ? "" : "s")" }
-        return isPartial ? "Scan did not complete" : "0 errors"
-    }
-
-    var partialDiscoveryDescription: String {
-        let count = reportedDiscoveryErrorCount
-        if count > 0 {
-            return "\(count) error\(count == 1 ? "" : "s") occurred during discovery."
-        }
-        return "The scan did not complete, so results may be incomplete."
-    }
-
     /// Non-model discoveries stay in the existing one-row-per-product table.
     var rows: [AIDiscoveryRow] { AIDiscoveryGrouping.rows(from: signals) }
 
