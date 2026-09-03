@@ -2650,6 +2650,41 @@ func TestManagedGuardianCoverageRejectsAliceSuccessBobFailureSameConnector(t *te
 	}
 }
 
+func TestManagedGuardianCoverageRejectsSuccessCountTargetMismatch(t *testing.T) {
+	authorizationDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
+	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+	current, _ := testManagedGuardianCurrentReady("codex", "S-1-5-21-1-2-3-1001", "alice", "/home/alice")
+	current.TargetCount = 2
+	auth := managedGuardianAuthorization{
+		Version:      2,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+		OK:           true,
+		TargetCount:  2,
+		SuccessCount: 2,
+		ProtectedTargets: []managedGuardianAuthorizationTarget{
+			{SID: "S-1-5-21-1-2-3-1001", User: "alice", UserHome: "/home/alice", Connector: "codex", OK: true},
+			{SID: "S-1-5-21-1-2-3-1002", User: "bob", UserHome: "/home/bob", Connector: "codex", OK: true},
+		},
+		Current: &current,
+	}
+	data, err := json.Marshal(auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
+		t.Fatal("attestation SuccessCount != TargetCount reported ready")
+	} else if !strings.Contains(reason, "current") {
+		t.Fatalf("mismatch refusal = %q, want current-attestation reason", reason)
+	}
+}
+
 func testManagedGuardianCurrentReady(
 	connectorName, sid, user, home string,
 ) (managedGuardianCurrentReadiness, string) {

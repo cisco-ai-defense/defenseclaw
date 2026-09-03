@@ -4297,14 +4297,14 @@ type managedGuardianAuthorizationTarget struct {
 }
 
 type managedGuardianCurrentReadiness struct {
-	Version        int                                `json:"version"`
-	ReconcileID    string                             `json:"reconcile_id"`
-	ManifestSHA256 string                             `json:"manifest_sha256"`
-	Generation     string                             `json:"generation"`
-	OK             bool                               `json:"ok"`
-	TargetCount    int                                `json:"target_count"`
-	SuccessCount   int                                `json:"success_count"`
-	FailureCount   int                                `json:"failure_count"`
+	Version        int                                 `json:"version"`
+	ReconcileID    string                              `json:"reconcile_id"`
+	ManifestSHA256 string                              `json:"manifest_sha256"`
+	Generation     string                              `json:"generation"`
+	OK             bool                                `json:"ok"`
+	TargetCount    int                                 `json:"target_count"`
+	SuccessCount   int                                 `json:"success_count"`
+	FailureCount   int                                 `json:"failure_count"`
 	Attestations   []managedGuardianCurrentAttestation `json:"attestations"`
 }
 
@@ -4420,6 +4420,7 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		current.Version != 2 ||
 		current.FailureCount != 0 ||
 		current.SuccessCount != len(current.Attestations) ||
+		current.SuccessCount != current.TargetCount ||
 		current.SuccessCount == 0 ||
 		current.Generation == "" ||
 		current.Generation != current.ReconcileID {
