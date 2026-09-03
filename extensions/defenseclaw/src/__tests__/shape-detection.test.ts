@@ -379,7 +379,7 @@ describe("resolveEffectiveFetchInit", () => {
       referrerPolicy: "no-referrer",
     });
     expect(effective.method).toBe("PUT");
-    expect(effective.headers.get("x-from-request")).toBe("1");
+    expect(effective.headers.get("x-from-request")).toBeNull();
     expect(effective.headers.get("x-from-init")).toBe("yes");
     expect(effective.body).toBe(
       JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
@@ -409,5 +409,28 @@ describe("resolveEffectiveFetchInit", () => {
     expect(effective.redirect).toBe("error");
     expect(effective.credentials).toBe("same-origin");
     expect(effective.body).toBe(req.body);
+  });
+
+  it("inherits the Request body when init.body is null", () => {
+    const req = new Request("https://custom-provider.test/v1/inference", {
+      method: "POST",
+      body: JSON.stringify({ messages: [{ role: "user", content: "keep" }] }),
+    });
+    const effective = resolveEffectiveFetchInit(req, { body: null });
+    expect(effective.body).toBe(req.body);
+  });
+
+  it("replaces Request headers when init.headers is supplied", () => {
+    const req = new Request("https://custom-provider.test/v1/inference", {
+      method: "POST",
+      headers: { authorization: "Bearer request-token", "x-keep": "1" },
+      body: JSON.stringify({ messages: [] }),
+    });
+    const effective = resolveEffectiveFetchInit(req, {
+      headers: { "content-type": "application/json" },
+    });
+    expect(effective.headers.get("authorization")).toBeNull();
+    expect(effective.headers.get("x-keep")).toBeNull();
+    expect(effective.headers.get("content-type")).toBe("application/json");
   });
 });

@@ -123,7 +123,7 @@ describe("fetch(request, init) interceptor semantics", () => {
       }),
     );
     const headers = new Headers(forwarded?.headers);
-    expect(headers.get("x-from-request")).toBe("1");
+    expect(headers.get("x-from-request")).toBeNull();
     expect(headers.get("x-from-init")).toBe("yes");
     expect(headers.get("X-DC-Target-URL")).toBe("https://custom-provider.test");
     expect(forwarded?.signal).toBeDefined();
@@ -194,6 +194,25 @@ describe("fetch(request, init) interceptor semantics", () => {
 
     const proxied = calls.find(
       (call) => call.input === `http://127.0.0.1:${guardrailPort}/v1/chat`,
+    );
+    expect(proxied).toBeDefined();
+    expect(await readForwardedBody(proxied?.init?.body)).toBe(payload);
+  });
+
+  it("inherits the Request body when init.body is null", async () => {
+    const payload = JSON.stringify({
+      messages: [{ role: "user", content: "keep-request-body" }],
+    });
+    const request = new Request("https://custom-provider.test/v1/inference", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    });
+
+    await fetch(request, { body: null });
+
+    const proxied = calls.find(
+      (call) => call.input === `http://127.0.0.1:${guardrailPort}/v1/inference`,
     );
     expect(proxied).toBeDefined();
     expect(await readForwardedBody(proxied?.init?.body)).toBe(payload);
