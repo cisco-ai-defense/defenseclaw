@@ -25,6 +25,9 @@ func PinnedDeploymentMode() string {
 // the transient case where mkdir succeeds and the subsequent validation
 // then fails. The leaf itself is validated after Mkdir completes.
 func PrepareServiceRuntimeDir(deploymentMode, path, label string) error {
+	if IsContainer(deploymentMode) {
+		return os.MkdirAll(path, 0o700)
+	}
 	if !IsManagedEnterprise(deploymentMode) {
 		return safefile.ProtectDirectory(path)
 	}

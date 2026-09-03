@@ -44,6 +44,7 @@ const (
 	DeploymentModeSandboxed         DeploymentMode = "sandboxed"
 	DeploymentModeServer            DeploymentMode = "server"
 	DeploymentModeSaaS              DeploymentMode = "saas"
+	DeploymentModeContainer         DeploymentMode = "container"
 )
 
 var validDeploymentModes = map[string]struct{}{
@@ -53,6 +54,7 @@ var validDeploymentModes = map[string]struct{}{
 	string(DeploymentModeSandboxed):         {},
 	string(DeploymentModeServer):            {},
 	string(DeploymentModeSaaS):              {},
+	string(DeploymentModeContainer):         {},
 }
 
 const (

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -52,6 +53,13 @@ func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool)
 		if directory && owner == 0 && info.Mode()&os.ModeSticky != 0 {
 			return nil
 		}
+		// In container environments, Kubernetes fsGroup makes emptyDir
+		// volumes group-writable. Accept group-writable directories
+		// when deployment_mode=container. Mount points are root-owned
+		// (owner==0) while user-created subdirs are user-owned.
+		if directory && isContainerDeploymentMode() {
+			return nil
+		}
 		kind := "file"
 		if directory {
 			kind = "directory"
@@ -59,6 +67,10 @@ func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool)
 		return fmt.Errorf("audit: database %s is group- or other-writable", kind)
 	}
 	return nil
+}
+
+func isContainerDeploymentMode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEFENSECLAW_DEPLOYMENT_MODE")), "container")
 }
 
 // macOS and some Unix installations expose a root-level system directory as a
@@ -89,5 +101,8 @@ func auditDBModeMatches(info os.FileInfo, want os.FileMode) bool {
 }
 
 func auditDBImmediateDirectoryModeTrusted(info os.FileInfo) bool {
-	return info.Mode().Perm()&0o022 == 0
+	if info.Mode().Perm()&0o022 == 0 {
+		return true
+	}
+	return isContainerDeploymentMode()
 }

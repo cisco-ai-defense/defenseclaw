@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"fmt"
+	"strings"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -16,7 +17,10 @@ func validateDeviceIdentityPathSyntax(_, _ string) error { return nil }
 
 func validateFreshIdentityDirectoryPlatform(path string, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok {
+		return fmt.Errorf("gateway: device identity directory ownership unavailable: %s", path)
+	}
+	if stat.Uid != uint32(os.Geteuid()) && !isContainerDeploymentMode() {
 		return fmt.Errorf("gateway: device identity directory is not owned by the current user: %s", path)
 	}
 	resolved, err := filepath.EvalSymlinks(path)
@@ -47,4 +51,8 @@ func syncFreshIdentityDirectory(path string) error {
 		return fmt.Errorf("gateway: close device identity directory %s after sync: %w", path, closeErr)
 	}
 	return nil
+}
+
+func isContainerDeploymentMode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEFENSECLAW_DEPLOYMENT_MODE")), "container")
 }
