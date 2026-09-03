@@ -199,6 +199,51 @@ describe("fetch(request, init) interceptor semantics", () => {
     expect(await readForwardedBody(proxied?.init?.body)).toBe(payload);
   });
 
+  it("does not treat a nested LLM key before the 64 KiB cap as a root shape", async () => {
+    const payload = JSON.stringify({
+      metadata: { messages: [{ role: "user", content: "nested" }] },
+      padding: "x".repeat(70_000),
+    });
+    await fetch("https://custom-provider.test/v1/inference", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    });
+    expect(calls.map((call) => call.input)).toContain(
+      "https://custom-provider.test/v1/inference",
+    );
+    expect(calls.map((call) => call.input)).not.toContain(
+      `http://127.0.0.1:${guardrailPort}/v1/inference`,
+    );
+  });
+
+  it("forwards duplex when the Request body is a stream", async () => {
+    const payload = JSON.stringify({
+      messages: [{ role: "user", content: "stream-body" }],
+    });
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+    });
+    const request = new Request("https://custom-provider.test/v1/inference", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+
+    await fetch(request);
+
+    const forwarded = calls.find(
+      (call) => call.input === `http://127.0.0.1:${guardrailPort}/v1/inference`,
+    )?.init as (RequestInit & { duplex?: string }) | undefined;
+    expect(forwarded).toBeDefined();
+    expect(forwarded?.duplex).toBe("half");
+    expect(await readForwardedBody(forwarded?.body)).toBe(payload);
+  });
+
   it("inherits the Request body when init.body is null", async () => {
     const payload = JSON.stringify({
       messages: [{ role: "user", content: "keep-request-body" }],
