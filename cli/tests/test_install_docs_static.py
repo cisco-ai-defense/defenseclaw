@@ -2255,6 +2255,7 @@ def test_policy_overview_matches_atomic_invalid_regex_rejection() -> None:
 
     assert "logged and dropped" not in overview
     assert "rejects the complete candidate" in overview
+    assert "Regexes compile during [rule-pack validation]" in overview
     assert "/docs/policies/rulepack-validation" in overview
     assert "invalid Go regular expression" in validation
     assert "silently discard the bad file" in validation
