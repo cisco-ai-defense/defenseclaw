@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +79,37 @@ func TestProxyOperationalMetricsUseGeneratedFamiliesAndCorrelation(t *testing.T)
 		t.Fatalf("forwarded-header value=%v", forwarded.Value())
 	}
 	duration := byName[observability.TelemetryInstrumentDefenseClawStreamDurationMs][0]
+	proxy.recordSemanticRoutingDecisionV8(ctx, SemanticRouteOutcome{
+		Result:          SemanticRouteApplied,
+		FailureCode:     SemanticRouteFailureNone,
+		OverrideApplied: true,
+		Latency:         2500 * time.Microsecond,
+		RequestModel:    "requested-model",
+		SelectedModel:   "llama3.1",
+		Decision: &ModelRouterDecision{
+			Reason:    "decision=continue model=fast confidence=0.91",
+			TargetURL: "http://127.0.0.1:11434",
+		},
+	})
+	routing := []telemetry.V8ProjectedMetric{}
+	for _, metric := range capture.metricSnapshot() {
+		if metric.Descriptor().Name == observability.TelemetryInstrumentDefenseClawSemanticRoutingDecision ||
+			metric.Descriptor().Name == observability.TelemetryInstrumentDefenseClawSemanticRoutingLatency {
+			routing = append(routing, metric)
+			attributes := metric.Attributes()
+			for _, forbidden := range []string{"decision=continue", "http://127.0.0.1:11434", "requested-model", "prompt"} {
+				for _, value := range attributes {
+					if strings.Contains(fmt.Sprint(value), forbidden) {
+						t.Fatalf("routing metric leaked %q in %v", forbidden, attributes)
+					}
+				}
+			}
+		}
+	}
+	if len(routing) != 2 {
+		t.Fatalf("routing metrics=%d", len(routing))
+	}
+
 	if value, ok := duration.Value().Double(); !ok || value != 1.5 ||
 		duration.Attributes()["defenseclaw.outcome"] != string(observability.OutcomeCompleted) {
 		t.Fatalf("stream duration value/attributes=%v/%v", duration.Value(), duration.Attributes())
