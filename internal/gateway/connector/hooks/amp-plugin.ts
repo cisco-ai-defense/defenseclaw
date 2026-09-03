@@ -49,7 +49,8 @@ function identityHeaders(): Record<string, string> {
 	if (typeof info.uid === "number" && info.uid >= 0) {
 		headers["X-DefenseClaw-User-Id"] = String(info.uid)
 	}
-	// Mirrors the account-name allowlist the shell hooks apply in _hardening.sh.
+	// Mirrors the account-name allowlist the POSIX hooks apply in their
+	// shared hardening helper.
 	if (typeof info.username === "string" && info.username.length > 0 &&
 		info.username.length <= 256 && /^[A-Za-z0-9._-]+$/.test(info.username)) {
 		headers["X-DefenseClaw-User-Name"] = info.username

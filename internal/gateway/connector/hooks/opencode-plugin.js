@@ -68,8 +68,8 @@ function defenseclawIdentityHeaders() {
   return headers;
 }
 
-// defenseclawSafeIdentityValue mirrors the account-name allowlist the shell
-// hooks apply in _hardening.sh.
+// defenseclawSafeIdentityValue mirrors the account-name allowlist the POSIX
+// hooks apply in their shared hardening helper.
 function defenseclawSafeIdentityValue(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 256 &&
     /^[A-Za-z0-9._-]+$/.test(value);

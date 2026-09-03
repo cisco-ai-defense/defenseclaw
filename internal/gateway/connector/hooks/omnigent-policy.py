@@ -365,7 +365,8 @@ def _identity_headers() -> dict[str, str]:
         # No identity is a supported outcome: the record is emitted
         # unattributed rather than wrongly attributed.
         return headers
-    # Mirrors the account-name allowlist the shell hooks apply in _hardening.sh.
+    # Mirrors the account-name allowlist the POSIX hooks apply in their
+    # shared hardening helper.
     if name and len(name) <= 256 and _SAFE_ACCOUNT_NAME.fullmatch(name):
         headers["X-DefenseClaw-User-Name"] = name
     return headers

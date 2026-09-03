@@ -65,8 +65,8 @@ _BRIDGE_PUBLICATION_SCHEMA = {
     },
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
-    "amp": "cb78dca919d1741e131f2ef5fe92a161c8c5dd96264e3ff5c06b93ee2f9f3428",
-    "opencode": "de7633f9ecc0d3020d82f9b0897080e75e119cdbcfee85864c24a044f1842379",
+    "amp": "b33193cbc307ac96de1ea1225e45de6eda9abd3043b848051c8fbab58a57924c",
+    "opencode": "92812c1b93005892875db052f751244fe020ea6b7506ecf43e1e778071902e5d",
 }
 _BRIDGE_DYNAMIC_LINES = {
     "amp": (
