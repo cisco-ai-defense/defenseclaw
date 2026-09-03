@@ -1043,8 +1043,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// `prompt` is a single string. Inspect it like any user turn so
 	// direct Ollama clients are not a bypass route. When system and
 	// prompt coexist, keep both in Messages for message-aware inspectors
-	// and inspect both texts: regex_judge and other content scanners
-	// use the string, not Messages (#718).
+	// and join both texts for regex_judge / content scanners, which
+	// inspect the string rather than Messages (#718). One Inspect keeps
+	// managed AID at a single call.
 	ollamaSystemText := ""
 	if userText == "" && strings.TrimSpace(partial.Prompt) != "" {
 		userText = partial.Prompt
@@ -1070,7 +1071,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	if passthroughReqForTelemetry.Model == "" {
 		passthroughReqForTelemetry.Model = label
 	}
-	inspectionText := promptInspectionText(userText)
+	inspectRaw := userText
+	if ollamaSystemText != "" {
+		inspectRaw = ollamaSystemText + "\n" + userText
+	}
+	inspectionText := promptInspectionText(inspectRaw)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
 	// or session-startup-shaped suffix inside the user-controlled OpenClaw
@@ -1102,18 +1107,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict.
-		if inspectionText != userText {
-			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
+		if inspectionText != inspectRaw {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", inspectRaw, partial.Messages, label, mode)
 			verdict = mergePromptVerdicts(verdict, rawVerdict)
-		}
-		if ollamaSystemText != "" {
-			systemInspect := promptInspectionText(ollamaSystemText)
-			systemVerdict := p.inspector.Inspect(r.Context(), "prompt", systemInspect, partial.Messages, label, mode)
-			verdict = mergePromptVerdicts(verdict, systemVerdict)
-			if systemInspect != ollamaSystemText {
-				rawSystem := p.inspector.Inspect(r.Context(), "prompt", ollamaSystemText, partial.Messages, label, mode)
-				verdict = mergePromptVerdicts(verdict, rawSystem)
-			}
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
