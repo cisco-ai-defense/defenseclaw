@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ const windsurfAdapterExitCodeEnv = "TEST_WINDSURF_ADAPTER_EXIT_CODE"
 func TestMain(m *testing.M) {
 	if os.Getenv(copilotAdapterHelperMode) == "result" {
 		payload, err := io.ReadAll(os.Stdin)
-		if err != nil || string(payload) != `{"source":"copilot-adapter-probe"}` {
+		if err != nil || !bytes.Contains(payload, []byte(`"source":"copilot-adapter-probe"`)) {
 			fmt.Fprintf(os.Stderr, "Copilot adapter helper received wrong stdin: %q\n", string(payload))
 			os.Exit(6)
 		}
@@ -176,6 +177,66 @@ func TestCopilotAdapterPreservesJSONInputAndDenyResponse(t *testing.T) {
 	}
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestCopilotAdapterHandlesLargeConcurrentStdin(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(copilotAdapterHelperMode, "result")
+	adapter := renderCopilotAdapterForTest(t, executable, copilotWindowsHookAdapterTimeoutMS)
+	payload := `{"source":"copilot-adapter-probe","padding":"` + strings.Repeat("x", 65536) + `"}`
+	quoted := strings.ReplaceAll(adapter, "'", "''")
+	const workers = 3
+	type adapterResult struct {
+		stdout string
+		stderr string
+		code   int
+		err    error
+	}
+	results := make([]adapterResult, workers)
+	var wait sync.WaitGroup
+	wait.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(index int) {
+			defer wait.Done()
+			cmd := exec.Command(
+				"powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+				"& '"+quoted+"' -Event 'preToolUse'",
+			)
+			cmd.Stdin = strings.NewReader(payload)
+			var out, errOut bytes.Buffer
+			cmd.Stdout = &out
+			cmd.Stderr = &errOut
+			runErr := cmd.Run()
+			result := adapterResult{stdout: out.String(), stderr: errOut.String()}
+			if runErr != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(runErr, &exitErr) {
+					result.err = runErr
+				} else {
+					result.code = exitErr.ExitCode()
+				}
+			}
+			results[index] = result
+		}(i)
+	}
+	wait.Wait()
+	for i, result := range results {
+		if result.err != nil {
+			t.Fatalf("worker %d run Copilot adapter: %v", i, result.err)
+		}
+		if result.code != 0 {
+			t.Fatalf("worker %d exit code = %d, want 0; stderr=%q", i, result.code, result.stderr)
+		}
+		if strings.TrimSpace(result.stdout) != `{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}` {
+			t.Fatalf("worker %d stdout = %q, want exact Copilot deny JSON; stderr=%q", i, result.stdout, result.stderr)
+		}
+		if result.stderr != "" {
+			t.Fatalf("worker %d stderr = %q, want empty", i, result.stderr)
+		}
 	}
 }
 

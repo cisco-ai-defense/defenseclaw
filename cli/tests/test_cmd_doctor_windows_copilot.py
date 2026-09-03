@@ -14,6 +14,7 @@ from defenseclaw.commands.cmd_doctor import (
     _windows_native_hook_check,
 )
 from defenseclaw.doctor_hooks import (
+    _COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT,
     _COPILOT_CONTRACT_EVENTS,
     _COPILOT_REQUIRED_HOOKS,
     validate_windows_copilot_hook_registration,
@@ -29,6 +30,7 @@ def _adapter_body(runtime: Path) -> str:
     literal = str(runtime).replace("'", "''")
     return f"""# defenseclaw-managed-hook v7
 $hook = '{literal}'
+{_COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT}
 $payload = [Console]::In.ReadToEnd()
 $payload[0] -eq [char]0xFEFF
 $startInfo.RedirectStandardInput = $true
@@ -316,6 +318,42 @@ def test_windows_copilot_doctor_classifies_tamper(
             "preToolUse",
         )
     config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert not check.healthy
+    assert expected in check.detail
+    assert "setup copilot --yes --restart" in check.detail
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("unbounded-timeout", "$timeoutMS = 25000"),
+        ("missing-timeout", "$timeoutMS = 25000"),
+        ("duplicate-timeout", "exactly one bounded timeout assignment"),
+        ("duplicate-hook", "exactly one bound hook executable"),
+    ],
+)
+def test_windows_copilot_doctor_rejects_unbounded_or_ambiguous_adapter(
+    tmp_path: Path,
+    mutation: str,
+    expected: str,
+) -> None:
+    install, data, config = _fixture(tmp_path)
+    adapter = data / "hooks" / "copilot-hook.ps1"
+    body = adapter.read_text(encoding="utf-8")
+    if mutation == "unbounded-timeout":
+        body = body.replace(_COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT, "$timeoutMS = 999999")
+    elif mutation == "missing-timeout":
+        body = "\n".join(
+            line for line in body.splitlines() if _COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT not in line
+        )
+    elif mutation == "duplicate-timeout":
+        body += f"\n{_COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT}\n"
+    elif mutation == "duplicate-hook":
+        body += "\n$hook = 'C:\\Windows\\System32\\notepad.exe'\n"
+    adapter.write_text(body + "\n", encoding="utf-8")
 
     check = _validate(install, data, config)
 

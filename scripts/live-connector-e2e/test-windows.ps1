@@ -987,7 +987,7 @@ $payload = [ordered]@{
     $renderedCopilotAdapter = $copilotAdapterSource.Replace(
         '{{.HookBinaryPS}}',
         'C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe'
-    ).Replace('{{.CopilotHookTimeoutMS}}', '29500')
+    ).Replace('{{.CopilotHookTimeoutMS}}', '25000')
     [IO.File]::WriteAllText(
         $copilotAdapter,
         $renderedCopilotAdapter,
@@ -1006,6 +1006,7 @@ $payload = [ordered]@{
     $copilotFixture = [ordered]@{ version = 1; hooks = $copilotHooks } |
         ConvertTo-Json -Depth 8
     Assert-CopilotSynchronousWindowsHookConfig $copilotFixture 'synthetic Copilot registration'
+    Assert-CopilotAdapterConcurrentStdin
 
     $copilotWrongEvent = $copilotFixture | ConvertFrom-Json
     $copilotWrongEvent.hooks.preToolUse[0].powershell =
@@ -2934,6 +2935,15 @@ connection.close()
         '\$null -ne \$disableAllHooks -and \[bool\]\$disableAllHooks\.Value' -and
         $wizardHookValidation -notmatch '\$hookDocument\.disableAllHooks') `
         'Copilot wizard validation treats omitted disableAllHooks as enabled while rejecting explicit true'
+    Assert-True ($wizardHookValidation -match '\[regex\]::Matches\(' -and
+        $wizardHookValidation -match '\$hookMatches\.Count -ne 1' -and
+        $wizardHookValidation -match "\`$timeoutMS = 25000" -and
+        $wizardHookValidation -match 'exactly one 25000ms timeout assignment') `
+        'Copilot wizard validation requires exactly one bound hook executable and a 25000ms timeout'
+    Assert-True ($nativeHarnessText -match 'function Assert-CopilotAdapterConcurrentStdin\b' -and
+        $nativeHarnessText -match 'Copilot adapter concurrent stdin probe timed out' -and
+        $nativeHarnessText -match "'x' \* 65536") `
+        'Windows native harness covers large concurrent Copilot adapter stdin'
     Assert-True ($wizardAcceptance -match 'Get-WatchdogIdentity' -and
         $wizardAcceptance -match "@\('watchdog', 'status'\)" -and
         $wizardAcceptance -match 'wizard-started watchdog' -and
