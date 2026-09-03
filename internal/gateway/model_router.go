@@ -21,13 +21,13 @@ const (
 	SemanticRouteApplied  = "applied"
 	SemanticRouteFallback = "fallback"
 
-	SemanticRouteFailureNone          = "none"
-	SemanticRouteFailureTimeout       = "timeout"
+	SemanticRouteFailureNone           = "none"
+	SemanticRouteFailureTimeout        = "timeout"
 	SemanticRouteFailureUpstreamStatus = "upstream_status"
-	SemanticRouteFailureDecode        = "decode_failure"
-	SemanticRouteFailureUnknownAlias  = "unknown_alias"
-	SemanticRouteFailureCredential    = "credential_failure"
-	SemanticRouteFailureConfig        = "configuration_failure"
+	SemanticRouteFailureDecode         = "decode_failure"
+	SemanticRouteFailureUnknownAlias   = "unknown_alias"
+	SemanticRouteFailureCredential     = "credential_failure"
+	SemanticRouteFailureConfig         = "configuration_failure"
 )
 
 // SemanticRouteOutcome is the content-free routing decision for one request.
