@@ -681,7 +681,12 @@ async function readStreamBounded(
       total += value.byteLength;
     }
   } finally {
-    if (options?.cancelRemainder !== false) {
+    if (options?.cancelRemainder === false) {
+      // Fire-and-forget: awaiting tee-branch cancel() can deadlock
+      // against the unconsumed sibling (#732), but skipping cancel
+      // entirely leaves the rest of a multi-GB body queued.
+      void reader.cancel().catch(() => undefined);
+    } else {
       try {
         await reader.cancel();
       } catch {
@@ -704,7 +709,13 @@ async function readStreamBounded(
 }
 
 function hasOwnBody(init?: RequestInit): boolean {
-  return Boolean(init && Object.prototype.hasOwnProperty.call(init, "body"));
+  // Native fetch(request, { body: null | undefined }) inherits the
+  // Request body. Only a non-null init.body replaces it.
+  return Boolean(
+    init &&
+      Object.prototype.hasOwnProperty.call(init, "body") &&
+      init.body != null,
+  );
 }
 
 /**
@@ -748,16 +759,9 @@ function combineAbortSignals(
   requestSignal?: AbortSignal | null,
   initSignal?: AbortSignal | null,
 ): AbortSignal | null | undefined {
-  if (requestSignal && initSignal && requestSignal !== initSignal) {
-    const anyFn = (
-      AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }
-    ).any;
-    if (typeof anyFn === "function") {
-      return anyFn.call(AbortSignal, [requestSignal, initSignal]);
-    }
-    return initSignal;
-  }
-  return initSignal ?? requestSignal;
+  // Native fetch(request, { signal }) uses the init signal only.
+  if (initSignal) return initSignal;
+  return requestSignal;
 }
 
 /**
@@ -782,12 +786,10 @@ export function resolveEffectiveFetchInit(
   referrerPolicy?: ReferrerPolicy;
 } {
   const req = input instanceof Request ? input : null;
-  const headers = new Headers(req?.headers);
-  if (init?.headers) {
-    new Headers(init.headers).forEach((value, key) => {
-      headers.set(key, value);
-    });
-  }
+  const headers =
+    init?.headers != null
+      ? new Headers(init.headers)
+      : new Headers(req?.headers);
   return {
     method: String(init?.method ?? req?.method ?? "GET"),
     headers,
@@ -1159,15 +1161,11 @@ export function createFetchInterceptor(
         headers.set(k, v);
       }
 
-      // Peek may have cloned a Request body. Hand originalFetch a
-      // fresh clone so undici does not see a locked/disturbed stream.
+      // Peek used a clone. Consume the original Request tee branch so
+      // the leftover sibling is not left unread.
       let rewriteBody = effective.body;
       if (!hasOwnBody(init) && input instanceof Request && !input.bodyUsed) {
-        try {
-          rewriteBody = input.clone().body;
-        } catch {
-          rewriteBody = effective.body;
-        }
+        rewriteBody = input.body ?? effective.body;
       }
 
       // Preserve Request metadata and caller init extras (duplex, etc.),
