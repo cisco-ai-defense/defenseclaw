@@ -170,6 +170,14 @@ X-Semantic-Router: routed
 X-Semantic-Router-Reason: decision=… model=… confidence=…
 ```
 
+Each guarded request also emits one request-correlated v8 routing decision
+(`defenseclaw.semantic_routing.decision` plus latency) on the same trace as the
+model operation. Labels are a closed set: `applied` or `fallback`, a failure
+code (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`,
+`credential_failure`, `configuration_failure`), and whether an override was
+applied. Prompt text, credentials, endpoints, and the header reason string are
+not metric labels.
+
 No separate public chat endpoint is exposed on the router port. Port `8080` is the
 loopback classifier API used by the gateway; clients should continue using their
 normal DefenseClaw connector endpoint. The container uses a read-only config mount,

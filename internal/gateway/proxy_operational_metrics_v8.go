@@ -187,6 +187,59 @@ func proxyOperationalV8MetricItem(
 	)
 }
 
+func (p *GuardrailProxy) recordSemanticRoutingDecisionV8(
+	ctx context.Context,
+	outcome SemanticRouteOutcome,
+) {
+	if p == nil || ctx == nil {
+		return
+	}
+	outcome = normalizeSemanticRouteOutcome(outcome)
+	runtime := p.proxyOperationalV8Runtime()
+	if runtime == nil {
+		return
+	}
+	decisionLabel := "default"
+	if outcome.OverrideApplied {
+		decisionLabel = "override"
+	}
+	meta := hookDecisionMetricMeta(ctx, hookDecisionMetricConnector(p.connectorName()))
+	observedAt := time.Now().UTC()
+	items := []observabilityruntime.GeneratedMetricBatchItem{
+		proxyOperationalV8MetricItem(
+			ctx, observedAt, meta, observability.TelemetryInstrumentDefenseClawSemanticRoutingDecision,
+			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+				return builder.BuildMetricDefenseClawSemanticRoutingDecision(
+					observability.MetricDefenseClawSemanticRoutingDecisionInput{
+						Envelope: envelope, Value: 1,
+						DefenseClawMetricResult:    observability.Present(outcome.Result),
+						DefenseClawMetricErrorCode: observability.Present(outcome.FailureCode),
+						DefenseClawMetricDecision:  observability.Present(decisionLabel),
+					},
+				)
+			},
+		),
+	}
+	if outcome.Latency >= 0 {
+		latencyMs := float64(outcome.Latency) / float64(time.Millisecond)
+		if !math.IsNaN(latencyMs) && !math.IsInf(latencyMs, 0) {
+			items = append(items, proxyOperationalV8MetricItem(
+				ctx, observedAt, meta, observability.TelemetryInstrumentDefenseClawSemanticRoutingLatency,
+				func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+					return builder.BuildMetricDefenseClawSemanticRoutingLatency(
+						observability.MetricDefenseClawSemanticRoutingLatencyInput{
+							Envelope: envelope, Value: latencyMs,
+							DefenseClawMetricResult:    observability.Present(outcome.Result),
+							DefenseClawMetricErrorCode: observability.Present(outcome.FailureCode),
+						},
+					)
+				},
+			))
+		}
+	}
+	_, _ = runtime.RecordGeneratedMetricBatch(ctx, items)
+}
+
 func proxyOperationalRoute(route string) string {
 	if strings.TrimSpace(route) == "/v1/chat/completions" {
 		return "/v1/chat/completions"

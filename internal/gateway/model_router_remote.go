@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -118,8 +119,28 @@ type classifyClassification struct {
 }
 
 func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput) *ModelRouterDecision {
+	return c.RouteDetailed(ctx, input).Decision
+}
+
+func (c *RemoteRouterClient) RouteDetailed(ctx context.Context, input *ModelRouterInput) (outcome SemanticRouteOutcome) {
+	started := time.Now()
+	outcome = SemanticRouteOutcome{
+		Result:      SemanticRouteFallback,
+		FailureCode: SemanticRouteFailureConfig,
+	}
+	if input != nil {
+		outcome.RequestModel = strings.TrimSpace(input.RequestModel)
+		if outcome.RequestModel == "" {
+			outcome.RequestModel = strings.TrimSpace(input.Model)
+		}
+	}
+	defer func() {
+		outcome.Latency = time.Since(started)
+		outcome = normalizeSemanticRouteOutcome(outcome)
+	}()
+
 	if c == nil || c.endpoint == "" || input == nil {
-		return nil
+		return outcome
 	}
 
 	msgs := make([]classifyMessage, len(input.Messages))
@@ -138,7 +159,8 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[routing] marshal error: %v\n", err)
-		return nil
+		outcome.FailureCode = SemanticRouteFailureConfig
+		return outcome
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
@@ -147,14 +169,20 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.endpoint+"/api/v1/classify/intent", bytes.NewReader(bodyBytes))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[routing] request build error: %v\n", err)
-		return nil
+		outcome.FailureCode = SemanticRouteFailureConfig
+		return outcome
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[routing] sr unreachable: falling back to default provider (%v)\n", err)
-		return nil
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || reqCtx.Err() != nil {
+			outcome.FailureCode = SemanticRouteFailureTimeout
+		} else {
+			outcome.FailureCode = SemanticRouteFailureConfig
+		}
+		return outcome
 	}
 	defer resp.Body.Close()
 
@@ -164,23 +192,27 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 		// for bounded operational diagnosis.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		fmt.Fprintf(os.Stderr, "[routing] classifier returned HTTP %d; falling back to default provider\n", resp.StatusCode)
-		return nil
+		outcome.FailureCode = SemanticRouteFailureUpstreamStatus
+		return outcome
 	}
 
 	var classResp classifyResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&classResp); err != nil {
 		fmt.Fprintf(os.Stderr, "[routing] decode error: %v\n", err)
-		return nil
+		outcome.FailureCode = SemanticRouteFailureDecode
+		return outcome
 	}
 
 	if classResp.RecommendedModel == "" {
-		return nil
+		outcome.FailureCode = SemanticRouteFailureDecode
+		return outcome
 	}
 
 	routerDecision := boundedRouterLabel(classResp.RoutingDecision, 64)
 	recommendedAlias := boundedRouterLabel(classResp.RecommendedModel, 128)
 	if recommendedAlias == "" {
-		return nil
+		outcome.FailureCode = SemanticRouteFailureDecode
+		return outcome
 	}
 	reason := fmt.Sprintf("decision=%s model=%s confidence=%.2f",
 		routerDecision, recommendedAlias, classResp.Classification.Confidence)
@@ -197,17 +229,20 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 		backend, ok := c.backends[recommendedAlias]
 		if !ok {
 			fmt.Fprintf(os.Stderr, "[routing] unknown model alias %q: falling back to default provider\n", recommendedAlias)
-			return nil
+			outcome.FailureCode = SemanticRouteFailureUnknownAlias
+			return outcome
 		}
 		model := strings.TrimSpace(backend.Model)
 		if model == "" {
 			fmt.Fprintf(os.Stderr, "[routing] model alias %q has no provider model: falling back to default provider\n", recommendedAlias)
-			return nil
+			outcome.FailureCode = SemanticRouteFailureConfig
+			return outcome
 		}
 		provider := strings.TrimSpace(backend.Provider)
 		if provider == "" {
 			fmt.Fprintf(os.Stderr, "[routing] model alias %q has no provider: falling back to default provider\n", recommendedAlias)
-			return nil
+			outcome.FailureCode = SemanticRouteFailureConfig
+			return outcome
 		}
 		decision.Provider = provider
 		decision.Model = model
@@ -222,7 +257,8 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 				resolved, err := tokenResolver(ctx, provider)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[routing] managed credential resolution failed for provider %q: %v\n", provider, err)
-					return nil
+					outcome.FailureCode = SemanticRouteFailureCredential
+					return outcome
 				}
 				decision.APIKey = strings.TrimSpace(resolved)
 			} else {
@@ -230,12 +266,13 @@ func (c *RemoteRouterClient) Route(ctx context.Context, input *ModelRouterInput)
 			}
 			if decision.APIKey == "" {
 				fmt.Fprintf(os.Stderr, "[routing] credential %q for model alias %q is unavailable: falling back to default provider\n", backend.APIKeyEnv, recommendedAlias)
-				return nil
+				outcome.FailureCode = SemanticRouteFailureCredential
+				return outcome
 			}
 		}
 	}
 
-	return decision
+	return outcomeFromDecision(input, decision, time.Since(started))
 }
 
 func boundedRouterLabel(value string, limit int) string {
