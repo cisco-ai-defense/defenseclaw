@@ -116,6 +116,7 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN;
     delete (globalThis as Record<string, unknown>).__defenseclawAwsHttp1ShimEvaluated;
     delete (globalThis as Record<string, unknown>).__defenseclawAwsHttp1GuardrailPatch;
     mockEnforcer.syncFromDaemon.mockResolvedValue(undefined);
@@ -205,6 +206,59 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       );
 
       expect(result).toBeUndefined();
+    });
+
+    it("fails closed on structurally invalid allow JSON", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async () =>
+        new Response(JSON.stringify({ action: "allow" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      await expect(
+        listeners.before_tool_call(
+          { toolName: "exec", params: { command: "printenv" } },
+          { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+        ),
+      ).resolves.toMatchObject({
+        block: true,
+        blockReason: expect.stringContaining("sidecar returned invalid verdict"),
+      });
+
+      await expect(
+        listeners.before_tool_call(
+          {
+            toolName: "message",
+            params: { to: "security@example.test", content: "status update" },
+          },
+          { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+        ),
+      ).resolves.toMatchObject({
+        block: true,
+        blockReason: expect.stringContaining("sidecar returned invalid verdict"),
+      });
+    });
+
+    it("fails closed on an unknown action enum", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            action: "pass",
+            severity: "NONE",
+            reason: "",
+            mode: "action",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      await expect(
+        listeners.before_tool_call(
+          { toolName: "exec", params: { command: "printenv" } },
+          { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+        ),
+      ).resolves.toMatchObject({ block: true });
     });
   });
 
