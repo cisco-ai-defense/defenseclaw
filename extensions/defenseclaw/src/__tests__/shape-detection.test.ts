@@ -311,6 +311,19 @@ describe("peekBodyForShape", () => {
     ).toBe("messages");
   });
 
+  it("ignores a nested LLM-shaped key in a truncated non-LLM prefix", async () => {
+    const body = JSON.stringify({
+      metadata: { messages: [{ role: "user", content: "nested" }] },
+      padding: "x".repeat(70_000),
+    });
+    await expect(
+      peekBodyForShape("https://custom-provider.test/v1/inference", {
+        method: "POST",
+        body,
+      }),
+    ).resolves.toBe("none");
+  });
+
   it("does not hang peeking a Request body larger than 64 KiB", async () => {
     const request = new Request("https://custom-provider.test/v1/chat", {
       method: "POST",

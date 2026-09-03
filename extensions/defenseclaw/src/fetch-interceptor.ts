@@ -728,13 +728,72 @@ function classifyPeekText(text: string): LLMBodyShape {
   try {
     return classifyBodyShape(JSON.parse(text));
   } catch {
-    if (/"messages"\s*:/.test(text)) return "messages";
-    if (/"contents"\s*:/.test(text)) return "contents";
-    if (/"inputs"\s*:/.test(text)) return "input";
-    if (/"input"\s*:/.test(text)) return "input";
-    if (/"prompt"\s*:/.test(text)) return "prompt";
-    return "none";
+    return classifyTruncatedRootKeys(text);
   }
+}
+
+/** Recover an LLM shape from a 64 KiB-truncated JSON object prefix. */
+function classifyTruncatedRootKeys(text: string): LLMBodyShape {
+  const keys = new Set(rootObjectKeys(text));
+  if (keys.has("messages")) return "messages";
+  if (keys.has("contents")) return "contents";
+  if (keys.has("inputs")) return "input";
+  if (keys.has("input")) return "input";
+  if (keys.has("prompt")) return "prompt";
+  return "none";
+}
+
+/**
+ * Collect object keys at depth 1 so a nested `"messages"` (or similar)
+ * cannot classify a non-LLM body after the peek cap slices the document.
+ */
+function rootObjectKeys(text: string): string[] {
+  const keys: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      if (depth === 1) {
+        const match = /^"((?:\\.|[^"\\])*)"\s*:/.exec(text.slice(i));
+        if (match) {
+          keys.push(match[1]!.replace(/\\(.)/g, "$1"));
+          i += match[0].length - 1;
+          continue;
+        }
+      }
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      depth++;
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return keys;
+}
+
+function requestDuplex(value: object | undefined): "half" | undefined {
+  if (!value || !("duplex" in value)) return undefined;
+  return (value as { duplex?: unknown }).duplex === "half" ? "half" : undefined;
 }
 
 function peekConcreteBody(body: unknown): LLMBodyShape {
@@ -1170,6 +1229,13 @@ export function createFetchInterceptor(
 
       // Preserve Request metadata and caller init extras (duplex, etc.),
       // then apply the resolved method/body/signal/redirect family.
+      const duplex =
+        requestDuplex(init) ??
+        (input instanceof Request ? requestDuplex(input) : undefined) ??
+        (typeof ReadableStream !== "undefined" &&
+        rewriteBody instanceof ReadableStream
+          ? "half"
+          : undefined);
       const newInit: RequestInit = {
         ...(input instanceof Request
           ? {
@@ -1198,6 +1264,7 @@ export function createFetchInterceptor(
         mode: effective.mode,
         referrer: effective.referrer,
         referrerPolicy: effective.referrerPolicy,
+        ...(duplex ? { duplex } : {}),
       };
 
       if (shapeBranch === "shape") {
