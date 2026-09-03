@@ -21,6 +21,7 @@ import {
   isKnownSafeDomain,
   isLLMShapedRequest,
   peekBodyForShape,
+  resolveEffectiveFetchInit,
 } from "../fetch-interceptor.js";
 
 describe("classifyBodyShape", () => {
@@ -292,5 +293,121 @@ describe("peekBodyForShape", () => {
         body: fd,
       }),
     ).toBe("none");
+  });
+
+  it("prefers init.body over a non-LLM Request body", async () => {
+    const req = new Request("https://custom-provider.test/v1/inference", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event: "not-an-llm" }),
+    });
+    expect(
+      await peekBodyForShape(req, {
+        method: "PUT",
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "override-llm-body" }],
+        }),
+      }),
+    ).toBe("messages");
+  });
+
+  it("does not hang peeking a Request body larger than 64 KiB", async () => {
+    const request = new Request("https://custom-provider.test/v1/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom",
+        messages: [{ role: "user", content: "x".repeat(70_000) }],
+      }),
+    });
+    const shape = await Promise.race([
+      peekBodyForShape(request),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("peek hung")), 1000);
+      }),
+    ]);
+    expect(shape).toBe("messages");
+  });
+
+  it("completes a large Request peek after the caller aborts", async () => {
+    const controller = new AbortController();
+    const request = new Request("https://custom-provider.test/v1/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "custom",
+        messages: [{ role: "user", content: "x".repeat(70_000) }],
+      }),
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 5);
+    await expect(
+      Promise.race([
+        peekBodyForShape(request),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error("peek hung after abort")), 1000);
+        }),
+      ]),
+    ).resolves.toBe("messages");
+  });
+});
+
+describe("resolveEffectiveFetchInit", () => {
+  it("lets init override Request method, headers, body, and signal", () => {
+    const requestController = new AbortController();
+    const initController = new AbortController();
+    const req = new Request("https://custom-provider.test/v1/inference", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-from-request": "1" },
+      body: JSON.stringify({ event: "not-an-llm" }),
+      signal: requestController.signal,
+      redirect: "follow",
+      credentials: "omit",
+    });
+    const effective = resolveEffectiveFetchInit(req, {
+      method: "PUT",
+      headers: { "x-from-init": "yes" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      signal: initController.signal,
+      redirect: "manual",
+      credentials: "include",
+      cache: "no-store",
+      integrity: "sha256-abc",
+      keepalive: true,
+      mode: "cors",
+      referrer: "https://app.example.test/",
+      referrerPolicy: "no-referrer",
+    });
+    expect(effective.method).toBe("PUT");
+    expect(effective.headers.get("x-from-request")).toBe("1");
+    expect(effective.headers.get("x-from-init")).toBe("yes");
+    expect(effective.body).toBe(
+      JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+    );
+    expect(effective.redirect).toBe("manual");
+    expect(effective.credentials).toBe("include");
+    expect(effective.cache).toBe("no-store");
+    expect(effective.integrity).toBe("sha256-abc");
+    expect(effective.keepalive).toBe(true);
+    expect(effective.mode).toBe("cors");
+    expect(effective.referrer).toBe("https://app.example.test/");
+    expect(effective.referrerPolicy).toBe("no-referrer");
+    expect(effective.signal).toBeDefined();
+    initController.abort();
+    expect(effective.signal?.aborted).toBe(true);
+  });
+
+  it("keeps Request metadata when init is omitted", () => {
+    const req = new Request("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+      redirect: "error",
+      credentials: "same-origin",
+    });
+    const effective = resolveEffectiveFetchInit(req);
+    expect(effective.method).toBe("POST");
+    expect(effective.redirect).toBe("error");
+    expect(effective.credentials).toBe("same-origin");
+    expect(effective.body).toBe(req.body);
   });
 });
