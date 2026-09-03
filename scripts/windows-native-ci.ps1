@@ -5068,7 +5068,7 @@ function Assert-CopilotAdapterConcurrentStdin {
     }
     $work = Join-Path ([IO.Path]::GetTempPath()) ('dc-copilot-adapter-' + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $work | Out-Null
-    $started = @()
+    $started = New-Object 'System.Collections.Generic.List[System.Diagnostics.Process]'
     try {
         $helperSource = Join-Path $work 'probe.cs'
         $helper = Join-Path $work 'defenseclaw-hook.exe'
@@ -5103,32 +5103,50 @@ internal static class Program {
         $rendered = [IO.File]::ReadAllText($adapterTemplate).Replace(
             '{{.HookBinaryPS}}',
             $helper.Replace("'", "''")
-        ).Replace('{{.CopilotHookTimeoutMS}}', '25000')
+        ).Replace('{{.CopilotHookTimeoutMS}}', '8000')
         [IO.File]::WriteAllText($adapter, $rendered, [Text.UTF8Encoding]::new($false))
         $payload = '{"source":"copilot-adapter-probe","padding":"' + ('x' * 65536) + '"}'
         $shell = (Get-Command powershell.exe -CommandType Application).Source
+        $quotedAdapter = $adapter.Replace("'", "''")
+        $outputs = New-Object 'System.Collections.Generic.List[object]'
         for ($index = 0; $index -lt 3; $index++) {
-            $stdinPath = Join-Path $work "stdin-$index.json"
-            $stdoutPath = Join-Path $work "stdout-$index.json"
-            $stderrPath = Join-Path $work "stderr-$index.txt"
-            [IO.File]::WriteAllText($stdinPath, $payload, [Text.UTF8Encoding]::new($false))
-            $started += Start-Process -FilePath $shell -ArgumentList @(
-                '-NoProfile', '-NonInteractive', '-File', $adapter, '-Event', 'preToolUse'
-            ) -NoNewWindow -PassThru -RedirectStandardInput $stdinPath `
-                -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+            $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $startInfo.FileName = $shell
+            $startInfo.Arguments = "-NoProfile -NonInteractive -Command `"& '$quotedAdapter' -Event 'preToolUse'`""
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardInput = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $startInfo
+            if (-not $process.Start()) {
+                throw 'Copilot adapter concurrent stdin probe did not start'
+            }
+            [void]$started.Add($process)
+            $process.StandardInput.Write($payload)
+            $process.StandardInput.Close()
+            $outputs.Add([pscustomobject]@{
+                Stdout = $process.StandardOutput
+                Stderr = $process.StandardError
+            })
         }
-        $deadline = [DateTime]::UtcNow.AddSeconds(20)
-        foreach ($process in $started) {
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        $results = @()
+        for ($index = 0; $index -lt $started.Count; $index++) {
+            $process = $started[$index]
             $remainingMS = [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds
             if ($remainingMS -le 0 -or -not $process.WaitForExit($remainingMS)) {
                 throw 'Copilot adapter concurrent stdin probe timed out'
             }
+            $stdout = $outputs[$index].Stdout.ReadToEnd()
+            $stderr = $outputs[$index].Stderr.ReadToEnd()
             if ($process.ExitCode -ne 0) {
-                throw "Copilot adapter concurrent stdin probe exited $($process.ExitCode)"
+                throw "Copilot adapter concurrent stdin probe exited $($process.ExitCode): $stderr"
             }
+            $results += $stdout
         }
-        for ($index = 0; $index -lt 3; $index++) {
-            $stdout = [IO.File]::ReadAllText((Join-Path $work "stdout-$index.json"))
+        foreach ($stdout in $results) {
             if ($stdout.IndexOf(
                 '{"permissionDecision":"deny","permissionDecisionReason":"matched: concurrent"}',
                 [StringComparison]::Ordinal
