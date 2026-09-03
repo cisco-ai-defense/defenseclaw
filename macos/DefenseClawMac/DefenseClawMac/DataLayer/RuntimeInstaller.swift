@@ -272,44 +272,6 @@ struct RuntimePayload: Sendable {
     }
 }
 
-/// Produces the runnable, signed-release resolver command shared by native-app
-/// upgrade surfaces. The release tag is validated before URL interpolation.
-enum RuntimeUpgradeResolverCommand {
-    static func authenticated(releaseTag: String) -> String? {
-        let tag = releaseTag.hasPrefix("v") ? String(releaseTag.dropFirst()) : releaseTag
-        guard tag.range(
-            of: #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"#,
-            options: .regularExpression
-        ) != nil else { return nil }
-        let assetBase = "https://github.com/cisco-ai-defense/defenseclaw/releases/download/\(tag)"
-        return """
-        (
-          set -eu
-          unset VERSION
-          umask 077
-          command -v cosign >/dev/null
-          checksums="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt')"
-          signature="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt.sig')"
-          certificate="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt.pem')"
-          resolver="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/defenseclaw-upgrade.sh')"
-          cosign verify-blob --certificate <(printf '%s\\n' "$certificate") --signature <(printf '%s\\n' "$signature") --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' <(printf '%s\\n' "$checksums")
-          line="$(printf '%s\\n' "$checksums" | grep -E '^[0-9a-f]{64}  defenseclaw-upgrade[.]sh$')"
-          [ "$(printf '%s\\n' "$line" | wc -l | tr -d ' ')" = 1 ]
-          expected="${line%% *}"
-          if command -v sha256sum >/dev/null; then
-            actual="$(printf '%s\\n' "$resolver" | sha256sum | awk '{print $1}')"
-          else
-            actual="$(printf '%s\\n' "$resolver" | shasum -a 256 | awk '{print $1}')"
-          fi
-          [ "$actual" = "$expected" ]
-          [ "$(printf '%s\\n' "$resolver" | tail -n 1)" = '# DefenseClaw upgrade resolver complete v1' ]
-          bash -n <(printf '%s\\n' "$resolver")
-          bash <(printf '%s\\n' "$resolver") --yes
-        )
-        """
-    }
-}
-
 struct RuntimeAuditRecoveryTarget {
     let homeRoot: URL
     let configURL: URL
@@ -611,6 +573,16 @@ extension AppState {
                 mode: 0o600,
                 expectedSourceSHA256: payload.dependencyLockSHA256
             )
+            if let overridesURL = payload.overridesURL,
+               let overridesSHA256 = payload.overridesSHA256 {
+                _ = try RuntimeInstallFilesystem.installRegularFileNoReplace(
+                    source: overridesURL.path,
+                    destination: dataHome + "/dependency-overrides-\(payload.version).txt",
+                    expectedParentIdentity: dataHomeIdentity,
+                    mode: 0o600,
+                    expectedSourceSHA256: overridesSHA256
+                )
+            }
         } catch {
             if let materializedWheelIdentity {
                 _ = RuntimeInstallFilesystem.cleanupOwnedPath(
@@ -1125,7 +1097,7 @@ extension AppState {
     }
 
     private static func existingRuntimeRefusal(marker: String, payload: RuntimePayload) -> String {
-        guard let resolverCommand = RuntimeUpgradeResolverCommand.authenticated(
+        guard let resolverCommand = authenticatedRuntimeUpgradeResolverCommand(
             releaseTag: payload.tag
         ) else {
             return """
@@ -1143,4 +1115,49 @@ extension AppState {
         """
     }
 
+    /// Produce only the runnable, signed-release resolver command shared by
+    /// every native-app refusal surface. Returning nil prevents a release tag
+    /// from being interpolated into a URL unless it is canonical SemVer.
+    static func authenticatedRuntimeUpgradeResolverCommand(releaseTag: String) -> String? {
+        RuntimeUpgradeResolverCommand.authenticated(releaseTag: releaseTag)
+    }
+
+}
+
+/// Produces the runnable, signed-release resolver command shared by native-app
+/// upgrade surfaces. The release tag is validated before URL interpolation.
+enum RuntimeUpgradeResolverCommand {
+    static func authenticated(releaseTag: String) -> String? {
+        let tag = releaseTag.hasPrefix("v") ? String(releaseTag.dropFirst()) : releaseTag
+        guard tag.range(
+            of: #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"#,
+            options: .regularExpression
+        ) != nil else { return nil }
+        let assetBase = "https://github.com/cisco-ai-defense/defenseclaw/releases/download/\(tag)"
+        return """
+        (
+          set -eu
+          unset VERSION
+          umask 077
+          command -v cosign >/dev/null
+          checksums="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt')"
+          signature="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt.sig')"
+          certificate="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt.pem')"
+          resolver="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/defenseclaw-upgrade.sh')"
+          cosign verify-blob --certificate <(printf '%s\\n' "$certificate") --signature <(printf '%s\\n' "$signature") --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' <(printf '%s\\n' "$checksums")
+          line="$(printf '%s\\n' "$checksums" | grep -E '^[0-9a-f]{64}  defenseclaw-upgrade[.]sh$')"
+          [ "$(printf '%s\\n' "$line" | wc -l | tr -d ' ')" = 1 ]
+          expected="${line%% *}"
+          if command -v sha256sum >/dev/null; then
+            actual="$(printf '%s\\n' "$resolver" | sha256sum | awk '{print $1}')"
+          else
+            actual="$(printf '%s\\n' "$resolver" | shasum -a 256 | awk '{print $1}')"
+          fi
+          [ "$actual" = "$expected" ]
+          [ "$(printf '%s\\n' "$resolver" | tail -n 1)" = '# DefenseClaw upgrade resolver complete v1' ]
+          bash -n <(printf '%s\\n' "$resolver")
+          bash <(printf '%s\\n' "$resolver") --yes
+        )
+        """
+    }
 }
