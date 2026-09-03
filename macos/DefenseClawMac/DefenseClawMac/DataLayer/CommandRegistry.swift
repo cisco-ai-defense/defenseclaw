@@ -196,7 +196,7 @@ enum CommandInvocationError: LocalizedError, Equatable {
 }
 
 enum CommandRegistry {
-    static let sourceCount = 232
+    static let sourceCount = 231
     static let all: [CommandDefinition] = [
         CommandDefinition(id: 0, title: "init", binary: "defenseclaw", arguments: ["init"], summary: "Initialize DefenseClaw", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 1, title: "init first-run", binary: "defenseclaw", arguments: ["init", "--non-interactive", "--yes", "--verify"], summary: "Run guided first-run backend with defaults", category: "setup", requiresInput: false, usage: ""),
