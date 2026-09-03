@@ -69,7 +69,8 @@
         "ci_cd",
         "sandboxed",
         "server",
-        "saas"
+        "saas",
+        "container"
       ]
     },
     "discovery_source": {

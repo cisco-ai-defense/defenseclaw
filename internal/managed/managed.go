@@ -41,6 +41,10 @@ func IsManagedEnterprise(mode string) bool {
 	return strings.EqualFold(strings.TrimSpace(mode), DeploymentModeManagedEnterprise)
 }
 
+func IsContainer(mode string) bool {
+	return strings.EqualFold(strings.TrimSpace(mode), "container")
+}
+
 func HookGuardianAuthorizationDir(dataDir string) string {
 	if configured := strings.TrimSpace(os.Getenv(HookGuardianAuthorizationDirEnv)); configured != "" {
 		return filepath.Clean(configured)
