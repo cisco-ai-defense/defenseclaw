@@ -212,8 +212,9 @@ injection:
   - "ignore all instructions"
   - "jailbreak"
 
-# Regex matches. Compiled at load time; bad regexes are logged and
-# dropped (the rest of the file still applies).
+# Regex matches. Compiled during candidate validation; any invalid
+# expression rejects the complete candidate. See
+# docs/policies/rulepack-validation.
 injection_regexes:
   - 'ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)'
 
@@ -237,6 +238,8 @@ exfiltration:
   - "/etc/passwd"
   - "exfiltrate"
 ```
+
+Regexes compile during [rule-pack validation](/docs/policies/rulepack-validation). Any invalid expression rejects the complete candidate; DefenseClaw does not log-and-drop a bad pattern while applying the rest of the file.
 
 Three-state semantics for each top-level key:
 
