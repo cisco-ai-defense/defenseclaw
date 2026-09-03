@@ -35,7 +35,7 @@ type enterpriseHooksTreeEntry struct {
 }
 
 func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(t *testing.T) {
-	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify"} {
+	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify", "rotate-prepare", "rotate-commit", "rotate-rollback"} {
 		t.Run(command, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
 			enterpriseHooksPlatformPreflight = func() error {
@@ -74,12 +74,15 @@ func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(
 			enterpriseHooksWatchRunE = blockedRun
 			enterpriseHooksStatusRunE = blockedRun
 			enterpriseHooksVerifyRunE = blockedRun
+			enterpriseHooksRotatePrepareRunE = blockedRun
+			enterpriseHooksRotateCommitRunE = blockedRun
+			enterpriseHooksRotateRollbackRunE = blockedRun
 
 			args := []string{"enterprise", "hooks", command}
 			switch command {
 			case "install", "uninstall":
 				args = append(args, "--connector", "codex", "--user", "alice", "--user-home", userHome)
-			case "reconcile", "watch", "status", "verify":
+			case "reconcile", "watch", "status", "verify", "rotate-prepare", "rotate-commit", "rotate-rollback":
 				args = append(args, "--manifest", manifest)
 			}
 			var stdout, stderr bytes.Buffer
@@ -133,7 +136,7 @@ func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(
 }
 
 func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T) {
-	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify"} {
+	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify", "rotate-prepare", "rotate-commit", "rotate-rollback"} {
 		t.Run(command, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
 			enterpriseHooksRuntimeGOOS = func() string { return "linux" }
@@ -159,6 +162,12 @@ func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T
 				enterpriseHooksStatusRunE = commandRun
 			case "verify":
 				enterpriseHooksVerifyRunE = commandRun
+			case "rotate-prepare":
+				enterpriseHooksRotatePrepareRunE = commandRun
+			case "rotate-commit":
+				enterpriseHooksRotateCommitRunE = commandRun
+			case "rotate-rollback":
+				enterpriseHooksRotateRollbackRunE = commandRun
 			}
 
 			rootCmd.SetArgs([]string{"enterprise", "hooks", command})
@@ -379,6 +388,9 @@ func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 	originalWatch := enterpriseHooksWatchRunE
 	originalStatus := enterpriseHooksStatusRunE
 	originalVerify := enterpriseHooksVerifyRunE
+	originalRotatePrepare := enterpriseHooksRotatePrepareRunE
+	originalRotateCommit := enterpriseHooksRotateCommitRunE
+	originalRotateRollback := enterpriseHooksRotateRollbackRunE
 	originalTokenMinter := enterpriseHookScopedTokenMinter
 	originalOTLPTokenMinter := enterpriseHookScopedOTLPTokenMinter
 	originalCfg, originalAuditStore, originalAuditLog := cfg, auditStore, auditLog
@@ -396,6 +408,9 @@ func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 		enterpriseHooksWatchRunE = originalWatch
 		enterpriseHooksStatusRunE = originalStatus
 		enterpriseHooksVerifyRunE = originalVerify
+		enterpriseHooksRotatePrepareRunE = originalRotatePrepare
+		enterpriseHooksRotateCommitRunE = originalRotateCommit
+		enterpriseHooksRotateRollbackRunE = originalRotateRollback
 		enterpriseHookScopedTokenMinter = originalTokenMinter
 		enterpriseHookScopedOTLPTokenMinter = originalOTLPTokenMinter
 		cfg, auditStore, auditLog = originalCfg, originalAuditStore, originalAuditLog
