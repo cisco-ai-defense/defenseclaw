@@ -9,8 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
-	"time"
+	"sync/atomic"
 
 	osuser "os/user"
 
@@ -28,28 +27,25 @@ type llmEventUser struct {
 	Email  string
 }
 
-// userEmailTTL bounds how long a resolved address is reused.
+// userEmailCollectionEnabled mirrors ai_discovery.include_user_email at the
+// gateway-package level so the two emission sites can consult it without
+// threading config through every hook and inventory call path.
 //
-// The address changes only when a user signs into a different account, so a
-// short cache costs nothing in freshness. It exists because the alternative is
-// opening and JSON-parsing a credential file on every hook event, which is the
-// hottest path in the product.
-const userEmailTTL = 5 * time.Minute
+// Wired from ai_discovery by NewSidecar and applyConfigReload, alongside
+// setManagedEnterpriseRedactionPosture. Reads use atomic.Bool so request hot
+// paths stay lock-free.
+var userEmailCollectionEnabled atomic.Bool
 
-// userEmailCacheMax bounds the number of (connector, user) pairs held. The key
-// space is attacker-influenced only to the extent that a local user can invent
-// connector names, so the cap keeps that from growing memory without bound.
-const userEmailCacheMax = 512
+// SetUserEmailCollectionEnabled records whether identity telemetry may carry
+// the end-user email address. Set from the ai_discovery wiring; tests may
+// toggle it under t.Cleanup. Idempotent and atomic.
+func SetUserEmailCollectionEnabled(v bool) { userEmailCollectionEnabled.Store(v) }
 
-type userEmailCacheEntry struct {
-	email    string
-	resolved time.Time
-}
-
-var (
-	userEmailMu    sync.Mutex
-	userEmailCache = map[string]userEmailCacheEntry{}
-)
+// UserEmailCollectionEnabled reports the flag set by
+// SetUserEmailCollectionEnabled. Off means the address is never attached to a
+// record, so a deployment whose privacy review has not approved collecting it
+// emits the uid or SID and the account name alone.
+func UserEmailCollectionEnabled() bool { return userEmailCollectionEnabled.Load() }
 
 // resolveHookUserIdentity determines which end user a hook event belongs to.
 //
@@ -61,7 +57,7 @@ var (
 // any local process.
 func resolveHookUserIdentity(ctx context.Context, connector string, payload map[string]interface{}) llmEventUser {
 	user := resolveHookUser(ctx, payload)
-	user.Email = hookUserEmail(connector, user.ID, payload)
+	user.Email = hookUserEmail(connector, payload)
 	return user
 }
 
@@ -180,62 +176,35 @@ func userFieldsFromHookPayload(payload map[string]interface{}) (string, string) 
 	return userID, userName
 }
 
-// hookUserEmail resolves the signed-in account for one hook event.
+// hookUserEmail resolves the signed-in account for one hook event, and only
+// from what the event itself carries.
 //
-// The profile directory is derived from the reported OS user id rather than
-// taken from the hook, so a hook cannot aim the read at another user's files.
-// An id the gateway cannot classify yields no address at all: without a real
-// SID or uid there is no profile to attribute an address to.
-func hookUserEmail(connector, userID string, payload map[string]interface{}) string {
+// The address also lives in a file under the user's profile, but reading it
+// needs a profile directory, and the only one available here would be derived
+// from the user id the request supplied. Nothing authenticates that claim: the
+// loopback listener is reachable by any local process holding a hook token,
+// and hook tokens are scoped per connector rather than per user. A local
+// account could therefore name another user's uid or SID and have the gateway
+// — running as a service account under a managed install — open that profile's
+// credential file and stamp its owner's address onto the caller's own event.
+//
+// The per-user inventory pass reads the same files without that exposure,
+// because there the profile comes from the operator-configured roots and its
+// owner is resolved by stat'ing the directory. That is where a file-backed
+// address is attributed; see inventoryHomeOwner.
+func hookUserEmail(connector string, payload map[string]interface{}) string {
 	connector = strings.TrimSpace(connector)
-	if connector == "" {
+	if connector == "" || !UserEmailCollectionEnabled() {
 		return ""
 	}
-	// Connectors that report the address in the payload need no file read and
-	// no cache: the value arrives with the event.
-	if raw, err := json.Marshal(payload); err == nil {
-		if email, err := useridentity.EmailForConnector(connector, "", raw); err == nil {
-			return email
-		}
-	}
-	if useridentity.KindForID(userID) == "" {
+	raw, err := json.Marshal(payload)
+	if err != nil {
 		return ""
 	}
-	return cachedUserEmail(connector, userID)
-}
-
-func cachedUserEmail(connector, userID string) string {
-	key := connector + "\x00" + userID
-	now := time.Now()
-
-	userEmailMu.Lock()
-	if entry, ok := userEmailCache[key]; ok && now.Sub(entry.resolved) < userEmailTTL {
-		userEmailMu.Unlock()
-		return entry.email
+	email, err := useridentity.EmailFromPayloadForConnector(connector, raw)
+	if err != nil {
+		return ""
 	}
-	userEmailMu.Unlock()
-
-	// Resolved outside the lock: this opens and parses a file, and holding the
-	// mutex across it would serialize every hook event on the endpoint behind
-	// one user's disk read.
-	email := ""
-	if home := useridentity.HomeForID(userID); home != "" {
-		if resolved, err := useridentity.EmailForConnector(connector, home, nil); err == nil {
-			email = resolved
-		}
-	}
-
-	userEmailMu.Lock()
-	defer userEmailMu.Unlock()
-	// A negative result is cached too. Most endpoints have no readable
-	// credential for most connectors, and without this the miss path would
-	// stat a missing file on every single event.
-	if len(userEmailCache) >= userEmailCacheMax {
-		if _, refresh := userEmailCache[key]; !refresh {
-			userEmailCache = map[string]userEmailCacheEntry{}
-		}
-	}
-	userEmailCache[key] = userEmailCacheEntry{email: email, resolved: now}
 	return email
 }
 
@@ -271,11 +240,4 @@ func v8UserIDKind(kind string) observability.Optional[string] {
 	default:
 		return observability.Absent[string]()
 	}
-}
-
-// resetUserEmailCacheForTest clears the resolved-address cache.
-func resetUserEmailCacheForTest() {
-	userEmailMu.Lock()
-	defer userEmailMu.Unlock()
-	userEmailCache = map[string]userEmailCacheEntry{}
 }

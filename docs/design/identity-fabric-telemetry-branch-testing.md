@@ -18,7 +18,7 @@ This branch adds the end user as a first-class attribute on v8 telemetry:
 | `user.id` | Windows SID, or POSIX uid |
 | `defenseclaw.user.id_kind` | `windows_sid` or `posix_uid`, so a consumer never has to infer which from the shape |
 | `defenseclaw.user.name` | bare OS account name, never `DOMAIN\user` |
-| `defenseclaw.user.email` | the account the agent is signed into, when the agent stores one locally |
+| `defenseclaw.user.email` | the account the agent is signed into. Opt-in via `ai_discovery.include_user_email`, off by default |
 
 An earlier revision of this branch wrote Astrix-shaped records to a per-user
 disk spool, because AI Defense had no ingest for them. That is gone. The
@@ -67,25 +67,64 @@ assertions. They must never drive an authorization decision.
 
 ### The email
 
+The address is **off by default**. It is collected only when
+`ai_discovery.include_user_email` is set:
+
+```yaml
+ai_discovery:
+  include_user_email: true
+```
+
+Everything else in this document works with the gate off; only the `email`
+column goes away. The gate exists because the uid or SID beside it identifies
+an account on one endpoint, while the address identifies a person across every
+system they use, and it reaches the AI Defense sink as plaintext. Collecting it
+is a deliberate deployment decision, not a side effect of enabling discovery.
+
 `internal/useridentity` reads the signed-in account from each connector's own
 local state:
 
-| Connector | Source |
-| --- | --- |
-| Claude Code | `oauthAccount.emailAddress` in `~/.claude.json` |
-| Codex | the `email` claim in the ID token in `~/.codex/auth.json` (signature deliberately unverified — we hold no issuer key, and this is evidence, not an assertion) |
-| Cursor | `user_email` in the hook payload; Cursor keeps no local account file |
+| Connector | Source | Carried on |
+| --- | --- | --- |
+| Claude Code | `oauthAccount.emailAddress` in `~/.claude.json` | inventory only |
+| Codex | the `email` claim in the ID token in `~/.codex/auth.json` (signature deliberately unverified — we hold no issuer key, and this is evidence, not an assertion) | inventory only |
+| Cursor | `user_email` in the hook payload; Cursor keeps no local account file | hook events only |
+
+That last column is the part worth understanding, because it is a security
+boundary rather than an implementation detail.
+
+A **hook event** carries an address only if the event itself carries one, which
+today means Cursor alone. The two file-backed connectors need a profile
+directory to read, and the only one a hook request could name is the one
+derived from the user id in the request — a value nothing authenticates. The
+loopback listener is reachable by any local process holding a hook token, and
+hook tokens are scoped per connector, not per user. Resolving a profile from
+that id would let one local account name another user's uid or SID and have the
+gateway, running as a service account, open that profile's credential file and
+stamp its owner's address onto the caller's own event. So `hookUserEmail` reads
+the payload and nothing else.
+
+**Inventory** resolves the same files safely and is where Codex and Claude Code
+addresses are attributed. There the profile comes from the operator-configured
+roots in `ai_discovery.home_dirs` and its owner is established by stat'ing that
+directory, so no request influences whose file is opened. The gateway resolves
+the address **per profile directory**, not for itself, so a scan of five user
+profiles reports five different accounts. When an explicit home is supplied,
+`CODEX_HOME` / `CLAUDE_CONFIG_DIR` from the reader's own environment are
+ignored — honoring them would attribute the gateway operator's account to every
+profile it scanned.
+
+The practical consequence: to answer "who is this person" for a Codex or Claude
+Code event, join the event's `user.id` to the `ai.discovery` row carrying the
+same `user.id`. The address arrives once per discovery cycle per user rather
+than on every event. That is also the more reliable of the two, since
+`ai.discovery` is force-collected under managed enterprise while the hook
+lifecycle buckets are not.
 
 Absent is a normal outcome and is preferred over a guess. The address is never
 synthesized from `username@domain`, git config, environment variables, or a
 Windows UPN. On a host where Codex keeps credentials only in the OS credential
 store, there is nothing to read and the field is simply omitted.
-
-For inventory, the gateway resolves the address **per profile directory**, not
-for itself, so a scan of five user profiles reports five different accounts.
-When an explicit home is supplied, `CODEX_HOME` / `CLAUDE_CONFIG_DIR` from the
-reader's own environment are ignored — honoring them would attribute the
-gateway operator's account to every profile it scanned.
 
 ## Where the records go
 
@@ -103,8 +142,10 @@ Defense without operator action. Note that `emitEndpointInventory` is gated on
 managed enterprise and does not run on an unmanaged install.
 
 `defenseclaw.user.email` is classified `identifier` / `sensitive` and is
-preserved in plaintext by the `managedaid` projection. **This needs privacy
-sign-off before the branch is merged.**
+preserved in plaintext by the `managedaid` projection. That is why it sits
+behind `ai_discovery.include_user_email` and defaults off: a deployment whose
+privacy review has not approved collecting the address emits the uid or SID and
+the account name alone, with no configuration required to stay that way.
 
 ---
 
@@ -234,13 +275,20 @@ identity per session-start-plus-one-tool-call sequence. The account name and
 address throughout this section are fixtures standing in for whatever the
 capturing account was; the uid and the field structure are as observed.
 
+One caveat on provenance: this capture predates the move to payload-only hook
+email, and it ran with the address collected unconditionally. The `user.id`,
+`id_kind`, and `name` columns are exactly as observed. The `email` column is
+shown below as the current code produces it, which for Codex means the address
+is no longer on the per-event records; `TestHookUserEmailComesOnlyFromTheEvent`
+is what pins that. Re-capture before relying on the email column.
+
 ```text
 bucket                 event                        user.id  id_kind    name    email
-agent.lifecycle        session_start                501      posix_uid  dcuser  dcuser@example.com
-guardrail.evaluation   hook_decision                501      posix_uid  dcuser  dcuser@example.com
-tool.activity          tool_start                   501      posix_uid  dcuser  dcuser@example.com
-tool.activity          tool.invocation.requested    501      posix_uid  dcuser  dcuser@example.com
-guardrail.evaluation   hook_decision                501      posix_uid  dcuser  dcuser@example.com
+agent.lifecycle        session_start                501      posix_uid  dcuser  -
+guardrail.evaluation   hook_decision                501      posix_uid  dcuser  -
+tool.activity          tool_start                   501      posix_uid  dcuser  -
+tool.activity          tool.invocation.requested    501      posix_uid  dcuser  -
+guardrail.evaluation   hook_decision                501      posix_uid  dcuser  -
 ```
 
 A full `agent.lifecycle` / `session_start` body from Codex:
@@ -253,7 +301,6 @@ A full `agent.lifecycle` / `session_start` body from Codex:
   "defenseclaw.agent.type": "codex",
   "defenseclaw.session.root.id": "mac-codex-1",
   "defenseclaw.session.source": "startup",
-  "defenseclaw.user.email": "dcuser@example.com",
   "defenseclaw.user.id_kind": "posix_uid",
   "defenseclaw.user.name": "dcuser",
   "gen_ai.agent.name": "codex",
@@ -264,17 +311,16 @@ A full `agent.lifecycle` / `session_start` body from Codex:
 }
 ```
 
-Per connector, the identity fields observed were:
+Per connector, on hook events, with `include_user_email` enabled:
 
-| Connector | `user.id` | `id_kind` | `name` | `email` |
+| Connector | `user.id` | `id_kind` | `name` | `email` on hook events |
 | --- | --- | --- | --- | --- |
-| codex | `501` | `posix_uid` | `dcuser` | `dcuser@example.com` (from the `auth.json` ID token) |
-| claudecode | `501` | `posix_uid` | `dcuser` | *absent* |
+| codex | `501` | `posix_uid` | `dcuser` | *absent* — file-backed, see the `ai.discovery` row |
+| claudecode | `501` | `posix_uid` | `dcuser` | *absent* — file-backed, see the `ai.discovery` row |
 | cursor | `501` | `posix_uid` | `dcuser` | `dcuser@example.com` (from the payload) |
 
-The absent Claude Code address is correct behavior, not a defect: this host's
-`~/.claude.json` has no `oauthAccount` block, so there is nothing to read and
-the field is omitted rather than guessed.
+With the gate off, which is the default, the `email` column is absent for all
+three and the other three columns are unchanged.
 
 The Cursor row is the useful one to check, because it proves the precedence
 rule. Cursor's payload carries `user_email`, and without the headers the
@@ -403,9 +449,10 @@ Cursor's Windows transport uses the generated PowerShell adapter and
   silently merge unrelated users.
 - `defenseclaw.user.name` is the bare account name. A `DOMAIN\user` value means
   the Windows lookup stopped stripping the qualifier.
-- `defenseclaw.user.email` absent is fine and expected on many hosts. Present
-  but wrong is not: it must match the account the connector is actually signed
-  into.
+- `defenseclaw.user.email` absent is the default and is expected everywhere
+  unless `ai_discovery.include_user_email` is on — and even then it is absent
+  from Codex and Claude Code hook events by design. Present but wrong is not
+  acceptable: it must match the account the connector is actually signed into.
 - No record carries the service account under a managed install.
 - MCP inventory rows are attributed per profile, and two users' same-named
   servers stay distinct.
@@ -417,9 +464,21 @@ Cursor's Windows transport uses the generated PowerShell adapter and
   that bucket. `ai.discovery` is force-collected, so inventory attribution is
   unconditional. Worth deciding whether hook identity should be promoted.
 - **The email is plaintext at the AI Defense sink.** Classified `identifier` /
-  `sensitive`, preserved by the `managedaid` projection. Needs privacy sign-off.
+  `sensitive`, preserved by the `managedaid` projection. This is why
+  `ai_discovery.include_user_email` defaults off; enabling it is the privacy
+  decision, and nothing else in the feature depends on it.
 - **The email is attribution evidence, not attestation.** Any process running as
   the user can write the connector config it is read from.
+- **A hook request's `user.id` is unauthenticated.** The loopback listener is
+  reachable by any local process holding a hook token, and hook tokens are
+  scoped per connector rather than per user, so one local account can claim
+  another's uid or SID and have its events attributed there. Nothing reads a
+  profile from that claim any more — that is why hook email is payload-only —
+  but the id, kind, and name on a hook record are still a claim rather than a
+  verified fact. Closing this needs a per-user transport binding: per-user
+  scoped tokens, or resolving the connection's peer credentials. Until then,
+  treat hook identity as attribution and inventory identity (whose owner is
+  established by stat'ing the profile directory) as the stronger signal.
 - **Only three connectors have an email source at all.** `codex` reads the
   `email` claim from `~/.codex/auth.json`, `claude-code` reads
   `oauthAccount.emailAddress` from `~/.claude.json`, and `cursor` forwards
@@ -429,8 +488,11 @@ Cursor's Windows transport uses the generated PowerShell adapter and
   in the OS keychain, or a Claude Code install on API-key rather than OAuth
   auth, both yield no address. The attribute is omitted in that case and the
   record is still emitted; the uid or SID and the account name carry the
-  attribution. Cursor's payload-only source also means its email is absent from
-  the periodic inventory, which has no payload to read.
+  attribution. The sources also split by carrier: Cursor's payload-only address
+  is absent from the periodic inventory, which has no payload to read, while
+  Codex's and Claude Code's file-backed addresses are absent from hook events,
+  which have no profile they may safely read. Neither is a defect; joining on
+  `user.id` recovers the address for any event.
 - **`emitEndpointInventory` is managed-enterprise-only**, so the inventory half
   of this branch cannot be exercised on an unmanaged macOS install. It is
   covered by unit tests instead

@@ -94,6 +94,47 @@ func TestCursorEmailComesFromPayloadOnly(t *testing.T) {
 	}
 }
 
+// TestEmailFromPayloadForConnectorNeverReadsAProfile is the boundary the hook
+// path depends on.
+//
+// On that path the only profile directory available is the one derived from
+// the user id the request supplied, and nothing authenticates that claim, so
+// the hook path must not reach a file-backed reader at all. An empty home does
+// not express that: EmailForConnector treats it as "read the calling process's
+// own profile", which is exactly the fallback proved here to be live. This test
+// pins that the payload-only entry point declines a file-backed connector even
+// when a readable, valid credential is sitting right where the ambient lookup
+// would find it.
+func TestEmailFromPayloadForConnectorNeverReadsAProfile(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".claude.json"), `{"oauthAccount":{"emailAddress":"ambient@example.com"}}`)
+	writeFile(t, filepath.Join(home, "codex", "auth.json"),
+		`{"tokens":{"id_token":"`+idToken(t, map[string]interface{}{"email": "ambient@example.com"})+`"}}`)
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
+
+	// The ambient read works, so a refusal below is the payload-only rule and
+	// not a missing fixture.
+	for _, connector := range []string{"claude-code", "codex"} {
+		if got, err := EmailForConnector(connector, "", nil); err != nil || got != "ambient@example.com" {
+			t.Fatalf("%s ambient lookup = (%q, %v), want ambient@example.com", connector, got, err)
+		}
+		if got, err := EmailFromPayloadForConnector(connector, nil); !errors.Is(err, ErrNoEmail) || got != "" {
+			t.Fatalf(
+				"%s reached its credential file from the payload-only entry point: (%q, %v)",
+				connector, got, err,
+			)
+		}
+	}
+
+	// A payload-reported address is still returned: the rule is about where
+	// the value comes from, not about withholding one the event carries.
+	got, err := EmailFromPayloadForConnector("cursor", []byte(`{"user_email":"carol@example.com"}`))
+	if err != nil || got != "carol@example.com" {
+		t.Fatalf("cursor payload lookup = (%q, %v), want carol@example.com", got, err)
+	}
+}
+
 // TestExplicitHomeIgnoresReaderEnvironmentOverrides is the multi-user
 // correctness property. The gateway scans other people's profiles; if
 // CODEX_HOME or CLAUDE_CONFIG_DIR from the gateway's own environment were

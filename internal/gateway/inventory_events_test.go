@@ -127,6 +127,13 @@ func withManagedEnterprise(t *testing.T, on bool) {
 	t.Cleanup(func() { SetManagedEnterpriseActive(previous) })
 }
 
+func withUserEmailCollection(t *testing.T, on bool) {
+	t.Helper()
+	previous := UserEmailCollectionEnabled()
+	SetUserEmailCollectionEnabled(on)
+	t.Cleanup(func() { SetUserEmailCollectionEnabled(previous) })
+}
+
 func TestEmitEndpointInventoryManagedUsesCanonicalV8Snapshots(t *testing.T) {
 	withManagedEnterprise(t, true)
 	capture := &endpointInventoryCapture{}
@@ -1563,7 +1570,7 @@ func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
 		t.Skip("profile ownership on Windows comes from ProfileList, which a temp dir has no entry in")
 	}
 	withManagedEnterprise(t, true)
-	resetUserEmailCacheForTest()
+	withUserEmailCollection(t, true)
 
 	home := t.TempDir()
 	claudeConfig := filepath.Join(home, ".claude.json")
@@ -1625,7 +1632,7 @@ func TestManagedInventorySkipsTheDaemonsOwnProfile(t *testing.T) {
 // somebody on this endpoint uses that account without saying who, which cannot
 // be joined and cannot be acted on.
 func TestInventoryHomeOwnerRefusesEmailWithoutAnOwner(t *testing.T) {
-	resetUserEmailCacheForTest()
+	withUserEmailCollection(t, true)
 	missing := filepath.Join(t.TempDir(), "no-such-profile")
 	if got := inventoryHomeOwner("claudecode", missing); !reflect.DeepEqual(got, llmEventUser{}) {
 		t.Fatalf("unresolvable profile produced %+v, want an empty owner", got)

@@ -716,6 +716,48 @@ func TestHookLLMEventMetaLocalUserFallbackRespectsManagedMode(t *testing.T) {
 	}
 }
 
+// TestHookUserEmailRequiresTheCollectionGate pins that the address is opt-in.
+//
+// It identifies a person across every system they use, unlike the uid or SID
+// it rides alongside, and it reaches AI Defense as plaintext. A deployment
+// that has not decided to collect it must emit records without it rather than
+// rely on nobody looking at the field.
+func TestHookUserEmailRequiresTheCollectionGate(t *testing.T) {
+	payload := map[string]interface{}{"user_email": "carol@example.com"}
+
+	withUserEmailCollection(t, false)
+	if got := hookUserEmail("cursor", payload); got != "" {
+		t.Fatalf("email collected with the gate off: %q", got)
+	}
+
+	withUserEmailCollection(t, true)
+	if got := hookUserEmail("cursor", payload); got != "carol@example.com" {
+		t.Fatalf("gate on: hookUserEmail = %q, want carol@example.com", got)
+	}
+}
+
+// TestHookUserEmailComesOnlyFromTheEvent pins that a hook event cannot cause a
+// profile read.
+//
+// codex and claudecode keep the address in a file under the user's profile,
+// and the only profile this path could name is the one derived from the user
+// id in the request — a value no local caller is authenticated to claim. So
+// these connectors report no address here even with the gate on and even when
+// the payload offers one; theirs is attributed by the inventory pass instead.
+func TestHookUserEmailComesOnlyFromTheEvent(t *testing.T) {
+	withUserEmailCollection(t, true)
+	payload := map[string]interface{}{"user_email": "carol@example.com"}
+
+	for _, connector := range []string{"codex", "claudecode"} {
+		if got := hookUserEmail(connector, payload); got != "" {
+			t.Errorf("%s resolved an address on the hook path: %q", connector, got)
+		}
+	}
+	if got := hookUserEmail("cursor", payload); got != "carol@example.com" {
+		t.Errorf("cursor lost its payload-reported address: %q", got)
+	}
+}
+
 func TestHookUserEmailIsPseudonymized(t *testing.T) {
 	userID, userName := userFieldsFromHookPayload(map[string]interface{}{"user_email": "Alice@Example.COM"})
 	if userID == "" || strings.Contains(strings.ToLower(userID), "alice@example.com") {

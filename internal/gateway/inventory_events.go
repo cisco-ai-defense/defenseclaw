@@ -397,8 +397,15 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 		// this endpoint uses it without saying who.
 		return llmEventUser{}
 	}
-	if email, err := useridentity.EmailForConnector(connectorName, home, nil); err == nil {
-		owner.Email = email
+	// This read is safe where the hook path's is not: home comes from the
+	// operator-configured profile roots and its owner was just resolved by
+	// stat'ing that directory, so no request influences whose file is opened.
+	// It is still gated, because collecting the address at all is a privacy
+	// decision independent of whether it can be attributed correctly.
+	if UserEmailCollectionEnabled() {
+		if email, err := useridentity.EmailForConnector(connectorName, home, nil); err == nil {
+			owner.Email = email
+		}
 	}
 	return owner
 }

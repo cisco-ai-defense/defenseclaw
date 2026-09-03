@@ -59,6 +59,28 @@ func EmailForConnector(connector, home string, payload []byte) (string, error) {
 	}
 }
 
+// EmailFromPayloadForConnector extracts the signed-in account from the agent's
+// own hook payload and from nowhere else.
+//
+// It exists so a caller holding no trustworthy profile directory cannot reach
+// the file-backed readers by accident. EmailForConnector with an empty home
+// falls back to the *calling* process's profile, which under a managed install
+// belongs to the service account — a different person, reported with the same
+// confidence as the right one. Callers on the hook path have only the user id
+// the request supplied, which no local caller is authenticated to claim, so
+// they have no profile they may safely read and use this instead.
+func EmailFromPayloadForConnector(connector string, payload []byte) (string, error) {
+	switch normalizeConnector(connector) {
+	case "cursor":
+		return cursorEmail(payload)
+	default:
+		// Every other supported connector keeps the address in a file under
+		// the user's profile. Add a connector here only if it reports the
+		// address in the payload itself.
+		return "", ErrNoEmail
+	}
+}
+
 // normalizeConnector folds the spellings the hooks, the connector registry,
 // and the discovery signatures each use for the same connector.
 func normalizeConnector(connector string) string {
