@@ -503,7 +503,23 @@ cat > "${KIT_DIR}/README-AVC.md" <<EOF
          -SetupExeUnsigned .\\DefenseClawSetup-Enterprise-x64.exe.unsigned \`
          -SourceCommit ${SOURCE_COMMIT} \`
          -Version ${VERSION} \`
-         -Out .\\out
+         -Out .\\out \`
+         -SigningType <DEV|PROD> \`
+         -ExpectedSignerSha256 <64-hex-char SHA-256 fingerprint>
+
+       -SigningType PROD          — Get-AuthenticodeSignature must return
+                                   Status = Valid on every payload.
+       -SigningType DEV           — additionally accepts UnknownError only
+                                   when StatusMessage matches the host-
+                                   localized CERT_E_CHAINING message AND
+                                   the fail-closed X509Chain check shows
+                                   only PartialChain (i.e. self-signed /
+                                   partial-chain DEV cert). Every other
+                                   status stays fatal in both modes.
+       -ExpectedSignerSha256      — bare 64-char SHA-256 hex; colons and
+                                   whitespace are tolerated and stripped.
+                                   Compared byte-exact (case-insensitive)
+                                   against SignerCertificate.GetCertHashString(SHA256).
 
     3. signtool sign  out\\DefenseClawSetup-Enterprise-x64.exe
 
@@ -625,8 +641,10 @@ else
   echo ""
   echo "Hand ${KIT_DIR} (or a zip of it) to AVC. AVC will:"
   echo "  1. signtool sign               payload\\*.{exe,ps1,psm1}"
-  echo "  2. .\\DefenseClawAssembler.exe (single verb, no Go)"
+  echo "  2. .\\DefenseClawAssembler.exe -SigningType <DEV|PROD> -ExpectedSignerSha256 <hex>"
   echo "  3. signtool sign               out\\DefenseClawSetup-Enterprise-x64.exe"
   echo "  4. pwsh -File packaging\\scripts\\lib\\finalize.ps1 ..."
+  echo ""
+  echo "See README-AVC.md inside the kit for the full assembler flag surface."
 fi
 echo ""

@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,229 +16,366 @@ import (
 	"time"
 )
 
-// payloadPathEnvVar is the environment variable readSignerSubjectCN
-// uses to pass the target file path into its PowerShell script.
-// Environment is the safe channel here: PowerShell's `-Command <string>`
-// does NOT populate $args with trailing argv (that's `-File` behavior),
-// so a naive `$args[0]` reference resolves to $null and
+// payloadPathEnvVar is the environment variable runPowerShellVerify uses
+// to pass the target file path into its PowerShell script. Environment
+// is the safe channel here: PowerShell's `-Command <string>` does NOT
+// populate $args with trailing argv (that's `-File` behavior), so a
+// naive `$args[0]` reference resolves to $null and
 // Get-AuthenticodeSignature -FilePath $null crashes on every call.
 // Env-var passing also removes the last shell-injection concern — the
 // path never enters the script literal.
 const payloadPathEnvVar = "DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH"
 
-// ciscoPublisherCN pins the Subject Common Name the payload's
-// Authenticode signature MUST resolve to. Matches the exact string the
-// shell assembler's assert-cisco-signature.{sh,ps1} pinned. `signtool
-// verify /n <cn>` accepts a SUBSTRING match per Microsoft's
-// documentation, so /n alone would let a certificate whose subject
-// merely CONTAINS this string (e.g. an internal "Cisco Systems, Inc.
-// Test Root") pass verification. verifyAuthenticode below therefore
-// runs a follow-up exact-equality check on the actual signer
-// certificate's Subject CN after signtool passes.
-const ciscoPublisherCN = "Cisco Systems, Inc."
+// psVerifyTimeout bounds each Get-AuthenticodeSignature invocation.
+// Chain building may include revocation lookups that stall indefinitely
+// when a network policy blackholes CRL/OCSP endpoints; the assembler
+// processes six payload files in series so an unbounded hang on any one
+// file would freeze AVC's signing job with no diagnostic. 60 s is
+// generous headroom over a healthy lookup (typically <2 s) while still
+// surfacing a stuck runner promptly.
+const psVerifyTimeout = 60 * time.Second
 
-// signtoolVerifyTimeout bounds each signtool verify call. Authenticode
-// chain building includes revocation lookups (CRL/OCSP) that stall
-// indefinitely when a network policy blackholes those endpoints; the
-// assembler processes six payload files in series so an unbounded
-// hang on any one file would freeze AVC's signing job with no
-// diagnostic. 60 seconds is generous headroom over a healthy lookup
-// (typically <2 s) while still surfacing a stuck runner promptly.
-const signtoolVerifyTimeout = 60 * time.Second
+// signingType controls the chain-trust policy applied to each payload.
+// The value comes from `-SigningType DEV|PROD` and is required whenever
+// -AllowUnsigned is not set. The prod-only path requires
+// Get-AuthenticodeSignature.Status == Valid; the dev path additionally
+// accepts Status == UnknownError specifically when StatusMessage is the
+// host-localized CERT_E_CHAINING message AND the fail-closed X509Chain
+// inspection shows PartialChain and nothing else. See classifyVerify
+// for the exact trust matrix.
+type signingType int
 
-// verifyAuthenticode asserts a Cisco-signed Authenticode signature on
-// path. It is a two-stage gate:
+const (
+	signingTypeProd signingType = iota
+	signingTypeDev
+)
+
+func (s signingType) String() string {
+	if s == signingTypeDev {
+		return "DEV"
+	}
+	return "PROD"
+}
+
+// parseSigningType is the CLI-facing parser for -SigningType.
+// Case-insensitive; whitespace-trimmed. Returns a usageError-compatible
+// message so main.go can wrap it consistently.
+func parseSigningType(s string) (signingType, error) {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "PROD":
+		return signingTypeProd, nil
+	case "DEV":
+		return signingTypeDev, nil
+	}
+	return signingTypeProd, fmt.Errorf("must be PROD or DEV (got: %q)", s)
+}
+
+// normalizeThumbprint accepts AVC's SHA-256 fingerprint in any of the
+// common shapes (bare hex, colon-separated, upper- or lower-case) and
+// returns the canonical lowercase-no-separators form. Anything that
+// does not resolve to exactly 32 bytes of hex is rejected. AVC's spec
+// pins bare 64-char hex as the recommended input, but this normalizer
+// stays permissive so a copy-paste from `certutil -hashfile ... SHA256`
+// (which uses spaces) or an openssl `... -fingerprint -sha256` output
+// (which uses colons) works out of the box.
+func normalizeThumbprint(input string) (string, error) {
+	stripped := strings.Map(func(r rune) rune {
+		switch r {
+		case ':', ' ', '\t', '\r', '\n':
+			return -1
+		}
+		return r
+	}, input)
+	stripped = strings.ToLower(stripped)
+	if len(stripped) != 64 {
+		return "", fmt.Errorf("must be a 64-hex-char SHA-256 fingerprint (got %d chars after stripping separators)", len(stripped))
+	}
+	if _, err := hex.DecodeString(stripped); err != nil {
+		return "", fmt.Errorf("not valid hex: %w", err)
+	}
+	return stripped, nil
+}
+
+// psSignatureRecord is the structured output of the PowerShell verify
+// script. The script emits JSON so the parse contract is unambiguous
+// (StatusMessage may contain arbitrary text including punctuation,
+// which a KEY=VALUE format would need to escape).
+type psSignatureRecord struct {
+	// Status is Get-AuthenticodeSignature.Status.ToString(). One of:
+	// Valid, NotSigned, HashMismatch, NotTrusted, NotSupportedFileFormat,
+	// UnknownError, Incompatible, Missing.
+	Status string `json:"Status"`
+	// StatusMessage is Get-AuthenticodeSignature.StatusMessage. On
+	// English hosts this is the human-readable HRESULT description
+	// (e.g. "A certificate chain could not be built to a trusted root
+	// authority."); on non-English hosts it is the localized form.
+	StatusMessage string `json:"StatusMessage"`
+	// Thumbprint is SignerCertificate.GetCertHashString(SHA256), lower-
+	// cased. Empty when the payload has no signer certificate.
+	Thumbprint string `json:"Thumbprint"`
+	// ChainStatusFlags is the list of X509ChainStatusFlags names from
+	// building an X509Chain on the signer certificate (default policy,
+	// no explicit RevocationMode override — matches signtool's default
+	// with /pa). "NoError" means the chain built cleanly.
+	ChainStatusFlags []string `json:"ChainStatusFlags"`
+	// CertEChainingMatch is true when StatusMessage is byte-exact to
+	// the host-localized text of HRESULT CERT_E_CHAINING (0x800B010A),
+	// computed via [Win32Exception]::new(0x800B010A).Message. Locale-
+	// safe: both messages come from the same OS resource table.
+	CertEChainingMatch bool `json:"CertEChainingMatch"`
+}
+
+// verifyAuthenticode is the fingerprint-based verify entry point.
+// Invokes PowerShell to gather a signed record about the file, then
+// applies the trust matrix in classifyVerify to decide accept vs.
+// reject. See docs/specs/003-windows-avc-standalone-assembler/ for
+// the design contract (AVC handoff, revision 2026-09-03).
 //
-//  1. Chain trust: `signtool verify /pa /n <cn> /q` — Microsoft's
-//     canonical verifier confirms a valid Authenticode chain up to a
-//     trusted root, narrowing accepted signers to those whose Subject
-//     matches the ciscoPublisherCN substring.
-//  2. Exact identity: read the actual signer certificate's Subject CN
-//     via readSignerSubjectCN and assert exact equality with
-//     ciscoPublisherCN. This closes the gap that /n's substring match
-//     leaves — a "Cisco Systems, Inc. (Test Root)" cert would pass
-//     step 1 but fails step 2.
-//
-// Errors are classified by cause:
-//   - signatureError — signtool exited non-zero (payload unsigned,
-//     signed by non-Cisco publisher, or broken chain) OR the exact CN
-//     check found a mismatch. Maps to exit-code 4.
-//   - ioError — environmental faults (non-Windows host, signtool /
-//     powershell not on PATH, exec.Cmd failed to launch, timeout).
-//     Runner-side problems, not payload-side signature rejection;
-//     maps to exit-code 6. Keeping the buckets distinct lets AVC's CI
-//     separate a legitimately unsigned payload from a runner missing
-//     the Windows SDK or PowerShell.
-func verifyAuthenticode(path string) error {
+// Errors are classified by cause so main.go's exit-code map does the
+// right thing:
+//   - signatureError — payload-side fault (unsigned, tampered, wrong
+//     signer, chain not trusted in the mode). Exit 4.
+//   - ioError — runner-side fault (non-Windows, powershell.exe not on
+//     PATH, exec launch failure, timeout). Exit 6.
+func verifyAuthenticode(path string, sigType signingType, expectedThumbprint string) error {
 	if runtime.GOOS != "windows" {
 		return &ioError{msg: fmt.Sprintf(
 			"Authenticode verify requires Windows (running on %s); pass -AllowUnsigned to skip",
 			runtime.GOOS,
 		)}
 	}
-	if err := runSigntoolVerify(path); err != nil {
-		return err
-	}
-	cn, err := readSignerSubjectCN(path)
+	rec, err := runPowerShellVerify(path)
 	if err != nil {
 		return err
 	}
-	return assertCNIsCisco(path, cn)
+	return classifyVerify(path, sigType, expectedThumbprint, rec)
 }
 
-// runSigntoolVerify is the chain-trust gate. Returns nil on success,
-// signatureError on a real verify rejection (started process, non-zero
-// exit), or ioError on environmental faults (missing signtool,
-// timeout, exec launch failure).
-func runSigntoolVerify(path string) error {
-	sigtool, err := exec.LookPath("signtool.exe")
-	if err != nil {
-		return &ioError{msg: fmt.Sprintf("signtool.exe not on PATH: %s", err)}
+// classifyVerify applies AVC's trust matrix in a pure function — no
+// I/O, no exec, no dependency on Windows. Split out for unit testing:
+// we cannot invoke signtool or PowerShell from CI, but we can feed
+// synthetic psSignatureRecord values through this function to prove
+// the matrix is correct.
+//
+// Trust matrix:
+//
+//	SigningType | Status         | Additional predicate           | Verdict
+//	------------+----------------+--------------------------------+---------
+//	PROD        | Valid          | thumbprint match               | accept
+//	PROD        | anything else  | any                            | reject
+//	DEV         | Valid          | thumbprint match               | accept
+//	DEV         | UnknownError   | CertEChainingMatch AND         |
+//	            |                |   ChainStatusFlags == {PartialChain} only
+//	            |                |   AND thumbprint match         | accept
+//	DEV         | UnknownError   | otherwise                      | reject
+//	DEV         | anything else  | any                            | reject
+//	both        | any            | thumbprint mismatch OR missing | reject
+func classifyVerify(path string, sigType signingType, expectedThumbprint string, rec psSignatureRecord) error {
+	// Fingerprint is the strongest identity check. Fail before looking
+	// at any status so a diagnostic hits the operator with the exact
+	// mismatch, not a downstream "chain untrusted" red herring.
+	if rec.Thumbprint == "" {
+		return &signatureError{msg: fmt.Sprintf(
+			"%s: no signer certificate on payload (Status=%s)",
+			path, rec.Status,
+		)}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), signtoolVerifyTimeout)
-	defer cancel()
-	// /pa               — Authenticode policy (default chain policy)
-	// /n <cn>           — narrow accepted signers by Subject substring
-	//                     (exact match is enforced by readSignerSubjectCN below)
-	// /q                — quiet: only exit code, no per-file chatter
-	cmd := exec.CommandContext(ctx, sigtool, "verify", "/pa", "/n", ciscoPublisherCN, "/q", path)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
+	if rec.Thumbprint != expectedThumbprint {
+		return &signatureError{msg: fmt.Sprintf(
+			"%s: signer thumbprint mismatch (expected %s, got %s)",
+			path, expectedThumbprint, rec.Thumbprint,
+		)}
+	}
+
+	// Fingerprint OK — apply the status gate.
+	switch rec.Status {
+	case "Valid":
+		// Fingerprint matched + Windows trusts the chain. Accept in
+		// both DEV and PROD.
 		return nil
-	}
-	// Distinguish causes in order of confidence:
-	//   1) context deadline exceeded → timeout (env fault)
-	//   2) *exec.ExitError → process started + exited non-zero → real verify rejection
-	//   3) anything else → process failed to start → env fault
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return &ioError{msg: fmt.Sprintf(
-			"signtool verify timed out after %s for %s (network policy may be blocking CRL/OCSP): %s",
-			signtoolVerifyTimeout, path, strings.TrimSpace(string(out)),
+
+	case "UnknownError":
+		if sigType != signingTypeDev {
+			return &signatureError{msg: fmt.Sprintf(
+				"%s: signature Status=UnknownError; PROD requires Valid (StatusMessage=%q)",
+				path, rec.StatusMessage,
+			)}
+		}
+		// DEV path: accept ONLY when the status message is exactly the
+		// host-localized CERT_E_CHAINING message AND the fail-closed
+		// X509Chain check saw PartialChain and nothing else. This
+		// guards against a future Windows or PowerShell version that
+		// surfaces the same UnknownError shape for a different chain
+		// fault (e.g. revoked, expired, other-untrusted-root).
+		if !rec.CertEChainingMatch {
+			return &signatureError{msg: fmt.Sprintf(
+				"%s: DEV accepts UnknownError only for CERT_E_CHAINING (0x800B010A); got StatusMessage=%q",
+				path, rec.StatusMessage,
+			)}
+		}
+		if !chainStatusIsOnlyPartialChain(rec.ChainStatusFlags) {
+			return &signatureError{msg: fmt.Sprintf(
+				"%s: DEV chain fail-closed rejected — expected only PartialChain, got %v",
+				path, rec.ChainStatusFlags,
+			)}
+		}
+		return nil
+
+	default:
+		// NotSigned, HashMismatch, NotTrusted, NotSupportedFileFormat,
+		// Incompatible, Missing — all fatal in both modes.
+		return &signatureError{msg: fmt.Sprintf(
+			"%s: signature Status=%s (StatusMessage=%q)",
+			path, rec.Status, rec.StatusMessage,
 		)}
 	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		// os/exec returns *ExitError only when the process actually
-		// ran to completion. A different error type (fs.PathError from
-		// LookPath was already handled; here it would be things like
-		// EPERM from a Job Object policy, or an EFAULT from an AV
-		// blocking exec) means signtool never started. That is a
-		// runner-side environmental fault, not a signature rejection.
-		return &ioError{msg: fmt.Sprintf(
-			"signtool verify failed to launch for %s: %s\n%s",
-			path, err, strings.TrimSpace(string(out)),
-		)}
-	}
-	return &signatureError{msg: fmt.Sprintf(
-		"signtool verify failed for %s: %s\n%s",
-		path, err, strings.TrimSpace(string(out)),
-	)}
 }
 
-// readSignerSubjectCN returns the Subject Common Name of the file's
-// Authenticode signer certificate. Uses PowerShell's
-// Get-AuthenticodeSignature (already required on AVC's Windows runner
-// for the payload's install-enterprise.ps1 signing step, so no new
-// dependency) and .NET's X509Certificate2.GetNameInfo(SimpleName) — the
-// same method the retired assert-cisco-signature.ps1 used. On error,
-// distinguishes exec-launch failures (ioError) from a PS-reported
-// invalid signature status (signatureError).
-func readSignerSubjectCN(path string) (string, error) {
-	// Path passed via env var, not $args[0]: PowerShell's
-	// `-Command <string>` does not populate $args (that behavior is
-	// exclusive to `-File`), so a naive $args[0] read resolves to
-	// $null and Get-AuthenticodeSignature -FilePath $null crashes on
-	// every invocation. Env-var passing also keeps the path out of
-	// the script literal, eliminating any shell-injection surface for
-	// pathological file names.
-	//
-	// ErrorActionPreference=Stop makes any underlying failure surface
-	// as a non-zero exit. Writing the CN via [Console]::Out.Write
-	// (rather than the default pipeline) avoids Powershell's
-	// terminal-width truncation and the trailing CRLF Write-Host adds.
-	script := `$ErrorActionPreference='Stop';` +
-		`$p = $env:` + payloadPathEnvVar + `;` +
-		`if ([string]::IsNullOrEmpty($p)) { throw "` + payloadPathEnvVar + ` not set" };` +
-		`$sig = Get-AuthenticodeSignature -FilePath $p;` +
-		`if ($sig.Status -ne 'Valid') { throw "signature status is $($sig.Status)" };` +
-		`[System.Console]::Out.Write(` +
-		`  $sig.SignerCertificate.GetNameInfo(` +
-		`    [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,` +
-		`    $false))`
-	ctx, cancel := context.WithTimeout(context.Background(), signtoolVerifyTimeout)
+// chainStatusIsOnlyPartialChain returns true when the flag set is
+// exactly {PartialChain} (with an optional NoError entry that .NET
+// sometimes appends when no other flag applies). Any other flag —
+// Revoked, NotTimeValid, OfflineRevocation, UntrustedRoot, etc. —
+// makes the check fail closed. An empty slice also fails: if there
+// is no chain to build, there is no PartialChain either.
+func chainStatusIsOnlyPartialChain(flags []string) bool {
+	seenPartial := false
+	for _, f := range flags {
+		switch f {
+		case "":
+			// Skip stray empty strings from the PS join.
+			continue
+		case "NoError":
+			// Ignore — some Windows builds emit NoError alongside a
+			// real flag. Presence of NoError alone doesn't identify
+			// PartialChain, so keep iterating.
+			continue
+		case "PartialChain":
+			seenPartial = true
+			continue
+		default:
+			// Any other flag disqualifies.
+			return false
+		}
+	}
+	return seenPartial
+}
+
+// psVerifyScript is the exact PowerShell body runPowerShellVerify
+// evaluates. It reads the payload path from the payloadPathEnvVar env
+// var (see comment on the constant for why), interrogates the file's
+// Authenticode signature via Get-AuthenticodeSignature + X509Chain,
+// and emits a single JSON object with the fields psSignatureRecord
+// decodes. JSON is used (rather than KEY=VALUE lines) because
+// StatusMessage may contain arbitrary punctuation and quoting escapes
+// would be fragile.
+//
+// Notes on the design:
+//   - Set-StrictMode is left at the default so a missing property on a
+//     null cert is a runtime error we can catch, not a silent $null
+//     that would leak into JSON.
+//   - Console.Out.Write is used (not Write-Output) so PowerShell's
+//     default host-width truncation and trailing CRLF do not affect
+//     the stdout the Go side reads.
+//   - The X509Chain.Build call uses default policy (no explicit
+//     RevocationMode). AVC's spec: "AVC does not explicitly configure
+//     X509Chain.RevocationMode. RELEASE builds use standard
+//     Authenticode verification..."
+//   - CertEChainingMatch is computed by resolving HRESULT 0x800B010A
+//     to its host-localized description via Win32Exception. Same OS
+//     resource table Get-AuthenticodeSignature.StatusMessage uses,
+//     so both strings match on any locale.
+const psVerifyScript = `$ErrorActionPreference = 'Stop'
+$p = $env:` + payloadPathEnvVar + `
+if ([string]::IsNullOrEmpty($p)) { throw '` + payloadPathEnvVar + ` not set' }
+$sig = Get-AuthenticodeSignature -FilePath $p
+$status = $sig.Status.ToString()
+$statusMsg = if ($sig.StatusMessage) { $sig.StatusMessage } else { '' }
+$fp = ''
+$chainFlags = New-Object System.Collections.Generic.List[string]
+if ($sig.SignerCertificate -ne $null) {
+    $fp = $sig.SignerCertificate.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256).ToLower()
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $null = $chain.Build($sig.SignerCertificate)
+    foreach ($cs in $chain.ChainStatus) {
+        [void]$chainFlags.Add($cs.Status.ToString())
+    }
+}
+if ($chainFlags.Count -eq 0) { [void]$chainFlags.Add('NoError') }
+$certEChainingMsg = ''
+try { $certEChainingMsg = [System.ComponentModel.Win32Exception]::new([int]0x800B010A).Message } catch { $certEChainingMsg = '' }
+$isChainingMatch = ($certEChainingMsg -ne '') -and ($statusMsg -ceq $certEChainingMsg)
+$obj = [ordered]@{
+    Status = $status
+    StatusMessage = $statusMsg
+    Thumbprint = $fp
+    ChainStatusFlags = @($chainFlags)
+    CertEChainingMatch = [bool]$isChainingMatch
+}
+[System.Console]::Out.Write(($obj | ConvertTo-Json -Compress))`
+
+// runPowerShellVerify invokes psVerifyScript on the given payload
+// path and returns the parsed record. Errors are classified as
+// ioError (env fault: PS not on PATH, launch failure, timeout) or
+// signatureError (PS exited non-zero — script threw, e.g. because
+// Get-AuthenticodeSignature could not read the file). Callers should
+// return the error verbatim; the exit-code classifier in main.go
+// will map it correctly.
+func runPowerShellVerify(path string) (psSignatureRecord, error) {
+	var zero psSignatureRecord
+	ctx, cancel := context.WithTimeout(context.Background(), psVerifyTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	// Inherit the parent environment and layer the payload path on top —
+	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", psVerifyScript)
+	// Inherit the parent environment and layer the payload path on top.
 	// os/exec's default is os.Environ() only when cmd.Env is nil, so an
 	// explicit slice is required.
 	cmd.Env = append(os.Environ(), payloadPathEnvVar+"="+path)
-	// Use Output(), NOT CombinedOutput(): a PowerShell warning on
-	// stderr (e.g. verbose module load, deprecated cmdlet notices)
-	// would otherwise be concatenated into stdout and would
-	// contaminate the CN string, causing exact-equality with
-	// ciscoPublisherCN to fail on a correctly signed payload. On
-	// failure, os/exec.Cmd.Output populates *ExitError.Stderr so the
-	// error branch below still gets the diagnostic.
+	// Output(), NOT CombinedOutput(): PS warnings on stderr must not
+	// concatenate into the JSON body. On failure, os/exec.Cmd.Output
+	// populates *ExitError.Stderr so the error branch below still
+	// surfaces stderr diagnostic.
 	out, err := cmd.Output()
 	if err == nil {
-		// Strip ONLY the transport terminator (a trailing CRLF that
-		// PowerShell's stdio may append when running under a console
-		// host); do NOT use strings.TrimSpace here — .NET's
-		// X509Certificate2.GetNameInfo(SimpleName) preserves whitespace
-		// verbatim, so a cert with a padded CN like " Cisco Systems, Inc. "
-		// would otherwise be silently normalized to the pinned string
-		// and pass the exact-equality check downstream, defeating the
-		// gap-closing purpose of that check (signtool's /n substring
-		// match already accepts padded look-alikes).
-		cn := strings.TrimRight(string(out), "\r\n")
-		if cn == "" {
-			return "", &signatureError{msg: fmt.Sprintf(
-				"%s: empty signer Subject CN — cert has no SimpleName",
-				path,
+		body := strings.TrimSpace(string(out))
+		if body == "" {
+			return zero, &ioError{msg: fmt.Sprintf(
+				"powershell verify for %s emitted empty stdout", path,
 			)}
 		}
-		return cn, nil
+		var rec psSignatureRecord
+		if jerr := json.Unmarshal([]byte(body), &rec); jerr != nil {
+			return zero, &ioError{msg: fmt.Sprintf(
+				"powershell verify for %s emitted unparseable JSON: %s\n%s",
+				path, jerr, body,
+			)}
+		}
+		// Normalize thumbprint casing — the PS script already lowercases
+		// it, but defense-in-depth so a future script tweak cannot
+		// accidentally break the exact-match comparison downstream.
+		rec.Thumbprint = strings.ToLower(strings.TrimSpace(rec.Thumbprint))
+		return rec, nil
 	}
-	// Recover stderr from *ExitError for a useful diagnostic — on
-	// non-*ExitError failures (exec launch problems) stderr is
-	// unavailable so we fall back to err.Error() alone.
+	// Distinguish env faults (missing PS, launch failure, timeout) from
+	// script-level failures (PS started but threw). Only the latter
+	// counts as a signature rejection.
 	var exitErr *exec.ExitError
 	stderr := ""
 	if errors.As(err, &exitErr) {
 		stderr = strings.TrimSpace(string(exitErr.Stderr))
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", &ioError{msg: fmt.Sprintf(
-			"read signer CN timed out after %s for %s: %s",
-			signtoolVerifyTimeout, path, stderr,
+		return zero, &ioError{msg: fmt.Sprintf(
+			"powershell verify timed out after %s for %s: %s",
+			psVerifyTimeout, path, stderr,
 		)}
 	}
 	if exitErr == nil {
-		return "", &ioError{msg: fmt.Sprintf(
-			"powershell.exe failed to launch while reading signer CN for %s: %s",
+		return zero, &ioError{msg: fmt.Sprintf(
+			"powershell.exe failed to launch while verifying %s: %s",
 			path, err,
 		)}
 	}
-	// PowerShell exited non-zero — Get-AuthenticodeSignature reported
-	// a non-Valid status, or the throw fired. Treat as a signature
-	// rejection.
-	return "", &signatureError{msg: fmt.Sprintf(
-		"read signer CN failed for %s: %s\n%s",
+	return zero, &signatureError{msg: fmt.Sprintf(
+		"powershell verify failed for %s: %s\n%s",
 		path, err, stderr,
-	)}
-}
-
-// assertCNIsCisco enforces exact equality of the observed Subject
-// Common Name with ciscoPublisherCN. Split out for direct unit testing
-// — we cannot mock signtool or PowerShell from a Go test, but we can
-// exercise the string-comparison logic against representative "look-
-// alike" subjects that would slip past signtool's /n substring match.
-func assertCNIsCisco(path, observedCN string) error {
-	if observedCN == ciscoPublisherCN {
-		return nil
-	}
-	return &signatureError{msg: fmt.Sprintf(
-		"%s: signer Subject CN mismatch (expected %q, got %q)",
-		path, ciscoPublisherCN, observedCN,
 	)}
 }
