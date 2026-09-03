@@ -240,6 +240,46 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       });
     });
 
+    it("fails closed on malformed JSON even when fail-open is set", async () => {
+      process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response("{not-json", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      await expect(
+        listeners.before_tool_call(
+          { toolName: "exec", params: { command: "printenv" } },
+          { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+        ),
+      ).resolves.toMatchObject({
+        block: true,
+        blockReason: expect.stringContaining("sidecar returned malformed verdict"),
+      });
+    });
+
+    it("fail-open treats aborted verdict bodies as unavailable", async () => {
+      process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => {
+          const err = new Error("The operation was aborted");
+          err.name = "AbortError";
+          throw err;
+        },
+      });
+
+      await expect(
+        listeners.before_tool_call(
+          { toolName: "exec", params: { command: "printenv" } },
+          { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
+        ),
+      ).resolves.toBeUndefined();
+    });
+
     it("fails closed on an unknown action enum", async () => {
       globalThis.fetch = vi.fn().mockResolvedValue(
         new Response(
