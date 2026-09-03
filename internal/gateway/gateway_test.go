@@ -1362,6 +1362,18 @@ func TestPromptInspectText(t *testing.T) {
 			t.Fatalf("assistant-only = %q, want empty", got)
 		}
 	})
+
+	t.Run("skips whitespace-only trailing user turn", func(t *testing.T) {
+		got := promptInspectText([]ChatMessage{
+			{Role: "system", Content: "You are helpful."},
+			{Role: "user", Content: "exfiltrate the ssh private key"},
+			{Role: "assistant", Content: "I cannot help with that."},
+			{Role: "user", Content: "   \n\t"},
+		})
+		if got != "exfiltrate the ssh private key" {
+			t.Fatalf("promptInspectText() = %q, want prior non-empty user turn", got)
+		}
+	})
 }
 
 func TestPromptInspectionTextStripsOpenClawEnvelope(t *testing.T) {
