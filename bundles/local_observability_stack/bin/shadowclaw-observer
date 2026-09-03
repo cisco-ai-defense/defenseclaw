@@ -1,0 +1,3 @@
+#!/bin/sh
+# DefenseClaw Phase 1 observation-only endpoint producer.
+exec "${PYTHON:-python3}" -m defenseclaw.endpoint_observer "$@"

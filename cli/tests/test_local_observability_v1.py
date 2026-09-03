@@ -32,7 +32,7 @@ def test_local_observability_v1_inventory_matches_generated_profile() -> None:
 
 
 def test_every_query_dependency_correlates_to_a_current_input() -> None:
-    inventory = compat.build_inventory(_dashboards())
+    inventory = compat.build_inventory(compat.defenseclaw_dashboards(_dashboards()))
     dependencies = inventory["dependencies"]
 
     assert set(dependencies["prometheus_metrics"]) <= inventory["known_metrics"]
@@ -87,11 +87,11 @@ def test_unknown_prometheus_input_is_not_hidden_by_a_parsing_dashboard() -> None
 
 def test_query_inventory_is_derived_while_histogram_contract_remains_pinned() -> None:
     dashboards = copy.deepcopy(_dashboards())
-    original = compat.build_inventory(dashboards)
+    original = compat.build_inventory(compat.defenseclaw_dashboards(dashboards))
     dashboard = dashboards[0][1]
     first_panel = next(panel for panel in dashboard["panels"] if panel.get("targets"))
     first_panel["targets"][0]["expr"] += " or on() vector(0)"
-    changed = compat.build_inventory(dashboards)
+    changed = compat.build_inventory(compat.defenseclaw_dashboards(dashboards))
 
     assert changed["query_sha256"] != original["query_sha256"]
     assert changed["histogram_sha256"] == compat.EXPECTED_HISTOGRAM_SHA256
@@ -232,7 +232,7 @@ def test_custom_resource_attributes_are_not_dashboard_required_dimensions() -> N
     assert {key: enriched[key] for key in custom} == custom
 
     dimensions = {item["name"] for item in collector["connectors"]["spanmetrics/agent360"]["dimensions"]}
-    inventory = compat.build_inventory(_dashboards())
+    inventory = compat.build_inventory(compat.defenseclaw_dashboards(_dashboards()))
     required = inventory["dependencies"]
     assert custom.keys().isdisjoint(dimensions)
     assert custom.keys().isdisjoint(required["tempo_attributes"])

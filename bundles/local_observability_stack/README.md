@@ -8,7 +8,10 @@ and [Agent360 guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observa
 describe the user-visible dashboard behavior.
 
 This directory is the source bundle copied into an installed DefenseClaw
-deployment. It defines one Compose project with five services:
+deployment. It defines one Compose project with five services. The managed
+`defenseclaw setup local-observability up` command also starts the small,
+observation-only endpoint observer shipped with DefenseClaw; that process is
+not a Compose service.
 
 | Service | Role |
 | --- | --- |
@@ -71,8 +74,13 @@ access-control boundary when exposed beyond loopback.
   local storage configuration.
 - [`grafana/provisioning/`](grafana/provisioning/): datasource and dashboard
   provisioning.
-- [`grafana/dashboards/`](grafana/dashboards/): the fourteen shipped dashboard
-  JSON definitions.
+- [`grafana/dashboards/`](grafana/dashboards/): the fourteen native dashboard
+  JSON definitions plus the bundled Phase 1 discovery board.
+- [`bin/shadowclaw-observer`](bin/shadowclaw-observer): the managed entry point
+  for the Phase 1 endpoint observer. It reports bounded process identity and
+  executable identity, coverage, exporter health, and its own resource usage
+  over OTLP/HTTP. It does not implement detection, session correlation, or
+  enforcement.
 - [`bin/openclaw-observability-bridge`](bin/openclaw-observability-bridge):
   low-level bundle controller; [`run.sh`](run.sh) is its compatibility shim.
 

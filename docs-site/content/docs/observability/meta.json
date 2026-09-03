@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "local-observability",
+    "shadow-ai-discovery",
     "grafana-dashboards",
     "agent360",
     "galileo",

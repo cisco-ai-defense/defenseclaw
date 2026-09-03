@@ -770,6 +770,12 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
         self.app, self.tmp_dir = _make_app()
+        observer_patcher = patch(
+            "defenseclaw.commands.cmd_setup_local_observability.start_observer",
+            return_value={"state": "running", "pid": 1234},
+        )
+        self.mock_start_observer = observer_patcher.start()
+        self.addCleanup(observer_patcher.stop)
 
     def tearDown(self) -> None:
         import shutil
@@ -825,6 +831,10 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
             timeout=180,
             wait=True,
             grafana_access_mode=None,
+        )
+        self.mock_start_observer.assert_called_once_with(
+            self.tmp_dir,
+            "http://127.0.0.1:4318",
         )
 
     def test_up_no_refresh_bundle_skips_refresh(self) -> None:

@@ -151,6 +151,10 @@ observability:
             return_value=controller,
         ),
         patch(
+            "defenseclaw.commands.cmd_setup_local_observability.start_observer",
+            return_value={"state": "running", "pid": 1234},
+        ) as start_observer,
+        patch(
             "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
             return_value=object(),
         ),
@@ -177,3 +181,30 @@ observability:
     ]
     assert raw["observability"]["local"]["retention_days"] == 37
     assert raw["observability"]["resource"]["attributes"]["service.name"] == "defenseclaw"
+    start_observer.assert_called_once_with(
+        app.cfg.data_dir,
+        "http://127.0.0.1:4318",
+    )
+
+
+def test_endpoint_observer_can_be_disabled(tmp_path: Path) -> None:
+    from defenseclaw.commands.cmd_setup_local_observability import local_observability
+
+    app = _app(tmp_path / "state")
+    controller = _controller()
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
+            return_value=controller,
+        ),
+        patch("defenseclaw.commands.cmd_setup_local_observability.start_observer") as start_observer,
+    ):
+        result = CliRunner().invoke(
+            local_observability,
+            ["up", "--no-config", "--no-refresh-bundle", "--no-endpoint-observer"],
+            obj=app,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Endpoint observer: disabled" in result.output
+    start_observer.assert_not_called()

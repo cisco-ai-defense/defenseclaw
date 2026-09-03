@@ -1,0 +1,107 @@
+{
+  "__comment_product": "ShadowClaw -- Universal Shadow AI Detector",
+  "__comment_author": "Mike Storm, Distinguished Engineer, CCIE Security 13847",
+  "__comment_copyright": "Copyright (c) 2026 Mike Storm. All rights reserved.",
+  "__comment_purpose": "Shows the minimum Phase 1 endpoint-observer telemetry shipped with DefenseClaw. It is observation-only and keeps its own service namespace.",
+  "__comment_attribution": "Redistributed under the ShadowClaw BSD 3-Clause License with Attribution Requirement; see SHADOWCLAW_LICENSE.md in this bundle.",
+  "uid": "shadow-ai-discovery",
+  "title": "Shadow AI Discovery Board",
+  "description": "Phase 1 endpoint observations from the bundled observation-only producer. Detection scoring, session correlation, and enforcement are not included.",
+  "tags": ["external-telemetry", "shadow-ai", "observation-only"],
+  "schemaVersion": 39,
+  "version": 5,
+  "editable": true,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "type": "row",
+      "title": "Phase 1 observer health",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Observer up",
+      "description": "1 while the bundled endpoint observer is polling. 0 or no data means the observer is not running.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "targets": [{"refId": "A", "expr": "max(shadowclaw_observer_up)", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "short", "mappings": [{"type": "value", "value": "1", "text": "RUNNING"}, {"type": "value", "value": "0", "text": "DOWN"}]}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value"}
+    },
+    {
+      "type": "stat",
+      "title": "Process coverage",
+      "description": "Fraction of the sampled process table reported as endpoint observations. A partial value is intentional when the report cap is reached.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "targets": [{"refId": "A", "expr": "max(shadowclaw_observer_coverage)", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value"}
+    },
+    {
+      "type": "stat",
+      "title": "Processes observed",
+      "description": "Number of process rows read from the host process table on the latest poll.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "targets": [{"refId": "A", "expr": "max(shadowclaw_observer_processes_observed)", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value"}
+    },
+    {
+      "type": "stat",
+      "title": "Exporter failures",
+      "description": "Cumulative OTLP request failures reported by the observer. This is a delivery health signal, not a detection result.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "targets": [{"refId": "A", "expr": "max(shadowclaw_observer_exporter_failures)", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Observer resource usage",
+      "description": "Resource usage of the small DefenseClaw-bundled observer process.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"h": 7, "w": 12, "x": 16, "y": 1},
+      "targets": [
+        {"refId": "A", "expr": "rate(shadowclaw_observer_resource_cpu_seconds[5m])", "legendFormat": "CPU seconds / second"},
+        {"refId": "B", "expr": "shadowclaw_observer_resource_max_rss", "legendFormat": "Max RSS"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "row",
+      "title": "Endpoint observations",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 8},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "logs",
+      "title": "Observer status",
+      "description": "The observer reports its coverage and exporter state on every poll.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "targets": [{"refId": "A", "expr": "{service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.observer.status\" | json | __error__=\"\""}],
+      "options": {"showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLines": true, "prettifyLogMessage": true, "enableLogDetails": true}
+    },
+    {
+      "type": "logs",
+      "title": "Process identity observations",
+      "description": "The Phase 1 observer reports bounded process identity and resource fields. It does not capture command lines or enforce policy.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+      "targets": [{"refId": "A", "expr": "{service_name=\"shadowclaw\"} | shadowclaw_event_name=\"shadowclaw.endpoint.snapshot\" | json | __error__=\"\""}],
+      "options": {"showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLines": true, "prettifyLogMessage": true, "enableLogDetails": true}
+    }
+  ],
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard"}]},
+  "links": []
+}

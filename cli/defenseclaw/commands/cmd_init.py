@@ -2127,6 +2127,7 @@ def _resolve_splunk_bridge_bundle():
 
 _OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = (
     os.path.join("bin", "openclaw-observability-bridge"),
+    os.path.join("bin", "shadowclaw-observer"),
     "run.sh",
 )
 
@@ -2238,6 +2239,7 @@ def _ensure_observability_stack_executables(dest: str) -> None:
     """Make sure the bridge entry points are executable after a copy."""
     for rel in (
         os.path.join("bin", "openclaw-observability-bridge"),
+        os.path.join("bin", "shadowclaw-observer"),
         "run.sh",
     ):
         path = os.path.join(dest, rel)

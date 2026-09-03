@@ -30,6 +30,11 @@ from defenseclaw.audit_actions import ACTION_SETUP_LOCAL_OBSERVABILITY
 from defenseclaw.bundle_refresh import RefreshResult, refresh_local_observability_stack
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.endpoint_observer import (
+    observer_status,
+    start_observer,
+    stop_observer,
+)
 from defenseclaw.observability.local_stack import (
     CONTRACT,
     GRAFANA_ACCESS_NO_PASSWORD,
@@ -131,6 +136,12 @@ def local_observability(ctx: click.Context) -> None:
     help="Value to stamp into observability.resource.attributes.service.name.",
 )
 @click.option(
+    "--endpoint-observer/--no-endpoint-observer",
+    default=True,
+    show_default=True,
+    help="Start the bundled observation-only endpoint producer alongside the stack.",
+)
+@click.option(
     "--refresh-bundle/--no-refresh-bundle",
     "refresh_bundle",
     default=True,
@@ -167,6 +178,7 @@ def up_cmd(
     endpoint: str | None,
     signals: str,
     service_name: str,
+    endpoint_observer: bool,
     refresh_bundle: bool,
     refresh_config: bool,
 ) -> None:
@@ -242,6 +254,26 @@ def up_cmd(
         grafana_password_file=str(controller.grafana_password_file),
     )
 
+    if endpoint_observer and started.readiness_verified:
+        observer_endpoint = "http://" + str(
+            contract.get("otlp_http_endpoint") or "127.0.0.1:4318"
+        )
+        try:
+            observer = start_observer(app.cfg.data_dir, observer_endpoint)
+        except (OSError, ValueError) as exc:
+            click.echo(f"  warning: endpoint observer was not started: {exc}")
+        else:
+            click.echo(
+                f"  {ux.bold('Endpoint observer:')} {observer['state']}"
+                + (f" (pid {observer['pid']})" if observer.get("pid") else "")
+            )
+    elif endpoint_observer:
+        click.echo(
+            f"  {ux.bold('Endpoint observer:')} not started because stack readiness was not verified"
+        )
+    else:
+        click.echo(f"  {ux.bold('Endpoint observer:')} disabled")
+
     if app.logger:
         app.logger.log_action(
             ACTION_SETUP_LOCAL_OBSERVABILITY,
@@ -249,7 +281,8 @@ def up_cmd(
             (
                 f"action=up endpoint={otlp_endpoint} protocol={otlp_protocol} "
                 f"logs={'true' if logs_enabled else 'false'} "
-                f"grafana_access={started.grafana_access_mode}"
+                f"grafana_access={started.grafana_access_mode} "
+                f"endpoint_observer={'true' if endpoint_observer else 'false'}"
             ),
         )
 
@@ -268,6 +301,11 @@ def up_cmd(
 @pass_ctx
 def down_cmd(app: AppContext, disable_config: bool) -> None:
     """Stop the stack (volumes preserved)."""
+    observer = stop_observer(app.cfg.data_dir)
+    click.echo(
+        f"  {ux.bold('Endpoint observer:')} {observer['state']}"
+        + (f" (pid {observer['pid']})" if observer.get("pid") else "")
+    )
     controller = _resolve_controller(app.cfg.data_dir)
     _run_native_controller(controller.down, "Docker Compose down")
 
@@ -305,6 +343,7 @@ def reset_cmd(app: AppContext, yes: bool) -> None:
         click.echo("  Aborted.")
         return
 
+    stop_observer(app.cfg.data_dir)
     controller = _resolve_controller(app.cfg.data_dir)
     _run_native_controller(
         lambda: controller.reset(confirmed=True),
@@ -331,6 +370,11 @@ def status_cmd(app: AppContext) -> None:
     controller = _resolve_controller(app.cfg.data_dir)
     output = _run_native_controller(controller.status, "Docker Compose status")
     click.echo(output, nl=False)
+    observer = observer_status(app.cfg.data_dir)
+    click.echo(
+        f"Endpoint observer: {observer['state']}"
+        + (f" (pid {observer['pid']})" if observer.get("pid") else "")
+    )
 
 
 @local_observability.command("logs")

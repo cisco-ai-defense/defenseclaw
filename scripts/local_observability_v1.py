@@ -52,7 +52,7 @@ def _is_runtime_source_file(relative: Path) -> bool:
         for runtime_name in _LOCAL_OBSERVABILITY_RUNTIME_SOURCE_FILES
     )
 
-EXPECTED_DASHBOARD_UIDS = {
+NATIVE_DASHBOARD_UIDS = {
     "defenseclaw-activity",
     "defenseclaw-agent-360",
     "defenseclaw-agent-identity",
@@ -68,6 +68,8 @@ EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-security",
     "defenseclaw-traffic",
 }
+EXTERNAL_DASHBOARD_UIDS = {"shadow-ai-discovery"}
+EXPECTED_DASHBOARD_UIDS = NATIVE_DASHBOARD_UIDS | EXTERNAL_DASHBOARD_UIDS
 EXPECTED_DATASOURCE_UIDS = {
     "prometheus": "defenseclaw-prometheus",
     "loki": "defenseclaw-loki",
@@ -749,13 +751,22 @@ def build_inventory(
     }
 
 
+def defenseclaw_dashboards(
+    dashboards: list[tuple[Path, dict[str, Any]]],
+) -> list[tuple[Path, dict[str, Any]]]:
+    return [
+        item
+        for item in dashboards
+        if str(item[1].get("uid", "")) in NATIVE_DASHBOARD_UIDS
+    ]
+
+
 def compatibility_errors(
     dashboards: list[tuple[Path, dict[str, Any]]],
     *,
     require_packaged: bool,
 ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
-    inventory = build_inventory(dashboards)
     uids = {str(dashboard.get("uid", "")) for _, dashboard in dashboards}
     if uids != EXPECTED_DASHBOARD_UIDS:
         missing_uids = sorted(EXPECTED_DASHBOARD_UIDS - uids)
@@ -763,6 +774,7 @@ def compatibility_errors(
         errors.append(
             f"local-observability-v1 dashboard UIDs drifted: missing={missing_uids}, extra={extra_uids}",
         )
+    inventory = build_inventory(defenseclaw_dashboards(dashboards))
     datasource_config = _load_yaml(BUNDLE / "grafana/provisioning/datasources/datasources.yml")
     datasource_uids = {
         item.get("type"): item.get("uid")
