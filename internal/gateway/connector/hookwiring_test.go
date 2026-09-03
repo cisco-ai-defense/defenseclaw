@@ -1340,7 +1340,19 @@ func TestAntigravityWindowsHookCommandBindsOfficialEvent(t *testing.T) {
 // exact emitted command across the supported agent launch boundaries. The
 // probe uses the same GUI subsystem as release defenseclaw-hook.exe so this
 // catches PowerShell returning before the process exits.
-const windowsNativePowerShellTestTimeout = time.Minute
+// This ceiling has to sit above copilotHookAdapterResultPropagationTimeoutMS so
+// a stalled adapter reports its own error instead of being killed mid-flight.
+const windowsNativePowerShellTestTimeout = 4 * time.Minute
+
+// copilotHookAdapterResultPropagationTimeoutMS replaces the shipped adapter
+// budget for the cases below, which assert that stdout, stderr, and the exit
+// code survive the GUI subsystem rather than that the adapter honours a
+// deadline; cursor_hook_adapter_windows_test.go covers the deadline with
+// budgets of its own. Handing the payload to a GUI-subsystem stdin handle
+// consumes nearly all of the shipped 25s budget even on an idle runner, so
+// reusing that budget here turns any competing load on the runner into a
+// failure of these assertions.
+const copilotHookAdapterResultPropagationTimeoutMS = 120_000
 
 func TestWindowsNativePowerShellHookCommandPropagatesProcessResults(t *testing.T) {
 	if runtime.GOOS != "windows" {
@@ -1401,7 +1413,7 @@ func main() {
 	}
 	copilotAdapter, err := renderTemplate(string(copilotTemplate), templateData{
 		HookBinaryPS:         strings.ReplaceAll(helper, "'", "''"),
-		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
+		CopilotHookTimeoutMS: copilotHookAdapterResultPropagationTimeoutMS,
 	})
 	if err != nil {
 		t.Fatalf("render Copilot adapter: %v", err)
