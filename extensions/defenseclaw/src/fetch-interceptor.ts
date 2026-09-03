@@ -653,10 +653,16 @@ function decodeUtf8Safe(buf: ArrayBufferView): string {
  * the cap; subsequent chunks are never read, so a pathological body
  * (GBs) never allocates past `cap` bytes. Returns the raw byte
  * sequence so the caller can decide on encoding.
+ *
+ * `cancelRemainder` defaults to true for standalone streams (sidecar
+ * overlay responses). Request.clone() tees the body; awaiting
+ * cancel() on one tee branch can stay pending until the sibling is
+ * consumed (#732), so Request peeks must pass false.
  */
 async function readStreamBounded(
   stream: ReadableStream<Uint8Array>,
   cap: number,
+  options?: { cancelRemainder?: boolean },
 ): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -675,12 +681,12 @@ async function readStreamBounded(
       total += value.byteLength;
     }
   } finally {
-    // Cancel the rest of the stream so the underlying transport
-    // does not keep delivering bytes we will never consume.
-    try {
-      await reader.cancel();
-    } catch {
-      /* ignore */
+    if (options?.cancelRemainder !== false) {
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
     }
     try {
       reader.releaseLock();
@@ -697,11 +703,116 @@ async function readStreamBounded(
   return out;
 }
 
+function hasOwnBody(init?: RequestInit): boolean {
+  return Boolean(init && Object.prototype.hasOwnProperty.call(init, "body"));
+}
+
+/**
+ * Classify a bounded peek. Full JSON wins; if the 64 KiB cap sliced
+ * mid-document, recover the top-level LLM key from the prefix so a
+ * large messages[] body is not treated as non-LLM.
+ */
+function classifyPeekText(text: string): LLMBodyShape {
+  if (!text) return "none";
+  try {
+    return classifyBodyShape(JSON.parse(text));
+  } catch {
+    if (/"messages"\s*:/.test(text)) return "messages";
+    if (/"contents"\s*:/.test(text)) return "contents";
+    if (/"inputs"\s*:/.test(text)) return "input";
+    if (/"input"\s*:/.test(text)) return "input";
+    if (/"prompt"\s*:/.test(text)) return "prompt";
+    return "none";
+  }
+}
+
+function peekConcreteBody(body: unknown): LLMBodyShape {
+  if (body == null) return "none";
+  if (typeof body === "string") {
+    return classifyPeekText(body.slice(0, BODY_PEEK_CAP_BYTES));
+  }
+  if (body instanceof Uint8Array) {
+    return classifyPeekText(decodeUtf8Safe(body.subarray(0, BODY_PEEK_CAP_BYTES)));
+  }
+  if (body instanceof ArrayBuffer) {
+    return classifyPeekText(
+      decodeUtf8Safe(new Uint8Array(body).subarray(0, BODY_PEEK_CAP_BYTES)),
+    );
+  }
+  // ReadableStream, FormData, Blob, etc. — consuming them would break
+  // the downstream fetch. Fall back to path-only detection.
+  return "none";
+}
+
+function combineAbortSignals(
+  requestSignal?: AbortSignal | null,
+  initSignal?: AbortSignal | null,
+): AbortSignal | null | undefined {
+  if (requestSignal && initSignal && requestSignal !== initSignal) {
+    const anyFn = (
+      AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }
+    ).any;
+    if (typeof anyFn === "function") {
+      return anyFn.call(AbortSignal, [requestSignal, initSignal]);
+    }
+    return initSignal;
+  }
+  return initSignal ?? requestSignal;
+}
+
+/**
+ * Fetch `request` + `init` precedence used by shape detection and the
+ * proxy rewrite. Caller `init` wins, matching native Fetch.
+ */
+export function resolveEffectiveFetchInit(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): {
+  method: string;
+  headers: Headers;
+  body?: BodyInit | null;
+  signal?: AbortSignal | null;
+  redirect?: RequestRedirect;
+  credentials?: RequestCredentials;
+  cache?: RequestCache;
+  integrity?: string;
+  keepalive?: boolean;
+  mode?: RequestMode;
+  referrer?: string;
+  referrerPolicy?: ReferrerPolicy;
+} {
+  const req = input instanceof Request ? input : null;
+  const headers = new Headers(req?.headers);
+  if (init?.headers) {
+    new Headers(init.headers).forEach((value, key) => {
+      headers.set(key, value);
+    });
+  }
+  return {
+    method: String(init?.method ?? req?.method ?? "GET"),
+    headers,
+    body: hasOwnBody(init) ? init!.body : (req ? req.body : undefined),
+    signal: combineAbortSignals(req?.signal, init?.signal),
+    redirect: init?.redirect ?? req?.redirect,
+    credentials: init?.credentials ?? req?.credentials,
+    cache: init?.cache ?? req?.cache,
+    integrity: init?.integrity ?? req?.integrity,
+    keepalive: init?.keepalive ?? req?.keepalive,
+    mode: init?.mode ?? req?.mode,
+    referrer: init?.referrer ?? req?.referrer,
+    referrerPolicy: init?.referrerPolicy ?? req?.referrerPolicy,
+  };
+}
+
 export async function peekBodyForShape(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<LLMBodyShape> {
   try {
+    // Fetch spec: a supplied init.body replaces the Request body.
+    if (hasOwnBody(init)) {
+      return peekConcreteBody(init!.body);
+    }
     if (input instanceof Request) {
       // input.clone() keeps the caller's Request body intact for the
       // downstream originalFetch call. Prefer a streaming read
@@ -714,7 +825,11 @@ export async function peekBodyForShape(
         .body;
       let bytes: Uint8Array;
       if (stream && typeof stream.getReader === "function") {
-        bytes = await readStreamBounded(stream, BODY_PEEK_CAP_BYTES);
+        // Do not await tee-branch cancel(): it can deadlock against
+        // the unconsumed original Request body (#732).
+        bytes = await readStreamBounded(stream, BODY_PEEK_CAP_BYTES, {
+          cancelRemainder: false,
+        });
       } else {
         const text = await cloned.text().catch(() => "");
         if (!text) return "none";
@@ -725,47 +840,12 @@ export async function peekBodyForShape(
         const capped = text.length > BODY_PEEK_CAP_BYTES
           ? text.slice(0, BODY_PEEK_CAP_BYTES)
           : text;
-        try {
-          return classifyBodyShape(JSON.parse(capped));
-        } catch {
-          return "none";
-        }
+        return classifyPeekText(capped);
       }
       if (bytes.byteLength === 0) return "none";
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(bytes)));
-      } catch {
-        return "none";
-      }
+      return classifyPeekText(decodeUtf8Safe(bytes));
     }
-    const body = init?.body as unknown;
-    if (body == null) return "none";
-    if (typeof body === "string") {
-      try {
-        return classifyBodyShape(JSON.parse(body.slice(0, BODY_PEEK_CAP_BYTES)));
-      } catch {
-        return "none";
-      }
-    }
-    if (body instanceof Uint8Array) {
-      const slice = body.subarray(0, BODY_PEEK_CAP_BYTES);
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(slice)));
-      } catch {
-        return "none";
-      }
-    }
-    if (body instanceof ArrayBuffer) {
-      const view = new Uint8Array(body).subarray(0, BODY_PEEK_CAP_BYTES);
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(view)));
-      } catch {
-        return "none";
-      }
-    }
-    // ReadableStream, FormData, Blob, etc. — consuming them would break
-    // the downstream fetch. Fall back to path-only detection.
-    return "none";
+    return peekConcreteBody(init?.body);
   } catch {
     return "none";
   }
@@ -1027,13 +1107,13 @@ export function createFetchInterceptor(
       let shouldIntercept = knownLLM;
       let shapeBranch: "known" | "shape" | "passthrough" = knownLLM ? "known" : "passthrough";
       let bodyShape: LLMBodyShape = "none";
+      const effective = resolveEffectiveFetchInit(input, init);
 
       // Layer 1: request-shape detection. Only peek the body when the
       // allowlist didn't already match — peeking costs a clone().
       if (!knownLLM) {
-        const method = (input instanceof Request ? input.method : init?.method) ?? "GET";
         bodyShape = await peekBodyForShape(input, init);
-        if (isLLMShapedRequest(urlStr, method, bodyShape, guardrailPort)) {
+        if (isLLMShapedRequest(urlStr, effective.method, bodyShape, guardrailPort)) {
           shouldIntercept = true;
           shapeBranch = "shape";
         }
@@ -1066,10 +1146,9 @@ export function createFetchInterceptor(
       // Rewrite: keep path + query, replace scheme://host with proxy.
       const proxied = `${proxyBase}${original.pathname}${original.search}`;
 
-      // Merge all original headers and add proxy-hop headers.
-      const headers = new Headers(
-        input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
-      );
+      // Merge effective headers (Request + init overrides) and add
+      // proxy-hop headers. init wins, matching native Fetch (#742).
+      const headers = new Headers(effective.headers);
       const providerKey = extractProviderKey(headers);
       const proxyHdrs = buildProxyHeaders(
         original.origin,
@@ -1080,11 +1159,48 @@ export function createFetchInterceptor(
         headers.set(k, v);
       }
 
-      // Build new init, preserving all original properties.
-      const newInit: RequestInit =
-        input instanceof Request
-          ? { method: input.method, body: input.body, headers }
-          : { ...(init ?? {}), headers };
+      // Peek may have cloned a Request body. Hand originalFetch a
+      // fresh clone so undici does not see a locked/disturbed stream.
+      let rewriteBody = effective.body;
+      if (!hasOwnBody(init) && input instanceof Request && !input.bodyUsed) {
+        try {
+          rewriteBody = input.clone().body;
+        } catch {
+          rewriteBody = effective.body;
+        }
+      }
+
+      // Preserve Request metadata and caller init extras (duplex, etc.),
+      // then apply the resolved method/body/signal/redirect family.
+      const newInit: RequestInit = {
+        ...(input instanceof Request
+          ? {
+              method: input.method,
+              redirect: input.redirect,
+              credentials: input.credentials,
+              cache: input.cache,
+              integrity: input.integrity,
+              keepalive: input.keepalive,
+              mode: input.mode,
+              referrer: input.referrer,
+              referrerPolicy: input.referrerPolicy,
+              signal: input.signal,
+            }
+          : {}),
+        ...(init ?? {}),
+        method: effective.method,
+        body: rewriteBody,
+        headers,
+        signal: effective.signal ?? undefined,
+        redirect: effective.redirect,
+        credentials: effective.credentials,
+        cache: effective.cache,
+        integrity: effective.integrity,
+        keepalive: effective.keepalive,
+        mode: effective.mode,
+        referrer: effective.referrer,
+        referrerPolicy: effective.referrerPolicy,
+      };
 
       if (shapeBranch === "shape") {
         console.log(
